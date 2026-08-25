@@ -7951,7 +7951,9 @@ fn cmd_help() {
     );
     shell_println!("  cmp F1 F2 Compare two files byte-by-byte");
     shell_println!("  comm [-123] F1 F2  Compare sorted files (3-column output)");
-    shell_println!("  diff F1 F2 Line-level diff (unified format)");
+    shell_println!(
+        "  diff [-a|--text] F1 F2  Line-level diff (unified format; a file with a NUL is reported as binary unless -a)"
+    );
     shell_println!("  od [-A o|d|x|n] [-t o1|x1|d1|u1|c] [-N count] F  Octal/hex dump");
     shell_println!("  cpuinfo   Show per-CPU utilization and scheduler counters");
     shell_println!("  top       Compact system overview (uptime, memory, CPU, tasks)");
@@ -11327,6 +11329,67 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_starts_with("diff names the file it could not read", &out, b"diff: ");
         assert_eq!(last_exit(), 2, "diff: unread is not 'identical'");
 
+        // A file with a NUL is reported, not rendered. The status stays 1:
+        // abbreviating the *output* must not be confused with failing to
+        // compare, which is 2 and is what `diff a b || rebuild` branches on.
+        let bin1 = Path::new("/tmp/kshell_diff_selftest_bin1");
+        let bin2 = Path::new("/tmp/kshell_diff_selftest_bin2");
+        Vfs::write_file(bin1, b"head\n\x00\xffpayload\n")?;
+        Vfs::write_file(bin2, b"head\n\x00\xfepayload\n")?;
+        let out =
+            capture_command("diff /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin2");
+        assert_output_starts_with("diff reports binary files", &out, b"Binary files ");
+        assert_eq!(last_exit(), 1, "diff: binary-and-differing is still 1");
+
+        // Two identical binaries say nothing at all -- the equality test runs
+        // before the binary test, exactly as in GNU. If that order were
+        // reversed this would print "Binary files ... differ" about two files
+        // that do not.
+        let out =
+            capture_command("diff /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin1");
+        assert_eq!(
+            out.as_slice(),
+            b"",
+            "diff: identical binaries print nothing"
+        );
+        assert_eq!(last_exit(), 0, "diff: identical binaries are success");
+
+        // `-a` reaches the byte-clean line diff underneath, and that diff must
+        // still distinguish `\xff` from `\xfe`. Those two bytes are the reason
+        // the lossy decode was removed: both used to become U+FFFD, so the
+        // lines compared *equal* and were printed as shared context. A `-a`
+        // that produced no hunk here would mean the old bug is back.
+        let out = capture_command(
+            "diff -a /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin2",
+        );
+        assert_output_starts_with("-a forces the line diff", &out, b"--- ");
+        assert_output_lacks("-a does not report binary", &out, b"Binary files ");
+        assert_eq!(last_exit(), 1, "diff -a: differing is 1");
+
+        // `--text` is the same flag spelled the other way, and both had to be
+        // named in the match or the second would have been dropped.
+        let out = capture_command(
+            "diff --text /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin2",
+        );
+        assert_output_starts_with("--text forces the line diff", &out, b"--- ");
+        assert_eq!(last_exit(), 1, "diff --text: differing is 1");
+
+        // An option nobody recognises stops the command. Dropped, it would
+        // have become a plain `diff` that reports "Binary files ... differ"
+        // about the very files the user asked to see the contents of -- a
+        // different command, run successfully.
+        let out = capture_command(
+            "diff --txt /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin2",
+        );
+        assert_output_starts_with(
+            "diff refuses an option it does not know",
+            &out,
+            b"diff: unrecognized option `--txt'",
+        );
+        assert_eq!(last_exit(), 2, "diff: a usage error is not a comparison");
+
+        let _ = Vfs::remove(bin1);
+        let _ = Vfs::remove(bin2);
         let _ = Vfs::remove(a);
         let _ = Vfs::remove(b);
         let _ = Vfs::remove(same);
@@ -101278,7 +101341,27 @@ fn cmd_cmp(args: &str) {
 
 /// Line-level diff between two files (unified format).
 ///
-/// Usage: `diff <file1> <file2>`
+/// Usage: `diff [-a|--text] <file1> <file2>`
+///
+/// **A file containing a NUL byte is reported as binary** — `Binary files X
+/// and Y differ`, status 1 — rather than line-diffed, unless `-a`/`--text`
+/// forces the diff. This is not squeamishness about correctness: the line
+/// diff below *is* correct on such a file, byte for byte. It is that a correct
+/// hunk of an object file is unreadable, arrives at a serial console one byte
+/// at a time, and can run to megabytes; the useful answer is the one sentence
+/// GNU prints. `-a` exists because refusing outright would put the byte-clean
+/// diff this function was fixed to produce out of reach for the one input that
+/// most needs it.
+///
+/// The test is a NUL **anywhere in the file**, where GNU's is a NUL in the
+/// first buffer it happens to read. GNU's rule is faster on a huge file and
+/// gives an answer that depends on a buffer size — change the constant and
+/// the same two files get a different verdict. We hold the whole file already
+/// (the byte compare above reads it all), so scanning it costs nothing we have
+/// not already paid, and the answer is a property of the files rather than of
+/// this implementation. The divergence is visible only for a file whose sole
+/// NUL is past GNU's first buffer: GNU line-diffs it, we call it binary, and
+/// `-a` recovers GNU's behaviour exactly.
 ///
 /// Uses a simple LCS-based diff algorithm suitable for kernel context.
 /// Files are capped at 2000 lines to bound memory usage.
@@ -101302,11 +101385,54 @@ fn cmd_cmp(args: &str) {
 /// found no difference were, before this, byte-identical **and**
 /// status-identical. There was no way for a caller to tell them apart.
 fn cmd_diff(args: &str) {
-    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    // Leading options only, then the two operands. The operand split below is
+    // deliberately `splitn(2, ' ')` rather than a whitespace split, so that an
+    // unquoted second path may contain spaces; that is pre-existing behaviour
+    // and this loop must not take it away, which is why it consumes words from
+    // the front and hands the *remainder* on untouched.
+    let mut force_text = false;
+    let mut rest = args.trim_start();
+    while rest.starts_with('-') {
+        let (word, tail) = match rest.split_once(' ') {
+            Some((w, t)) => (w, t.trim_start()),
+            None => (rest, ""),
+        };
+        if word == "--" {
+            // End of options: whatever follows is a path, even if it starts
+            // with a dash. This is the only way to diff a file called `-a`.
+            rest = tail;
+            break;
+        }
+        if word == "-" {
+            // The stdin convention, which this `diff` does not implement. Left
+            // to fall through as a path so the failure names the thing that is
+            // missing ("diff: -: NotFound") instead of claiming `-` is an
+            // option nobody has heard of.
+            break;
+        }
+        match word {
+            "-a" | "--text" => {
+                force_text = true;
+                rest = tail;
+            }
+            other => {
+                // Refuse rather than drop. A dropped `--txt` would silently
+                // become a plain `diff`, which on a binary file is exactly the
+                // megabyte of unreadable output the flag was typed to request
+                // — or, worse, is not, and the user never learns why.
+                shell_println!("diff: unrecognized option `{}'", other);
+                shell_println!("Usage: diff [-a|--text] <file1> <file2>");
+                set_exit(2);
+                return;
+            }
+        }
+    }
+
+    let parts: Vec<&str> = rest.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
         // 2, not 1: inside `diff`, 1 is the reserved answer "compared them,
         // they differ".
-        shell_println!("Usage: diff <file1> <file2>");
+        shell_println!("Usage: diff [-a|--text] <file1> <file2>");
         set_exit(2);
         return;
     }
@@ -101333,7 +101459,25 @@ fn cmd_diff(args: &str) {
 
     if data1 == data2 {
         // Identical files — no output (like Unix diff), and status 0, which
-        // `dispatch` has already set.
+        // `dispatch` has already set. This is *above* the binary test on
+        // purpose: two identical object files are not something to report, and
+        // GNU says nothing about them either.
+        return;
+    }
+
+    // Binary: say so in one line instead of emitting a correct but unreadable
+    // hunk. Status 1, not 2 — this is not a refusal to compare. The comparison
+    // was made (the byte equality above is the whole of it) and its answer is
+    // "they differ"; only the *rendering* is abbreviated. Returning 2 here
+    // would tell `diff a b || rebuild` that the question could not be
+    // answered, when it was.
+    if !force_text && (data1.contains(&0) || data2.contains(&0)) {
+        shell_println!(
+            "Binary files {} and {} differ",
+            path1.display(),
+            path2.display()
+        );
+        set_exit(1);
         return;
     }
 

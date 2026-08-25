@@ -73355,6 +73355,14 @@ was written for, and nothing regresses. When every command is on the list,
 `command_parses_own_quotes` and `remove_quotes` both delete themselves in
 favour of a real argv.
 
+**Migrated so far** (2026-08-25): `trap`, `awk`, `fold`, `base64`, `cut`, `tr`,
+`sed`. Each moved when a concrete bug forced it, not as a sweep — `sed` joined
+because `classify_sed_args` used `split_whitespace`, so
+`sed 's/hello world/hi/'` split into `s/hello` and `world/hi/` and was refused
+as an unterminated `s` command. That is the useful property of doing this one
+command at a time: every conversion arrives with a test for the thing it broke
+(here, kshell self-test rung 47), which a 750-function sweep would not have.
+
 **Not purely mechanical**, which is why it is debt rather than an afternoon:
 the commands disagree about what they want. `echo` wants the rest of the line
 joined; `grep` wants words; `trap` wants word 1 as a command string and word 2

@@ -76188,14 +76188,226 @@ Covered by self-test rung 39, which asserts whole byte strings rather than
 searching them: the failures here are about *where* the breaks fall and *which*
 bytes survive, and only a byte comparison can see either.
 
-**Left standing:** `-b` still cannot read input that is not valid UTF-8, because
-the pipe is narrowed to `&str` before `fold` sees it (`shell_bytes_as_str`, the
-`char`-oriented arm of `dispatch_with_input`). That is the shared byte-clean
-issue, not a `fold` one; what `-b` changes here is where the breaks fall, which
-is the reason people reach for it (`fold -b -w76` over base64), and that case is
-exact.
+**Resolution, part two — the same bug, by the other door (`c4fbbd776`).**
+
+The paragraph that stood here said `-b` could not read input that was not
+valid UTF-8, called it "the shared byte-clean issue, not a `fold` one", and
+left it. Re-reading the finished rewrite, that was wrong twice over.
+
+It was wrong about *scope*: the rewrite's whole subject is a `fold` that
+answers a question it could not read, and `fold_run` still contained
+
+```rust
+let text = core::str::from_utf8(&data).unwrap_or("");
+```
+
+for every named file. A file `fold` could not decode was folded as the empty
+string — no output, exit 0. That is not the shared narrowing at all; it is a
+fresh instance of this entry's own bug class, arriving from the file half
+instead of the pipe half, and strictly worse than the pipe's behaviour, which
+at least *said* it could not cope.
+
+And it was wrong about *cost*: making the pipe half byte-clean was not the
+"shared issue" either, because the narrowing at `dispatch_with_input` is
+per-command — the comment there says so — and `fold` no longer needed it.
+
+So `fold` is now byte-clean end to end: `fold_units` takes `&[u8]`,
+`fold_process` splits with `split_inclusive(|&b| b == b'\n')` and
+`strip_suffix(b"\n")`, `fold_run` passes the VFS bytes straight through, and
+`"fold"` moved up into the byte-clean arm of `dispatch_with_input`.
+
+In `-b` nothing changed: every byte was already one unit. In column mode the
+bytes are decoded incrementally — `from_utf8`, then `valid_up_to()` and
+`error_len()` on the error — and each byte that belongs to no valid character
+becomes a one-column unit of its own. That is what GNU does in the C locale,
+and it is the only option that leaves the bytes alone: dropping the byte loses
+data, and substituting U+FFFD *changes* it, in a program whose entire job is to
+insert newlines and change nothing else. A sequence cut short by the end of
+input (`error_len()` returns `None`) is written back as the bytes it is. The
+loop always consumes at least one byte — `error_len()` is never `Some(0)`, and
+a `None` only arises when something follows the valid prefix — so it cannot
+spin.
+
+Rung 39 grew four cases: `\xff\xfe\xfd\xfc` folds at width 2 and exits 0;
+`\xff` followed by α at width 1 proves the decoder resynchronises and keeps α
+whole; `zz\xce` proves a truncated sequence survives; and a *file* of
+undecodable bytes folds rather than reporting itself empty — the case the
+`unwrap_or("")` answered with silence and success.
+
+**Left standing:** the same `from_utf8(&data).unwrap_or("")` is still live at
+seven other sites in `kshell.rs`, each turning an undecodable file into an
+empty one and exiting 0:
+
+| function | command |
+|---|---|
+| `cut_run` | `cut` |
+| `cmd_tr` (twice — the two-file and one-file paths) | `tr` |
+| `cmd_mapfile` | `mapfile` / `readarray` |
+| `cmd_base64` | `base64 -d` only — encoding already passes the bytes through |
+| `cmd_sed` | `sed` |
+| `cmd_awk` | `awk` |
+
+They are all the same bug as this entry's and want the same treatment, command
+by command; the `dispatch_with_input` narrowing is deliberately per-command so
+each arm can move up as it converts.
+
+`base64 -d` is the odd one out and the one to take first, because the
+`unwrap_or("")` is the *smaller* of two faults sitting next to each other —
+see `TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT`.
 
 **Noticed in passing:** `parse_cut_args` does not bundle short options, so
 `cut -sd: -f1` is refused as an unrecognized option where getopt would accept
 it. The fix is `parse_fold_args`'s flag loop. Not urgent — a refusal is honest,
 not a silent guess — but it is a gratuitous difference from every other `cut`.
+
+#### TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT (lane A, 2026-08-25) — ✅ FIXED (`4ddcbd9d9`)
+
+**In short:** `base64 -d` is supposed to write the decoded bytes. Ours writes
+an English sentence about them — `<binary: 4096 bytes>` — whenever the result
+is not valid text. So `base64 f | base64 -d > g` cannot reproduce `f`, which is
+the one thing base64 exists to do. Exit status is 0 either way.
+
+**Where.** `kernel/src/kshell.rs`, `cmd_base64`, the `if decode` arm
+(around line 119560).
+
+```rust
+let text = core::str::from_utf8(&data).unwrap_or("");
+match base64_decode(text) {
+    Ok(decoded) => {
+        // Print as text if valid UTF-8, otherwise show hex summary.
+        if let Ok(s) = core::str::from_utf8(&decoded) {
+            shell_println!("{}", s);
+        } else {
+            shell_println!("<binary: {} bytes>", decoded.len());
+        }
+    }
+    ...
+```
+
+**Three faults, in order of severity.**
+
+1. **The decoded bytes are replaced by a description of themselves.** The
+   whole point of base64 is to carry data that is not text; the branch that
+   handles that case is the branch that throws the data away. `shell_write_bytes`
+   is right there — `fold`, `tee`, `sort` and the rest already use it — so this
+   is a two-line fix, not a design problem.
+2. **`shell_println!` adds a newline the input never had.** Even for the
+   valid-text path, decoding `YWJj` (`abc`, no newline) writes `abc\n`. Same
+   class as the `sed` and `fold` trailing-newline drift.
+3. **`from_utf8(&data).unwrap_or("")` makes an undecodable input into an empty
+   one.** Base64 text is ASCII by construction, so an input that fails to
+   decode as UTF-8 is not base64 at all and deserves a diagnostic. Instead the
+   empty string decodes successfully to zero bytes, and `base64 -d` prints a
+   blank line and exits **0** — a wrong answer reported as success, the class
+   `TD-A-FOLD-GUESSED-AT-EVERY-ARGUMENT-IT-COULD-NOT-READ` is about.
+
+**Proper fix.** Take the file bytes undecoded; reject a non-ASCII input with a
+diagnostic and exit 1 (GNU: `base64: invalid input`); on success write the
+decoded bytes with `shell_write_bytes` and add nothing. Cover it with a
+self-test rung that asserts a genuine round trip over bytes that are not valid
+UTF-8 — the assertion the current code cannot pass and the reason the fault
+survived: nothing yet checks that `base64 -d` produces *bytes*.
+
+**Noticed while** making `fold` byte-clean and auditing the remaining
+`from_utf8(&data).unwrap_or("")` sites in `kshell.rs`.
+
+**Resolution (`4ddcbd9d9`).** All three faults, plus the argument handling they
+were sitting on top of, which turned out to be the same silent-guess shape as
+`fold`'s.
+
+The decoded bytes now go out through `shell_write_bytes` with nothing appended,
+so `base64 f | base64 -d` reproduces `f`. The input is read as `&[u8]` and
+`base64_decode` refuses what is not base64 instead of decoding the empty string
+and reporting success.
+
+`parse_base64_args` replaces "look at the first word": `-d`/`--decode`,
+`-i`/`--ignore-garbage`, `-w N`/`--wrap=N` (0 = never wrap) and `--help`, with
+getopt-style bundling, `--` to end the options, and `-` or no operand naming the
+pipe. `base64` also joins the byte-clean arm of `dispatch_with_input`, which it
+had never been in at all — `cat f | base64` used to print a usage message and
+fail.
+
+The decoder tightened where it used to guess (`Xy=z` is refused rather than
+read as `Xy==`; nothing may follow the padding; a partial group is an error)
+and stayed lenient in the one place compatibility demands it (trailing bits,
+and line breaks as structure). Those two calls are argued in
+design-decisions §276.
+
+Covered by self-test rung 40, which leads with the round trip: ten bytes that
+are not valid UTF-8, encoded, fed back through `base64 -d`, and required back
+byte for byte.
+
+**Noticed in passing:** there is a *second* `base64_encode` in the kernel, at
+`kernel/src/net/http.rs:1271`, with its own tests at `:1652`. Two encoders of
+the same format is the duplication class `sed`'s two transform loops belong to
+— one of them will drift. Neither is wrong today, so this is tech debt rather
+than a bug: the fix is for `net::http` and `kshell` to share one, most
+naturally in a small `base64` module, and the `net/websocket.rs` caller at
+`:193` moves with it.
+
+#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — filed, blocked on `ere` going `no_std`
+
+**In short:** `awk '/^err/ {print}'` in the kernel shell does not match lines
+that *start* with `err`. It matches lines that *contain* the four characters
+`^err`, which almost nothing does — and it exits 0, so the empty output looks
+like an honest "no matches". Lane B fixed exactly this in the userspace `awk`
+months ago and built a shared engine so it could not come back; the kernel
+shell has its own copy of `awk` that was never wired to that engine.
+
+**Where.** `kernel/src/kshell.rs`, `awk_pattern_matches` (~122305). Its own
+comment states the fault:
+
+```rust
+// /regex/ pattern — literal string match.
+if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
+    let pat = &pattern[1..pattern.len() - 1];
+    return line.contains(pat);
+}
+```
+
+`sed_addr_matches` (~121581) has the same shape for `sed`'s addresses.
+
+**What it costs.** Every metacharacter is read as itself, and every row exits 0:
+
+| written | what it matches | what awk means |
+|---|---|---|
+| `/^err/` | the literal `^err`, anywhere in the line | lines beginning `err` |
+| `/a.c/` | the literal `a.c` | `abc`, `axc`, `a c`, … |
+| `/x*/` | the literal `x*` | every line — `x*` matches the empty string |
+| `/err$/` | the literal `err$` | lines ending `err` |
+
+The third row is the worst of them: a pattern that in awk matches *everything*
+here matches almost nothing, so a filter that should be a no-op silently
+discards the whole input.
+
+**Why it is still open.** This is the same bug as
+`B-FOUR-PROGRAMS-MATCHED-REGULAR-EXPRESSIONS-WITH-str::contains`, and it has
+the same right answer: use the `ere` crate lane B wrote for it. But `ere`
+cannot be linked into the kernel today —
+
+```toml
+bstr = { version = "1.13.0", default-features = false, features = ["std"] }
+```
+
+— and `userspace/**` is lane B's tree. Filed as
+`requests/a-b-ere-is-std-only-so-the-kernel-shell-still-matches-regexes-with-contains.md`,
+asking for a `no_std` + `alloc` build of the crate. `ere` wants `bstr` for one
+function (`char_indices`), which `bstr` offers under `alloc`, so the change may
+be a feature flag and some `std::` → `core::`/`alloc::` paths.
+
+**Why not just write one here.** A second ERE in `kernel/` is the outcome the
+`ere` crate exists to prevent — its Cargo.toml says so directly — and two
+engines that must agree about `[[:alpha:]]`, leftmost-longest and backreference
+semantics will not agree for long. A kernel-resident copy would also have to be
+re-verified against gawk independently, duplicating `scripts/awk-diff.sh`.
+
+**The fallback, if lane B declines.** Refuse rather than guess: any `/.../`
+pattern containing a metacharacter reports `awk: regular expressions are not
+supported in the kernel shell` and exits 2. Worse for the user, but a refusal
+is detectable and a wrong answer is not.
+
+**Not `grep`.** `kshell`'s `grep` matches by substring too (`grep_matches`,
+~96861), but it advertises "search for pattern in files", has no `-E`, and a
+fixed-string search is a defensible reading of that. It is left alone
+deliberately; only `awk` and `sed`, where the syntax itself promises a regex,
+are counted here.

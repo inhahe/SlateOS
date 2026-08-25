@@ -161,11 +161,38 @@ def call_graph(lines, spans):
         callees = set()
         for start, end in occurrences:
             for j in range(start + 1, min(end + 1, len(lines))):
-                for other in re.findall(r"\b([a-z_][a-z0-9_]*)\s*\(", lines[j]):
+                for other in mentions(lines[j]):
                     if other in names and other != name:
                         callees.add(other)
         graph[name] = (occurrences[0][0], callees)
     return graph
+
+
+# A name used as a *value* rather than called: `or_else(card_from_env)`,
+# `map(ics_unescape)`, `unwrap_or_else(quick_scan_ports)`, a function pointer
+# in a dispatch table.  Rust reaches the body just as surely as `f()` does, and
+# looking only for `name(` cannot see any of it.
+#
+# This is not a hypothetical gap.  `gui/compositor`'s `card_from_value` was
+# reported unreachable because its one production caller, `card_from_env`, is
+# named at `options.card.or_else(card_from_env)` -- so the *caller* looked dead
+# and took its callee down with it.  `apps/calendar`'s `ics_unescape`
+# (`map(ics_unescape)`) and `apps/netscan`'s `quick_scan_ports` were the same
+# defect wearing different idioms.  Three of the report's highest-reach
+# findings, all false.
+#
+# `.` excluded on the left so `entry.name` does not credit a `fn name`; `(`,
+# `:` and `!` on the right so a call, a path segment (`mod::f`) and a macro are
+# left to the call rule or ignored.  A local variable that shares a function's
+# name will make a spurious edge and mark a dead function live -- that is the
+# direction this script prefers to be wrong in, per the note above.
+IDENT = re.compile(r"(?<![.\w])([a-z_][a-z0-9_]*)\b(?![\s]*[(:!])")
+CALL = re.compile(r"\b([a-z_][a-z0-9_]*)\s*\(")
+
+
+def mentions(line):
+    """Every identifier on `line` that could name a function being reached."""
+    return CALL.findall(line) + IDENT.findall(line)
 
 
 def reachable_from(graph, root):

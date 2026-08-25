@@ -8,14 +8,18 @@
 # link count, owner, group, inode number and block count are `struct stat`
 # fields with no Windows equivalent; and the "is this a fifo / socket / device"
 # question that `-F` and the type column answer cannot even be asked. So this
-# harness re-execs itself into WSL, builds our `ls` for
-# `x86_64-unknown-linux-gnu`, and runs both against the same fixture tree on
-# WSL's own ext4.
+# harness runs entirely inside WSL, against a fixture tree on WSL's own ext4.
 #
-# Everything else about the shape of this script is `du-diff.sh`'s, deliberately
-# so -- both sides reached through a `PATH` lookup of the bare word so that
-# `argv[0]` matches, the subject built every run from the package that owns it,
-# a skip rather than a failure when WSL or cargo is missing, and a
+# Getting there is `diff-wsl.sh`'s job, as it is for every harness here: it
+# re-execs into WSL, builds our `ls` for `x86_64-unknown-linux-gnu` -- and
+# refuses to run against a build cache that did not react to a source change --
+# fixes the locale, and hands back a scratch directory removed on exit. What
+# this harness keeps for itself is the *reference*, for the reason immediately
+# below; hence `DIFF_NO_REF=1`, and `DIFF_NO_BINDIR=1` so that the two `PATH`
+# directories are made after it has one.
+#
+# The rest of the shape is `du-diff.sh`'s, deliberately so -- both sides reached
+# through a `PATH` lookup of the bare word so that `argv[0]` matches, and a
 # `!reason|command` line for a difference we intend.
 #
 # Three things are specific to `ls` and worth stating.
@@ -41,14 +45,20 @@
 # fixture is created in a single burst, so both runs render the same mtimes.
 set -u
 
-if [ "${LS_DIFF_INNER:-}" != 1 ]; then
-    cd "$(dirname "$0")/.." || exit 1
-    if ! wsl -e true 2>/dev/null; then
-        echo "ls-diff: no WSL on this machine; SKIPPED"
-        exit 0
-    fi
-    exec wsl -e env LS_DIFF_INNER=1 "OURS=${OURS:-}" LC_ALL=C.UTF-8 bash ./scripts/ls-diff.sh
-fi
+DIFF_PROG=ls
+DIFF_NO_REF=1
+DIFF_NO_BINDIR=1
+# `GNU` names a reference to use instead of building 9.5; `LS_DIFF_CACHE` says
+# where to build it. Both are read below, on the far side of the re-exec, so
+# both have to be carried across it.
+DIFF_FORWARD="GNU LS_DIFF_CACHE"
+# The socket fixture is made with python3, and a socket is the only way to
+# reach the `s` type letter, the `=` indicator and the `so` colour slot. If it
+# is missing the fixture silently is too, and eleven cases agree that a name
+# they cannot see is absent -- which is a pass that measured nothing.
+DIFF_NEED=python3
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 # `ls` reads more of the environment than most utilities, and every one of
 # these would change both sides at once -- which is worse than changing one,
@@ -124,71 +134,35 @@ case $gnu_version in
         ;;
 esac
 
-OURS=${OURS:-}
-
-if [ -z "$OURS" ]; then
-    export PATH="$HOME/.cargo/bin:$PATH"
-    if ! command -v cargo >/dev/null 2>&1; then
-        cat >&2 <<'MISSING'
-ls-diff: no cargo inside WSL, so our ls cannot be built for Linux.
-
-Install one (a per-user toolchain, nothing system-wide):
-
-  wsl -e sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --profile minimal"
-
-MISSING
-        echo "ls-diff: cargo missing inside WSL; SKIPPED"
-        exit 0
-    fi
-    # The target directory is under WSL's home, and shared with du-diff,
-    # find-diff and cmp-diff: same workspace, same triple, so their dependency
-    # artifacts are identical and a directory each stored the same objects four
-    # times over. See design-decisions.md §374. Delete it with
-    # `wsl rm -rf ~/.cache/slateos-diff-target`.
-    #
-    # Built from the workspace *root*, not from `userspace/coreutils`. Cargo
-    # searches for config upwards from the cwd, and `userspace/.cargo/config.
-    # toml` turns on `build-std` -- which this build does not want (Linux has a
-    # prebuilt std) and which fails outright unless the `rust-src` component is
-    # installed for the active toolchain. Running from the root avoids the zone
-    # config entirely; `-p coreutils` picks the same package.
-    root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-    ( cd "$root" \
-      && CARGO_TARGET_DIR="$HOME/.cache/slateos-diff-target" \
-         cargo build -p coreutils --bin ls --target x86_64-unknown-linux-gnu ) >&2 || {
-        echo "ls-diff: the build failed"
-        exit 1
-    }
-    OURS="$HOME/.cache/slateos-diff-target/x86_64-unknown-linux-gnu/debug/ls"
-fi
-
-if [ ! -x "$OURS" ]; then
-    echo "ls-diff: $OURS is not executable"
-    exit 1
-fi
-
 GNU=$(cd "$(dirname "$GNU")" && pwd)/$(basename "$GNU") || exit 1
-OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") || exit 1
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d /tmp/ls-diff.XXXXXX) || exit 1
-trap 'chmod -R u+rwX "$fixtures" 2>/dev/null; rm -rf "$fixtures"' EXIT
-
-mkdir -p "$fixtures/bin-gnu" "$fixtures/bin-ours" || exit 1
-ln -s "$GNU" "$fixtures/bin-gnu/ls" || exit 1
-ln -s "$OURS" "$fixtures/bin-ours/ls" || exit 1
-GNU_PATH="$fixtures/bin-gnu:$PATH"
-OURS_PATH="$fixtures/bin-ours:$PATH"
+# Everything scratch lives under `$DIFF_TMP`, which `diff-wsl.sh` removes on
+# exit. A second `trap ... EXIT` here would *replace* that one rather than add
+# to it, and leak the whole directory every run; `diff_cleanup` already does the
+# `chmod -R` that the unreadable-directory fixture below needs.
+#
+# `diff-wsl.sh` was told not to build these (`DIFF_NO_BINDIR=1`), because the
+# reference is not known until the block above has built or found it. The
+# arrangement is the standard one all the same: one symlink per side, named
+# `ls`, in a directory that is the head of `PATH` for that one invocation.
+mkdir -p "$bindir/gnu" "$bindir/ours" || exit 1
+ln -s "$GNU" "$bindir/gnu/ls" || exit 1
+ln -s "$OURS" "$bindir/ours/ls" || exit 1
+# Prepended, not the whole of `PATH`: a case line may hold a leading
+# `VAR=value` and a case may name any command, so narrowing `PATH` to the one
+# directory would starve them and fail both sides identically.
+GNU_PATH="$bindir/gnu:$PATH"
+OURS_PATH="$bindir/ours:$PATH"
 
 # Both sides' output, kept beside the fixture tree rather than inside it -- a
 # case listing `.` must not find the harness's own scratch files.
-out_a="$fixtures/out-gnu"
-out_b="$fixtures/out-ours"
+out_a="$DIFF_TMP/out-gnu"
+out_b="$DIFF_TMP/out-ours"
 
-mkdir -p "$fixtures/tree" || exit 1
-cd "$fixtures/tree" || exit 1
+mkdir -p "$DIFF_TMP/tree" || exit 1
+cd "$DIFF_TMP/tree" || exit 1
 
 # ---------------------------------------------------------------- fixtures ---
 #
@@ -225,7 +199,8 @@ printf 'xxxx' > t/bb
 chmod 2750 t/dir
 chmod 1777 t/sub
 mkfifo t/fifo
-python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' t/sock 2>/dev/null || :
+python3 -c 'import socket,sys; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1])' t/sock
+[ -S t/sock ] || { echo "ls-diff: could not make the socket fixture; refusing to run" >&2; exit 1; }
 ln -s a t/link
 ln -s nowhere t/dangle
 : > t/.hidden
@@ -307,8 +282,15 @@ run_case() {
     # the NULs fall would be reported as agreement. bash even says so
     # ("ignored null byte in input"); a harness that answers a question it did
     # not ask is worse than one that skips it.
-    ( LS_PATH=$GNU_PATH; eval "$line" >"$out_a" 2>&1; printf 'rc=%s' "$?" >>"$out_a" )
-    ( LS_PATH=$OURS_PATH; eval "$line" >"$out_b" 2>&1; printf 'rc=%s' "$?" >>"$out_b" )
+    #
+    # Through `diff_run`, so that if a case ever dies of a signal it is the
+    # program's own output that is compared and not bash's announcement of the
+    # death -- which carries a pid, and so would differ on every run forever.
+    # The two streams stay one file with one offset (`2>&1` then `diff_run`'s
+    # `4>&2` dup the same description), which is what the `ls -R t` case below
+    # measures the flush order of.
+    ( LS_PATH=$GNU_PATH; diff_run eval "$line" >"$out_a" 2>&1; printf 'rc=%s' "$?" >>"$out_a" )
+    ( LS_PATH=$OURS_PATH; diff_run eval "$line" >"$out_b" 2>&1; printf 'rc=%s' "$?" >>"$out_b" )
 
     if cmp -s "$out_a" "$out_b"; then
         if [ "$expect_diff" = 1 ]; then

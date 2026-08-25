@@ -1025,6 +1025,42 @@ mod tests {
         assert_eq!(args.rest, vec!["a.txt".to_string(), "b.txt".into()]);
     }
 
+    /// Duplicates survive, because de-duplicating them is not this layer's call.
+    ///
+    /// What a repeated argument means is the application's business — a second
+    /// tab, or a jump to the tab that is already open, or an error. This layer
+    /// cannot know which, so it reports what was typed and lets the application
+    /// decide.
+    #[test]
+    fn a_repeated_argument_is_not_collapsed() {
+        let args = Args::parse(["a.rs".to_string(), "b.rs".into(), "a.rs".into()]).unwrap();
+        assert_eq!(
+            args.rest,
+            vec!["a.rs".to_string(), "b.rs".into(), "a.rs".into()]
+        );
+    }
+
+    /// So a wrapper script can pass `--display` after the user's own arguments
+    /// and have it take effect, which is the only ordering a wrapper controls.
+    #[test]
+    fn the_last_display_wins() {
+        let args = Args::parse([
+            "--display".to_string(),
+            "a:1".into(),
+            "--display=b:2".into(),
+        ])
+        .unwrap();
+        assert_eq!(args.display.as_deref(), Some("b:2"));
+        assert!(args.rest.is_empty(), "neither address was taken for a file");
+    }
+
+    /// A lone `-` is the conventional name for standard input, not an option.
+    #[test]
+    fn a_bare_dash_is_an_argument_and_not_an_option() {
+        let args = Args::parse(["-".to_string()]).unwrap();
+        assert_eq!(args.rest, vec!["-".to_string()]);
+    }
+
     /// The harness must not silently accept an event it cannot route.
     #[test]
     fn an_event_for_no_window_at_all_is_not_dispatched() {

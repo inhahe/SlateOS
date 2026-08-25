@@ -1174,30 +1174,21 @@ mod tests {
         p
     }
 
-    /// The accents the appearance page actually offers, minus `Custom`.
+    /// `p` for `light` mode wearing `accent`, as the settings page would build.
     ///
-    /// [`Palette::on_accent`] is a *step* function of the accent's
-    /// brightness, so one fixture accent samples one side of the step and
-    /// says nothing about the other. Walking the real menu is what makes
-    /// "the lettering is read off the fill" a claim about the function
-    /// rather than about one sample of it.
-    const OFFERED: [AccentColor; 14] = [
-        AccentColor::Blue,
-        AccentColor::Lavender,
-        AccentColor::Teal,
-        AccentColor::Green,
-        AccentColor::Yellow,
-        AccentColor::Peach,
-        AccentColor::Pink,
-        AccentColor::Mauve,
-        AccentColor::Red,
-        AccentColor::Rosewater,
-        AccentColor::Flamingo,
-        AccentColor::Maroon,
-        AccentColor::Sky,
-        AccentColor::Sapphire,
-    ];
-
+    /// The tests that call this walk [`AccentColor::presets`] — the list the
+    /// appearance page draws its swatches from, and so the authority for "the
+    /// accents the user is actually offered", minus `Custom`. They used to
+    /// walk a hand-written copy of that list declared here, which is the
+    /// failure module 87 in `known-issues.md` names: a test that re-derives
+    /// the answer proves its own copy. An accent added to `presets` would have
+    /// been skipped in silence by every loop below.
+    ///
+    /// [`Palette::on_accent`] is a *step* function of the accent's brightness,
+    /// so one fixture accent samples one side of the step and says nothing
+    /// about the other. Walking the real menu is what makes "the lettering is
+    /// read off the fill" a claim about the function rather than about one
+    /// sample of it.
     fn wearing(light: bool, accent: AccentColor) -> Palette {
         let mut p = Palette::for_mode(light);
         p.accent = if light {
@@ -1832,7 +1823,7 @@ mod tests {
         let mut saw_dark_ink = false;
         let mut saw_light_ink = false;
         for light in [false, true] {
-            for accent in OFFERED {
+            for &accent in AccentColor::presets() {
                 let p = wearing(light, accent);
                 for (i, &tab) in A11yTab::ALL.iter().enumerate() {
                     let mut ui = busy();

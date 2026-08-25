@@ -1382,30 +1382,19 @@ mod tests {
         p
     }
 
-    /// The fourteen named accents the appearance page offers.
-    ///
-    /// Needed wherever the property under test is a *function of* the accent
-    /// rather than "did this follow the accent at all" — `on_accent` is a
-    /// threshold, and one sample characterises a step function only by luck.
-    /// See known-issues.md lesson 20.
-    const OFFERED: [AccentColor; 14] = [
-        AccentColor::Blue,
-        AccentColor::Lavender,
-        AccentColor::Teal,
-        AccentColor::Green,
-        AccentColor::Yellow,
-        AccentColor::Peach,
-        AccentColor::Pink,
-        AccentColor::Mauve,
-        AccentColor::Red,
-        AccentColor::Rosewater,
-        AccentColor::Flamingo,
-        AccentColor::Maroon,
-        AccentColor::Sky,
-        AccentColor::Sapphire,
-    ];
-
     /// `p` for `light` mode wearing `accent`, as the settings page would build.
+    ///
+    /// The tests that call this walk [`AccentColor::presets`] — the named
+    /// accents the appearance page offers, and the list it draws its swatches
+    /// from. Needed wherever the property under test is a *function of* the
+    /// accent rather than "did this follow the accent at all": `on_accent` is
+    /// a threshold, and one sample characterises a step function only by luck.
+    /// See known-issues.md lesson 20.
+    ///
+    /// They used to walk a hand-written copy of `presets` declared here, which
+    /// is the failure lesson 42 names: a test that re-derives the answer
+    /// proves its own copy, so an accent added to the settings page would have
+    /// been skipped in silence by every loop below.
     fn wearing(light: bool, accent: AccentColor) -> Palette {
         let mut p = Palette::for_mode(light);
         p.accent = if light {
@@ -2222,7 +2211,7 @@ mod tests {
             (hi + 0.05) / (lo + 0.05)
         }
         for light in [false, true] {
-            for accent in OFFERED {
+            for &accent in AccentColor::presets() {
                 let p = wearing(light, accent);
                 let mut mgr = DisplaySettingsManager::default();
                 mgr.active_tab = DisplaySettingsTab::TestPatterns;

@@ -5478,7 +5478,32 @@ not cover it.
 
 ---
 
-### TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS. `kill -l` and `trap` model Linux's signal table; the development host's bash uses a BSD-ish MSYS one — 2026-08-04 — OPEN (unverifiable on this host)
+### TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS. `kill -l` and `trap` model Linux's signal table; the development host's bash uses a BSD-ish MSYS one — 2026-08-04 — **VERIFIED CORRECT 2026-08-25**; the premise "unverifiable on this host" is retired
+
+> **Measured against glibc bash, 2026-08-25.** `scripts/osh-diff.sh` compares
+> osh against `/usr/bin/bash` inside WSL, so the table below is now checkable
+> and has been checked. **osh's numbering for signals 1–31 is identical to
+> glibc bash's, name for name and number for number** — including the three
+> this entry called out as differing under MSYS:
+>
+> | signal | osh | glibc bash | MSYS bash (the old reference) |
+> |---|---|---|---|
+> | `SIGBUS` | 7 | **7** | 10 |
+> | `SIGUSR1` | 10 | **10** | — |
+> | `SIGUSR2` | 12 | **12** | — |
+> | `SIGSYS` | 31 | **31** | 12 |
+> | `SIGEMT` | rejected | **rejected** | 7 |
+>
+> Both shells reject `SIGEMT` with the same wording (`kill: EMT: invalid signal
+> specification`), so the agreement extends to the error path. Nothing here was
+> ever an osh defect, and it is no longer unverifiable — it is verified.
+>
+> **One real gap did surface**, which is what a correct reference is for:
+> osh's table stops at 31, while glibc bash exposes the 31 real-time signals
+> 34–64. `kill -l RTMIN` answers `34` in bash and `invalid signal
+> specification` in osh. That is an osh limitation rather than a reference
+> artifact, and it is tracked separately as
+> `TD-OILS-NO-REAL-TIME-SIGNALS` below.
 
 **Where:** `userspace/oils/src/interp.rs` — the signal name/number table behind
 `kill`, `trap` and `$?`'s 128+n encoding.
@@ -5528,6 +5553,64 @@ that was already installed by the host.
 **Why not waived instead.** An `# EXPECT-DIFF` would pin the artifact into the
 corpus as if it were behaviour. There is nothing to assert here: the host cannot
 represent the input the test wants.
+
+> **Gone as of 2026-08-25 — the host was the whole problem, and the host has
+> changed.** `scripts/osh-diff.sh` runs both shells inside WSL on ext4, where
+> mode bits are real. Re-measured:
+>
+> | shell | `test -x w.sh` after `chmod +x` | `type -a w.sh` |
+> |---|---|---|
+> | osh | `yes` | `w.sh is /tmp/…/w.sh` |
+> | glibc bash | `yes` | `w.sh is /tmp/…/w.sh` |
+>
+> Identical. **`type -a` is now usable in corpus cases**, including on files the
+> case creates itself, and the restriction this entry imposed on case authors is
+> lifted. `tests/corpus/path-prefix-assignment-search.sh`'s header still warns
+> against it; that warning is now stale and should be dropped when the file is
+> next touched.
+>
+> The WONTFIX stands as a judgement about osh — there was never a bug here — but
+> the *measurement* is no longer blocked.
+
+### TD-OILS-NO-REAL-TIME-SIGNALS. osh's signal table stops at 31; bash exposes SIGRTMIN..SIGRTMAX (34–64) — 2026-08-25 — OPEN
+
+**In short:** POSIX systems have two kinds of signal. The classic ones
+(`SIGINT`, `SIGTERM`, …) are numbered 1–31 and osh handles all of them
+correctly. Linux adds a second block, the *real-time* signals — 31 extra
+numbered slots (34–64) that programs use to send each other application-defined
+notifications. osh does not know they exist. A script that says `kill -RTMIN+2
+$pid` works under bash and fails under osh.
+
+**Found by** the reference-shell migration: this was invisible while the corpus
+measured against MSYS bash, whose own table is BSD-shaped and disagreed with
+osh's in so many places that the real-time block was lost in the noise. Against
+glibc bash the 1–31 range agrees exactly, which is what makes the tail visible.
+
+**Where:** `userspace/oils/src/interp.rs` — the signal name/number table behind
+`kill`, `trap` and `$?`'s 128+n encoding.
+
+**Measured:**
+
+```
+$ osh  -c 'kill -l RTMIN'   →  kill: RTMIN: invalid signal specification
+$ bash -c 'kill -l RTMIN'   →  34
+```
+
+`kill -l` output is identical up to `31) SIGSYS`, after which bash continues
+with 34–64 and osh stops.
+
+**Proper fix.** Extend the table with `SIGRTMIN` (34) through `SIGRTMAX` (64),
+and accept the `RTMIN+n` / `RTMAX-n` name forms in `kill`, `trap` and `kill -l`,
+which is how they are almost always written. Note that glibc reserves 32 and 33
+for its own threading use and bash lists neither, so the block genuinely starts
+at 34 — the numbers are not simply "32 onwards".
+
+**Risk of leaving it.** Low but real: real-time signals are rare in shell
+scripts, but a script that uses one fails with a confusing "invalid signal
+specification" rather than doing nothing, and the failure is at the point of
+use rather than at startup.
+
+---
 
 ### TD-OILS-PRINTF-Q-HIGH-BYTES. `%q`/`@Q` deliberately disagree with the reference bash about which *characters* are printable — 2026-08-03 — ⚠️ **KNOWN DEVIATION, NOT A BUG** — narrowed 2026-08-07
 
@@ -7102,7 +7185,30 @@ and the disagreement will close on its own.
 regenerate. Do not special-case the 74; they are a symptom of the granularity,
 not the rule.
 
-### TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST. A child spawned by osh sees `\xef\xbf\xbd` where bash's child sees `\xff` — 2026-08-08 — OPEN (host-only)
+### TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST. A child spawned by osh sees `\xef\xbf\xbd` where bash's child sees `\xff` — 2026-08-08 — **NOT REPRODUCIBLE OFF WINDOWS (confirmed 2026-08-25)**; the host-only claim is now measured rather than argued
+
+> **The "why it is host-only" section below was reasoning; this is the
+> measurement.** The `x86_64-unknown-linux-gnu` osh that `scripts/osh-diff.sh`
+> builds hands a child an argv vector, exactly as SlateOS will, and the bytes
+> survive. A child was given `\xff` three different ways and printed each byte
+> it received:
+>
+> | how the byte reached the child | osh | glibc bash |
+> |---|---|---|
+> | `showarg $(printf "\xff")` | `[ff]` | `[ff]` |
+> | `showarg $'\xff'` | `[ff]` | `[ff]` |
+> | `v=$(printf "\xff"); showarg "$v"` | `[ff]` | `[ff]` |
+>
+> No replacement character anywhere, and identical to bash in all three shapes.
+> So the corruption is confined to `wincmd.rs` and the Windows `CreateProcess`
+> command line, as argued — and the argument is now backed by a run rather than
+> by inspection of the spawn path.
+>
+> **The corpus restriction is lifted.** "Corpus cases must not route a byte that
+> is no character through a child's argv" was a rule imposed by the measuring
+> apparatus. Under `scripts/osh-diff.sh` such a case is legitimate and would
+> pass; keep it in mind only if a case is ever run against the Windows host
+> build directly.
 
 **Where:** `userspace/oils/src/wincmd.rs` and the `std::process::Command` spawn
 path in `userspace/oils/src/interp.rs` — Windows takes a UTF-16 command line,
@@ -7920,7 +8026,33 @@ and thread the shell start instant through so `%(…)T -2` is exact. Deferred:
 UTC formatting is correct and deterministic, and scripts that need a
 specific zone can compute the offset explicitly.
 
-### TD-OILS-HOST-ARGV0. External commands see the resolved absolute path as `argv[0]` on the *Windows host build* instead of the command word as typed (correct on the slateos/unix target) — NOT-A-BUG on target / host-only test artifact — 2026-07-20
+### TD-OILS-HOST-ARGV0. External commands see the resolved absolute path as `argv[0]` on the *Windows host build* instead of the command word as typed (correct on the slateos/unix target) — NOT-A-BUG on target / host-only test artifact — 2026-07-20 — **`cfg(unix)` path now measured, 2026-08-25**
+
+> **"Validate argv[0] behavior on the slateos target when a ring-3 exec
+> self-test exists" — partly discharged, sooner and more cheaply than that.**
+> `scripts/osh-diff.sh` builds osh for `x86_64-unknown-linux-gnu`, where
+> `cfg(unix)` is true, so the `CommandExt::arg0` override below is *compiled in
+> and exercised* — the same code the slateos target uses. Every host-only claim
+> in this entry, including the `exec -a`/`-l`/`-c` paragraph, was re-measured
+> against glibc bash:
+>
+> | probe | osh | glibc bash |
+> |---|---|---|
+> | `cat /nope` | `cat: /nope: No such file or directory` | identical |
+> | `sh -c 'echo $0'` | `sh` | identical |
+> | `exec -a myname sh -c 'echo $0'` | `myname` | identical |
+> | `exec -l sh -c 'echo $0'` | `-sh` | identical |
+> | `exec -c env` | (empty) | identical |
+>
+> So `argv[0]` is the word as typed, `exec -a` chooses it, `exec -l` prefixes
+> the `-`, and `exec -c` really does clear the environment. All five were
+> unobservable under the old apparatus and all five are correct.
+>
+> **What this does not prove:** slateos is not Linux, and the ring-3 exec
+> self-test is still the thing that would test *slateos'* exec. What is now
+> settled is that the code is right and the Windows host was the only thing
+> hiding it — the remaining risk is in the target's exec implementation, not in
+> osh's use of it.
 
 **Where:** `userspace/oils/src/interp.rs` (`exec_external`, the `PCommand`
 construction ~line 5664). The `arg0` override is `#[cfg(unix)]`.

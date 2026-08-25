@@ -75837,7 +75837,7 @@ see `TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT`.
 it. The fix is `parse_fold_args`'s flag loop. Not urgent — a refusal is honest,
 not a silent guess — but it is a gratuitous difference from every other `cut`.
 
-#### TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT (lane A, 2026-08-25) — OPEN
+#### TD-A-BASE64-D-DESCRIBES-ITS-OUTPUT-INSTEAD-OF-WRITING-IT (lane A, 2026-08-25) — ✅ FIXED (`4ddcbd9d9`)
 
 **In short:** `base64 -d` is supposed to write the decoded bytes. Ours writes
 an English sentence about them — `<binary: 4096 bytes>` — whenever the result
@@ -75887,3 +75887,37 @@ survived: nothing yet checks that `base64 -d` produces *bytes*.
 
 **Noticed while** making `fold` byte-clean and auditing the remaining
 `from_utf8(&data).unwrap_or("")` sites in `kshell.rs`.
+
+**Resolution (`4ddcbd9d9`).** All three faults, plus the argument handling they
+were sitting on top of, which turned out to be the same silent-guess shape as
+`fold`'s.
+
+The decoded bytes now go out through `shell_write_bytes` with nothing appended,
+so `base64 f | base64 -d` reproduces `f`. The input is read as `&[u8]` and
+`base64_decode` refuses what is not base64 instead of decoding the empty string
+and reporting success.
+
+`parse_base64_args` replaces "look at the first word": `-d`/`--decode`,
+`-i`/`--ignore-garbage`, `-w N`/`--wrap=N` (0 = never wrap) and `--help`, with
+getopt-style bundling, `--` to end the options, and `-` or no operand naming the
+pipe. `base64` also joins the byte-clean arm of `dispatch_with_input`, which it
+had never been in at all — `cat f | base64` used to print a usage message and
+fail.
+
+The decoder tightened where it used to guess (`Xy=z` is refused rather than
+read as `Xy==`; nothing may follow the padding; a partial group is an error)
+and stayed lenient in the one place compatibility demands it (trailing bits,
+and line breaks as structure). Those two calls are argued in
+design-decisions §276.
+
+Covered by self-test rung 40, which leads with the round trip: ten bytes that
+are not valid UTF-8, encoded, fed back through `base64 -d`, and required back
+byte for byte.
+
+**Noticed in passing:** there is a *second* `base64_encode` in the kernel, at
+`kernel/src/net/http.rs:1271`, with its own tests at `:1652`. Two encoders of
+the same format is the duplication class `sed`'s two transform loops belong to
+— one of them will drift. Neither is wrong today, so this is tech debt rather
+than a bug: the fix is for `net::http` and `kshell` to share one, most
+naturally in a small `base64` module, and the `net/websocket.rs` caller at
+`:193` moves with it.

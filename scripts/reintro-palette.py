@@ -24566,6 +24566,377 @@ DEFECTS = [
             'manager_add_and_remove',
         ],
     ),
+    # ------------------------------------------------------------------
+    # Module 86: the calendar's event store, its text format and its
+    # reminders. Modules 68-70 swept this file's *drawing*, and 82 swept the
+    # recurrence and date arithmetic; what is left unasked is the bookkeeping
+    # underneath -- add/remove/update/get by ID, the range query's overlap
+    # test, `export_text`/`import_text`, and the whole of `ReminderManager`.
+    # 76 of the file's 114 tests had never been named by any defect.
+    # ------------------------------------------------------------------
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the ID handed back to the caller is not the ID stamped on the event",
+        CAL,
+        [
+            ('        event.id = id;\n',
+             '        event.id = id.saturating_add(1);\n'),
+        ],
+        ["desktop"],
+        [
+            # Every later lookup in the module is by the returned ID, so the
+            # event the caller just added is one it can never find again.
+            'event_store_get',
+            'event_store_remove',
+            'event_store_update',
+            'import_single_event',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: removing an event that is not there reports success",
+        CAL,
+        [
+            ('        self.events.len() < before\n',
+             '        self.events.len() <= before\n'),
+        ],
+        ["desktop"],
+        [
+            'event_store_remove',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: removing one event removes every other event instead",
+        CAL,
+        [
+            ('        self.events.retain(|e| e.id != id);\n',
+             '        self.events.retain(|e| e.id == id);\n'),
+        ],
+        ["desktop"],
+        [
+            'event_store_remove',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: an update to an event that does not exist reports that it happened",
+        CAL,
+        [
+            ('            f(e);\n            true\n        } else {\n            false\n        }\n',
+             '            f(e);\n            true\n        } else {\n            true\n        }\n'),
+        ],
+        ["desktop"],
+        [
+            'event_store_update_nonexistent',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an update lands on the first event whose ID is at least the one asked for",
+        CAL,
+        [
+            ('        if let Some(e) = self.events.iter_mut().find(|e| e.id == id) {\n',
+             '        if let Some(e) = self.events.iter_mut().find(|e| e.id >= id) {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape. `event_store_update_nonexistent` asks a
+            # *empty* store for ID 999, and `>=` finds nothing in an empty
+            # store either -- the two predicates only disagree when the store
+            # still holds an event whose ID is above the missing one, which is
+            # the state a delete leaves behind.
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: an event is looked up by its position in the list rather than by its ID",
+        CAL,
+        [
+            ('        self.events.iter().find(|e| e.id == id)\n',
+             '        self.events.get(id as usize)\n'),
+        ],
+        ["desktop"],
+        [
+            'event_store_get',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: an event that begins exactly where the range ends is counted inside it",
+        CAL,
+        [
+            ('                if event.start_timestamp < range_end && event.end_timestamp > range_start {\n',
+             '                if event.start_timestamp <= range_end && event.end_timestamp > range_start {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape: every event in the suite starts at 09:00,
+            # 10:00, 14:00 or 23:00, and the range ends every fixture asks
+            # about are midnights, so no fixture puts a start *on* a range
+            # end. Midnight is the range end of every day cell, so a real
+            # event at exactly 00:00 would be drawn on the day before too.
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: an event that ends exactly where the range begins is counted inside it",
+        CAL,
+        [
+            ('                if event.start_timestamp < range_end && event.end_timestamp > range_start {\n',
+             '                if event.start_timestamp < range_end && event.end_timestamp >= range_start {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape, for the mirror-image reason as `G`: no
+            # fixture has an event *ending* exactly on a range start either.
+            # The half-open interval is what stops a meeting ending at
+            # midnight from appearing on both days. Module 82's `E` proved
+            # this for the *recurring* branch; the non-recurring branch has
+            # never been asked.
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: every non-recurring event is returned whatever range was asked for",
+        CAL,
+        [
+            ('                if event.start_timestamp < range_end && event.end_timestamp > range_start {\n                    result.push(event.clone());\n                }\n',
+             '                result.push(event.clone());\n'),
+        ],
+        ["desktop"],
+        [
+            'events_for_range',
+            'events_for_date_non_recurring',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a hex colour made of non-hex characters parses as black",
+        CAL,
+        [
+            ('    let r = u8::from_str_radix(s.get(0..2)?, 16).ok()?;\n',
+             '    let r = u8::from_str_radix(s.get(0..2)?, 16).unwrap_or(0);\n'),
+            ('    let g = u8::from_str_radix(s.get(2..4)?, 16).ok()?;\n',
+             '    let g = u8::from_str_radix(s.get(2..4)?, 16).unwrap_or(0);\n'),
+            ('    let b = u8::from_str_radix(s.get(4..6)?, 16).ok()?;\n',
+             '    let b = u8::from_str_radix(s.get(4..6)?, 16).unwrap_or(0);\n'),
+        ],
+        ["desktop"],
+        [
+            # All three at once on purpose: `?` on the first channel hides a
+            # broken second and third, so patching one is untestable.
+            'parse_hex_color_invalid_chars',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: importing a multi-event file keeps only the last event's fields",
+        CAL,
+        [
+            ('                if in_event {\n',
+             '                if !in_event {\n'),
+        ],
+        ["desktop"],
+        [
+            # The count still comes out right -- the store gains one event per
+            # EVENT line either way -- so only a test that reads the imported
+            # *fields* can see it.
+            'export_import_roundtrip',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: an imported event's all-day flag comes back inverted",
+        CAL,
+        [
+            ('                all_day = val == "true";\n',
+             '                all_day = val != "true";\n'),
+        ],
+        ["desktop"],
+        [
+            'export_import_roundtrip',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a weekly event is imported as a monthly one",
+        CAL,
+        [
+            ('                    "weekly" => Some(Recurrence::Weekly),\n',
+             '                    "weekly" => Some(Recurrence::Monthly),\n'),
+        ],
+        ["desktop"],
+        [
+            'export_import_roundtrip',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the colour line's leading space is kept, so every imported colour is dropped",
+        CAL,
+        [
+            ('            } else if let Some(val) = trimmed.strip_prefix("color: ") {\n',
+             '            } else if let Some(val) = trimmed.strip_prefix("color:") {\n'),
+        ],
+        ["desktop"],
+        [
+            # Seven characters is not six, so `parse_hex_color` answers None
+            # and the event silently reverts to the renderer's default.
+            'import_single_event',
+            'export_import_roundtrip',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: an exported colour channel below 0x10 loses its leading zero",
+        CAL,
+        [
+            ('                out.push_str(&format!("color: {:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));\n',
+             '                out.push_str(&format!("color: {:X}{:X}{:X}\\n", c.r, c.g, c.b));\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape. `export_color_hex_format` uses F38BA8 and the
+            # round trip uses A6E3A1 and F9E2AF -- every channel in the suite
+            # is >= 0x10, so the padding never has anything to do. A dark
+            # colour writes fewer than six digits, which the length check in
+            # `parse_hex_color` then refuses on the way back in, silently
+            # losing the colour the user chose.
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a recurrence walk runs one occurrence past the end of the range",
+        CAL,
+        [
+            ('        if occ_start >= range_end {\n',
+             '        if occ_start > range_end {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape: the recurrence fixtures anchor at 10:00 and
+            # 14:00 and stop at midnights, so no occurrence ever starts *on*
+            # the range end. A daily event anchored at 00:00 would gain a
+            # whole extra day at the end of every range it is drawn in.
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a reminder fires N minutes after its event instead of before it",
+        CAL,
+        [
+            ('            event_start.saturating_sub((lead_minutes as u64).saturating_mul(SECS_PER_MIN));\n',
+             '            event_start.saturating_add((lead_minutes as u64).saturating_mul(SECS_PER_MIN));\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_set_and_due',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the reminder lead time is read as seconds rather than as minutes",
+        CAL,
+        [
+            ('            event_start.saturating_sub((lead_minutes as u64).saturating_mul(SECS_PER_MIN));\n',
+             '            event_start.saturating_sub(lead_minutes as u64);\n'),
+        ],
+        ["desktop"],
+        [
+            # A 15-minute warning arrives 15 seconds before the meeting.
+            'reminder_set_and_due',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a dismissed reminder keeps coming back as due",
+        CAL,
+        [
+            ('            .filter(|r| !r.dismissed && r.fire_at <= now)\n',
+             '            .filter(|r| r.fire_at <= now)\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_dismiss',
+            'reminder_dismiss_all',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a reminder due exactly now is not due yet",
+        CAL,
+        [
+            ('            .filter(|r| !r.dismissed && r.fire_at <= now)\n',
+             '            .filter(|r| !r.dismissed && r.fire_at < now)\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_set_and_due',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: snoozing a reminder moves it earlier instead of later",
+        CAL,
+        [
+            ('                r.fire_at = r.fire_at.saturating_add(duration.secs());\n',
+             '                r.fire_at = r.fire_at.saturating_sub(duration.secs());\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_snooze',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a snooze is absorbed by an already-dismissed reminder for the same event",
+        CAL,
+        [
+            ('            if r.event_id == event_id && !r.dismissed {\n',
+             '            if r.event_id == event_id {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape: no fixture dismisses a reminder and then
+            # snoozes the same event. The loop breaks on the first match, so
+            # a dead reminder standing earlier in the list swallows the
+            # snooze and the live one fires again immediately.
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: dismissing one reminder dismisses every reminder for that event",
+        CAL,
+        [
+            ('                r.dismissed = true;\n                break;\n',
+             '                r.dismissed = true;\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape: `multiple_reminders_same_event` sets two
+            # reminders on one event but never dismisses either, and every
+            # fixture that *does* dismiss has one reminder per event. Yet
+            # that test is precisely what establishes two reminders on one
+            # event as a supported arrangement -- a day-before and an
+            # hour-before -- so dismissing the first must not cancel the
+            # second.
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: dismiss-all dismisses only the first reminder",
+        CAL,
+        [
+            ('        for r in &mut self.reminders {\n            r.dismissed = true;\n        }\n',
+             '        for r in &mut self.reminders {\n            r.dismissed = true;\n            break;\n        }\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_dismiss_all',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the active-reminder count includes the dismissed ones",
+        CAL,
+        [
+            ('        self.reminders.iter().filter(|r| !r.dismissed).count()\n',
+             '        self.reminders.len()\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_dismiss',
+            'reminder_dismiss_all',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: pruning keeps the dismissed reminders and throws away the live ones",
+        CAL,
+        [
+            ('        self.reminders.retain(|r| !r.dismissed);\n',
+             '        self.reminders.retain(|r| r.dismissed);\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_prune_dismissed',
+        ],
+    ),
 ]
 def run_tests(pkg):
     r = subprocess.run(

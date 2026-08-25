@@ -2658,6 +2658,83 @@ check_selftest_skips() {
 
 check_selftest_skips
 
+# A hand-written "every variant" list cannot go stale loudly.
+#
+# `const ALL: [Foo; N] = [...]` claims to name every variant of `Foo`, and the
+# language has no way to check it: adding a variant leaves the array a valid
+# array of N `Foo`s, just no longer a complete one.  Where such a list drives a
+# test loop, the variant nobody added to it is the one case nothing asks about
+# -- a branch that looks covered, which is worse than one that looks bare.
+#
+# An exhaustive `match` elsewhere does break the build, but it breaks it
+# somewhere else; the author fixes `label()`, the compiler goes quiet, and the
+# list is still the old length.
+#
+# The in-language fix is `assert!(ALL.len() == core::mem::variant_count::<Foo>())`
+# and it is E0658 on stable.  If that ever stabilises, delete this gate and the
+# script and write the assertion beside each list -- an error at the list beats
+# a report about it.
+#
+# Requested by lane C in requests/c-a-wire-the-variant-list-gate-into-boot-test.md,
+# which shipped the script scoped to gui/apps/net*/pkg and left widening to us.
+# It is now tree-wide, which is also what exposed the one bug in it: matching a
+# bare element type by name across crates paired `gui/keylayout`'s *struct*
+# `Level` with `kernel/src/klog.rs`'s unrelated 5-variant enum of the same name.
+# Resolution is scoped nearest-first now, and anything it cannot place is
+# reported as a skip rather than dropped.
+check_variant_lists() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Variant list check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # The counter is a heuristic over Rust source, and a miscounting heuristic
+    # reports a clean tree exactly the way a clean tree does.  Its fixture runs
+    # first so that collapse is a gate fault and not a pass.  This is not
+    # hypothetical: the first version of the script reported `CursorShape` as
+    # having 12 of its 13 variants, because the pass that collapses struct and
+    # tuple variants ate `[default]` and left a bare `#` glued to `Arrow`.
+    echo "=== Checking the variant list gate against its fixture ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-variant-lists.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The variant list gate no longer" >&2
+        echo "agrees with its own fixture, so its verdict on the tree means" >&2
+        echo "nothing -- a counter that miscounts reports zero findings just" >&2
+        echo "like a tree with none." >&2
+        return 1
+    fi
+
+    echo "=== Checking that every ALL list still names every variant ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-variant-lists.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A list named ALL/ALL_*/EVERY_* is a" >&2
+    echo "claim that it holds every variant of its enum, and one of them no" >&2
+    echo "longer does." >&2
+    echo "" >&2
+    echo "If the variant belongs in the list: add it, and update the array" >&2
+    echo "length beside it.  Check whether the loops that walk the list now" >&2
+    echo "need a case for it -- that is the coverage this gate exists to" >&2
+    echo "protect." >&2
+    echo "" >&2
+    echo "If the list is meant to be a subset: rename it to say so (the tree" >&2
+    echo "uses ZONELESS, EXPENSE_CATS, FIXED) and put the reason in a doc" >&2
+    echo "comment beside it.  A subset named ALL is the same defect wearing" >&2
+    echo "the other hat." >&2
+    return 1
+}
+
+if ! check_variant_lists; then
+    exit 1
+fi
+
 # Keep `.unwrap()` / `.expect()` out of kernel production paths.
 #
 # The count reached zero on 2026-08-22 and the script that measured it was

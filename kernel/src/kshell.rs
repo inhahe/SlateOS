@@ -14120,9 +14120,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // answer. The pipe form is asserted here because it is the one a self
         // test can run without a fixture file; the file form shares the parser
         // and refuses before it reaches the branch that opens anything.
-        let out = piped("sed -q -i 's/a/b/'", b"a\n");
+        // The replacement text is a nonsense token rather than `b` or `X`
+        // throughout this rung, because these assertions forbid it *in the
+        // diagnostic too*. A one-letter sentinel is one word away from being
+        // found in the error message and failing the test for the wrong reason
+        // -- `POSIX` alone rules out `X`.
+        let out = piped("sed -q -i 's/a/zzq/'", b"a\n");
         assert_eq!(last_exit(), 1, "an unrecognised option is a failure");
-        assert_output_lacks("and edits nothing", &out, b"b");
+        assert_output_lacks("and edits nothing", &out, b"zzq");
         assert_output_contains("named by its own letter", &out, b"invalid option -- 'q'");
 
         // A bundle is reported by the letter that was wrong, not by the bundle
@@ -14134,9 +14139,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // `-e` with nothing after it. This used to collect no script and run
         // the ones it had, so a truncated command line looked wholly obeyed.
-        let out = piped("sed -e 's/a/X/' -e", b"a\n");
+        let out = piped("sed -e 's/a/zzq/' -e", b"a\n");
         assert_eq!(last_exit(), 1, "-e with no argument is a failure");
-        assert_output_lacks("and nothing is run", &out, b"X");
+        assert_output_lacks("and nothing is run", &out, b"zzq");
         assert_output_contains("says which option", &out, b"requires an argument -- 'e'");
 
         // Position, not shape — and the case that made it worth changing. The
@@ -14174,17 +14179,24 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // an `-e` is given every operand is a file, so a later script-shaped
         // word is a filename and not a second script. `2d` here is a missing
         // file, which is a failure; what must not happen is line 2 vanishing.
-        let out = piped("sed -e 's/a/X/' 2d", b"a\nb\n");
+        let out = piped("sed -e 's/a/zzq/' 2d", b"a\nb\n");
         assert_eq!(last_exit(), 1, "an operand after -e is a file, and missing");
-        assert_output_lacks("so nothing was edited", &out, b"X");
+        assert_output_lacks("so nothing was edited", &out, b"zzq");
 
         // A GNU option this sed does not have is refused by name, with what it
-        // would have done. `-E` is the one that matters: silently ignoring it
-        // leaves the pattern read as a BRE, so `sed -E 's/a+/X/'` matches the
-        // literal `a+` and answers -- the silent-guess shape exactly.
-        let out = piped("sed -E 's/a+/X/'", b"aaa\n");
+        // would have done. `-E` is the one that matters: ignoring it leaves the
+        // pattern read as a BRE, where `+` is an ordinary character, so `a+`
+        // quietly stops meaning "one or more a" and starts meaning "an a and a
+        // plus sign".
+        //
+        // The tell is the *input*, not the replacement. Against `aaa` a BRE
+        // `a+` matches nothing, so an ignored `-E` would pass `aaa` through
+        // unchanged and the replacement would be absent either way -- forbidding
+        // it would assert nothing. What separates refusing from ignoring is
+        // whether the line comes out at all.
+        let out = piped("sed -E 's/a+/zzq/'", b"aaa\n");
         assert_eq!(last_exit(), 1, "-E is refused, not ignored");
-        assert_output_lacks("and nothing is edited", &out, b"X");
+        assert_output_lacks("and the input is not passed through", &out, b"aaa");
         assert_output_contains("with the dialect named", &out, b"basic regular expression");
 
         // `-i` takes an attached backup suffix in GNU. Ignoring it would

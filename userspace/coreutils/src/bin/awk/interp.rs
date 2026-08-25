@@ -271,7 +271,44 @@ impl Interp {
     ///
     /// # Errors
     /// Returns the fatal diagnostic; the caller prints it and exits 2.
+    ///
+    /// # What the program already printed is printed, fatal or not
+    ///
+    /// The buffered output is flushed on *every* way out of here, because a
+    /// fatal error does not retract the lines that were written before it.
+    /// `awk '{print}' good.txt missing.txt` prints `good.txt` and then fails;
+    /// so does any program that prints for an hour and then divides by zero.
+    ///
+    /// It did not, and the bug was invisible for as long as it existed. The
+    /// body below is one `?`-chain, so a fatal skipped the `finish_all` at the
+    /// end of it; `die` then reached `process::exit`, which does not run
+    /// destructors, so the `BufWriter` holding an entire run's output was
+    /// dropped without being written. Nothing reported it — the output simply
+    /// was not there. Measured against gawk, which prints it.
+    ///
+    /// The old harness could not have caught this: it compared stdout through
+    /// `$(...)` for cases that were all a single line, and it had no file
+    /// operands at all, so the two-file case that shows it plainly could not
+    /// be written.
     pub fn run(&mut self) -> R<i32> {
+        let outcome = self.run_to_end();
+        let flushed = self
+            .out
+            .finish_all()
+            .map_err(|e| Fatal(format!("write error: {}", coreutils::errmsg::strerror(&e))));
+        match outcome {
+            // The program's own failure is the cause and wins the report; a
+            // flush that also failed is a consequence of the same full disk.
+            Err(e) => Err(e),
+            Ok(code) => {
+                flushed?;
+                Ok(code)
+            }
+        }
+    }
+
+    /// The program itself, without the flush that has to happen either way.
+    fn run_to_end(&mut self) -> R<i32> {
         let begin = std::mem::take(&mut self.prog.begin);
         let res = self.exec_all(&begin);
         self.prog.begin = begin;
@@ -292,9 +329,6 @@ impl Interp {
         self.prog.end = end;
         res?;
 
-        self.out
-            .finish_all()
-            .map_err(|e| Fatal(format!("write error: {}", coreutils::errmsg::strerror(&e))))?;
         Ok(self.exit_code.unwrap_or(0))
     }
 
@@ -461,8 +495,13 @@ impl Interp {
                         // program is usually computing a total over the files it
                         // was given, and a total that silently omits one of them
                         // is worse than no answer at all.
+                        //
+                        // The wording is gawk's, quotes and all: this is not a
+                        // rendering of a parser's internals but a plain report
+                        // about a file, and a script that greps awk's stderr
+                        // should not have to know which awk it got.
                         return Err(Fatal(format!(
-                            "can't open file {}: {}",
+                            "fatal: cannot open file `{}' for reading: {}",
                             String::from_utf8_lossy(&text),
                             coreutils::errmsg::strerror(&e)
                         )));
@@ -1630,15 +1669,21 @@ fn arith(op: BinOp, l: f64, r: f64) -> R<f64> {
         BinOp::Add => l + r,
         BinOp::Sub => l - r,
         BinOp::Mul => l * r,
+        // The wording is gawk's. `attempted` is not decoration: it says the
+        // division did not happen, which is the difference between this and an
+        // IEEE infinity, and awk is one of the few languages where that is a
+        // hard error rather than a value.
         BinOp::Div => {
             if r == 0.0 {
-                return Err(Fatal("division by zero".to_string()));
+                return Err(Fatal("fatal: division by zero attempted".to_string()));
             }
             l / r
         }
         BinOp::Mod => {
             if r == 0.0 {
-                return Err(Fatal("division by zero in %".to_string()));
+                return Err(Fatal(
+                    "fatal: division by zero attempted in `%'".to_string(),
+                ));
             }
             // C's `fmod`, which keeps the sign of the left operand — awk is
             // specified in terms of it, so `-7 % 3` is -1 and not 2.

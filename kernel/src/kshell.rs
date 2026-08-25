@@ -14394,6 +14394,89 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!("  kshell::self_test 55: diff and comm compare the bytes they reported differ");
+    {
+        let a = "/tmp/kshell_cmp_a";
+        let b = "/tmp/kshell_cmp_b";
+        let write = |p: &str, d: &[u8]| crate::fs::Vfs::write_file(p, d);
+
+        // The case that needs no unusual input: a DOS file against its Unix
+        // twin. `str::lines` strips a trailing `\r`, so every line decoded
+        // identically, no hunk was produced, and the fallback announced
+        // "(files differ only in trailing newline)" about files that differ on
+        // every line. The message was a guess -- the only benign explanation
+        // for a state its own comment called impossible.
+        write(a, b"zz_one\r\nzz_two\r\n")?;
+        write(b, b"zz_one\nzz_two\n")?;
+        let out = capture_command(&alloc::format!("diff {a} {b}"));
+        assert_eq!(last_exit(), 1, "CRLF against LF is a difference");
+        assert_output_lacks(
+            "and is not blamed on the trailing newline",
+            &out,
+            b"trailing newline",
+        );
+        // Every line differs, so every line must appear on both sides. `-`
+        // carries the CR; `+` must not.
+        assert_output_contains("the CRLF line is removed", &out, b"-zz_one\r\n");
+        assert_output_contains("and the LF line added", &out, b"+zz_one\n");
+
+        // The undecodable case, which is worse than a missing hunk: U+FFFD
+        // collapsed distinct bytes, so lines that differ compared *equal* and
+        // were printed with a leading space -- as context the two files share.
+        // The exit status was right the whole time, which is why this needs an
+        // assertion about the output and not about the status.
+        write(a, b"zz_head\n\xff\nzz_tail\n")?;
+        write(b, b"zz_head\n\xfe\nzz_tail\n")?;
+        let out = capture_command(&alloc::format!("diff {a} {b}"));
+        assert_eq!(last_exit(), 1, "two undecodable bytes differ");
+        assert_output_contains("the differing line is removed", &out, b"-\xff\n");
+        assert_output_contains("and the other added", &out, b"+\xfe\n");
+        assert_output_lacks("and is not reported as shared context", &out, b" \xff\n");
+
+        // The fallback itself, now derived rather than assumed. This is the one
+        // state that genuinely is only the final newline, and it should still
+        // say so -- and say which file has it, which the old line could not.
+        write(a, b"zz_only\n")?;
+        write(b, b"zz_only")?;
+        let out = capture_command(&alloc::format!("diff {a} {b}"));
+        assert_eq!(last_exit(), 1, "a missing final newline is a difference");
+        assert_output_contains("named as the trailing newline", &out, b"trailing newline");
+        // The whole phrase, not just the filename: both names appear in the
+        // `---`/`+++` header no matter what is found, so asserting on a name
+        // alone would pass whatever the note said -- an assertion that cannot
+        // fail, which is the shape this rung exists to remove from `diff`.
+        assert_output_contains("and says which file has it", &out, b"kshell_cmp_a has one");
+
+        // `comm`'s share of the same defect: lines differing only in
+        // undecodable bytes were reported in the "common to both" column.
+        // Sorted by bytes, which is what `sort` produces and what `comm`
+        // requires -- \xfe before \xff.
+        write(a, b"zz_common\n\xfe\n")?;
+        write(b, b"zz_common\n\xff\n")?;
+        let out = capture_command(&alloc::format!("comm -12 {a} {b}"));
+        assert_output_contains("the genuinely shared line is common", &out, b"zz_common\n");
+        assert_output_lacks("and two different bytes are not", &out, b"\xfe\n");
+        assert_output_lacks("in either direction", &out, b"\xff\n");
+
+        // ...and the ordering half, which is `comm`'s alone. `comm` is a merge
+        // and only correct on sorted input. Under the decode, U+FFFD is the
+        // three bytes EF BF BD, so \xff sorted *below* \xfe -- the reverse of
+        // the byte order `sort` uses. Fed a byte-sorted file, the merge saw its
+        // precondition violated and put lines in the wrong columns. Column 1
+        // here is file-1-only, and both bytes belong there in byte order.
+        write(a, b"\xfe\n\xff\n")?;
+        write(b, b"zz_zzz\n")?;
+        let out = capture_command(&alloc::format!("comm -23 {a} {b}"));
+        assert_eq!(
+            out.as_slice(),
+            b"\xfe\n\xff\n",
+            "a byte-sorted file merges in byte order, and neither line is lost"
+        );
+
+        let _ = crate::fs::Vfs::remove(a);
+        let _ = crate::fs::Vfs::remove(b);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -98969,12 +99052,23 @@ fn cmd_cmp(args: &str) {
     set_exit(1);
 }
 
-/// Line-level diff between two text files (unified format).
+/// Line-level diff between two files (unified format).
 ///
 /// Usage: `diff <file1> <file2>`
 ///
 /// Uses a simple LCS-based diff algorithm suitable for kernel context.
 /// Files are capped at 2000 lines to bound memory usage.
+///
+/// **Lines are bytes**, split on `\n` only — see [`split_lines`]. Not a
+/// generalisation for its own sake: the output used to be computed from
+/// `from_utf8_lossy`, which collapses every undecodable byte to one U+FFFD, so
+/// lines that genuinely differed compared equal and were printed as *shared
+/// context*. That the same function had already established the files differ,
+/// by comparing their bytes, is what made it a contradiction rather than a
+/// limitation — the correct status and the wrong output came out of one run.
+///
+/// This is also what makes `diff dos.txt unix.txt` work, `str::lines` having
+/// silently dropped the `\r` that was the entire difference.
 ///
 /// Exits with the same three-valued status as `cmp`: **0** identical, **1**
 /// they differ, **2** the comparison could not be made — an unreadable file, a
@@ -99019,13 +99113,25 @@ fn cmd_diff(args: &str) {
         return;
     }
 
-    // Split into lines. Treat as text — invalid UTF-8 bytes get replacement chars.
-    // For a kernel shell this is acceptable; binary files should use `cmp`.
-    let text1 = String::from_utf8_lossy(&data1);
-    let text2 = String::from_utf8_lossy(&data2);
-
-    let lines1: Vec<&str> = text1.lines().collect();
-    let lines2: Vec<&str> = text2.lines().collect();
+    // Lines are byte slices, and the split is `\n` only. Both halves of that
+    // matter, and both used to be wrong in a way the byte compare above could
+    // not catch — it decides *whether* the files differ, and then everything
+    // below decided *how* from a lossy decode of the same bytes.
+    //
+    // `from_utf8_lossy` maps every invalid byte to the same U+FFFD, so `\xff`
+    // and `\xfe` compared **equal**, and two genuinely different lines were
+    // classified `Edit::Keep` and printed with a leading space — reported as
+    // context the two files share. Wrong output under a correct exit status,
+    // which is the worse pairing: the status is what a script tests and the
+    // output is what a person reads.
+    //
+    // `str::lines` was the half that needed no unusual input at all. It strips
+    // a trailing `\r`, so `diff dos.txt unix.txt` — the commonest reason to
+    // run diff — produced no hunks and fell through to the note at the bottom,
+    // which told the user the files differed "only in trailing newline" about
+    // files differing on every line.
+    let lines1: Vec<&[u8]> = split_lines(&data1);
+    let lines2: Vec<&[u8]> = split_lines(&data2);
 
     const MAX_LINES: usize = 2000;
     if lines1.len() > MAX_LINES || lines2.len() > MAX_LINES {
@@ -99198,24 +99304,66 @@ fn cmd_diff(args: &str) {
 
         for idx in *hstart..*hend {
             if let Some((kind, line_idx)) = edits.get(idx) {
-                let line_text = match kind {
-                    Edit::Keep | Edit::Remove => lines1.get(*line_idx).unwrap_or(&""),
-                    Edit::Add => lines2.get(*line_idx).unwrap_or(&""),
+                let empty: &[u8] = &[];
+                let line_text: &[u8] = match kind {
+                    Edit::Keep | Edit::Remove => lines1.get(*line_idx).copied().unwrap_or(empty),
+                    Edit::Add => lines2.get(*line_idx).copied().unwrap_or(empty),
                 };
-                let prefix = match kind {
-                    Edit::Keep => ' ',
-                    Edit::Remove => '-',
-                    Edit::Add => '+',
+                let prefix: u8 = match kind {
+                    Edit::Keep => b' ',
+                    Edit::Remove => b'-',
+                    Edit::Add => b'+',
                 };
-                shell_println!("{}{}", prefix, line_text);
+                // The body is written as bytes rather than formatted, because
+                // formatting it would need it to be a `str` again and that is
+                // the whole defect. A line that is not text prints as whatever
+                // the terminal makes of it, which is the honest rendering --
+                // and unlike U+FFFD it does not make two different lines look
+                // like one.
+                shell_write_bytes(&[prefix]);
+                shell_write_bytes(line_text);
+                shell_write_bytes(b"\n");
             }
         }
     }
 
     if hunks.is_empty() {
-        // Should not happen since data1 != data2, but could if only trailing
-        // newline differs. Show a minimal note.
-        shell_println!("(files differ only in trailing newline)");
+        // No hunk means the two line sequences are equal: a Keep pairs equal
+        // lines, so if the sequences differed the backtrack would have had to
+        // emit at least one Add or Remove. Combined with `data1 != data2`,
+        // checked at the top, this branch is the case "same lines, different
+        // bytes".
+        //
+        // With a byte-exact splitter that has exactly one cause. `split_lines`
+        // loses nothing except whether the input ended in `\n`: the file is
+        // recoverable as the lines joined by `\n` plus that flag, so the pair
+        // (lines, final-newline) determines the bytes. Equal lines and unequal
+        // bytes therefore force the flag to differ.
+        //
+        // That is what the old line here claimed, but it claimed it under a
+        // comment reading "should not happen" -- it was the only benign
+        // explanation, not a checked one. It was reachable by two other routes,
+        // both of them real differences the lossy decode had erased, and both
+        // ended with the user being told the files were essentially the same.
+        // The claim is now computed from the bytes it describes.
+        let nl1 = data1.last() == Some(&b'\n');
+        let nl2 = data2.last() == Some(&b'\n');
+        if nl1 == nl2 {
+            // Unreachable by the argument above. Kept as a branch rather than
+            // an `unreachable!()` because the alternative to being wrong here
+            // must not be panicking a shell, and kept saying *nothing* about
+            // the cause because naming an unverified one is the defect this
+            // whole change removes. If the splitter ever grows a second thing
+            // it discards, this prints instead of lying.
+            shell_println!("(files differ, but not in any complete line)");
+        } else {
+            let (with, without) = if nl1 {
+                (path1.display(), path2.display())
+            } else {
+                (path2.display(), path1.display())
+            };
+            shell_println!("(only in trailing newline: {with} has one, {without} does not)");
+        }
     }
 
     // Reached only when `data1 != data2`, checked above, so every path here is
@@ -119457,11 +119605,26 @@ fn cmd_comm(args: &str) {
         }
     };
 
-    let text1 = alloc::string::String::from_utf8_lossy(&data1);
-    let text2 = alloc::string::String::from_utf8_lossy(&data2);
-
-    let lines1: alloc::vec::Vec<&str> = text1.lines().collect();
-    let lines2: alloc::vec::Vec<&str> = text2.lines().collect();
+    // Byte lines, for two reasons, of which the second is the one specific to
+    // `comm`.
+    //
+    // The shared one: `from_utf8_lossy` maps every invalid byte to the same
+    // U+FFFD, so two lines differing only in undecodable bytes compared equal
+    // and were printed in the "common to both" column -- a wrong answer with
+    // exit 0.
+    //
+    // The one only `comm` has: this is a merge of two streams, and it is
+    // correct *only* on sorted input -- it advances whichever side compares
+    // Less and never looks back. `sort` orders by bytes. The decoded view does
+    // not preserve that order, because U+FFFD is the three bytes EF BF BD, so a
+    // `\xff` line sorted *below* a `\xfe` one here where the raw bytes put it
+    // above. A file `sort` had just produced could therefore look unsorted to
+    // `comm`, and a merge whose precondition is broken underneath it puts lines
+    // in the wrong columns for reasons no single comparison explains.
+    // `<[u8]>::cmp` below is exactly the ordering `sort` used, so the two
+    // commands now agree by construction rather than by coincidence on ASCII.
+    let lines1: alloc::vec::Vec<&[u8]> = split_lines(&data1);
+    let lines2: alloc::vec::Vec<&[u8]> = split_lines(&data2);
 
     let mut i = 0usize;
     let mut j = 0usize;
@@ -119476,30 +119639,41 @@ fn cmd_comm(args: &str) {
         (false, false) => "",
     };
 
+    // One place that writes a column, so the prefix and the body cannot drift
+    // apart. The body goes out as bytes: formatting it would require it to be
+    // a `str` again, which is the defect being removed.
+    let emit = |prefix: &str, line: &[u8]| {
+        shell_write_bytes(prefix.as_bytes());
+        shell_write_bytes(line);
+        shell_write_bytes(b"\n");
+    };
+
+    let empty: &[u8] = &[];
     while i < lines1.len() && j < lines2.len() {
-        let cmp = lines1[i].cmp(lines2[j]);
-        match cmp {
+        let a = lines1.get(i).copied().unwrap_or(empty);
+        let b = lines2.get(j).copied().unwrap_or(empty);
+        match a.cmp(b) {
             core::cmp::Ordering::Less => {
                 // Line only in file 1.
                 if show1 {
-                    shell_println!("{}", lines1[i]);
+                    emit("", a);
                 }
-                i += 1;
+                i = i.saturating_add(1);
             }
             core::cmp::Ordering::Greater => {
                 // Line only in file 2.
                 if show2 {
-                    shell_println!("{}{}", col2_prefix, lines2[j]);
+                    emit(col2_prefix, b);
                 }
-                j += 1;
+                j = j.saturating_add(1);
             }
             core::cmp::Ordering::Equal => {
                 // Line in both files.
                 if show3 {
-                    shell_println!("{}{}", col3_prefix, lines1[i]);
+                    emit(col3_prefix, a);
                 }
-                i += 1;
-                j += 1;
+                i = i.saturating_add(1);
+                j = j.saturating_add(1);
             }
         }
     }
@@ -119507,17 +119681,17 @@ fn cmd_comm(args: &str) {
     // Remaining lines from file 1.
     while i < lines1.len() {
         if show1 {
-            shell_println!("{}", lines1[i]);
+            emit("", lines1.get(i).copied().unwrap_or(empty));
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     // Remaining lines from file 2.
     while j < lines2.len() {
         if show2 {
-            shell_println!("{}{}", col2_prefix, lines2[j]);
+            emit(col2_prefix, lines2.get(j).copied().unwrap_or(empty));
         }
-        j += 1;
+        j = j.saturating_add(1);
     }
 }
 
@@ -124401,7 +124575,7 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &[u8]) -> Result<bool
 ///   yet write anything of its own.
 fn sed_apply(text: &[u8], script: &[SedCmd], suppress: bool) -> Result<Vec<u8>, ere::MatchLimit> {
     let final_newline = text.last() == Some(&b'\n');
-    let lines = sed_lines(text);
+    let lines = split_lines(text);
     let total = lines.len();
     let mut output: Vec<u8> = Vec::new();
 
@@ -124458,19 +124632,25 @@ fn sed_apply(text: &[u8], script: &[SedCmd], suppress: bool) -> Result<Vec<u8>, 
 
 /// Split input into lines on `\n` alone, keeping every other byte.
 ///
-/// This replaces `str::lines`, which is wrong here in two separate ways. It
-/// **strips a trailing `\r`**, so a CRLF file run through `sed -i` came back
-/// with Unix endings whether or not any line had matched — a whole-file rewrite
-/// nobody asked for. To sed, `\r` is an ordinary character of the pattern
-/// space, matchable by `.` and by `[[:cntrl:]]`, and it must survive a round
-/// trip untouched. It also requires `&str`, which is the other half of the same
-/// bug: a file that is not UTF-8 had no lines at all.
+/// This replaces `str::lines`, which is wrong for a line-oriented utility in
+/// two separate ways. It **strips a trailing `\r`**, so a CRLF file run through
+/// `sed -i` came back with Unix endings whether or not any line had matched — a
+/// whole-file rewrite nobody asked for. To sed, `\r` is an ordinary character of
+/// the pattern space, matchable by `.` and by `[[:cntrl:]]`, and it must survive
+/// a round trip untouched. It also requires `&str`, which is the other half of
+/// the same bug: a file that is not UTF-8 had no lines at all.
 ///
 /// A trailing `\n` terminates the last line rather than starting an empty one,
 /// which is why `a\n` is one line and not two. Whether that newline was present
-/// is the caller's business — see `final_newline` — because it is what decides
-/// if the output owes a separator.
-fn sed_lines(text: &[u8]) -> Vec<&[u8]> {
+/// is the caller's business — see `sed_apply`'s `final_newline` — because it is
+/// what decides if the output owes a separator.
+///
+/// Shared rather than per-command on purpose. It arrived as `sed_lines`, and
+/// `diff` and `comm` then turned out to hold *the same two bugs* through their
+/// own `from_utf8_lossy(…).lines()` — which is the argument for one splitter
+/// with the reasoning written down once, rather than three that agree by
+/// coincidence until one of them is edited.
+fn split_lines(text: &[u8]) -> Vec<&[u8]> {
     let mut out: Vec<&[u8]> = Vec::new();
     let mut start = 0usize;
     for (i, &b) in text.iter().enumerate() {

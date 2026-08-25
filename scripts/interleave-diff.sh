@@ -104,8 +104,8 @@ VERDICT=na; REPORT=
 # `compare PROG ARGS…` sets `VERDICT` to one of: pass, fail, na, vacuous.
 compare() {
   local prog="$1"; shift
-  local side dir o_rc g_rc m_o_rc m_g_rc rc
-  local d=$DIFF_TMP/case
+  local side o_rc g_rc m_o_rc m_g_rc rc
+  local d="$DIFF_TMP/case"
   rm -rf "$d"; mkdir -p "$d"
 
   # Step 1: separate, to establish that the content agrees at all.

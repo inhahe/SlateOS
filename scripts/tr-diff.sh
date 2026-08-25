@@ -51,7 +51,9 @@ cd "$fixtures" >/dev/null || exit 1
 # invocation, so `argv[0]` is the bare word on both sides. This replaced a
 # reference held as a *string* and word-split at every call site, which is why
 # `compare` below has lost its second parameter.
-run_side() { local side=$1; shift; env PATH="$bindir/$side" tr "$@"; }
+# `diff_run` keeps bash's own announcement of a child that died of a signal
+# out of the stderr the caller captures; `diff-wsl.sh` says why.
+run_side() { local side=$1; shift; diff_run env PATH="$bindir/$side" tr "$@"; }
 
 compare() {
   local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift

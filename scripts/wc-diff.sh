@@ -52,7 +52,9 @@ cd "$fixtures" >/dev/null || exit 1
 # invocation, so `argv[0]` is the bare word on both sides. This replaced a
 # reference held as a *string* and word-split at every call site, which is why
 # the calls below have gained a quoted argument where they used to have none.
-run_side() { local side=$1; shift; env PATH="$bindir/$side" wc "$@"; }
+# `diff_run` keeps bash's own announcement of a child that died of a signal
+# out of the stderr the caller captures; `diff-wsl.sh` says why.
+run_side() { local side=$1; shift; diff_run env PATH="$bindir/$side" wc "$@"; }
 
 printf 'alpha beta\ngamma\n'                    > plain.txt      # 2 12 17
 printf 'one two three'                          > unterminated.txt

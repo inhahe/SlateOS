@@ -78,7 +78,9 @@ cd "$fixtures" >/dev/null || exit 1
 # it moved last time. That is the specific failure this timeout exists for, and
 # it is why the *reference* is wrapped too: a harness that only bounded our side
 # would hang on the day the reference was the buggy one.
-run_side() { local side=$1; shift; timeout -k 2 30 env PATH="$bindir/$side" fold "$@"; }
+# `diff_run` keeps bash's own announcement of a child that died of a signal
+# out of the stderr the caller captures; `diff-wsl.sh` says why.
+run_side() { local side=$1; shift; diff_run timeout -k 2 30 env PATH="$bindir/$side" fold "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 printf 'abcdefghij\n'                     > plain.txt

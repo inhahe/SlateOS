@@ -58,6 +58,8 @@ cd "$fixtures" >/dev/null || exit 1
 # needed — and is spliced into the same `env` that narrows `PATH`. It replaced
 # two references held as *strings* and word-split at every call site, which is
 # why `compare` now takes a locale where it used to take a reference.
+# `diff_run` keeps bash's own announcement of a child that died of a signal
+# out of the stderr the caller captures; `diff-wsl.sh` says why.
 run_side() {
   local side=$1 loc=$2; shift 2
   diff_run env "LC_ALL=$loc" PATH="$bindir/$side" od "$@"

@@ -67,7 +67,9 @@ cd "$fixtures" >/dev/null || exit 1
 # One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
 # a symlink named `nl` in a directory that is the whole of `PATH` for that
 # one invocation, so `argv[0]` is the bare word on both sides.
-run_side() { local side=$1; shift; env PATH="$bindir/$side" nl "$@"; }
+# `diff_run` keeps bash's own announcement of a child that died of a signal
+# out of the stderr the caller captures; `diff-wsl.sh` says why.
+run_side() { local side=$1; shift; diff_run env PATH="$bindir/$side" nl "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 printf 'a\nb\nc\n'                        > plain.txt

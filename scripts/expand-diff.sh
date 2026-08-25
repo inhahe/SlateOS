@@ -69,7 +69,9 @@ cd "$fixtures" >/dev/null || exit 1
 # case that does so does not fail, it wedges the run and fills the disk. No case
 # here should ever come near this, so a timeout that fires is itself a bug
 # report: it shows up as a status difference rather than as a hung harness.
-run_side() { local side=$1; shift; timeout -k 2 30 env PATH="$bindir/$side" expand "$@"; }
+# `diff_run` keeps bash's own announcement of a child that died of a signal
+# out of the stderr the caller captures; `diff-wsl.sh` says why.
+run_side() { local side=$1; shift; diff_run timeout -k 2 30 env PATH="$bindir/$side" expand "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 printf 'a\tb\tc\n'                        > plain.txt

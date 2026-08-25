@@ -65,7 +65,9 @@ cd "$fixtures" >/dev/null || exit 1
 # One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
 # a symlink named `unexpand` in a directory that is the whole of `PATH` for that
 # one invocation, so `argv[0]` is the bare word on both sides.
-run_side() { local side=$1; shift; timeout -k 2 30 env PATH="$bindir/$side" unexpand "$@"; }
+# `diff_run` keeps bash's own announcement of a child that died of a signal
+# out of the stderr the caller captures; `diff-wsl.sh` says why.
+run_side() { local side=$1; shift; diff_run timeout -k 2 30 env PATH="$bindir/$side" unexpand "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 # Every leading-blank width from 0 to 17, so an off-by-one at either of the

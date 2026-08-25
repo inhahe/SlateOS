@@ -66,7 +66,9 @@ ENVV=()
 # symlink named `uniq` in a directory that is the whole of `PATH` for that one
 # invocation, so `argv[0]` is the bare word on both sides. `$ENVV` rides on the
 # same `env`, which is why it must come before `PATH` sets the search path.
-run_side() { local side=$1; shift; env "${ENVV[@]}" PATH="$bindir/$side" uniq "$@"; }
+# `diff_run` keeps bash's own announcement of a child that died of a signal
+# out of the stderr the caller captures; `diff-wsl.sh` says why.
+run_side() { local side=$1; shift; diff_run env "${ENVV[@]}" PATH="$bindir/$side" uniq "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 # Runs of every shape: a pair, a singleton, a triple, and a trailing singleton.

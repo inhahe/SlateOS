@@ -100,9 +100,11 @@ cd "$fixtures" >/dev/null || exit 1
 # invocation, so `argv[0]` is the bare word on both sides. The locale stays a
 # per-case argument because half the cases here are *about* the locale; it is
 # spliced into the same `env` that narrows `PATH`.
+# `diff_run` keeps bash's own announcement of a child that died of a signal
+# out of the stderr the caller captures; `diff-wsl.sh` says why.
 run_side() {
   local side=$1 loc=$2; shift 2
-  timeout -k 2 30 env "LC_ALL=$loc" PATH="$bindir/$side" comm "$@"
+  diff_run timeout -k 2 30 env "LC_ALL=$loc" PATH="$bindir/$side" comm "$@"
 }
 
 # --- fixtures ----------------------------------------------------------------

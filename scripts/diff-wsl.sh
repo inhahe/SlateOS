@@ -260,10 +260,17 @@ diff_ours_example() {
 # while its artifacts told a different story: every binary that called a
 # function added to `coreutils::stdfd` that morning failed to compile with
 # `cannot find function `close_stdout` in module `stdfd``, and `cargo clean -p
-# coreutils` was the whole fix. The directory had a `debug/` full of finished
-# binaries and no `deps/` at all, so something had removed the intermediates
-# and left the fingerprints -- a disk that filled, or a kill during a write;
-# the cause was not recoverable after the fact.
+# coreutils` was the whole fix.
+#
+# This comment used to add that the directory "had a `debug/` full of finished
+# binaries and no `deps/` at all, so something had removed the intermediates"
+# -- a disk that filled, or a kill during a write. That inference was wrong and
+# is withdrawn (2026-08-25): cargo 1.100.0-nightly does not create `deps/` at
+# all. It puts every unit under `debug/build/<pkg>/<hash>/out/`, as a clean
+# build of a hello-world confirms. The missing directory was therefore evidence
+# of nothing, and what actually let cargo call a stale library fresh is still
+# unexplained. Which is the argument for the check below, not against it: it
+# fires on the symptom, and the symptom is all anyone gets.
 #
 # A compile error is the *lucky* shape of that bug. The unlucky shape is a
 # harness whose subject compiles against a stale library and passes, certifying
@@ -295,32 +302,100 @@ diff_newer_than() {
        -name '*.rs' -newer "$1" -print -quit 2>/dev/null
 }
 
-# One library artifact per package in `DIFF_PKG`, or nothing for a package that
-# has no library.
+# The manifest for package $1, or nothing.
 #
-# `deps/` holds one per build hash; the newest is the one the binaries above
-# were just linked against.
-diff_lib_artifacts() {
-  for diff_p in $DIFF_PKG; do
-    ls -t "$target_dir/x86_64-unknown-linux-gnu/debug/deps/lib${diff_p}-"*.rlib \
-      2>/dev/null | head -1
+# One glob level, not a recursive search: `userspace/` alone holds several
+# thousand package directories, and walking it costs minutes -- far more than
+# the check it exists to serve. A package somewhere this does not reach is
+# *reported*, never skipped; see `diff_lib_artifact`.
+diff_manifest() {
+  for diff_m in "$root"/*/"$1"/Cargo.toml "$root/$1/Cargo.toml"; do
+    if [ -f "$diff_m" ]; then
+      printf '%s\n' "$diff_m"
+      return 0
+    fi
   done
+  return 1
 }
 
-# Print `ARTIFACT|NEWER-FILE` and succeed if $1 is stale; fail silently if not.
+# The library target name for the package manifested at $1, or nothing if that
+# package has no library at all.
+#
+# These are cargo's own two rules, in cargo's order: an explicit `[lib] name`
+# wins, and failing that a package has a library if and only if `src/lib.rs`
+# exists, named after the package with dashes turned into underscores.
+#
+# Read from the manifest rather than taken as a knob, because a knob would be a
+# second copy of something the tree already states -- and `oils`, whose library
+# is named `osh`, is the standing proof that the copy nobody rereads is the one
+# that goes wrong. Guessing the library name from the package name is precisely
+# the bug this replaces.
+diff_lib_name() {
+  diff_explicit=$(awk '
+    /^[ \t]*\[/ { diff_in = ($0 ~ /^[ \t]*\[lib\]/); next }
+    diff_in && /^[ \t]*name[ \t]*=/ {
+      sub(/^[^=]*=[ \t]*/, ""); sub(/[ \t]*(#.*)?$/, ""); gsub(/["'\'']/, "")
+      print; exit
+    }
+  ' "$1")
+  if [ -n "$diff_explicit" ]; then
+    printf '%s\n' "$diff_explicit"
+    return 0
+  fi
+  [ -f "${1%/Cargo.toml}/src/lib.rs" ] || return 0
+  basename "${1%/Cargo.toml}" | tr - _
+}
+
+# The newest library artifact of package $1.
+#
+# Prints the path and returns 0; prints nothing and returns 0 when the package
+# has no library; returns 1 when it has one and the build produced no artifact,
+# and 2 when the package could not be found at all.
+#
+# ## Why this searches instead of naming a directory
+#
+# It named one until 2026-08-25: `debug/deps/lib<pkg>-*.rlib`, which was right
+# when it was written and is now right nowhere. Cargo 1.100.0-nightly moved
+# intermediates to `debug/build/<pkg>/<hash>/out/`, and `deps/` no longer
+# exists; a clean build of a hello-world produces no such directory. Both of
+# this check's inputs were therefore wrong at once -- the wrong folder and, for
+# `oils`, the wrong filename -- so it matched nothing, found nothing to
+# complain about, and passed. A check that cannot fail is not a check.
+#
+# So it asks where the artifact *is* rather than asserting where it should be.
+# A layout the next toolchain invents costs nothing here as long as the file
+# keeps its name, and if it ever stops being found the answer is a refusal to
+# run, not a silent pass.
+diff_lib_artifact() {
+  diff_manifest_path=$(diff_manifest "$1") || return 2
+  diff_libname=$(diff_lib_name "$diff_manifest_path")
+  [ -z "$diff_libname" ] && return 0
+
+  diff_found=$(find "$target_dir/x86_64-unknown-linux-gnu/debug" \
+      -name "lib${diff_libname}-*.rlib" -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | head -1)
+  [ -z "$diff_found" ] && return 1
+  printf '%s\n' "${diff_found#* }"
+}
+
+# Print `SUBJECT|COMPLAINT` and succeed if $1 is stale; fail silently if not.
+#
+# The right-hand side is a whole predicate rather than just the offending
+# filename, because there are now four ways to be stale and only one of them is
+# "something is newer than this". `diff_assert_fresh` prints it verbatim.
 diff_stale_one() {
   local diff_late
   if [ ! -f "$1" ]; then
-    printf '%s|<the build left nothing here>\n' "$1"
+    printf '%s|was not produced by the build at all\n' "$1"
     return 0
   fi
   diff_late=$(diff_newer_than "$1")
   [ -z "$diff_late" ] && return 1
-  printf '%s|%s\n' "$1" "$diff_late"
+  printf '%s|is older than %s\n' "$1" "$diff_late"
   return 0
 }
 
-# `BINARY|NEWER-FILE` for the first stale artifact, or nothing.
+# `SUBJECT|COMPLAINT` for the first stale artifact, or nothing.
 # An artifact the build did not produce at all counts as stale.
 #
 # ## The library is checked first, and that is the point
@@ -340,11 +415,25 @@ diff_stale_one() {
 # says when it was linked and nothing about how old the code inside it is. So
 # the artifact that actually holds the shared code is checked on its own.
 diff_first_stale() {
-  local diff_b diff_bin diff_late diff_lib
-  for diff_lib in $(diff_lib_artifacts); do
+  local diff_b diff_bin diff_late diff_lib diff_p diff_rc
+  for diff_p in $DIFF_PKG; do
+    diff_lib=$(diff_lib_artifact "$diff_p")
+    diff_rc=$?
+    if [ "$diff_rc" = 2 ]; then
+      printf '%s|%s\n' "the package \`$diff_p\`" \
+        "has no Cargo.toml anywhere under $root -- is DIFF_PKG right?"
+      return 0
+    fi
+    if [ "$diff_rc" != 0 ]; then
+      printf '%s|%s\n' "\`$diff_p\`'s library" \
+        "is declared in its Cargo.toml, but the build produced no .rlib for it"
+      return 0
+    fi
+    # Empty: the package has no library, so there is nothing here to be stale.
+    [ -z "$diff_lib" ] && continue
     diff_late=$(diff_newer_than "$diff_lib")
     if [ -n "$diff_late" ]; then
-      printf '%s|%s\n' "$diff_lib" "$diff_late"
+      printf '%s|%s\n' "$diff_lib" "is older than $diff_late"
       return 0
     fi
   done
@@ -365,7 +454,7 @@ diff_assert_fresh() {
   [ -z "$diff_stale" ] && return 0
 
   echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
-  echo "  is older than ${diff_stale#*|} -- the build cache is stale. Cleaning." >&2
+  echo "  ${diff_stale#*|} -- the build cache is stale. Cleaning." >&2
   for diff_p in $DIFF_PKG; do
     ( cd "$root" && cargo clean -p "$diff_p" \
         --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2
@@ -377,7 +466,7 @@ diff_assert_fresh() {
   diff_stale=$(diff_first_stale)
   [ -z "$diff_stale" ] && return 0
   echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
-  echo "  is STILL older than ${diff_stale#*|} after a clean rebuild." >&2
+  echo "  STILL ${diff_stale#*|}, after a clean rebuild." >&2
   echo "  Refusing to run: the comparison would be against a binary nobody built." >&2
   return 1
 }

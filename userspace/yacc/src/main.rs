@@ -16,6 +16,9 @@
 // classic algorithm. Allow too_many_arguments at file scope.
 #![allow(clippy::too_many_arguments)]
 
+// Only `run_main` names a file in a diagnostic, and it is not compiled
+// under `cfg(test)` — so neither is this, like `env` and `fs` below.
+#[cfg(not(test))]
 use quoting::quoteaf_os;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 #[cfg(not(test))]

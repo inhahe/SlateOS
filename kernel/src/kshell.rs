@@ -11576,7 +11576,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         let path = "/tmp/kshell_sed_status.txt";
-        crate::fs::Vfs::write_file(path, b"old\n")?;
+        crate::fs::Vfs::write_file(path, b"zz_file_marker\n")?;
 
         // The token the failing cases are piped, chosen so that finding it in
         // the output can only mean the input was passed through. `old` would
@@ -11584,15 +11584,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // usage message would be indistinguishable to the assertion.
         let marker: &[u8] = b"zz_passthru_marker\n";
 
-        // `s/old` -- the pattern is opened and never closed, so
-        // `parse_sed_command` returns `None` and there is nothing to run.
+        // `s/nomatch` -- the pattern is opened and never closed, so
+        // `parse_sed_command` returns an error and there is nothing to run.
         // Running nothing is not the same as running an identity transform,
         // which is exactly what the old code could not tell apart.
         //
-        // (`s/old/new`, a trailing delimiter short, is *not* the example to
-        // use here: this parser accepts it where GNU does not. Both halves
-        // agree about that, so it is a separate question from this one.)
-        let out = piped("sed s/old", marker);
+        // The script's pattern is deliberately a word that appears in neither
+        // the pipe nor the file: the diagnostic quotes the offending script
+        // back, so a pattern shared with the data would make "the message
+        // mentioned it" and "the data came through" indistinguishable -- the
+        // same trap `old` set for the marker above.
+        let out = piped("sed s/nomatch", marker);
         assert_output_lacks(
             "a bad script does not pass the input through",
             &out,
@@ -11600,8 +11602,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         assert_eq!(last_exit(), 1, "cmd | sed: an unparseable script fails");
 
-        let out = capture_command(&alloc::format!("sed s/old {}", path));
-        assert_output_lacks("nor does the file form print the file", &out, b"old");
+        let out = capture_command(&alloc::format!("sed s/nomatch {}", path));
+        assert_output_lacks(
+            "nor does the file form print the file",
+            &out,
+            b"zz_file_marker",
+        );
         assert_eq!(
             last_exit(),
             1,
@@ -11631,8 +11637,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_contains("a good script still edits the pipe", &out, b"new");
         assert_eq!(last_exit(), 0, "cmd | sed: a good script is success");
 
-        let out = capture_command(&alloc::format!("sed s/old/new/ {}", path));
-        assert_output_contains("and still edits the file", &out, b"new");
+        let out = capture_command(&alloc::format!("sed s/zz_file_marker/zz_edited/ {}", path));
+        assert_output_contains("and still edits the file", &out, b"zz_edited");
         assert_eq!(last_exit(), 0, "sed SCRIPT FILE: a good script is success");
 
         // `awk` had the same silent pass-through for a missing program.
@@ -11729,6 +11735,90 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"zz_seen",
         );
         assert_eq!(last_exit(), 1, "sed -i with nothing to edit is a failure");
+    }
+
+    serial_println!("  kshell::self_test 35: sed refuses a script it cannot honour");
+    // Rung 33 established that a script `parse_sed_command` *rejects* is a
+    // failure rather than a pass-through. This rung is about the scripts it
+    // used to *accept* while not honouring them, which is the worse half: a
+    // rejected script produces no output, but a mis-honoured one produces
+    // output that looks right.
+    //
+    // Three shapes, all of which used to succeed:
+    //
+    //   s/a/b      one delimiter short. `find_unescaped(..).unwrap_or(len)`
+    //              treated "no closing delimiter" as "closes at the end", so
+    //              the commonest sed typo there is ran as though correct.
+    //   s/a/b/i    an unimplemented flag, dropped in silence -- so a request
+    //              for a case-insensitive substitution performed a
+    //              case-sensitive one and reported success.
+    //   -e bad     one unparseable expression among good ones, dropped by
+    //              `filter_map` while the good ones ran.
+    //
+    // Each is a *wrong answer reported as success*, which is strictly worse
+    // than a missing answer: nothing downstream can detect it.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // `zz_keep` is the witness that sed produced *any* output at all: it
+        // matches nothing, so a run that edits or a run that passes through
+        // both emit it, and only a run that refuses omits it. It is named in
+        // none of the scripts below on purpose -- the diagnostics quote the
+        // offending script back, so a token shared with a script would make
+        // "the message mentioned it" and "sed emitted the line" the same
+        // observation. That is the trap rung 33's `old` set.
+        let data: &[u8] = b"zz_keep\nzz_subject\nzz_dup zz_dup\n";
+
+        let out = piped("sed s/zz_subject/zz_hit/", data);
+        assert_output_contains("a terminated script substitutes", &out, b"zz_hit");
+        assert_output_contains("and copies the lines it does not match", &out, b"zz_keep");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // `g` must still be honoured -- not merely tolerated -- or the flag
+        // check below would be satisfied by a parser that rejected every flag.
+        let out = piped("sed s/zz_dup/zz_one/g", data);
+        assert_output_contains(
+            "the g flag still replaces every match",
+            &out,
+            b"zz_one zz_one",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // One delimiter short. GNU: `unterminated 's' command`, exit 1.
+        let out = piped("sed s/zz_subject/zz_hit", data);
+        assert_output_lacks("an unterminated s/// emits nothing", &out, b"zz_keep");
+        assert_output_contains("and says why", &out, b"unterminated command");
+        assert_eq!(last_exit(), 1, "an unterminated s/// is a failure");
+
+        // A flag that is not `g`.
+        let out = piped("sed s/zz_subject/zz_hit/i", data);
+        assert_output_lacks("an unimplemented flag emits nothing", &out, b"zz_keep");
+        assert_output_contains("and says why", &out, b"unknown option");
+        assert_eq!(last_exit(), 1, "an unimplemented s/// flag is a failure");
+
+        // One bad expression among good ones. The good one must not run
+        // either: the old behaviour ran it and reported success, so asserting
+        // only on the status would pass against a version that still applied
+        // it. The expression number is asserted too, since counting from the
+        // wrong end is the obvious way to get this wrong.
+        let out = piped("sed -e s/zz_subject/zz_hit/ -e zz_nonsense", data);
+        assert_output_lacks(
+            "a bad -e expression stops the good ones too",
+            &out,
+            b"zz_keep",
+        );
+        assert_output_contains("and names which one is bad", &out, b"expression #2");
+        assert_eq!(last_exit(), 1, "one bad -e expression fails the invocation");
+
+        // Both good expressions still run, in order -- the second sees what the
+        // first produced.
+        let out = piped("sed -e s/zz_subject/zz_mid/ -e s/zz_mid/zz_end/", data);
+        assert_output_contains("two good -e expressions both run", &out, b"zz_end");
+        assert_eq!(last_exit(), 0, "and succeed");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -119508,17 +119598,11 @@ fn cmd_sed(args: &str) {
         return;
     }
 
-    // Parse sed commands.
-    let parsed: alloc::vec::Vec<SedCmd> = commands
-        .iter()
-        .filter_map(|c| parse_sed_command(c))
-        .collect();
-
-    if parsed.is_empty() {
-        shell_println!("sed: invalid command syntax");
-        set_exit(1);
+    // Every script must parse. `filter_map` used to drop the ones that did not
+    // and run the rest, so one bad `-e` among good ones was invisible.
+    let Some(parsed) = parse_sed_scripts(&commands) else {
         return;
-    }
+    };
 
     // Process each file (or use empty content if no file given).
     if file_args.is_empty() {
@@ -119639,29 +119723,138 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
     }
 }
 
+/// Why a `sed` script could not be turned into a [`SedCmd`].
+///
+/// The parser used to answer every one of these with `None`, and both callers
+/// used to answer `None` with `filter_map` — so a bad script standing among
+/// good ones was silently *dropped* and only an all-bad script was reported at
+/// all. `sed -e 's/a/b/' -e 'nonsense' f` ran the first expression, ignored the
+/// second, and exited 0.
+///
+/// That is the same failure the pipe-form pass-through had (`0a785652a`): a
+/// script the shell cannot honour, honoured approximately, reported as success.
+/// Carrying the reason out of the parser is what lets the caller say *which*
+/// expression is wrong and *what* is wrong with it, as GNU sed does.
+enum SedParseError {
+    /// A delimiter was opened and never closed: `s/old`, `s/old/new`, `/pat`.
+    /// GNU: `unterminated 's' command` / `unterminated address regex`.
+    Unterminated,
+    /// The script does not begin with anything this parser recognises.
+    Unknown,
+    /// An `s///` flag suffix this parser cannot honour.
+    UnknownFlag(char),
+    /// Recognised in shape, but the bytes do not slice — a non-ASCII delimiter,
+    /// which this byte-wise scanner cannot walk without landing mid-character.
+    Invalid,
+}
+
+impl SedParseError {
+    /// Print the diagnostic for expression `n` (1-based, as GNU numbers them).
+    ///
+    /// The script text is quoted back because `#1` alone identifies nothing
+    /// when there is only one expression — which is the usual case. GNU prints
+    /// a character offset for the same reason; naming the expression is the
+    /// more useful half of that when the mistake is often *which string got
+    /// treated as a script* (`classify_sed_args` will read a bare `something`
+    /// as one, since it begins with `s`).
+    fn report(&self, n: usize, script: &str) {
+        match *self {
+            Self::Unterminated => {
+                shell_println!(
+                    "sed: -e expression #{}: unterminated command: {}",
+                    n,
+                    script
+                );
+            }
+            Self::Unknown => {
+                shell_println!("sed: -e expression #{}: unknown command: {}", n, script);
+            }
+            Self::UnknownFlag(c) => {
+                shell_println!(
+                    "sed: -e expression #{}: unknown option to 's': {} in {}",
+                    n,
+                    c,
+                    script
+                );
+            }
+            Self::Invalid => {
+                shell_println!(
+                    "sed: -e expression #{}: invalid command syntax: {}",
+                    n,
+                    script
+                );
+            }
+        }
+    }
+}
+
+/// Parse every script, or report the first one that cannot be parsed and fail.
+///
+/// Shared by [`cmd_sed`] and [`cmd_sed_input`] for the same reason
+/// [`classify_sed_args`] is shared: two copies of this logic drifted once
+/// already, and the drift is what let `-i` be parsed by one half and ignored by
+/// the other.
+///
+/// Returns `None` having already printed the diagnostic and set the status, so
+/// a caller's whole error path is `let Some(parsed) = … else { return };`.
+fn parse_sed_scripts(commands: &[alloc::string::String]) -> Option<alloc::vec::Vec<SedCmd>> {
+    let mut parsed = alloc::vec::Vec::with_capacity(commands.len());
+    for (idx, script) in commands.iter().enumerate() {
+        match parse_sed_command(script) {
+            Ok(cmd) => parsed.push(cmd),
+            Err(e) => {
+                e.report(idx.saturating_add(1), script);
+                set_exit(1);
+                return None;
+            }
+        }
+    }
+    Some(parsed)
+}
+
 /// Parse a sed command string into a `SedCmd`.
-fn parse_sed_command(cmd: &str) -> Option<SedCmd> {
+fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
     let bytes = cmd.as_bytes();
 
     // Substitution: s/pattern/replacement/[g]
-    if bytes.first() == Some(&b's') && bytes.len() >= 4 {
-        let delim = bytes[1];
-        // Find pattern end.
-        let pat_start = 2;
-        let pat_end = find_unescaped(bytes, delim, pat_start)?;
-        let rep_start = pat_end + 1;
-        let rep_end = find_unescaped(bytes, delim, rep_start).unwrap_or(bytes.len());
-        let flags = if rep_end < bytes.len() {
-            &cmd[rep_end + 1..]
-        } else {
-            ""
+    if bytes.first() == Some(&b's') {
+        let Some(&delim) = bytes.get(1) else {
+            return Err(SedParseError::Unterminated);
         };
+        // The scan below walks bytes, so a multi-byte delimiter would have it
+        // stopping on a continuation byte and slicing mid-character. Refuse
+        // instead. GNU accepts any character as a delimiter; matching that
+        // needs a char-wise scanner, which this is not.
+        if !delim.is_ascii() {
+            return Err(SedParseError::Invalid);
+        }
+        let pat_start = 2;
+        let pat_end = find_unescaped(bytes, delim, pat_start).ok_or(SedParseError::Unterminated)?;
+        let rep_start = pat_end.saturating_add(1);
+        // The closing delimiter is *required*. This used to fall back to
+        // `bytes.len()`, so `s/old/new` — one delimiter short, and the
+        // commonest sed typo there is — ran as though the delimiter were
+        // present. GNU calls that `unterminated 's' command`. The user who
+        // dropped it meant something, and guessing which is not the parser's
+        // job: the guess is indistinguishable from a correct run.
+        let rep_end = find_unescaped(bytes, delim, rep_start).ok_or(SedParseError::Unterminated)?;
 
-        let pattern = alloc::string::String::from(cmd.get(pat_start..pat_end)?);
-        let replacement = alloc::string::String::from(cmd.get(rep_start..rep_end).unwrap_or(""));
+        let flags = cmd.get(rep_end.saturating_add(1)..).unwrap_or("");
+        // Only `g` is implemented, and an unrecognised flag used to be dropped
+        // in silence — so `s/a/b/i` performed a case-*sensitive* substitution
+        // and reported success. That is a wrong answer rather than a missing
+        // one, which is strictly worse: nothing downstream can detect it.
+        if let Some(c) = flags.chars().find(|c| *c != 'g') {
+            return Err(SedParseError::UnknownFlag(c));
+        }
+
+        let pattern =
+            alloc::string::String::from(cmd.get(pat_start..pat_end).ok_or(SedParseError::Invalid)?);
+        let replacement =
+            alloc::string::String::from(cmd.get(rep_start..rep_end).ok_or(SedParseError::Invalid)?);
         let global = flags.contains('g');
 
-        return Some(SedCmd::Substitute {
+        return Ok(SedCmd::Substitute {
             pattern,
             replacement,
             global,
@@ -119671,32 +119864,35 @@ fn parse_sed_command(cmd: &str) -> Option<SedCmd> {
 
     // Address commands: /pattern/d or /pattern/p
     if bytes.first() == Some(&b'/') {
-        let pat_end = find_unescaped(bytes, b'/', 1)?;
-        let pattern = alloc::string::String::from(cmd.get(1..pat_end)?);
-        let action = cmd.get(pat_end + 1..)?;
+        let pat_end = find_unescaped(bytes, b'/', 1).ok_or(SedParseError::Unterminated)?;
+        let pattern =
+            alloc::string::String::from(cmd.get(1..pat_end).ok_or(SedParseError::Invalid)?);
+        let action = cmd
+            .get(pat_end.saturating_add(1)..)
+            .ok_or(SedParseError::Invalid)?;
 
         return match action.trim() {
-            "d" => Some(SedCmd::Delete {
+            "d" => Ok(SedCmd::Delete {
                 addr: SedAddr::Pattern(pattern),
             }),
-            "p" => Some(SedCmd::Print {
+            "p" => Ok(SedCmd::Print {
                 addr: SedAddr::Pattern(pattern),
             }),
-            _ => None,
+            _ => Err(SedParseError::Unknown),
         };
     }
 
     // Line number commands: Nd
     if bytes.last() == Some(&b'd') {
-        let num_str = &cmd[..cmd.len().saturating_sub(1)];
+        let num_str = cmd.get(..cmd.len().saturating_sub(1)).unwrap_or("");
         if let Ok(n) = num_str.parse::<usize>() {
-            return Some(SedCmd::Delete {
+            return Ok(SedCmd::Delete {
                 addr: SedAddr::Line(n),
             });
         }
     }
 
-    None
+    Err(SedParseError::Unknown)
 }
 
 /// Find the position of an unescaped delimiter byte starting from `start`.
@@ -119787,16 +119983,11 @@ fn cmd_sed_input(args: &str, input: &str) {
         return;
     }
 
-    let parsed: alloc::vec::Vec<SedCmd> = commands
-        .iter()
-        .filter_map(|c| parse_sed_command(c))
-        .collect();
-
-    if parsed.is_empty() {
-        shell_println!("sed: invalid command syntax");
-        set_exit(1);
+    // Same rule as the file half, from the same function: any script that does
+    // not parse fails the whole invocation.
+    let Some(parsed) = parse_sed_scripts(&commands) else {
         return;
-    }
+    };
 
     let mut output = alloc::string::String::new();
     for (line_idx, line) in input.lines().enumerate() {

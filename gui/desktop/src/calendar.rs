@@ -3245,6 +3245,45 @@ mod tests {
         assert_eq!(found[0].title, "B");
     }
 
+    /// The sort at the end of `events_for_range` had no test at all: every
+    /// other caller either stores its events already in order or gets back a
+    /// single one, so deleting the sort outright left the whole suite green.
+    /// Found by the reintroduction harness (module 82, defect `O`).
+    ///
+    /// Order is not cosmetic here -- the day cells, the detail card and the
+    /// `N more` overflow all render the list front-to-back, so an unsorted
+    /// result shows a 5pm meeting above a 9am one and hides the *later* event
+    /// behind the overflow when the cell runs out of room.
+    #[test]
+    fn events_come_back_in_time_order_whatever_order_they_were_stored_in() {
+        let mut store = EventStore::new();
+        let ts = |d, h| date_to_timestamp(2024, 6, d, h, 0, 0).expect("valid");
+        // Deliberately stored latest-first, and interleaved across days so
+        // that neither insertion order nor a per-day grouping would pass.
+        for (title, day, hour) in [
+            ("evening", 15, 17),
+            ("morning", 14, 9),
+            ("noon", 15, 12),
+            ("dawn", 14, 6),
+        ] {
+            let start = ts(day, hour);
+            add(&mut store, make_event(title, start, start + 3600));
+        }
+
+        let found = store.events_for_range(ts(14, 0), ts(16, 0));
+        let titles: Vec<&str> = found.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, ["dawn", "morning", "noon", "evening"]);
+
+        // Stated as an invariant too, so a future event added to the fixture
+        // cannot quietly weaken the assertion above into a shorter list.
+        assert!(
+            found
+                .windows(2)
+                .all(|w| w[0].start_timestamp <= w[1].start_timestamp),
+            "the result must be non-decreasing in start time"
+        );
+    }
+
     #[test]
     fn search_case_insensitive() {
         let mut store = EventStore::new();
@@ -3272,6 +3311,16 @@ mod tests {
 
         let results3 = store.search("xyz");
         assert!(results3.is_empty());
+
+        // Every query above is already lower-case, which makes them blind to
+        // the half of the rule that lower-cases the *query*: the haystack is
+        // lower-cased too, so dropping `query.to_lowercase()` leaves all three
+        // passing. A capital in the query is the only thing that tells the two
+        // halves apart -- and a user typing a proper noun is the ordinary way
+        // one arrives.
+        assert_eq!(store.search("MEETING").len(), 1, "an upper-case query");
+        assert_eq!(store.search("Team").len(), 1, "a capitalised query");
+        assert_eq!(store.search("ENGINEERING").len(), 1, "in the description");
     }
 
     // ========================================================================
@@ -3353,6 +3402,21 @@ mod tests {
         let range_end = date_to_timestamp(2024, 7, 1, 0, 0, 0).expect("valid");
         let events = store.events_for_range(range_start, range_end);
         assert_eq!(events.len(), 6);
+
+        // A count alone does not say the series is *monthly*. Stepping a flat
+        // 30 days also yields six hits across these six months -- it just
+        // walks them off the 15th, one or two days further each time. Since
+        // landing on the same day of each month is the entire point of
+        // anchoring the recurrence rather than repeatedly adding to the
+        // previous occurrence, that is the part worth asserting.
+        for (i, e) in events.iter().enumerate() {
+            let (year, month, day, hour, ..) = timestamp_to_date(e.start_timestamp);
+            assert_eq!(
+                (year, month, day, hour),
+                (2024, u32::try_from(i + 1).expect("month fits"), 15, 9),
+                "occurrence {i} should be the 15th at 09:00"
+            );
+        }
     }
 
     #[test]

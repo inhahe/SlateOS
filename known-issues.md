@@ -72397,7 +72397,7 @@ problem, which is the direction that matters:
 Only the fourth stale defect was real: the tray's layout label had gone from
 `.unwrap_or("??")` to `self.active_layout().map_or("??", |l| l.short_label)`
 when the accessor became fallible. It is retargeted. The list is once again
-**1722 defects, 0 stale, 0 ambiguous, 0 no-op**.
+**1722 defects, 0 stale, 0 ambiguous, 0 no-op** (1737 after module 82 below).
 
 **All four were then re-run for real, not left at preflight-green** — which is
 the whole point of this harness applied to itself. A defect that merely
@@ -72423,6 +72423,105 @@ skipped loop that looks like a cancelled one — and reporting the answer as if
 it were to the original. A harness that exists to stop tests being trusted on
 faith is the last place that should be trusted on faith itself; every one of
 these fixes is therefore a permanent check rather than a repair to one entry.
+
+**MODULE 82, 2026-08-25 — the first tranche aimed at *logic* rather than
+colour, and it found three genuinely broken tests.** Target chosen by
+measurement rather than taste: `gui/desktop/src/calendar.rs` was the largest
+single hole in the tree — **102 of its 113 tests unproved**. The reason turned
+out to be structural and worth recording, because it holds for every file
+converted in the colour campaign: calendar.rs already *had* 49 defects, and
+every one of them was a palette defect. The colour half of the file was
+thoroughly proved and the logic half — recurrence expansion, timestamp
+arithmetic, range queries, search, sorting — had never been asked a single
+question. **A file is not "covered" because it appears in the defect list; it
+is covered in the dimension the defects were written along.**
+
+Fifteen defects (`A`…`O`, labelled with 82-character runs per the
+run-length-is-the-module-number convention). Final sweep, 708 s:
+
+```
+15 defects: 15 caught, 0 escaped, 0 never asked, 0 under-caught,
+0 under-declared
+restored: all files match their recorded SHA-256
+```
+
+That clean line is the *second* run. The first exposed four problems, three of
+which were faults in the production tests rather than in the defects, and all
+three were fixed in the tests rather than by weakening or dropping the defect:
+
+- **Lesson 26: a count-only assertion cannot tell a monthly series from a
+  30-day one.** `recurring_monthly` asserted `events.len() == 6` and nothing
+  else, so defect `B` (monthly recurrence steps a flat 30 days) reported
+  `[MISSING: recurring_monthly]` — stepping 30 days also produces six hits
+  across six months. It just walks them off the 15th, one or two days further
+  each time. Landing on the same day of each month is the *entire point* of
+  anchoring a recurrence to the original date instead of repeatedly adding to
+  the previous occurrence, so that is what the test now asserts: every
+  occurrence is `(2024, i+1, 15, 09:00)`. The general form — **a length check
+  proves a series has the right number of elements, never that they are the
+  right elements** — applies to every `assert_eq!(x.len(), n)` in the suite.
+- **Lesson 27: a case-insensitivity test whose every query is lower-case
+  constrains only half the rule.** Defect `K` deleted `query.to_lowercase()`
+  from `EventStore::search` and escaped outright. `search_case_insensitive`
+  passed only lower-case queries in, and the haystack is lower-cased too — so
+  it tested the haystack half and was blind to the query half. Three
+  assertions were added with capitals in the query (`"MEETING"`, `"Team"`,
+  `"ENGINEERING"`), and note the ordinary path to them is a user typing a
+  proper noun, not an exotic input. A test named for a symmetric property must
+  exercise **both** sides of the symmetry or it has tested one.
+- **Lesson 28: a sort with no interleaved fixture has no test at all.** Defect
+  `O` deleted `result.sort_by_key(|e| e.start_timestamp)` from
+  `events_for_range` and the entire 2936-test suite stayed green. Every other
+  caller either stores its events already in order or gets exactly one back, so
+  the sort was load-bearing in production and unobserved in test. Order is not
+  cosmetic here: the day cells, the detail card and the `N more` overflow all
+  render the list front-to-back, so an unsorted result puts a 5pm meeting above
+  a 9am one and hides the *later* event behind the overflow.
+  `events_come_back_in_time_order_whatever_order_they_were_stored_in` now
+  stores four events latest-first and interleaved across two days — so neither
+  insertion order nor a per-day grouping would pass — and states the
+  non-decreasing invariant as well as the exact list, so a future event added
+  to the fixture cannot quietly weaken it.
+- **Lesson 29: a `match` arm can be the type-pinning site, so a defect that
+  adds a method call there fails to compile instead of proving anything.**
+  Defect `D` was first written as `Recurrence::Daily =>
+  anchor.add_days(step.saturating_mul(2))` and produced two
+  `error[E0689]: can't call method saturating_mul on ambiguous numeric type
+  {integer}`. The Daily arm is where `step`'s integer type gets fixed for the
+  *whole* `match`; calling a method there makes every arm's literal ambiguous
+  at once. Retargeted to `anchor.add_days(step + 1)` — "a daily event skips its
+  own first day" — which needs no method resolution. The general rule: a
+  reintroduced defect must be spelled in operations that do not depend on
+  inference the defect itself removes, or `DID NOT COMPILE` replaces the
+  verdict you were after.
+
+Two further defects were wrong about *where* the behaviour lives, which is the
+ordinary cost of writing declarations before seeing them fire:
+
+- `C` (yearly recurrence) escaped when written as `add_years` → `add_months`,
+  because a monthly step still hits the anniversary on the way past and never
+  lands on the day after. Retargeted to a flat 365-day step, which drifts to
+  2024-03-13 because 2024 is a leap year — the failure exists only because the
+  fixture happens to cross a leap year, which is the sort of thing to choose
+  deliberately rather than notice afterwards.
+- `E` (the range guard `occ_end > range_start` opened to `>=`) was declared
+  against `events_for_date_spanning_midnight`, but the guard lives inside
+  `expand_recurrence`, which a *non-recurring* event never reaches. Re-declared
+  against `recurring_yearly`, where an all-day occurrence ends exactly where
+  the queried day starts.
+
+Two defects declare unusually long catcher lists on purpose: `I` (the minute
+component read off the day's remainder rather than divided by 60) declares
+**12** and `N` (the day window is an hour long) declares **8**. Those lists are
+not padding — they *measure* how central `timestamp_parts` and the day window
+are to the module, and a future refactor that shrinks either list is telling
+you something about the file.
+
+Net effect on the campaign: unproved **2473 → 2442**, proved **15.7 % →
+16.8 %**, `0 dangling`, single-prover 84 → 113, on `1737 defects, 0 stale, 0
+ambiguous, 0 no-op`. The single-prover rise is expected and is not a
+regression: fifteen new defects against a module with one view of each
+behaviour produce mostly-sole catchers, exactly as `blur.rs` did.
 
 ### BUG-C-GUITK-CONTRAST_TEXT-PICKS-WHITE-WHERE-BLACK-IS-FOUR-TIMES-MORE-LEGIBLE
 

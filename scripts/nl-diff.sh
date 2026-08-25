@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
 # Differential test: our nl against GNU nl.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `nl` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll` rather
+# `scripts/diff-wsl.sh` gives the reasons. The reference has to be glibc's: the
+# host's `nl` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll` rather
 # than glibc, whose `getopt` words every option diagnostic differently
-# (`unknown option -- x` against `invalid option -- 'x'`). A harness pointed at
-# it would certify sentences no GNU/Linux system prints. See `known-issues.md`
-# → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `head-diff.sh`, `wc-diff.sh`, `cut-diff.sh` and
-# `uniq-diff.sh`.
+# (`unknown option -- x` against `invalid option -- 'x'`), so a harness pointed
+# at it certifies sentences no GNU/Linux system prints (`known-issues.md` →
+# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`). This file already
+# avoided that by reaching for `wsl -e env LC_ALL=C.UTF-8 nl`, at the cost of a
+# WSL process per case and a probe to check that `wsl`'s inherited Windows cwd
+# landed on the same bytes under `/mnt/...`.
+#
+# The subject moves with it. Nothing in this file was an expected difference
+# only because of the host — unlike `cut`, `fold`, `expand` and `unexpand`,
+# `nl` takes no operand whose *kind* the two platforms disagree about — so the
+# tally below is unchanged by the move.
+#
+# Run `OURS=/usr/bin/nl ./scripts/nl-diff.sh` to confirm the harness still
+# discriminates: every expected difference should turn into an XPASS.
 #
 # ## Why `od -An -c`, and why every case pins `-w`
 #
@@ -42,41 +52,22 @@
 # reference would be wrong.
 set -u
 
-# Our nl is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils nl "${OURS:-}") || exit 1
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `nl` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=nl
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 
-run_ours() { "$OURS_ABS" "$@"; }
-run_gnu()  { local loc=$1; shift; wsl -e env "LC_ALL=$loc" nl "$@"; }
-
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands on
-# the same bytes under `/mnt/c/...`. Verified rather than assumed, because a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-printf 'probe\n' > .probe
-if [ "$(run_gnu C.UTF-8 -w1 .probe 2>/dev/null)" = "$(printf '1\tprobe')" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "nl-diff: glibc nl not reachable in this directory; skipping"
-fi
-rm -f .probe
+# One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
+# a symlink named `nl` in a directory that is the whole of `PATH` for that
+# one invocation, so `argv[0]` is the bare word on both sides.
+run_side() { local side=$1; shift; env PATH="$bindir/$side" nl "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 printf 'a\nb\nc\n'                        > plain.txt
@@ -107,18 +98,18 @@ printf 'a\xff\n\xfe\xfd\nb\n'                                 > badbytes.txt
 printf 'a\r\nb\r\n'                                           > crlf.txt
 
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc stdin=$1 loc=$2; shift 2
+  local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift
   o_err=$(mktemp); g_err=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(nl | od)` the recorded status is
   # od's, and `PIPESTATUS` is set in the substitution's subshell where it cannot
   # be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
   if [ "$stdin" = "-" ]; then
-    run_ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    run_gnu "$loc" "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    printf '%b' "$stdin" | run_ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | run_gnu "$loc" "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | run_side ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | run_side gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -152,20 +143,18 @@ report() {
   return 0
 }
 
-run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "nl $*"; }
+run_case()  { compare - "$@"; report "nl $*"; }
 run_stdin() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
-  compare "$input" C.UTF-8 "$@"
+  compare "$input" "$@"
   report "printf '$input' | nl $*"
 }
 # A case we expect to differ, with the reason. Counted separately so that a case
 # that starts agreeing is reported too — an xfail that silently becomes correct
 # is a stale note in the harness.
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local why="$1"; shift
-  compare - C.UTF-8 "$@"
+  compare - "$@"
   if [ "$AGREED" = yes ]; then
     xpass=$((xpass+1)); printf 'XPASS nl %s  (expected to differ: %s)\n' "$*" "$why"
   else
@@ -465,9 +454,7 @@ run_case -ba -w1 -v 9223372036854775807 -p sec.txt
 xfail_case 'our --help omits the GNU project ancillary block' --help
 xfail_case 'our --version names SlateOS' --version
 
-if [ "$HAVE_GNU" = yes ]; then
-  printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
-  [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
-  printf '\n'
-fi
+printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
+[ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
+printf '\n'
 [ "$fail" -eq 0 ] || exit 1

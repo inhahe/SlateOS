@@ -78623,7 +78623,7 @@ fixture that matched would have tested the smaller half of the bug.
 
 ---
 
-## `A-KSHELL-DIFF-BLAMES-THE-TRAILING-NEWLINE-FOR-ANY-DIFFERENCE-IT-CANNOT-SEE` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-DIFF-BLAMES-THE-TRAILING-NEWLINE-FOR-ANY-DIFFERENCE-IT-CANNOT-SEE` (lane A, 2026-08-25) — ✅ **FIXED** (`6d8a057d7`, `fc1670be6`, 2026-08-25)
 
 **Where.** `kernel/src/kshell.rs` — `cmd_diff` (~98986), specifically the decode
 at ~99024 and the fallback message at ~99215.
@@ -78743,3 +78743,55 @@ mangled. It is still worth converting for consistency, last.
 **Severity.** Wrong output with a correct exit status, on ordinary text files
 (the CRLF case) with no unusual input required. Below sed's data destruction,
 above the option-wording items.
+
+### Fixed
+
+`6d8a057d7`, with the assertion repair in `fc1670be6`.
+
+| | was | is |
+|---|---|---|
+| `diff dos.txt unix.txt` | "(files differ only in trailing newline)" | every line shown, `-` carrying the `\r` |
+| `diff` on lines differing only in undecodable bytes | printed as shared context, with a leading space | shown as `-`/`+`, bytes intact |
+| `diff a b` where only the final newline differs | "(files differ only in trailing newline)" | names which of the two files has it |
+| `comm -12` on lines differing only in undecodable bytes | reported common to both | reported as neither's |
+| `comm` on a byte-sorted file | merge precondition broken, lines in wrong columns | `<[u8]>::cmp`, the ordering `sort` used |
+
+`sed_lines` was renamed `split_lines` and is now the one splitter for all
+three commands, since all three held the same two bugs.
+
+**The fallback is derived, not assumed**, which is the part worth keeping in
+mind if this code is touched again. "Same lines, different bytes" has exactly
+one cause under a byte-exact splitter, and the argument is written at the call
+site: `split_lines` discards nothing except whether the input ended in `\n`, so
+the pair (lines, final-newline) reconstructs the file, and therefore equal lines
+with unequal bytes force that flag to differ. The other branch is unreachable by
+that argument; it is kept rather than made an `unreachable!()` because the
+alternative to being wrong must not be panicking a shell, and it deliberately
+names **no** cause — if the splitter ever grows a second thing it discards, it
+prints instead of lying.
+
+**Two of the pinning assertions had to be repaired before they meant anything**,
+which is worth recording because it is the same defect one level up. `comm -12`
+forbade `\xfe\n` and `\xff\n` in the common column — but the decode being
+removed turned *both* into U+FFFD, so the broken build emitted `\xef\xbf\xbd`
+and neither forbidden string could ever appear. The assertion would have passed
+against the bug it named. It is now equality on the whole output. `diff`'s
+undecodable case had the same hole (` \xff\n`) and now forbids `\xef\xbf\xbd`
+anywhere, which states the real invariant: every byte of a diff is copied from
+one of the two files, and none is invented by a decoder.
+
+**Still open, deliberately left out of this change:**
+
+- `comm` never checks that its input is sorted. GNU prints `comm: file 1 is not
+  in sorted order` and exits 1; this one answers confidently either way. The
+  conversion makes `comm` agree with `sort` about the ordering, which removes
+  the way *we* broke the precondition, but a user who hands it unsorted input
+  still gets a wrong answer with exit 0. Its own change.
+- `diff` has no `Binary files X and Y differ`. A byte-exact line diff of a
+  binary file is now *correct*, but it is unreadable and floods a serial
+  console. GNU's rule is a NUL in the first buffer. That is a judgement about
+  output policy rather than about correctness, which is why it was not smuggled
+  into a correctness fix.
+- `column` still decodes lossily (~14868, ~14908). It is a display formatter
+  writing only to stdout, so a mangled character is visible as mangled rather
+  than mistaken for data — the lowest severity of the four and the last to do.

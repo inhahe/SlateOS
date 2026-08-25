@@ -1398,12 +1398,24 @@ fn remove_quotes(s: &str) -> String {
 /// and exited 0: the one outcome indistinguishable from a file that needed no
 /// translating.
 ///
+/// `sed` is `awk`'s case: the script is one argument whose interior spaces are
+/// load-bearing, on both sides of a substitution. Dequoted,
+/// `sed 's/hello world/hi/'` becomes the two words `s/hello` and `world/hi/`,
+/// and the first is an unterminated `s` command — so the whole invocation was
+/// refused, and every pattern or replacement containing a space was
+/// unwritable. Since `cbc37cfe2` made the patterns real regular expressions
+/// that also rules out an ordinary bracket expression: `s/[a-z] [0-9]/x/`
+/// cannot be said without a space.
+///
 /// The list is the migration path, not a special case: a command moves onto
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
 /// See `known-issues.md` → `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`.
 fn command_parses_own_quotes(cmd: &str) -> bool {
-    matches!(cmd, "trap" | "awk" | "fold" | "base64" | "cut" | "tr")
+    matches!(
+        cmd,
+        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed"
+    )
 }
 
 /// Expand a `${...}` brace expression.
@@ -11899,8 +11911,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_contains("and says why", &out, b"unterminated command");
         assert_eq!(last_exit(), 1, "an unterminated s/// is a failure");
 
-        // A flag that is not `g`.
-        let out = piped("sed s/zz_subject/zz_hit/i", data);
+        // A flag that is not implemented. This was `i` until `i`/`I` became
+        // case-folding (rung 48), which is the useful way for a rung like this
+        // to fail: the exemplar has to be a flag that is *still* missing, and
+        // `p` -- GNU's "also print the substituted line" -- is one. Implementing
+        // a flag should turn this rung red rather than leave it asserting
+        // something that has quietly stopped being true.
+        let out = piped("sed s/zz_subject/zz_hit/p", data);
         assert_output_lacks("an unimplemented flag emits nothing", &out, b"zz_keep");
         assert_output_contains("and says why", &out, b"unknown option");
         assert_eq!(last_exit(), 1, "an unimplemented s/// flag is a failure");
@@ -13632,6 +13649,135 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             assert!(
                 !out.windows(4).any(|w| w == b"abc\n"),
                 "{} does not print its input",
+                script
+            );
+        }
+    }
+
+    serial_println!("  kshell::self_test 47: a sed script may contain a space");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // `sed` is on `command_parses_own_quotes` now, so the quotes reach
+        // `classify_sed_args` and `split_words` keeps the script in one piece.
+        assert!(command_parses_own_quotes("sed"));
+
+        // A space in the pattern. Dequoted and split on whitespace this was
+        // `s/hello` — an unterminated `s` command — so the invocation was
+        // refused outright and there was no way to write it at all.
+        let out = piped("sed 's/hello world/hi/'", b"hello world\n");
+        assert_eq!(out.as_slice(), b"hi\n", "a space in the pattern");
+        assert_eq!(last_exit(), 0, "and it is a success");
+
+        // A space in the replacement, which failed the same way from the other
+        // side: the tail `world/'` was read as a *file* operand.
+        let out = piped("sed 's/x/a b/'", b"x\n");
+        assert_eq!(out.as_slice(), b"a b\n", "a space in the replacement");
+
+        // The regexes landed first, so this is the case that motivates it:
+        // a bracket expression with a space between its two halves cannot be
+        // written any other way.
+        let out = piped("sed 's/[a-z] [0-9]/X/'", b"a 1\nab\n");
+        assert_eq!(out.as_slice(), b"X\nab\n", "a space inside a regex");
+
+        // A space is also a perfectly ordinary thing to substitute *for*,
+        // which is most of what anyone uses sed for interactively.
+        let out = piped("sed 's/ /_/g'", b"a b c\n");
+        assert_eq!(out.as_slice(), b"a_b_c\n", "a space as the whole pattern");
+
+        // `-e` takes the following word, and that word is now a whole quoted
+        // script rather than its first fragment.
+        let out = piped("sed -e 's/a b/X/' -e 's/c d/Y/'", b"a b\nc d\n");
+        assert_eq!(
+            out.as_slice(),
+            b"X\nY\n",
+            "two -e scripts, each with a space"
+        );
+
+        // Double quotes are the same word-joining device as single ones here.
+        let out = piped("sed \"s/a b/X/\"", b"a b\n");
+        assert_eq!(out.as_slice(), b"X\n", "double quotes join a word too");
+
+        // An address with a space in it, so the fix is not only about `s///`.
+        let out = piped("sed '/a b/d'", b"a b\nab\n");
+        assert_eq!(out.as_slice(), b"ab\n", "a space in an address");
+
+        // What must NOT change: an unquoted script still works exactly as it
+        // did, and a second script-shaped word is still a file operand rather
+        // than a second script.
+        let out = piped("sed s/a/b/", b"a\n");
+        assert_eq!(out.as_slice(), b"b\n", "an unquoted script is unaffected");
+    }
+
+    serial_println!("  kshell::self_test 48: sed's I flag folds case");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // Both spellings on `s///`, as GNU accepts. `i` used to be refused
+        // outright (before that, silently ignored — a case-*sensitive* answer
+        // reported as success).
+        let out = piped("sed 's/abc/X/I'", b"ABC\nabc\n");
+        assert_eq!(out.as_slice(), b"X\nX\n", "s///I folds case");
+        assert_eq!(last_exit(), 0, "and it is a success");
+
+        let out = piped("sed 's/abc/X/i'", b"AbC\n");
+        assert_eq!(out.as_slice(), b"X\n", "s///i is the same flag");
+
+        // Combined with `g`, in either order — the flags are a set, not a
+        // sequence.
+        let out = piped("sed 's/a/X/gI'", b"aAa\n");
+        assert_eq!(out.as_slice(), b"XXX\n", "gI");
+        let out = piped("sed 's/a/X/Ig'", b"aAa\n");
+        assert_eq!(out.as_slice(), b"XXX\n", "Ig is the same set");
+
+        // Folding is the engine's, not a pattern rewrite, so it reaches inside
+        // a bracket expression rather than stopping at the syntax.
+        let out = piped("sed 's/[a-c]/X/g'", b"aBc\n");
+        assert_eq!(out.as_slice(), b"XBX\n", "no fold without the flag");
+        let out = piped("sed 's/[a-c]/X/gI'", b"aBc\n");
+        assert_eq!(out.as_slice(), b"XXX\n", "the flag folds a range too");
+
+        // Addresses take `I` too, on both actions.
+        let out = piped("sed '/abc/Id'", b"ABC\nxyz\n");
+        assert_eq!(out.as_slice(), b"xyz\n", "an address folds case");
+        let out = piped("sed -n '/abc/Ip'", b"ABC\nxyz\n");
+        assert_eq!(out.as_slice(), b"ABC\n", "and so does /p");
+
+        // A space between the flag and the action, which GNU allows.
+        let out = piped("sed '/abc/I d'", b"ABC\nxyz\n");
+        assert_eq!(out.as_slice(), b"xyz\n", "I d, spaced");
+
+        // The default is unchanged — otherwise every assertion above could
+        // pass by the engine folding case unconditionally.
+        let out = piped("sed 's/abc/X/'", b"ABC\n");
+        assert_eq!(out.as_slice(), b"ABC\n", "no flag, no fold");
+        let out = piped("sed '/abc/d'", b"ABC\n");
+        assert_eq!(out.as_slice(), b"ABC\n", "no flag on an address either");
+
+        // Lowercase `i` after an *address* is not this flag: it is GNU's
+        // insert command, which this shell does not have. Refusing it keeps
+        // the room to add it; reading it as "ignore case" would silently
+        // reinterpret a valid insert script.
+        let out = piped("sed '/abc/id'", b"ABC\n");
+        assert_eq!(last_exit(), 1, "/abc/id is refused, not read as I");
+        assert!(!out.windows(4).any(|w| w == b"ABC\n"), "and prints nothing");
+
+        // The flags that are still missing must still be refused, or the
+        // widened check would have let them through in silence.
+        for script in ["sed 's/a/b/p'", "sed 's/a/b/2'", "sed 's/a/b/M'"] {
+            let out = piped(script, b"a\n");
+            assert_eq!(last_exit(), 1, "{} is refused", script);
+            assert!(
+                !out.windows(2).any(|w| w == b"a\n"),
+                "{} prints nothing",
                 script
             );
         }
@@ -122646,26 +122792,41 @@ fn cmd_lz4(args: &str) {
 // sed — stream editor (subset)
 // ---------------------------------------------------------------------------
 
-/// `sed` command — stream editor for text transformation.
+/// The usage block for the file form of `sed`.
 ///
-/// Supported commands:
-///   `s/pattern/replacement/[g]`  — substitute (first or all)
-///   `/pattern/d`                 — delete matching lines
-///   `Nd`                         — delete line N
+/// A function rather than three `shell_println!`s inline because the pipe form
+/// prints its own near-copy, and the pair had already drifted once — the file
+/// form learned `-e` and the pipe form did not, so a flag both halves accepted
+/// was advertised by only one of them.
+fn sed_usage() {
+    shell_println!("Usage: sed [-i] [-n] [-e CMD] 's/old/new/[g]' [file]");
+    shell_println!("       sed [-i] [-n] '/pattern/[I]d' [file]");
+    shell_println!("       sed [-i] [-n] '/pattern/[I]p' [file]");
+    shell_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
+    sed_dialect_note();
+}
+
+/// Which regular-expression dialect a `sed` pattern is read in, and what the
+/// replacement's two metacharacters mean.
 ///
-/// Flags:
-///   `-i`   In-place edit (modify file directly)
-///   `-n`   Suppress default output
-///   `-e CMD`  Specify command (can repeat)
-///
-/// Examples:
-///   sed 's/old/new/g' file.txt         Replace all occurrences
-///   sed -i 's/old/new/' file.txt       In-place substitution
-///   sed '/pattern/d' file.txt          Delete matching lines
-///   sed -n '/pattern/p' file.txt       Print matching lines (like grep)
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
+/// Worth two lines of usage text because the dialect decides what an existing,
+/// working script *means* rather than whether it runs: someone who writes
+/// `s/a+b/X/` expecting the ERE reading gets a silent non-match, and there is
+/// no error anywhere to point them at the answer.
+fn sed_dialect_note() {
+    shell_println!("A pattern is a POSIX basic regular expression (there is no -E):");
+    shell_println!("  a+b is three literal characters; a\\+b is the repetition.");
+    shell_println!("In a replacement, & is the whole match and \\1..\\9 are groups.");
+    shell_println!("s///i and s///I ignore case; after an address only I does.");
+}
+
 /// A `sed` argument string, classified into its four parts.
-struct SedArgs<'a> {
+///
+/// The documentation block that used to stand here belonged to [`cmd_sed`] and
+/// had come adrift: a doc comment attaches to the *next item*, and the next
+/// item was this struct, so `sed`'s usage notes were rendered as the
+/// description of its argument record and `cmd_sed` was documented by nothing.
+struct SedArgs {
     /// `-i` was given: edit the files in place rather than printing.
     in_place: bool,
     /// `-n` was given: print only what a `p` command asks for.
@@ -122673,7 +122834,11 @@ struct SedArgs<'a> {
     /// The script words, in the order they were given.
     scripts: alloc::vec::Vec<alloc::string::String>,
     /// Everything that is neither a flag nor the script: the file operands.
-    files: alloc::vec::Vec<&'a str>,
+    ///
+    /// Owned rather than borrowed from the argument line, because the words are
+    /// now produced by [`split_words`], which removes quotes as it splits and
+    /// therefore has to build new strings.
+    files: alloc::vec::Vec<alloc::string::String>,
 }
 
 /// Split a `sed` argument string into flags, script and file operands.
@@ -122685,8 +122850,18 @@ struct SedArgs<'a> {
 /// asked for an in-place edit and got a filter. Two copies of a parser is how
 /// one command comes to disagree with itself, which is the fault this whole
 /// line of work has been chasing; one copy is the fix that stops it recurring.
-fn classify_sed_args(args: &str) -> SedArgs<'_> {
-    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+///
+/// Splits with [`split_words`], not `split_whitespace`, so a quoted script is
+/// one word. This is the same move `awk`, `cut` and `tr` made — see
+/// [`command_parses_own_quotes`], which `sed` now qualifies for — and it is not
+/// cosmetic here either: a sed script's interior spaces are load-bearing in
+/// both halves of a substitution. `sed 's/hello world/hi/'` split into
+/// `s/hello` and `world/hi/'`, and the first of those is an unterminated `s`
+/// command, so the whole invocation was refused. Now that patterns are real
+/// regular expressions (`cbc37cfe2`) the same applies to a bracket expression:
+/// `s/[a-z] [0-9]/x/` cannot be written without a space in it.
+fn classify_sed_args(args: &str) -> SedArgs {
+    let parts = split_words(args);
     let mut out = SedArgs {
         in_place: false,
         suppress: false,
@@ -122695,14 +122870,14 @@ fn classify_sed_args(args: &str) -> SedArgs<'_> {
     };
     let mut i = 0usize;
 
-    while let Some(&part) = parts.get(i) {
-        match part {
+    while let Some(part) = parts.get(i) {
+        match part.as_str() {
             "-i" => out.in_place = true,
             "-n" => out.suppress = true,
             "-e" => {
                 i = i.saturating_add(1);
-                if let Some(&script) = parts.get(i) {
-                    out.scripts.push(alloc::string::String::from(script));
+                if let Some(script) = parts.get(i) {
+                    out.scripts.push(script.clone());
                 }
             }
             // The first word that looks like a script is the script; a later
@@ -122713,10 +122888,10 @@ fn classify_sed_args(args: &str) -> SedArgs<'_> {
                 if out.scripts.is_empty() {
                     out.scripts.push(alloc::string::String::from(s));
                 } else {
-                    out.files.push(s);
+                    out.files.push(alloc::string::String::from(s));
                 }
             }
-            _ => out.files.push(part),
+            _ => out.files.push(part.clone()),
         }
         i = i.saturating_add(1);
     }
@@ -122724,11 +122899,32 @@ fn classify_sed_args(args: &str) -> SedArgs<'_> {
     out
 }
 
+/// `sed` command — stream editor for text transformation.
+///
+/// Supported commands:
+///   `s/pattern/replacement/[gi]` — substitute (first or all; `i`/`I` fold case)
+///   `/pattern/[I]d`              — delete matching lines
+///   `/pattern/[I]p`              — print matching lines (with `-n`)
+///   `Nd`                         — delete line N
+///
+/// Flags:
+///   `-i`   In-place edit (modify file directly)
+///   `-n`   Suppress default output
+///   `-e CMD`  Specify command (can repeat)
+///
+/// A pattern is a POSIX **basic** regular expression, as sed's are without
+/// `-E`: `a+b` is three literal characters and `a\+b` is the repetition. In a
+/// replacement, `&` is the whole match and `\1`…`\9` are groups.
+///
+/// Examples:
+///   sed 's/old/new/g' file.txt         Replace all occurrences
+///   sed -i 's/old/new/' file.txt       In-place substitution
+///   sed 's/old/new/I' file.txt         Substitute, ignoring case
+///   sed '/pattern/d' file.txt          Delete matching lines
+///   sed -n '/pattern/Ip' file.txt      Print matching lines, ignoring case
 fn cmd_sed(args: &str) {
-    if args.split_whitespace().next().is_none() {
-        shell_println!("Usage: sed [-i] [-n] [-e CMD] 's/old/new/[g]' [file]");
-        shell_println!("       sed [-i] [-n] '/pattern/d' [file]");
-        shell_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
+    if split_words(args).is_empty() {
+        sed_usage();
         set_exit(1);
         return;
     }
@@ -122759,7 +122955,7 @@ fn cmd_sed(args: &str) {
         return;
     }
 
-    for &file in &file_args {
+    for file in &file_args {
         let path = resolve_path(file);
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
@@ -123083,17 +123279,24 @@ fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
         let rep_end = find_unescaped(bytes, delim, rep_start).ok_or(SedParseError::Unterminated)?;
 
         let flags = cmd.get(rep_end.saturating_add(1)..).unwrap_or("");
-        // Only `g` is implemented, and an unrecognised flag used to be dropped
-        // in silence — so `s/a/b/i` performed a case-*sensitive* substitution
-        // and reported success. That is a wrong answer rather than a missing
-        // one, which is strictly worse: nothing downstream can detect it.
-        if let Some(c) = flags.chars().find(|c| *c != 'g') {
+        // `g`, `i` and `I` are implemented; anything else is refused. An
+        // unrecognised flag used to be dropped in silence, so `s/a/b/i`
+        // performed a case-*sensitive* substitution and reported success — a
+        // wrong answer rather than a missing one, which is strictly worse
+        // because nothing downstream can detect it. The flag is honoured now,
+        // but the refusal stays for the ones that are still missing (`p`, `w`,
+        // `m`/`M`, and a numeric occurrence count), for the same reason.
+        if let Some(c) = flags.chars().find(|c| !matches!(*c, 'g' | 'i' | 'I')) {
             return Err(SedParseError::UnknownFlag(c));
         }
+        // Both spellings, as GNU does. Only the address form is picky about
+        // case, and for a reason — see the address parser below.
+        let ci = flags.contains(['i', 'I']);
 
         let pattern = sed_compile(
             cmd.get(pat_start..pat_end).ok_or(SedParseError::Invalid)?,
             delim,
+            ci,
         )?;
         let replacement = sed_parse_replacement(
             cmd.get(rep_start..rep_end).ok_or(SedParseError::Invalid)?,
@@ -123110,18 +123313,34 @@ fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
         });
     }
 
-    // Address commands: /pattern/d or /pattern/p
+    // Address commands: /pattern/[I]d or /pattern/[I]p
     if bytes.first() == Some(&b'/') {
         let pat_end = find_unescaped(bytes, b'/', 1).ok_or(SedParseError::Unterminated)?;
+        let action = cmd
+            .get(pat_end.saturating_add(1)..)
+            .ok_or(SedParseError::Invalid)?
+            .trim();
+
+        // Uppercase `I` only, which is not an inconsistency with `s///`
+        // accepting both: after an address, a lowercase `i` is the *insert*
+        // command, so `/abc/i foo` appends the line `foo`. Accepting `i` here
+        // as "case-insensitive" would silently reinterpret a valid insert
+        // script as a modifier on the address it follows. This shell has no
+        // insert command, so `/abc/id` is refused rather than run — which is
+        // the right answer for a command that is not implemented, and leaves
+        // room to add it without changing what an existing script means.
+        let (ci, action) = match action.strip_prefix('I') {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, action),
+        };
+
         let addr = SedAddr::Regex(sed_compile(
             cmd.get(1..pat_end).ok_or(SedParseError::Invalid)?,
             b'/',
+            ci,
         )?);
-        let action = cmd
-            .get(pat_end.saturating_add(1)..)
-            .ok_or(SedParseError::Invalid)?;
 
-        return match action.trim() {
+        return match action {
             "d" => Ok(SedCmd::Delete { addr }),
             "p" => Ok(SedCmd::Print { addr }),
             _ => Err(SedParseError::Unknown),
@@ -123155,7 +123374,11 @@ fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
 /// is how it gets past [`find_unescaped`]. The backslash is stripped before the
 /// engine sees it, as GNU does: `\/` is not a defined BRE escape, so leaving it
 /// in would turn a working `s/a\/b/x/` into a compile error.
-fn sed_compile(pattern: &str, delim: u8) -> Result<ere::Regex, SedParseError> {
+///
+/// `ci` is the `I` (and, for `s///`, `i`) flag: the engine folds case rather
+/// than this function rewriting the pattern, because a rewrite would have to
+/// know which bytes are inside a bracket expression and which are syntax.
+fn sed_compile(pattern: &str, delim: u8, ci: bool) -> Result<ere::Regex, SedParseError> {
     let mut src = alloc::vec::Vec::with_capacity(pattern.len());
     let mut escaped = false;
     for &b in pattern.as_bytes() {
@@ -123188,7 +123411,7 @@ fn sed_compile(pattern: &str, delim: u8) -> Result<ere::Regex, SedParseError> {
         return Err(SedParseError::NoPreviousRegex);
     }
 
-    ere::bre::compile(&src, false).map_err(|e| SedParseError::BadRegex(e.message()))
+    ere::bre::compile(&src, ci).map_err(|e| SedParseError::BadRegex(e.message()))
 }
 
 /// Parse an `s///` replacement into the pieces [`sed_render`] emits.
@@ -123376,10 +123599,12 @@ fn sed_render(
 /// mean anything — see [`classify_sed_args`].
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_sed_input(args: &str, input: &str) {
-    if args.split_whitespace().next().is_none() {
+    if split_words(args).is_empty() {
         shell_println!("Usage: cmd | sed [-n] [-e CMD] 's/old/new/[g]'");
-        shell_println!("       cmd | sed [-n] '/pattern/d'");
+        shell_println!("       cmd | sed [-n] '/pattern/[I]d'");
+        shell_println!("       cmd | sed [-n] '/pattern/[I]p'");
         shell_println!("       cmd | sed [-n] 'Nd'  (delete line N)");
+        sed_dialect_note();
         set_exit(1);
         return;
     }

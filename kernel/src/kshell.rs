@@ -14898,6 +14898,42 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "with a failure status");
     }
 
+    serial_println!("  kshell::self_test 60: a bare `quota` reports the state, not an error");
+    {
+        // Found by check-query-status.py, which is the mirror of the usage-line
+        // gate: a block reachable only when no argument was given, printing
+        // program state, and then setting a failure status. `quota` was the
+        // third instance of the shape that `elog echo` and `fc algo` shipped --
+        // it answers "quotas are currently enabled" and used to report that it
+        // had failed to do so.
+        //
+        // Pinned separately from rung 58's two because the fix also reordered
+        // the output: the state line leads and the synopsis follows it as a
+        // hint. Printed the other way round the text reads as a complaint, and
+        // the next person sweeping usage lines will put the status back.
+        let out = capture_command("quota");
+        assert_output_contains(
+            "the bare form answers with the current enforcement state",
+            &out,
+            b"Quotas are currently ",
+        );
+        assert_eq!(last_exit(), 0, "and succeeded, because it answered");
+
+        // The synopsis is still there -- dropping the status must not have cost
+        // the reader the list of subcommands.
+        assert_output_contains("with the synopsis kept as a hint", &out, b"Usage: quota <on|off|");
+
+        // And the error case, which shares no branch with the query above and
+        // must still fail.
+        let out = capture_command("quota zz_not_a_subcommand");
+        assert_output_contains(
+            "an unrecognised subcommand is a mistake",
+            &out,
+            b"Unknown subcommand 'zz_not_a_subcommand'",
+        );
+        assert_eq!(last_exit(), 1, "and reports failure");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -18783,16 +18819,23 @@ fn cmd_quota(args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
 
     if parts.is_empty() {
-        shell_println!("Usage: quota <on|off|set|setfiles|show|list|stats|remove> [args...]");
+        // Bare `quota` is a question, and this is its answer -- the same
+        // reading as `elog echo` and `fc algo`, whose no-argument branches
+        // report the current setting and succeed. So the state line leads and
+        // the synopsis follows it as a hint for changing it; printed the other
+        // way round, with a failure status under it, the command answered
+        // correctly and told `quota && …` it had not.
         shell_println!(
-            "  Quotas are currently {}.",
+            "Quotas are currently {}.",
             if quota::is_enabled() {
                 "enabled"
             } else {
                 "disabled"
             }
         );
-        set_exit(1);
+        shell_println!(
+            "Usage: quota <on|off|set|setfiles|show|list|stats|remove> [args...]  to change"
+        );
         return;
     }
 
@@ -19096,10 +19139,15 @@ fn cmd_quota(args: &str) {
         }
 
         _ => {
+            // Worded "Use:" rather than "Usage:", which is why the usage-status
+            // gate never saw it: `quota banana` scolded the user and reported
+            // success. The wording is now the gate's, so the next sweep finds
+            // it the same way every other arm is found.
             shell_println!(
-                "Unknown subcommand '{}'. Use: on, off, set, setfiles, show, list, stats, remove",
+                "Unknown subcommand '{}'. Usage: quota <on|off|set|setfiles|show|list|stats|remove>",
                 parts[0]
             );
+            set_exit(1);
         }
     }
 }

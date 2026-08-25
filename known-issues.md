@@ -73713,16 +73713,13 @@ the query prints its answer *and* exits 0. They are listed in the checker's
 lines will find them again and that list is where the answer needs to be
 waiting.
 
-**Still open (the unmechanised half).** `scripts/check-usage-status.py` checks
-one direction — a diagnostic that claims success. Nothing checks the other —
-a correct answer that claims failure — and that is now the direction that has
-produced two shipped bugs. A search restricted to blocks that also print
-`Usage:` (which is how these two were found) is not the general case: a query
-path that sets a failure status without printing any usage line would not be
-caught. The general check is "a `set_exit` on a path reached only by a
-*successful* query", which needs more than brace-counting to decide. Until it
-exists, treat any `set_exit` added near a value-reporting `println!` as
-suspect.
+**The unmechanised half — ✅ MECHANISED 2026-08-25 as `scripts/check-query-status.py`.**
+`scripts/check-usage-status.py` checks one direction: a diagnostic that claims
+success. The other — a correct answer that claims failure — went unchecked, and
+was the direction that had produced both shipped bugs. It now has its own gate,
+run from `boot-test.sh` next to the first, and the gate found a third instance
+on its first run. See `A-KSHELL-A-BARE-QUOTA-ANSWERED-AND-REPORTED-FAILURE`
+below.
 
 **One case the mechanical pass had to be pulled back from,** because it is the
 shape where the obvious patch is a *regression*:
@@ -73846,6 +73843,140 @@ control (`swapcfg`), the not-a-typo control (`nat`), both halves of the
 `fhist autoversion` and `wallpaper offset` splits, and both halves of
 `lockdep`, whose unrecognised subcommand previously produced byte-identical
 output and status to the query.
+
+---
+
+## A-KSHELL-A-BARE-QUOTA-ANSWERED-AND-REPORTED-FAILURE — ✅ FIXED 2026-08-25 (lane A)
+
+**In short:** typing `quota` on its own printed "Quotas are currently enabled."
+— the correct answer to the question — and then told the shell the command had
+failed. A script that runs `quota && something` never ran `something`, even
+though nothing went wrong. Found by a new checker written for exactly this
+shape, which is the third instance of it after `elog echo` and `fc algo`.
+While fixing it, a second, opposite bug turned up one screen further down in
+the same command: `quota banana` scolded the user and reported *success*.
+
+**Where:** `kernel/src/kshell.rs`, `cmd_quota`.
+
+**The gate.** `scripts/check-usage-status.py` has since August guarded one
+direction — a diagnostic that reports success. Nothing guarded the other, and
+`A-KSHELL-A-QUERY-THAT-ANSWERED-CORRECTLY-REPORTED-FAILURE` recorded that gap
+explicitly, because it is the direction the August sweep itself got wrong twice.
+`scripts/check-query-status.py` closes it. Its rule:
+
+> A block that can only be reached by the user *asking* — no argument was given
+> — and that answers by printing program state must not set a failure status.
+
+Three questions per non-zero `set_exit`: is the enclosing block guarded on "no
+argument given"; does at least one print *directly* in that block interpolate
+program state (a `foo::bar()` call, not just literal text or the user's own
+words echoed back); does it then fail. All three, and the site is reported.
+Run from `boot-test.sh` immediately after the usage-status gate.
+
+**Deliberately a second script, not a second rule inside the first.** The two
+rules point in opposite directions — "this needs a status", "this must not have
+one" — and a single classifier holding both would resolve a disagreement between
+them silently. Kept apart, each states a property, and a site that trips both is
+a site whose author has to say which it is. `quota` is exactly that site: taking
+the status off for the query direction made it trip the usage-status gate, which
+is how its `ALLOWED` entry came to be written with a reason attached.
+
+**Verified in both directions before being trusted.** Run against the revision
+before the August fix (`git show 9251e5a3d^:kernel/src/kshell.rs`) it reports
+`cmd_fcompress` and `cmd_elog` — the two sites that actually shipped the bug —
+and `cmd_quota`. Run against the tree today it reports `cmd_quota` alone, which
+is how the bug was found. A checker nobody has watched fail is a checker nobody
+knows works, so the invocation is written into the script's docstring.
+
+**Fix, half one — the query.** Bare `quota` is a question and this is its
+answer, the same reading as `elog echo` and `fc algo`. The `set_exit(1)` is
+gone, and the two lines swapped: the state line leads and the synopsis follows
+it as a hint ending "to change". The order is part of the fix, not tidying —
+printed the other way round the output *reads* as a complaint, and the next
+person sweeping usage lines will put the status back.
+
+**Fix, half two — the typo, and a blind spot it exposes.** `cmd_quota`'s
+catch-all arm printed
+
+```rust
+shell_println!("Unknown subcommand '{}'. Use: on, off, set, …", parts[0]);
+```
+
+with no status at all: `quota banana` reported success. The usage-status gate
+never saw it because the gate keys on the *word* `Usage:`, and this arm says
+`Use:`. The arm now sets `set_exit(1)` and is worded `Usage:` so the gate can
+see it.
+
+**That blind spot is general and still open.** Re-running the usage-status
+walk with its trigger widened from `Usage:` to `Unknown…`/`Unrecognised…`/
+`Invalid…`/`Use: ` reports **49 further sites** in `kshell.rs` that print a
+diagnostic and report success — `cmd_container`'s seven `Invalid container ID`
+paths, `cmd_wakesensor`'s five `Unknown sensor` arms, `cmd_theme`, `cmd_progmgr`,
+`cmd_secpolicy`, and more. (Two of the 51 raw matches are report lines rather
+than diagnostics: `thumbcache`'s "Invalidated {} entries" and `vlan`'s "Unknown
+drops:" counter.) This is the same lesson a third time — a gate keyed on the
+shape of the last bug defines its own blind spot — and it is tracked as
+`A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE` below.
+
+**Tested by:** `kshell::self_test` rung 60 — `quota` prints the state line and
+exits 0, the synopsis survives as a hint, and `quota zz_not_a_subcommand` names
+the word and exits 1.
+
+---
+
+## A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE — open (lane A)
+
+**In short:** the shell has a build-time check that stops a command from
+printing an error message and then telling the caller it succeeded. The check
+finds the message by looking for the word "Usage:". Messages that start
+"Unknown subcommand…", "Invalid port", "Unknown sensor" and so on say exactly
+the same thing in different words, and the check does not look for them — so
+49 of them still report success today.
+
+**Where:** `kernel/src/kshell.rs`; the gate is
+`scripts/check-usage-status.py`, whose trigger is
+
+```python
+USAGE = re.compile(r'(?:console_println!|shell_println!)\s*\(\s*"\s*[Uu]sage\b')
+```
+
+**How the 49 were counted.** The checker's own forward walk, with only that
+regex swapped for `Unknown|Unrecogni[sz]ed|Invalid|Use: ` and `ALLOWED`
+cleared, reports 51 sites; two are report lines that merely begin with one of
+those words (`thumbcache`'s "Invalidated {} entries for: …", `vlan`'s
+"  Unknown drops:    {}" statistic). The rest are real: seven `Invalid
+container ID '{}'` paths in `cmd_container`, five `Unknown sensor`/`Unknown
+level` arms in `cmd_wakesensor`, three `Invalid port` (`telnetd`, `sshd`,
+`netsyslog`), `cmd_theme` ×3, `cmd_progmgr` ×3, `cmd_swapcfg` ×2,
+`cmd_useracct` ×2, `cmd_sysdiag` ×2, `cmd_secpolicy` ×2, and singles in
+`cmd_colorscheme`, `cmd_overlay`, `cmd_fcompress`, `cmd_fspolicy`, `cmd_atime`,
+`cmd_fstrim`, `cmd_appregistry`, `cmd_hotkey`, `cmd_scriptlang`,
+`cmd_kernelbuild` ×2, `cmd_netsettings`, `cmd_parental`, `cmd_elog`,
+`cmd_logpersist`, `cmd_vmguest`, `cmd_taskbar`, `cmd_startmenu`,
+`cmd_container_network`.
+
+**Why this is the interesting part and not a footnote.** It is the third time
+the same methodological failure has produced shipped bugs in this one file. The
+710-site sweep keyed on "a `Usage:` print followed by `return;`" and missed 87
+that fall off the end of a `match` arm. The checker written to replace it keyed
+on the *semantic* property but kept the *lexical* trigger, so it inherited the
+blind spot one level down: it is complete over messages containing the word
+"Usage", which is not the set it is trying to guard. A gate's trigger is part
+of its rule, and a trigger derived from the wording of the last bug is a
+syntactic sweep wearing a semantic hat.
+
+**The proper fix** is to make the trigger the *category* rather than a word:
+any print that names something the user typed back at them as wrong. In
+practice that is a widened vocabulary plus an allowlist for the report lines
+that happen to start with the same words — which is what the count above
+already demonstrates works. Then fix all 49. Doing it in one change with the
+count pinned (so the debt can only shrink) is the same shape as the
+`KNOWN_CONFLATED` mechanism already in the script.
+
+**Why it is not fixed in the same commit as the `quota` one:** 49 sites in 30
+functions is its own change with its own boot test, and folding it into the
+commit that introduces the *query* gate would put two unrelated sweeps behind
+one green run.
 
 ---
 

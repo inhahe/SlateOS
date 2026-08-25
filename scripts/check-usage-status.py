@@ -80,6 +80,9 @@ ALLOWED = {
         "a hint on a query's answer -- 'to change' says so; the query succeeded",
     ("cmd_fcompress", "Usage: fc algo <lz4|gzip|zstd|bzip2|xz>"):
         "same: guarded by `parts.len() < 2`, so only the query reaches it",
+    ("cmd_quota", "Usage: quota <on|off|set|setfiles|show|list|stats|remove>"):
+        "same shape, found by check-query-status.py: bare `quota` reports whether "
+        "enforcement is on, and the synopsis under it says how to change that",
 
     # Helpers whose callers set the status. Listed rather than silently
     # skipped, because "the caller does it" is a claim that can stop being

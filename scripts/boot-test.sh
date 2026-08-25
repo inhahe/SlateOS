@@ -2628,6 +2628,48 @@ check_usage_status() {
 
 check_usage_status
 
+# ... and the mirror of it: answering a question is not reporting a failure.
+#
+# The rule above, applied to a site it does not fit, produces the opposite bug.
+# `elog echo` and `fc algo` print the current setting when given no value and
+# append a usage line as a hint for changing it; the August sweep read the hint
+# as a complaint and gave both a `set_exit(1)`, so for a month they printed the
+# right answer and told the caller they had failed.  `$(fc algo)` under `set -e`
+# killed the script *after* producing the value it asked for.
+#
+# Deliberately a separate script rather than a second rule inside the first: the
+# two point in opposite directions, and a single classifier holding both would
+# resolve a disagreement between them silently.  Apart, each states a property,
+# and a site that trips both is a site whose author has to say which it is.
+check_query_status() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== query-status check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that answering a query reports success ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-query-status.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each block above can only be reached by the" >&2
+    echo "user asking -- no argument was given -- and it answers with the current" >&2
+    echo "state and then reports failure." >&2
+    echo "" >&2
+    echo "Drop the set_exit.  If the block really is an error -- a required" >&2
+    echo "operand is missing, so nothing was answered -- add it to ALLOWED in the" >&2
+    echo "script with a reason instead." >&2
+    exit 1
+}
+
+check_query_status
+
 # Keep self-test skips honest: looked up, and reported.
 #
 # A self-test may legitimately skip -- there is no second CPU to offline on a

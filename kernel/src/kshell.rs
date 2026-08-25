@@ -397,6 +397,29 @@ fn assert_output_lacks(what: &str, out: &[u8], forbidden: &[u8]) {
     panic!("`{}` output contained text it must not", what);
 }
 
+/// Build a `root/d1/d2/.../dN` path two levels deeper than [`WALK_DEPTH_CAP`],
+/// for the self-test rungs that prove a recursive walk stops at the cap.
+///
+/// Two past the cap rather than one, so the walk *hits* the limit instead of
+/// merely reaching it, and the rung cannot pass on an off-by-one.
+///
+/// This exists because the fixtures used to be literal paths — 18 components
+/// for `find`'s cap of 16, 34 for `ls`'s 32. A literal is a second, silent copy
+/// of the constant: raising the cap leaves the fixture shallower than the limit
+/// it is supposed to trip, and the rung then asserts nothing while still
+/// passing. Deriving it from the constant is what keeps the two from drifting.
+///
+/// The result is built with `Vfs::mkdir_all`, which caps the whole path at
+/// [`crate::fs::vfs::MAX_MKDIR_ALL_COMPONENTS`]; the `const` assertion beside
+/// [`WALK_DEPTH_CAP`] is what holds that.
+fn deep_fixture_path(root: &str) -> String {
+    let mut path = String::from(root);
+    for level in 1..=WALK_DEPTH_CAP.saturating_add(2) {
+        path.push_str(&alloc::format!("/d{}", level));
+    }
+    path
+}
+
 // ---------------------------------------------------------------------------
 // Working directory
 // ---------------------------------------------------------------------------
@@ -11102,11 +11125,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Vfs::mkdir_all(shallow)?;
         Vfs::write_file(Path::new("/tmp/kshell_find_shallow/needle.txt"), b"x")?;
 
-        // 18 levels: two past FIND_DEPTH_CAP, so the walk is certain to hit the
-        // cap rather than merely reach it.
-        Vfs::mkdir_all(Path::new(
-            "/tmp/kshell_find_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17/d18",
-        ))?;
+        // Two levels past [`WALK_DEPTH_CAP`], so the walk is certain to hit the
+        // cap rather than merely reach it. Built in a loop rather than spelled
+        // out: this was an 18-component literal chosen when the cap was 16, and
+        // a hand-written path silently stops testing anything the day the cap
+        // moves past it -- which it just did.
+        Vfs::mkdir_all(Path::new(&deep_fixture_path("/tmp/kshell_find_deep")))?;
 
         // 0: matched. The ordinary path, asserted so the rungs below cannot pass
         // by breaking the search itself.
@@ -11203,17 +11227,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         use crate::fs::vfs::Vfs;
 
-        // 34 levels: two past LS_DEPTH_CAP.
-        Vfs::mkdir_all(Path::new(
-            "/tmp/kshell_ls_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17\
-             /d18/d19/d20/d21/d22/d23/d24/d25/d26/d27/d28/d29/d30/d31/d32/d33/d34",
-        ))?;
+        // Two levels past [`WALK_DEPTH_CAP`]; see `deep_fixture_path` for why
+        // this is no longer a literal.
+        Vfs::mkdir_all(Path::new(&deep_fixture_path("/tmp/kshell_ls_deep")))?;
 
         let out = capture_command("ls -R /tmp/kshell_ls_deep");
         assert_output_contains("the cap is named when it bites", &out, b"recursion limit");
         // The path is the point: without it the line is unattributable, which is
-        // what it was before.
-        assert_output_contains("ls names the subtree it stopped at", &out, b"/d33");
+        // what it was before. The walk refuses at the first level *past* the
+        // cap, and the root is depth 0, so that is `d{cap+1}` -- derived rather
+        // than written out, for the same reason the fixture is.
+        let stopped_at = alloc::format!("/d{}", WALK_DEPTH_CAP.saturating_add(1));
+        assert_output_contains(
+            "ls names the subtree it stopped at",
+            &out,
+            stopped_at.as_bytes(),
+        );
         assert_eq!(last_exit(), 1, "ls: a truncated listing is incomplete");
 
         // A listing that fits under the cap is untouched by any of this. Its own
@@ -11476,6 +11505,155 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let out = capture_command("echo parser_ok");
         assert_output_starts_with("a plain command still runs", &out, b"parser_ok");
         assert_eq!(last_exit(), 0, "and still reports success");
+    }
+
+    serial_println!("  kshell::self_test 32: both spellings of `tee` agree about failure");
+    // `tee` is one command with two implementations -- `cmd_tee_input` for the
+    // piped form and `cmd_tee` for `tee FILE TEXT` -- and only the first set a
+    // status when the write failed. The messages were byte-identical, so the
+    // disagreement was invisible in the output and showed up only in `&&`.
+    //
+    // The sweep that fixed the rest of this class could not reach it: its rule
+    // required the message to be `progname: <complaint>`, and `tee: write
+    // error: {:?}` puts two words before the colon that carries the meaning.
+    // `known-issues.md` recorded three such sites as deliberately unswept; two
+    // have since been fixed by later waves, and this was the last one.
+    {
+        // Local rather than shared: the earlier rungs each define their own
+        // `piped` inside their own block, so there is nothing in scope here.
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // A directory that does not exist, so the write cannot succeed. Both
+        // forms are asked to write to the same bad path, which is what makes
+        // this a comparison rather than two independent assertions.
+        let bad = "/zzz_no_such_dir/tee_selftest.txt";
+
+        let out = capture_command(&alloc::format!("tee {} hello", bad));
+        assert_output_contains("the two-argument form reports the error", &out, b"tee: ");
+        assert_eq!(last_exit(), 1, "tee FILE TEXT: a failed write is a failure");
+
+        let out = piped(&alloc::format!("tee {}", bad), b"hello");
+        assert_output_contains("the piped form reports the error", &out, b"tee: ");
+        assert_eq!(
+            last_exit(),
+            1,
+            "tee < input: a failed write is a failure too"
+        );
+
+        // And a write that works still succeeds, in both forms -- otherwise a
+        // blanket `set_exit(1)` would satisfy the two assertions above while
+        // breaking every honest use of the command.
+        let good = "/tmp/kshell_tee_status.txt";
+        let _ = capture_command(&alloc::format!("tee {} hello", good));
+        assert_eq!(last_exit(), 0, "tee FILE TEXT: a good write is success");
+        let _ = piped(&alloc::format!("tee {}", good), b"hello");
+        assert_eq!(last_exit(), 0, "tee < input: a good write is success");
+    }
+
+    serial_println!(
+        "  kshell::self_test 33: a sed/awk script the shell cannot run is not a success"
+    );
+    // The lead rung 32 left behind -- "any command with a piped and a
+    // non-piped implementation is a candidate for the same split-brain" --
+    // found `sed` and `awk`, and their version is worse than `tee`'s.
+    //
+    // `tee` at least printed its error; these two answered a script they could
+    // not parse by **printing the input verbatim and exiting 0**. So
+    // `cat config | sed 's/old/new' > config.new` -- one slash short, the
+    // commonest sed typo there is -- wrote a file that looked edited, was
+    // byte-for-byte the original, and reported success. The file halves have
+    // always rejected the same scripts with status 1, which is why each check
+    // below asks both halves the same question instead of asserting about one.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let path = "/tmp/kshell_sed_status.txt";
+        crate::fs::Vfs::write_file(path, b"old\n")?;
+
+        // The token the failing cases are piped, chosen so that finding it in
+        // the output can only mean the input was passed through. `old` would
+        // not do: the usage banner contains the word, so a pass-through and a
+        // usage message would be indistinguishable to the assertion.
+        let marker: &[u8] = b"zz_passthru_marker\n";
+
+        // `s/old` -- the pattern is opened and never closed, so
+        // `parse_sed_command` returns `None` and there is nothing to run.
+        // Running nothing is not the same as running an identity transform,
+        // which is exactly what the old code could not tell apart.
+        //
+        // (`s/old/new`, a trailing delimiter short, is *not* the example to
+        // use here: this parser accepts it where GNU does not. Both halves
+        // agree about that, so it is a separate question from this one.)
+        let out = piped("sed s/old", marker);
+        assert_output_lacks(
+            "a bad script does not pass the input through",
+            &out,
+            b"zz_passthru_marker",
+        );
+        assert_eq!(last_exit(), 1, "cmd | sed: an unparseable script fails");
+
+        let out = capture_command(&alloc::format!("sed s/old {}", path));
+        assert_output_lacks("nor does the file form print the file", &out, b"old");
+        assert_eq!(
+            last_exit(),
+            1,
+            "sed SCRIPT FILE: an unparseable script fails"
+        );
+
+        // No script at all. Only the pipe form is spelled here: `sed /abs/path`
+        // reads the path as an address command, because it starts with `/` --
+        // which is GNU's reading of it too (`unterminated address regex`), so
+        // there is no way to hand the file form a file and no script.
+        let out = piped("sed", marker);
+        assert_output_lacks(
+            "a missing script does not pass input through",
+            &out,
+            b"zz_passthru_marker",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "cmd | sed: no script at all is a usage error"
+        );
+
+        // A script that does parse still runs, in both halves -- otherwise a
+        // blanket `set_exit(1)` would satisfy every assertion above while
+        // breaking the command outright.
+        let out = piped("sed s/old/new/", b"old\n");
+        assert_output_contains("a good script still edits the pipe", &out, b"new");
+        assert_eq!(last_exit(), 0, "cmd | sed: a good script is success");
+
+        let out = capture_command(&alloc::format!("sed s/old/new/ {}", path));
+        assert_output_contains("and still edits the file", &out, b"new");
+        assert_eq!(last_exit(), 0, "sed SCRIPT FILE: a good script is success");
+
+        // `awk` had the same silent pass-through for a missing program.
+        let out = piped("awk", marker);
+        assert_output_lacks(
+            "no program does not pass the input through",
+            &out,
+            b"zz_passthru_marker",
+        );
+        assert_eq!(last_exit(), 1, "cmd | awk: no program is a usage error");
+
+        let out = capture_command("awk");
+        assert_output_contains("and the file form says so too", &out, b"Usage:");
+        assert_eq!(last_exit(), 1, "awk: no program is a usage error there too");
+
+        // Note this goes through `dispatch_with_input` rather than `execute`:
+        // `{print}` would otherwise meet the shell's own brace handling before
+        // awk ever saw it.
+        let out = piped("awk {print}", b"alpha\n");
+        assert_output_contains("a real program still runs", &out, b"alpha");
+        assert_eq!(last_exit(), 0, "cmd | awk: a real program is success");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -12441,18 +12619,80 @@ fn cmd_ls(args: &str) {
     );
 }
 
-/// How deep `ls -R` will descend before giving up on a subtree.
+/// How deep any of the shell's recursive directory walks will descend before
+/// giving up on a subtree: `ls -R`, `find`, and `grep -r`.
 ///
-/// A stack-safety limit against infinite recursion — a symlink loop, most
-/// obviously. Named rather than inlined because the limit is now *reported*
-/// when it bites, and the diagnostic and the check must not be able to drift
-/// apart.
-const LS_DEPTH_CAP: u32 = 32;
+/// A stack-safety limit against unbounded recursion — a symlink loop, most
+/// obviously. Named rather than inlined because the limit is *reported* when it
+/// bites, and the diagnostic and the check must not be able to drift apart.
+///
+/// # Why one constant, and why this number
+///
+/// This was three constants (`LS_DEPTH_CAP` 32, `FIND_DEPTH_CAP` 16,
+/// `MAX_GREP_DEPTH` 16) whose stated justification was, verbatim, "the shell's
+/// task stack is 64 KiB (`TASK_STACK_SIZE`)". **The shell does not run on a task
+/// stack.** Both of its entry points — `kshell::self_test` and `kshell::run` —
+/// are reached from `kernel_main`, which runs on the dedicated 2 MiB
+/// `KERNEL_BOOT_STACK`, of which 1984 KiB is usable (the low 64 KiB is the
+/// canary redzone). Every one of the three numbers was picked against a stack
+/// the code never touches.
+///
+/// So the number is derived from the frames that actually exist. Measured with
+/// `llvm-objdump` on the debug build — the profile the boot test runs, and the
+/// expensive one, since debug frames here are ~6x release:
+///
+/// | walker                  | bytes/level (debug) | at cap 48 |
+/// |-------------------------|--------------------:|----------:|
+/// | `ls_list_dir`           |                3712 |    174 KiB |
+/// | `find_recurse_filtered` |                1232 |     58 KiB |
+/// | `grep_recursive`        |                 960 |     45 KiB |
+///
+/// The cap is sized for the worst walker, so 48 costs at most 174 KiB — under
+/// 9% of the usable boot stack — leaving the rest for the non-recursive call
+/// chain beneath the innermost level (VFS, ext4), which is a constant, not
+/// multiplied by depth. Uniform rather than per-walker on purpose: "the shell
+/// descends at most 48 levels" is one fact to learn instead of three, and the
+/// worst case is the one that has to fit anyway.
+///
+/// # The second ceiling, which the stack measurement could not see
+///
+/// Stack headroom alone would allow several hundred levels, and the first
+/// version of this constant was 64 for that reason. It failed the boot test:
+/// **`Vfs::mkdir_all` refuses a path of more than 64 components** ("to prevent
+/// abuse", `fs/vfs.rs`), so the self-test fixture — which must build a tree
+/// *deeper* than the cap in order to trip it — could not be created at all, and
+/// rung 27 died with `InvalidArgument` before the walk under test ever ran.
+///
+/// The two limits are unrelated in kind: one is how deep this shell can safely
+/// *recurse*, the other is how deep the VFS will *create*. The cap belongs below
+/// both, with room for the fixture's own prefix: at 48, the deepest tree the
+/// rungs build is `/tmp/<name>/d1..d50` = 52 components, comfortably inside the
+/// VFS's 64.
+///
+/// 48 is still far past any real tree (a kernel source tree is ~12 deep, a
+/// pathological `node_modules` ~40) and is still a hard stop for a symlink loop,
+/// which is unbounded and so is caught by any finite cap.
+///
+/// If a walker's frame grows, re-measure rather than guessing: the old numbers
+/// looked deliberate and were arithmetic against the wrong stack.
+const WALK_DEPTH_CAP: u32 = 48;
+
+// The fixture in `deep_fixture_path` is `WALK_DEPTH_CAP + 2` levels under a
+// two-component prefix (`/tmp/<name>`), and it is built with `Vfs::mkdir_all`,
+// which refuses more than `MAX_MKDIR_ALL_COMPONENTS`. Raising the cap past that
+// leaves the fixture uncreatable, which is not a test failure but an
+// `InvalidArgument` from the fixture itself -- the rung dies before reaching the
+// walk it exists to check. That is exactly how this was found, so it is a build
+// error now rather than a boot-test one.
+const _: () = assert!(
+    (WALK_DEPTH_CAP as usize) + 4 <= crate::fs::vfs::MAX_MKDIR_ALL_COMPONENTS,
+    "WALK_DEPTH_CAP is too deep for the self-test fixture to build with Vfs::mkdir_all"
+);
 
 /// Internal helper for ls: list one directory and optionally recurse.
 ///
 /// `depth` guards against infinite recursion (e.g., symlink loops); the bound is
-/// [`LS_DEPTH_CAP`].
+/// [`WALK_DEPTH_CAP`].
 ///
 /// Sets a failing status itself rather than leaving it to `cmd_ls`, which is
 /// what it already does for an unreadable directory below. The usual reason a
@@ -12471,7 +12711,7 @@ fn ls_list_dir(
     recursive: bool,
     depth: u32,
 ) {
-    if depth > LS_DEPTH_CAP {
+    if depth > WALK_DEPTH_CAP {
         // Named the path and set a status, neither of which it used to do. `ls`
         // has no equivalent of `find`'s user-supplied depth, so unlike there,
         // every hit on this limit is a refusal: the directories below it exist
@@ -12481,7 +12721,7 @@ fn ls_list_dir(
         shell_println!(
             "ls: {}: recursion limit ({}) reached, not listed",
             path.display(),
-            LS_DEPTH_CAP
+            WALK_DEPTH_CAP
         );
         set_exit(1);
         return;
@@ -13823,7 +14063,7 @@ fn du_recurse(path: &Path, depth: usize, max_depth: usize, summary_only: bool) -
 /// Exits **0** when the walk completed — *including* when it matched nothing,
 /// which is a complete answer and not an error — and **1** when it could not
 /// walk something: an unreadable directory, a subtree cut off by
-/// [`FIND_DEPTH_CAP`], or a usage error. Two values, not the three
+/// [`WALK_DEPTH_CAP`], or a usage error. Two values, not the three
 /// `grep`/`cmp`/`diff` use; see [`FindTally`] for why the third would be
 /// meaningless here.
 #[allow(clippy::arithmetic_side_effects)]
@@ -13901,20 +14141,20 @@ fn cmd_find(args: &str) {
     // A `-maxdepth` deeper than the cap cannot be honoured, and pretending
     // otherwise is the same silence in a different place: the old code let the
     // user's number straight through, so `-maxdepth 200` would have recursed 200
-    // levels into the shell's 64 KiB stack if a tree that deep existed. Clamp,
-    // and say so once here rather than once per subtree below.
+    // levels if a tree that deep existed. Clamp, and say so once here rather
+    // than once per subtree below.
     let (max_depth, depth_limit_is_builtin) = match user_max_depth {
-        Some(n) if n <= FIND_DEPTH_CAP => (n, false),
+        Some(n) if n <= WALK_DEPTH_CAP => (n, false),
         Some(n) => {
             shell_println!(
                 "find: -maxdepth {}: exceeds the built-in limit of {}, using {}",
                 n,
-                FIND_DEPTH_CAP,
-                FIND_DEPTH_CAP
+                WALK_DEPTH_CAP,
+                WALK_DEPTH_CAP
             );
-            (FIND_DEPTH_CAP, true)
+            (WALK_DEPTH_CAP, true)
         }
-        None => (FIND_DEPTH_CAP, true),
+        None => (WALK_DEPTH_CAP, true),
     };
 
     let filter = FindFilter {
@@ -13941,18 +14181,6 @@ fn cmd_find(args: &str) {
     }
 }
 
-/// How deep `find` will descend before giving up on a subtree.
-///
-/// This is a stack-safety limit, not a feature: `find_recurse_filtered` recurses
-/// once per directory level, and the shell's task stack is 64 KiB
-/// ([`crate::sched::task::TASK_STACK_SIZE`]). It is emphatically *not* the same
-/// thing as the user's `-maxdepth`, even though one field used to carry both --
-/// see [`FindFilter::depth_limit_is_builtin`].
-///
-/// Named rather than inlined because the limit is now *reported* when it bites,
-/// and the diagnostic and the check must not be able to drift apart.
-const FIND_DEPTH_CAP: u32 = 16;
-
 /// Parsed find predicates.
 struct FindFilter<'a> {
     name_pattern: Option<&'a str>,
@@ -13961,7 +14189,7 @@ struct FindFilter<'a> {
     size_filter: Option<(i64, char)>,
     empty_filter: bool,
     /// The depth actually enforced: the user's `-maxdepth` if they gave one and
-    /// it fits, otherwise [`FIND_DEPTH_CAP`].
+    /// it fits, otherwise [`WALK_DEPTH_CAP`].
     max_depth: u32,
     /// Whether `max_depth` is ours or theirs.
     ///
@@ -13993,7 +14221,7 @@ struct FindTally {
     /// Paths that satisfied every predicate.
     matches: u64,
     /// Directories the walk could not read, or subtrees it was cut off from by
-    /// [`FIND_DEPTH_CAP`]. Any of these means the search was incomplete, so the
+    /// [`WALK_DEPTH_CAP`]. Any of these means the search was incomplete, so the
     /// zero-match answer is not an answer.
     unreadable: usize,
 }
@@ -95178,7 +95406,7 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, tally: &mut FindT
             shell_println!(
                 "find: {}: recursion limit ({}) reached, not searched",
                 path.display(),
-                FIND_DEPTH_CAP
+                WALK_DEPTH_CAP
             );
             tally.unreadable = tally.unreadable.saturating_add(1);
         }
@@ -95516,12 +95744,6 @@ fn cmd_hexdump(args: &str) {
 // exists here, so it was silently documenting whatever item happened to follow
 // it, which after this change would have been the depth limit.
 
-/// How deep `grep -r` will descend before giving up on a subtree.
-///
-/// Named rather than inlined because the limit is now *reported* when it bites,
-/// and the diagnostic and the check must not be able to drift apart.
-const MAX_GREP_DEPTH: usize = 16;
-
 /// Grep flags parsed from command-line arguments.
 struct GrepFlags {
     case_insensitive: bool,
@@ -95829,7 +96051,8 @@ fn grep_file(
     }
 }
 
-/// Recursively search a directory for grep matches (depth limit 16).
+/// Recursively search a directory for grep matches, bounded by
+/// [`WALK_DEPTH_CAP`].
 ///
 /// Every way this can decline to search something now says so and records it in
 /// `tally`. It previously had three bare `return`s — an unstattable path, an
@@ -95842,7 +96065,7 @@ fn grep_recursive(
     flags: &GrepFlags,
     multi_file: bool,
     tally: &mut GrepTally,
-    depth: usize,
+    depth: u32,
 ) {
     // Two unrelated stopping conditions used to share one `if`. Only one of
     // them is a failure: reaching the match cap is the ordinary, already-
@@ -95851,11 +96074,11 @@ fn grep_recursive(
     if tally.matches >= flags.max_matches {
         return;
     }
-    if depth > MAX_GREP_DEPTH {
+    if depth > WALK_DEPTH_CAP {
         shell_println!(
             "grep: {}: recursion limit ({}) reached, not searched",
             path.display(),
-            MAX_GREP_DEPTH
+            WALK_DEPTH_CAP
         );
         tally.unreadable = tally.unreadable.saturating_add(1);
         return;
@@ -108083,7 +108306,13 @@ fn cmd_tee(args: &str) {
 
     // Write to the file.
     if let Err(e) = crate::fs::Vfs::write_file(path, text.as_bytes()) {
+        // The pipe form of this same command, `cmd_tee_input`, already sets a
+        // status for the byte-identical error. Same command, same failure, same
+        // message, opposite status -- so `tee /ro/f x && deploy` ran `deploy`
+        // when the two-argument form was used and did not when the piped form
+        // was, which is the kind of difference nobody thinks to test for.
         shell_println!("tee: write error: {:?}", e);
+        set_exit(1);
     }
 }
 
@@ -119367,9 +119596,25 @@ fn sed_replace_first(text: &str, pattern: &str, replacement: &str) -> alloc::str
 }
 
 /// `sed` pipe-input variant: processes piped text instead of a file.
+///
+/// Rejects the same malformed invocations [`cmd_sed`] rejects, with the same
+/// status. This form used to accept all of them and **print the input
+/// verbatim**, which is worse than the `tee` disagreement that led here: `tee`
+/// at least printed its error. A script this parser cannot read — `s/old`,
+/// whose pattern is never closed — produced the unedited input and exit 0, so
+/// `cat config | sed 's/old' > config.new` wrote a file that looked plausible,
+/// was not edited at all, and reported success. GNU sed calls that
+/// `unterminated 's' command` and exits 1.
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_sed_input(args: &str, input: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        shell_println!("Usage: cmd | sed [-n] [-e CMD] 's/old/new/[g]'");
+        shell_println!("       cmd | sed [-n] '/pattern/d'");
+        shell_println!("       cmd | sed [-n] 'Nd'  (delete line N)");
+        set_exit(1);
+        return;
+    }
     let mut suppress = false;
     let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     let mut i = 0;
@@ -119393,13 +119638,22 @@ fn cmd_sed_input(args: &str, input: &str) {
         i += 1;
     }
 
+    if commands.is_empty() {
+        // Byte-identical to `cmd_sed`'s: the complaint is about the script,
+        // which is the same script whichever end the text arrives from.
+        shell_println!("sed: no command specified");
+        set_exit(1);
+        return;
+    }
+
     let parsed: alloc::vec::Vec<SedCmd> = commands
         .iter()
         .filter_map(|c| parse_sed_command(c))
         .collect();
 
     if parsed.is_empty() {
-        shell_print!("{}", input);
+        shell_println!("sed: invalid command syntax");
+        set_exit(1);
         return;
     }
 
@@ -119564,11 +119818,25 @@ fn cmd_awk(args: &str) {
 }
 
 /// `awk` pipe-input variant.
+///
+/// Rejects a missing program with the same status [`cmd_awk`] does. As with
+/// `cmd_sed_input`, this form used to print the input verbatim and exit 0, so
+/// `cat log | awk` was a silent `cat` that claimed to have run a program.
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_awk_input(args: &str, input: &str) {
+    if args.trim().is_empty() {
+        shell_println!("Usage: cmd | awk [-F sep] 'program'");
+        shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
+        shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
+        shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        set_exit(1);
+        return;
+    }
+
     let (fs_char, program, _files) = parse_awk_args(args);
     if program.is_empty() {
-        shell_print!("{}", input);
+        shell_println!("awk: no program specified");
+        set_exit(1);
         return;
     }
 

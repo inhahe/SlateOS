@@ -73771,6 +73771,33 @@ rule and judging it plausible. Two of the three false positives were single
 sites out of thousands, and both would have turned a working command into a
 failing one.
 
+#### 2026-08-24, later — the under-sweep is closed, by hand (lane A, `910ef26af`)
+
+All three sites now set a status. The predicate was never loosened, and should
+not be: the reasoning above still holds, and `"Network Usage:"` is still a row
+of a report. What changed is the recognition that **three is a number you fix by
+hand.** A rule that cannot safely admit three sites is a good rule; leaving the
+three sites broken because the rule cannot reach them is a separate decision,
+and it was the wrong one.
+
+Two had already been picked up by later waves (`base64: decode error:`, and the
+piped `tee` in `cmd_tee_input`) — so the count here was stale, and the entry
+still read "three unfixed sites" while only one was left. The survivor was
+`cmd_tee`, the `tee FILE TEXT` form.
+
+That one is worth recording for its shape rather than its size. `tee` is **one
+command with two implementations**, and they disagreed: the piped form set a
+status on a failed write, the two-argument form did not. Identical message,
+identical failure, opposite status — invisible in the output, visible only in
+`&&`. A per-message sweep cannot find that class at all, because nothing about
+either message is wrong; the defect is the *disagreement between two call
+paths*, which is only apparent when both are read together. Rung 32 therefore
+asserts both forms against the same bad path, and both against a good write.
+
+**Worth checking elsewhere:** any command with a piped and a non-piped
+implementation (`dispatch_with_input` vs `dispatch`) is a candidate for the same
+split-brain. This was found by hand, not by a rule.
+
 ### 2026-08-24 — the payoff: giving `syshealth` a status uncovered two real kernel bugs
 
 Fixed in `429a81bc3` and `e5c2d77df`. Recorded here because the *way* they
@@ -74605,6 +74632,162 @@ spent. Everywhere else in the shell a usage error is still 1, and the 17
 `"Syntax error: …"` sites remain queued for flat `set_exit(1)` exactly as
 originally planned.
 
+---
+
+## TD-B-SED-MISSING-COMMANDS — `l`, `W` and `R` are unimplemented, so `-l N` and `--sandbox` have nothing to act on (lane B, 2026-08-24) — RESOLVED 2026-08-24
+
+**What it is.** Our `sed` implements most of the GNU command set, but three
+commands are missing outright, and two options exist only to be accepted:
+
+| Missing | What GNU does | What ours does |
+|---|---|---|
+| `l` | prints the pattern space unambiguously — non-printing bytes as octal escapes, a trailing `$`, wrapped at the `-l` width with a `\` at each break | ``unknown command: `l'`` (status 1) |
+| `W FILE` | writes the *first line* of the pattern space to FILE | ``unknown command: `W'`` |
+| `R FILE` | reads *one line* from FILE per cycle and queues it for output | ``unknown command: `R'`` |
+| `-l N` | sets the wrap width `l` uses (default 70; `0` means never wrap) | parsed and discarded |
+| `--sandbox` | makes `e`, `r`, `w`, `R`, `W` a *parse-time* error: `e/r/w commands disabled in sandbox mode` | accepted and ignored |
+
+**Why `-l` is discarded rather than stored.** A field holding a width that
+nothing reads is a claim the program does not honour; the next reader would
+have to prove the absence rather than see it. The option is consumed with a
+comment pointing here instead. Restore the field in the same change that adds
+`l`, not before.
+
+**Reproduce.** `bash scripts/sed-diff.sh` — the cases
+`sed -n l`, `sed -n l 0`, `sed -l 3 's/.*/aaaaaaaa/;l'`, `sed -n '$!N;W …'`,
+`sed 'R def.txt'`, `sed '1R def.txt'` and `sed --sandbox 'w /tmp/x'` all report
+DIFF, each showing our parse error against GNU's output.
+
+**The proper fix.** Implement all three commands and give the two options
+something to act on:
+
+1. `l` — escape with GNU's table: a backslash followed by one of `abfnrtv`, or
+   a doubled backslash for a backslash itself, and a three-digit octal
+   `\ooo` for every other byte outside `[[:print:]]`. Then append `$`,
+   and wrap so that each output line is at most `N` columns *including* the
+   continuation `\`. `l 0` and `-l 0` disable wrapping; an explicit operand on
+   the command (`l 5`) overrides `-l` for that command only. Note that the
+   width counts *escaped* columns, not input bytes.
+2. `W` — like `w`, but stops at the first newline in the pattern space; shares
+   `w`'s open-file table so two `W`s to one name append to one handle.
+3. `R` — one line per cycle from a lazily-opened file, appended to the same
+   append-queue `r` uses; end of file makes it a silent no-op, and an
+   unopenable file is *not* an error (GNU ignores it, unlike `r`'s sibling
+   `w`).
+4. `--sandbox` — a flag consulted by the *parser*, rejecting `e/r/w/R/W` with
+   `e/r/w commands disabled in sandbox mode` at the character where the
+   command starts.
+
+Scoped as sed tranche 2b.
+
+**Resolution (2026-08-24).** All five done as described, each measured against
+GNU sed rather than written from the description above — which was wrong in one
+place worth recording. The wrap width is applied *per escape*, not per byte:
+GNU tests `output_width + escape_len + 1 > line_len` before emitting a whole
+escape, so `\303` is never torn across a break, and the `+ 1` reserves the
+column the continuation `\` will sit in. That is why `-l 1` opens with a bare
+`\` and a break — no escape can fit in `1 - 1` columns. Point 1 above says
+"at most `N` columns *including* the continuation `\`", which is the same rule
+stated in a way that does not tell you what to do with an escape that straddles
+the boundary.
+
+Two further behaviours were measured and are now implemented, neither of them
+guessable from the manual:
+
+* Two `R`s naming one file **share its read position**, so one cycle takes two
+  different lines rather than the same line twice. The handles are interned by
+  name at parse time for exactly this reason.
+* `-s` (and `-i`, which implies it) **rewinds every `R` source** at each new
+  input file, so `sed -s 'R inc' a b` pairs `inc`'s *first* lines with both
+  files.
+
+`-l` is read with `atoi`, which cannot fail: `-l 3x` means 3 and `-l x`, `-l ''`
+and `-l -1` all mean 0 — never wrap. None is an error, on either side.
+
+`sed-diff.sh` went from 166 passed / 21 differed to 175 passed / 12 differed;
+all seven cases named under **Reproduce** above are green, as are `sed w` and
+`sed r`, whose message was aligned to GNU's `missing filename in r/R/w/W
+commands` while in the area. The remaining 12 are tranches 2c and 2d, and the
+`e` gap below.
+
+---
+
+## TD-B-SED-E-AND-DEBUG — the `e` command and `--debug` are still missing (lane B, 2026-08-24) — **open**
+
+**What it is.** Two gaps are left in `sed` after TD-B-SED-MISSING-COMMANDS
+closed the other five:
+
+| Missing | What GNU does | What ours does |
+|---|---|---|
+| `e` / `e COMMAND` / `s///e` | runs the pattern space (or COMMAND) through the shell and substitutes the output | ``unknown command: `e'`` (status 1) |
+| `--debug` | prints an annotated trace: the parsed program, then `INPUT:`/`PATTERN:`/`COMMAND:`/`MATCHED REGEX REGISTERS`/`END-OF-CYCLE:` per cycle | accepted and ignored, so the run's ordinary output appears instead |
+
+**Why they are still out.** `e` needs a shell to hand the command to, and the
+one question it raises — *which* shell, and what happens when there is none —
+is a policy question rather than a coding one on an OS that does not have
+`/bin/sh` at a fixed path yet. `--debug` is a large, exactly-specified output
+format whose only consumer is a person reading it; it is worth doing, but it is
+worth doing after the wording tranches (2c) that share its error-reporting
+machinery.
+
+**Reproduce.** `bash scripts/sed-diff.sh` — the case `sed --debug s/a/A/`
+reports DIFF, showing our ordinary output against GNU's trace. `e` has no
+harness case because there is nothing yet to compare.
+
+**The proper fix.**
+
+1. `e` — spawn the shell with the pattern space as its command, replace the
+   pattern space with its stdout, and drop one trailing separator. `s///e` does
+   the same to the *result* of the substitution. Both must be refused by
+   `Parser::deny_in_sandbox`, which already exists and already carries the
+   message naming them; add the two call sites and extend
+   `the_sandbox_refuses_every_command_that_reaches_outside_the_script`, which
+   names this entry in a comment.
+2. `--debug` — a flag on `Exec` and a writer that renders the compiled program
+   back to text. The rendering is the bulk of it: it must round-trip every
+   command, which is a useful check on the parser in its own right.
+
+Scoped as sed tranche 2d.
+
+---
+
+## TD-B-ERE-BRACKET-BACKSLASH — a backslash inside `[...]` is unescaped, where POSIX and GNU make it a member (lane B, 2026-08-24) — **open**
+
+**What it is.** In `ere`, `class_char` (`userspace/ere/src/engine.rs`) reads a
+backslash inside a bracket expression as starting an escape. POSIX gives a
+backslash no special meaning there at all, and GNU agrees in *both* dialects —
+measured against the real `grep`:
+
+| pattern | subject | GNU | ours |
+|---|---|---|---|
+| `grep -E '^[\.]$'` | `.` | matches | matches |
+| `grep -E '^[\.]$'` | `\` | **matches** | does not |
+| `grep -E '^[\t]$'` | `t` | matches | does not |
+| `grep -E '^[\t]$'` | TAB | does not | **matches** |
+| `grep -E '^[\w-]+$'` | `w\-` | matches | does not |
+
+So `[\t]` is our tab and GNU's "backslash or `t`". BRE is unaffected in
+practice: `bre::to_ere` doubles a backslash inside a bracket precisely to
+cancel this out, which is why `grep '[\]'` is right today and `grep -E '[\]'`
+is not.
+
+**Why it is not simply "make `\` a member".** The engine is shared, and the
+dialects genuinely disagree: POSIX and GNU `awk` *require* `[\t]` to be a tab,
+so the current behaviour is correct for `awk` and wrong for `grep -E` and
+`sed -E`. The fix is therefore a dialect flag rather than a one-line change.
+
+**The proper fix.** Add a `brackets_take_escapes` flag alongside the existing
+case-fold flag on `Regex::new_flags`, default it to *off* (POSIX/GNU
+behaviour), and have `awk` turn it on. Then delete the doubling in
+`bre::to_ere` — it exists only to compensate — and its test
+`a_backslash_inside_a_bracket_is_a_member`, replacing it with one that checks
+the untranslated form. Add harness cases to `grep-diff.sh` for the five rows
+above.
+
+**Reproduce.** `printf '\\n' | grep -E '^[\.]$'` — GNU prints the backslash,
+ours prints nothing.
+---
+
 ### 2026-08-24 — `gunzip FILE` compresses a file that isn't gzip, instead of refusing — ✅ FIXED same day (lane A, `4d9990f4c`)
 
 **In short:** typing `gunzip notes.txt` does not report "that isn't a gzip
@@ -74727,3 +74910,120 @@ the whole reason this is worth writing down rather than just doing.
 **Severity.** Low and non-destructive as it stands — the divergence costs disk
 space and script compatibility, never data. Note that fixing it moves it *toward*
 being destructive, so the fix needs more care than the bug does.
+
+---
+
+### 2026-08-24 — the split-brain screen: what the `tee` lead actually found (lane A)
+
+The `tee` entry above closed with a lead: *"any command with a piped and a
+non-piped implementation (`dispatch_with_input` vs `dispatch`) is a candidate
+for the same split-brain."* This is what came of following it. Two of the
+findings are fixed (`0a785652a`); three are recorded below and not fixed.
+
+**How the screen was run, and why its output is not a verdict.** All 19 paired
+commands were enumerated from `dispatch_with_input`'s match arms, and a script
+counted `set_exit(1)` calls in each `cmd_X` against its `cmd_X_input`. Fourteen
+pairs came back with a non-zero count on one side and zero on the other. **Only
+two of those fourteen were bugs.** A `cmd_X_input` with no `set_exit` at all is
+usually *correct*: the file half's only failures are file-open errors, which
+have no piped analogue — the pipe supplied the bytes, so there is nothing left
+to fail at. Every one of the fourteen was read by hand against its twin before
+any verdict was reached, which is the same discipline the earlier sweeps needed
+and the reason this count is described here as a *filter* rather than a result.
+
+**Fixed: `sed` and `awk` printed the input verbatim and exited 0 for a script
+they could not run.** See `0a785652a` and self-test rung 33. This is a worse
+shape than `tee`'s — `tee` at least printed its error, whereas these produce
+plausible output, so `cat config | sed 's/old' > config.new` writes an unedited
+copy and reports success.
+
+**Correct, on inspection:** `sort`, `uniq`, `head`, `tail`, `wc`, `nl`, `rev`
+and `tac` all delegate to the file form when the argument names a file and have
+no failure mode left on the pipe path; `paste`, `tr`, `column` and `grep`
+already set a status. `cmd_tr_input` is the model the `sed`/`awk` fix followed.
+
+#### TD-A-FIVE-PIPE-FORMS-SILENTLY-DISCARD-A-FILE-OPERAND (lane A, 2026-08-24) — **open**
+
+**In short:** `cat a.txt | cut -f1 b.txt` cuts fields out of `a.txt` and ignores
+`b.txt` entirely — no error, no warning, exit 0. On Linux the named file wins
+and the pipe is left unread. Five commands do this: `cut`, `fold`, `sed`, `awk`
+and `mapfile`. Their piped implementations parse the file operand out of the
+arguments and then throw it away.
+
+**Where.** `kernel/src/kshell.rs`: `cmd_cut_input` (discards `parse_cut_args`'s
+fourth return value), `cmd_fold_input` (same, `parse_fold_args`), `cmd_sed_input`
+(never collects `file_args` at all), `cmd_awk_input` (binds `_files` and drops
+it), `cmd_mapfile_input` (takes only the first word as the array name).
+
+**Why it is a bug and not a design choice.** The other eleven paired commands in
+this shell — `sort`, `uniq`, `head`, `tail`, `wc`, `nl`, `rev`, `tac`, `grep`,
+`tee`, `paste` — all handle it, and they handle it two different but deliberate
+ways: eight delegate wholesale to the file form, `grep` delegates once it sees a
+second positional word, `paste` reads the file as an extra column (which is what
+GNU `paste - file` does). So there is an established convention, stated in the
+comment above the pipe-input block, and these five are simply outside it.
+
+**The `sed -i` corollary, which is the sharp edge.** `cat f | sed -i 's/a/b/'`
+parses `-i` in the file form and *silently ignores* it in the pipe form. The
+user asked for an in-place edit of a file and got a filtered pipe instead — the
+file is untouched, and exit status is 0. GNU refuses this outright (`sed: no
+input files while in-place editing`). This is the one case in the entry that
+loses work rather than merely diverging.
+
+**Proper fix.** Delegate, following `grep`'s shape rather than the blanket one:
+decide *before* flag parsing whether a file operand is present, and if so hand
+the whole argument string to the file form and leave the pipe unread. `grep`'s
+own comment explains why the order matters — the two halves do not accept the
+same flag set, so rejecting flags first would break a legitimate invocation that
+merely has a pipe attached. `mapfile` is the exception: bash's `mapfile` takes
+no file operand at all, so the right answer there is to reject a second word
+rather than delegate to a file form this shell invented.
+
+**Severity.** Medium. Silent and plausible — the output looks like a result, and
+in the `-i` case the user believes a file was edited that was not.
+
+#### TD-A-SED-ACCEPTS-AN-UNTERMINATED-SUBSTITUTION (lane A, 2026-08-24) — **open**
+
+**In short:** `sed 's/old/new'` — a trailing `/` short — is an error on Linux
+(`unterminated 's' command`) and runs happily here, substituting `new` for
+`old`. Both halves of the command agree about this, so it is not a split-brain;
+it is a lenient parser.
+
+**Where.** `parse_sed_command` in `kernel/src/kshell.rs`: the replacement's end
+delimiter is found with `find_unescaped(...).unwrap_or(bytes.len())`, so a
+missing one silently means "to the end of the script".
+
+**Why it was not fixed with `0a785652a`.** That commit's whole subject was the
+two halves *disagreeing*; this is the two halves agreeing on something GNU
+rejects. Fixing it changes the behaviour of a command that currently works, for
+every caller, which is a separate change with a separate risk — a script relying
+on the leniency would start failing. Rung 33 documents the distinction inline so
+the next reader does not mistake one for the other.
+
+**Proper fix.** Require the closing delimiter (`find_unescaped(...)?`), and add
+a rung asserting `sed 's/old/new'` fails while `sed 's/old/new/'` succeeds.
+Note the flag suffix parsing already assumes a terminator is present when it
+slices `&cmd[rep_end + 1..]`, so tightening this simplifies the code rather than
+complicating it.
+
+**Severity.** Low. The current reading is the one the user almost certainly
+meant; the cost is that a genuinely truncated script runs instead of failing.
+
+#### TD-A-XARGS-REPORTS-THE-LAST-COMMANDS-STATUS-NOT-THE-WORST (lane A, 2026-08-24) — **open**
+
+**In short:** `printf 'good\nbad\n' | xargs check && deploy` runs `deploy` if
+the *last* invocation succeeded, even when an earlier one failed. GNU `xargs`
+exits 123 if any invocation exits non-zero, precisely so that a batch failure
+cannot hide behind a final success.
+
+**Where.** `cmd_xargs_input` in `kernel/src/kshell.rs` calls `execute(&full_cmd)`
+in a loop and never inspects the status, so whatever the final `execute` left in
+the exit slot is what the pipeline reports.
+
+**Proper fix.** Track the worst status across the loop and set it once at the
+end — the "batch operations must track and report the worst error, not just the
+last one" rule from `CLAUDE.md`. Whether to use GNU's 123 or a flat 1 should
+follow whatever the `cmp`/`diff` entry above settled for multi-valued statuses,
+so the shell speaks one convention rather than two.
+
+**Severity.** Medium in scripts, invisible interactively.

@@ -110,12 +110,18 @@ impl JoiningType {
 
     /// Whether this character may join to the one before it in logical order.
     fn joins_prev(self) -> bool {
-        matches!(self, Self::DualJoining | Self::RightJoining | Self::JoinCausing)
+        matches!(
+            self,
+            Self::DualJoining | Self::RightJoining | Self::JoinCausing
+        )
     }
 
     /// Whether this character may join to the one after it in logical order.
     fn joins_next(self) -> bool {
-        matches!(self, Self::DualJoining | Self::LeftJoining | Self::JoinCausing)
+        matches!(
+            self,
+            Self::DualJoining | Self::LeftJoining | Self::JoinCausing
+        )
     }
 
     /// Whether this character takes a positional form at all.
@@ -162,10 +168,7 @@ pub(crate) fn forms(pieces: &[Piece], out: &mut Vec<Option<Form>>) {
     // The early-out is what keeps Latin from paying for this. It costs one
     // table probe per character and saves the allocation below plus the
     // masking the caller would otherwise do.
-    if !pieces
-        .iter()
-        .any(|&(ch, _)| JoiningType::of(ch).shapes())
-    {
+    if !pieces.iter().any(|&(ch, _)| JoiningType::of(ch).shapes()) {
         return;
     }
 
@@ -238,7 +241,7 @@ mod tests {
     /// Nothing in a Latin string joins, and the caller is told so by an empty
     /// answer rather than by a vector of `None`.
     #[test]
-    fn text_that_does_not_join_reports_nothing(){
+    fn text_that_does_not_join_reports_nothing() {
         assert!(shape("Hamburgefonstiv").is_empty());
         assert!(shape("").is_empty());
         assert!(shape("\u{5e9}\u{5dc}\u{5d5}\u{5dd}").is_empty());
@@ -250,11 +253,7 @@ mod tests {
         // beh beh beh
         assert_eq!(
             shape("\u{628}\u{628}\u{628}"),
-            vec![
-                Some(Form::Initial),
-                Some(Form::Medial),
-                Some(Form::Final)
-            ]
+            vec![Some(Form::Initial), Some(Form::Medial), Some(Form::Final)]
         );
     }
 
@@ -309,10 +308,7 @@ mod tests {
     /// even though nothing follows to join to.
     #[test]
     fn zero_width_joiner_forces_a_form_without_taking_one() {
-        assert_eq!(
-            shape("\u{628}\u{200d}"),
-            vec![Some(Form::Initial), None]
-        );
+        assert_eq!(shape("\u{628}\u{200d}"), vec![Some(Form::Initial), None]);
         assert_eq!(
             shape("\u{200d}\u{628}\u{200d}"),
             vec![None, Some(Form::Medial), None]

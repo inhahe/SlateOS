@@ -257,7 +257,11 @@ fn rule_set(data: &[u8], sub: usize, at: usize, count: u16, index: u16) -> Optio
     if index >= count {
         return None;
     }
-    sub_offset(data, sub, at.checked_add(usize::from(index).checked_mul(2)?)?)
+    sub_offset(
+        data,
+        sub,
+        at.checked_add(usize::from(index).checked_mul(2)?)?,
+    )
 }
 
 /// The rules of a rule set, in the font's order — which is the order they are
@@ -318,9 +322,7 @@ fn seq_rule(
             }
         },
     )?;
-    hit.at
-        .get_mut(1..count)?
-        .copy_from_slice(fill.get(..rest)?);
+    hit.at.get_mut(1..count)?.copy_from_slice(fill.get(..rest)?);
     hit.input = count;
     hit.end = end;
     hit.records = at.checked_add(rest.checked_mul(2)?)?;
@@ -379,9 +381,7 @@ fn chain_rule(
             }
         },
     )?;
-    hit.at
-        .get_mut(1..count)?
-        .copy_from_slice(fill.get(..rest)?);
+    hit.at.get_mut(1..count)?.copy_from_slice(fill.get(..rest)?);
 
     let at = at.checked_add(rest.checked_mul(2)?)?;
     let ahead = usize::from(u16_at(data, at)?);

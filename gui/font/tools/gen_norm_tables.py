@@ -47,6 +47,8 @@ import os
 import sys
 import unicodedata
 
+from rustfmt_out import rustfmt
+
 HANGUL_SYLLABLES = range(0xAC00, 0xD7A4)
 
 
@@ -258,6 +260,12 @@ def main():
                 + "\n"
             )
         w("];\n")
+    # Match what `cargo fmt -p osfont` would do to this file, so that
+    # regenerating it and formatting it are each a no-op after the other.
+    # Without this the two rewrite each other's output forever, and every
+    # unrelated diff carries a thousand lines of table churn. See
+    # rustfmt_out.py for the whole reason.
+    rustfmt(out)
 
     print(f"wrote {out}")
     print(f"  Unicode {unicodedata.unidata_version}")

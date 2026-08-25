@@ -381,9 +381,18 @@ mod tests {
     #[test]
     fn letters_report_their_script() {
         assert_eq!(ScriptTags::of('a').map(|t| t.preferred), Some(*b"latn"));
-        assert_eq!(ScriptTags::of('\u{5d0}').map(|t| t.preferred), Some(*b"hebr"));
-        assert_eq!(ScriptTags::of('\u{627}').map(|t| t.preferred), Some(*b"arab"));
-        assert_eq!(ScriptTags::of('\u{4e00}').map(|t| t.preferred), Some(*b"hani"));
+        assert_eq!(
+            ScriptTags::of('\u{5d0}').map(|t| t.preferred),
+            Some(*b"hebr")
+        );
+        assert_eq!(
+            ScriptTags::of('\u{627}').map(|t| t.preferred),
+            Some(*b"arab")
+        );
+        assert_eq!(
+            ScriptTags::of('\u{4e00}').map(|t| t.preferred),
+            Some(*b"hani")
+        );
     }
 
     /// The whole reason the fallback field exists: OpenType revised the Indic
@@ -406,7 +415,11 @@ mod tests {
     #[test]
     fn scriptless_characters_do_not_decide() {
         for ch in [' ', '1', '.', ',', '\t', '\u{301}'] {
-            assert_eq!(ScriptTags::of(ch), None, "{ch:?} should not select a script");
+            assert_eq!(
+                ScriptTags::of(ch),
+                None,
+                "{ch:?} should not select a script"
+            );
         }
         assert_eq!(tags_of("hello there, world"), vec![(18, Some(*b"latn"))]);
     }
@@ -491,7 +504,11 @@ mod tests {
         let levels = [0, 0, 1, 1, 1, 0, 0];
         assert_eq!(
             tags_at("ab cd x", &levels),
-            vec![(2, Some(*b"latn")), (5, Some(*b"latn")), (7, Some(*b"latn"))]
+            vec![
+                (2, Some(*b"latn")),
+                (5, Some(*b"latn")),
+                (7, Some(*b"latn"))
+            ]
         );
     }
 
@@ -522,7 +539,11 @@ mod tests {
         let levels = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0];
         assert_eq!(
             tags_at("hello \u{5d0}\u{5dc}\u{5d5}\u{5dd} world", &levels),
-            vec![(6, Some(*b"latn")), (10, Some(*b"hebr")), (16, Some(*b"latn"))]
+            vec![
+                (6, Some(*b"latn")),
+                (10, Some(*b"hebr")),
+                (16, Some(*b"latn"))
+            ]
         );
     }
 
@@ -531,7 +552,10 @@ mod tests {
     /// would refuse a ligature or a contextual form for no reason at all.
     #[test]
     fn a_level_change_that_keeps_the_direction_is_not_a_boundary() {
-        assert_eq!(tags_at("ab12cd", &[0, 0, 2, 2, 0, 0]), vec![(6, Some(*b"latn"))]);
+        assert_eq!(
+            tags_at("ab12cd", &[0, 0, 2, 2, 0, 0]),
+            vec![(6, Some(*b"latn"))]
+        );
     }
 
     /// An empty level list means "no bidi here", not "level zero everywhere
@@ -549,11 +573,11 @@ mod tests {
     /// need not even register.
     #[test]
     fn a_shared_digit_does_not_cut_the_word_around_it() {
-        assert_eq!(ScriptTags::of('\u{660}').map(|t| t.preferred), Some(*b"arab"));
         assert_eq!(
-            tags_of("\u{780}\u{660}\u{780}"),
-            vec![(3, Some(*b"thaa"))]
+            ScriptTags::of('\u{660}').map(|t| t.preferred),
+            Some(*b"arab")
         );
+        assert_eq!(tags_of("\u{780}\u{660}\u{780}"), vec![(3, Some(*b"thaa"))]);
         // And the same digit inside Arabic is still Arabic.
         assert_eq!(tags_of("\u{627}\u{660}\u{627}"), vec![(3, Some(*b"arab"))]);
     }

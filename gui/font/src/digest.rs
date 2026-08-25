@@ -176,10 +176,7 @@ mod tests {
             let mut digest = Digest::EMPTY;
             digest.add_range(first, last);
             for g in first..=last {
-                assert!(
-                    digest.may_have(g),
-                    "range {first}..={last} lost glyph {g}"
-                );
+                assert!(digest.may_have(g), "range {first}..={last} lost glyph {g}");
                 if g == u16::MAX {
                     break;
                 }

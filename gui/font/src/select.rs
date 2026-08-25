@@ -138,7 +138,11 @@ pub fn score(have: Style, want: Query) -> Score {
 /// Ties go to the earlier candidate, so a caller that has an order it cares
 /// about — files sorted by path, say — gets a stable answer rather than one
 /// that depends on directory iteration order.
-pub fn best<T>(candidates: impl IntoIterator<Item = T>, want: Query, style_of: impl Fn(&T) -> Style) -> Option<T> {
+pub fn best<T>(
+    candidates: impl IntoIterator<Item = T>,
+    want: Query,
+    style_of: impl Fn(&T) -> Style,
+) -> Option<T> {
     candidates
         .into_iter()
         .map(|c| {
@@ -281,8 +285,16 @@ mod tests {
 
     #[test]
     fn the_nearest_within_a_direction_wins() {
-        assert_eq!(pick(&[100, 200, 300], 900), 300, "all lighter: take the heaviest");
-        assert_eq!(pick(&[600, 800, 900], 100), 600, "all heavier: take the lightest");
+        assert_eq!(
+            pick(&[100, 200, 300], 900),
+            300,
+            "all lighter: take the heaviest"
+        );
+        assert_eq!(
+            pick(&[600, 800, 900], 100),
+            600,
+            "all heavier: take the lightest"
+        );
     }
 
     #[test]
@@ -392,7 +404,10 @@ mod tests {
         // Equidistant from 400 in the *same* tier only if neither is the
         // 400/500 special case, so use a request where they genuinely tie.
         let want = Query::regular().at_weight(100);
-        assert_eq!(score(a, want).cmp(&score(b, want)), core::cmp::Ordering::Less);
+        assert_eq!(
+            score(a, want).cmp(&score(b, want)),
+            core::cmp::Ordering::Less
+        );
         // A real tie: the same style twice, distinguished by a payload.
         let picked = best([(1_u8, a), (2, a)], want, |(_, s)| *s).expect("some");
         assert_eq!(picked.0, 1);

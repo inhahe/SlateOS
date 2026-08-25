@@ -86,6 +86,8 @@ import os
 import unicodedata
 import urllib.request
 
+from rustfmt_out import rustfmt
+
 # Blocks whose code points the Indic, Khmer and Myanmar shapers read —
 # HarfBuzz's list. Basic Latin and the punctuation blocks are in it because a
 # placeholder or a dotted circle can stand in for a base.
@@ -631,6 +633,12 @@ def main():
                 f"Position::{RUST_POSITION[pos]}),\n"
             )
         w("];\n")
+    # Match what `cargo fmt -p osfont` would do to this file, so that
+    # regenerating it and formatting it are each a no-op after the other.
+    # Without this the two rewrite each other's output forever, and every
+    # unrelated diff carries a thousand lines of table churn. See
+    # rustfmt_out.py for the whole reason.
+    rustfmt(out)
 
     print(f"wrote {out}")
     print(f"  Unicode {version}")

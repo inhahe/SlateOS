@@ -177,9 +177,11 @@ impl Subtable {
         let rows_at = indices_at.checked_add(region_index_count.checked_mul(2)?)?;
 
         let (wide, narrow) = if long_words { (4, 2) } else { (2, 1) };
-        let row_size = word_count
-            .checked_mul(wide)?
-            .checked_add(region_index_count.checked_sub(word_count)?.checked_mul(narrow)?)?;
+        let row_size = word_count.checked_mul(wide)?.checked_add(
+            region_index_count
+                .checked_sub(word_count)?
+                .checked_mul(narrow)?,
+        )?;
 
         // A subtable over *no* regions is legal and real — four of them on
         // this host, one with 1780 rows. Every row is empty, so every delta is
@@ -333,7 +335,9 @@ impl VarStore {
         let Some(start) = usize::from(index).checked_mul(self.axis_count) else {
             return 0.0;
         };
-        let Some(region) = self.regions.get(start..start.checked_add(self.axis_count).unwrap_or(0))
+        let Some(region) = self
+            .regions
+            .get(start..start.checked_add(self.axis_count).unwrap_or(0))
         else {
             return 0.0;
         };
@@ -432,8 +436,7 @@ impl IndexMap {
         }
         let inner_bits = (entry_format & 0x0F).checked_add(1)?;
         let entry_size = usize::try_from(((entry_format & 0x30) >> 4).checked_add(1)?).ok()?;
-        let end = entries_at
-            .checked_add(usize::try_from(count).ok()?.checked_mul(entry_size)?)?;
+        let end = entries_at.checked_add(usize::try_from(count).ok()?.checked_mul(entry_size)?)?;
         if end > data.len() {
             return None;
         }
@@ -455,7 +458,9 @@ impl IndexMap {
             return None;
         }
         let clamped = usize::try_from(index.min(self.count.checked_sub(1)?)).ok()?;
-        let at = self.entries_at.checked_add(clamped.checked_mul(self.entry_size)?)?;
+        let at = self
+            .entries_at
+            .checked_add(clamped.checked_mul(self.entry_size)?)?;
         let bytes = data.get(at..at.checked_add(self.entry_size)?)?;
         let mut raw = 0u32;
         for &b in bytes {
@@ -593,7 +598,9 @@ impl Mvar {
             // `lo + (hi - lo) / 2` rather than `(lo + hi) / 2`: the latter can
             // overflow, and `arithmetic_side_effects` is denied here anyway.
             let mid = lo.checked_add(hi.checked_sub(lo)?.checked_div(2)?)?;
-            let at = self.records_at.checked_add(mid.checked_mul(self.record_size)?)?;
+            let at = self
+                .records_at
+                .checked_add(mid.checked_mul(self.record_size)?)?;
             let found: [u8; 4] = data.get(at..at.checked_add(4)?)?.try_into().ok()?;
             match found.cmp(&tag) {
                 core::cmp::Ordering::Less => lo = mid.checked_add(1)?,

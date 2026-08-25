@@ -53,6 +53,8 @@ import os
 import re
 import sys
 
+from rustfmt_out import rustfmt
+
 DEFAULT_SOURCE = (
     "https://raw.githubusercontent.com/harfbuzz/harfbuzz/main/src/hb-ot-tag-table.hh"
 )
@@ -404,6 +406,12 @@ def main():
     out_path = os.path.abspath(args.out)
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         emit(f, languages2, languages3, blocked, rules, args.source)
+    # Match what `cargo fmt -p osfont` would do to this file, so that
+    # regenerating it and formatting it are each a no-op after the other.
+    # Without this the two rewrite each other's output forever, and every
+    # unrelated diff carries a thousand lines of table churn. See
+    # rustfmt_out.py for the whole reason.
+    rustfmt(out_path)
 
     def several_of(table):
         return sum(1 for _, tags in table if len(tags) > 1)

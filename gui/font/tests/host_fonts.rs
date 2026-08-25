@@ -42,8 +42,8 @@ use osfont::gsub::SubGlyph;
 use osfont::raster::rasterize;
 use osfont::scaled::{ScaledFont, Target};
 use osfont::script::ScriptTags;
+use osfont::sfnt::{Face, Outline, PathCmd, Point, SfntError, name_id};
 use osfont::shape::{Affinity, TAB_WIDTH_IN_SPACES};
-use osfont::sfnt::{name_id, Face, Outline, PathCmd, Point, SfntError};
 
 /// Every glyph these tests substitute came from Latin text, so Latin is the
 /// script its features must be chosen under. Spelled once, because passing the
@@ -55,7 +55,18 @@ type OutlineRecord = (usize, f32, f32, f32, f32, f32, f32);
 /// One `the_outline_oracle_agrees_about_unvaried_glyphs` row: file, glyph, record.
 type DefaultOutline = (&'static str, u16, usize, f32, f32, f32, f32, f32, f32);
 /// One `installed_variable_fonts_vary_their_outlines` row, with the instance.
-type VariedOutline = (&'static str, u16, usize, usize, f32, f32, f32, f32, f32, f32);
+type VariedOutline = (
+    &'static str,
+    u16,
+    usize,
+    usize,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+    f32,
+);
 
 const LATIN: Option<ScriptTags> = Some(ScriptTags {
     preferred: *b"latn",
@@ -265,7 +276,10 @@ fn every_installed_font_parses_or_fails_cleanly() {
 
     assert!(opened > 0, "not one installed font opened");
     if otf_found > 0 {
-        assert!(otf_opened > 0, "{otf_found} `.otf` fonts and not one opened");
+        assert!(
+            otf_opened > 0,
+            "{otf_found} `.otf` fonts and not one opened"
+        );
         assert!(otf_ink > 0, "`.otf` fonts opened but rasterized no ink");
     }
 }
@@ -330,10 +344,7 @@ fn cff_letters_look_like_letters() {
         collect_fonts(&dir, &mut candidates, 0);
     }
     candidates.sort();
-    candidates.retain(|p| {
-        p.extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("otf"))
-    });
+    candidates.retain(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("otf")));
     if candidates.is_empty() {
         println!("no `.otf` fonts on this host — nothing to check");
         return;
@@ -344,7 +355,9 @@ fn cff_letters_look_like_letters() {
     let mut checked = 0usize;
     for path in &candidates {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         if !['A', 'g', 'l', 'o']
             .iter()
             .all(|c| face.glyph_index(*c).is_some())
@@ -602,14 +615,16 @@ fn installed_fonts_report_their_names() {
     ];
     let mut oracles_checked = 0usize;
     for (file, expected) in oracles {
-        let Some(path) = files.iter().find(|p| {
-            p.file_name()
-                .is_some_and(|n| n.eq_ignore_ascii_case(file))
-        }) else {
+        let Some(path) = files
+            .iter()
+            .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case(file)))
+        else {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         assert_eq!(
             face.family().as_deref(),
             Some(expected),
@@ -707,7 +722,10 @@ fn installed_fonts_report_their_style() {
         "every face on this host reported the same weight — the field is not \
          being read"
     );
-    assert!(italics > 0, "not one italic face — the slant flags are not being read");
+    assert!(
+        italics > 0,
+        "not one italic face — the slant flags are not being read"
+    );
 
     // The oracle: a family's own files, which differ *only* in style.
     let oracles: [(&str, u16, bool); 12] = [
@@ -733,7 +751,9 @@ fn installed_fonts_report_their_style() {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let style = face.style();
         assert_eq!(
             (style.weight, style.italic),
@@ -753,10 +773,10 @@ fn installed_fonts_report_their_style() {
     // Arial Narrow is the condensed member of the Arial family, and is the
     // reason width class is read at all: without it, a request for "Arial"
     // can be answered with a narrow face that measures quite differently.
-    if let Some(path) = files
-        .iter()
-        .find(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("arialn.ttf")))
-        && let Ok(data) = fs::read(path)
+    if let Some(path) = files.iter().find(|p| {
+        p.file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("arialn.ttf"))
+    }) && let Ok(data) = fs::read(path)
         && let Ok(face) = Face::parse(data)
     {
         assert!(
@@ -799,7 +819,9 @@ fn installed_fonts_kern_the_pairs_that_need_it() {
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         opened += 1;
         if !face.has_kerning() {
             continue;
@@ -859,7 +881,9 @@ fn installed_fonts_kern_the_pairs_that_need_it() {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let (Some(a), Some(v)) = (face.glyph_index('A'), face.glyph_index('V')) else {
             continue;
         };
@@ -920,7 +944,9 @@ fn a_mark_between_a_kerning_pair_costs_the_kern_only_if_the_flag_says_so() {
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let (Some(t), Some(o), Some(acute)) = (
             face.glyph_index('T'),
             face.glyph_index('o'),
@@ -984,7 +1010,9 @@ fn a_mark_between_a_kerning_pair_costs_the_kern_only_if_the_flag_says_so() {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let want = 14.0 * f32::from(widens_by) / f32::from(face.units_per_em());
         let font = ScaledFont::from_bytes(fs::read(path).expect("re-read"), 14.0).expect("scaled");
         let bare = font.measure("To");
@@ -1038,7 +1066,9 @@ fn installed_fonts_ligate_fi() {
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         opened += 1;
         if !face.has_substitutions() {
             continue;
@@ -1154,7 +1184,9 @@ fn installed_fonts_ligate_fi() {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let (Some(f), Some(i)) = (face.glyph_index('f'), face.glyph_index('i')) else {
             continue;
         };
@@ -1188,7 +1220,11 @@ fn installed_fonts_ligate_fi() {
         // The cluster is the pair's first byte, so a caret can sit before or
         // after the ligature and nowhere inside it.
         let clusters: Vec<usize> = run.glyphs().iter().map(|g| g.cluster).collect();
-        assert_eq!(clusters, vec![0], "{file}: fi reported clusters {clusters:?}");
+        assert_eq!(
+            clusters,
+            vec![0],
+            "{file}: fi reported clusters {clusters:?}"
+        );
     }
     assert!(
         checked >= 1,
@@ -1249,7 +1285,9 @@ fn installed_fonts_reach_lookups_past_the_subtable_budget() {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let gids: Vec<u16> = text.chars().filter_map(|c| face.glyph_index(c)).collect();
         if gids.len() != text.chars().count() {
             continue;
@@ -1331,7 +1369,9 @@ fn installed_fonts_leave_plain_latin_alone() {
     let mut changed = Vec::new();
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         if !face.has_substitutions() {
             continue;
         }
@@ -1448,7 +1488,9 @@ fn shaped_runs_agree_with_their_strings_about_boundaries() {
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         if !face.has_substitutions() {
             continue;
         }
@@ -1626,7 +1668,9 @@ fn symbol_encoded_fonts_still_map_ascii() {
             continue;
         }
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let mut mapped = 0usize;
         for cp in 0x20u32..0x7F {
             let (Some(ch), Some(shifted)) = (char::from_u32(cp), char::from_u32(0xF000 + cp))
@@ -1698,7 +1742,9 @@ fn installed_fonts_leave_a_tab_alone() {
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         if !face.has_substitutions() {
             continue;
         }
@@ -1745,7 +1791,11 @@ fn installed_fonts_leave_a_tab_alone() {
             "{}: the tab advanced {tab_advance} px, not the {expected} px of \
              four spaces{}",
             path.display(),
-            if touched { " — the face's own space rule reached it" } else { "" }
+            if touched {
+                " — the face's own space rule reached it"
+            } else {
+                ""
+            }
         );
         // And it must draw nothing. The advance alone would not catch a
         // substitution to a glyph that happens to be the same width, and a tab
@@ -1758,7 +1808,11 @@ fn installed_fonts_leave_a_tab_alone() {
             "{}: the glyph standing in for the tab draws ink — it is not the \
              space it went in as{}",
             path.display(),
-            if touched { " (this face substitutes ' ')" } else { "" }
+            if touched {
+                " (this face substitutes ' ')"
+            } else {
+                ""
+            }
         );
         let letter = font.shape("x");
         assert_eq!(
@@ -1818,7 +1872,9 @@ fn installed_fonts_place_combining_marks() {
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         opened += 1;
         if !face.has_marks() {
             continue;
@@ -1869,7 +1925,8 @@ fn installed_fonts_place_combining_marks() {
             path.display()
         );
         assert_eq!(
-            mark.advance, 0.0,
+            mark.advance,
+            0.0,
             "{}: the acute advances the pen",
             path.display()
         );
@@ -2243,7 +2300,9 @@ fn installed_fonts_join_arabic_letters() {
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         if !face.has_substitutions() || face.glyph_index('\u{628}').is_none() {
             continue;
         }
@@ -2275,7 +2334,8 @@ fn installed_fonts_join_arabic_letters() {
         }
 
         assert_ne!(
-            gids[1], isolated,
+            gids[1],
+            isolated,
             "{}: the middle beh of a three-letter word kept its isolated \
              form — `medi` was not applied",
             path.display()
@@ -2367,7 +2427,9 @@ fn installed_fonts_reorder_right_to_left_text() {
 
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         if !"\u{5d0}\u{5d1}\u{5d2}AB"
             .chars()
             .all(|ch| face.glyph_index(ch).is_some())
@@ -2406,7 +2468,9 @@ fn installed_fonts_reorder_right_to_left_text() {
         // Clusters are still sorted in the *logical* order, which is what
         // every query on the run depends on.
         assert!(
-            run.glyphs().windows(2).all(|w| w[0].cluster <= w[1].cluster),
+            run.glyphs()
+                .windows(2)
+                .all(|w| w[0].cluster <= w[1].cluster),
             "{}: reordering disturbed the clusters",
             path.display()
         );
@@ -2486,7 +2550,9 @@ fn a_paragraph_direction_can_be_given_and_changes_the_answer() {
     let mut checked = 0usize;
     for path in &files {
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data.clone()) else { continue };
+        let Ok(face) = Face::parse(data.clone()) else {
+            continue;
+        };
         if !"(a)".chars().all(|ch| face.glyph_index(ch).is_some()) {
             continue;
         }
@@ -2574,7 +2640,10 @@ fn a_paragraph_direction_can_be_given_and_changes_the_answer() {
     }
 
     println!("faces checked: {checked}");
-    assert!(checked >= 1, "no installed face has `(`, `)` and `a` distinctly");
+    assert!(
+        checked >= 1,
+        "no installed face has `(`, `)` and `a` distinctly"
+    );
 }
 
 /// Whether the sfnt table directory names `tag`, read without the parser under
@@ -2691,7 +2760,9 @@ fn installed_variable_fonts_report_their_axes() {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let vars = face
             .variation_axes()
             .unwrap_or_else(|| panic!("{name}: carries `fvar` but reports no axes"));
@@ -2826,7 +2897,9 @@ fn no_installed_face_invents_variation_axes() {
         // one thing both readers must agree on for the comparison to mean
         // anything.
         let has_fvar = directory_has_table(&data, b"fvar");
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         total += 1;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
@@ -2860,7 +2933,11 @@ fn no_installed_face_invents_variation_axes() {
         // the extras. Both are the caller's mistake and neither may panic or
         // resize the coordinate array, which is indexed positionally by
         // everything downstream.
-        assert_eq!(vars.normalize(&[]).len(), vars.axes().len(), "{name}: empty");
+        assert_eq!(
+            vars.normalize(&[]).len(),
+            vars.axes().len(),
+            "{name}: empty"
+        );
         assert!(vars.normalize(&[]).is_default(), "{name}: empty is default");
         let too_many = vec![400.0f32; vars.axes().len() + 5];
         assert_eq!(
@@ -2916,108 +2993,129 @@ fn installed_variable_fonts_normalize_named_instances() {
     // user-space position it came from.
     let expected: &[(&str, &[&[i16]])] = &[
         // CascadiaCode.ttf: wght, avar yes
-        ("CascadiaCode.ttf", &[
-            &[-16384],  // 200
-            &[-10923],  // 300
-            &[-5461],  // 350
-            &[0],  // 400
-            &[9830],  // 600
-            &[16384],  // 700
-        ]),
+        (
+            "CascadiaCode.ttf",
+            &[
+                &[-16384], // 200
+                &[-10923], // 300
+                &[-5461],  // 350
+                &[0],      // 400
+                &[9830],   // 600
+                &[16384],  // 700
+            ],
+        ),
         // CascadiaMono.ttf: wght, avar yes
-        ("CascadiaMono.ttf", &[
-            &[-16384],  // 200
-            &[-10923],  // 300
-            &[-5461],  // 350
-            &[0],  // 400
-            &[9830],  // 600
-            &[16384],  // 700
-        ]),
+        (
+            "CascadiaMono.ttf",
+            &[
+                &[-16384], // 200
+                &[-10923], // 300
+                &[-5461],  // 350
+                &[0],      // 400
+                &[9830],   // 600
+                &[16384],  // 700
+            ],
+        ),
         // ReemKufi.ttf: wght, avar no
-        ("ReemKufi.ttf", &[
-            &[0],  // 400
-            &[5461],  // 500
-            &[10923],  // 600
-            &[16384],  // 700
-        ]),
+        (
+            "ReemKufi.ttf",
+            &[
+                &[0],     // 400
+                &[5461],  // 500
+                &[10923], // 600
+                &[16384], // 700
+            ],
+        ),
         // SegUIVar.ttf: wght/opsz, avar yes
-        ("SegUIVar.ttf", &[
-            &[-16384, -7447],  // 300, 8
-            &[-8192, -7447],  // 350, 8
-            &[0, -7447],  // 400, 8
-            &[8192, -7447],  // 600, 8
-            &[16384, -7447],  // 700, 8
-            &[-16384, 0],  // 300, 10.5
-            &[-8192, 0],  // 350, 10.5
-            &[0, 0],  // 400, 10.5
-            &[8192, 0],  // 600, 10.5
-            &[16384, 0],  // 700, 10.5
-            &[-16384, 16384],  // 300, 36
-            &[-8192, 16384],  // 350, 36
-            &[0, 16384],  // 400, 36
-            &[8192, 16384],  // 600, 36
-            &[16384, 16384],  // 700, 36
-        ]),
+        (
+            "SegUIVar.ttf",
+            &[
+                &[-16384, -7447], // 300, 8
+                &[-8192, -7447],  // 350, 8
+                &[0, -7447],      // 400, 8
+                &[8192, -7447],   // 600, 8
+                &[16384, -7447],  // 700, 8
+                &[-16384, 0],     // 300, 10.5
+                &[-8192, 0],      // 350, 10.5
+                &[0, 0],          // 400, 10.5
+                &[8192, 0],       // 600, 10.5
+                &[16384, 0],      // 700, 10.5
+                &[-16384, 16384], // 300, 36
+                &[-8192, 16384],  // 350, 36
+                &[0, 16384],      // 400, 36
+                &[8192, 16384],   // 600, 36
+                &[16384, 16384],  // 700, 36
+            ],
+        ),
         // SitkaVF-Italic.ttf: opsz/wght, avar yes
-        ("SitkaVF-Italic.ttf", &[
-            &[-16384, 0],  // 6, 400
-            &[-16384, 9885],  // 6, 600
-            &[-16384, 16384],  // 6, 700
-            &[0, 0],  // 11, 400
-            &[0, 9885],  // 11, 600
-            &[0, 16384],  // 11, 700
-            &[5699, 0],  // 16.7391, 400
-            &[5699, 9885],  // 16.7391, 600
-            &[5699, 16384],  // 16.7391, 700
-            &[9973, 0],  // 21.0434, 400
-            &[9973, 9885],  // 21.0434, 600
-            &[9973, 16384],  // 21.0434, 700
-            &[13534, 0],  // 24.6303, 400
-            &[13534, 9885],  // 24.6303, 600
-            &[13534, 16384],  // 24.6303, 700
-            &[16384, 0],  // 27.5, 400
-            &[16384, 9885],  // 27.5, 600
-            &[16384, 16384],  // 27.5, 700
-        ]),
+        (
+            "SitkaVF-Italic.ttf",
+            &[
+                &[-16384, 0],     // 6, 400
+                &[-16384, 9885],  // 6, 600
+                &[-16384, 16384], // 6, 700
+                &[0, 0],          // 11, 400
+                &[0, 9885],       // 11, 600
+                &[0, 16384],      // 11, 700
+                &[5699, 0],       // 16.7391, 400
+                &[5699, 9885],    // 16.7391, 600
+                &[5699, 16384],   // 16.7391, 700
+                &[9973, 0],       // 21.0434, 400
+                &[9973, 9885],    // 21.0434, 600
+                &[9973, 16384],   // 21.0434, 700
+                &[13534, 0],      // 24.6303, 400
+                &[13534, 9885],   // 24.6303, 600
+                &[13534, 16384],  // 24.6303, 700
+                &[16384, 0],      // 27.5, 400
+                &[16384, 9885],   // 27.5, 600
+                &[16384, 16384],  // 27.5, 700
+            ],
+        ),
         // SitkaVF.ttf: opsz/wght, avar yes
-        ("SitkaVF.ttf", &[
-            &[-16384, 0],  // 6, 400
-            &[-16384, 9885],  // 6, 600
-            &[-16384, 16384],  // 6, 700
-            &[0, 0],  // 11, 400
-            &[0, 9885],  // 11, 600
-            &[0, 16384],  // 11, 700
-            &[5699, 0],  // 16.7391, 400
-            &[5699, 9885],  // 16.7391, 600
-            &[5699, 16384],  // 16.7391, 700
-            &[9973, 0],  // 21.0434, 400
-            &[9973, 9885],  // 21.0434, 600
-            &[9973, 16384],  // 21.0434, 700
-            &[13534, 0],  // 24.6303, 400
-            &[13534, 9885],  // 24.6303, 600
-            &[13534, 16384],  // 24.6303, 700
-            &[16384, 0],  // 27.5, 400
-            &[16384, 9885],  // 27.5, 600
-            &[16384, 16384],  // 27.5, 700
-        ]),
+        (
+            "SitkaVF.ttf",
+            &[
+                &[-16384, 0],     // 6, 400
+                &[-16384, 9885],  // 6, 600
+                &[-16384, 16384], // 6, 700
+                &[0, 0],          // 11, 400
+                &[0, 9885],       // 11, 600
+                &[0, 16384],      // 11, 700
+                &[5699, 0],       // 16.7391, 400
+                &[5699, 9885],    // 16.7391, 600
+                &[5699, 16384],   // 16.7391, 700
+                &[9973, 0],       // 21.0434, 400
+                &[9973, 9885],    // 21.0434, 600
+                &[9973, 16384],   // 21.0434, 700
+                &[13534, 0],      // 24.6303, 400
+                &[13534, 9885],   // 24.6303, 600
+                &[13534, 16384],  // 24.6303, 700
+                &[16384, 0],      // 27.5, 400
+                &[16384, 9885],   // 27.5, 600
+                &[16384, 16384],  // 27.5, 700
+            ],
+        ),
         // bahnschrift.ttf: wght/wdth, avar yes
-        ("bahnschrift.ttf", &[
-            &[-16384, 0],  // 300, 100
-            &[-8192, 0],  // 350, 100
-            &[0, 0],  // 400, 100
-            &[8192, 0],  // 600, 100
-            &[16384, 0],  // 700, 100
-            &[-16384, -8192],  // 300, 87.5
-            &[-8192, -8192],  // 350, 87.5
-            &[0, -8192],  // 400, 87.5
-            &[8192, -8192],  // 600, 87.5
-            &[16384, -8192],  // 700, 87.5
-            &[-16384, -16384],  // 300, 75
-            &[-8192, -16384],  // 350, 75
-            &[0, -16384],  // 400, 75
-            &[8192, -16384],  // 600, 75
-            &[16384, -16384],  // 700, 75
-        ]),
+        (
+            "bahnschrift.ttf",
+            &[
+                &[-16384, 0],      // 300, 100
+                &[-8192, 0],       // 350, 100
+                &[0, 0],           // 400, 100
+                &[8192, 0],        // 600, 100
+                &[16384, 0],       // 700, 100
+                &[-16384, -8192],  // 300, 87.5
+                &[-8192, -8192],   // 350, 87.5
+                &[0, -8192],       // 400, 87.5
+                &[8192, -8192],    // 600, 87.5
+                &[16384, -8192],   // 700, 87.5
+                &[-16384, -16384], // 300, 75
+                &[-8192, -16384],  // 350, 75
+                &[0, -16384],      // 400, 75
+                &[8192, -16384],   // 600, 75
+                &[16384, -16384],  // 700, 75
+            ],
+        ),
     ];
 
     let mut files = Vec::new();
@@ -3033,7 +3131,9 @@ fn installed_variable_fonts_normalize_named_instances() {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let vars = face
             .variation_axes()
             .unwrap_or_else(|| panic!("{name}: carries `fvar` but reports no axes"));
@@ -3071,7 +3171,6 @@ fn installed_variable_fonts_normalize_named_instances() {
         expected.iter().map(|(_, i)| i.len()).sum::<usize>()
     );
 }
-
 
 /// A glyph outline reduced to the few numbers a test can compare across two
 /// independent implementations.
@@ -3168,18 +3267,25 @@ fn a_variable_face_at_its_default_instance_draws_the_default_outline() {
             continue;
         }
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let Some(vars) = face.variation_axes() else {
             continue;
         };
         let default = vars.default_coords();
-        assert!(default.is_default(), "{name}: default coords are not default");
+        assert!(
+            default.is_default(),
+            "{name}: default coords are not default"
+        );
 
         // A sample rather than the whole face: 600 glyphs reaches composites and
         // unusual contours in every one of these fonts, and Sitka alone is 3000
         // glyphs across two faces.
         for gid in 0..face.num_glyphs().min(600) {
-            let Ok(plain) = face.outline(gid) else { continue };
+            let Ok(plain) = face.outline(gid) else {
+                continue;
+            };
             let varied = face
                 .outline_at(gid, &default)
                 .unwrap_or_else(|e| panic!("{name}: glyph {gid} at default: {e:?}"));
@@ -3191,7 +3297,10 @@ fn a_variable_face_at_its_default_instance_draws_the_default_outline() {
         }
         faces += 1;
     }
-    assert!(faces >= 7, "expected at least 7 faces with `gvar`; saw {faces}");
+    assert!(
+        faces >= 7,
+        "expected at least 7 faces with `gvar`; saw {faces}"
+    );
     println!("{faces} faces, {glyphs} glyphs identical at the default instance");
 }
 
@@ -3216,27 +3325,237 @@ fn a_variable_face_at_its_default_instance_draws_the_default_outline() {
 fn the_outline_oracle_agrees_about_unvaried_glyphs() {
     // (file, glyph id, command count, x_min, y_min, x_max, y_max, sum x, sum y)
     let expected: &[DefaultOutline] = &[
-    ("CascadiaCode.ttf", 0, 24, 128.0, 0.0, 1072.0, 1420.0, 10844.0, 12590.0),
-    ("CascadiaCode.ttf", 1, 16, 45.0, 0.0, 1155.0, 1420.0, 7460.0, 7446.0),
-    ("CascadiaCode.ttf", 2, 22, 45.0, 0.0, 1155.0, 1830.0, 10759.0, 15846.0),
-    ("CascadiaMono.ttf", 0, 24, 128.0, 0.0, 1072.0, 1420.0, 10844.0, 12590.0),
-    ("CascadiaMono.ttf", 1, 16, 45.0, 0.0, 1155.0, 1420.0, 7460.0, 7446.0),
-    ("CascadiaMono.ttf", 2, 22, 45.0, 0.0, 1155.0, 1830.0, 10759.0, 15846.0),
-    ("ReemKufi.ttf", 2, 16, 28.0, 0.0, 672.0, 755.0, 4454.0, 3921.0),
-    ("ReemKufi.ttf", 27, 28, 11.0, 0.0, 890.0, 725.0, 14189.5, 10469.0),
-    ("ReemKufi.ttf", 3, 22, 28.0, 0.0, 672.0, 918.0, 6564.0, 8243.0),
-    ("SegUIVar.ttf", 0, 12, 166.0, 0.0, 1156.0, 1398.0, 5768.0, 5740.0),
-    ("SegUIVar.ttf", 3, 16, 175.0, -18.0, 407.0, 1434.0, 6475.0, 6628.0),
-    ("SegUIVar.ttf", 110, 6, 144.0, 506.0, 690.0, 635.0, 1812.0, 2788.0),
-    ("SitkaVF-Italic.ttf", 0, 12, 0.0, 0.0, 1024.0, 1434.0, 4174.0, 7245.0),
-    ("SitkaVF-Italic.ttf", 4, 30, -107.0, 0.0, 1362.0, 1456.0, 20710.0, 12304.5),
-    ("SitkaVF-Italic.ttf", 30, 41, -107.0, 0.0, 1362.0, 1904.0, 33682.0, 41008.0),
-    ("SitkaVF.ttf", 0, 12, 0.0, 0.0, 1024.0, 1434.0, 5035.0, 5818.0),
-    ("SitkaVF.ttf", 4, 29, -1.0, 0.0, 1449.0, 1456.0, 21197.5, 12052.5),
-    ("SitkaVF.ttf", 30, 40, -1.0, 0.0, 1449.0, 1904.0, 30794.0, 40489.5),
-    ("bahnschrift.ttf", 0, 12, 180.0, 0.0, 1288.0, 1454.0, 7515.0, 7095.0),
-    ("bahnschrift.ttf", 2, 15, 40.0, 0.0, 1286.0, 1454.0, 7646.0, 6064.0),
-    ("bahnschrift.ttf", 3, 21, 40.0, 0.0, 1286.0, 1917.0, 11401.0, 14541.0),
+        (
+            "CascadiaCode.ttf",
+            0,
+            24,
+            128.0,
+            0.0,
+            1072.0,
+            1420.0,
+            10844.0,
+            12590.0,
+        ),
+        (
+            "CascadiaCode.ttf",
+            1,
+            16,
+            45.0,
+            0.0,
+            1155.0,
+            1420.0,
+            7460.0,
+            7446.0,
+        ),
+        (
+            "CascadiaCode.ttf",
+            2,
+            22,
+            45.0,
+            0.0,
+            1155.0,
+            1830.0,
+            10759.0,
+            15846.0,
+        ),
+        (
+            "CascadiaMono.ttf",
+            0,
+            24,
+            128.0,
+            0.0,
+            1072.0,
+            1420.0,
+            10844.0,
+            12590.0,
+        ),
+        (
+            "CascadiaMono.ttf",
+            1,
+            16,
+            45.0,
+            0.0,
+            1155.0,
+            1420.0,
+            7460.0,
+            7446.0,
+        ),
+        (
+            "CascadiaMono.ttf",
+            2,
+            22,
+            45.0,
+            0.0,
+            1155.0,
+            1830.0,
+            10759.0,
+            15846.0,
+        ),
+        (
+            "ReemKufi.ttf",
+            2,
+            16,
+            28.0,
+            0.0,
+            672.0,
+            755.0,
+            4454.0,
+            3921.0,
+        ),
+        (
+            "ReemKufi.ttf",
+            27,
+            28,
+            11.0,
+            0.0,
+            890.0,
+            725.0,
+            14189.5,
+            10469.0,
+        ),
+        (
+            "ReemKufi.ttf",
+            3,
+            22,
+            28.0,
+            0.0,
+            672.0,
+            918.0,
+            6564.0,
+            8243.0,
+        ),
+        (
+            "SegUIVar.ttf",
+            0,
+            12,
+            166.0,
+            0.0,
+            1156.0,
+            1398.0,
+            5768.0,
+            5740.0,
+        ),
+        (
+            "SegUIVar.ttf",
+            3,
+            16,
+            175.0,
+            -18.0,
+            407.0,
+            1434.0,
+            6475.0,
+            6628.0,
+        ),
+        (
+            "SegUIVar.ttf",
+            110,
+            6,
+            144.0,
+            506.0,
+            690.0,
+            635.0,
+            1812.0,
+            2788.0,
+        ),
+        (
+            "SitkaVF-Italic.ttf",
+            0,
+            12,
+            0.0,
+            0.0,
+            1024.0,
+            1434.0,
+            4174.0,
+            7245.0,
+        ),
+        (
+            "SitkaVF-Italic.ttf",
+            4,
+            30,
+            -107.0,
+            0.0,
+            1362.0,
+            1456.0,
+            20710.0,
+            12304.5,
+        ),
+        (
+            "SitkaVF-Italic.ttf",
+            30,
+            41,
+            -107.0,
+            0.0,
+            1362.0,
+            1904.0,
+            33682.0,
+            41008.0,
+        ),
+        (
+            "SitkaVF.ttf",
+            0,
+            12,
+            0.0,
+            0.0,
+            1024.0,
+            1434.0,
+            5035.0,
+            5818.0,
+        ),
+        (
+            "SitkaVF.ttf",
+            4,
+            29,
+            -1.0,
+            0.0,
+            1449.0,
+            1456.0,
+            21197.5,
+            12052.5,
+        ),
+        (
+            "SitkaVF.ttf",
+            30,
+            40,
+            -1.0,
+            0.0,
+            1449.0,
+            1904.0,
+            30794.0,
+            40489.5,
+        ),
+        (
+            "bahnschrift.ttf",
+            0,
+            12,
+            180.0,
+            0.0,
+            1288.0,
+            1454.0,
+            7515.0,
+            7095.0,
+        ),
+        (
+            "bahnschrift.ttf",
+            2,
+            15,
+            40.0,
+            0.0,
+            1286.0,
+            1454.0,
+            7646.0,
+            6064.0,
+        ),
+        (
+            "bahnschrift.ttf",
+            3,
+            21,
+            40.0,
+            0.0,
+            1286.0,
+            1917.0,
+            11401.0,
+            14541.0,
+        ),
     ];
 
     let mut files = Vec::new();
@@ -3252,7 +3571,9 @@ fn the_outline_oracle_agrees_about_unvaried_glyphs() {
             continue;
         }
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         for &(_, gid, cmds, x0, y0, x1, y1, sx, sy) in
             expected.iter().filter(|r| r.0.eq_ignore_ascii_case(name))
         {
@@ -3267,7 +3588,11 @@ fn the_outline_oracle_agrees_about_unvaried_glyphs() {
             checked += 1;
         }
     }
-    assert_eq!(checked, expected.len(), "not every named face was installed");
+    assert_eq!(
+        checked,
+        expected.len(),
+        "not every named face was installed"
+    );
     println!("{checked} unvaried glyphs agree with the oracle");
 }
 
@@ -3295,69 +3620,762 @@ fn installed_variable_fonts_vary_their_outlines() {
     // (file, glyph id, named instance, command count, bbox, sum x, sum y).
     // The trailing comment is the instance's user-space position.
     let expected: &[VariedOutline] = &[
-    ("CascadiaCode.ttf", 0, 0, 24, 154.0, 0.0, 1046.0, 1420.0, 11018.0, 12692.0),  // 200
-    ("CascadiaCode.ttf", 1, 0, 16, 69.0, 0.0, 1131.0, 1420.0, 7484.0, 7687.0),  // 200
-    ("CascadiaCode.ttf", 2, 0, 22, 69.0, 0.0, 1131.0, 1830.0, 10888.0, 16087.0),  // 200
-    ("CascadiaCode.ttf", 0, 3, 24, 128.0, 0.0, 1072.0, 1420.0, 10844.0, 12590.0),  // 400
-    ("CascadiaCode.ttf", 1, 3, 16, 45.0, 0.0, 1155.0, 1420.0, 7460.0, 7446.0),  // 400
-    ("CascadiaCode.ttf", 2, 3, 22, 45.0, 0.0, 1155.0, 1830.0, 10759.0, 15846.0),  // 400
-    ("CascadiaCode.ttf", 0, 5, 24, 111.0, 0.0, 1089.0, 1420.0, 10756.0, 12537.0),  // 700
-    ("CascadiaCode.ttf", 1, 5, 16, 28.0, 0.0, 1172.0, 1420.0, 7443.0, 6819.0),  // 700
-    ("CascadiaCode.ttf", 2, 5, 22, 28.0, 0.0, 1172.0, 1855.0, 10793.0, 15269.0),  // 700
-    ("CascadiaMono.ttf", 0, 0, 24, 154.0, 0.0, 1046.0, 1420.0, 11018.0, 12692.0),  // 200
-    ("CascadiaMono.ttf", 1, 0, 16, 69.0, 0.0, 1131.0, 1420.0, 7484.0, 7687.0),  // 200
-    ("CascadiaMono.ttf", 2, 0, 22, 69.0, 0.0, 1131.0, 1830.0, 10888.0, 16087.0),  // 200
-    ("CascadiaMono.ttf", 0, 3, 24, 128.0, 0.0, 1072.0, 1420.0, 10844.0, 12590.0),  // 400
-    ("CascadiaMono.ttf", 1, 3, 16, 45.0, 0.0, 1155.0, 1420.0, 7460.0, 7446.0),  // 400
-    ("CascadiaMono.ttf", 2, 3, 22, 45.0, 0.0, 1155.0, 1830.0, 10759.0, 15846.0),  // 400
-    ("CascadiaMono.ttf", 0, 5, 24, 111.0, 0.0, 1089.0, 1420.0, 10756.0, 12537.0),  // 700
-    ("CascadiaMono.ttf", 1, 5, 16, 28.0, 0.0, 1172.0, 1420.0, 7443.0, 6819.0),  // 700
-    ("CascadiaMono.ttf", 2, 5, 22, 28.0, 0.0, 1172.0, 1855.0, 10793.0, 15269.0),  // 700
-    ("ReemKufi.ttf", 2, 0, 16, 28.0, 0.0, 672.0, 755.0, 4454.0, 3921.0),  // 400
-    ("ReemKufi.ttf", 27, 0, 28, 11.0, 0.0, 890.0, 725.0, 14189.5, 10469.0),  // 400
-    ("ReemKufi.ttf", 3, 0, 22, 28.0, 0.0, 672.0, 918.0, 6564.0, 8243.0),  // 400
-    ("ReemKufi.ttf", 2, 2, 16, 17.3, 0.0, 680.0, 761.7, 4438.7, 3816.3),  // 600
-    ("ReemKufi.ttf", 27, 2, 28, 7.0, 0.0, 904.7, 732.3, 14551.5, 10359.7),  // 600
-    ("ReemKufi.ttf", 3, 2, 22, 17.3, 0.0, 680.0, 932.0, 6594.7, 8207.0),  // 600
-    ("ReemKufi.ttf", 2, 3, 16, 12.0, 0.0, 684.0, 765.0, 4431.0, 3764.0),  // 700
-    ("ReemKufi.ttf", 27, 3, 28, 5.0, 0.0, 912.0, 736.0, 14732.5, 10305.0),  // 700
-    ("ReemKufi.ttf", 3, 3, 22, 12.0, 0.0, 684.0, 939.0, 6610.0, 8189.0),  // 700
-    ("SegUIVar.ttf", 0, 0, 12, 176.0, 0.0, 1166.0, 1398.0, 5868.0, 5740.0),  // 300, 8
-    ("SegUIVar.ttf", 3, 0, 16, 206.9, -18.0, 397.1, 1434.0, 6697.4, 6302.4),  // 300, 8
-    ("SegUIVar.ttf", 110, 0, 6, 154.5, 541.8, 701.1, 647.3, 1865.8, 2920.0),  // 300, 8
-    ("SegUIVar.ttf", 0, 7, 12, 166.0, 0.0, 1156.0, 1398.0, 5768.0, 5740.0),  // 400, 10.5
-    ("SegUIVar.ttf", 3, 7, 16, 175.0, -18.0, 407.0, 1434.0, 6475.0, 6628.0),  // 400, 10.5
-    ("SegUIVar.ttf", 110, 7, 6, 144.0, 506.0, 690.0, 635.0, 1812.0, 2788.0),  // 400, 10.5
-    ("SegUIVar.ttf", 0, 14, 12, 156.0, 0.0, 1146.0, 1398.0, 5668.0, 5740.0),  // 700, 36
-    ("SegUIVar.ttf", 3, 14, 16, 142.0, -23.0, 508.0, 1434.0, 7321.0, 7742.0),  // 700, 36
-    ("SegUIVar.ttf", 110, 14, 6, 133.0, 436.0, 680.0, 657.0, 1759.0, 2622.0),  // 700, 36
-    ("SitkaVF-Italic.ttf", 0, 0, 12, 0.0, 0.0, 1024.0, 1484.0, 4185.0, 7506.0),  // 6, 400
-    ("SitkaVF-Italic.ttf", 4, 0, 30, -91.0, 0.0, 1449.0, 1506.0, 22435.0, 12897.0),  // 6, 400
-    ("SitkaVF-Italic.ttf", 30, 0, 41, -91.0, 0.0, 1449.0, 1997.0, 36432.0, 42958.0),  // 6, 400
-    ("SitkaVF-Italic.ttf", 0, 9, 12, 0.0, 0.0, 1024.0, 1399.9, 4174.0, 7074.6),  // 21.0434, 400
-    ("SitkaVF-Italic.ttf", 4, 9, 30, -144.1, 0.0, 1251.8, 1421.3, 18260.9, 11676.0),  // 21.0434, 400
-    ("SitkaVF-Italic.ttf", 30, 9, 41, -144.1, 0.0, 1251.8, 1840.7, 30079.7, 39488.1),  // 21.0434, 400
-    ("SitkaVF-Italic.ttf", 0, 17, 12, 0.0, 0.0, 1024.0, 1378.0, 4179.0, 6970.0),  // 27.5, 700
-    ("SitkaVF-Italic.ttf", 4, 17, 30, -179.0, 0.0, 1282.0, 1399.0, 17639.5, 11438.5),  // 27.5, 700
-    ("SitkaVF-Italic.ttf", 30, 17, 41, -179.0, 0.0, 1282.0, 1864.0, 28250.0, 39451.0),  // 27.5, 700
-    ("SitkaVF.ttf", 0, 0, 12, 0.0, 0.0, 1024.0, 1484.0, 5035.0, 6018.0),  // 6, 400
-    ("SitkaVF.ttf", 4, 0, 29, 16.0, 0.0, 1534.0, 1506.0, 22748.5, 12614.5),  // 6, 400
-    ("SitkaVF.ttf", 30, 0, 40, 16.0, 0.0, 1534.0, 1997.0, 33293.0, 42365.5),  // 6, 400
-    ("SitkaVF.ttf", 0, 9, 12, 0.0, 0.0, 1024.0, 1399.9, 5035.0, 5681.7),  // 21.0434, 400
-    ("SitkaVF.ttf", 4, 9, 29, -35.1, 0.0, 1346.1, 1421.3, 19098.7, 11475.4),  // 21.0434, 400
-    ("SitkaVF.ttf", 30, 9, 40, -35.1, 0.0, 1346.1, 1840.7, 27925.5, 39063.9),  // 21.0434, 400
-    ("SitkaVF.ttf", 0, 17, 12, 0.0, 0.0, 1024.0, 1378.0, 5035.0, 5594.0),  // 27.5, 700
-    ("SitkaVF.ttf", 4, 17, 29, -73.0, 0.0, 1358.0, 1399.0, 18252.5, 11091.0),  // 27.5, 700
-    ("SitkaVF.ttf", 30, 17, 40, -73.0, 0.0, 1358.0, 1858.0, 26836.5, 38771.5),  // 27.5, 700
-    ("bahnschrift.ttf", 0, 0, 12, 180.0, 0.0, 1288.0, 1454.0, 7480.0, 7130.0),  // 300, 100
-    ("bahnschrift.ttf", 2, 0, 15, 40.0, 0.0, 1286.0, 1454.0, 7646.0, 6244.0),  // 300, 100
-    ("bahnschrift.ttf", 3, 0, 21, 40.0, 0.0, 1286.0, 1877.0, 11351.0, 14611.0),  // 300, 100
-    ("bahnschrift.ttf", 0, 7, 12, 140.0, 0.0, 1088.0, 1454.0, 6312.5, 7100.0),  // 400, 87.5
-    ("bahnschrift.ttf", 2, 7, 15, 35.0, 0.0, 1081.0, 1454.0, 6467.0, 6035.5),  // 400, 87.5
-    ("bahnschrift.ttf", 3, 7, 21, 35.0, 0.0, 1081.0, 1914.0, 9649.0, 14487.0),  // 400, 87.5
-    ("bahnschrift.ttf", 0, 14, 12, 89.0, 0.0, 899.0, 1454.0, 5168.0, 7042.0),  // 700, 75
-    ("bahnschrift.ttf", 2, 14, 15, 19.0, 0.0, 887.0, 1454.0, 5257.0, 5455.0),  // 700, 75
-    ("bahnschrift.ttf", 3, 14, 21, 19.0, 0.0, 887.0, 1957.0, 7844.0, 13978.0),  // 700, 75
+        (
+            "CascadiaCode.ttf",
+            0,
+            0,
+            24,
+            154.0,
+            0.0,
+            1046.0,
+            1420.0,
+            11018.0,
+            12692.0,
+        ), // 200
+        (
+            "CascadiaCode.ttf",
+            1,
+            0,
+            16,
+            69.0,
+            0.0,
+            1131.0,
+            1420.0,
+            7484.0,
+            7687.0,
+        ), // 200
+        (
+            "CascadiaCode.ttf",
+            2,
+            0,
+            22,
+            69.0,
+            0.0,
+            1131.0,
+            1830.0,
+            10888.0,
+            16087.0,
+        ), // 200
+        (
+            "CascadiaCode.ttf",
+            0,
+            3,
+            24,
+            128.0,
+            0.0,
+            1072.0,
+            1420.0,
+            10844.0,
+            12590.0,
+        ), // 400
+        (
+            "CascadiaCode.ttf",
+            1,
+            3,
+            16,
+            45.0,
+            0.0,
+            1155.0,
+            1420.0,
+            7460.0,
+            7446.0,
+        ), // 400
+        (
+            "CascadiaCode.ttf",
+            2,
+            3,
+            22,
+            45.0,
+            0.0,
+            1155.0,
+            1830.0,
+            10759.0,
+            15846.0,
+        ), // 400
+        (
+            "CascadiaCode.ttf",
+            0,
+            5,
+            24,
+            111.0,
+            0.0,
+            1089.0,
+            1420.0,
+            10756.0,
+            12537.0,
+        ), // 700
+        (
+            "CascadiaCode.ttf",
+            1,
+            5,
+            16,
+            28.0,
+            0.0,
+            1172.0,
+            1420.0,
+            7443.0,
+            6819.0,
+        ), // 700
+        (
+            "CascadiaCode.ttf",
+            2,
+            5,
+            22,
+            28.0,
+            0.0,
+            1172.0,
+            1855.0,
+            10793.0,
+            15269.0,
+        ), // 700
+        (
+            "CascadiaMono.ttf",
+            0,
+            0,
+            24,
+            154.0,
+            0.0,
+            1046.0,
+            1420.0,
+            11018.0,
+            12692.0,
+        ), // 200
+        (
+            "CascadiaMono.ttf",
+            1,
+            0,
+            16,
+            69.0,
+            0.0,
+            1131.0,
+            1420.0,
+            7484.0,
+            7687.0,
+        ), // 200
+        (
+            "CascadiaMono.ttf",
+            2,
+            0,
+            22,
+            69.0,
+            0.0,
+            1131.0,
+            1830.0,
+            10888.0,
+            16087.0,
+        ), // 200
+        (
+            "CascadiaMono.ttf",
+            0,
+            3,
+            24,
+            128.0,
+            0.0,
+            1072.0,
+            1420.0,
+            10844.0,
+            12590.0,
+        ), // 400
+        (
+            "CascadiaMono.ttf",
+            1,
+            3,
+            16,
+            45.0,
+            0.0,
+            1155.0,
+            1420.0,
+            7460.0,
+            7446.0,
+        ), // 400
+        (
+            "CascadiaMono.ttf",
+            2,
+            3,
+            22,
+            45.0,
+            0.0,
+            1155.0,
+            1830.0,
+            10759.0,
+            15846.0,
+        ), // 400
+        (
+            "CascadiaMono.ttf",
+            0,
+            5,
+            24,
+            111.0,
+            0.0,
+            1089.0,
+            1420.0,
+            10756.0,
+            12537.0,
+        ), // 700
+        (
+            "CascadiaMono.ttf",
+            1,
+            5,
+            16,
+            28.0,
+            0.0,
+            1172.0,
+            1420.0,
+            7443.0,
+            6819.0,
+        ), // 700
+        (
+            "CascadiaMono.ttf",
+            2,
+            5,
+            22,
+            28.0,
+            0.0,
+            1172.0,
+            1855.0,
+            10793.0,
+            15269.0,
+        ), // 700
+        (
+            "ReemKufi.ttf",
+            2,
+            0,
+            16,
+            28.0,
+            0.0,
+            672.0,
+            755.0,
+            4454.0,
+            3921.0,
+        ), // 400
+        (
+            "ReemKufi.ttf",
+            27,
+            0,
+            28,
+            11.0,
+            0.0,
+            890.0,
+            725.0,
+            14189.5,
+            10469.0,
+        ), // 400
+        (
+            "ReemKufi.ttf",
+            3,
+            0,
+            22,
+            28.0,
+            0.0,
+            672.0,
+            918.0,
+            6564.0,
+            8243.0,
+        ), // 400
+        (
+            "ReemKufi.ttf",
+            2,
+            2,
+            16,
+            17.3,
+            0.0,
+            680.0,
+            761.7,
+            4438.7,
+            3816.3,
+        ), // 600
+        (
+            "ReemKufi.ttf",
+            27,
+            2,
+            28,
+            7.0,
+            0.0,
+            904.7,
+            732.3,
+            14551.5,
+            10359.7,
+        ), // 600
+        (
+            "ReemKufi.ttf",
+            3,
+            2,
+            22,
+            17.3,
+            0.0,
+            680.0,
+            932.0,
+            6594.7,
+            8207.0,
+        ), // 600
+        (
+            "ReemKufi.ttf",
+            2,
+            3,
+            16,
+            12.0,
+            0.0,
+            684.0,
+            765.0,
+            4431.0,
+            3764.0,
+        ), // 700
+        (
+            "ReemKufi.ttf",
+            27,
+            3,
+            28,
+            5.0,
+            0.0,
+            912.0,
+            736.0,
+            14732.5,
+            10305.0,
+        ), // 700
+        (
+            "ReemKufi.ttf",
+            3,
+            3,
+            22,
+            12.0,
+            0.0,
+            684.0,
+            939.0,
+            6610.0,
+            8189.0,
+        ), // 700
+        (
+            "SegUIVar.ttf",
+            0,
+            0,
+            12,
+            176.0,
+            0.0,
+            1166.0,
+            1398.0,
+            5868.0,
+            5740.0,
+        ), // 300, 8
+        (
+            "SegUIVar.ttf",
+            3,
+            0,
+            16,
+            206.9,
+            -18.0,
+            397.1,
+            1434.0,
+            6697.4,
+            6302.4,
+        ), // 300, 8
+        (
+            "SegUIVar.ttf",
+            110,
+            0,
+            6,
+            154.5,
+            541.8,
+            701.1,
+            647.3,
+            1865.8,
+            2920.0,
+        ), // 300, 8
+        (
+            "SegUIVar.ttf",
+            0,
+            7,
+            12,
+            166.0,
+            0.0,
+            1156.0,
+            1398.0,
+            5768.0,
+            5740.0,
+        ), // 400, 10.5
+        (
+            "SegUIVar.ttf",
+            3,
+            7,
+            16,
+            175.0,
+            -18.0,
+            407.0,
+            1434.0,
+            6475.0,
+            6628.0,
+        ), // 400, 10.5
+        (
+            "SegUIVar.ttf",
+            110,
+            7,
+            6,
+            144.0,
+            506.0,
+            690.0,
+            635.0,
+            1812.0,
+            2788.0,
+        ), // 400, 10.5
+        (
+            "SegUIVar.ttf",
+            0,
+            14,
+            12,
+            156.0,
+            0.0,
+            1146.0,
+            1398.0,
+            5668.0,
+            5740.0,
+        ), // 700, 36
+        (
+            "SegUIVar.ttf",
+            3,
+            14,
+            16,
+            142.0,
+            -23.0,
+            508.0,
+            1434.0,
+            7321.0,
+            7742.0,
+        ), // 700, 36
+        (
+            "SegUIVar.ttf",
+            110,
+            14,
+            6,
+            133.0,
+            436.0,
+            680.0,
+            657.0,
+            1759.0,
+            2622.0,
+        ), // 700, 36
+        (
+            "SitkaVF-Italic.ttf",
+            0,
+            0,
+            12,
+            0.0,
+            0.0,
+            1024.0,
+            1484.0,
+            4185.0,
+            7506.0,
+        ), // 6, 400
+        (
+            "SitkaVF-Italic.ttf",
+            4,
+            0,
+            30,
+            -91.0,
+            0.0,
+            1449.0,
+            1506.0,
+            22435.0,
+            12897.0,
+        ), // 6, 400
+        (
+            "SitkaVF-Italic.ttf",
+            30,
+            0,
+            41,
+            -91.0,
+            0.0,
+            1449.0,
+            1997.0,
+            36432.0,
+            42958.0,
+        ), // 6, 400
+        (
+            "SitkaVF-Italic.ttf",
+            0,
+            9,
+            12,
+            0.0,
+            0.0,
+            1024.0,
+            1399.9,
+            4174.0,
+            7074.6,
+        ), // 21.0434, 400
+        (
+            "SitkaVF-Italic.ttf",
+            4,
+            9,
+            30,
+            -144.1,
+            0.0,
+            1251.8,
+            1421.3,
+            18260.9,
+            11676.0,
+        ), // 21.0434, 400
+        (
+            "SitkaVF-Italic.ttf",
+            30,
+            9,
+            41,
+            -144.1,
+            0.0,
+            1251.8,
+            1840.7,
+            30079.7,
+            39488.1,
+        ), // 21.0434, 400
+        (
+            "SitkaVF-Italic.ttf",
+            0,
+            17,
+            12,
+            0.0,
+            0.0,
+            1024.0,
+            1378.0,
+            4179.0,
+            6970.0,
+        ), // 27.5, 700
+        (
+            "SitkaVF-Italic.ttf",
+            4,
+            17,
+            30,
+            -179.0,
+            0.0,
+            1282.0,
+            1399.0,
+            17639.5,
+            11438.5,
+        ), // 27.5, 700
+        (
+            "SitkaVF-Italic.ttf",
+            30,
+            17,
+            41,
+            -179.0,
+            0.0,
+            1282.0,
+            1864.0,
+            28250.0,
+            39451.0,
+        ), // 27.5, 700
+        (
+            "SitkaVF.ttf",
+            0,
+            0,
+            12,
+            0.0,
+            0.0,
+            1024.0,
+            1484.0,
+            5035.0,
+            6018.0,
+        ), // 6, 400
+        (
+            "SitkaVF.ttf",
+            4,
+            0,
+            29,
+            16.0,
+            0.0,
+            1534.0,
+            1506.0,
+            22748.5,
+            12614.5,
+        ), // 6, 400
+        (
+            "SitkaVF.ttf",
+            30,
+            0,
+            40,
+            16.0,
+            0.0,
+            1534.0,
+            1997.0,
+            33293.0,
+            42365.5,
+        ), // 6, 400
+        (
+            "SitkaVF.ttf",
+            0,
+            9,
+            12,
+            0.0,
+            0.0,
+            1024.0,
+            1399.9,
+            5035.0,
+            5681.7,
+        ), // 21.0434, 400
+        (
+            "SitkaVF.ttf",
+            4,
+            9,
+            29,
+            -35.1,
+            0.0,
+            1346.1,
+            1421.3,
+            19098.7,
+            11475.4,
+        ), // 21.0434, 400
+        (
+            "SitkaVF.ttf",
+            30,
+            9,
+            40,
+            -35.1,
+            0.0,
+            1346.1,
+            1840.7,
+            27925.5,
+            39063.9,
+        ), // 21.0434, 400
+        (
+            "SitkaVF.ttf",
+            0,
+            17,
+            12,
+            0.0,
+            0.0,
+            1024.0,
+            1378.0,
+            5035.0,
+            5594.0,
+        ), // 27.5, 700
+        (
+            "SitkaVF.ttf",
+            4,
+            17,
+            29,
+            -73.0,
+            0.0,
+            1358.0,
+            1399.0,
+            18252.5,
+            11091.0,
+        ), // 27.5, 700
+        (
+            "SitkaVF.ttf",
+            30,
+            17,
+            40,
+            -73.0,
+            0.0,
+            1358.0,
+            1858.0,
+            26836.5,
+            38771.5,
+        ), // 27.5, 700
+        (
+            "bahnschrift.ttf",
+            0,
+            0,
+            12,
+            180.0,
+            0.0,
+            1288.0,
+            1454.0,
+            7480.0,
+            7130.0,
+        ), // 300, 100
+        (
+            "bahnschrift.ttf",
+            2,
+            0,
+            15,
+            40.0,
+            0.0,
+            1286.0,
+            1454.0,
+            7646.0,
+            6244.0,
+        ), // 300, 100
+        (
+            "bahnschrift.ttf",
+            3,
+            0,
+            21,
+            40.0,
+            0.0,
+            1286.0,
+            1877.0,
+            11351.0,
+            14611.0,
+        ), // 300, 100
+        (
+            "bahnschrift.ttf",
+            0,
+            7,
+            12,
+            140.0,
+            0.0,
+            1088.0,
+            1454.0,
+            6312.5,
+            7100.0,
+        ), // 400, 87.5
+        (
+            "bahnschrift.ttf",
+            2,
+            7,
+            15,
+            35.0,
+            0.0,
+            1081.0,
+            1454.0,
+            6467.0,
+            6035.5,
+        ), // 400, 87.5
+        (
+            "bahnschrift.ttf",
+            3,
+            7,
+            21,
+            35.0,
+            0.0,
+            1081.0,
+            1914.0,
+            9649.0,
+            14487.0,
+        ), // 400, 87.5
+        (
+            "bahnschrift.ttf",
+            0,
+            14,
+            12,
+            89.0,
+            0.0,
+            899.0,
+            1454.0,
+            5168.0,
+            7042.0,
+        ), // 700, 75
+        (
+            "bahnschrift.ttf",
+            2,
+            14,
+            15,
+            19.0,
+            0.0,
+            887.0,
+            1454.0,
+            5257.0,
+            5455.0,
+        ), // 700, 75
+        (
+            "bahnschrift.ttf",
+            3,
+            14,
+            21,
+            19.0,
+            0.0,
+            887.0,
+            1957.0,
+            7844.0,
+            13978.0,
+        ), // 700, 75
     ];
 
     let mut files = Vec::new();
@@ -3374,7 +4392,9 @@ fn installed_variable_fonts_vary_their_outlines() {
             continue;
         }
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let vars = face
             .variation_axes()
             .unwrap_or_else(|| panic!("{name}: carries `fvar` but reports no axes"));
@@ -3410,7 +4430,11 @@ fn installed_variable_fonts_vary_their_outlines() {
             checked += 1;
         }
     }
-    assert_eq!(checked, expected.len(), "not every named face was installed");
+    assert_eq!(
+        checked,
+        expected.len(),
+        "not every named face was installed"
+    );
     assert!(
         moved * 4 >= checked * 3,
         "only {moved} of {checked} rows actually varied; the sample is too weak"
@@ -3442,7 +4466,9 @@ fn a_weight_axis_reaches_the_rasterized_glyph() {
     for path in &files {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let Some(vars) = face.variation_axes() else {
             continue;
         };
@@ -3534,109 +4560,130 @@ fn installed_variable_fonts_vary_their_advances() {
     // (file name, one advance row per instance: the default first, then the
     // named instances in `fvar` order).
     let expected: &[(&str, &[&[u16]])] = &[
-        ("CascadiaCode.ttf", &[
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // default
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 200
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 300
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 350
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 400
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 600
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 700
-        ]),  // gids [0, 222, 444, 666, 888, 1110, 1332, 1554]
-        ("CascadiaMono.ttf", &[
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // default
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 200
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 300
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 350
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 400
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 600
-            &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200],  // 700
-        ]),  // gids [0, 222, 444, 666, 888, 1110, 1332, 1554]
-        ("ReemKufi.ttf", &[
-            &[500, 806, 591, 549, 850, 720, 460, 0],  // default
-            &[500, 806, 591, 549, 850, 720, 460, 0],  // 400
-            &[500, 805, 599, 556, 850, 720, 466, 0],  // 500
-            &[500, 804, 606, 564, 850, 720, 473, 0],  // 600
-            &[500, 803, 614, 571, 850, 720, 479, 0],  // 700
-        ]),  // gids [0, 101, 202, 303, 404, 505, 606, 707]
-        ("SegUIVar.ttf", &[
-            &[1322, 1168, 813, 1200, 1073, 1042, 256, 861],  // default
-            &[1342, 1187, 786, 1209, 1027, 1061, 256, 906],  // 300, 8
-            &[1342, 1190, 816, 1218, 1064, 1072, 206, 908],  // 350, 8
-            &[1342, 1195, 846, 1246, 1098, 1085, 256, 915],  // 400, 8
-            &[1342, 1224, 902, 1272, 1123, 1108, 256, 970],  // 600, 8
-            &[1342, 1257, 965, 1302, 1150, 1135, 256, 1026],  // 700, 8
-            &[1322, 1167, 734, 1149, 962, 1012, 256, 868],  // 300, 10.5
-            &[1322, 1167, 773, 1155, 1017, 1026, 164, 864],  // 350, 10.5
-            &[1322, 1168, 813, 1200, 1073, 1042, 256, 861],  // 400, 10.5
-            &[1322, 1202, 877, 1230, 1101, 1069, 256, 926],  // 600, 10.5
-            &[1322, 1243, 955, 1266, 1135, 1102, 256, 992],  // 700, 10.5
-            &[1302, 1109, 746, 1109, 939, 971, 256, 886],  // 300, 36
-            &[1302, 1129, 756, 1146, 961, 996, 256, 916],  // 350, 36
-            &[1302, 1112, 804, 1195, 1053, 1014, 256, 920],  // 400, 36
-            &[1302, 1146, 867, 1226, 1081, 1045, 256, 981],  // 600, 36
-            &[1302, 1187, 943, 1263, 1115, 1082, 256, 1055],  // 700, 36
-        ]),  // gids [0, 316, 632, 948, 1264, 1580, 1896, 2212]
-        ("SitkaVF-Italic.ttf", &[
-            &[1024, 1651, 1225, 763, 1024, 1310, 1342, 1321],  // default
-            &[1024, 1771, 1320, 836, 1047, 1408, 1437, 1432],  // 6, 400
-            &[1024, 1807, 1366, 873, 1047, 1439, 1509, 1462],  // 6, 600
-            &[1024, 1830, 1396, 898, 1047, 1459, 1556, 1482],  // 6, 700
-            &[1024, 1651, 1225, 763, 1024, 1310, 1342, 1321],  // 11, 400
-            &[1024, 1682, 1268, 802, 1024, 1343, 1405, 1362],  // 11, 600
-            &[1024, 1703, 1296, 828, 1024, 1364, 1447, 1389],  // 11, 700
-            &[1024, 1559, 1150, 701, 1024, 1234, 1269, 1230],  // 16.7391, 400
-            &[1024, 1586, 1190, 743, 1024, 1269, 1326, 1284],  // 16.7391, 600
-            &[1024, 1604, 1217, 771, 1024, 1293, 1363, 1320],  // 16.7391, 700
-            &[1024, 1490, 1093, 654, 1024, 1177, 1215, 1162],  // 21.0434, 400
-            &[1024, 1514, 1132, 698, 1024, 1215, 1266, 1226],  // 21.0434, 600
-            &[1024, 1530, 1158, 728, 1024, 1239, 1300, 1268],  // 21.0434, 700
-            &[1024, 1433, 1046, 615, 1024, 1130, 1169, 1105],  // 24.6303, 400
-            &[1024, 1454, 1084, 661, 1024, 1169, 1216, 1177],  // 24.6303, 600
-            &[1024, 1468, 1109, 692, 1024, 1195, 1247, 1225],  // 24.6303, 700
-            &[1024, 1387, 1008, 584, 1024, 1092, 1133, 1060],  // 27.5, 400
-            &[1024, 1406, 1045, 632, 1024, 1132, 1176, 1138],  // 27.5, 600
-            &[1024, 1419, 1070, 663, 1024, 1159, 1205, 1190],  // 27.5, 700
-        ]),  // gids [0, 148, 296, 444, 592, 740, 888, 1036]
-        ("SitkaVF.ttf", &[
-            &[1024, 1650, 1255, 764, 1024, 1318, 1442, 1321],  // default
-            &[1024, 1770, 1354, 835, 1047, 1416, 1553, 1432],  // 6, 400
-            &[1024, 1799, 1400, 873, 1047, 1468, 1602, 1462],  // 6, 600
-            &[1024, 1818, 1430, 898, 1047, 1502, 1634, 1482],  // 6, 700
-            &[1024, 1650, 1255, 764, 1024, 1318, 1442, 1321],  // 11, 400
-            &[1024, 1681, 1298, 803, 1024, 1367, 1491, 1362],  // 11, 600
-            &[1024, 1701, 1327, 829, 1024, 1399, 1524, 1389],  // 11, 700
-            &[1024, 1558, 1177, 705, 1024, 1242, 1355, 1230],  // 16.7391, 400
-            &[1024, 1591, 1218, 746, 1024, 1289, 1406, 1284],  // 16.7391, 600
-            &[1024, 1613, 1245, 773, 1024, 1319, 1439, 1320],  // 16.7391, 700
-            &[1024, 1489, 1118, 661, 1024, 1185, 1290, 1162],  // 21.0434, 400
-            &[1024, 1524, 1158, 703, 1024, 1230, 1342, 1226],  // 21.0434, 600
-            &[1024, 1547, 1184, 730, 1024, 1260, 1376, 1268],  // 21.0434, 700
-            &[1024, 1432, 1069, 624, 1024, 1137, 1236, 1105],  // 24.6303, 400
-            &[1024, 1468, 1108, 667, 1024, 1181, 1289, 1177],  // 24.6303, 600
-            &[1024, 1492, 1133, 695, 1024, 1210, 1323, 1225],  // 24.6303, 700
-            &[1024, 1386, 1030, 595, 1024, 1099, 1193, 1060],  // 27.5, 400
-            &[1024, 1423, 1067, 638, 1024, 1142, 1246, 1138],  // 27.5, 600
-            &[1024, 1448, 1092, 667, 1024, 1170, 1281, 1190],  // 27.5, 700
-        ]),  // gids [0, 148, 296, 444, 592, 740, 888, 1036]
-        ("bahnschrift.ttf", &[
-            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // default
-            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 300, 100
-            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 350, 100
-            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 400, 100
-            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 600, 100
-            &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136],  // 700, 100
-            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 300, 87.5
-            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 350, 87.5
-            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 400, 87.5
-            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 600, 87.5
-            &[1228, 982, 986, 1038, 1297, 661, 1268, 964],  // 700, 87.5
-            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 300, 75
-            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 350, 75
-            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 400, 75
-            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 600, 75
-            &[988, 802, 834, 868, 1130, 566, 1094, 792],  // 700, 75
-        ]),  // gids [0, 120, 240, 360, 480, 600, 720, 840]
+        (
+            "CascadiaCode.ttf",
+            &[
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // default
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 200
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 300
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 350
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 400
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 600
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 700
+            ],
+        ), // gids [0, 222, 444, 666, 888, 1110, 1332, 1554]
+        (
+            "CascadiaMono.ttf",
+            &[
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // default
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 200
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 300
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 350
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 400
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 600
+                &[1200, 1200, 1200, 1200, 1200, 1200, 1200, 1200], // 700
+            ],
+        ), // gids [0, 222, 444, 666, 888, 1110, 1332, 1554]
+        (
+            "ReemKufi.ttf",
+            &[
+                &[500, 806, 591, 549, 850, 720, 460, 0], // default
+                &[500, 806, 591, 549, 850, 720, 460, 0], // 400
+                &[500, 805, 599, 556, 850, 720, 466, 0], // 500
+                &[500, 804, 606, 564, 850, 720, 473, 0], // 600
+                &[500, 803, 614, 571, 850, 720, 479, 0], // 700
+            ],
+        ), // gids [0, 101, 202, 303, 404, 505, 606, 707]
+        (
+            "SegUIVar.ttf",
+            &[
+                &[1322, 1168, 813, 1200, 1073, 1042, 256, 861], // default
+                &[1342, 1187, 786, 1209, 1027, 1061, 256, 906], // 300, 8
+                &[1342, 1190, 816, 1218, 1064, 1072, 206, 908], // 350, 8
+                &[1342, 1195, 846, 1246, 1098, 1085, 256, 915], // 400, 8
+                &[1342, 1224, 902, 1272, 1123, 1108, 256, 970], // 600, 8
+                &[1342, 1257, 965, 1302, 1150, 1135, 256, 1026], // 700, 8
+                &[1322, 1167, 734, 1149, 962, 1012, 256, 868],  // 300, 10.5
+                &[1322, 1167, 773, 1155, 1017, 1026, 164, 864], // 350, 10.5
+                &[1322, 1168, 813, 1200, 1073, 1042, 256, 861], // 400, 10.5
+                &[1322, 1202, 877, 1230, 1101, 1069, 256, 926], // 600, 10.5
+                &[1322, 1243, 955, 1266, 1135, 1102, 256, 992], // 700, 10.5
+                &[1302, 1109, 746, 1109, 939, 971, 256, 886],   // 300, 36
+                &[1302, 1129, 756, 1146, 961, 996, 256, 916],   // 350, 36
+                &[1302, 1112, 804, 1195, 1053, 1014, 256, 920], // 400, 36
+                &[1302, 1146, 867, 1226, 1081, 1045, 256, 981], // 600, 36
+                &[1302, 1187, 943, 1263, 1115, 1082, 256, 1055], // 700, 36
+            ],
+        ), // gids [0, 316, 632, 948, 1264, 1580, 1896, 2212]
+        (
+            "SitkaVF-Italic.ttf",
+            &[
+                &[1024, 1651, 1225, 763, 1024, 1310, 1342, 1321], // default
+                &[1024, 1771, 1320, 836, 1047, 1408, 1437, 1432], // 6, 400
+                &[1024, 1807, 1366, 873, 1047, 1439, 1509, 1462], // 6, 600
+                &[1024, 1830, 1396, 898, 1047, 1459, 1556, 1482], // 6, 700
+                &[1024, 1651, 1225, 763, 1024, 1310, 1342, 1321], // 11, 400
+                &[1024, 1682, 1268, 802, 1024, 1343, 1405, 1362], // 11, 600
+                &[1024, 1703, 1296, 828, 1024, 1364, 1447, 1389], // 11, 700
+                &[1024, 1559, 1150, 701, 1024, 1234, 1269, 1230], // 16.7391, 400
+                &[1024, 1586, 1190, 743, 1024, 1269, 1326, 1284], // 16.7391, 600
+                &[1024, 1604, 1217, 771, 1024, 1293, 1363, 1320], // 16.7391, 700
+                &[1024, 1490, 1093, 654, 1024, 1177, 1215, 1162], // 21.0434, 400
+                &[1024, 1514, 1132, 698, 1024, 1215, 1266, 1226], // 21.0434, 600
+                &[1024, 1530, 1158, 728, 1024, 1239, 1300, 1268], // 21.0434, 700
+                &[1024, 1433, 1046, 615, 1024, 1130, 1169, 1105], // 24.6303, 400
+                &[1024, 1454, 1084, 661, 1024, 1169, 1216, 1177], // 24.6303, 600
+                &[1024, 1468, 1109, 692, 1024, 1195, 1247, 1225], // 24.6303, 700
+                &[1024, 1387, 1008, 584, 1024, 1092, 1133, 1060], // 27.5, 400
+                &[1024, 1406, 1045, 632, 1024, 1132, 1176, 1138], // 27.5, 600
+                &[1024, 1419, 1070, 663, 1024, 1159, 1205, 1190], // 27.5, 700
+            ],
+        ), // gids [0, 148, 296, 444, 592, 740, 888, 1036]
+        (
+            "SitkaVF.ttf",
+            &[
+                &[1024, 1650, 1255, 764, 1024, 1318, 1442, 1321], // default
+                &[1024, 1770, 1354, 835, 1047, 1416, 1553, 1432], // 6, 400
+                &[1024, 1799, 1400, 873, 1047, 1468, 1602, 1462], // 6, 600
+                &[1024, 1818, 1430, 898, 1047, 1502, 1634, 1482], // 6, 700
+                &[1024, 1650, 1255, 764, 1024, 1318, 1442, 1321], // 11, 400
+                &[1024, 1681, 1298, 803, 1024, 1367, 1491, 1362], // 11, 600
+                &[1024, 1701, 1327, 829, 1024, 1399, 1524, 1389], // 11, 700
+                &[1024, 1558, 1177, 705, 1024, 1242, 1355, 1230], // 16.7391, 400
+                &[1024, 1591, 1218, 746, 1024, 1289, 1406, 1284], // 16.7391, 600
+                &[1024, 1613, 1245, 773, 1024, 1319, 1439, 1320], // 16.7391, 700
+                &[1024, 1489, 1118, 661, 1024, 1185, 1290, 1162], // 21.0434, 400
+                &[1024, 1524, 1158, 703, 1024, 1230, 1342, 1226], // 21.0434, 600
+                &[1024, 1547, 1184, 730, 1024, 1260, 1376, 1268], // 21.0434, 700
+                &[1024, 1432, 1069, 624, 1024, 1137, 1236, 1105], // 24.6303, 400
+                &[1024, 1468, 1108, 667, 1024, 1181, 1289, 1177], // 24.6303, 600
+                &[1024, 1492, 1133, 695, 1024, 1210, 1323, 1225], // 24.6303, 700
+                &[1024, 1386, 1030, 595, 1024, 1099, 1193, 1060], // 27.5, 400
+                &[1024, 1423, 1067, 638, 1024, 1142, 1246, 1138], // 27.5, 600
+                &[1024, 1448, 1092, 667, 1024, 1170, 1281, 1190], // 27.5, 700
+            ],
+        ), // gids [0, 148, 296, 444, 592, 740, 888, 1036]
+        (
+            "bahnschrift.ttf",
+            &[
+                &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136], // default
+                &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136], // 300, 100
+                &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136], // 350, 100
+                &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136], // 400, 100
+                &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136], // 600, 100
+                &[1468, 1162, 1139, 1208, 1464, 756, 1442, 1136], // 700, 100
+                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 300, 87.5
+                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 350, 87.5
+                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 400, 87.5
+                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 600, 87.5
+                &[1228, 982, 986, 1038, 1297, 661, 1268, 964],    // 700, 87.5
+                &[988, 802, 834, 868, 1130, 566, 1094, 792],      // 300, 75
+                &[988, 802, 834, 868, 1130, 566, 1094, 792],      // 350, 75
+                &[988, 802, 834, 868, 1130, 566, 1094, 792],      // 400, 75
+                &[988, 802, 834, 868, 1130, 566, 1094, 792],      // 600, 75
+                &[988, 802, 834, 868, 1130, 566, 1094, 792],      // 700, 75
+            ],
+        ), // gids [0, 120, 240, 360, 480, 600, 720, 840]
     ];
 
     let mut files = Vec::new();
@@ -3655,7 +4702,9 @@ fn installed_variable_fonts_vary_their_advances() {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let vars = face
             .variation_axes()
             .unwrap_or_else(|| panic!("{name}: opened but reports no axes"));
@@ -3738,73 +4787,89 @@ fn installed_variable_fonts_vary_their_global_metrics() {
     type Expectation<'a> = (&'a str, &'a [[u8; 4]], &'a [&'a [i16]]);
 
     let expected: &[Expectation<'_>] = &[
-        ("ReemKufi.ttf", &[*b"xhgt", *b"cpht"], &[
-            &[0, 0],  // default
-            &[0, 0],  // 400
-            &[6, 4],  // 500
-            &[13, 7],  // 600
-            &[19, 11],  // 700
-        ]),
-        ("SegUIVar.ttf", &[*b"xhgt"], &[
-            &[0],  // default
-            &[25],  // 300, 8
-            &[25],  // 350, 8
-            &[25],  // 400, 8
-            &[25],  // 600, 8
-            &[25],  // 700, 8
-            &[0],  // 300, 10.5
-            &[0],  // 350, 10.5
-            &[0],  // 400, 10.5
-            &[0],  // 600, 10.5
-            &[0],  // 700, 10.5
-            &[0],  // 300, 36
-            &[0],  // 350, 36
-            &[0],  // 400, 36
-            &[0],  // 600, 36
-            &[0],  // 700, 36
-        ]),
-        ("SitkaVF-Italic.ttf", &[*b"xhgt", *b"cpht", *b"undo", *b"unds"], &[
-            &[0, 0, 0, 0],  // default
-            &[0, 0, 0, 0],  // 6, 400
-            &[0, 0, 0, 0],  // 6, 600
-            &[0, 0, 0, 0],  // 6, 700
-            &[0, 0, 0, 0],  // 11, 400
-            &[-35, -30, 5, -2],  // 11, 600
-            &[-58, -50, 8, -4],  // 11, 700
-            &[-56, -37, 3, -1],  // 16.7391, 400
-            &[-80, -57, 6, -3],  // 16.7391, 600
-            &[-96, -69, 8, -4],  // 16.7391, 700
-            &[-99, -65, 5, -2],  // 21.0434, 400
-            &[-114, -76, 7, -3],  // 21.0434, 600
-            &[-124, -84, 8, -4],  // 21.0434, 700
-            &[-134, -88, 7, -3],  // 24.6303, 400
-            &[-142, -93, 7, -4],  // 24.6303, 600
-            &[-147, -96, 8, -4],  // 24.6303, 700
-            &[-162, -106, 8, -4],  // 27.5, 400
-            &[-164, -106, 8, -4],  // 27.5, 600
-            &[-166, -106, 8, -4],  // 27.5, 700
-        ]),
-        ("SitkaVF.ttf", &[*b"xhgt", *b"cpht", *b"undo", *b"unds"], &[
-            &[0, 0, 0, 0],  // default
-            &[57, 50, -4, 2],  // 6, 400
-            &[57, 50, 44, -29],  // 6, 600
-            &[57, 50, 76, -50],  // 6, 700
-            &[0, 0, 0, 0],  // 11, 400
-            &[-1, 0, 48, -31],  // 11, 600
-            &[-1, 0, 79, -52],  // 11, 700
-            &[-37, -19, 0, 0],  // 16.7391, 400
-            &[-38, -19, 48, -31],  // 16.7391, 600
-            &[-38, -19, 79, -52],  // 16.7391, 700
-            &[-65, -34, 0, 0],  // 21.0434, 400
-            &[-65, -34, 48, -31],  // 21.0434, 600
-            &[-66, -34, 79, -52],  // 21.0434, 700
-            &[-88, -46, 0, 0],  // 24.6303, 400
-            &[-88, -46, 48, -31],  // 24.6303, 600
-            &[-89, -46, 79, -52],  // 24.6303, 700
-            &[-107, -56, 0, 0],  // 27.5, 400
-            &[-107, -56, 48, -31],  // 27.5, 600
-            &[-107, -56, 79, -52],  // 27.5, 700
-        ]),
+        (
+            "ReemKufi.ttf",
+            &[*b"xhgt", *b"cpht"],
+            &[
+                &[0, 0],   // default
+                &[0, 0],   // 400
+                &[6, 4],   // 500
+                &[13, 7],  // 600
+                &[19, 11], // 700
+            ],
+        ),
+        (
+            "SegUIVar.ttf",
+            &[*b"xhgt"],
+            &[
+                &[0],  // default
+                &[25], // 300, 8
+                &[25], // 350, 8
+                &[25], // 400, 8
+                &[25], // 600, 8
+                &[25], // 700, 8
+                &[0],  // 300, 10.5
+                &[0],  // 350, 10.5
+                &[0],  // 400, 10.5
+                &[0],  // 600, 10.5
+                &[0],  // 700, 10.5
+                &[0],  // 300, 36
+                &[0],  // 350, 36
+                &[0],  // 400, 36
+                &[0],  // 600, 36
+                &[0],  // 700, 36
+            ],
+        ),
+        (
+            "SitkaVF-Italic.ttf",
+            &[*b"xhgt", *b"cpht", *b"undo", *b"unds"],
+            &[
+                &[0, 0, 0, 0],        // default
+                &[0, 0, 0, 0],        // 6, 400
+                &[0, 0, 0, 0],        // 6, 600
+                &[0, 0, 0, 0],        // 6, 700
+                &[0, 0, 0, 0],        // 11, 400
+                &[-35, -30, 5, -2],   // 11, 600
+                &[-58, -50, 8, -4],   // 11, 700
+                &[-56, -37, 3, -1],   // 16.7391, 400
+                &[-80, -57, 6, -3],   // 16.7391, 600
+                &[-96, -69, 8, -4],   // 16.7391, 700
+                &[-99, -65, 5, -2],   // 21.0434, 400
+                &[-114, -76, 7, -3],  // 21.0434, 600
+                &[-124, -84, 8, -4],  // 21.0434, 700
+                &[-134, -88, 7, -3],  // 24.6303, 400
+                &[-142, -93, 7, -4],  // 24.6303, 600
+                &[-147, -96, 8, -4],  // 24.6303, 700
+                &[-162, -106, 8, -4], // 27.5, 400
+                &[-164, -106, 8, -4], // 27.5, 600
+                &[-166, -106, 8, -4], // 27.5, 700
+            ],
+        ),
+        (
+            "SitkaVF.ttf",
+            &[*b"xhgt", *b"cpht", *b"undo", *b"unds"],
+            &[
+                &[0, 0, 0, 0],         // default
+                &[57, 50, -4, 2],      // 6, 400
+                &[57, 50, 44, -29],    // 6, 600
+                &[57, 50, 76, -50],    // 6, 700
+                &[0, 0, 0, 0],         // 11, 400
+                &[-1, 0, 48, -31],     // 11, 600
+                &[-1, 0, 79, -52],     // 11, 700
+                &[-37, -19, 0, 0],     // 16.7391, 400
+                &[-38, -19, 48, -31],  // 16.7391, 600
+                &[-38, -19, 79, -52],  // 16.7391, 700
+                &[-65, -34, 0, 0],     // 21.0434, 400
+                &[-65, -34, 48, -31],  // 21.0434, 600
+                &[-66, -34, 79, -52],  // 21.0434, 700
+                &[-88, -46, 0, 0],     // 24.6303, 400
+                &[-88, -46, 48, -31],  // 24.6303, 600
+                &[-89, -46, 79, -52],  // 24.6303, 700
+                &[-107, -56, 0, 0],    // 27.5, 400
+                &[-107, -56, 48, -31], // 27.5, 600
+                &[-107, -56, 79, -52], // 27.5, 700
+            ],
+        ),
     ];
 
     let mut files = Vec::new();
@@ -3823,7 +4888,9 @@ fn installed_variable_fonts_vary_their_global_metrics() {
             continue;
         };
         let Ok(data) = fs::read(path) else { continue };
-        let Ok(face) = Face::parse(data) else { continue };
+        let Ok(face) = Face::parse(data) else {
+            continue;
+        };
         let vars = face
             .variation_axes()
             .unwrap_or_else(|| panic!("{name}: opened but reports no axes"));
@@ -3841,7 +4908,10 @@ fn installed_variable_fonts_vary_their_global_metrics() {
                 vars.instance_coords(row - 1)
                     .unwrap_or_else(|| panic!("{name}: instance {row} does not normalize"))
             };
-            let got: Vec<i16> = tags.iter().map(|&t| face.metric_delta(t, &coords)).collect();
+            let got: Vec<i16> = tags
+                .iter()
+                .map(|&t| face.metric_delta(t, &coords))
+                .collect();
             assert_eq!(got.as_slice(), *want_row, "{name}: instance row {row}");
             rows.push(got);
         }
@@ -3955,5 +5025,8 @@ fn a_variation_index_kern_follows_the_instance() {
             "{left}/{right} does not move across the weight axis"
         );
     }
-    println!("{} Reem Kufi pairs corrected through GDEF's store", expected.len());
+    println!(
+        "{} Reem Kufi pairs corrected through GDEF's store",
+        expected.len()
+    );
 }

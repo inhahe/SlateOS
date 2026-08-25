@@ -11364,6 +11364,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The headline bug: `gunzip` on a file that is not gzip refuses, rather
         // than reading the name as a request to compress. `plain` is the file
         // just recovered above, so its contents are as un-gzip as they get.
+        //
+        // The archive has to go first, and the reason is worth stating because
+        // it cost a boot: this shell's `gzip` does *not* remove its input the
+        // way GNU's does, so `archive` is still sitting there from the compress
+        // step above. Asserting `archive` is absent without deleting it first
+        // asserted nothing about `gunzip` at all -- it read a leftover, and
+        // failed while the code under test was behaving correctly. Deleting it
+        // is what turns the check into a real one: if `gunzip` still guessed
+        // "not gzip, so compress it", it would put the file straight back.
+        let _ = crate::fs::vfs::Vfs::remove(archive);
         let out = capture_command("gunzip /tmp/kshell_gzip_selftest.txt");
         assert_output_contains("gunzip says what is wrong", &out, b"not in gzip format");
         assert_eq!(

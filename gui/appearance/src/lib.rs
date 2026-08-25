@@ -1399,6 +1399,52 @@ impl DecorationColors {
 
         colors
     }
+
+    /// Every colour a frame is drawn with, paired with its field name.
+    ///
+    /// The counterpart of [`Palette::roles`], and here for the same reason and
+    /// held to the struct the same way: the destructure has no `..`, so a
+    /// twelfth decoration colour stops this compiling until it is named, which
+    /// is the prompt to decide whether the sweeps that read this should cover
+    /// it. Without that, adding a field errors only at the struct literals in
+    /// [`for_mode`](Self::for_mode) and [`from_palette`](Self::from_palette) —
+    /// the author fills those in, the compiler falls silent, and the new colour
+    /// is drawn by the window manager and checked by nothing. See
+    /// `known-issues.md` lesson 44.
+    ///
+    /// `#[cfg(test)]` because the only callers are this crate's own sweeps.
+    /// [`Palette::roles`] is public because the shell's conversion sweep needs
+    /// it from outside; nothing outside needs this one, and a public method
+    /// added on the chance that something might is API nobody asked for.
+    #[cfg(test)]
+    fn roles(&self) -> [(&'static str, Color); 11] {
+        let Self {
+            title_focused_bg,
+            title_focused_fg,
+            title_unfocused_bg,
+            title_unfocused_fg,
+            border_focused,
+            border_unfocused,
+            close_button,
+            maximize_button,
+            minimize_button,
+            shadow,
+            desktop_bg,
+        } = *self;
+        [
+            ("title_focused_bg", title_focused_bg),
+            ("title_focused_fg", title_focused_fg),
+            ("title_unfocused_bg", title_unfocused_bg),
+            ("title_unfocused_fg", title_unfocused_fg),
+            ("border_focused", border_focused),
+            ("border_unfocused", border_unfocused),
+            ("close_button", close_button),
+            ("maximize_button", maximize_button),
+            ("minimize_button", minimize_button),
+            ("shadow", shadow),
+            ("desktop_bg", desktop_bg),
+        ]
+    }
 }
 
 /// The drop shadow, in both modes.
@@ -2213,55 +2259,34 @@ mod tests {
         // dark in light mode: dark title text on a dark bar, or a border that
         // vanishes. Every field genuinely differs between Mocha and Latte
         // except the shadow, which is deliberately the same black.
+        //
+        // The field list is `DecorationColors::roles` rather than a copy of it
+        // written out here. It was written out here, in an array whose declared
+        // length held it to nothing: a twelfth decoration colour would have left
+        // this test asserting about ten of twelve while still being named
+        // "every colour a frame is drawn with". `roles` destructures the struct
+        // exhaustively, so the same addition now fails to compile there.
         let dark = DecorationColors::for_mode(false);
         let light = DecorationColors::for_mode(true);
-        let pairs: [(&str, Color, Color); 10] = [
-            (
-                "title_focused_bg",
-                dark.title_focused_bg,
-                light.title_focused_bg,
-            ),
-            (
-                "title_focused_fg",
-                dark.title_focused_fg,
-                light.title_focused_fg,
-            ),
-            (
-                "title_unfocused_bg",
-                dark.title_unfocused_bg,
-                light.title_unfocused_bg,
-            ),
-            (
-                "title_unfocused_fg",
-                dark.title_unfocused_fg,
-                light.title_unfocused_fg,
-            ),
-            ("border_focused", dark.border_focused, light.border_focused),
-            (
-                "border_unfocused",
-                dark.border_unfocused,
-                light.border_unfocused,
-            ),
-            ("close_button", dark.close_button, light.close_button),
-            (
-                "maximize_button",
-                dark.maximize_button,
-                light.maximize_button,
-            ),
-            (
-                "minimize_button",
-                dark.minimize_button,
-                light.minimize_button,
-            ),
-            ("desktop_bg", dark.desktop_bg, light.desktop_bg),
-        ];
-        for (field, d, l) in pairs {
-            assert_ne!(d, l, "{field} is the same colour in both modes");
+        let mut checked_shadow = false;
+        for ((field, d), (_, l)) in dark.roles().into_iter().zip(light.roles()) {
+            if field == "shadow" {
+                checked_shadow = true;
+                assert_eq!(
+                    d, l,
+                    "the shadow is meant to be the same black in both modes"
+                );
+            } else {
+                assert_ne!(d, l, "{field} is the same colour in both modes");
+            }
         }
-        assert_eq!(
-            dark.shadow, light.shadow,
-            "the shadow is meant to be the same black in both modes"
-        );
+        // The exception is matched by name, and the two ways that can rot are
+        // not symmetrical. A *renamed* shadow becomes a field asserted to
+        // differ, and fails loudly. A shadow dropped from `roles` altogether
+        // just stops being checked, and the test stays green having quietly
+        // given up its one assertion about a colour that must not change. So
+        // say that the branch ran -- lesson 41.
+        assert!(checked_shadow, "`roles` no longer yields the shadow");
     }
 
     #[test]
@@ -2622,6 +2647,17 @@ mod tests {
         // itself, which is the vacuous shape this whole file's tests are
         // written to avoid. A constant this crate does not have is not a
         // constant this test can check.
+        //
+        // The other direction, since the name says *every* dark constant: this
+        // file declares 26 non-`LIGHT_` colours and 24 are pinned below. The
+        // two that are not are `DARK_EXTREME` and `SHADOW`, and they are absent
+        // because Catppuccin does not publish them — `DARK_EXTREME` is the
+        // high-contrast accessibility black and `SHADOW` is a black with an
+        // alpha, so neither has a Mocha value to disagree with. Every constant
+        // that *is* a Mocha colour is here. Note that nothing enforces that
+        // arithmetic: a twenty-seventh dark constant would leave this array at
+        // 24 and compile, because a module's constants cannot be destructured
+        // the way `Palette`'s fields can. See known-issues.md lesson 44.
         let published: [(&str, Color, u32); 24] = [
             ("rosewater", ROSEWATER, 0xF5E0DC),
             ("flamingo", FLAMINGO, 0xF2CDCD),

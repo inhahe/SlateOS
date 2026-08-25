@@ -74217,3 +74217,41 @@ harness case because there is nothing yet to compare.
    command, which is a useful check on the parser in its own right.
 
 Scoped as sed tranche 2d.
+
+---
+
+## TD-B-ERE-BRACKET-BACKSLASH — a backslash inside `[...]` is unescaped, where POSIX and GNU make it a member (lane B, 2026-08-24) — **open**
+
+**What it is.** In `ere`, `class_char` (`userspace/ere/src/engine.rs`) reads a
+backslash inside a bracket expression as starting an escape. POSIX gives a
+backslash no special meaning there at all, and GNU agrees in *both* dialects —
+measured against the real `grep`:
+
+| pattern | subject | GNU | ours |
+|---|---|---|---|
+| `grep -E '^[\.]$'` | `.` | matches | matches |
+| `grep -E '^[\.]$'` | `\` | **matches** | does not |
+| `grep -E '^[\t]$'` | `t` | matches | does not |
+| `grep -E '^[\t]$'` | TAB | does not | **matches** |
+| `grep -E '^[\w-]+$'` | `w\-` | matches | does not |
+
+So `[\t]` is our tab and GNU's "backslash or `t`". BRE is unaffected in
+practice: `bre::to_ere` doubles a backslash inside a bracket precisely to
+cancel this out, which is why `grep '[\]'` is right today and `grep -E '[\]'`
+is not.
+
+**Why it is not simply "make `\` a member".** The engine is shared, and the
+dialects genuinely disagree: POSIX and GNU `awk` *require* `[\t]` to be a tab,
+so the current behaviour is correct for `awk` and wrong for `grep -E` and
+`sed -E`. The fix is therefore a dialect flag rather than a one-line change.
+
+**The proper fix.** Add a `brackets_take_escapes` flag alongside the existing
+case-fold flag on `Regex::new_flags`, default it to *off* (POSIX/GNU
+behaviour), and have `awk` turn it on. Then delete the doubling in
+`bre::to_ere` — it exists only to compensate — and its test
+`a_backslash_inside_a_bracket_is_a_member`, replacing it with one that checks
+the untranslated form. Add harness cases to `grep-diff.sh` for the five rows
+above.
+
+**Reproduce.** `printf '\\n' | grep -E '^[\.]$'` — GNU prints the backslash,
+ours prints nothing.

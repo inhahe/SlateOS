@@ -66,8 +66,7 @@ pub fn compile(pattern: BStr<'_>, ci: bool) -> Result<Regex, EreError> {
 ///
 /// # Errors
 /// Returns [`EreError`] for a trailing backslash, an unmatched `\(`, `\{` or
-/// `[`, a quantifier with nothing to repeat, or a construct the engine cannot
-/// express (a backreference or a word boundary).
+/// `[`, or a quantifier with nothing to repeat.
 #[allow(clippy::too_many_lines)] // One flat dispatch over BRE's characters; splitting it would hide the table.
 pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
     let cs: Vec<Ch> = chars(pattern).collect();
@@ -136,35 +135,25 @@ pub fn to_ere(pattern: BStr<'_>) -> Result<Str, EreError> {
                         }
                         out.push(q as u8);
                     }
-                    // Perl-ish shorthands, written out as the bracket
-                    // expressions they abbreviate so the engine needs no new
-                    // syntax and the semantics are POSIX's own classes.
-                    Some('w') => {
-                        out.extend_from_slice(b"[[:alnum:]_]");
+                    // The GNU operators pass straight through: the ERE parser
+                    // reads them itself, so the translation is the identity and
+                    // the two dialects cannot disagree about what one means.
+                    // They used to be rewritten here into the bracket
+                    // expressions they abbreviate, which worked but left `\w`
+                    // meaning a literal `w` in ERE — `grep -E '\w'` searched
+                    // for the letter.
+                    Some('w' | 'W' | 's' | 'S') => {
+                        out.push(b'\\');
+                        e.push_to(&mut out);
                         prev_atom = true;
                     }
-                    Some('W') => {
-                        out.extend_from_slice(b"[^[:alnum:]_]");
-                        prev_atom = true;
-                    }
-                    Some('s') => {
-                        out.extend_from_slice(b"[[:space:]]");
-                        prev_atom = true;
-                    }
-                    Some('S') => {
-                        out.extend_from_slice(b"[^[:space:]]");
-                        prev_atom = true;
-                    }
-                    Some(w @ ('<' | '>' | 'b' | 'B')) => {
-                        return Err(EreError::new(
-                            RegCode::BadPattern,
-                            [
-                                b"word boundary \\".as_slice(),
-                                &[w as u8],
-                                b" is not supported",
-                            ]
-                            .concat(),
-                        ));
+                    // The four word assertions are zero-width, so they leave
+                    // `prev_atom` alone rather than setting it: `\<*` has no
+                    // more to repeat than `^*` does, and BRE reads the `*` in
+                    // both as a literal.
+                    Some('<' | '>' | 'b' | 'B') => {
+                        out.push(b'\\');
+                        e.push_to(&mut out);
                     }
                     // A backreference passes straight through: the ERE parser
                     // reads `\1`-`\9` the same way, so the translation is the
@@ -479,18 +468,43 @@ mod tests {
     }
 
     #[test]
-    fn shorthand_classes_expand_to_posix_ones() {
-        assert_eq!(t(r"\w\+"), "[[:alnum:]_]+");
-        assert_eq!(t(r"\s"), "[[:space:]]");
-        assert_eq!(t(r"\W"), "[^[:alnum:]_]");
-        assert_eq!(t(r"\S"), "[^[:space:]]");
+    fn the_gnu_operators_pass_through_to_the_ere_parser() {
+        // The translation is the identity — the ERE parser reads these itself,
+        // so the two dialects cannot disagree about what one means. Before
+        // 2026-08-24 they were rewritten here into the bracket expressions they
+        // abbreviate, which worked in BRE but left `\w` meaning a literal `w`
+        // in ERE: `grep -E '\w'` searched for the letter.
+        assert_eq!(t(r"\w\+"), r"\w+");
+        assert_eq!(t(r"\s"), r"\s");
+        assert_eq!(t(r"\W"), r"\W");
+        assert_eq!(t(r"\S"), r"\S");
         assert!(m(r"^\w\w*$", "ab_1"));
         assert!(!m(r"^\w\w*$", "a b"));
+        assert!(m(r"^\s$", " "));
+        assert!(m(r"^\W$", "-"));
+        assert!(m(r"^\S$", "x"));
+    }
+
+    #[test]
+    fn the_word_assertions_pass_through_and_are_zero_width() {
+        assert_eq!(t(r"\<word\>"), r"\<word\>");
+        assert_eq!(t(r"\bx\B"), r"\bx\B");
+        assert!(m(r"\<bar\>", "foo bar baz"));
+        assert!(!m(r"\<ar\>", "foo bar baz"));
+        assert!(m(r"\bfoo\b", "foo bar"));
+        assert!(m(r"a\Bb", "abc"));
+        assert!(!m(r"b\Bc", "ab c"));
+        // Zero-width, so a following `*` has nothing to repeat and BRE reads it
+        // as the literal it is there — same as after `^`. Measured: GNU
+        // `grep '\>*'` matches `a*` and not `ab`, so the `*` is the character,
+        // not a repeat of the assertion.
+        assert_eq!(t(r"\>*"), r"\>\*");
+        assert!(m(r"\>*", "a*"));
+        assert!(!m(r"\>*", "ab"));
     }
 
     #[test]
     fn what_the_engine_cannot_express_is_refused_not_mistranslated() {
-        assert!(err(r"\<word\>").contains("word boundary"));
         assert!(err(r"a\").contains("trailing backslash"));
         assert!(err(r"\(a").contains(r"unmatched \("));
         assert!(err(r"a\)").contains(r"unmatched \)"));

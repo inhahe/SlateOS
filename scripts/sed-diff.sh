@@ -59,6 +59,10 @@ printf '/usr/bin\n/tmp/x\nrelative\n'   > paths.txt
 printf 'Alpha1\nbeta22\nGAMMA333\n'     > mixed.txt
 printf 'A\x01\x7f\x80\xff\xc3\xa9Z\n'   > bytes.txt
 printf 'd\ne\nf\n'                      > def.txt
+# For the GNU word operators. `a_b` and `cafe' are each a single word --- `_`
+# is a word character and so is a letter outside ASCII --- and the run of two
+# spaces is where `\b` and `\B` disagree most visibly.
+printf 'foo bar\na_b  c\ncaf\xc3\xa9 x1\n' > words2.txt
 # NUL-separated, for `-z`. It holds an embedded newline on purpose: under `-z`
 # a newline is an ordinary byte, so a command that still splits on one is
 # visibly wrong here and merely lucky against a file that has none.
@@ -307,6 +311,24 @@ run_stdin words.txt 's/a\+/X/'
 run_stdin words.txt -E 's/a+/X/'
 run_stdin words.txt -E 's/(foo|baz)/[\1]/'
 run_stdin words.txt 's/foo\|baz/X/'
+# The GNU word operators, in both dialects: they are a glibc feature rather than
+# a BRE one, so `-E` has to honour them too. Until 2026-08-24 `\<` was a hard
+# error here and `-E '\w'` silently searched for the letter `w`.
+run_stdin words2.txt 's/\b/|/g'
+run_stdin words2.txt 's/\B/|/g'
+run_stdin words2.txt 's/\</[/g'
+run_stdin words2.txt 's/\>/]/g'
+run_stdin words2.txt 's/\w/./g'
+run_stdin words2.txt 's/\W/./g'
+run_stdin words2.txt 's/\s/_/g'
+run_stdin words2.txt 's/\S/./g'
+run_stdin words2.txt -E 's/\b/|/g'
+run_stdin words2.txt -E 's/\B/|/g'
+run_stdin words2.txt -E 's/\<\w+\>/[&]/g'
+run_stdin words2.txt -E 's/\w/./g'
+run_stdin words2.txt -E 's/\s/_/g'
+run_stdin words2.txt -n '/\<c\>/p'
+run_stdin words2.txt -n '/\bx1\b/p'
 # A replacement carrying an escape that is not a group reference, and one
 # carrying a literal newline.
 run_stdin abc.txt 's/b/\n/'

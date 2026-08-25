@@ -28,8 +28,19 @@ use std::process::Command;
 pub fn shell<S: AsRef<OsStr>>(text: S) -> Command {
     #[cfg(unix)]
     {
+        use std::os::unix::process::CommandExt;
         let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg(text);
+        // `argv[0]` is `sh`, not `/bin/sh`, because that is the name the shell
+        // puts on its own diagnostics — and to anyone reading the terminal
+        // those diagnostics are ours. C's `popen` and `system` both spell it
+        // `execl ("/bin/sh", "sh", "-c", cmd, NULL)` for this reason: the path
+        // is how the shell is *found*, the word is how it *identifies itself*.
+        //
+        // Measured: `awk 'BEGIN {print | "nosuchcmd"}'` said
+        // `/bin/sh: 1: nosuchcmd: not found` here, against gawk's
+        // `sh: 1: nosuchcmd: not found`. The absolute path leaks an
+        // implementation detail into a message meant for a user.
+        command.arg0("sh").arg("-c").arg(text);
         command
     }
     #[cfg(not(unix))]

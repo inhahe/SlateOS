@@ -13502,6 +13502,141 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
+    serial_println!("  kshell::self_test 46: sed matches basic regular expressions");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // `classify_sed_args` splits its argument line on whitespace, so a sed
+        // script here cannot contain a space (`TD-KSHELL-COMMANDS-TAKE-A-FLAT-
+        // STRING-NOT-ARGV`). Every case below is written without one; that is a
+        // constraint on the test, not on what is being tested.
+
+        // ---- addresses ----------------------------------------------------
+        //
+        // An address used to be `line.contains(pat)`, so an anchor selected the
+        // lines holding a literal `^` — none of them. `sed '/^abc/d'` deleted
+        // nothing and exited 0, which reads exactly like a file that had no
+        // matching lines.
+        let out = piped("sed '/^abc/d'", b"abc\nzabc\n");
+        assert_eq!(out.as_slice(), b"zabc\n", "^ anchors an address");
+        assert_eq!(last_exit(), 0, "and the run is a success");
+
+        let out = piped("sed -n '/a.c/p'", b"abc\naxc\nxyz\n");
+        assert_eq!(
+            out.as_slice(),
+            b"abc\naxc\n",
+            ". in an address is any character"
+        );
+
+        // ---- s/// left-hand side ------------------------------------------
+        //
+        // `sed_replace_first` was `str::find`, so the pattern was three literal
+        // characters.
+        let out = piped("sed 's/a.c/X/'", b"abc\naxc\nzzz\n");
+        assert_eq!(out.as_slice(), b"X\nX\nzzz\n", ". in s/// is any character");
+
+        // The two anchors, which a substring search can never satisfy: no line
+        // contains a `^` or a `$`, so both of these used to be no-ops.
+        let out = piped("sed 's/^/PRE/'", b"a\nb\n");
+        assert_eq!(
+            out.as_slice(),
+            b"PREa\nPREb\n",
+            "^ is the start of the line"
+        );
+        let out = piped("sed 's/c$/K/'", b"abc\ncab\n");
+        assert_eq!(out.as_slice(), b"abK\ncab\n", "$ is the end of the line");
+
+        // ---- BRE, specifically ---------------------------------------------
+        //
+        // Compiling sed's patterns as *extended* regular expressions would pass
+        // every assertion above and still be wrong. These four are the ones that
+        // tell the dialects apart: without `-E`, `+` and `(` are ordinary
+        // characters and the repetition/group spellings are the backslashed
+        // ones.
+        let out = piped("sed 's/a+b/X/'", b"a+b\naab\n");
+        assert_eq!(
+            out.as_slice(),
+            b"X\naab\n",
+            "in a BRE, + is a literal plus sign"
+        );
+        let out = piped("sed 's/a\\+b/X/'", b"a+b\naab\n");
+        assert_eq!(
+            out.as_slice(),
+            b"a+b\nX\n",
+            "and the repetition is spelled backslash-plus"
+        );
+        let out = piped("sed 's/(a)/X/'", b"(a)\na\n");
+        assert_eq!(
+            out.as_slice(),
+            b"X\na\n",
+            "in a BRE, parentheses are literal"
+        );
+        let out = piped("sed 's/\\(a\\)b/[\\1]/'", b"ab\n");
+        assert_eq!(
+            out.as_slice(),
+            b"[a]\n",
+            "and the group is spelled backslash-paren"
+        );
+
+        // ---- s/// right-hand side ------------------------------------------
+        //
+        // `&` and `\1` were literal text: `sed 's/\(a*\)b/[\1]/'` wrote the two
+        // characters `\1`, and both exited 0.
+        let out = piped("sed 's/\\(a*\\)b/[\\1]/'", b"aaab\n");
+        assert_eq!(out.as_slice(), b"[aaa]\n", "\\1 is the first group");
+        let out = piped("sed 's/abc/[&]/'", b"xabcy\n");
+        assert_eq!(out.as_slice(), b"x[abc]y\n", "& is the whole match");
+        let out = piped("sed 's/abc/\\&/'", b"abc\n");
+        assert_eq!(out.as_slice(), b"&\n", "\\& is a literal ampersand");
+        // The doubled backslash `find_unescaped` used to read as an escaped
+        // delimiter, which made this exact script `unterminated command`.
+        let out = piped("sed 's/abc/\\\\/'", b"abc\n");
+        assert_eq!(out.as_slice(), b"\\\n", "\\\\ is a literal backslash");
+
+        // ---- the mechanics that must keep working --------------------------
+        let out = piped("sed 's/a/X/'", b"aaa\n");
+        assert_eq!(out.as_slice(), b"Xaa\n", "without g, only the first match");
+        let out = piped("sed 's/a/X/g'", b"aaa\n");
+        assert_eq!(out.as_slice(), b"XXX\n", "with g, every match");
+        // An empty match is a position, not a span. GNU writes the replacement
+        // between every pair of characters and then stops; a loop that did not
+        // step past a zero-width match would never terminate.
+        let out = piped("sed 's/x*/-/g'", b"ab\n");
+        assert_eq!(out.as_slice(), b"-a-b-\n", "a zero-width match advances");
+        // An escaped delimiter still means the delimiter.
+        let out = piped("sed 's/a\\/b/X/'", b"a/b\n");
+        assert_eq!(out.as_slice(), b"X\n", "an escaped delimiter is literal");
+        // A pattern with no metacharacter behaves as it always did.
+        let out = piped("sed 's/zz_subject/zz_hit/'", b"zz_subject\n");
+        assert_eq!(out.as_slice(), b"zz_hit\n", "a plain literal still works");
+
+        // ---- refusals -------------------------------------------------------
+        //
+        // Each of these is a script this shell cannot honour. Every one is
+        // reported and exits non-zero rather than being approximated, and none
+        // of them prints the input: a sed that emits its input unchanged and
+        // exits 0 is indistinguishable from one that did the edit.
+        for (script, want) in [
+            ("sed 's//X/'", b"no previous regular expression" as &[u8]),
+            ("sed 's/a[b/X/'", b"Unmatched ["),
+            ("sed 's/\\(a\\)/\\3/'", b"invalid reference"),
+            ("sed 's/a/\\U/'", b"unsupported replacement escape"),
+        ] {
+            let out = piped(script, b"abc\n");
+            assert_output_contains(script, &out, want);
+            assert_eq!(last_exit(), 1, "{} is refused", script);
+            assert!(
+                !out.windows(4).any(|w| w == b"abc\n"),
+                "{} does not print its input",
+                script
+            );
+        }
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -122636,7 +122771,19 @@ fn cmd_sed(args: &str) {
         };
 
         let text = core::str::from_utf8(&data).unwrap_or("");
-        let output = sed_apply(text, &parsed, suppress);
+        // A declined match is not "no match": the engine hit its work limit and
+        // has no verdict. Folding that into `false` would silently keep a line
+        // that `d` was asked to delete, so the file is left exactly as it was
+        // and the failure is reported. Under `-i` that matters most — a partial
+        // answer written back over the original is unrecoverable.
+        let output = match sed_apply(text, &parsed, suppress) {
+            Ok(output) => output,
+            Err(_) => {
+                shell_println!("sed: '{}': {}", path.display(), ere::MatchLimit);
+                set_exit(1);
+                continue;
+            }
+        };
 
         if in_place {
             match crate::fs::Vfs::write_file(&path, output.as_bytes()) {
@@ -122658,12 +122805,16 @@ fn cmd_sed(args: &str) {
     }
 }
 
-/// Parsed sed command.
+/// Parsed sed command, with every regular expression already compiled.
+///
+/// Compiled at parse time for the reason `awk` compiles at parse time: a script
+/// that cannot be honoured must be refused before the first line is read, not
+/// discovered part-way through an edit that has already written half a file.
 enum SedCmd {
     /// `s/pattern/replacement/[g]`
     Substitute {
-        pattern: alloc::string::String,
-        replacement: alloc::string::String,
+        pattern: ere::Regex,
+        replacement: alloc::vec::Vec<SedRepl>,
         global: bool,
         addr: SedAddr,
     },
@@ -122673,22 +122824,40 @@ enum SedCmd {
     Print { addr: SedAddr },
 }
 
+/// One piece of an `s///` replacement.
+///
+/// A parsed template rather than a string, because `&` and `\1` have to be
+/// distinguished from the literal characters `&` and `1` *once*, when the
+/// script is read, rather than re-scanned for every line of every file.
+enum SedRepl {
+    /// Text to emit as it stands.
+    Lit(alloc::string::String),
+    /// `&` or `\0` (the whole match) and `\1`…`\9` (a group).
+    Group(usize),
+}
+
 /// Sed address (line selector).
 enum SedAddr {
     /// All lines.
     All,
     /// Specific line number.
     Line(usize),
-    /// Lines matching a pattern.
-    Pattern(alloc::string::String),
+    /// Lines matching a **basic** regular expression.
+    Regex(ere::Regex),
 }
 
 /// Check if a sed address matches the current line.
-fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
+///
+/// `Err` is a declined answer, not a "no" — see [`AwkPattern::matches`] for why
+/// that distinction is load-bearing. It matters more here than in `awk`: this
+/// verdict can select a line for `d`, so folding a declined match into `false`
+/// would keep a line the script asked to delete, or (for the negated forms this
+/// shell does not yet have) delete one it asked to keep.
+fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> Result<bool, ere::MatchLimit> {
     match addr {
-        SedAddr::All => true,
-        SedAddr::Line(n) => line_num == *n,
-        SedAddr::Pattern(pat) => line.contains(pat.as_str()),
+        SedAddr::All => Ok(true),
+        SedAddr::Line(n) => Ok(line_num == *n),
+        SedAddr::Regex(re) => re.is_match(line.as_bytes()),
     }
 }
 
@@ -122708,7 +122877,11 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
 /// final newline for input that had none. A newline follows every emitted line
 /// *except* the last line of an input that did not end in one — which is a
 /// property of the input, not of whether that line survived the script.
-fn sed_apply(text: &str, script: &[SedCmd], suppress: bool) -> alloc::string::String {
+fn sed_apply(
+    text: &str,
+    script: &[SedCmd],
+    suppress: bool,
+) -> Result<alloc::string::String, ere::MatchLimit> {
     let final_newline = text.ends_with('\n');
     let total = text.lines().count();
     let mut output = alloc::string::String::new();
@@ -122727,21 +122900,17 @@ fn sed_apply(text: &str, script: &[SedCmd], suppress: bool) -> alloc::string::St
                     global,
                     addr,
                 } => {
-                    if sed_addr_matches(addr, line_num, &current) {
-                        if *global {
-                            current = sed_replace_all(&current, pattern, replacement);
-                        } else {
-                            current = sed_replace_first(&current, pattern, replacement);
-                        }
+                    if sed_addr_matches(addr, line_num, &current)? {
+                        current = sed_substitute(&current, pattern, replacement, *global)?;
                     }
                 }
                 SedCmd::Delete { addr } => {
-                    if sed_addr_matches(addr, line_num, &current) {
+                    if sed_addr_matches(addr, line_num, &current)? {
                         deleted = true;
                     }
                 }
                 SedCmd::Print { addr } => {
-                    if sed_addr_matches(addr, line_num, &current) {
+                    if sed_addr_matches(addr, line_num, &current)? {
                         print_this = true;
                     }
                 }
@@ -122756,7 +122925,7 @@ fn sed_apply(text: &str, script: &[SedCmd], suppress: bool) -> alloc::string::St
         }
     }
 
-    output
+    Ok(output)
 }
 
 /// Why a `sed` script could not be turned into a [`SedCmd`].
@@ -122782,6 +122951,18 @@ enum SedParseError {
     /// Recognised in shape, but the bytes do not slice — a non-ASCII delimiter,
     /// which this byte-wise scanner cannot walk without landing mid-character.
     Invalid,
+    /// The regular expression itself did not compile. Carries glibc's own
+    /// sentence for the failure, so the kernel shell words it as userspace does.
+    BadRegex(&'static str),
+    /// An empty pattern, which in GNU sed means "the last regexp used". This
+    /// shell keeps no such thing, and matching the empty string everywhere
+    /// instead would be an answer rather than a refusal.
+    NoPreviousRegex,
+    /// `\N` in a replacement, where the pattern has no group `N`.
+    BadGroupRef(char),
+    /// A replacement escape this shell does not implement — `\U` and the other
+    /// GNU case conversions. Refused rather than emitted as its own text.
+    BadReplEscape(char),
 }
 
 impl SedParseError {
@@ -122817,6 +122998,32 @@ impl SedParseError {
                 shell_println!(
                     "sed: -e expression #{}: invalid command syntax: {}",
                     n,
+                    script
+                );
+            }
+            Self::BadRegex(msg) => {
+                shell_println!("sed: -e expression #{}: {}: {}", n, msg, script);
+            }
+            Self::NoPreviousRegex => {
+                shell_println!(
+                    "sed: -e expression #{}: no previous regular expression: {}",
+                    n,
+                    script
+                );
+            }
+            Self::BadGroupRef(c) => {
+                shell_println!(
+                    "sed: -e expression #{}: invalid reference \\{} on `s' command's RHS: {}",
+                    n,
+                    c,
+                    script
+                );
+            }
+            Self::BadReplEscape(c) => {
+                shell_println!(
+                    "sed: -e expression #{}: unsupported replacement escape \\{} in {}",
+                    n,
+                    c,
                     script
                 );
             }
@@ -122884,10 +123091,15 @@ fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
             return Err(SedParseError::UnknownFlag(c));
         }
 
-        let pattern =
-            alloc::string::String::from(cmd.get(pat_start..pat_end).ok_or(SedParseError::Invalid)?);
-        let replacement =
-            alloc::string::String::from(cmd.get(rep_start..rep_end).ok_or(SedParseError::Invalid)?);
+        let pattern = sed_compile(
+            cmd.get(pat_start..pat_end).ok_or(SedParseError::Invalid)?,
+            delim,
+        )?;
+        let replacement = sed_parse_replacement(
+            cmd.get(rep_start..rep_end).ok_or(SedParseError::Invalid)?,
+            delim,
+            pattern.group_count(),
+        )?;
         let global = flags.contains('g');
 
         return Ok(SedCmd::Substitute {
@@ -122901,19 +123113,17 @@ fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
     // Address commands: /pattern/d or /pattern/p
     if bytes.first() == Some(&b'/') {
         let pat_end = find_unescaped(bytes, b'/', 1).ok_or(SedParseError::Unterminated)?;
-        let pattern =
-            alloc::string::String::from(cmd.get(1..pat_end).ok_or(SedParseError::Invalid)?);
+        let addr = SedAddr::Regex(sed_compile(
+            cmd.get(1..pat_end).ok_or(SedParseError::Invalid)?,
+            b'/',
+        )?);
         let action = cmd
             .get(pat_end.saturating_add(1)..)
             .ok_or(SedParseError::Invalid)?;
 
         return match action.trim() {
-            "d" => Ok(SedCmd::Delete {
-                addr: SedAddr::Pattern(pattern),
-            }),
-            "p" => Ok(SedCmd::Print {
-                addr: SedAddr::Pattern(pattern),
-            }),
+            "d" => Ok(SedCmd::Delete { addr }),
+            "p" => Ok(SedCmd::Print { addr }),
             _ => Err(SedParseError::Unknown),
         };
     }
@@ -122931,36 +123141,223 @@ fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
     Err(SedParseError::Unknown)
 }
 
+/// Compile one sed pattern as a **basic** regular expression.
+///
+/// BRE and not ERE, and the difference is not cosmetic: in a BRE `a+b` is the
+/// three literal characters, `a\+b` is the repetition, and groups are `\(…\)`
+/// while a bare `(` is an ordinary character. Compiling sed's patterns as EREs
+/// would swap those readings round and silently change what a working script
+/// means — which is the same class of fault as the substring search this
+/// replaces, only harder to spot because most patterns would still work.
+/// `sed -E` (which this shell does not have) is where the ERE reading belongs.
+///
+/// `\<delim>` inside the pattern is the delimiter as a literal character, which
+/// is how it gets past [`find_unescaped`]. The backslash is stripped before the
+/// engine sees it, as GNU does: `\/` is not a defined BRE escape, so leaving it
+/// in would turn a working `s/a\/b/x/` into a compile error.
+fn sed_compile(pattern: &str, delim: u8) -> Result<ere::Regex, SedParseError> {
+    let mut src = alloc::vec::Vec::with_capacity(pattern.len());
+    let mut escaped = false;
+    for &b in pattern.as_bytes() {
+        if escaped {
+            // Only the delimiter loses its backslash; every other escape is the
+            // engine's to interpret, and eating backslashes here would break
+            // `\(`, `\{`, `\.` and the rest of BRE's syntax.
+            if b != delim {
+                src.push(b'\\');
+            }
+            src.push(b);
+            escaped = false;
+            continue;
+        }
+        if b == b'\\' {
+            escaped = true;
+            continue;
+        }
+        src.push(b);
+    }
+    if escaped {
+        src.push(b'\\');
+    }
+
+    // An empty pattern in GNU sed means "the last regexp used", and this shell
+    // has no last regexp to offer. Compiling it would match the empty string
+    // everywhere, so `s//X/g` would interleave `X` between every character and
+    // report success -- a wrong answer, where GNU gives an error.
+    if src.is_empty() {
+        return Err(SedParseError::NoPreviousRegex);
+    }
+
+    ere::bre::compile(&src, false).map_err(|e| SedParseError::BadRegex(e.message()))
+}
+
+/// Parse an `s///` replacement into the pieces [`sed_render`] emits.
+///
+/// `&` is the whole match and `\1`…`\9` are groups, as in every sed. Both used
+/// to be literal text: `sed 's/\(a*\)b/[\1]/'` wrote the two characters `\1`,
+/// and `sed 's/x/[&]/'` wrote `[&]`, in both cases exiting 0.
+///
+/// `ngroups` is the pattern's group count, so `\3` against a pattern with two
+/// groups is a *script* error rather than an empty expansion at run time. GNU
+/// calls it `invalid reference \3 on 's' command's RHS`.
+///
+/// An escape this shell does not implement is refused rather than passed
+/// through as its own text. `\U`, `\L`, `\u`, `\l` and `\E` are GNU case
+/// conversions; emitting a literal `U` for `\U` would be a wrong answer of
+/// exactly the kind `s/a/b/i` was rejected for.
+fn sed_parse_replacement(
+    repl: &str,
+    delim: u8,
+    ngroups: usize,
+) -> Result<alloc::vec::Vec<SedRepl>, SedParseError> {
+    let mut out = alloc::vec::Vec::new();
+    let mut lit = alloc::string::String::new();
+    let mut chars = repl.chars();
+
+    while let Some(c) = chars.next() {
+        if c == '&' {
+            if !lit.is_empty() {
+                out.push(SedRepl::Lit(core::mem::take(&mut lit)));
+            }
+            out.push(SedRepl::Group(0));
+            continue;
+        }
+        if c != '\\' {
+            lit.push(c);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            // A replacement ending in a backslash. GNU: `unterminated `s'
+            // command`, because the backslash would have escaped the delimiter.
+            return Err(SedParseError::Unterminated);
+        };
+        match next {
+            '0'..='9' => {
+                let n = next as usize - '0' as usize;
+                if n > ngroups {
+                    return Err(SedParseError::BadGroupRef(next));
+                }
+                if !lit.is_empty() {
+                    out.push(SedRepl::Lit(core::mem::take(&mut lit)));
+                }
+                out.push(SedRepl::Group(n));
+            }
+            'n' => lit.push('\n'),
+            't' => lit.push('\t'),
+            'r' => lit.push('\r'),
+            '\\' | '&' => lit.push(next),
+            // The delimiter, escaped so it could get past `find_unescaped`.
+            c if c.is_ascii() && c as u32 == u32::from(delim) => lit.push(c),
+            other => return Err(SedParseError::BadReplEscape(other)),
+        }
+    }
+
+    if !lit.is_empty() {
+        out.push(SedRepl::Lit(lit));
+    }
+    Ok(out)
+}
+
 /// Find the position of an unescaped delimiter byte starting from `start`.
+///
+/// The scan steps *over* an escape rather than looking backwards from a
+/// candidate delimiter, which is the only way to read `\\` correctly. Looking
+/// back one byte cannot tell `\/` (an escaped delimiter) from `\\/` (an escaped
+/// backslash, then the delimiter): both have a backslash in front of the `/`.
+/// The old code answered "escaped" to each, so `sed 's/x/\\/'` — a replacement
+/// of one literal backslash — was reported as `unterminated command`, and any
+/// script whose pattern or replacement ended in a backslash was unreachable.
 fn find_unescaped(bytes: &[u8], delim: u8, start: usize) -> Option<usize> {
     let mut i = start;
-    while i < bytes.len() {
-        if bytes[i] == delim {
-            // Check if preceded by backslash.
-            if i > start && bytes[i - 1] == b'\\' {
-                i += 1;
-                continue;
-            }
+    while let Some(&b) = bytes.get(i) {
+        if b == b'\\' {
+            // Whatever follows is that byte's own, delimiter or not. A trailing
+            // lone backslash puts `i` past the end, which ends the loop and
+            // reports the command as unterminated — which it is.
+            i = i.saturating_add(2);
+            continue;
+        }
+        if b == delim {
             return Some(i);
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
     None
 }
 
-/// Replace the first occurrence of `pattern` in `text` with `replacement`.
-fn sed_replace_first(text: &str, pattern: &str, replacement: &str) -> alloc::string::String {
-    if pattern.is_empty() {
-        return alloc::string::String::from(text);
+/// Apply one `s///` to one line.
+///
+/// This replaces `sed_replace_first` and `sed_replace_all`, which were
+/// `str::find` and a `str::find` loop: `sed 's/a.c/x/'` replaced only the
+/// literal three characters `a.c`, `sed 's/^/> /'` prefixed nothing at all
+/// because no line contains a `^`, and both exited 0. The pattern is now a
+/// **basic** regular expression, which is what sed means without `-E`.
+///
+/// The unreplaced-tail write at the end is why this cannot be a `map`/`join`:
+/// what follows the last match has to be copied whether or not there was a
+/// match at all, and `sed_replace_all`'s loop got that right only by accident
+/// of its structure.
+fn sed_substitute(
+    text: &str,
+    re: &ere::Regex,
+    repl: &[SedRepl],
+    global: bool,
+) -> Result<alloc::string::String, ere::MatchLimit> {
+    let hay = text.as_bytes();
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(hay.len());
+    let mut last = 0usize;
+
+    for caps in re.capture_spans_iter(hay) {
+        let caps = caps?;
+        let Some((s, e)) = caps.first().copied().flatten() else {
+            break;
+        };
+        out.extend_from_slice(hay.get(last..s).unwrap_or_default());
+        sed_render(repl, hay, &caps, &mut out);
+        last = e;
+        if !global {
+            break;
+        }
     }
-    if let Some(pos) = text.find(pattern) {
-        let mut result = alloc::string::String::with_capacity(text.len());
-        result.push_str(&text[..pos]);
-        result.push_str(replacement);
-        result.push_str(&text[pos + pattern.len()..]);
-        result
-    } else {
-        alloc::string::String::from(text)
+    out.extend_from_slice(hay.get(last..).unwrap_or_default());
+
+    // The subject was a `str`, every span the engine reports is on a character
+    // boundary, and every literal spliced in came from a `str`, so the result
+    // is valid UTF-8 by construction. It is still checked rather than assumed:
+    // `from_utf8_unchecked` here would make an engine bug into undefined
+    // behaviour in the kernel, and the cost is a linear scan of one line.
+    Ok(match alloc::string::String::from_utf8(out) {
+        Ok(s) => s,
+        // Unreachable for the reason above. Returning the line unedited would
+        // be a silent wrong answer, so say what happened and keep going with
+        // the closest honest thing: the input.
+        Err(_) => {
+            shell_println!("sed: internal error: substitution produced invalid text");
+            alloc::string::String::from(text)
+        }
+    })
+}
+
+/// Expand a parsed replacement template for one match.
+///
+/// A group that did not participate contributes nothing — which is distinct
+/// from a group that does not *exist*, and that one is rejected at parse time,
+/// where it can still be reported as a script error.
+fn sed_render(
+    parts: &[SedRepl],
+    hay: &[u8],
+    caps: &[Option<(usize, usize)>],
+    out: &mut alloc::vec::Vec<u8>,
+) {
+    for part in parts {
+        match part {
+            SedRepl::Lit(text) => out.extend_from_slice(text.as_bytes()),
+            SedRepl::Group(n) => {
+                if let Some(Some((s, e))) = caps.get(*n) {
+                    out.extend_from_slice(hay.get(*s..*e).unwrap_or_default());
+                }
+            }
+        }
     }
 }
 
@@ -123029,24 +123426,16 @@ fn cmd_sed_input(args: &str, input: &str) {
     // of the extraction. The pop that used to stand here is what lost the final
     // newline on every piped `sed`, so `cat f | sed 's/a/b/' | wc -l` counted
     // one line short.
-    shell_print!("{}", sed_apply(input, &parsed, suppress));
-}
-
-/// Replace all occurrences of `pattern` in `text` with `replacement`.
-fn sed_replace_all(text: &str, pattern: &str, replacement: &str) -> alloc::string::String {
-    if pattern.is_empty() {
-        return alloc::string::String::from(text);
+    // Same declined-match rule as the file half: nothing is printed, because a
+    // partial edit that exits 0 is exactly the silent guess this wiring exists
+    // to remove.
+    match sed_apply(input, &parsed, suppress) {
+        Ok(output) => shell_print!("{}", output),
+        Err(_) => {
+            shell_println!("sed: {}", ere::MatchLimit);
+            set_exit(1);
+        }
     }
-    let mut result = alloc::string::String::with_capacity(text.len());
-    let mut start = 0;
-    while let Some(pos) = text[start..].find(pattern) {
-        let abs_pos = start + pos;
-        result.push_str(&text[start..abs_pos]);
-        result.push_str(replacement);
-        start = abs_pos + pattern.len();
-    }
-    result.push_str(&text[start..]);
-    result
 }
 
 // ---------------------------------------------------------------------------

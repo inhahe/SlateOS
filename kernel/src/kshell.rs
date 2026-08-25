@@ -7502,7 +7502,11 @@ fn dispatch(line: &str) {
         "base64" => cmd_base64(args),
         "wipe" => cmd_wipe(args),
         "checksum" | "cksum" => cmd_checksum(args),
-        "gunzip" | "gzip" => cmd_gunzip(args),
+        // Two arms, not one: the name is the whole difference between these
+        // commands, and folding them into one arm threw it away before
+        // `cmd_gunzip` could read it. See `GzipMode`.
+        "gzip" => cmd_gunzip(args, GzipMode::Compress),
+        "gunzip" => cmd_gunzip(args, GzipMode::Decompress),
         "bunzip2" | "bzcat" => cmd_bunzip2(args),
         "bzip2" => cmd_bzip2(args),
         "unxz" | "xzcat" => cmd_unxz(args),
@@ -11237,13 +11241,15 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // most likely to be mistaken for a result, since nothing failed at the
         // I/O layer and the command has something true to say.
         //
-        // `-t` is load-bearing, and not for the reason it looks like. Plain
-        // `gunzip <not-gzip>` does not reach this diagnostic at all: `cmd_gunzip`
-        // serves both `gzip` and `gunzip`, `dispatch` discards which name was
-        // typed, so the function guesses from the file's magic bytes and a file
-        // that is *not* gzip is taken as a request to compress it. `-t` is one of
-        // the two flags that suppress that guess. See known-issues -- the guess
-        // is a bug in its own right, and this rung would have asserted around it.
+        // `-t` was load-bearing when this rung was written, and is now merely
+        // one of two ways to reach the diagnostic. Plain `gunzip <not-gzip>`
+        // used not to reach it at all: `cmd_gunzip` serves both `gzip` and
+        // `gunzip`, `dispatch` discarded which name was typed, so the function
+        // guessed the direction from the file's magic bytes and a file that is
+        // *not* gzip was taken as a request to compress it. `-t` suppressed that
+        // guess. The guess was a bug in its own right and rung 30 now covers it;
+        // `-t` is kept here so this rung keeps testing the sweep rather than the
+        // fix.
         crate::fs::vfs::Vfs::write_file(
             Path::new("/tmp/kshell_sweep_selftest.gz"),
             b"this is not gzip",
@@ -11252,23 +11258,126 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_starts_with("gunzip rejects the magic", &out, b"gunzip: ");
         assert_eq!(last_exit(), 1, "a malformed archive is a failed command");
 
-        // The five `-t` successes the sweep deliberately left alone are *not*
-        // asserted here, and the omission is deliberate. `gunzip -t good.gz`
-        // prints `gunzip: '<file>': OK (...)` on success, because real `gzip -t`
-        // does -- so the convention the sweep runs on is not "the prefix means
-        // an error", it is "the prefix means the command is speaking about
-        // itself". Guarding that needs a *valid* archive, and this shell has no
-        // compressor to make one with: `gzip` and `gunzip` both dispatch to
-        // `cmd_gunzip`. Hand-assembling gzip bytes to test something the sweep
-        // did not change would be a boot cycle wagered on my memory of a
-        // container format.
-        //
-        // The exclusion is guarded better elsewhere anyway: the sweep script
-        // keys its exemptions on the message text and aborts if any of them
-        // stops matching a site, so the check fires when someone re-runs the
-        // sweep -- which is the moment the mistake would actually be made.
+        // The five `-t` successes the sweep deliberately left alone are asserted
+        // in rung 30 rather than here, because guarding them needs a *valid*
+        // archive and making one needs the direction fix that rung 30 is about.
+        // They matter to the sweep: `gunzip -t good.gz` prints
+        // `gunzip: '<file>': OK (...)` on success, because real `gzip -t` does --
+        // so the convention the sweep runs on is not "the prefix means an
+        // error", it is "the prefix means the command is speaking about itself".
 
         let _ = crate::fs::vfs::Vfs::remove(Path::new("/tmp/kshell_sweep_selftest.gz"));
+    }
+
+    // 30. `gzip` compresses and `gunzip` decompresses, whichever way the file
+    //     happens to look.
+    //
+    // `gzip` and `gunzip` share one function, and until now they shared one
+    // *dispatch arm* as well -- so the name the user typed was discarded before
+    // the function could read it, and the direction was inferred from the file's
+    // magic bytes instead: gzip header, decompress; anything else, compress.
+    //
+    // That guess is right for `gzip` and exactly backwards for `gunzip`, which
+    // is the worst shape a default can have, because the wrong half is the half
+    // that looks like it worked. `gunzip notes.txt` -- a plain mistake, the kind
+    // a tab-completion makes -- did not say "not in gzip format"; it compressed
+    // the file, wrote `notes.txt.gz`, printed a success line and exited 0. The
+    // mirror case was as bad and quieter: `gzip archive.gz` decompressed it.
+    //
+    // `-d` made it worse rather than better. It was `"-d" => {}`, commented
+    // "no-op, default for gunzip" -- but it was only a no-op if the guess was
+    // already going the right way, so `gzip -d notes.txt`, a user saying
+    // "decompress" as plainly as the interface allows, compressed it.
+    //
+    // The direction now comes from the name, overridden only by an explicit
+    // flag. These assertions are about *which way it went*, so each one uses a
+    // file whose contents point the other way -- a test that passed a gzip file
+    // to `gunzip` would be satisfied by the old guess too.
+    {
+        let plain = Path::new("/tmp/kshell_gzip_selftest.txt");
+        let archive = Path::new("/tmp/kshell_gzip_selftest.txt.gz");
+        // Compressible rather than random: a body that shrinks makes the
+        // round-trip assertion below prove the codec ran, not merely that a
+        // container was wrapped around the bytes and unwrapped again.
+        let body: &[u8] =
+            b"slateos gzip round trip slateos gzip round trip slateos gzip round trip";
+        let _ = crate::fs::vfs::Vfs::remove(archive);
+        crate::fs::vfs::Vfs::write_file(plain, body)?;
+
+        // `gzip` on a plain file compresses it. This is the direction the old
+        // guess got right, and it is here as the baseline the rest are read
+        // against.
+        let out = capture_command("gzip /tmp/kshell_gzip_selftest.txt");
+        assert_output_starts_with("gzip reports what it wrote", &out, b"gzip: ");
+        assert_eq!(last_exit(), 0, "compressing a plain file succeeds");
+        let compressed = crate::fs::vfs::Vfs::read_file(archive)?;
+        assert!(
+            compressed.len() >= 2 && compressed[0] == 0x1F && compressed[1] == 0x8B,
+            "gzip wrote a gzip header"
+        );
+
+        // `-t` on a good archive: the one case in this shell where a message
+        // prefixed with the command's own name reports a *success*. The bail
+        // sweep exempted five of these by name; this is what the exemption
+        // protects, and rung 29 could not assert it because nothing could
+        // produce a valid archive to test with.
+        let out = capture_command("gunzip -t /tmp/kshell_gzip_selftest.txt.gz");
+        assert_output_contains("a good archive tests OK", &out, b": OK (");
+        assert_eq!(last_exit(), 0, "a valid archive is not a failure");
+
+        // `gzip` on something already gzip refuses instead of producing
+        // `.gz.gz`. Without this the direction fix would trade one silent wrong
+        // answer for another: the old code decompressed here, and the naive fix
+        // compresses a second time, which is just as much not what was asked and
+        // is harder to notice.
+        let out = capture_command("gzip /tmp/kshell_gzip_selftest.txt.gz");
+        assert_output_starts_with("gzip refuses to re-compress", &out, b"gzip: ");
+        assert_eq!(
+            last_exit(),
+            1,
+            "re-compressing an archive is a failed command"
+        );
+        assert!(
+            crate::fs::vfs::Vfs::read_file(Path::new("/tmp/kshell_gzip_selftest.txt.gz.gz"))
+                .is_err(),
+            "and wrote no .gz.gz"
+        );
+
+        // `gzip -d` decompresses -- the flag that used to be a no-op. The
+        // round-trip is asserted on the bytes, since a decompress that produced
+        // the wrong content would still print a success line.
+        let _ = crate::fs::vfs::Vfs::remove(plain);
+        let out = capture_command("gzip -d /tmp/kshell_gzip_selftest.txt.gz");
+        // `gunzip: `, not `gzip: `, even though `gzip` is what was typed: the
+        // decompress half of the function names itself after the operation
+        // rather than after the invocation. GNU would say `gzip: ` here. Left
+        // as-is and asserted as-is -- the prefix is what the message means, not
+        // which name reached it, and the sweep's convention holds either way.
+        assert_output_starts_with("gzip -d reports what it wrote", &out, b"gunzip: ");
+        assert_eq!(last_exit(), 0, "gzip -d succeeds");
+        assert_eq!(
+            crate::fs::vfs::Vfs::read_file(plain)?.as_slice(),
+            body,
+            "the round trip returned the original bytes"
+        );
+
+        // The headline bug: `gunzip` on a file that is not gzip refuses, rather
+        // than reading the name as a request to compress. `plain` is the file
+        // just recovered above, so its contents are as un-gzip as they get.
+        let out = capture_command("gunzip /tmp/kshell_gzip_selftest.txt");
+        assert_output_contains("gunzip says what is wrong", &out, b"not in gzip format");
+        assert_eq!(
+            last_exit(),
+            1,
+            "decompressing a non-archive is a failed command"
+        );
+        assert!(
+            crate::fs::vfs::Vfs::read_file(archive).is_err(),
+            "and compressed nothing behind the user's back"
+        );
+
+        let _ = crate::fs::vfs::Vfs::remove(plain);
+        let _ = crate::fs::vfs::Vfs::remove(archive);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -117662,17 +117771,39 @@ fn cmd_checksum(args: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// gunzip — gzip decompression
+// gzip / gunzip — gzip compression and decompression
 // ---------------------------------------------------------------------------
 
-/// `gunzip` / `gzip -d` command — decompress gzip files.
+/// Which of the two commands sharing [`cmd_gunzip`] the user actually typed.
+///
+/// `gzip` and `gunzip` are one function because they share almost all of their
+/// machinery, and every other compressor family in this shell splits them
+/// (`bzip2`/`bunzip2`, `xz`/`unxz`, `zstd`/`unzstd`, `lz4`/`unlz4`). Sharing the
+/// body is fine; what was not fine was sharing the *dispatch arm*, which
+/// discarded the name and left the function to guess the direction from the
+/// file's contents.
+#[derive(Clone, Copy)]
+enum GzipMode {
+    Compress,
+    Decompress,
+}
+
+/// `gzip` / `gunzip` command — gzip compression and decompression.
+///
+/// The direction comes from `invoked_as`, i.e. from which of the two names the
+/// user typed, and is overridden only by an explicit flag. It is emphatically
+/// *not* guessed from the file's contents; see the comment on `decompress`
+/// below for what that guess used to do.
 ///
 /// Usage:
+/// - `gzip file`                — compress to `file.gz`
 /// - `gunzip file.gz`           — decompress to file (strips .gz)
+/// - `gzip -d file.gz`          — decompress whichever name was typed
+/// - `gunzip -c file`           — compress whichever name was typed
 /// - `gunzip file.gz -o out`    — decompress to explicit output path
 /// - `gunzip -t file.gz`        — test integrity only (no output)
 /// - `gunzip -l file.gz`        — show compressed/uncompressed sizes
-fn cmd_gunzip(args: &str) {
+fn cmd_gunzip(args: &str, invoked_as: GzipMode) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
     if parts.is_empty() {
         shell_println!(
@@ -117690,6 +117821,7 @@ fn cmd_gunzip(args: &str) {
     let mut test_only = false;
     let mut list_mode = false;
     let mut compress_mode = false;
+    let mut explicit_decompress = false;
     let mut input_path: Option<&str> = None;
     let mut output_path: Option<&str> = None;
     let mut skip_next = false;
@@ -117702,7 +117834,12 @@ fn cmd_gunzip(args: &str) {
         match p {
             "-t" | "--test" => test_only = true,
             "-l" | "--list" => list_mode = true,
-            "-d" => {} // gzip -d: explicit decompress mode (no-op, default for gunzip)
+            // Was `"-d" => {}`, commented "no-op, default for gunzip". It was
+            // not a no-op that happened to be harmless: with the direction
+            // inferred from magic bytes, `gzip -d notes.txt` -- a user saying
+            // "decompress this" as plainly as the interface allows -- compressed
+            // it anyway.
+            "-d" | "--decompress" => explicit_decompress = true,
             "-c" => compress_mode = true, // explicit compress mode
             "-o" => {
                 if let Some(&out) = parts.get(i.wrapping_add(1)) {
@@ -117741,14 +117878,57 @@ fn cmd_gunzip(args: &str) {
         }
     };
 
-    // Auto-detect: if the file starts with gzip magic and we're not
-    // explicitly compressing, decompress.  If -c is given or the file
-    // is not gzip, compress.
     let is_gzip =
         file_data.len() >= 2 && file_data.first() == Some(&0x1F) && file_data.get(1) == Some(&0x8B);
 
-    if compress_mode || (!is_gzip && !test_only && !list_mode) {
+    // Which direction to go. This used to be inferred from the file's magic
+    // bytes -- "not gzip, so the user must want it compressed" -- which is a
+    // reasonable guess for `gzip` and precisely backwards for `gunzip`, and it
+    // ran because `dispatch` sent both names to one arm and the function had no
+    // other way to tell them apart. `gunzip notes.txt` therefore wrote
+    // `notes.txt.gz`: the opposite of what was asked, reported as success. The
+    // mirror case was just as wrong -- `gzip archive.gz` *decompressed* it.
+    //
+    // Now the name decides, and only an explicit flag overrides it:
+    //   * `-d` / `-c` say the direction outright;
+    //   * `-t` and `-l` test and describe an existing archive, so they are
+    //     decompress-side whichever name invoked them.
+    // The magic bytes no longer choose anything; they are only checked below,
+    // where the answer is already known and the question is whether the file
+    // matches it.
+    let decompress = if test_only || list_mode {
+        true
+    } else if compress_mode {
+        false
+    } else if explicit_decompress {
+        true
+    } else {
+        matches!(invoked_as, GzipMode::Decompress)
+    };
+
+    if !decompress {
         // COMPRESS mode.
+
+        // Refuse to compress something that is already gzip, as GNU gzip does
+        // ("already has .gz suffix -- unchanged"). Without this the direction
+        // fix would trade one silent wrong answer for another: the old code
+        // *decompressed* `gzip archive.gz`, and the naive fix compresses it into
+        // `archive.gz.gz`, which is just as much not what was asked and is
+        // harder to notice. `-o` names the output explicitly, so it reads as
+        // deliberate and is allowed through.
+        //
+        // The test is the magic bytes rather than the file name: a `.gz` suffix
+        // is a claim and the header is the fact, and it is the fact that decides
+        // whether a second round of compression is redundant.
+        if is_gzip && output_path.is_none() {
+            shell_println!(
+                "gzip: '{}': already gzip-compressed, not compressing again (use -o to override)",
+                input.display()
+            );
+            set_exit(1);
+            return;
+        }
+
         let compressed = crate::fs::compress::gzip(&file_data);
 
         let out = if let Some(explicit) = output_path {

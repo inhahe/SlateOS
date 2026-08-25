@@ -489,9 +489,21 @@ pub enum Hit {
     PowerMenuEntry(usize),
     /// The open power menu, but not one of its rows.
     PowerMenuPanel,
-    /// A window button on the taskbar, by index into
-    /// [`taskbar_windows`](DesktopShell::taskbar_windows).
-    TaskbarButton(usize),
+    /// A window button on the taskbar, carrying **the window it stands for**.
+    ///
+    /// The id and not the slot number. A slot is a position on a bar whose
+    /// contents change, so a hit that carried one would have to be resolved
+    /// against the window list a second time, by the code that acts on it —
+    /// and that second lookup can fail, which is a state the shell then has to
+    /// have an answer for. It had one (`None => Consumed`, with a comment
+    /// about the window closing under the click) and the answer was
+    /// unreachable: `hit_test` reads the same list in the same call, so a slot
+    /// it reports is a slot that was occupied a microsecond ago and still is.
+    /// Naming the window makes the impossible state unrepresentable instead of
+    /// merely unvisited, and it makes the hit test's own assertion mean
+    /// something — "the button drawn third belongs to the third window" rather
+    /// than "the third button is the third button".
+    TaskbarButton(WindowId),
     /// The taskbar panel, but not one of its controls.
     TaskbarPanel,
     /// The tray clock, which opens the calendar popup.
@@ -1550,9 +1562,12 @@ impl DesktopShell {
             if self.clock_rect().contains(x, y) {
                 return Hit::Clock;
             }
-            for index in 0..self.taskbar_windows().len() {
+            // The slot is resolved to a window *here*, while the list that
+            // produced the rectangle is still in hand — see
+            // [`Hit::TaskbarButton`].
+            for (index, window) in self.taskbar_windows().iter().enumerate() {
                 if self.taskbar_button_rect(index).contains(x, y) {
-                    return Hit::TaskbarButton(index);
+                    return Hit::TaskbarButton(window.id);
                 }
             }
             return Hit::TaskbarPanel;
@@ -1739,32 +1754,21 @@ impl DesktopShell {
                 ShellAction::Consumed
             }
             Hit::StartMenuPanel | Hit::PowerMenuPanel | Hit::TaskbarPanel => ShellAction::Consumed,
-            Hit::TaskbarButton(index) => {
-                match self.taskbar_windows().get(index).map(|w| w.id) {
-                    Some(id) => ShellAction::Control(ShellRequest::window(
-                        id,
-                        // The button of the window you are already looking at
-                        // minimises it — the taskbar button is a toggle, not a
-                        // second way to focus what is already focused.
-                        if self.focused_window == Some(id) {
-                            ShellControlAction::Minimize
-                        } else {
-                            // `Activate`, not `Restore`: a window minimised
-                            // while maximised has to come back maximised, and
-                            // restoring would silently drop a state the user
-                            // never asked to leave. See the compositor's
-                            // `activate_window`.
-                            ShellControlAction::Activate
-                        },
-                    )),
-                    // The button is gone from under the click — the window
-                    // closed between the frame it was drawn in and this press.
-                    // Consumed rather than passed on: the click landed on the
-                    // taskbar, and a taskbar must not leak clicks to whatever
-                    // is behind it just because a button vanished.
-                    None => ShellAction::Consumed,
-                }
-            }
+            Hit::TaskbarButton(id) => ShellAction::Control(ShellRequest::window(
+                id,
+                // The button of the window you are already looking at
+                // minimises it — the taskbar button is a toggle, not a second
+                // way to focus what is already focused.
+                if self.focused_window == Some(id) {
+                    ShellControlAction::Minimize
+                } else {
+                    // `Activate`, not `Restore`: a window minimised while
+                    // maximised has to come back maximised, and restoring
+                    // would silently drop a state the user never asked to
+                    // leave. See the compositor's `activate_window`.
+                    ShellControlAction::Activate
+                },
+            )),
             // Not the shell's pixel, so not the shell's press. It used to focus
             // the window it thought was there, which was both a guess — the
             // shell holds no window rectangles — and a change to a list the

@@ -15150,6 +15150,178 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!("  kshell::self_test 63: an option that is not understood is refused");
+    // Seven commands used to *discard* a word they did not recognise. That is
+    // the silent-guess shape in its purest form: the command runs, answers a
+    // question nobody asked -- usually a broader one, since the dropped word
+    // was almost always a filter -- and exits 0, so nothing downstream can
+    // tell. The two that matter most are asserted by their effect on the disk
+    // rather than by their message, because a message is what a *reader*
+    // sees and the disk is what a script sees.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let dir = "/tmp/kshell_optsweep";
+        Vfs::mkdir_all(Path::new(dir))?;
+        Vfs::write_file(Path::new("/tmp/kshell_optsweep/zz_full.txt"), b"content")?;
+        // A file whose name begins with `-`. Our paths allow every byte but
+        // `/` and NUL, so this is an ordinary file, and before `--` existed it
+        // could not be named on any of these command lines.
+        Vfs::write_file(Path::new("/tmp/kshell_optsweep/-empty"), b"x")?;
+
+        // find: an unimplemented predicate used to fall off the end of the
+        // `if`/`else if` chain, leaving an *unfiltered* walk that printed every
+        // file under the path and exited 0.
+        let out = capture_command("find /tmp/kshell_optsweep -mtime -1");
+        assert_output_contains(
+            "find refuses a predicate it cannot evaluate",
+            &out,
+            b"unknown predicate",
+        );
+        assert_eq!(last_exit(), 1, "find: an unknown predicate is an error");
+
+        // find -size: `.unwrap_or(0)` turned this into "size greater than 0",
+        // which matches nearly every file there is.
+        let out = capture_command("find /tmp/kshell_optsweep -size +abc");
+        assert_output_contains("find refuses a size it cannot read", &out, b"invalid -size");
+        assert_eq!(last_exit(), 1, "find: an unreadable size is an error");
+
+        // ...and a size it *can* read still works, so the rung above is not
+        // passing because -size stopped working altogether.
+        let out = capture_command("find /tmp/kshell_optsweep -size +1c");
+        assert_output_contains("a valid -size still selects", &out, b"zz_full.txt");
+        assert_eq!(last_exit(), 0, "find: a valid size is not an error");
+
+        // A third bare word had nowhere to go and was dropped.
+        let out = capture_command("find /tmp/kshell_optsweep zz_full.txt zz_extra");
+        assert_output_contains(
+            "find refuses an operand it has no slot for",
+            &out,
+            b"paths must precede expression",
+        );
+        assert_eq!(last_exit(), 1, "find: a stray operand is an error");
+
+        // `--` makes the file called `-empty` nameable. Without it the word is
+        // the empty-file predicate, so this is a case where the *same* line
+        // means two different things and only `--` can say which.
+        let out = capture_command("find /tmp/kshell_optsweep -- -empty");
+        assert_output_contains("`--` names a file that begins with a dash", &out, b"-empty");
+        assert_eq!(last_exit(), 0, "find: `--` is not an error");
+
+        // locate: the catch-all silently dropped anything starting with `-`.
+        let out = capture_command("locate --zznosuch zzpat");
+        assert_output_contains(
+            "locate refuses an unknown option",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "locate: an unknown option is an error");
+
+        // A missing value is the same defect in a different place: `ext_filter`
+        // stayed `None`, which is not "no extension asked for" but "every
+        // extension", so the search silently widened.
+        let out = capture_command("locate --ext");
+        assert_output_contains(
+            "locate refuses a missing value",
+            &out,
+            b"requires an extension",
+        );
+        assert_eq!(last_exit(), 1, "locate: a missing value is an error");
+
+        // dedup: `--min-size` fell back to its default, and dedup's other half
+        // is `--delete`.
+        let out = capture_command("dedup --min-size zzz");
+        assert_output_contains("dedup refuses a size it cannot read", &out, b"--min-size");
+        assert_eq!(last_exit(), 1, "dedup: an unreadable size is an error");
+
+        let out = capture_command("dedup --zznosuch");
+        assert_output_contains(
+            "dedup refuses an unknown option",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "dedup: an unknown option is an error");
+
+        // backup: each flag was tested for independently, so `--dry-runn` was
+        // not a dry run *and* not an error -- the backup ran for real.
+        let out = capture_command(
+            "backup create /tmp/kshell_optsweep /tmp/kshell_optsweep_bk --dry-runn",
+        );
+        assert_output_contains(
+            "backup refuses a misspelled --dry-run rather than backing up",
+            &out,
+            b"unrecognized argument",
+        );
+        assert_eq!(last_exit(), 1, "backup: an unknown flag is an error");
+        assert!(
+            Vfs::readdir(Path::new("/tmp/kshell_optsweep_bk")).is_err(),
+            "and the backup it was told not to perform did not happen"
+        );
+
+        // undelete scan: every filter was optional-on-failure, so a mistake
+        // listed *more* than was asked for.
+        let out = capture_command("undelete scan --zznosuch");
+        assert_output_contains(
+            "undelete refuses an unknown option",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "undelete: an unknown option is an error");
+
+        let out = capture_command("undelete scan --limit abc");
+        assert_output_contains(
+            "undelete refuses a limit it cannot read",
+            &out,
+            b"not a number",
+        );
+        assert_eq!(last_exit(), 1, "undelete: an unreadable limit is an error");
+
+        // batch: the worst of the seven. The flag scan did not match the typo,
+        // and every operand list separately dropped `-`-leading words, so the
+        // typo vanished between the two and the files were deleted for real by
+        // a command asked only to describe itself.
+        let out = capture_command("batch delete --dry-runn /tmp/kshell_optsweep/zz_full.txt");
+        assert_output_contains(
+            "batch refuses a misspelled --dry-run",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "batch: an unknown option is an error");
+        assert!(
+            Vfs::read_file(Path::new("/tmp/kshell_optsweep/zz_full.txt")).is_ok(),
+            "and the file it was told not to delete is still there"
+        );
+
+        // mapfile: an option it does not implement used to fall through into
+        // the *array name* slot.
+        let out = capture_command("mapfile -u 0 ZZOPTARR");
+        assert_output_contains(
+            "mapfile refuses an option it does not implement",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(
+            last_exit(),
+            2,
+            "mapfile: a builtin reports a usage error as 2"
+        );
+
+        // oci run: an unknown option was skipped but its *value* was not, so
+        // the value became the container's command. Refused before the image
+        // is even loaded, which is why a nonexistent image dir is fine here.
+        let out = capture_command("oci run /zz_no_such_image --menory 512m");
+        assert_output_contains(
+            "oci refuses an unknown option",
+            &out,
+            b"Unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "oci: an unknown option is an error");
+
+        let _ = Vfs::remove(Path::new("/tmp/kshell_optsweep/zz_full.txt"));
+        let _ = Vfs::remove(Path::new("/tmp/kshell_optsweep/-empty"));
+        let _ = Vfs::remove(Path::new(dir));
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -17664,17 +17836,78 @@ fn cmd_find(args: &str) {
     let mut user_max_depth: Option<u32> = None;
     let mut empty_filter = false;
 
+    // Set by `--`. A path is allowed to begin with `-` -- our filesystem
+    // permits every byte but `/` and NUL in a name -- so without this there is
+    // no way to hand `find` a directory literally called `-empty`.
+    let mut flags_done = false;
+
     let mut words = args.split_whitespace().peekable();
     while let Some(w) = words.next() {
+        if !flags_done && w == "--" {
+            flags_done = true;
+            continue;
+        }
+        // A lone `-` is a filename, not a truncated predicate.
+        if flags_done || w == "-" || !w.starts_with('-') {
+            if search_path.is_empty() {
+                search_path = w;
+            } else if name_pattern.is_none() {
+                // Legacy: bare pattern without -name.
+                name_pattern = Some(w);
+            } else {
+                // A third bare word has nowhere to go. It used to be dropped,
+                // so `find . foo bar` searched for `foo` and reported success
+                // while `bar` -- possibly the argument the user actually cared
+                // about -- was never considered.
+                shell_println!("find: paths must precede expression: `{}'", w);
+                set_exit(1);
+                return;
+            }
+            continue;
+        }
         if w == "-name" {
-            name_pattern = words.next();
+            let Some(p) = words.next() else {
+                shell_println!("find: missing argument to `-name'");
+                set_exit(1);
+                return;
+            };
+            name_pattern = Some(p);
         } else if w == "-type" {
-            if let Some(t) = words.next() {
-                type_filter = t.chars().next();
+            let Some(t) = words.next() else {
+                shell_println!("find: missing argument to `-type'");
+                set_exit(1);
+                return;
+            };
+            // `t.chars().next()` used to take the first character of whatever
+            // arrived, so `-type zzz` became `-type z`, matched nothing, and
+            // exited 0 — a search that answered "no such files" to a question
+            // it had not understood. There are three types; anything else is a
+            // mistake, and a mistake in a filter must not be answered with an
+            // empty result set.
+            match t {
+                "f" | "d" | "l" => type_filter = t.chars().next(),
+                _ => {
+                    shell_println!(
+                        "find: unknown argument to -type: {} (expected f, d or l)",
+                        t
+                    );
+                    set_exit(1);
+                    return;
+                }
             }
         } else if w == "-size" {
-            if let Some(s) = words.next() {
-                size_filter = Some(parse_size_predicate(s));
+            let Some(s) = words.next() else {
+                shell_println!("find: missing argument to `-size'");
+                set_exit(1);
+                return;
+            };
+            match parse_size_predicate(s) {
+                Some(spec) => size_filter = Some(spec),
+                None => {
+                    shell_println!("find: invalid -size argument `{}'", s);
+                    set_exit(1);
+                    return;
+                }
             }
         } else if w == "-maxdepth" {
             // `.unwrap_or(16)` used to turn `-maxdepth abc` into a silent
@@ -17697,11 +17930,17 @@ fn cmd_find(args: &str) {
             }
         } else if w == "-empty" {
             empty_filter = true;
-        } else if !w.starts_with('-') && search_path.is_empty() {
-            search_path = w;
-        } else if !w.starts_with('-') && name_pattern.is_none() {
-            // Legacy: bare pattern without -name.
-            name_pattern = Some(w);
+        } else {
+            // Everything reaching here begins with `-` and is not a predicate
+            // we implement. The chain used to end without an `else`, so
+            // `find . -mtime -1` and `find . -nmae x` alike ran an *unfiltered*
+            // walk and printed every file under `.` with a zero exit -- a
+            // wrong answer wearing the costume of a right one. A predicate we
+            // cannot evaluate cannot be dropped from the query; it can only be
+            // refused.
+            shell_println!("find: unknown predicate `{}'", w);
+            set_exit(1);
+            return;
         }
     }
 
@@ -17799,8 +18038,27 @@ struct FindTally {
     unreadable: usize,
 }
 
-/// Parse a `-size` argument like `+1M`, `-512k`, `100c`.
-fn parse_size_predicate(s: &str) -> (i64, char) {
+/// Parse a `-size` argument like `+1M`, `-512k`, `100c`, into
+/// `(bytes, one of '+' / '-' / '=')`.
+///
+/// Returns `None` for anything it cannot read as a size, which is the entire
+/// point of the function's shape. It used to end
+/// `num_str.parse::<i64>().unwrap_or(0) * multiplier`, so `find . -size +abc`
+/// quietly became "size greater than 0" -- which matches almost every file on
+/// the disk, printed as a successful answer to a question nobody asked. The
+/// caller now refuses instead.
+///
+/// This is the same bug, in the same function-sized neighbourhood, as the
+/// `-maxdepth` `.unwrap_or(16)` fixed a few lines above: that fix was applied
+/// to the *site* rather than to the *category*, so its twin three lines down
+/// survived it. A guessed number is worse than a refusal precisely because it
+/// is indistinguishable from a real one at the exit status.
+///
+/// Deliberate divergence from GNU, noted so it is not mistaken for an
+/// oversight: a bare `-size 100` here means 100 *bytes*, where GNU means 100
+/// 512-byte blocks. See the `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS`
+/// entry in `known-issues.md`.
+fn parse_size_predicate(s: &str) -> Option<(i64, char)> {
     let (sign, rest) = if let Some(stripped) = s.strip_prefix('+') {
         ('+', stripped)
     } else if let Some(stripped) = s.strip_prefix('-') {
@@ -17810,20 +18068,25 @@ fn parse_size_predicate(s: &str) -> (i64, char) {
     };
 
     // Parse suffix.
-    let (num_str, multiplier) = if rest.ends_with('G') || rest.ends_with('g') {
-        (&rest[..rest.len() - 1], 1024i64 * 1024 * 1024)
-    } else if rest.ends_with('M') || rest.ends_with('m') {
-        (&rest[..rest.len() - 1], 1024i64 * 1024)
-    } else if rest.ends_with('k') || rest.ends_with('K') {
-        (&rest[..rest.len() - 1], 1024i64)
-    } else if let Some(stripped) = rest.strip_suffix('c') {
-        (stripped, 1i64)
-    } else {
-        (rest, 1i64) // default: bytes
-    };
+    let (num_str, multiplier) =
+        if let Some(stripped) = rest.strip_suffix('G').or_else(|| rest.strip_suffix('g')) {
+            (stripped, 1024i64 * 1024 * 1024)
+        } else if let Some(stripped) = rest.strip_suffix('M').or_else(|| rest.strip_suffix('m')) {
+            (stripped, 1024i64 * 1024)
+        } else if let Some(stripped) = rest.strip_suffix('k').or_else(|| rest.strip_suffix('K')) {
+            (stripped, 1024i64)
+        } else if let Some(stripped) = rest.strip_suffix('c') {
+            (stripped, 1i64)
+        } else {
+            (rest, 1i64) // default: bytes
+        };
 
-    let value = num_str.parse::<i64>().unwrap_or(0) * multiplier;
-    (value, sign)
+    // A negative count is not a smaller size, it is a different question; and
+    // `parse` would accept `-5` here only because the leading `-` was already
+    // eaten as the comparison sign, so `--5` would slip through. Reject both.
+    let count = num_str.parse::<u64>().ok()?;
+    let value = i64::try_from(count).ok()?.checked_mul(multiplier)?;
+    Some((value, sign))
 }
 
 /// `locate` — fast file search using the filesystem index.
@@ -17857,32 +18120,84 @@ fn cmd_locate(args: &str) {
     let mut size_max: Option<u64> = None;
     let mut path_mode = false;
     let mut pattern: Option<&str> = None;
+    let mut flags_done = false;
     let mut i = 0;
 
     while i < parts.len() {
-        match parts.get(i).copied().unwrap_or("") {
+        let word = parts.get(i).copied().unwrap_or("");
+        if !flags_done && word == "--" {
+            flags_done = true;
+            i = i.saturating_add(1);
+            continue;
+        }
+        if flags_done || word == "-" || !word.starts_with('-') {
+            if pattern.is_some() {
+                // The second pattern used to overwrite the first in silence,
+                // so `locate foo bar` searched only for `bar` and answered as
+                // if `foo` had never been asked about.
+                shell_println!("locate: only one pattern may be given (got `{}')", word);
+                set_exit(1);
+                return;
+            }
+            pattern = Some(word);
+            i = i.saturating_add(1);
+            continue;
+        }
+        match word {
             "--update" | "-u" => do_update = true,
             "--stats" | "-s" => do_stats = true,
             "--path" | "-p" => path_mode = true,
             "--ext" | "-e" => {
                 i = i.saturating_add(1);
-                ext_filter = parts.get(i).copied();
+                // A missing argument used to leave `ext_filter` as `None`,
+                // which is not "no extension given" but "match every
+                // extension" -- the search silently widened to everything.
+                let Some(e) = parts.get(i).copied() else {
+                    shell_println!("locate: option `{}' requires an extension", word);
+                    set_exit(1);
+                    return;
+                };
+                ext_filter = Some(e);
             }
             "--size" => {
                 i = i.saturating_add(1);
-                if let Some(range_str) = parts.get(i).copied() {
-                    if let Some(dash) = range_str.find('-') {
-                        let min_s = &range_str[..dash];
-                        let max_s = &range_str[dash.saturating_add(1)..];
-                        size_min = parse_size_value(min_s);
-                        size_max = parse_size_value(max_s);
+                let Some(range_str) = parts.get(i).copied() else {
+                    shell_println!("locate: option `--size' requires a MIN-MAX range");
+                    set_exit(1);
+                    return;
+                };
+                // Every failure below used to fall through to "no size filter
+                // at all", so `locate --size abc x` quietly answered a
+                // *different, broader* question than the one it was asked and
+                // exited 0. A filter that cannot be built is not an absent
+                // filter.
+                let Some(dash) = range_str.find('-') else {
+                    shell_println!(
+                        "locate: --size: `{}' is not a MIN-MAX range (expected e.g. 1k-1M)",
+                        range_str
+                    );
+                    set_exit(1);
+                    return;
+                };
+                // An *empty* side is a deliberate open end -- `1k-` is "at
+                // least 1k", `-1M` is "at most 1M" -- so only a side that was
+                // written and could not be read is an error.
+                let min_s = range_str.get(..dash).unwrap_or("");
+                let max_s = range_str.get(dash.saturating_add(1)..).unwrap_or("");
+                for side in [min_s, max_s] {
+                    if !side.is_empty() && parse_size_value(side).is_none() {
+                        shell_println!("locate: --size: `{}' is not a size", side);
+                        set_exit(1);
+                        return;
                     }
                 }
+                size_min = parse_size_value(min_s);
+                size_max = parse_size_value(max_s);
             }
-            s => {
-                if !s.starts_with('-') {
-                    pattern = Some(s);
-                }
+            other => {
+                shell_println!("locate: unrecognized option `{}'", other);
+                set_exit(1);
+                return;
             }
         }
         i = i.saturating_add(1);
@@ -18069,27 +18384,61 @@ fn cmd_dedup(args: &str) {
     let mut min_size: u64 = 1; // Skip empty files by default.
     let mut max_size: u64 = 64 * 1024 * 1024; // 64 MiB.
     let mut target_dir: Option<&str> = None;
+    let mut flags_done = false;
     let mut i = 0;
 
     while i < parts.len() {
-        match parts.get(i).copied().unwrap_or("") {
+        let word = parts.get(i).copied().unwrap_or("");
+        if !flags_done && word == "--" {
+            flags_done = true;
+            i = i.saturating_add(1);
+            continue;
+        }
+        if flags_done || word == "-" || !word.starts_with('-') {
+            if target_dir.is_some() {
+                shell_println!("dedup: only one directory may be given (got `{}')", word);
+                set_exit(1);
+                return;
+            }
+            target_dir = Some(word);
+            i = i.saturating_add(1);
+            continue;
+        }
+        match word {
             "--dry-run" | "-n" => dry_run = true,
             "--delete" => {
                 delete_mode = true;
                 dry_run = false;
             }
             "--stats" | "-s" => stats_only = true,
+            // `--min-size`/`--max-size` used to fall back to the *default*
+            // bound when the argument was missing or unreadable. On a command
+            // whose other half is `--delete`, silently widening the size
+            // window means silently enlarging the set of files considered for
+            // removal: `dedup --delete --min-size 1O /` (letter O for zero)
+            // would have deduplicated from one byte upwards while the user
+            // believed they had excluded everything small.
             "--min-size" => {
                 i = i.saturating_add(1);
-                if let Some(v) = parts.get(i).copied() {
-                    min_size = parse_size_value(v).unwrap_or(1);
-                }
+                min_size = match parts.get(i).copied().map(parse_size_value) {
+                    Some(Some(v)) => v,
+                    _ => {
+                        shell_println!("dedup: --min-size: expected a size");
+                        set_exit(1);
+                        return;
+                    }
+                };
             }
             "--max-size" => {
                 i = i.saturating_add(1);
-                if let Some(v) = parts.get(i).copied() {
-                    max_size = parse_size_value(v).unwrap_or(64 * 1024 * 1024);
-                }
+                max_size = match parts.get(i).copied().map(parse_size_value) {
+                    Some(Some(v)) => v,
+                    _ => {
+                        shell_println!("dedup: --max-size: expected a size");
+                        set_exit(1);
+                        return;
+                    }
+                };
             }
             "--help" | "-h" => {
                 shell_println!(
@@ -18106,10 +18455,13 @@ fn cmd_dedup(args: &str) {
                 // which is precisely why the *status* has to tell them apart.
                 return;
             }
-            s => {
-                if !s.starts_with('-') {
-                    target_dir = Some(s);
-                }
+            other => {
+                shell_println!("dedup: unrecognized option `{}'", other);
+                shell_println!(
+                    "Usage: dedup [--dry-run|-n] [--delete] [--stats|-s] [--min-size N] [--max-size N] [DIR]"
+                );
+                set_exit(1);
+                return;
             }
         }
         i = i.saturating_add(1);
@@ -23393,6 +23745,75 @@ fn cmd_dirsync(args: &str) {
     }
 }
 
+/// The trailing flags of a `backup` subcommand, after its positional
+/// arguments.
+struct BackupCmdFlags {
+    /// `--incremental` / `-i` was given.
+    incremental: bool,
+    /// `--no-verify` was *not* given.
+    verify: bool,
+    /// `--dry-run` / `-n` was given.
+    dry_run: bool,
+    /// `--exclude` / `-x` prefixes, in the order given.
+    exclude: Vec<PathBuf>,
+}
+
+/// Parse the trailing flags of a `backup` subcommand.
+///
+/// Returns `None` — having printed the reason and set a non-zero status — for
+/// any word that is not a flag this subcommand accepts, and for `--exclude`
+/// with no prefix after it.
+///
+/// Each flag used to be tested for independently with `contains` / `any`, so a
+/// word that was none of the three or four being looked for simply did not
+/// exist as far as the command was concerned. For `--no-verfy` that is merely
+/// untidy: the typo fails *safe*, because the backup verifies anyway. But
+/// `--dry-runn` fails *unsafe* — the user asks to be shown what would happen,
+/// the misspelling is discarded, and the backup is performed for real. A flag
+/// that decides whether the command writes to the disk is the last thing that
+/// may be dropped for being mistyped.
+///
+/// `--exclude` with a missing prefix has the same shape: the exclusion the
+/// user asked for silently did not happen, and the files they meant to keep
+/// out of the backup went into it.
+fn backup_parse_flags(
+    sub: &str,
+    flags: &[&str],
+    allow_incremental: bool,
+    allow_exclude: bool,
+) -> Option<BackupCmdFlags> {
+    let mut out = BackupCmdFlags {
+        incremental: false,
+        verify: true,
+        dry_run: false,
+        exclude: Vec::new(),
+    };
+    let mut i = 0usize;
+    while let Some(&w) = flags.get(i) {
+        match w {
+            "--incremental" | "-i" if allow_incremental => out.incremental = true,
+            "--no-verify" => out.verify = false,
+            "--dry-run" | "-n" => out.dry_run = true,
+            "--exclude" | "-x" if allow_exclude => {
+                i = i.saturating_add(1);
+                let Some(&prefix) = flags.get(i) else {
+                    shell_println!("backup {}: `{}' requires a path prefix", sub, w);
+                    set_exit(1);
+                    return None;
+                };
+                out.exclude.push(PathBuf::from(prefix));
+            }
+            _ => {
+                shell_println!("backup {}: unrecognized argument `{}'", sub, w);
+                set_exit(1);
+                return None;
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    Some(out)
+}
+
 /// `backup` — incremental backup engine.
 fn cmd_backup(args: &str) {
     use crate::fs::backup;
@@ -23411,27 +23832,19 @@ fn cmd_backup(args: &str) {
             }
             let src = parts[1];
             let dst = parts[2];
-            let flags = &parts[3..];
-            let mut exclude = Vec::new();
-            let mut i = 0;
-            while i < flags.len() {
-                if flags[i] == "--exclude" || flags[i] == "-x" {
-                    if i + 1 < flags.len() {
-                        exclude.push(PathBuf::from(flags[i + 1]));
-                        i += 1;
-                    }
-                }
-                i += 1;
-            }
+            let Some(flags) = backup_parse_flags(sub, parts.get(3..).unwrap_or(&[]), true, true)
+            else {
+                return;
+            };
             let opts = backup::BackupOptions {
-                mode: if flags.iter().any(|f| *f == "--incremental" || *f == "-i") {
+                mode: if flags.incremental {
                     backup::BackupMode::Incremental
                 } else {
                     backup::BackupMode::Full
                 },
-                verify: !flags.contains(&"--no-verify"),
-                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
-                exclude,
+                verify: flags.verify,
+                dry_run: flags.dry_run,
+                exclude: flags.exclude,
                 ..backup::BackupOptions::default()
             };
             if opts.dry_run {
@@ -23466,11 +23879,14 @@ fn cmd_backup(args: &str) {
             }
             let src = parts[1];
             let dst = parts[2];
-            let flags = &parts[3..];
+            let Some(flags) = backup_parse_flags(sub, parts.get(3..).unwrap_or(&[]), false, false)
+            else {
+                return;
+            };
             let opts = backup::BackupOptions {
                 mode: backup::BackupMode::Incremental,
-                verify: !flags.contains(&"--no-verify"),
-                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
+                verify: flags.verify,
+                dry_run: flags.dry_run,
                 ..backup::BackupOptions::default()
             };
             if opts.dry_run {
@@ -23503,13 +23919,19 @@ fn cmd_backup(args: &str) {
             }
             let backup_root = parts[1];
             let dst = parts[2];
-            let manifest_id = parts
-                .get(3)
-                .and_then(|s| if s.starts_with('-') { None } else { Some(*s) });
-            let flags = &parts[3..];
+            // The optional manifest id sits between the positionals and the
+            // flags, so it has to be taken out before the flag list is judged
+            // — otherwise it would be refused as an unrecognized argument.
+            let manifest_id = parts.get(3).copied().filter(|s| !s.starts_with('-'));
+            let first_flag = if manifest_id.is_some() { 4 } else { 3 };
+            let Some(flags) =
+                backup_parse_flags(sub, parts.get(first_flag..).unwrap_or(&[]), false, false)
+            else {
+                return;
+            };
             let opts = backup::RestoreOptions {
-                verify: !flags.contains(&"--no-verify"),
-                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
+                verify: flags.verify,
+                dry_run: flags.dry_run,
                 ..backup::RestoreOptions::default()
             };
             if opts.dry_run {
@@ -23628,37 +24050,65 @@ fn cmd_undelete(args: &str) {
     match sub {
         "scan" | "list" | "ls" => {
             let mut filter = undelete::ScanFilter::new();
+            let mut flags_done = false;
             let mut i = 1;
-            while i < parts.len() {
-                match parts[i] {
+            // Every arm below used to shrug off a missing or unparseable
+            // argument, and the catch-all dropped unrecognised options
+            // outright. All three failures widen the scan in silence: the
+            // filter the user asked for is simply not applied, and a listing
+            // of *more* than was asked for looks exactly like a correct one.
+            while let Some(&word) = parts.get(i) {
+                if !flags_done && word == "--" {
+                    flags_done = true;
+                    i = i.saturating_add(1);
+                    continue;
+                }
+                if flags_done || word == "-" || !word.starts_with('-') {
+                    // First positional arg is a path prefix shortcut.
+                    filter = filter.with_prefix(word);
+                    i = i.saturating_add(1);
+                    continue;
+                }
+                let mut take_value = |what: &str| -> Option<&str> {
+                    i = i.saturating_add(1);
+                    let v = parts.get(i).copied();
+                    if v.is_none() {
+                        shell_println!("undelete {}: `{}' requires {}", sub, word, what);
+                        set_exit(1);
+                    }
+                    v
+                };
+                match word {
                     "--prefix" | "-p" => {
-                        if i + 1 < parts.len() {
-                            filter = filter.with_prefix(parts[i + 1]);
-                            i += 1;
-                        }
+                        let Some(v) = take_value("a path prefix") else {
+                            return;
+                        };
+                        filter = filter.with_prefix(v);
                     }
                     "--name" | "-n" => {
-                        if i + 1 < parts.len() {
-                            filter = filter.with_name(parts[i + 1]);
-                            i += 1;
-                        }
+                        let Some(v) = take_value("a name") else {
+                            return;
+                        };
+                        filter = filter.with_name(v);
                     }
                     "--limit" | "-l" => {
-                        if i + 1 < parts.len() {
-                            if let Ok(n) = parts[i + 1].parse::<usize>() {
-                                filter = filter.with_limit(n);
-                            }
-                            i += 1;
-                        }
+                        let Some(v) = take_value("a count") else {
+                            return;
+                        };
+                        let Ok(n) = v.parse::<usize>() else {
+                            shell_println!("undelete {}: --limit: `{}' is not a number", sub, v);
+                            set_exit(1);
+                            return;
+                        };
+                        filter = filter.with_limit(n);
                     }
                     other => {
-                        // First positional arg is a path prefix shortcut.
-                        if !other.starts_with('-') {
-                            filter = filter.with_prefix(other);
-                        }
+                        shell_println!("undelete {}: unrecognized option `{}'", sub, other);
+                        set_exit(1);
+                        return;
                     }
                 }
-                i += 1;
+                i = i.saturating_add(1);
             }
             match undelete::scan(&filter) {
                 Ok(results) => {
@@ -24032,23 +24482,78 @@ fn cmd_archive(args: &str) {
     }
 }
 
-/// `batch` — bulk file operations with pattern matching.
-fn cmd_batch(args: &str) {
+/// Split a `batch` command line into its options and its operands.
+///
+/// Returns `None` — having printed the reason and set a non-zero status — for
+/// any word that begins with `-` and is not an option `batch` accepts.
+///
+/// This replaces a scan that looked for each flag independently across the
+/// whole line while every subcommand separately dropped `-`-leading words from
+/// its operand list with `.filter(|f| !f.starts_with('-'))`. The two halves
+/// together made a misspelled flag *disappear*: `batch delete --dry-runn a b`
+/// was not a dry run, because the typo did not match, and the typo was not an
+/// operand either, so `a` and `b` were deleted for real by a command the user
+/// had asked only to describe itself. Nothing on screen said otherwise.
+///
+/// The filter was also why a file called `-x` could not be deleted, moved or
+/// copied: our filesystem permits every byte but `/` and NUL in a name, so
+/// such files exist, and `--` is how you name one.
+fn batch_split_args<'a>(
+    parts: &[&'a str],
+) -> Option<(crate::fs::batch::BatchOptions, Vec<&'a str>)> {
     use crate::fs::batch;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    let dry_run = parts.iter().any(|f| *f == "--dry-run" || *f == "-n");
-    let conflict = if parts.contains(&"--overwrite") {
+    let mut dry_run = false;
+    let mut overwrite = false;
+    let mut rename = false;
+    let mut operands: Vec<&'a str> = Vec::new();
+    let mut flags_done = false;
+    for &word in parts {
+        if !flags_done && word == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || word == "-" || !word.starts_with('-') {
+            operands.push(word);
+            continue;
+        }
+        match word {
+            "--dry-run" | "-n" => dry_run = true,
+            "--overwrite" => overwrite = true,
+            "--rename" => rename = true,
+            other => {
+                shell_println!("batch: unrecognized option `{}'", other);
+                set_exit(1);
+                return None;
+            }
+        }
+    }
+    // `--overwrite` beat `--rename` regardless of order before, and still
+    // does; changing which wins is a separate question from refusing typos.
+    let on_conflict = if overwrite {
         batch::ConflictStrategy::Overwrite
-    } else if parts.contains(&"--rename") {
+    } else if rename {
         batch::ConflictStrategy::Rename
     } else {
         batch::ConflictStrategy::Skip
     };
-    let opts = batch::BatchOptions {
-        on_conflict: conflict,
-        dry_run,
+    Some((
+        batch::BatchOptions {
+            on_conflict,
+            dry_run,
+        },
+        operands,
+    ))
+}
+
+/// `batch` — bulk file operations with pattern matching.
+fn cmd_batch(args: &str) {
+    use crate::fs::batch;
+    let all: Vec<&str> = args.split_whitespace().collect();
+    let Some((opts, parts)) = batch_split_args(&all) else {
+        return;
     };
+    let sub = parts.first().copied().unwrap_or("");
+    let dry_run = opts.dry_run;
     match sub {
         "rename" | "ren" => {
             if parts.len() < 4 {
@@ -24084,11 +24589,7 @@ fn cmd_batch(args: &str) {
                 return;
             }
             let dest = resolve_path(parts[1]);
-            let resolved: Vec<PathBuf> = parts[2..]
-                .iter()
-                .filter(|f| !f.starts_with('-'))
-                .map(resolve_path)
-                .collect();
+            let resolved: Vec<PathBuf> = parts[2..].iter().map(resolve_path).collect();
             if dry_run {
                 shell_println!("(dry run)");
             }
@@ -24112,11 +24613,7 @@ fn cmd_batch(args: &str) {
                 return;
             }
             let dest = resolve_path(parts[1]);
-            let resolved: Vec<PathBuf> = parts[2..]
-                .iter()
-                .filter(|f| !f.starts_with('-'))
-                .map(resolve_path)
-                .collect();
+            let resolved: Vec<PathBuf> = parts[2..].iter().map(resolve_path).collect();
             if dry_run {
                 shell_println!("(dry run)");
             }
@@ -24134,11 +24631,7 @@ fn cmd_batch(args: &str) {
                 set_exit(1);
                 return;
             }
-            let resolved: Vec<PathBuf> = parts[1..]
-                .iter()
-                .filter(|f| !f.starts_with('-'))
-                .map(resolve_path)
-                .collect();
+            let resolved: Vec<PathBuf> = parts[1..].iter().map(resolve_path).collect();
             if dry_run {
                 shell_println!("(dry run)");
             }
@@ -99808,6 +100301,66 @@ fn to_lower(s: &str) -> String {
     out
 }
 
+/// Split a `grep` argument list into its option words and its operands.
+///
+/// Shared by both halves of `grep` because they are contractually required to
+/// read an argument list the same way — the file half and the pipe half
+/// disagreeing about the same argument is a bug this command has already had
+/// twice (`-l`, then `-Z`), and the predicate below used to be *written out
+/// twice*, once here and once as the pipe half's delegation pre-pass. Two
+/// copies of a rule are two rules.
+///
+/// Three kinds of word:
+///
+/// * `--` ends the options. Everything after it is an operand however it is
+///   spelled, which is the only way to name a file whose name begins with `-`
+///   — and our paths allow every byte but `/` and NUL, so such a file is
+///   perfectly legal and was previously unnameable.
+/// * A word beginning with `--` that is not `--` is a **long option**, and
+///   `grep` here has none. It is an error. It used to fall through to the
+///   operand list, which meant `grep --color pat file` searched for the
+///   literal text `--color` in files named `pat` and `file`, reported however
+///   many lines contained it, and exited 0 or 1 accordingly. Nothing in that
+///   run said the option had not been understood — a wrong answer delivered as
+///   a right one, which is the whole family this is part of.
+/// * `-` alone is an operand (the conventional name for standard input);
+///   anything else beginning with `-` is a bundle of short flags.
+///
+/// `Err` carries the offending long option so the caller can name it.
+fn grep_split_args(args: &str) -> Result<(Vec<&str>, Vec<&str>), &str> {
+    let mut opts: Vec<&str> = Vec::new();
+    let mut operands: Vec<&str> = Vec::new();
+    let mut flags_done = false;
+
+    for word in args.split_whitespace() {
+        if flags_done || word == "-" || !word.starts_with('-') {
+            operands.push(word);
+            continue;
+        }
+        if word == "--" {
+            flags_done = true;
+            continue;
+        }
+        if word.starts_with("--") {
+            return Err(word);
+        }
+        opts.push(word);
+    }
+
+    Ok((opts, operands))
+}
+
+/// Report a long option `grep` does not have, in GNU's wording and with
+/// `grep`'s own usage status.
+///
+/// 2, not 1: within `grep`, 1 is the reserved answer "searched, found nothing",
+/// so a usage error returning 1 would tell `grep --color pat f || echo absent`
+/// that the pattern is absent from a file it never opened.
+fn grep_reject_long_option(word: &str) {
+    shell_println!("grep: unrecognized option '{}'", word);
+    set_exit(2);
+}
+
 /// `grep [-ivclnwrI] PATTERN TARGET...` — search files, or trees with `-r`.
 ///
 /// Exits with GNU's three-valued status: **0** matched, **1** searched
@@ -99818,35 +100371,36 @@ fn to_lower(s: &str) -> String {
 /// as missing *text*.
 fn cmd_grep(args: &str) {
     let mut flags = GrepFlags::new();
-    let mut words: alloc::vec::Vec<&str> = Vec::new();
+    let (opt_words, words) = match grep_split_args(args) {
+        Ok(v) => v,
+        Err(w) => {
+            grep_reject_long_option(w);
+            return;
+        }
+    };
 
-    // Parse flags and positional arguments.
-    for word in args.split_whitespace() {
-        if word.starts_with('-') && word.len() > 1 && !word.starts_with("--") {
-            for ch in word[1..].chars() {
-                match ch {
-                    'i' => flags.case_insensitive = true,
-                    'I' => flags.case_insensitive = false, // explicit case-sensitive
-                    'v' => flags.invert = true,
-                    'c' => flags.count_only = true,
-                    'n' => flags.show_line_numbers = true,
-                    'l' => flags.files_only = true,
-                    'w' => flags.whole_word = true,
-                    'r' | 'R' => flags.recursive = true,
-                    _ => {
-                        // 2, not the shell's usual 1: within `grep`, 1 is the
-                        // reserved, meaningful answer "searched, found
-                        // nothing". A usage error that returned 1 would tell
-                        // `grep -Z pat f || echo absent` that the pattern is
-                        // absent from a file it never opened.
-                        shell_println!("grep: unknown flag '-{}'", ch);
-                        set_exit(2);
-                        return;
-                    }
+    for word in &opt_words {
+        for ch in word.get(1..).unwrap_or("").chars() {
+            match ch {
+                'i' => flags.case_insensitive = true,
+                'I' => flags.case_insensitive = false, // explicit case-sensitive
+                'v' => flags.invert = true,
+                'c' => flags.count_only = true,
+                'n' => flags.show_line_numbers = true,
+                'l' => flags.files_only = true,
+                'w' => flags.whole_word = true,
+                'r' | 'R' => flags.recursive = true,
+                _ => {
+                    // 2, not the shell's usual 1: within `grep`, 1 is the
+                    // reserved, meaningful answer "searched, found
+                    // nothing". A usage error that returned 1 would tell
+                    // `grep -Z pat f || echo absent` that the pattern is
+                    // absent from a file it never opened.
+                    shell_println!("grep: unknown flag '-{}'", ch);
+                    set_exit(2);
+                    return;
                 }
             }
-        } else {
-            words.push(word);
         }
     }
 
@@ -107379,8 +107933,12 @@ impl<'a> OciRunFlags<'a> {
     ///
     /// `#[inline(never)]` so the stack split this type exists for survives a
     /// change of optimisation level.
+    ///
+    /// Returns `None` when the line could not be parsed, having said why. The
+    /// caller must abandon the run: see the unknown-option arm below for why a
+    /// half-understood container command line is not safe to act on.
     #[inline(never)]
-    fn parse(parts: &[&'a str]) -> Self {
+    fn parse(parts: &[&'a str]) -> Option<Self> {
         use crate::oci;
 
         let mut name: Option<&str> = None;
@@ -107797,9 +108355,31 @@ impl<'a> OciRunFlags<'a> {
                     }
                 }
                 tok if tok.starts_with('-') => {
-                    // Unknown option: skip it (and don't consume a value,
-                    // since we don't know its arity).
-                    i = i.saturating_add(1);
+                    // An unknown option used to be skipped, on the reasoning
+                    // that we cannot know its arity and so cannot know whether
+                    // to skip its value too. That reasoning is right about the
+                    // arity and wrong about the conclusion: skipping is not
+                    // the neutral act it looks like.
+                    //
+                    // Every flag in this parser exists to *narrow* what the
+                    // container may do -- `--read-only`, `--memory`, `--user`,
+                    // `--tmpfs`, `--cap-drop` when it lands. Dropping one for
+                    // being misspelled runs the container with more authority
+                    // than the operator asked for, and prints a container ID
+                    // as if the request had been honoured in full. Worse, an
+                    // unknown option's *value* is not skipped, so it lands in
+                    // the first positional slot and silently becomes the CMD
+                    // override: `oci run img --menory 512m` runs `512m` as the
+                    // container's command instead of the image's entrypoint.
+                    //
+                    // Not knowing the arity is exactly why we must stop: we
+                    // cannot even say how much of the rest of the line we have
+                    // misread.
+                    shell_println!("[oci] Unrecognized option '{}'", tok);
+                    shell_println!(
+                        "[oci] (put the container's own arguments after the image, not before)"
+                    );
+                    return None;
                 }
                 _ => {
                     // First positional token after the image dir: this and
@@ -107812,7 +108392,7 @@ impl<'a> OciRunFlags<'a> {
                 }
             }
         }
-        Self {
+        Some(Self {
             name,
             net_ip,
             net_gw,
@@ -107836,7 +108416,7 @@ impl<'a> OciRunFlags<'a> {
             labels,
             label_file_entries,
             cmd_override,
-        }
+        })
     }
 }
 
@@ -108506,7 +109086,10 @@ fn oci_run(parts: &[&str]) {
     // Parse the optional flags.  They come back from a separate function, rather
     // than being filled by a loop here, to keep the parser's stack slots out of
     // this frame -- see [`OciRunFlags`].
-    let f = OciRunFlags::parse(parts);
+    let Some(f) = OciRunFlags::parse(parts) else {
+        set_exit(1);
+        return;
+    };
 
     // Step 1: Load OCI image metadata. `dir` may be an on-disk OCI
     // layout directory or a named-store reference (`name:tag`);
@@ -109887,60 +110470,61 @@ fn cmd_grep_input(args: &str, input: &str) {
     // therefore break `cat x | grep -r pat /dir`, which is a perfectly good file
     // search that merely has a pipe attached — so the delegation has to be the
     // first question asked, not the last.
-    let positional_count = args
-        .split_whitespace()
-        .filter(|w| !(w.starts_with('-') && w.len() > 1 && !w.starts_with("--")))
-        .count();
-    if positional_count >= 2 {
+    let (opt_words, positional) = match grep_split_args(args) {
+        Ok(v) => v,
+        Err(w) => {
+            // Reported here rather than after the delegation: a long option is
+            // wrong for *both* halves, so there is no half to defer to, and
+            // `cmd_grep` would only reach the same conclusion a moment later.
+            grep_reject_long_option(w);
+            return;
+        }
+    };
+    if positional.len() >= 2 {
         cmd_grep(args);
         return;
     }
 
     // Parse flags and find the pattern.
     let mut flags = GrepFlags::new();
-    let mut positional: alloc::vec::Vec<&str> = Vec::new();
 
-    for word in args.split_whitespace() {
-        if word.starts_with('-') && word.len() > 1 && !word.starts_with("--") {
-            for ch in word[1..].chars() {
-                match ch {
-                    'i' => flags.case_insensitive = true,
-                    'I' => flags.case_insensitive = false,
-                    'v' => flags.invert = true,
-                    'c' => flags.count_only = true,
-                    'n' => flags.show_line_numbers = true,
-                    'w' => flags.whole_word = true,
-                    // `-l` used to be silently dropped here while the file half
-                    // honoured it, so `grep -l p f` named the file and
-                    // `cat f | grep -l p` printed the matching lines instead.
-                    // On a pipe the "file" is stdin, which GNU spells
-                    // `(standard input)`.
-                    'l' => flags.files_only = true,
-                    'r' | 'R' => {
-                        // Named, rather than lumped in with a typo, because it
-                        // is a real flag being refused for a real reason: there
-                        // is no tree to walk on the right of a pipe. (With a
-                        // directory operand this never runs — the delegation
-                        // above already sent it to the file form.)
-                        shell_println!("grep: -{}: no directory to search on piped input", ch);
-                        set_exit(2);
-                        return;
-                    }
-                    _ => {
-                        // The file form rejects an unknown flag; this one used
-                        // to drop it on the floor. So `grep -Z pat f` failed
-                        // while `cat f | grep -Z pat` quietly searched with -Z
-                        // ignored -- the two halves disagreeing about the same
-                        // argument, which the contract below forbids. A typo'd
-                        // flag must not silently change what was searched for.
-                        shell_println!("grep: unknown flag '-{}'", ch);
-                        set_exit(2);
-                        return;
-                    }
+    for word in &opt_words {
+        for ch in word.get(1..).unwrap_or("").chars() {
+            match ch {
+                'i' => flags.case_insensitive = true,
+                'I' => flags.case_insensitive = false,
+                'v' => flags.invert = true,
+                'c' => flags.count_only = true,
+                'n' => flags.show_line_numbers = true,
+                'w' => flags.whole_word = true,
+                // `-l` used to be silently dropped here while the file half
+                // honoured it, so `grep -l p f` named the file and
+                // `cat f | grep -l p` printed the matching lines instead.
+                // On a pipe the "file" is stdin, which GNU spells
+                // `(standard input)`.
+                'l' => flags.files_only = true,
+                'r' | 'R' => {
+                    // Named, rather than lumped in with a typo, because it
+                    // is a real flag being refused for a real reason: there
+                    // is no tree to walk on the right of a pipe. (With a
+                    // directory operand this never runs — the delegation
+                    // above already sent it to the file form.)
+                    shell_println!("grep: -{}: no directory to search on piped input", ch);
+                    set_exit(2);
+                    return;
+                }
+                _ => {
+                    // The file form rejects an unknown flag; this one used
+                    // to drop it on the floor. So `grep -Z pat f` failed
+                    // while `cat f | grep -Z pat` quietly searched with -Z
+                    // ignored -- the two halves disagreeing about the same
+                    // argument, which the contract below forbids. A typo'd
+                    // flag must not silently change what was searched for.
+                    shell_println!("grep: unknown flag '-{}'", ch);
+                    set_exit(2);
+                    return;
                 }
             }
-        } else {
-            positional.push(word);
         }
     }
 
@@ -110537,6 +111121,7 @@ fn parse_cut_args(args: &str) -> Result<CutSpec, CutParseError> {
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut only_delimited = false;
     let mut files: Vec<String> = Vec::new();
+    let mut flags_done = false;
 
     let mut i = 0usize;
     while let Some(word) = words.get(i) {
@@ -110544,9 +111129,20 @@ fn parse_cut_args(args: &str) -> Result<CutSpec, CutParseError> {
         let w = word.as_str();
 
         // A lone `-` is the conventional name for standard input, not an
-        // option. Everything else without a leading `-` is a file.
-        if w == "-" || !w.starts_with('-') {
+        // option. Everything else without a leading `-` is a file — and after
+        // `--`, so is everything full stop.
+        if flags_done || w == "-" || !w.starts_with('-') {
             files.push(String::from(w));
+            continue;
+        }
+
+        // `--` ends the options. Our paths allow every byte but `/` and NUL, so
+        // a file called `-weird.txt` is legal, and without this it could not be
+        // named at all: `cut -f1 -weird.txt` reads the name as flags, and
+        // `cut -f1 -- -weird.txt` refused the `--`. A refusal rather than a
+        // wrong answer, but a reachable file two commands could not open.
+        if w == "--" {
+            flags_done = true;
             continue;
         }
 
@@ -111854,6 +112450,7 @@ fn parse_fold_args(args: &str) -> Result<FoldSpec, FoldParseError> {
     let mut spaces = false;
     let mut bytes = false;
     let mut files: Vec<String> = Vec::new();
+    let mut flags_done = false;
 
     let mut i = 0usize;
     while let Some(word) = words.get(i) {
@@ -111861,9 +112458,16 @@ fn parse_fold_args(args: &str) -> Result<FoldSpec, FoldParseError> {
         let w = word.as_str();
 
         // A lone `-` is the conventional name for standard input, not an
-        // option. Everything else without a leading `-` is a file.
-        if w == "-" || !w.starts_with('-') {
+        // option. Everything else without a leading `-` is a file — and after
+        // `--`, so is everything full stop. See `parse_cut_args` for why a file
+        // whose name begins with `-` is a real case here rather than a curio.
+        if flags_done || w == "-" || !w.starts_with('-') {
             files.push(String::from(w));
+            continue;
+        }
+
+        if w == "--" {
+            flags_done = true;
             continue;
         }
 
@@ -113013,24 +113617,64 @@ fn cmd_read(args: &str) {
     }
 }
 
+/// Strip `mapfile`'s leading options off `args`, returning
+/// `(strip_newlines, remainder)`.
+///
+/// Returns `None` after reporting an option `mapfile` does not implement.
+///
+/// The scan this replaces stopped at the first word it did not recognise and
+/// let it fall through into the *array name* slot, so `mapfile -u 0 ARR` read
+/// a file called `0 ARR` into an array called `-u`. That is an error rather
+/// than a silent wrong answer, but it is an error that names neither the
+/// option nor the mistake, and it would quietly become a wrong answer the day
+/// a file called `0 ARR` existed. bash's `mapfile` has `-d -n -O -s -u -C -c`
+/// besides `-t`; we implement only `-t`, and saying so plainly is cheaper than
+/// being wrong in an interesting way.
+///
+/// The remainder is returned as a *slice of the original string*, not as
+/// words, because `cmd_mapfile` deliberately treats everything after the array
+/// name as one file path — spaces included.
+fn mapfile_split_flags(args: &str) -> Option<(bool, &str)> {
+    let mut strip_newlines = false;
+    let mut rest = args.trim_start();
+    while !rest.is_empty() {
+        let (word, tail) = match rest.find([' ', '\t']) {
+            Some(i) => (
+                rest.get(..i).unwrap_or(""),
+                rest.get(i..).unwrap_or("").trim_start(),
+            ),
+            None => (rest, ""),
+        };
+        // An array literally named `-t` is not reachable otherwise.
+        if word == "--" {
+            rest = tail;
+            break;
+        }
+        // A lone `-` is a name, not a truncated option.
+        if word == "-" || !word.starts_with('-') {
+            break;
+        }
+        if word == "-t" {
+            strip_newlines = true;
+            rest = tail;
+            continue;
+        }
+        shell_println!("mapfile: unrecognized option `{}'", word);
+        set_exit(2);
+        return None;
+    }
+    Some((strip_newlines, rest))
+}
+
 /// `mapfile [-t] ARRAY [FILE]` — read lines from file into an array.
 ///
 /// Reads all lines from FILE (or stdin if invoked via pipe) and stores
 /// each line as an element of ARRAY.  With `-t`, trailing newlines are
 /// stripped from each element.  Also available as `readarray`.
 fn cmd_mapfile(args: &str) {
-    let mut strip_newlines = false;
-    let mut rest = args;
-
-    // Parse flags.
-    while rest.starts_with('-') {
-        if rest.starts_with("-t ") || rest.starts_with("-t\t") || rest == "-t" {
-            strip_newlines = true;
-            rest = rest.get(3..).unwrap_or("").trim_start();
-        } else {
-            break;
-        }
-    }
+    let Some((strip_newlines, rest)) = mapfile_split_flags(args) else {
+        return;
+    };
 
     // Parse array name.
     let (var_name, file_path) = if let Some(sp) = rest.find(' ') {
@@ -113066,17 +113710,9 @@ fn cmd_mapfile(args: &str) {
 
 /// `mapfile` with piped input: `cmd | mapfile [-t] ARRAY`
 fn cmd_mapfile_input(args: &str, input: &str) {
-    let mut strip_newlines = false;
-    let mut rest = args;
-
-    while rest.starts_with('-') {
-        if rest.starts_with("-t ") || rest.starts_with("-t\t") || rest == "-t" {
-            strip_newlines = true;
-            rest = rest.get(3..).unwrap_or("").trim_start();
-        } else {
-            break;
-        }
-    }
+    let Some((strip_newlines, rest)) = mapfile_split_flags(args) else {
+        return;
+    };
 
     let mut words = rest.split_whitespace();
     let var_name = words.next().unwrap_or("MAPFILE");
@@ -120759,11 +121395,22 @@ fn cmd_comm(args: &str) {
     let mut show2 = true;
     let mut show3 = true;
     let mut files: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    let mut flags_done = false;
 
     for word in args.split_whitespace() {
-        if word.starts_with('-') && word.len() > 1 && word.as_bytes()[1] != b'/' {
+        // `--` ends the options, which is how a file whose name begins with `-`
+        // is named. This replaces a narrower rule that used to sit in the test
+        // below — `word.as_bytes()[1] != b'/'`, so `-/x` was taken as a file —
+        // which was the same idea reached for ad hoc and covering one spelling
+        // of it. With a real end-of-options marker, `-/x` goes back to being
+        // what GNU calls it: `invalid option -- '/'`.
+        if word == "--" && !flags_done {
+            flags_done = true;
+            continue;
+        }
+        if !flags_done && word.starts_with('-') && word.len() > 1 {
             // Parse flag characters.
-            for ch in word[1..].chars() {
+            for ch in word.get(1..).unwrap_or("").chars() {
                 match ch {
                     '1' => show1 = false,
                     '2' => show2 = false,
@@ -123360,11 +124007,28 @@ fn cmd_zip(args: &str) {
     let mut recursive = true; // Default: recurse into dirs (like Info-ZIP).
     let mut positional: Vec<&str> = Vec::new();
 
+    // Options are recognised wherever they appear, and `--` ends them.
+    //
+    // This used to be `positional.is_empty()` — options only before the archive
+    // name — which had two problems pulling the same way. `zip a.zip -zz f`
+    // silently filed `-zz` as a *file to compress*, so a typo'd option became a
+    // missing-file error about something the caller never named, and the option
+    // it was meant to be went unmentioned. And a file genuinely called
+    // `-weird.txt` could only be reached by accident, in the trailing position,
+    // with no way to say which reading was meant. Info-ZIP takes options
+    // anywhere (`zip -r a.zip d -x '*.o'`), so position-independence is also
+    // the faithful reading.
+    let mut flags_done = false;
     for token in args.split_whitespace() {
+        if flags_done {
+            positional.push(token);
+            continue;
+        }
         match token {
+            "--" => flags_done = true,
             "-0" => store_only = true,
             "-r" => recursive = true,
-            _ if token.starts_with('-') && positional.is_empty() => {
+            _ if token.starts_with('-') && token.len() > 1 => {
                 for ch in token.chars().skip(1) {
                     match ch {
                         '0' => store_only = true,

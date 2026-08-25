@@ -1384,12 +1384,19 @@ fn remove_quotes(s: &str) -> String {
 /// and an action of `print` that prints an empty record. For `fold` and
 /// `base64` it is the ordinary case of a file name with a space in it.
 ///
+/// `cut` is here for a sharper reason: its delimiter can *be* a space, and
+/// `cut -d' ' -f1` is how you say so. Dequoted, that is `-d  -f1`, whose words
+/// are `-d` and `-f1` — so the delimiter became the string `-f1` and the
+/// command failed with `the delimiter must be a single character: '-f1'`,
+/// naming an argument the user never wrote as a delimiter. Splitting on spaces
+/// is the single most common thing anyone asks `cut` to do.
+///
 /// The list is the migration path, not a special case: a command moves onto
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
 /// See `known-issues.md` → `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`.
 fn command_parses_own_quotes(cmd: &str) -> bool {
-    matches!(cmd, "trap" | "awk" | "fold" | "base64")
+    matches!(cmd, "trap" | "awk" | "fold" | "base64" | "cut")
 }
 
 /// Expand a `${...}` brace expression.
@@ -6890,6 +6897,11 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // writes them back unchanged. The *program* is still `&str` -- it came
         // from the command line, which is -- but the data never is.
         "awk" => cmd_awk_input(args, input),
+        // `cut -f` is a delimiter split and a field copy, both byte
+        // operations. `cut -c` counts characters and so decodes -- but per
+        // *line*, and a line it cannot decode is reported rather than allowed
+        // to empty the file.
+        "cut" => cmd_cut_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
@@ -6901,14 +6913,13 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // cope with it. Converting one more of these is a matter of moving its
         // arm up into the block above.
         //
-        // `grep`, `cut` and `tr` are `char`-oriented (character classes, field
-        // indices, display width); `sed` is a real text interpreter;
-        // `xargs` and `column` re-parse into words and measure display width.
-        // `mapfile` is blocked on something else rather than on itself — it
-        // stores its lines as `String`s in the shell environment, which is
-        // still a `String` map, so converting it here would only move the
-        // decode one call deeper.
-        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "xargs" | "column" | "sed" => {
+        // `grep` and `tr` are `char`-oriented (character classes, code-point
+        // ranges); `sed` is a real text interpreter; `xargs` and `column`
+        // re-parse into words and measure display width. `mapfile` is blocked
+        // on something else rather than on itself — it stores its lines as
+        // `String`s in the shell environment, which is still a `String` map,
+        // so converting it here would only move the decode one call deeper.
+        "grep" | "mapfile" | "readarray" | "tr" | "xargs" | "column" | "sed" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -6916,7 +6927,6 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
             match cmd {
                 "grep" => cmd_grep_input(args, text),
                 "mapfile" | "readarray" => cmd_mapfile_input(args, text),
-                "cut" => cmd_cut_input(args, text),
                 "tr" => cmd_tr_input(args, text),
                 "xargs" => cmd_xargs_input(args, text),
                 "column" => cmd_column_input(args, text),
@@ -13016,6 +13026,140 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 "expression recognition must not depend on the record"
             );
         }
+    }
+
+    serial_println!(
+        "  kshell::self_test 43: cut -f is byte-clean, and -c says what it cannot count"
+    );
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        // The bug this rung exists for. The file read was
+        // `from_utf8(&data).unwrap_or("")`, so a file `cut` could not decode
+        // became an *empty* one: no output, exit 0, indistinguishable from a
+        // file that really was empty. A field cut needs no decoding at all.
+        let bin = "/tmp/zz_cut_bin";
+        crate::fs::Vfs::write_file(bin, b"\xff\xfe:ok\n\xc3\x28:two\n")?;
+
+        let out = plain(&alloc::format!("cut -d: -f2 {bin}"));
+        assert_eq!(
+            out.as_slice(),
+            b"ok\ntwo\n",
+            "a field cut of an undecodable file returns the fields"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // The other half of the same record: the bytes that are not text come
+        // back exactly as they were read.
+        let out = plain(&alloc::format!("cut -d: -f1 {bin}"));
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\xfe\n\xc3\x28\n",
+            "and the undecodable field is reproduced byte for byte"
+        );
+
+        // The pipe half. `cut` used to be narrowed through `shell_bytes_as_str`
+        // before it saw the pipe at all, so this was a diagnostic and exit 1 --
+        // honest, but a refusal of something it can now simply do.
+        let out = piped("cut -d: -f2", b"\xff:ok\n");
+        assert_eq!(out.as_slice(), b"ok\n", "the pipe is bytes too");
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // `\r` is data. `str::lines` ate a `\r` before the `\n`, so the last
+        // field of a CRLF file silently lost its last byte -- the same fault
+        // `fold` and `awk` were fixed for.
+        let out = piped("cut -d: -f2", b"a:b\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"b\r\n",
+            "a CR before the newline stays in the field"
+        );
+
+        // A line with no delimiter is one whole field and is written unchanged,
+        // undecodable or not.
+        let out = piped("cut -d: -f1", b"\xff\xfe\n");
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\xfe\n",
+            "an undelimited line passes through as bytes"
+        );
+
+        // `-c` counts characters, which is why `-b` is refused. It must still
+        // count *characters* and not bytes.
+        let out = piped("cut -c1-2", "\u{e9}x\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            "\u{e9}x\n".as_bytes(),
+            "-c counts characters, not the bytes they take"
+        );
+
+        // And a line it cannot decode is reported and skipped -- per line, so
+        // the rest of the input is still cut. This is the one place `cut` still
+        // needs its input to be text, and the only honest answer is to say so.
+        let out = piped("cut -c1-2", b"ok\n\xff\xfe\n");
+        assert_output_contains("the good line is still cut", &out, b"ok\n");
+        assert_output_contains(
+            "and the bad one is named, with its line number",
+            &out,
+            b"line 2: not valid text",
+        );
+        assert_eq!(last_exit(), 1, "and the status says something went wrong");
+
+        // A multi-byte delimiter splits on its encoding, which is the same set
+        // of positions a character split would find -- UTF-8 is
+        // self-synchronising, so the byte match cannot land mid-character.
+        let out = piped("cut -d\u{e9} -f2", "a\u{e9}b\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            b"b\n",
+            "a multi-byte delimiter splits where the character does"
+        );
+
+        // A space delimiter is the most common thing anyone asks cut for, and
+        // it is only expressible with a quote. Dequoted at the dispatch
+        // boundary, `-d' ' -f1` became the words `-d` and `-f1`, so the
+        // delimiter was taken to be the string `-f1` and the command failed
+        // naming an argument the user never wrote as a delimiter.
+        let out = piped("cut -d' ' -f2", b"a b c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"b\n",
+            "a quoted space delimiter is a space"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // Both spellings of the argument, since they take different paths
+        // through cut_opt_value: attached to the flag, and as the next word.
+        let out = piped("cut -d ' ' -f2,3", b"a b c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"b c\n",
+            "the detached spelling means the same, and the delimiter rejoins the fields"
+        );
+
+        // The quoting must not swallow the rest of the line: a quoted operand
+        // is still an operand.
+        let spaced = "/tmp/zz cut spaced";
+        crate::fs::Vfs::write_file(spaced, b"x:y\n")?;
+        let out = plain(&alloc::format!("cut -d: -f2 '{spaced}'"));
+        assert_eq!(
+            out.as_slice(),
+            b"y\n",
+            "a file name with spaces in it is one operand"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+        let _ = crate::fs::Vfs::remove(spaced);
+
+        let _ = crate::fs::Vfs::remove(bin);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -107942,24 +108086,59 @@ fn cut_selected(ranges: &[(usize, usize)], n: usize) -> bool {
     ranges.iter().any(|&(s, e)| n >= s && n <= e)
 }
 
-/// Write the selected part of every line in `text`.
+/// Write the selected part of every line in `data`, returning the worst status.
 ///
 /// Selected input is written in the order it is *read*, and exactly once —
 /// `cut -f3,1` writes field 1 then field 3, and `cut -f1,1` writes it once.
 /// That is POSIX and GNU behaviour. The old loop walked the list as written,
 /// so it both reordered and duplicated; the difference only shows up when a
 /// list is out of order, which is exactly when it is hardest to notice.
-fn cut_process(text: &str, spec: &CutSpec) {
-    for line in text.lines() {
+///
+/// **The input is bytes.** It used to be `&str`, reached through
+/// `from_utf8(&data).unwrap_or("")`, so a file `cut` could not decode became an
+/// *empty* one and the command exited 0 — output indistinguishable from a file
+/// that really was empty. `-f` needs no decoding at all: a delimiter split and
+/// a field copy are byte operations, so a `.tar` or a latin-1 log now cuts
+/// correctly rather than vanishing.
+///
+/// `-c` is the one mode that genuinely needs characters, because it counts
+/// them; `-b` is refused by [`parse_cut_args`] precisely so that `-c` can mean
+/// what its name says. A line it cannot decode is *reported and skipped*, per
+/// line, rather than being allowed to empty the whole file: the rest of the
+/// file is still cut, and the status says something went wrong.
+///
+/// `\r` is data, not part of the terminator — see [`text_records`]. `str::lines`
+/// swallowed it, so the last field of a CRLF file silently lost a byte.
+///
+/// `name` is the operand this data came from, for the per-line diagnostic.
+fn cut_process(data: &[u8], spec: &CutSpec, name: &str) -> u8 {
+    let mut worst: u8 = 0;
+    // `-d` is a `char`; its UTF-8 encoding is what the byte split matches.
+    let mut delim_buf = [0u8; 4];
+    let delim = spec.delim.encode_utf8(&mut delim_buf).as_bytes();
+
+    for (idx0, line) in text_records(data).into_iter().enumerate() {
         match spec.mode {
             CutMode::Chars => {
-                let out: String = line
+                let Ok(text) = core::str::from_utf8(line) else {
+                    // Counting characters in bytes that are not characters is
+                    // not a thing that can be done. Saying so beats answering.
+                    shell_println!(
+                        "cut: {}: line {}: not valid text, and -c counts characters",
+                        name,
+                        idx0.saturating_add(1)
+                    );
+                    worst = worst.max(1);
+                    continue;
+                };
+                let out: String = text
                     .chars()
                     .enumerate()
                     .filter(|&(idx, _)| cut_selected(&spec.ranges, idx.saturating_add(1)))
                     .map(|(_, c)| c)
                     .collect();
-                shell_println!("{}", out);
+                shell_write_bytes(out.as_bytes());
+                shell_write_bytes(b"\n");
             }
             CutMode::Fields => {
                 // A line with no delimiter is one whole field, and is written
@@ -107967,27 +108146,29 @@ fn cut_process(text: &str, spec: &CutSpec) {
                 // The old code reached the same result for field 1 by accident
                 // and the wrong one for every other field, writing a blank
                 // line where the whole line belonged.
-                if !line.contains(spec.delim) {
+                if !awk_bytes_contain(line, delim) {
                     if !spec.only_delimited {
-                        shell_println!("{}", line);
+                        shell_write_bytes(line);
+                        shell_write_bytes(b"\n");
                     }
                     continue;
                 }
                 let mut first = true;
-                for (idx, part) in line.split(spec.delim).enumerate() {
+                for (idx, part) in split_bytes_on(line, delim).into_iter().enumerate() {
                     if !cut_selected(&spec.ranges, idx.saturating_add(1)) {
                         continue;
                     }
                     if !first {
-                        shell_print!("{}", spec.delim);
+                        shell_write_bytes(delim);
                     }
                     first = false;
-                    shell_print!("{}", part);
+                    shell_write_bytes(part);
                 }
-                shell_println!();
+                shell_write_bytes(b"\n");
             }
         }
     }
+    worst
 }
 
 /// Run a parsed `cut` over its operands, with `stdin` standing in for `-`.
@@ -107995,10 +108176,10 @@ fn cut_process(text: &str, spec: &CutSpec) {
 /// `stdin` is `None` when there is no pipe feeding this command, which is a
 /// different thing from an empty pipe: the first has nothing to read and
 /// should say so, the second has read everything there was.
-fn cut_run(spec: &CutSpec, stdin: Option<&str>) {
+fn cut_run(spec: &CutSpec, stdin: Option<&[u8]>) {
     if spec.files.is_empty() {
         match stdin {
-            Some(text) => cut_process(text, spec),
+            Some(data) => set_exit(cut_process(data, spec, "-")),
             None => {
                 shell_println!("cut: no file operand and no input to read");
                 set_exit(1);
@@ -108011,7 +108192,7 @@ fn cut_run(spec: &CutSpec, stdin: Option<&str>) {
     for path in &spec.files {
         if path == "-" {
             match stdin {
-                Some(text) => cut_process(text, spec),
+                Some(data) => worst = worst.max(cut_process(data, spec, "-")),
                 None => {
                     shell_println!("cut: -: no input to read");
                     worst = worst.max(1);
@@ -108021,10 +108202,8 @@ fn cut_run(spec: &CutSpec, stdin: Option<&str>) {
         }
         let resolved = resolve_path(path);
         match crate::fs::Vfs::read_file(&resolved) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                cut_process(text, spec);
-            }
+            // Straight from the VFS, undecoded.
+            Ok(data) => worst = worst.max(cut_process(&data, spec, path)),
             Err(e) => {
                 // Every operand is attempted, and the worst status is reported
                 // — a later readable file must not erase an earlier missing
@@ -108043,6 +108222,11 @@ fn cut_run(spec: &CutSpec, stdin: Option<&str>) {
 /// - `-f LIST` / `-c LIST`: comma-separated `N`, `N-M`, `N-`, `-M`
 /// - `-s`: skip lines with no delimiter, fields only
 /// - `-`: read the pipe
+///
+/// `-f` is byte-clean: it neither decodes nor validates its input, so it cuts a
+/// binary or non-UTF-8 file correctly. `-c` counts characters and so must
+/// decode; a line it cannot decode is reported and skipped, and the status
+/// becomes 1. See [`cut_process`].
 fn cmd_cut(args: &str) {
     match parse_cut_args(args) {
         Ok(spec) => cut_run(&spec, None),
@@ -108061,7 +108245,7 @@ fn cmd_cut(args: &str) {
 /// A `-` operand names the pipe, so `cat a.txt | cut -f1 - b.txt` reads both,
 /// in that order. Without that, the file-wins rule (`bb9787783`) would have
 /// turned `-` into a request to open a file literally called `-`.
-fn cmd_cut_input(args: &str, input: &str) {
+fn cmd_cut_input(args: &str, input: &[u8]) {
     match parse_cut_args(args) {
         Ok(spec) => cut_run(&spec, Some(input)),
         Err(e) => {
@@ -122451,14 +122635,17 @@ fn awk_field_sep(fs: &str) -> Result<AwkFs, AwkParseError> {
     Ok(AwkFs::Literal(resolved))
 }
 
-/// Split input into awk records: `\n`-terminated, with the terminator removed.
+/// Split input into `\n`-terminated records, with the terminator removed.
 ///
 /// Not `str::lines`, for the reason recorded against `fold`: `lines` strips a
-/// `\r` that precedes the `\n`, which awk treats as ordinary data — so
-/// `$NF` of a CRLF file silently lost its last character. A final record with
-/// no trailing newline still counts, as it does in gawk, but a trailing
-/// newline does not invent an extra empty one.
-fn awk_records(data: &[u8]) -> alloc::vec::Vec<&[u8]> {
+/// `\r` that precedes the `\n`, which every one of these commands treats as
+/// ordinary data — so `awk`'s `$NF` and `cut`'s last field of a CRLF file both
+/// silently lost their last character. A final record with no trailing newline
+/// still counts, as it does in gawk and GNU `cut`, but a trailing newline does
+/// not invent an extra empty one.
+///
+/// Shared by `awk` and `cut` so the two cannot disagree about what a line is.
+fn text_records(data: &[u8]) -> alloc::vec::Vec<&[u8]> {
     if data.is_empty() {
         return alloc::vec::Vec::new();
     }
@@ -122471,7 +122658,7 @@ fn awk_records(data: &[u8]) -> alloc::vec::Vec<&[u8]> {
 /// `nr` is threaded rather than reset per file because awk's `NR` counts
 /// records over the whole run; `FNR` (per-file) is not implemented.
 fn awk_feed(data: &[u8], rules: &[AwkRule], fs: &AwkFs, nr: &mut usize) {
-    for record in awk_records(data) {
+    for record in text_records(data) {
         *nr = nr.saturating_add(1);
         let fields = awk_split_fields(record, fs);
         let nf = fields.len();
@@ -122799,9 +122986,15 @@ fn awk_bytes_contain(hay: &[u8], needle: &[u8]) -> bool {
 
 /// Split a record into fields on a literal byte sequence, keeping empty fields.
 ///
-/// `sep` is never empty — [`awk_field_sep`] refuses a zero-length separator,
-/// which would otherwise make this loop forever.
-fn awk_split_literal<'a>(record: &'a [u8], sep: &[u8]) -> alloc::vec::Vec<&'a [u8]> {
+/// An empty `sep` yields the whole record as one field rather than looping
+/// forever; `awk_field_sep` refuses a zero-length `-F` before it gets here, and
+/// `cut`'s delimiter is a `char`, whose UTF-8 encoding is at least one byte.
+///
+/// Shared by `awk`'s `-F` and `cut`'s `-d`. Splitting on a multi-byte UTF-8
+/// separator is safe without decoding because UTF-8 is self-synchronising: no
+/// encoded character is a substring of another at a non-character boundary, so
+/// a byte-wise match is always a character-wise one.
+fn split_bytes_on<'a>(record: &'a [u8], sep: &[u8]) -> alloc::vec::Vec<&'a [u8]> {
     let mut out: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::new();
     if sep.is_empty() {
         out.push(record);
@@ -122842,7 +123035,7 @@ fn awk_split_fields<'a>(record: &'a [u8], fs: &AwkFs) -> alloc::vec::Vec<&'a [u8
             .split(|&b| b == b' ' || b == b'\t' || b == b'\n')
             .filter(|f| !f.is_empty())
             .collect(),
-        AwkFs::Literal(sep) => awk_split_literal(record, sep),
+        AwkFs::Literal(sep) => split_bytes_on(record, sep),
     }
 }
 

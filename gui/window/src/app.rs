@@ -265,6 +265,17 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             if id != window {
                 return EventResponse::Continue;
             }
+            // A geometry change invalidates the last frame no matter what the
+            // application makes of it: the frame on screen was drawn for the
+            // old size, and every application would otherwise have to remember
+            // to say `Redraw` here. That is 137 chances to forget, and the
+            // symptom of forgetting — a window that shows a stale frame
+            // stretched or letterboxed until something else happens to be
+            // clicked — is exactly the kind nobody attributes to the resize.
+            // So the loop takes the decision, as it does the batch boundary.
+            if matches!(event, Event::Resize { .. } | Event::ScaleChanged { .. }) {
+                dirty = true;
+            }
             match app.on_event(event) {
                 Response::Idle => EventResponse::Continue,
                 Response::Redraw => {
@@ -645,6 +656,39 @@ mod tests {
             drawn.borrow().last(),
             Some(&(1024.0, 768.0)),
             "the frame answering the resize was drawn at the old size"
+        );
+    }
+
+    /// The resize redraw is the loop's decision, not the application's.
+    ///
+    /// An application that answers `Idle` to everything is not saying "the
+    /// window still looks right at the new size" — it is saying "nothing in my
+    /// model changed", which is true and beside the point. Left to each app
+    /// this is 137 chances to forget, and forgetting shows a stale frame at the
+    /// wrong size until some later event happens to redraw.
+    #[test]
+    fn a_resize_redraws_even_an_app_that_says_it_is_idle() {
+        let mut app = Recorder::new(Response::Idle);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        let drawn = Rc::clone(&app.drawn);
+
+        desktop.borrow_mut().script.push_back(vec![InputEvent::new(
+            window,
+            // Deliberately not `Recorder`'s own 640x480: a "new" size equal to
+            // the old one is a resize that needs no frame, so the assertion
+            // would hold whether or not the rule existed.
+            Event::Resize {
+                width: 320,
+                height: 200,
+            },
+        )]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(
+            drawn.borrow().last(),
+            Some(&(320.0, 200.0)),
+            "an idle verdict suppressed the frame the resize itself required"
         );
     }
 

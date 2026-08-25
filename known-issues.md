@@ -77758,5 +77758,5 @@ palette so each defect names every test that catches it.
 
 `gui/desktop/src/calendar.rs` is now 65 of 120 tests never-asked, down from 76 of
 114. The swept corpus stands at **2949 tests, 2314 unproved -- 21.5 % proved, 0
-dangling, 207 single-prover**; the figure recorded above after module 85 was
+dangling, 204 single-prover**; the figure recorded above after module 85 was
 21.0 %.

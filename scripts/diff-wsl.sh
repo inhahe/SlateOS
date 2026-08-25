@@ -86,7 +86,7 @@
 # | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared. Single-binary harnesses only |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
 # | `DIFF_NO_REF`    | (unset) | do not look for a reference; the harness finds its own |
-# | `DIFF_NO_BINDIR` | (unset) | do not build the `PATH` directories; the harness makes its own |
+# | `DIFF_NO_BINDIR` | (unset) | do not build the `PATH` directories; the harness makes its own. See below — this is almost never what a harness wants |
 #
 # Afterwards it has set:
 #
@@ -109,7 +109,31 @@
 #
 # `OURS=/usr/bin/<prog>` overrides the build with the reference itself, which
 # is how a harness is checked for still being able to tell the two apart: it
-# should then report every xfail as an XPASS and nothing else.
+# should then report every xfail as an XPASS and nothing else. For a *family*
+# harness `OURS` names the directory instead — `/usr/bin` — since there is no
+# single subject for it to name.
+#
+# ## `DIFF_NO_BINDIR` is for two situations, and neither is "I have a family"
+#
+# Three harnesses set it and then rebuilt this file's multi-binary `$bindir`
+# by hand, name for name (`interleave-diff.sh`, `digest-diff.sh`,
+# `write-error-diff.sh`, all converted 2026-08-25). Every one of the three had
+# drifted from the copy here in the same direction: it took `OURS` as a
+# directory without checking it *is* one, so a mistyped `OURS` skipped every
+# name in silence rather than saying so. Two copies of one judgement is one
+# copy that is wrong, and the wrong one is the one nobody rereads.
+#
+# The two situations the knob is actually for:
+#
+# * **The subject has no same-named counterpart to symlink beside.**
+#   `extfloat-diff.sh`: its subject is a `--example`, and its reference is a C
+#   program it compiles itself.
+# * **The reference is not known yet when this file runs.** `ls-diff.sh` builds
+#   GNU coreutils 9.5 from source, because the 9.4 WSL ships lays out columns
+#   differently; the symlinks cannot be made until that build has finished.
+#
+# Anything else — including "my harness compares a family" — wants `DIFF_BINS`
+# with more than one name in it and no `DIFF_NO_BINDIR` at all.
 
 if [ -z "${DIFF_PROG:-}" ]; then
   echo "diff-wsl.sh: DIFF_PROG is not set" >&2

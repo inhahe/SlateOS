@@ -36,7 +36,7 @@ use super::sys::{
     CardPath, CardSource, EBUSY, ENODEV, ENOENT, Errno, KmsSys, MAX_CARDS, Mapped, OutArray,
 };
 use super::uapi::{
-    self, ModeCardRes, ModeCreateDumb, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2,
+    self, ModeCardRes, ModeCreateDumb, ModeCrtc, ModeCrtcPageFlip, ModeDestroyDumb, ModeFbCmd2,
     ModeGetConnector, ModeGetEncoder, ModeMapDumb, ModeModeinfo,
 };
 use super::{
@@ -108,6 +108,17 @@ struct CardState {
     fbs: Vec<(u32, u32, u32, u32, u32)>,
     /// Every page flip, as `(crtc_id, fb_id)`.
     flips: Vec<(u32, u32)>,
+    /// Every accepted `SETCRTC` that enabled a CRTC, as
+    /// `(crtc_id, connector_id, fb_id, hdisplay, vdisplay)`.
+    mode_sets: Vec<(u32, u32, u32, u32, u32)>,
+    /// The mode currently programmed on each CRTC, as
+    /// `(crtc_id, hdisplay, vdisplay)`.
+    ///
+    /// A CRTC absent from this list has no mode, and [`uapi::PAGE_FLIP`] on it
+    /// is refused — which is what makes the mode-set load-bearing here rather
+    /// than decorative. Before the kernel became strict, a fake that accepted
+    /// any flip would have passed just as happily with no `SETCRTC` at all.
+    modes: Vec<(u32, u32, u32)>,
     /// Handles passed to `DESTROY_DUMB`.
     destroyed: Vec<u32>,
     /// Ids passed to `RMFB`.
@@ -198,6 +209,24 @@ fn fill_u32s(buf: &mut [u8], values: &[u32]) {
         slot.copy_from_slice(&v.to_le_bytes());
     }
 }
+
+/// Read `n` `u32`s the caller placed in the out-of-line array at `ptr_at`.
+///
+/// The mirror of [`fill_u32s`]: `SETCRTC` is the one ioctl here whose array
+/// travels *into* the kernel rather than out of it.
+fn read_u32s(arrays: &mut [OutArray<'_>], ptr_at: usize, n: u32) -> Vec<u32> {
+    let Some(buf) = array_at(arrays, ptr_at) else {
+        return Vec::new();
+    };
+    buf.chunks_exact(4)
+        .take(n as usize)
+        .map(|c| u32::from_le_bytes(fixed(c)))
+        .collect()
+}
+
+/// The kernel's cap on `count_connectors`, past which it refuses rather than
+/// allocating. `0xFFFF_FFFF` would otherwise ask for 16 GiB.
+const MAX_SET_CONNECTORS: u32 = 32;
 
 impl FakeCard {
     /// A one-monitor machine: two CRTCs, a dark head listed first, and a
@@ -498,15 +527,107 @@ impl KmsSys for FakeCard {
                 state.removed.push(id);
                 Ok(())
             }
+            uapi::SETCRTC => {
+                // Modelled on the kernel's `DrmDevice::set_crtc`, checks in the
+                // same order and with the same errnos, so that a compositor
+                // that satisfies this fake satisfies the real one.
+                let set = ModeCrtc::from_bytes(&fixed(payload));
+                if !state.crtcs.contains(&set.crtc_id) {
+                    return Err(ENOENT);
+                }
+                if set.mode_valid == 0 {
+                    // A disable that also names a framebuffer or a connector is
+                    // self-contradictory and is more likely a caller bug.
+                    if set.fb_id != 0 || set.count_connectors != 0 {
+                        return Err(EINVAL);
+                    }
+                    state.modes.retain(|m| m.0 != set.crtc_id);
+                    return Ok(());
+                }
+                // A timed CRTC driving nothing, or fetching from nowhere, is
+                // not a state worth entering.
+                if set.count_connectors == 0 || set.fb_id == 0 {
+                    return Err(EINVAL);
+                }
+                if set.count_connectors > MAX_SET_CONNECTORS {
+                    return Err(EINVAL);
+                }
+                let ids = read_u32s(
+                    arrays,
+                    ModeCrtc::SET_CONNECTORS_PTR_AT,
+                    set.count_connectors,
+                );
+                let crtc_index = state
+                    .crtcs
+                    .iter()
+                    .position(|&c| c == set.crtc_id)
+                    .unwrap_or(usize::MAX);
+                for id in &ids {
+                    let Some(conn) = state.connectors.iter().find(|c| c.id == *id).cloned() else {
+                        return Err(ENOENT);
+                    };
+                    // Routable to this CRTC through one of its encoders.
+                    let routable = conn.encoders.iter().any(|e| {
+                        state
+                            .encoders
+                            .iter()
+                            .find(|enc| enc.id == *e)
+                            .is_some_and(|enc| {
+                                crtc_index < 32 && enc.possible_crtcs & (1 << crtc_index) != 0
+                            })
+                    });
+                    if !routable {
+                        return Err(EINVAL);
+                    }
+                    // The mode must be one the display actually advertised.
+                    // `vrefresh == 0` means "don't care", as Linux's
+                    // `drm_mode_equal` effectively does.
+                    let advertised = conn.modes.iter().any(|m| {
+                        m.hdisplay == set.mode.hdisplay
+                            && m.vdisplay == set.mode.vdisplay
+                            && (set.mode.vrefresh == 0 || m.vrefresh == set.mode.vrefresh)
+                    });
+                    if !advertised {
+                        return Err(EINVAL);
+                    }
+                }
+                // "Invalid fb size": the buffer must cover the mode's extent
+                // from the origin the caller named.
+                let Some(&fb) = state.fbs.iter().find(|f| f.0 == set.fb_id) else {
+                    return Err(EINVAL);
+                };
+                let need_w = set.x.saturating_add(u32::from(set.mode.hdisplay));
+                let need_h = set.y.saturating_add(u32::from(set.mode.vdisplay));
+                if fb.3 < need_w || fb.4 < need_h {
+                    return Err(EINVAL);
+                }
+                let (w, h) = (u32::from(set.mode.hdisplay), u32::from(set.mode.vdisplay));
+                state.modes.retain(|m| m.0 != set.crtc_id);
+                state.modes.push((set.crtc_id, w, h));
+                for id in ids {
+                    state.mode_sets.push((set.crtc_id, id, set.fb_id, w, h));
+                }
+                Ok(())
+            }
             uapi::PAGE_FLIP => {
                 let flip = ModeCrtcPageFlip::from_bytes(&fixed(payload));
                 if flip.reserved != 0 || flip.flags != 0 {
                     return Err(EINVAL);
                 }
                 if !state.crtcs.contains(&flip.crtc_id) {
-                    return Err(EINVAL);
+                    return Err(ENOENT);
                 }
-                if !state.fbs.iter().any(|f| f.0 == flip.fb_id) {
+                let Some(&fb) = state.fbs.iter().find(|f| f.0 == flip.fb_id) else {
+                    return Err(EINVAL);
+                };
+                // The two checks the kernel gained, and the reason `SETCRTC` is
+                // no longer optional: a CRTC with no mode has nothing to flip
+                // *into*, and a framebuffer that is not the mode's size would
+                // be cropped or over-read by whichever backend is fitted.
+                let Some(&(_, mw, mh)) = state.modes.iter().find(|m| m.0 == flip.crtc_id) else {
+                    return Err(EINVAL);
+                };
+                if fb.3 != mw || fb.4 != mh {
                     return Err(EINVAL);
                 }
                 state.flips.push((flip.crtc_id, flip.fb_id));
@@ -653,8 +774,29 @@ fn the_crtc_bitmask_is_read_as_an_index_into_the_crtc_list_not_as_a_crtc_id() {
 
 #[test]
 fn the_crtc_already_driving_the_connector_is_preferred_over_a_merely_possible_one() {
-    // The firmware lit a head at boot; that CRTC is already scanning out at
-    // this mode, and taking it means the first flip does not have to modeset.
+    // The firmware lit a head at boot; adopting that CRTC retimes a head that
+    // is already running rather than moving the picture to a different one.
+    let card = FakeCard::desktop();
+    card.edit(|s| {
+        s.connectors[1].current_encoder = 51;
+        // Either CRTC would do, so the bitmask alone would hand out index 0
+        // (id 1) — the first reachable one. The binding says 2.
+        s.encoders[1].possible_crtcs = 0b11;
+        s.encoders[1].crtc_id = 2;
+    });
+    let scanout = DrmScanout::new(card).unwrap();
+    assert_eq!(scanout.crtc_id(), 2, "the one already bound");
+}
+
+#[test]
+fn a_bound_encoder_naming_a_crtc_its_own_bitmask_forbids_is_not_believed() {
+    // A card can contradict itself: the encoder reports a live binding to a
+    // CRTC that its `possible_crtcs` says it cannot reach. That used to be
+    // harmless — the CRTC really was scanning out, so a flip against it worked.
+    // It is not harmless now: `SETCRTC` refuses a connector that is not
+    // routable to the named CRTC, so preferring the bound one would program
+    // nothing and lose the head. The bitmask is what the kernel checks, so the
+    // bitmask is what we believe.
     let card = FakeCard::desktop();
     card.edit(|s| {
         s.connectors[1].current_encoder = 51;
@@ -662,8 +804,15 @@ fn the_crtc_already_driving_the_connector_is_preferred_over_a_merely_possible_on
         // …even though the bitmask says only index 1 (id 2) is reachable.
         s.encoders[1].possible_crtcs = 0b10;
     });
-    let scanout = DrmScanout::new(card).unwrap();
-    assert_eq!(scanout.crtc_id(), 1, "the one already bound");
+    let scanout = DrmScanout::new(card.clone()).unwrap();
+    assert_eq!(scanout.crtc_id(), 2, "fell back to the bitmask");
+    card.read(|s| {
+        assert_eq!(
+            s.mode_sets,
+            vec![(2, 31, s.fbs[1].0, 1366, 768)],
+            "and the mode-set the kernel would have refused was never sent"
+        );
+    });
 }
 
 #[test]
@@ -723,7 +872,11 @@ fn the_scanout_buffers_are_created_mapped_and_registered_in_that_order() {
             .filter(|r| {
                 matches!(
                     *r,
-                    uapi::CREATE_DUMB | uapi::MAP_DUMB | uapi::ADDFB2 | uapi::PAGE_FLIP
+                    uapi::CREATE_DUMB
+                        | uapi::MAP_DUMB
+                        | uapi::ADDFB2
+                        | uapi::SETCRTC
+                        | uapi::PAGE_FLIP
                 )
             })
             .collect();
@@ -736,8 +889,161 @@ fn the_scanout_buffers_are_created_mapped_and_registered_in_that_order() {
                 uapi::CREATE_DUMB,
                 uapi::MAP_DUMB,
                 uapi::ADDFB2,
+                // Both buffers exist before the mode-set, because the mode-set
+                // has to name one of them and the kernel checks that it covers
+                // the mode. Ordering it the other way round is the mistake the
+                // resize path has to avoid too.
+                uapi::SETCRTC,
                 uapi::PAGE_FLIP,
             ]
+        );
+    });
+}
+
+// --------------------------------------------------------------- mode-set --
+
+#[test]
+fn the_mode_set_names_the_connector_the_native_mode_and_the_buffer_not_yet_shown() {
+    // Every field of it matters and each one fails differently: a wrong
+    // connector lights nothing, a mode the display did not advertise is
+    // EINVAL, and a framebuffer smaller than the mode is "Invalid fb size".
+    let card = FakeCard::desktop();
+    let scanout = DrmScanout::new(card.clone()).unwrap();
+    card.read(|s| {
+        assert_eq!(s.mode_sets.len(), 1, "one head, one mode-set");
+        let (crtc, conn, fb, w, h) = s.mode_sets[0];
+        assert_eq!(crtc, scanout.crtc_id());
+        assert_eq!(conn, scanout.connector_id());
+        assert_eq!((w, h), (1366, 768), "the panel's native mode");
+        // The mode-set adopts the *back* buffer of the pair, so the first flip
+        // is a real change rather than a flip to what is already scanning out.
+        assert_ne!(fb, s.flips[0].1, "the first flip flips away from it");
+        assert!(
+            s.fbs.iter().any(|f| f.0 == fb),
+            "and it is one of ours, not a boot leftover"
+        );
+    });
+}
+
+#[test]
+fn a_first_flip_would_be_refused_without_the_mode_set() {
+    // The reason the mode-set is issued at all. This asserts the *fake* is
+    // strict in the way the kernel became strict — if this ever passes with
+    // the CRTC unprogrammed, the fake has stopped modelling the kernel and
+    // every other test here has stopped proving anything about mode-setting.
+    let card = FakeCard::desktop();
+    let _scanout = DrmScanout::new(card.clone()).unwrap();
+    let (crtc, fb) = card.read(|s| s.flips[0]);
+
+    card.edit(|s| s.modes.retain(|m| m.0 != crtc));
+    let flip = ModeCrtcPageFlip {
+        crtc_id: crtc,
+        fb_id: fb,
+        ..ModeCrtcPageFlip::default()
+    };
+    let mut payload = flip.to_bytes();
+    let mut card = card;
+    assert_eq!(
+        card.ioctl(uapi::PAGE_FLIP, &mut payload, &mut []),
+        Err(EINVAL),
+        "a CRTC with no mode has nothing to flip into"
+    );
+}
+
+#[test]
+fn a_card_that_refuses_the_mode_set_still_comes_up_if_its_flips_work() {
+    // The `limine-fb` shape: the display is already timed at the only mode it
+    // advertises, so the mode-set is redundant and its failure is not a reason
+    // to decline the connector. The fake keeps the mode programmed here, which
+    // is precisely the case the real backend presents.
+    let card = FakeCard::desktop();
+    card.edit(|s| {
+        s.modes.push((2, 1366, 768));
+        s.fail.push((uapi::SETCRTC, ENODEV));
+    });
+    let scanout = DrmScanout::new(card.clone()).expect("a redundant mode-set is not load-bearing");
+    assert_eq!(scanout.size(), (1366, 768));
+    card.read(|s| {
+        assert!(s.mode_sets.is_empty(), "the mode-set really did fail");
+        assert_eq!(s.flips.len(), 1, "and the head came up anyway");
+    });
+}
+
+#[test]
+fn a_card_that_refuses_the_mode_set_and_has_no_mode_declines_the_head() {
+    // The `ATI` shape, and the failure this whole change exists to prevent
+    // reaching a user: nothing is timed, the mode-set fails, and so the flip
+    // fails. The head is dropped by the path that already existed for a head
+    // whose first flip fails — no new error handling, which is the argument for
+    // letting the flip be the arbiter.
+    let card = FakeCard::desktop();
+    card.edit(|s| s.fail.push((uapi::SETCRTC, ENODEV)));
+    assert_eq!(
+        DrmScanout::new(card.clone()).map(|_| ()).unwrap_err(),
+        ScanoutError::Ioctl {
+            request: uapi::PAGE_FLIP,
+            errno: EINVAL,
+        },
+        "the flip is what reports it, and it names the flip rather than the \
+         mode-set — which is the cost of letting the flip be the arbiter"
+    );
+    card.read(|s| assert!(s.flips.is_empty(), "nothing was ever scanned out"));
+}
+
+#[test]
+fn a_mode_set_the_display_never_advertised_is_refused() {
+    // Guards the fake's own strictness in the other direction: if it accepted
+    // any mode, the compositor could pass a mode it invented and no test would
+    // notice. Issued by hand because the compositor only ever picks an
+    // advertised one.
+    let card = FakeCard::desktop();
+    let scanout = DrmScanout::new(card.clone()).unwrap();
+    let fb = card.read(|s| s.fbs[0].0);
+    let mut card = card;
+    let mut conn = 31_u32.to_le_bytes();
+    let set = ModeCrtc {
+        count_connectors: 1,
+        crtc_id: 2,
+        fb_id: fb,
+        mode_valid: 1,
+        mode: ModeModeinfo {
+            hdisplay: 640,
+            vdisplay: 480,
+            ..ModeModeinfo::default()
+        },
+        ..ModeCrtc::default()
+    };
+    let mut payload = set.to_bytes();
+    let mut arrays = [OutArray::new(ModeCrtc::SET_CONNECTORS_PTR_AT, &mut conn)];
+    assert_eq!(
+        card.ioctl(uapi::SETCRTC, &mut payload, &mut arrays),
+        Err(EINVAL)
+    );
+    drop(scanout);
+}
+
+#[test]
+fn every_head_of_a_multi_monitor_card_is_mode_set_before_it_is_flipped() {
+    let card = FakeCard::two_monitors();
+    let scanout = DrmScanout::new(card.clone()).unwrap();
+    assert_eq!(scanout.heads().len(), 2, "both heads came up");
+    card.read(|s| {
+        assert_eq!(s.mode_sets.len(), 2, "one mode-set each");
+        let last_set = s.log.iter().rposition(|&r| r == uapi::SETCRTC);
+        let first_flip = s.log.iter().position(|&r| r == uapi::PAGE_FLIP);
+        assert!(
+            last_set < first_flip,
+            "every head is timed before any head is flipped"
+        );
+        assert_eq!(
+            s.mode_sets.iter().map(|m| m.0).collect::<Vec<_>>(),
+            vec![1, 2],
+            "each head programmed its own CRTC"
+        );
+        assert_eq!(
+            s.mode_sets.iter().map(|m| (m.3, m.4)).collect::<Vec<_>>(),
+            vec![(1024, 768), (1366, 768)],
+            "each at its own display's native mode, not one shared size"
         );
     });
 }
@@ -1451,8 +1757,11 @@ fn the_crtc_a_connector_is_already_bound_to_is_still_not_taken_twice() {
         s.encoders[0].crtc_id = 2;
         s.connectors[1].current_encoder = 51;
         s.encoders[1].crtc_id = 2;
-        // …and the second connector can in fact reach either CRTC, so there is
-        // somewhere for it to go once the first has claimed the bound one.
+        // Both bindings have to be ones the bitmask agrees with, or they are
+        // not believed at all and the double-claim never happens. Both
+        // connectors can in fact reach either CRTC, so there is somewhere for
+        // the second to go once the first has claimed the bound one.
+        s.encoders[0].possible_crtcs = 0b11;
         s.encoders[1].possible_crtcs = 0b11;
     });
     let scanout = DrmScanout::new(card).unwrap();

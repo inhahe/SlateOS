@@ -122,6 +122,7 @@ WP = "gui/desktop/src/wallpaper.rs"
 AX = "gui/desktop/src/a11y.rs"
 SWITCH = "gui/desktop/src/switch.rs"
 SLIDER = "gui/desktop/src/slider.rs"
+MM = "gui/desktop/src/multimon.rs"
 # The toolkit, one crate *below* `appearance`. 537 moved the WCAG arithmetic
 # down here so there would be one copy of it; a defect patched into this file
 # is therefore visible to `appearance` and `desktop` as well as to `guitk`.
@@ -23396,6 +23397,1544 @@ DEFECTS = [
             # outright left the entire suite green. The sort had no test at
             # all. The catcher below was written for it.
             'events_come_back_in_time_order_whatever_order_they_were_stored_in',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the start button is a fixed size whatever the display scaling",
+        DESK,
+        [
+            ('            self.scale(START_BUTTON_WIDTH).min(bar.w),\n',
+             '            START_BUTTON_WIDTH.min(bar.w),\n'),
+        ],
+        ["desktop"],
+        [
+            # The button is still drawn from the same rectangle, so it is not
+            # visibly wrong at 100%. At 200% it is half the width the rest of
+            # the bar grew to, and the gap between where it is drawn and where
+            # it can be clicked is the whole failure.
+            'the_start_button_is_clickable_where_it_is_drawn_at_every_scale',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the taskbar does not grow with the display scaling",
+        DESK,
+        [
+            ('        self.scale(self.taskbar_height as f32)\n',
+             '        self.taskbar_height as f32\n'),
+        ],
+        ["desktop"],
+        [
+            # `taskbar_height` is the logical height the settings panel asks
+            # for, so failing to scale it leaves a 40px bar on a 200% display --
+            # and, because the work area is the screen minus the bar, hands the
+            # extra 40px to windows that will be drawn under it.
+            'the_taskbar_grows_with_the_scaling_and_takes_the_room_from_the_work_area',
+            'the_clocks_target_covers_the_reading_that_is_drawn_at_every_scaling',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a taskbar taller than the screen inverts the bar's geometry",
+        DESK,
+        [
+            ('            height.min(self.screen_height as f32),\n',
+             '            height,\n'),
+        ],
+        ["desktop"],
+        [
+            # The `y` is already clamped by `.max(0.0)`, so without the height
+            # clamp too the rectangle runs off the bottom -- and on a screen
+            # shorter than the bar the two clamps disagree, which is the case
+            # the catcher constructs.
+            'a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the start menu is not clamped to the room above the taskbar",
+        DESK,
+        [
+            ('        let h = self.scale(START_MENU_HEIGHT).min(bar.y.max(0.0));\n',
+             '        let h = self.scale(START_MENU_HEIGHT);\n'),
+        ],
+        ["desktop"],
+        [
+            # At 200% the menu's nominal height is 800px, which on an 800px
+            # screen starts at y = -40. A row drawn above the top edge cannot be
+            # clicked, so this is the unreachable-program bug that the scroll
+            # offset exists to prevent, arriving by the other door.
+            'a_scaled_start_menu_still_reaches_every_program',
+            'a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: adjacent start-menu rows overlap by a pixel",
+        DESK,
+        [
+            ('            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * height,\n',
+             '            menu.y + self.scale(START_MENU_TOP_PADDING) + row as f32 * (height - 1.0),\n'),
+        ],
+        ["desktop"],
+        [
+            # The classic fencepost. Every row after the first is one pixel high
+            # into its neighbour, so the boundary pixel belongs to two rows and
+            # `hit_test` gives it to whichever it scans first -- which means one
+            # row of pixels launches the wrong program.
+            'adjacent_rows_do_not_share_a_pixel',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a scrolled start menu launches the program drawn at the top of the list",
+        DESK,
+        [
+            ('        let index = self.start_menu_scroll.checked_add(row)?;\n',
+             '        let index = row;\n'),
+        ],
+        ["desktop"],
+        [
+            # `row` counts from the top of the *visible* list and the entry
+            # index counts from the top of the whole list; the scroll offset is
+            # the only thing between them. Drop it and the menu launches by
+            # screen position -- correct until the moment anyone scrolls, then
+            # wrong for every row at once.
+            'a_scrolled_row_launches_the_program_named_on_it',
+            'a_scaled_start_menu_still_reaches_every_program',
+            'the_list_cannot_scroll_past_either_end',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: the start menu scrolls the wrong way",
+        DESK,
+        [
+            ('        let moved = if rows >= 0 {\n            self.start_menu_scroll\n                .saturating_add(rows.unsigned_abs() as usize)\n        } else {\n            self.start_menu_scroll\n                .saturating_sub(rows.unsigned_abs() as usize)\n        };\n',
+             '        let moved = if rows >= 0 {\n            self.start_menu_scroll\n                .saturating_sub(rows.unsigned_abs() as usize)\n        } else {\n            self.start_menu_scroll\n                .saturating_add(rows.unsigned_abs() as usize)\n        };\n'),
+        ],
+        ["desktop"],
+        [
+            # This is a reintroduction in the literal sense: the method's own
+            # doc comment records that it used to be this way round, and that it
+            # was the one place in the tree where a positive delta moved towards
+            # row 0. The comment is left in place by the patch, so the defect
+            # also stands for the case where code and comment disagree.
+            'a_wheel_notch_over_the_menu_scrolls_it',
+            'the_list_cannot_scroll_past_either_end',
+            'a_scrolled_row_launches_the_program_named_on_it',
+            'a_scaled_start_menu_still_reaches_every_program',
+            'reopening_the_menu_rewinds_the_list',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the start menu can scroll three rows past its own end",
+        DESK,
+        [
+            ('        self.start_menu_scroll = moved.min(max);\n',
+             '        self.start_menu_scroll = moved.min(max.saturating_add(3));\n'),
+        ],
+        ["desktop"],
+        [
+            # Not removed, loosened -- an off-by-N rather than an off-by-
+            # nothing, because a clamp that is merely generous is the version
+            # that survives review. The visible result is a menu that can be
+            # scrolled into empty space below the last program.
+            'the_list_cannot_scroll_past_either_end',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: the start menu reopens wherever it was last left",
+        DESK,
+        [
+            ('            self.start_menu_open = true;\n            self.start_menu_scroll = 0;\n',
+             '            self.start_menu_open = true;\n'),
+        ],
+        ["desktop"],
+        [
+            # A menu that reopens scrolled hides the first application from a
+            # user who has no idea it ever scrolled -- and who therefore has no
+            # reason to scroll back up to look for it.
+            'reopening_the_menu_rewinds_the_list',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: reopening the start menu keeps the leftover part-notch",
+        DESK,
+        [
+            ('            self.start_menu_wheel.reset();\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            # The subtler half of the same rewind. The offset goes back to 0 but
+            # the fraction still pushing it does not, so a menu opened just
+            # after a trackpad flick steps off row 0 on the next tiny delta --
+            # which looks like the list moving on its own.
+            'reopening_the_menu_forgets_the_leftover_fraction',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: closing the start menu strands the power menu open over the desktop",
+        DESK,
+        [
+            ('        self.start_menu_open = false;\n        self.power_menu_open = false;\n    }\n',
+             '        self.start_menu_open = false;\n    }\n'),
+        ],
+        ["desktop"],
+        [
+            # `close_start_menu` is deliberately the single place the menu
+            # closes, so that the submenu cannot outlive its parent. Removing
+            # one line from it leaves a power menu floating over an empty
+            # desktop, anchored to a button that is no longer drawn.
+            'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
+            'the_power_menu_offers_every_system_action_and_launches_them',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the start menu lists the system actions as ordinary programs",
+        DESK,
+        [
+            ('            .filter(|app| matches!(app.category, Category::Application | Category::Setting))\n',
+             '            .filter(|app| {\n                matches!(\n                    app.category,\n                    Category::Application | Category::Setting | Category::System\n                )\n            })\n'),
+        ],
+        ["desktop"],
+        [
+            # The exclusion is not tidiness: it is what keeps `Shutdown` from
+            # being one mis-click away from `Screenshot` in an alphabetical
+            # list. It also puts every system action in *both* menus at once,
+            # which is the half the partition test sees.
+            'the_two_menus_between_them_offer_every_program_exactly_once',
+            'the_start_menu_offers_only_programs_the_launcher_knows',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the power menu offers the applications instead of the system actions",
+        DESK,
+        [
+            ('            .filter(|app| matches!(app.category, Category::System))\n',
+             '            .filter(|app| matches!(app.category, Category::Application))\n'),
+        ],
+        ["desktop"],
+        [
+            # The complement of L, and the reason the two filters are written as
+            # complements of one another: an action must be in exactly one of
+            # the two lists, and only a test that checks the *partition* can see
+            # a change that puts it in the wrong one rather than in neither.
+            'the_power_menu_offers_every_system_action_and_launches_them',
+            'the_two_menus_between_them_offer_every_program_exactly_once',
+            'a_click_on_the_list_behind_the_power_menu_only_dismisses_it',
+            'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: dismissing the power menu takes the start menu down with it",
+        DESK,
+        [
+            ('            self.power_menu_open = false;\n            if !Self::keeps_start_menu_open(hit) {\n                self.start_menu_open = false;\n            }\n            return ShellAction::Consumed;\n',
+             '            self.power_menu_open = false;\n            self.start_menu_open = false;\n            return ShellAction::Consumed;\n'),
+        ],
+        ["desktop"],
+        [
+            # The submenu is dismissed first and *on its own*: a click on the
+            # application list while the power menu is up should close the power
+            # menu and leave the list where it was. Closing both makes one click
+            # undo two things, the second of which the user did not ask for.
+            'a_click_on_the_list_behind_the_power_menu_only_dismisses_it',
+            'closing_the_start_menu_any_way_at_all_takes_the_power_menu_with_it',
+            'the_power_button_toggles_its_menu_and_leaves_the_start_menu_open',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a click on the calendar's own margin closes the calendar",
+        DESK,
+        [
+            ('        if self.calendar.visible && !matches!(hit, Hit::Clock | Hit::CalendarControl(_)) {\n',
+             '        if self.calendar.visible && !matches!(hit, Hit::Clock) {\n'),
+        ],
+        ["desktop"],
+        [
+            # `Hit::CalendarControl` covers the popup's inert space as well as
+            # its controls, which is what stops a click in its own margin
+            # dismissing it -- the single most irritating way for a popup to
+            # behave, and one that only shows up when you miss a button by two
+            # pixels.
+            'a_click_on_the_calendars_margin_leaves_it_open',
+            'a_calendar_arrow_pages_the_month_it_is_drawn_beside',
+            'reopening_the_calendar_rewinds_it',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a release over the shell's chrome is handed to the client underneath",
+        DESK,
+        [
+            ('            MouseEventKind::Release(_) => {\n                if self.hit_test(event.x, event.y).is_shell_chrome() {\n                    ShellAction::Consumed\n                } else {\n                    ShellAction::Pass\n                }\n            }\n',
+             '            MouseEventKind::Release(_) => ShellAction::Pass,\n'),
+        ],
+        ["desktop"],
+        [
+            # A release belongs to whoever took the press. A client that saw a
+            # release with no press for it reads a click on the taskbar as a
+            # click on itself -- so the visible symptom is a button in an
+            # application firing when you let go over the shell.
+            'a_release_over_chrome_is_swallowed_with_the_press',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a right-click on the shell's chrome falls through to the client",
+        DESK,
+        [
+            ('        if button != MouseButton::Left {\n            return if hit.is_shell_chrome() {\n                ShellAction::Consumed\n            } else {\n                ShellAction::Pass\n            };\n        }\n',
+             '        if button != MouseButton::Left {\n            return ShellAction::Pass;\n        }\n'),
+        ],
+        ["desktop"],
+        [
+            # Only the primary button acts, but the others must still not reach
+            # a client when they land on the shell's own surfaces. Otherwise a
+            # right-click on the taskbar opens the context menu of whatever
+            # window is behind the bar.
+            'a_right_click_on_chrome_acts_on_nothing_but_is_still_consumed',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the taskbar button minimizes the window you were trying to reach",
+        DESK,
+        [
+            ('                if self.focused_window == Some(id) {\n                    ShellControlAction::Minimize\n                } else {\n',
+             '                if self.focused_window != Some(id) {\n                    ShellControlAction::Minimize\n                } else {\n'),
+        ],
+        ["desktop"],
+        [
+            # The toggle inverted. Clicking an unfocused window's button
+            # minimizes it instead of raising it, and clicking the focused one
+            # raises what is already raised -- so the taskbar becomes a way to
+            # make windows disappear and nothing else.
+            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
+            'a_minimized_window_can_be_got_back_from_its_taskbar_button',
+            'the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop',
+            'a_double_click_is_the_same_event_to_this_shell_as_a_single_one',
+            'a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised',
+            'a_taskbar_button_asks_the_compositor_rather_than_changing_anything',
+            'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: bare taskbar leaks the click to whatever is behind the bar",
+        DESK,
+        [
+            ('            return Hit::TaskbarPanel;\n',
+             '            return Hit::Desktop;\n'),
+        ],
+        ["desktop"],
+        [
+            # A press that lands on the bar but on none of its controls -- the
+            # gap after the last button, or the slot a window just vacated. The
+            # bar must keep it; passing it on raises whatever window happens to
+            # be underneath, which the user experiences as a random misfire.
+            #
+            # This defect used to patch the `None` arm of the taskbar-button
+            # match in `handle_press`, and escaped, because that arm was
+            # unreachable: `hit_test` only reported a button index it had just
+            # found a window for. The arm is gone (`Hit::TaskbarButton` now
+            # carries the `WindowId`) and the defect asks the question the test
+            # actually answers.
+            'a_click_where_a_button_used_to_be_is_still_the_taskbars',
+            'the_taskbar_panel_swallows_clicks_that_hit_nothing',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the window list is merged into what the shell believed instead of replacing it",
+        DESK,
+        [
+            ('        self.windows = kept;\n',
+             '        self.windows.extend(kept);\n'),
+        ],
+        ["desktop"],
+        [
+            # The compositor's list is the authority, and the only way the shell
+            # finds out a window is gone is that it stops being in one. Merging
+            # means nothing is ever removed: closed windows keep their taskbar
+            # buttons forever, and the bar only ever grows.
+            'the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it',
+            'an_empty_desktop_leaves_nothing_focused',
+            'a_click_where_a_button_used_to_be_is_still_the_taskbars',
+            'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: the taskbar lists the panels and popups and leaves out the applications",
+        DESK,
+        [
+            ('            if info.layer != Layer::Normal {\n',
+             '            if info.layer == Layer::Normal {\n'),
+        ],
+        ["desktop"],
+        [
+            # An inversion rather than a deletion, because a deleted filter
+            # shows up as *extra* buttons and an inverted one shows up as the
+            # wrong ones -- and the wrong ones are what a test that only counts
+            # buttons would let through.
+            'a_click_off_the_calendar_closes_it_without_acting',
+            'a_double_click_is_the_same_event_to_this_shell_as_a_single_one',
+            'a_key_release_only_ends_the_window_switcher',
+            'a_minimized_window_can_be_got_back_from_its_taskbar_button',
+            'a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not',
+            'a_new_window_opens_above_the_existing_ones_and_takes_focus',
+            'a_press_over_the_taskbar_does_not_reach_it_while_the_overview_is_up',
+            'a_refused_shortcut_does_not_swallow_the_rest_of_the_batch',
+            'a_retitle_reaches_the_button_without_disturbing_shell_local_state',
+            'a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised',
+            'a_taskbar_button_asks_the_compositor_rather_than_changing_anything',
+            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
+            'a_taskbar_button_is_clickable_where_it_is_drawn',
+            'a_window_is_only_visible_on_its_own_desktop',
+            'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+            'a_window_list_is_what_says_which_desktop_a_window_is_on',
+            'alt_f4_asks_the_compositor_and_changes_nothing_itself',
+            'alt_f4_asks_the_compositor_to_close_the_focused_window',
+            'alt_tab_between_two_windows_swaps_them',
+            'alt_tab_reaches_a_minimized_window',
+            'alt_tab_survives_the_windows_closing_underneath_it',
+            'alt_tab_visits_every_window_and_comes_back_round',
+            'alt_tab_with_one_window_is_consumed_without_opening_the_switcher',
+            'an_empty_desktop_leaves_nothing_focused',
+            'clicking_a_zone_asks_for_the_focused_window_to_be_tiled_into_it',
+            'each_thumbnail_selects_the_layout_it_pictures',
+            'every_drawn_string_follows_the_users_font_size',
+            'run_returns_when_the_compositor_hangs_up',
+            'shift_alt_tab_goes_round_the_other_way',
+            'show_desktop_does_not_ask_an_already_minimized_window_to_minimize',
+            'snapping_and_switching_desktops_are_different_shortcuts',
+            'stepping_backwards_survives_the_windows_closing_underneath_it',
+            'super_d_asks_for_every_window_to_be_minimised',
+            'super_d_minimizes_everything_on_the_current_desktop',
+            'super_down_restores_a_maximized_window_and_minimizes_any_other',
+            'super_right_asks_for_a_tile_and_computes_no_geometry',
+            'switching_desktop_names_no_window',
+            'the_chooser_closes_the_ways_a_popup_closes',
+            'the_chooser_draws_the_layout_it_will_place_into',
+            'the_chooser_tiles_the_work_area_and_not_the_screen',
+            'the_compositors_window_list_is_what_the_taskbar_is_drawn_from',
+            'the_corner_setting_reaches_the_start_menu_and_the_taskbar_buttons',
+            'the_list_that_refreshes_the_taskbar_refreshes_the_overview',
+            'the_lit_zone_is_the_one_a_press_would_place_into',
+            'the_stacking_order_is_the_one_the_list_arrived_in',
+            'the_taskbar_leaves_out_every_surface_that_is_not_an_application_window',
+            'the_tiled_window_is_whichever_one_is_focused_now',
+            'the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop',
+            'the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it',
+            'turning_the_date_on_widens_the_tray_and_narrows_the_buttons',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: an update rebuilds each window from nothing, losing the shell's own state",
+        DESK,
+        [
+            ('            let previous = self.windows.get(&id);\n',
+             '            let previous: Option<&ManagedWindow> = None;\n'),
+        ],
+        ["desktop"],
+        [
+            # `icon_id` has no counterpart in the compositor's list -- it is
+            # shell-local, and an update that does not look up the existing
+            # window cannot preserve it. The symptom is every taskbar icon
+            # reverting to the blank one each time any window is retitled.
+            'a_retitle_reaches_the_button_without_disturbing_shell_local_state',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: every taskbar button acts on the first window on the bar",
+        DESK,
+        [
+            ('                if self.taskbar_button_rect(index).contains(x, y) {\n                    return Hit::TaskbarButton(window.id);\n',
+             '                if self.taskbar_button_rect(index).contains(x, y) {\n                    let _ = window;\n                    return Hit::TaskbarButton(self.taskbar_windows()[0].id);\n'),
+        ],
+        ["desktop"],
+        [
+            # The pairing of slot to window, which is what the hit test is for
+            # once the hit carries an id. The old form of
+            # `a_taskbar_button_is_clickable_where_it_is_drawn` compared the
+            # slot number with itself and could not fail; this is the defect it
+            # was named for and did not catch.
+            'a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised',
+            'a_taskbar_button_asks_the_compositor_rather_than_changing_anything',
+            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
+            'a_taskbar_button_is_clickable_where_it_is_drawn',
+            'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: a coordinate past the edge of the space wraps to the other edge",
+        MM,
+        [
+            ('    i32::try_from(v).unwrap_or(if v.is_negative() { i32::MIN } else { i32::MAX })\n',
+             '    i32::try_from(v).unwrap_or(if v.is_negative() { i32::MAX } else { i32::MIN })\n'),
+        ],
+        ["desktop"],
+        [
+            # Clamping the wrong way is the wrap the i64 widening exists to
+            # prevent: a monitor pushed off one edge reappears on the other.
+            'a_coordinate_past_the_edge_of_the_space_stops_there_rather_than_wrapping',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: a rectangle built from reversed corners is enormous, not empty",
+        MM,
+        [
+            ('        let w = u32::try_from(right.saturating_sub(left).max(0)).unwrap_or(u32::MAX);\n',
+             '        let w = u32::try_from(right.saturating_sub(left)).unwrap_or(u32::MAX);\n'),
+        ],
+        ["desktop"],
+        [
+            # `try_from` on a negative width fails, and the `unwrap_or` then
+            # hands back `u32::MAX` -- the widest rectangle there is, from a
+            # pair of corners that describe no rectangle at all.
+            'a_rectangle_built_from_reversed_corners_is_empty_not_enormous',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: the right and bottom edges of a rectangle belong to it",
+        MM,
+        [
+            ('        px >= self.left() && py >= self.top() && px < self.right() && py < self.bottom()\n',
+             '        px >= self.left() && py >= self.top() && px <= self.right() && py <= self.bottom()\n'),
+        ],
+        ["desktop"],
+        [
+            # Half-open is what lets two monitors sit edge to edge without
+            # either a seam or an overlap. Closed on the far side, the column
+            # at x = 1920 belongs to both of them, and `monitor_at` answers
+            # with whichever was registered first.
+            'a_rectangles_edges_are_half_open',
+            'monitor_contains_point',
+            'rotated_monitor_contains',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the desktop's bounding box skips a monitor showing nothing",
+        MM,
+        [
+            ('    pub fn union(self, other: Self) -> Self {\n        Self::from_corners(\n',
+             '    pub fn union(self, other: Self) -> Self {\n        if other.is_empty() {\n            return self;\n        }\n        Self::from_corners(\n'),
+        ],
+        ["desktop"],
+        [
+            # A monitor stuck in a zero-sized mode still has a position, and
+            # the pointer can still be driven onto it -- so leaving it out of
+            # the bounding box puts a reachable place outside the desktop.
+            'the_union_reaches_a_monitor_even_if_that_monitor_shows_nothing',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a rectangle is empty only when both of its sides are zero",
+        MM,
+        [
+            ('        self.w == 0 || self.h == 0\n',
+             '        self.w == 0 && self.h == 0\n'),
+        ],
+        ["desktop"],
+        [
+            # A 1920x0 strip covers no pixels, and callers guard a division by
+            # the desktop's size on exactly this answer.
+            'a_rectangle_with_one_zero_side_covers_nothing_and_says_so',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: a rotated panel keeps its landscape dimensions",
+        MM,
+        [
+            ('            Self::Left | Self::Right => (native_h, native_w),\n',
+             '            Self::Left | Self::Right => (native_w, native_h),\n'),
+        ],
+        ["desktop"],
+        [
+            # Every question about where a monitor is goes through
+            # `effective_resolution`, so a portrait panel that reports itself
+            # landscape is 1920 wide in the layout and 1080 wide on the glass.
+            'rotated_monitor_bounds',
+            'rotated_monitor_contains',
+            'rotation_left_swaps_dimensions',
+            'rotation_right_swaps_dimensions',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: DPI is computed from millimetres multiplied by 25.4, not divided",
+        MM,
+        [
+            ('        let inches = self.physical_size_mm.0 as f32 / 25.4;\n',
+             '        let inches = self.physical_size_mm.0 as f32 * 25.4;\n'),
+        ],
+        ["desktop"],
+        [
+            'monitor_calculated_dpi',
+        ],
+    ),
+    (
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the config word "left" is read as a right rotation',
+        MM,
+        [
+            ('            "left" => Some(Self::Left),\n',
+             '            "left" => Some(Self::Right),\n'),
+        ],
+        ["desktop"],
+        [
+            # The save side and the load side have to agree on the word or the
+            # layout comes back from disk turned the wrong way; the round-trip
+            # is the only place the two halves meet.
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a monitor that does not report its physical size divides by zero",
+        MM,
+        [
+            ('        if self.physical_size_mm.0 == 0 {\n            return None;\n        }\n        let inches',
+             '        let inches'),
+        ],
+        ["desktop"],
+        [
+            # Not a panic -- `f32` division by zero is infinity, so the shell
+            # gets `Some(inf)` and scales the UI by it.
+            'monitor_dpi_zero_physical_size',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: the desktop's bounding box includes monitors the user turned off",
+        MM,
+        [
+            ('            .filter(|m| m.enabled)\n            .map(MonitorInfo::bounds)\n            .reduce(VirtualRect::union)\n',
+             '            .map(MonitorInfo::bounds)\n            .reduce(VirtualRect::union)\n'),
+        ],
+        ["desktop"],
+        [
+            # The bounding box is what window clamping is measured against, so
+            # a disabled monitor inside it is a region a window can be dragged
+            # to and never come back from.
+            'clamp_no_enabled_monitors',
+            'virtual_bounds_all_disabled',
+            'virtual_bounds_ignores_disabled',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a monitor the user turned off can still be the primary one",
+        MM,
+        [
+            ('        self.monitors.iter().find(|m| m.primary && m.enabled)\n',
+             '        self.monitors.iter().find(|m| m.primary)\n'),
+        ],
+        ["desktop"],
+        [
+            # `suggest_default_monitor` takes the primary before it considers
+            # area, so a disabled primary puts every new window on a dark screen.
+            'a_monitor_the_user_turned_off_is_not_offered_as_the_primary_one',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the pointer finds monitors the user turned off",
+        MM,
+        [
+            ('        self.monitors.iter().find(|m| m.enabled && m.contains(x, y))\n',
+             '        self.monitors.iter().find(|m| m.contains(x, y))\n'),
+        ],
+        ["desktop"],
+        [
+            'monitor_at_disabled_ignored',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: dragging a monitor that is not in the layout sends it to the origin",
+        MM,
+        [
+            ('        let Some(target) = self.monitors.iter().find(|m| m.id == id) else {\n            return (x, y);\n        };\n',
+             '        let Some(target) = self.monitors.iter().find(|m| m.id == id) else {\n            return (0, 0);\n        };\n'),
+        ],
+        ["desktop"],
+        [
+            'snap_unknown_monitor_returns_original',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: an edge exactly at the snap threshold does not snap",
+        MM,
+        [
+            ('            distance: (SNAP_THRESHOLD as u64).saturating_add(1),\n',
+             '            distance: SNAP_THRESHOLD as u64,\n'),
+        ],
+        ["desktop"],
+        [
+            # The seed is what makes "nothing offered" and "nothing offered
+            # was close enough" the same state. Seeded at the threshold rather
+            # than one past it, the threshold becomes exclusive and the
+            # constant means one less than it says.
+            'a_snap_exactly_at_the_threshold_still_snaps_and_one_past_it_does_not',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: a snap candidate no better than the running best displaces it",
+        MM,
+        [
+            ('        if distance < self.distance {\n',
+             '        if distance <= self.distance {\n'),
+        ],
+        ["desktop"],
+        [
+            # Two failures in one character: among equally good candidates the
+            # last now wins rather than the first, and a candidate exactly one
+            # past the threshold ties with the seed and snaps.
+            'a_snap_exactly_at_the_threshold_still_snaps_and_one_past_it_does_not',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: monitors can be snapped end to end but not lined up",
+        MM,
+        [
+            ('            snap_x.offer(x, moving.left(), b.left());\n            snap_x.offer(x, moving.right(), b.right());\n\n            snap_y.offer(y, moving.top(), b.bottom());\n            snap_y.offer(y, moving.bottom(), b.top());\n            snap_y.offer(y, moving.top(), b.top());\n            snap_y.offer(y, moving.bottom(), b.bottom());\n',
+             '\n            snap_y.offer(y, moving.top(), b.bottom());\n            snap_y.offer(y, moving.bottom(), b.top());\n'),
+        ],
+        ["desktop"],
+        [
+            # Four offers per neighbour per axis: two abut, two align. Dropping
+            # the aligning pair leaves a side-by-side pair of monitors unable
+            # to have their tops brought level, which is the commonest thing
+            # anyone does in a display arrangement panel.
+            'every_snap_case_moves_the_edge_it_names_onto_the_edge_it_names',
+            'snap_aligns_edges',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a snap moves the monitor to the target edge rather than by the gap",
+        MM,
+        [
+            ('            self.position = narrow(i64::from(origin).saturating_add(target.saturating_sub(edge)));\n',
+             '            self.position = narrow(target);\n'),
+        ],
+        ["desktop"],
+        [
+            # Right for the case where the edge being moved is the monitor's
+            # own left one, and wrong for the other three -- which is exactly
+            # the mistake the shared `offer` was written to make impossible,
+            # so it is the one worth checking still is.
+            'every_snap_case_moves_the_edge_it_names_onto_the_edge_it_names',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: a monitor the user turned off still attracts a drag",
+        MM,
+        [
+            ('            if other.id == id || !other.enabled {\n',
+             '            if other.id == id {\n'),
+        ],
+        ["desktop"],
+        [
+            # A disabled monitor is not on the desktop, so it has no edge to
+            # align with; snapping to one drags the monitor being moved
+            # somewhere the user cannot see a reason for.
+            'a_disabled_neighbour_offers_nothing_to_snap_to',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: gaps are only looked for once three monitors are attached",
+        MM,
+        [
+            ('        if enabled.len() < 2 {\n',
+             '        if enabled.len() < 3 {\n'),
+        ],
+        ["desktop"],
+        [
+            # Two monitors is the setup that has gaps: one is a rectangle and
+            # cannot, three is rare. Raising the floor by one makes the whole
+            # feature silently do nothing for almost everybody.
+            'detect_gap_between_monitors',
+            'detect_gaps_stacked_with_offset',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the covered regions are reported as the gaps",
+        MM,
+        [
+            ('                if !enabled.iter().any(|b| b.contains(mid_x, mid_y)) {\n',
+             '                if enabled.iter().any(|b| b.contains(mid_x, mid_y)) {\n'),
+        ],
+        ["desktop"],
+        [
+            'detect_gap_between_monitors',
+            'detect_gaps_stacked_with_offset',
+            'no_gaps_when_adjacent',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: a horizontal arrangement advances by each monitor's height",
+        MM,
+        [
+            ('                    let (ew, _) = m.effective_resolution();\n',
+             '                    let (_, ew) = m.effective_resolution();\n'),
+        ],
+        ["desktop"],
+        [
+            # Landscape monitors are wider than they are tall, so this leaves
+            # every monitor overlapping the one before it by the difference --
+            # a mirrored strip down the left of each screen.
+            'auto_arrange_horizontal',
+            'auto_arrange_skips_disabled',
+            'manager_auto_arrange_delegates',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a horizontal arrangement moves the monitors the user turned off",
+        MM,
+        [
+            ('            ArrangeMode::Horizontal => {\n                let mut x: i32 = 0;\n                for m in &mut self.monitors {\n                    if !m.enabled {\n                        continue;\n                    }\n',
+             '            ArrangeMode::Horizontal => {\n                let mut x: i32 = 0;\n                for m in &mut self.monitors {\n'),
+        ],
+        ["desktop"],
+        [
+            # A disabled monitor is not on the desktop, so giving it a slot in
+            # the row spends desktop width on nothing and pushes every monitor
+            # after it sideways by a screen.
+            'auto_arrange_skips_disabled',
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: mirrored monitors are stacked one pixel apart instead of overlapping",
+        MM,
+        [
+            ('            ArrangeMode::Mirror => {\n                for m in &mut self.monitors {\n                    if !m.enabled {\n                        continue;\n                    }\n                    m.position = (0, 0);\n                }\n            }\n',
+             '            ArrangeMode::Mirror => {\n                let mut y: i32 = 0;\n                for m in &mut self.monitors {\n                    if !m.enabled {\n                        continue;\n                    }\n                    m.position = (0, y);\n                    y = y.saturating_add(1);\n                }\n            }\n'),
+        ],
+        ["desktop"],
+        [
+            # Mirroring is the one mode defined by the positions being equal.
+            # One pixel of offset is enough to break it and small enough that
+            # nothing else in the layout notices.
+            'auto_arrange_mirror',
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: primary-only mode leaves every other monitor on",
+        MM,
+        [
+            ('                    } else {\n                        m.enabled = false;\n                    }\n',
+             '                    } else {\n                        m.enabled = true;\n                    }\n'),
+        ],
+        ["desktop"],
+        [
+            # It also turns *on* monitors the user had disabled, because the
+            # arm runs over every monitor and not only the enabled ones.
+            'auto_arrange_primary_disables_others',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: plugging in a monitor that is already attached adds it twice",
+        MM,
+        [
+            ('        if self.layout.monitors.iter().any(|m| m.id == info.id) {\n            return;\n        }\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            # Every lookup in this module is `find(|m| m.id == id)`, so the
+            # second copy is unreachable by id -- it exists only to be drawn,
+            # to be arranged, and to widen the bounding box.
+            'manager_duplicate_add_ignored',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: unplugging the primary monitor leaves the desktop with none",
+        MM,
+        [
+            ('        if was_primary {\n            // Promote the first enabled monitor.\n            if let Some(first) = self.layout.monitors.iter_mut().find(|m| m.enabled) {\n                first.primary = true;\n            }\n        }\n',
+             '        let _ = was_primary;\n'),
+        ],
+        ["desktop"],
+        [
+            # `primary()` then answers `None` for a machine that still has
+            # monitors, and every new window is placed by the largest-area
+            # fallback instead of where the user said.
+            'manager_remove_primary_promotes',
+        ],
+    ),
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the config file spells an inverted panel \'normal\'",
+        MM,
+        [
+            ('            Self::Inverted => "inverted",\n',
+             '            Self::Inverted => "normal",\n'),
+        ],
+        ["desktop"],
+        [
+            # A collision needs two variants to be visible, so the single-value
+            # round trip cannot see it. Only the all-four sweep can.
+            'every_rotation_survives_a_round_trip_through_the_config_file',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the config file spells a left rotation \'right\'",
+        MM,
+        [
+            ('            Self::Left => "left",\n',
+             '            Self::Left => "right",\n'),
+        ],
+        ["desktop"],
+        [
+            # The save half and the load half have to agree on the word, and
+            # the round-trip is the only place the two of them meet.
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: a monitor the user switched off is written out as switched on",
+        MM,
+        [
+            ('            out.push_str(&format!("enabled={}\\n", cfg.enabled));\n',
+             '            out.push_str("enabled=true\\n");\n'),
+        ],
+        ["desktop"],
+        [
+            # `enabled` defaults to true when the key is absent, so writing a
+            # constant true is indistinguishable from writing nothing -- and
+            # both mean a monitor the user disabled comes back after a reboot.
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: the saved resolution is separated by a comma, like a position",
+        MM,
+        [
+            ('                "resolution={}x{}\\n",\n',
+             '                "resolution={},{}\\n",\n'),
+        ],
+        ["desktop"],
+        [
+            # The loader splits the resolution on `x` and errors when it is
+            # absent, so this makes every file this build writes unreadable by
+            # every build including itself.
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: a line that is only an open bracket starts a section",
+        MM,
+        [
+            ("            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {\n",
+             "            if let Some(name) = line.strip_prefix('[').map(|l| l.trim_end_matches(']')) {\n"),
+        ],
+        ["desktop"],
+        [
+            # `[` alone then opens a section with no keys in it, and the next
+            # real header flushes that section -- which fails for a missing
+            # resolution, so one stray character turns the whole file into a
+            # parse error.
+            'a_line_that_is_only_an_open_bracket_is_not_a_section_header',
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: the last section of the config file is dropped",
+        MM,
+        [
+            ('        // Flush last section.\n        flush(\n            &current_connector,\n            &current_res,\n            &current_pos,\n            &current_rot,\n            &current_scale,\n            &current_enabled,\n            &mut configs,\n        )?;\n\n        Ok(Self { configs })\n',
+             '        Ok(Self { configs })\n'),
+        ],
+        ["desktop"],
+        [
+            # Sections are written into the map when the *next* header is
+            # seen, so without the final flush a single-monitor file loads as
+            # an empty one -- and a missing key in the last section stops
+            # being an error at all.
+            'a_line_that_is_only_an_open_bracket_is_not_a_section_header',
+            'an_empty_section_name_round_trips_rather_than_slicing_off_a_bracket',
+            'config_load_missing_key',
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: a section with no resolution loads as a zero-sized monitor",
+        MM,
+        [
+            ('                let r = res.ok_or_else(|| ConfigError::MissingKey("resolution".into()))?;\n',
+             '                let r = res.unwrap_or((0, 0));\n'),
+        ],
+        ["desktop"],
+        [
+            'config_load_missing_key',
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: a position is split on \'x\', like a resolution",
+        MM,
+        [
+            ("                    let Some((xs, yst)) = val.split_once(',') else {\n",
+             "                    let Some((xs, yst)) = val.split_once('x') else {\n"),
+        ],
+        ["desktop"],
+        [
+            # Every `position=` line in every file this build has ever written
+            # then fails to parse, and the error is `InvalidValue`, so the
+            # whole config is refused rather than one monitor defaulted.
+            'a_line_that_is_only_an_open_bracket_is_not_a_section_header',
+            'an_empty_section_name_round_trips_rather_than_slicing_off_a_bracket',
+            'config_load_missing_key',
+            'config_save_load_roundtrip',
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: a resolution with no \'x\' in it loads as a zero-sized monitor",
+        MM,
+        [
+            ("                    let Some((ws, hs)) = val.split_once('x') else {\n                        return Err(ConfigError::InvalidValue(format!(\"resolution: {val}\")));\n                    };\n",
+             "                    let (ws, hs) = val.split_once('x').unwrap_or((\"0\", \"0\"));\n"),
+        ],
+        ["desktop"],
+        [
+            # A corrupt config file should be reported, not silently rounded
+            # to a monitor with no pixels on it. This is also the only branch
+            # of the resolution parser any test reaches: `resolution=abc` has
+            # no `x`, so it never gets as far as the two `parse` calls.
+            'config_load_invalid_resolution',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a window is placed at the monitor's top-left rather than its middle",
+        MM,
+        [
+            ('        let slack_x = i64::from(m.w).saturating_sub(i64::from(window.w)) / 2;\n        let slack_y = i64::from(m.h).saturating_sub(i64::from(window.h)) / 2;\n',
+             '        let slack_x = 0i64;\n        let slack_y = 0i64;\n'),
+        ],
+        ["desktop"],
+        [
+            'place_on_monitor_centers',
+            'place_on_monitor_offset_position',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a window is centred on the first monitor whichever one was asked for",
+        MM,
+        [
+            ('        VirtualRect::new(\n            narrow(m.left().saturating_add(slack_x)),\n            narrow(m.top().saturating_add(slack_y)),\n            window.w,\n            window.h,\n        )\n',
+             '        VirtualRect::new(narrow(slack_x), narrow(slack_y), window.w, window.h)\n'),
+        ],
+        ["desktop"],
+        [
+            # The monitor's size is still respected, so the window is the
+            # right size in the right place on the wrong screen -- which on a
+            # single-monitor machine is invisible.
+            'place_on_monitor_offset_position',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: a window moved between monitors takes its vertical fraction from the width",
+        MM,
+        [
+            ('        let rel_y = fraction(window.top().saturating_sub(f.top()), f.h);\n',
+             '        let rel_y = fraction(window.top().saturating_sub(f.top()), f.w);\n'),
+        ],
+        ["desktop"],
+        [
+            # Landscape monitors are wider than they are tall, so the window
+            # creeps towards the top of the target screen every time it is
+            # moved -- and off it, if the source monitor is portrait.
+            'move_to_monitor_proportional',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: clamping a window to a desktop smaller than the visible minimum panics",
+        MM,
+        [
+            ('            narrow(rect.left().min(far_x).max(near_x)),\n            narrow(rect.top().min(far_y).max(near_y)),\n',
+             '            narrow(rect.left().clamp(near_x, far_x)),\n            narrow(rect.top().clamp(near_y, far_y)),\n'),
+        ],
+        ["desktop"],
+        [
+            # `MIN_VISIBLE` is 48, so a desktop narrower than that puts `near`
+            # past `far`, and `clamp` on an inverted range is a panic -- in
+            # the shell, reachable from any config file naming a tiny mode.
+            'a_desktop_smaller_than_the_visible_minimum_does_not_panic',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: a window smaller than the visible minimum is clamped as if it were larger",
+        MM,
+        [
+            ('        let keep_x = i64::from(Self::MIN_VISIBLE.min(rect.w));\n        let keep_y = i64::from(Self::MIN_VISIBLE.min(rect.h));\n',
+             '        let keep_x = i64::from(Self::MIN_VISIBLE);\n        let keep_y = i64::from(Self::MIN_VISIBLE);\n'),
+        ],
+        ["desktop"],
+        [
+            # A 10px window is then allowed to sit 38px past the edge, which
+            # is 28px further than it is wide: entirely off the desktop, by
+            # the rule whose whole job is to keep it on.
+            'a_window_smaller_than_the_visible_minimum_is_kept_whole_on_screen',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: clamping against a desktop with no monitors moves the window to the origin",
+        MM,
+        [
+            ('        if bounds.is_empty() {\n            // No enabled monitors — there is nowhere to be visible.\n            return rect;\n        }\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            # With every monitor disabled the bounding box is the empty
+            # rectangle at the origin, so every window on the machine is
+            # herded into a single point and stays there when a monitor
+            # comes back.
+            'clamp_no_enabled_monitors',
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: no part of a window has to stay on the desktop",
+        MM,
+        [
+            ('    pub const MIN_VISIBLE: u32 = 48;\n',
+             '    pub const MIN_VISIBLE: u32 = 0;\n'),
+        ],
+        ["desktop"],
+        [
+            # Zero is the value that makes the clamp a no-op in the direction
+            # that matters: a window may sit exactly one pixel past the edge,
+            # with nothing left to grab it by.
+            'a_desktop_smaller_than_the_visible_minimum_does_not_panic',
+            'a_window_smaller_than_the_visible_minimum_is_kept_whole_on_screen',
+            'clamp_to_visible_off_left',
+            'clamp_to_visible_off_right',
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a new window ignores the primary monitor and goes to the biggest",
+        MM,
+        [
+            ('        if let Some(p) = layout.primary() {\n            return Some(p.id);\n        }\n',
+             ''),
+        ],
+        ["desktop"],
+        [
+            # Choosing the primary is the whole point; the largest-area scan
+            # is the fallback for when there is not one.
+            'suggest_default_monitor_primary',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: with no primary monitor a new window goes to the smallest screen",
+        MM,
+        [
+            ('            .max_by_key(|m| m.bounds().area())\n',
+             '            .min_by_key(|m| m.bounds().area())\n'),
+        ],
+        ["desktop"],
+        [
+            'suggest_default_monitor_largest_when_no_primary',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: making a monitor primary does not demote the old one",
+        MM,
+        [
+            ('        for m in &mut self.layout.monitors {\n            m.primary = m.id == id;\n        }\n',
+             '        for m in &mut self.layout.monitors {\n            if m.id == id {\n                m.primary = true;\n            }\n        }\n'),
+        ],
+        ["desktop"],
+        [
+            # `primary()` is a `find`, so two primaries means the first in
+            # registration order wins and the user's choice is ignored --
+            # silently, and only on machines that had a primary already.
+            'manager_set_primary',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: the DPI scale factor is taken as given, however absurd",
+        MM,
+        [
+            ('            m.scale_factor = scale.clamp(0.25, 8.0);\n',
+             '            m.scale_factor = scale;\n'),
+        ],
+        ["desktop"],
+        [
+            'manager_scale_clamped',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: unplugging a monitor leaves it in the layout",
+        MM,
+        [
+            ('        self.layout.monitors.retain(|m| m.id != id);\n',
+             '        self.layout.monitors.retain(|m| m.id != id || m.primary);\n'),
+        ],
+        ["desktop"],
+        [
+            # Only the primary survives, which is the monitor most likely to
+            # be the one that was unplugged -- and it keeps widening the
+            # bounding box from a place with no screen in it.
+            #
+            # `manager_remove_primary_promotes` does *not* catch it: the
+            # monitor that failed to leave is still enabled and still first,
+            # so the promotion scan re-promotes the monitor that was
+            # unplugged and the assertion passes.
+            'manager_add_and_remove',
+        ],
+    ),
+    # ------------------------------------------------------------------
+    # Module 86: the calendar's event store, its text format and its
+    # reminders. Modules 68-70 swept this file's *drawing*, and 82 swept the
+    # recurrence and date arithmetic; what is left unasked is the bookkeeping
+    # underneath -- add/remove/update/get by ID, the range query's overlap
+    # test, `export_text`/`import_text`, and the whole of `ReminderManager`.
+    # 76 of the file's 114 tests had never been named by any defect.
+    # ------------------------------------------------------------------
+    (
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the ID handed back to the caller is not the ID stamped on the event",
+        CAL,
+        [
+            ('        event.id = id;\n',
+             '        event.id = id.saturating_add(1);\n'),
+        ],
+        ["desktop"],
+        [
+            # Every later lookup in the module is by the returned ID, so the
+            # event the caller just added is one it can never find again.
+            'event_store_get',
+            'event_store_remove',
+            'event_store_update',
+            'import_single_event',
+        ],
+    ),
+    (
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: removing an event that is not there reports success",
+        CAL,
+        [
+            ('        self.events.len() < before\n',
+             '        self.events.len() <= before\n'),
+        ],
+        ["desktop"],
+        [
+            'event_store_remove',
+        ],
+    ),
+    (
+        "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC: removing one event removes every other event instead",
+        CAL,
+        [
+            ('        self.events.retain(|e| e.id != id);\n',
+             '        self.events.retain(|e| e.id == id);\n'),
+        ],
+        ["desktop"],
+        [
+            'event_store_remove',
+        ],
+    ),
+    (
+        "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD: an update to an event that does not exist reports that it happened",
+        CAL,
+        [
+            ('            f(e);\n            true\n        } else {\n            false\n        }\n',
+             '            f(e);\n            true\n        } else {\n            true\n        }\n'),
+        ],
+        ["desktop"],
+        [
+            'event_store_update_nonexistent',
+        ],
+    ),
+    (
+        "EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE: an update lands on the first event whose ID is at least the one asked for",
+        CAL,
+        [
+            ('        if let Some(e) = self.events.iter_mut().find(|e| e.id == id) {\n',
+             '        if let Some(e) = self.events.iter_mut().find(|e| e.id >= id) {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape. `event_store_update_nonexistent` asks a
+            # *empty* store for ID 999, and `>=` finds nothing in an empty
+            # store either -- the two predicates only disagree when the store
+            # still holds an event whose ID is above the missing one, which is
+            # the state a delete leaves behind.
+        ],
+    ),
+    (
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF: an event is looked up by its position in the list rather than by its ID",
+        CAL,
+        [
+            ('        self.events.iter().find(|e| e.id == id)\n',
+             '        self.events.get(id as usize)\n'),
+        ],
+        ["desktop"],
+        [
+            'event_store_get',
+        ],
+    ),
+    (
+        "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG: an event that begins exactly where the range ends is counted inside it",
+        CAL,
+        [
+            ('                if event.start_timestamp < range_end && event.end_timestamp > range_start {\n',
+             '                if event.start_timestamp <= range_end && event.end_timestamp > range_start {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape: every event in the suite starts at 09:00,
+            # 10:00, 14:00 or 23:00, and the range ends every fixture asks
+            # about are midnights, so no fixture puts a start *on* a range
+            # end. Midnight is the range end of every day cell, so a real
+            # event at exactly 00:00 would be drawn on the day before too.
+        ],
+    ),
+    (
+        "HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: an event that ends exactly where the range begins is counted inside it",
+        CAL,
+        [
+            ('                if event.start_timestamp < range_end && event.end_timestamp > range_start {\n',
+             '                if event.start_timestamp < range_end && event.end_timestamp >= range_start {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape, for the mirror-image reason as `G`: no
+            # fixture has an event *ending* exactly on a range start either.
+            # The half-open interval is what stops a meeting ending at
+            # midnight from appearing on both days. Module 82's `E` proved
+            # this for the *recurring* branch; the non-recurring branch has
+            # never been asked.
+        ],
+    ),
+    (
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII: every non-recurring event is returned whatever range was asked for",
+        CAL,
+        [
+            ('                if event.start_timestamp < range_end && event.end_timestamp > range_start {\n                    result.push(event.clone());\n                }\n',
+             '                result.push(event.clone());\n'),
+        ],
+        ["desktop"],
+        [
+            'events_for_range',
+            'events_for_date_non_recurring',
+        ],
+    ),
+    (
+        "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a hex colour made of non-hex characters parses as black",
+        CAL,
+        [
+            ('    let r = u8::from_str_radix(s.get(0..2)?, 16).ok()?;\n',
+             '    let r = u8::from_str_radix(s.get(0..2)?, 16).unwrap_or(0);\n'),
+            ('    let g = u8::from_str_radix(s.get(2..4)?, 16).ok()?;\n',
+             '    let g = u8::from_str_radix(s.get(2..4)?, 16).unwrap_or(0);\n'),
+            ('    let b = u8::from_str_radix(s.get(4..6)?, 16).ok()?;\n',
+             '    let b = u8::from_str_radix(s.get(4..6)?, 16).unwrap_or(0);\n'),
+        ],
+        ["desktop"],
+        [
+            # All three at once on purpose: `?` on the first channel hides a
+            # broken second and third, so patching one is untestable.
+            'parse_hex_color_invalid_chars',
+        ],
+    ),
+    (
+        "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: importing a multi-event file keeps only the last event's fields",
+        CAL,
+        [
+            ('                if in_event {\n',
+             '                if !in_event {\n'),
+        ],
+        ["desktop"],
+        [
+            # The count still comes out right -- the store gains one event per
+            # EVENT line either way -- so only a test that reads the imported
+            # *fields* can see it.
+            'export_import_roundtrip',
+        ],
+    ),
+    (
+        "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: an imported event's all-day flag comes back inverted",
+        CAL,
+        [
+            ('                all_day = val == "true";\n',
+             '                all_day = val != "true";\n'),
+        ],
+        ["desktop"],
+        [
+            'export_import_roundtrip',
+        ],
+    ),
+    (
+        "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: a weekly event is imported as a monthly one",
+        CAL,
+        [
+            ('                    "weekly" => Some(Recurrence::Weekly),\n',
+             '                    "weekly" => Some(Recurrence::Monthly),\n'),
+        ],
+        ["desktop"],
+        [
+            'export_import_roundtrip',
+        ],
+    ),
+    (
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the colour line's leading space is kept, so every imported colour is dropped",
+        CAL,
+        [
+            ('            } else if let Some(val) = trimmed.strip_prefix("color: ") {\n',
+             '            } else if let Some(val) = trimmed.strip_prefix("color:") {\n'),
+        ],
+        ["desktop"],
+        [
+            # Seven characters is not six, so `parse_hex_color` answers None
+            # and the event silently reverts to the renderer's default.
+            'import_single_event',
+            'export_import_roundtrip',
+        ],
+    ),
+    (
+        "OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: an exported colour channel below 0x10 loses its leading zero",
+        CAL,
+        [
+            ('                out.push_str(&format!("color: {:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));\n',
+             '                out.push_str(&format!("color: {:X}{:X}{:X}\\n", c.r, c.g, c.b));\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape. `export_color_hex_format` uses F38BA8 and the
+            # round trip uses A6E3A1 and F9E2AF -- every channel in the suite
+            # is >= 0x10, so the padding never has anything to do. A dark
+            # colour writes fewer than six digits, which the length check in
+            # `parse_hex_color` then refuses on the way back in, silently
+            # losing the colour the user chose.
+        ],
+    ),
+    (
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP: a recurrence walk runs one occurrence past the end of the range",
+        CAL,
+        [
+            ('        if occ_start >= range_end {\n',
+             '        if occ_start > range_end {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape: the recurrence fixtures anchor at 10:00 and
+            # 14:00 and stop at midnights, so no occurrence ever starts *on*
+            # the range end. A daily event anchored at 00:00 would gain a
+            # whole extra day at the end of every range it is drawn in.
+        ],
+    ),
+    (
+        "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ: a reminder fires N minutes after its event instead of before it",
+        CAL,
+        [
+            ('            event_start.saturating_sub((lead_minutes as u64).saturating_mul(SECS_PER_MIN));\n',
+             '            event_start.saturating_add((lead_minutes as u64).saturating_mul(SECS_PER_MIN));\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_set_and_due',
+        ],
+    ),
+    (
+        "RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR: the reminder lead time is read as seconds rather than as minutes",
+        CAL,
+        [
+            ('            event_start.saturating_sub((lead_minutes as u64).saturating_mul(SECS_PER_MIN));\n',
+             '            event_start.saturating_sub(lead_minutes as u64);\n'),
+        ],
+        ["desktop"],
+        [
+            # A 15-minute warning arrives 15 seconds before the meeting.
+            'reminder_set_and_due',
+        ],
+    ),
+    (
+        "SSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS: a dismissed reminder keeps coming back as due",
+        CAL,
+        [
+            ('            .filter(|r| !r.dismissed && r.fire_at <= now)\n',
+             '            .filter(|r| r.fire_at <= now)\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_dismiss',
+            'reminder_dismiss_all',
+        ],
+    ),
+    (
+        "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT: a reminder due exactly now is not due yet",
+        CAL,
+        [
+            ('            .filter(|r| !r.dismissed && r.fire_at <= now)\n',
+             '            .filter(|r| !r.dismissed && r.fire_at < now)\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_set_and_due',
+        ],
+    ),
+    (
+        "UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU: snoozing a reminder moves it earlier instead of later",
+        CAL,
+        [
+            ('                r.fire_at = r.fire_at.saturating_add(duration.secs());\n',
+             '                r.fire_at = r.fire_at.saturating_sub(duration.secs());\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_snooze',
+        ],
+    ),
+    (
+        "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV: a snooze is absorbed by an already-dismissed reminder for the same event",
+        CAL,
+        [
+            ('            if r.event_id == event_id && !r.dismissed {\n',
+             '            if r.event_id == event_id {\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape: no fixture dismisses a reminder and then
+            # snoozes the same event. The loop breaks on the first match, so
+            # a dead reminder standing earlier in the list swallows the
+            # snooze and the live one fires again immediately.
+        ],
+    ),
+    (
+        "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW: dismissing one reminder dismisses every reminder for that event",
+        CAL,
+        [
+            ('                r.dismissed = true;\n                break;\n',
+             '                r.dismissed = true;\n'),
+        ],
+        ["desktop"],
+        [
+            # Predicted escape: `multiple_reminders_same_event` sets two
+            # reminders on one event but never dismisses either, and every
+            # fixture that *does* dismiss has one reminder per event. Yet
+            # that test is precisely what establishes two reminders on one
+            # event as a supported arrangement -- a day-before and an
+            # hour-before -- so dismissing the first must not cancel the
+            # second.
+        ],
+    ),
+    (
+        "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX: dismiss-all dismisses only the first reminder",
+        CAL,
+        [
+            ('        for r in &mut self.reminders {\n            r.dismissed = true;\n        }\n',
+             '        for r in &mut self.reminders {\n            r.dismissed = true;\n            break;\n        }\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_dismiss_all',
+        ],
+    ),
+    (
+        "YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY: the active-reminder count includes the dismissed ones",
+        CAL,
+        [
+            ('        self.reminders.iter().filter(|r| !r.dismissed).count()\n',
+             '        self.reminders.len()\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_dismiss',
+            'reminder_dismiss_all',
+        ],
+    ),
+    (
+        "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ: pruning keeps the dismissed reminders and throws away the live ones",
+        CAL,
+        [
+            ('        self.reminders.retain(|r| !r.dismissed);\n',
+             '        self.reminders.retain(|r| r.dismissed);\n'),
+        ],
+        ["desktop"],
+        [
+            'reminder_prune_dismissed',
         ],
     ),
 ]

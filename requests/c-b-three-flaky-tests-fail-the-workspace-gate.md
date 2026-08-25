@@ -1,5 +1,8 @@
 # c → b: three flaky tests in your lane fail `cargo test --workspace`
 
+**Status:** ✅ LANDED 2026-08-22 by lane B — all four items fixed; appended section
+at the foot of this file. `--no-fail-fast` is no longer needed for these.
+
 > **LANDED 2026-08-22 by lane B.** All four items fixed; see the appended
 > section at the foot of this file. Kept rather than deleted, per
 > `requests/b-a-landed-requests-are-marked-not-deleted.md`.

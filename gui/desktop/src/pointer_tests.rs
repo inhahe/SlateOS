@@ -24,8 +24,9 @@ use crate::launcher::{self, Category};
 use crate::snap;
 use crate::{
     DesktopShell, Hit, Key, KeyEvent, Layer, ManagedWindow, Modifiers, MouseButton, MouseEvent,
-    MouseEventKind, Rect, START_MENU_ROW_HEIGHT, ShellAction, ShellControlAction, ShellRequest,
-    TextRole, WindowId, WindowInfo, WindowList, WindowState, click, scroll, scroll_rows,
+    MouseEventKind, Rect, START_BUTTON_WIDTH, START_MENU_ROW_HEIGHT, ShellAction,
+    ShellControlAction, ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState,
+    click, scroll, scroll_rows,
 };
 use appearance::{AppearanceSettings, WindowCorners};
 use guitk::render::{RenderCommand, RenderTree};
@@ -597,16 +598,55 @@ fn the_power_menu_follows_the_theme_and_the_corner_setting() {
 
 // ---- the taskbar ----------------------------------------------------------
 
+/// The button drawn in slot *n* must name the window listed in slot *n*.
+///
+/// Stated with the ids captured on the way in rather than read back out of
+/// `taskbar_windows()`: `hit_test(centre(taskbar_button_rect(i))) ==
+/// TaskbarButton(i)` — which is what this test used to say — compares the slot
+/// number with itself, and no arrangement of windows can make it false. The
+/// ids make it a claim about the *pairing*, which is the thing that would
+/// actually strand a click on the wrong program.
 #[test]
 fn a_taskbar_button_is_clickable_where_it_is_drawn() {
     let mut shell = shell();
-    open(&mut shell, "A");
-    open(&mut shell, "B");
-    open(&mut shell, "C");
+    let a = open(&mut shell, "A");
+    let b = open(&mut shell, "B");
+    let c = open(&mut shell, "C");
 
-    for index in 0..shell.visible_windows().len() {
-        let (x, y) = centre(shell.taskbar_button_rect(index));
-        assert_eq!(shell.hit_test(x, y), Hit::TaskbarButton(index));
+    // Left to right in the order the compositor listed them, which `open`
+    // appends to.
+    for (index, id) in [a, b, c].into_iter().enumerate() {
+        let rect = shell.taskbar_button_rect(index);
+        let (x, y) = centre(rect);
+        assert_eq!(
+            shell.hit_test(x, y),
+            Hit::TaskbarButton(id),
+            "the button in slot {index} does not belong to the window there"
+        );
+
+        // The buttons are on the bar and in order, which is the part that no
+        // amount of agreement between the hit test and the accessor can show.
+        let bar = shell.taskbar_rect();
+        assert!(
+            rect.x >= bar.x + shell.start_button_rect().w,
+            "button {index} is drawn over the start button"
+        );
+        assert!(
+            rect.x + rect.w <= shell.tray_x(),
+            "button {index} runs into the system tray"
+        );
+        assert!(
+            rect.y >= bar.y && rect.y + rect.h <= bar.y + bar.h,
+            "button {index} escapes the bar vertically"
+        );
+        if index > 0 {
+            let previous = shell.taskbar_button_rect(index - 1);
+            assert!(
+                rect.x >= previous.x + previous.w,
+                "buttons {} and {index} overlap",
+                index - 1
+            );
+        }
     }
 }
 
@@ -622,7 +662,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     let b = open(&mut shell, "B");
     assert_eq!(shell.focused_window, Some(b));
 
-    // A is at index 0: `visible_windows` is in the compositor's order, and B
+    // A is at index 0: `taskbar_windows` is in the compositor's order, and B
     // arrived above it.
     let first = shell.taskbar_button_rect(0);
     assert_eq!(
@@ -641,7 +681,7 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     );
 
     let index = shell
-        .visible_windows()
+        .taskbar_windows()
         .iter()
         .position(|w| w.id == b)
         .unwrap();
@@ -658,16 +698,28 @@ fn a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focus
     );
 }
 
+/// The window closed between the frame its button was drawn in and the press.
+/// The click lands on bare taskbar, and bare taskbar keeps it: a bar that let
+/// it through would raise whatever happened to be behind.
+///
+/// Named for the panel and not for the button, because the panel is what
+/// answers. It was called `a_taskbar_button_whose_window_has_gone_swallows_the
+/// _click`, which described a code path that did not exist —
+/// [`Hit::TaskbarButton`] is resolved to a window by the same call that
+/// produced it, so it never names one that has gone, and the `None` arm the
+/// old name pointed at was unreachable. The behaviour is real; only the route
+/// to it was misdescribed.
 #[test]
-fn a_taskbar_button_whose_window_has_gone_swallows_the_click() {
-    // The window closed between the frame the button was drawn in and the
-    // press. Nothing to ask for — but the click landed on the taskbar, and a
-    // taskbar that let it through would raise whatever happened to be behind.
+fn a_click_where_a_button_used_to_be_is_still_the_taskbars() {
     let mut shell = shell();
     open(&mut shell, "A");
     let button = shell.taskbar_button_rect(0);
     shell.apply_window_list(&here(&[]));
 
+    assert_eq!(
+        shell.hit_test(button.x + 4.0, button.y + 4.0),
+        Hit::TaskbarPanel
+    );
     assert_eq!(click_at(&mut shell, button), ShellAction::Consumed);
 }
 
@@ -695,7 +747,7 @@ fn the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it() {
         "a window absent from the list kept its taskbar button"
     );
     let titles: Vec<&str> = shell
-        .visible_windows()
+        .taskbar_windows()
         .iter()
         .map(|w| w.title.as_str())
         .collect();
@@ -706,7 +758,7 @@ fn the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it() {
     );
     assert_eq!(shell.focused_window, Some(WindowId(2)));
     assert_eq!(
-        shell.visible_windows().last().map(|w| w.id),
+        shell.taskbar_windows().last().map(|w| w.id),
         Some(WindowId(2)),
         "the list is bottom-to-top, so the last entry is topmost"
     );
@@ -725,7 +777,7 @@ fn the_taskbar_leaves_out_every_surface_that_is_not_an_application_window() {
 
     shell.apply_window_list(&here(&[wallpaper, app(3, "Editor"), bar]));
 
-    let ids: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
+    let ids: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
     assert_eq!(ids, [WindowId(3)], "the shell listed its own surfaces");
 }
 
@@ -744,15 +796,105 @@ fn a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not() {
 
     assert_eq!(shell.windows[&WindowId(1)].state, WindowState::Minimized);
     assert!(
-        !shell.windows[&WindowId(1)].visible,
-        "a minimized window is not on the glass"
+        shell.windows[&WindowId(1)].mapped,
+        "a minimized window is still mapped -- the user put it away, it did not go away"
+    );
+    assert!(
+        !shell.windows[&WindowId(1)].on_glass(),
+        "a minimized window is not being drawn"
     );
     assert!(
         shell.windows.contains_key(&WindowId(2)),
         "an unmapped window keeps its id and its place in the stack"
     );
-    let listed: Vec<WindowId> = shell.visible_windows().iter().map(|w| w.id).collect();
-    assert_eq!(listed, [WindowId(3)]);
+
+    // The assertion this test is named for, and which it did not used to make:
+    // it asserted `[WindowId(3)]` -- that the minimized window had lost its
+    // button -- which is the bug itself, written down as the expectation. A
+    // test whose name promises one behaviour and whose body pins the opposite
+    // is worse than no test, because a reader who greps for the promise finds
+    // it and stops looking.
+    let listed: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
+    assert_eq!(
+        listed,
+        [WindowId(1), WindowId(3)],
+        "the minimized window keeps its button; only the unmapped one loses it"
+    );
+}
+
+#[test]
+fn a_minimized_window_can_be_got_back_from_its_taskbar_button() {
+    // The other half of the same rule, and the reason it matters. Clicking the
+    // button of a window that is not focused asks for `Activate` -- which the
+    // compositor implements as un-minimize-then-focus precisely so that this
+    // click works. That care was unreachable code for as long as minimizing a
+    // window deleted its button: there was no way left to click.
+    let mut shell = shell();
+    let id = open(&mut shell, "Editor");
+    minimize(&mut shell, id);
+
+    assert_eq!(
+        shell.taskbar_windows().len(),
+        1,
+        "the button must still be there to be clicked"
+    );
+    let button = shell.taskbar_button_rect(0);
+    assert_eq!(
+        click_at(&mut shell, button),
+        ShellAction::Control(ShellRequest::window(id, ShellControlAction::Activate)),
+        "the click must ask for the window back, not minimize it again"
+    );
+}
+
+#[test]
+fn alt_tab_reaches_a_minimized_window() {
+    // The switcher lists the same set for the same reason: Alt+Tab is the other
+    // standing way to reach a window you put away, and a switcher that silently
+    // skipped minimized windows made the last one you minimized unreachable by
+    // either route at once.
+    let mut shell = shell();
+    let first = open(&mut shell, "Editor");
+    open(&mut shell, "Terminal");
+    minimize(&mut shell, first);
+
+    assert_eq!(shell.taskbar_windows().len(), 2, "both are still listed");
+    shell.start_alt_tab();
+    assert!(
+        shell.alt_tab_active,
+        "two windows is enough to switch between"
+    );
+    assert!(
+        shell
+            .taskbar_windows()
+            .iter()
+            .any(|w| w.id == first && w.state == WindowState::Minimized),
+        "the minimized window must be among the rows the switcher steps through"
+    );
+}
+
+#[test]
+fn show_desktop_does_not_ask_an_already_minimized_window_to_minimize() {
+    // The one caller that wants the *narrow* question. Super+D means "clear the
+    // screen", so it has nothing to say to a window that is already away --
+    // asking would be a request the compositor must ignore and, worse, one the
+    // user would have to undo twice to get back where they were. This is why
+    // the fix is two accessors rather than one widened one.
+    let mut shell = shell();
+    let away = open(&mut shell, "Editor");
+    let still_here = open(&mut shell, "Terminal");
+    minimize(&mut shell, away);
+
+    let asked: Vec<WindowId> = shell
+        .windows
+        .values()
+        .filter(|w| w.on_glass() && w.desktop == shell.current_desktop)
+        .map(|w| w.id)
+        .collect();
+    assert_eq!(
+        asked,
+        [still_here],
+        "only the window still on the glass should be asked to go away"
+    );
 }
 
 #[test]
@@ -820,7 +962,7 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
         ))
     );
     assert!(
-        shell.visible_windows().len() == 1,
+        shell.taskbar_windows().len() == 1,
         "the shell acted on the request itself"
     );
 
@@ -828,7 +970,12 @@ fn the_window_list_is_the_only_thing_that_grows_the_shells_idea_of_the_desktop()
     let mut away = app(1, "Editor");
     away.minimized = true;
     shell.apply_window_list(&here(&[away]));
-    assert!(shell.visible_windows().is_empty());
+    // The button survives the minimize -- this used to assert
+    // `taskbar_windows().is_empty()`, which is the stranded-window bug stated
+    // as an expectation for the second time in this file. What the round trip
+    // actually shows is that the *state* moved and the listing did not.
+    assert_eq!(shell.taskbar_windows().len(), 1);
+    assert_eq!(shell.windows[&WindowId(1)].state, WindowState::Minimized);
     assert_eq!(shell.focused_window, None);
 }
 
@@ -1362,14 +1509,47 @@ fn motion_is_left_to_the_client() {
 fn adjacent_rows_do_not_share_a_pixel() {
     let mut shell = shell();
     shell.toggle_start_menu();
-    let first = shell.start_menu_row_rect(0);
-    let boundary = first.y + first.h;
-    assert!(!first.contains(first.x + 4.0, boundary));
-    assert!(
-        shell
-            .start_menu_row_rect(1)
-            .contains(first.x + 4.0, boundary)
-    );
+    let rows = shell.start_menu_visible_rows();
+    assert!(rows >= 3, "the fixture must draw rows to compare");
+
+    for row in 0..3 {
+        let this = shell.start_menu_row_rect(row);
+        let next = shell.start_menu_row_rect(row + 1);
+        let boundary = this.y + this.h;
+        let x = this.x + 4.0;
+
+        // Where the seam is. This used to be the whole test, and it is only
+        // half the property: it says the rows meet with no gap, and says
+        // nothing at all about their meeting *twice*. Rows laid out one pixel
+        // short still cover the boundary -- they simply cover the pixel before
+        // it as well -- so a defect that made every row start early passed the
+        // test the row-sharing was named after.
+        assert!(!this.contains(x, boundary), "row {row} claims its own end");
+        assert!(
+            next.contains(x, boundary),
+            "row {} does not start where row {row} ends",
+            row + 1
+        );
+
+        // And that the seam is only one. The pixel before the boundary belongs
+        // to this row and to nothing else.
+        assert!(this.contains(x, boundary - 0.5));
+        assert!(
+            !next.contains(x, boundary - 0.5),
+            "rows {row} and {} both claim the pixel above their boundary",
+            row + 1
+        );
+
+        // Stated once more as arithmetic, because the two `contains` pairs
+        // above still admit a pitch that is wrong by less than half a pixel,
+        // which over a long list walks the last row off the menu.
+        assert!(
+            (next.y - boundary).abs() < 0.001,
+            "row {} starts at {} but row {row} ends at {boundary}",
+            row + 1,
+            next.y
+        );
+    }
 }
 
 /// A screen too small for the chrome must produce empty rectangles, not
@@ -1379,6 +1559,23 @@ fn a_screen_smaller_than_the_taskbar_does_not_invert_the_geometry() {
     let shell = DesktopShell::new(200, 20);
     let bar = shell.taskbar_rect();
     assert_eq!(bar.y, 0.0);
+    // The bar is clamped to the screen it is on. Checking only that it starts
+    // at 0 leaves the far edge unstated, and the far edge is the half that can
+    // run away: the bar's thickness is what the *user* asked for (48 logical
+    // pixels by default, more at 200% scaling), so on a screen shorter than
+    // that an unclamped bar hangs 28 pixels off the bottom -- a rectangle that
+    // answers `contains` for coordinates the display does not have.
+    assert!(
+        bar.h <= shell.screen_height as f32,
+        "the taskbar is {} tall on a {}-tall screen",
+        bar.h,
+        shell.screen_height
+    );
+    assert_eq!(
+        bar.y + bar.h,
+        shell.screen_height as f32,
+        "the taskbar must sit on the bottom edge on a small screen too"
+    );
     assert!(shell.taskbar_button_width() >= 0.0);
     assert_eq!(shell.work_area().3, 0);
     assert!(!Rect::new(0.0, 0.0, 0.0, 0.0).contains(0.0, 0.0));
@@ -1425,6 +1622,25 @@ fn the_start_button_is_clickable_where_it_is_drawn_at_every_scale() {
     for percent in [100, 125, 150, 200] {
         let mut shell = scaled(percent);
         let start = shell.start_button_rect();
+
+        // Hand-written arithmetic, not a second reading of the shell. Aiming
+        // at the middle of `start_button_rect()` and finding the start button
+        // there proves only that the hit test and the accessor agree -- and
+        // they cannot disagree, because the hit test *is* a call to the
+        // accessor. A button that stayed its logical width on a 200% display
+        // would shrink the test's aim along with itself and pass. So the size
+        // has to be asserted against a number written here.
+        let expected = START_BUTTON_WIDTH * f32::from(percent) / 100.0;
+        assert!(
+            (start.w - expected).abs() < 0.01,
+            "the start button is {} wide at {percent}% scaling, expected {expected}",
+            start.w
+        );
+        assert!(
+            (start.h - shell.taskbar_thickness()).abs() < 0.01,
+            "the start button is not the full height of the bar at {percent}%"
+        );
+
         assert_eq!(click_at(&mut shell, start), ShellAction::Consumed);
         assert!(shell.start_menu_open, "at {percent}% scaling");
     }

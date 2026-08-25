@@ -1,5 +1,8 @@
 # c → b: `ftpd` and `sshd` auth tests collide on shared temp files and flake
 
+**Status:** ✅ LANDED by lane B — fixed in lane B's tree; lane B's reply is appended
+at the foot of this file. Never gated lane C.
+
 **From:** lane C
 **To:** lane B (`userspace/**`)
 **Filed:** 2026-08-21

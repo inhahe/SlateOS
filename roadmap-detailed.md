@@ -3180,15 +3180,23 @@ options with warnings" decision.)_
   `de-qwertz`, `fr-azerty`, `es-qwerty`. Selected by
   `inputsettings`' `keyboard.layout`, applied by the compositor, drawn by the
   shell's preview from the same table. `design-decisions.md` §549.
+- [x] Dead keys — `´` then `e` types `é`, on the French, German and Spanish
+  layouts. Deadness is declared per *face* in `keylayout` (French carries `^`
+  twice, dead on one key and live on AltGr+9), composed by `osfont::deadkey`
+  out of the same generated UAX #15 tables the shaper uses, and sequenced by
+  `compositor`'s `DeadKeys`, which is the only crate that links both. A failed
+  composition types both characters (`design-decisions.md` §550); space,
+  a second dead key and a key that types nothing are §551.
 
 _Keyboard layouts: Dvorak (+ left-hand, right-hand, programmer variants), Colemak, Workman. Plus QWERTY and locale-specific. Custom remap from any starting layout._
 
 _Not yet offered, and deliberately: left-hand, right-hand and Programmer
 Dvorak, whose exact rows could not be verified here — a layout typed from
 memory is worse than an absent one, because the user cannot tell a wrong table
-from a broken keyboard. Dead keys and compose sequences are likewise absent
-(`TD-ONLY-ONE-KEYBOARD-LAYOUT` (3)-(4)), which is why the national layouts
-offered are ones that need neither._
+from a broken keyboard. Compose sequences (`Compose`, `o`, `c` → `©`) are also
+absent: unlike a dead key, which remembers exactly one character, a compose
+sequence is a prefix tree of arbitrary depth, and it needs a table of its own
+rather than the pair-at-a-time composition dead keys reuse._
 
 ### 5.3 Network
 

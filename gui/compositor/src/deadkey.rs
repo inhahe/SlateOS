@@ -196,6 +196,7 @@ impl DeadKeys {
         // `design-decisions.md` §550: type both rather than discard. This is
         // the case `KeyEvent::text` was widened from `Option<char>` to a
         // `String` for -- it is the only one that types two characters.
+        //
         // Eight, because a `char` is at most four bytes in UTF-8 and there are
         // exactly two of them. Written as the constant rather than as a sum of
         // the two lengths so that there is no arithmetic to overflow-check on

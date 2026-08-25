@@ -32838,6 +32838,48 @@ so it is where a test belongs asserting that every dead face in every builtin
 layout maps to a real `deadkey::combining` entry. Until that lands, the three
 national layouts still type a standalone accent where a real board would compose.
 
+**Update 2026-08-24, later still — step (3) is done; dead keys work end to
+end.** `gui/compositor/src/deadkey.rs` holds the pending accent: an
+`Option<char>` on the compositor beside `ModifierState`, consulted from
+`handle_key` on the path where the compositor did the translation, disarmed by
+`release_all_modifiers` and by a focus change. Typing `´` then `e` on
+`de-qwertz` now produces one key event carrying no text and a second carrying
+`é`.
+
+The two conventions the note above asked for — plus a third it did not
+anticipate — are decided and recorded as `design-decisions.md` §551. **Space**
+types the bare accent alone: the only way to type a `´` at all on a board where
+that key is dead, and the escape hatch that lets the third rule discard safely.
+**A second dead key** flushes the first and re-arms, checked *before* the
+composition table is consulted, because `¨` really does compose with an acute
+into U+0385 GREEK DIALYTIKA TONOS — an ordering that is invisible except in
+that one case. "Pressed twice types one accent and leaves one waiting" then
+falls out of that with no rule of its own, which is why it needed no separate
+decision. **A key that types no text** discards the accent, Backspace being the
+case that decides it, with modifier keys excluded so that `É` stays typeable.
+
+The cross-crate test the note asked for exists as
+`every_dead_face_in_every_builtin_layout_composes_with_something`, and it
+counts rather than merely sweeping: thirteen dead faces reached across the
+three national layouts, so a layout that lost its `dead` block fails here
+instead of passing by checking nothing.
+
+**Found and fixed on the way:** `key_for_layout` answered `None` for the space
+bar, because a `Layout` is the alphanumeric block and space is not in it. On
+the evdev path — every real machine — the space bar therefore typed no text at
+all and no text field could hold a space. The host backend hid it completely,
+because it supplies its own character. Fixed by
+`keymap::text_outside_the_block`; the numeric keypad is the same shape of gap
+and is now tracked as
+`TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK`.
+
+**What remains of this entry is step (4) only:** compose sequences (`Compose`,
+`o`, `c` → `©`). Unlike a dead key, which remembers exactly one character, a
+compose sequence is a prefix tree of arbitrary depth and needs a table of its
+own rather than the pair-at-a-time composition dead keys reuse. Nothing else in
+(1)-(3) is outstanding, and the three national layouts now compose where a real
+board would.
+
 ## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
 
 **In short:** when a program stopped itself for job control (what a shell does

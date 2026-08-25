@@ -71634,12 +71634,13 @@ all three output formats, the escaping, every option error and prefix
 ambiguity, and the whole of `--check` including the layout latch, the
 `WARNING:` lines with their singular/plural forms, and the exit statuses.
 
-Run `PROG=md5sum OURS=/usr/bin/md5sum ./scripts/digest-diff.sh` to confirm the
-harness still discriminates; it reports the two xfails as XPASS and nothing
-else, which is what says the remaining 113 are comparisons and not
-coincidences. (`OURS` replaces a single binary, so the harness refuses it
-without a `PROG` saying which — rather than applying it to whichever program
-happened to run first.)
+Run `OURS=/usr/bin ./scripts/digest-diff.sh` to confirm the harness still
+discriminates; it reports all four xfails as XPASS and nothing else, which is
+what says the remaining 226 are comparisons and not coincidences. (`OURS` names
+a *directory*, as in every family harness here, so one run covers both
+programs. It named a single binary until 2026-08-25, which meant it also needed
+a `PROG=` beside it to say which — and so the discrimination check could only
+ever cover one of the two programs at a time.)
 
 ### What our own tests caught that the harness could not have
 

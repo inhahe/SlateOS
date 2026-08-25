@@ -24256,6 +24256,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            # A collision needs two variants to be visible, so the single-value
+            # round trip cannot see it. Only the all-four sweep can.
+            'every_rotation_survives_a_round_trip_through_the_config_file',
         ],
     ),
     (

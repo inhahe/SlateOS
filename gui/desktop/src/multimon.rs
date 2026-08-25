@@ -1941,4 +1941,59 @@ mod tests {
         assert_eq!(entry.resolution, (800, 600));
         assert_eq!(entry.position, (1, 2));
     }
+
+    #[test]
+    fn every_rotation_survives_a_round_trip_through_the_config_file() {
+        // `as_str` and `from_str_config` are two independently-written lists of
+        // the same four words, and a round trip is the only place the two of
+        // them meet. A variant whose label collides with another's — `Inverted`
+        // written out as "normal" — reads back as the wrong rotation, so a
+        // monitor mounted upside down comes back the wrong way up after a
+        // reboot, and the settings UI cannot fix it: what it saves reads back as
+        // the setting it replaced. Round-tripping *one* rotation cannot see
+        // that, because a collision needs two variants to be visible; only
+        // covering all of them can.
+        const ALL: [Rotation; 4] = [
+            Rotation::Normal,
+            Rotation::Left,
+            Rotation::Right,
+            Rotation::Inverted,
+        ];
+
+        // The collision itself, stated directly rather than inferred from a
+        // failed round trip.
+        let mut labels: Vec<&str> = ALL.iter().map(|r| r.as_str()).collect();
+        let written = labels.len();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), written, "two rotations share a config label");
+
+        for rotation in ALL {
+            // Exhaustiveness guard: a fifth variant stops this match compiling
+            // until it is listed in `ALL` above, so a new rotation cannot be
+            // added and silently left out of this test.
+            match rotation {
+                Rotation::Normal | Rotation::Left | Rotation::Right | Rotation::Inverted => {}
+            }
+
+            let mut cfg = MonitorConfig::default();
+            cfg.configs.insert(
+                "DP-1".into(),
+                PerMonitorConfig {
+                    resolution: (1920, 1080),
+                    position: (0, 0),
+                    rotation,
+                    scale: 1.0,
+                    enabled: true,
+                },
+            );
+
+            let text = cfg.save_to_string();
+            let loaded = MonitorConfig::load_from_string(&text).expect("should parse");
+            assert_eq!(
+                loaded.configs["DP-1"].rotation, rotation,
+                "{rotation:?} was written out as {text:?}"
+            );
+        }
+    }
 }

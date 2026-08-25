@@ -74787,7 +74787,39 @@ commands` while in the area. The remaining 12 are tranches 2c and 2d, and the
 
 ---
 
-## TD-B-SED-E-AND-DEBUG — the `e` command and `--debug` are still missing (lane B, 2026-08-24) — **open**
+## TD-B-SED-E-AND-DEBUG — the `e` command and `--debug` are still missing (lane B, 2026-08-24) — ✅ **FIXED 2026-08-24**
+
+**Fixed** in sed tranche 2d. `e`, `e COMMAND` and `s///e` all go through
+`coreutils::shell::shell_bytes`, which is the one place in the tree that decides
+what "the shell" is — so the policy question this entry parked turned out to
+have been answered already, by `awk`'s `system()` and `split --filter`. All
+three are refused by `--sandbox`, and
+`the_sandbox_refuses_every_command_that_reaches_outside_the_script` now names
+them.
+
+`--debug` is implemented in full: the `SED PROGRAM:` dump (built during parsing,
+into `Command::dump`, because that is the only moment the script's text still
+exists) and the runtime trace (`INPUT:`, `PATTERN:`, `HOLD:`, `COMMAND:`,
+`MATCHED REGEX REGISTERS`, `END-OF-CYCLE:`). Forty-odd `--debug` cases in
+`scripts/sed-diff.sh` compare it against GNU byte for byte; one case differs on
+purpose, for the reason in `design-decisions.md` §379 — GNU sign-extends a byte
+≥ 0x80 into `\o37777777600`, and we print `\o200`.
+
+Two unrelated defects surfaced while wiring the trace's `INPUT:` line, and were
+fixed with it:
+
+- `Job::in_place` handed a `-` operand to `Input`, which mapped `-` to standard
+  input unconditionally — contradicting the `File::open` immediately above it,
+  so `sed -i 's/a/A/' -- -` half-edited a file and half-read a stream. `Input`
+  now carries `dash_is_stdin`.
+- `Input::fill` reads one line ahead, and updated `cur_name` when it opened the
+  *next* file — so at a file boundary `F` and `INPUT:` named the wrong file.
+  Each `Line` now carries its own `Rc<OsString>` name.
+
+The original entry follows.
+
+---
+
 
 **What it is.** Two gaps are left in `sed` after TD-B-SED-MISSING-COMMANDS
 closed the other five:
@@ -75017,7 +75049,28 @@ and `tac` all delegate to the file form when the argument names a file and have
 no failure mode left on the pipe path; `paste`, `tr`, `column` and `grep`
 already set a status. `cmd_tr_input` is the model the `sed`/`awk` fix followed.
 
-#### TD-A-FIVE-PIPE-FORMS-SILENTLY-DISCARD-A-FILE-OPERAND (lane A, 2026-08-24) — **open**
+#### TD-A-FIVE-PIPE-FORMS-SILENTLY-DISCARD-A-FILE-OPERAND (lane A, 2026-08-24) — ✅ **FIXED same day (`bb9787783`, boot-verified `eba6d16ce`)**
+
+> **Fixed as described below, with one deliberate departure and one addition.**
+>
+> * **`mapfile` delegates rather than rejecting a second word.** The plan below
+>   argued for rejection on the grounds that bash's `mapfile` takes no file
+>   operand at all. That reasoning does not survive contact with the fact that
+>   *this shell's* `cmd_mapfile` does take one — the operand is our own
+>   extension, so refusing it in the pipe half would invent a third behaviour
+>   rather than remove a disagreement. Consistency with `cmd_mapfile` beats
+>   consistency with a bash spelling bash does not have.
+> * **`sed`'s share was done as a refactor, not a patch.** Both halves now call
+>   one `classify_sed_args`; the duplicated argument loop is gone. The two
+>   copies had *already* drifted — that drift is precisely how `-i` came to be
+>   parsed in one half and ignored in the other — so removing the duplication is
+>   what stops the next flag doing the same thing.
+> * Covered by self-test rung 34, which pipes one token while naming a file
+>   containing a different one, so the two possible answers are distinguishable.
+>   It also asserts that a pipe with *no* file named still reads the pipe, so
+>   that "the file wins" cannot have been implemented as "the pipe never wins".
+>
+> The original entry follows unchanged.
 
 **In short:** `cat a.txt | cut -f1 b.txt` cuts fields out of `a.txt` and ignores
 `b.txt` entirely — no error, no warning, exit 0. On Linux the named file wins
@@ -75057,7 +75110,48 @@ rather than delegate to a file form this shell invented.
 **Severity.** Medium. Silent and plausible — the output looks like a result, and
 in the `-i` case the user believes a file was edited that was not.
 
-#### TD-A-SED-ACCEPTS-AN-UNTERMINATED-SUBSTITUTION (lane A, 2026-08-24) — **open**
+#### TD-A-SED-ACCEPTS-AN-UNTERMINATED-SUBSTITUTION (lane A, 2026-08-24) — ✅ **FIXED same day (`da9e7a0ca`, boot-verified `6e7a6ced7`)**
+
+> **Fixed, and two more of the same shape were found in the same function
+> while fixing it.** The entry below asked only for `find_unescaped(...)?`. The
+> unterminated `s///` turned out to be one of three ways this parser answered a
+> script it could not honour by honouring it approximately:
+>
+> | Script | Old behaviour | Now |
+> |---|---|---|
+> | `s/a/b` | ran as though the delimiter were there | `unterminated command`, exit 1 |
+> | `s/a/b/i` | flag dropped; a **case-sensitive** substitution reported as success | `unknown option to 's'`, exit 1 |
+> | `-e good -e bad` | the bad one dropped by `filter_map`, the good one ran | fails, naming `expression #2` |
+>
+> The third is the one worth remembering: `parsed.is_empty()` only caught an
+> **all**-bad invocation, so a single bad `-e` standing among good ones was
+> invisible. All three are *wrong answers reported as success*, which is
+> strictly worse than missing ones — nothing downstream can detect them.
+>
+> **What changed structurally.** `parse_sed_command` returns
+> `Result<SedCmd, SedParseError>`; both halves share one `parse_sed_scripts`,
+> for the same reason `classify_sed_args` is shared (two copies of this drifted
+> once already, and that drift is what let `-i` be parsed by one half and
+> ignored by the other). The diagnostic quotes the offending script back
+> because `#1` identifies nothing when there is only one expression — the usual
+> case — and because the commonest confusion here is *which string got read as
+> a script*: `classify_sed_args` will take a bare `something` for one, since it
+> begins with `s`.
+>
+> **The entry's own prediction held.** It said tightening would *simplify*
+> rather than complicate, because the flag-suffix slice `&cmd[rep_end + 1..]`
+> already assumed a terminator. It did: the `rep_end < bytes.len()` branch is
+> gone, and so is the `bytes.len() >= 4` guard, which had been sending `s` and
+> `s/` to `unknown command` instead of `unterminated`.
+>
+> **One test-design consequence.** Quoting the script back means a token shared
+> between a script and the data makes "the message mentioned it" and "sed
+> emitted the line" the same observation. Rung 33's file content therefore moved
+> off `old`, and rung 35's witness `zz_keep` is named in none of its scripts —
+> it is asserted *absent* to prove a refused run emits neither an edit nor a
+> pass-through.
+>
+> The original entry follows unchanged.
 
 **In short:** `sed 's/old/new'` — a trailing `/` short — is an error on Linux
 (`unterminated 's' command`) and runs happily here, substituting `new` for
@@ -75084,7 +75178,7 @@ complicating it.
 **Severity.** Low. The current reading is the one the user almost certainly
 meant; the cost is that a genuinely truncated script runs instead of failing.
 
-#### TD-A-XARGS-REPORTS-THE-LAST-COMMANDS-STATUS-NOT-THE-WORST (lane A, 2026-08-24) — **open**
+#### TD-A-XARGS-REPORTS-THE-LAST-COMMANDS-STATUS-NOT-THE-WORST (lane A, 2026-08-24) — ✅ FIXED (`a3eea79a1`, boot-verified `65b4dda4b`)
 
 **In short:** `printf 'good\nbad\n' | xargs check && deploy` runs `deploy` if
 the *last* invocation succeeded, even when an earlier one failed. GNU `xargs`
@@ -75235,3 +75329,224 @@ should come from the layout rather than the table, which is an argument for
 
 **Severity.** Medium. It is a whole physical key block that does nothing, and
 data-entry users reach for it first. Not urgent only because the top row works.
+
+**Two more found in the same function while reading it for the fix** (2026-08-24):
+
+* **`-n` swallows an argument it could not read.** The parse is
+  `max_args = rest.get(..end).and_then(|s| s.parse::<usize>().ok())`, and the
+  word is consumed from `rest` whether or not the parse succeeded. So
+  `xargs -n abc rm` leaves `max_args` at `None`, drops `abc` on the floor, and
+  runs **one** invocation with every input word — the opposite of what was
+  asked, reported as success. `-n 0` does the same, via the `Some(n) if n > 0`
+  guard falling through to the single-invocation arm. GNU: `xargs: invalid
+  number "abc" for -n option`, exit 1. Same family as the `sed` flag that was
+  ignored rather than refused: a wrong answer, not a missing one.
+* **Empty input runs nothing, where GNU runs the command once.** `words
+  .is_empty()` returns early, so `printf '' | xargs false` exits 0. GNU runs the
+  command once with no arguments unless `-r`/`--no-run-if-empty` is given, and
+  would exit 1 here. **BSD/macOS `xargs` does not run it** — so unlike the two
+  bugs above there is no single correct answer to match, and our behaviour is
+  already one of the two real ones. Left alone deliberately; noted so the next
+  reader does not "fix" it into GNU's shape without knowing it is a fork.
+
+**Fixed 2026-08-24** in `a3eea79a1`. The status is now the worst of the
+invocations, and the `-n` swallow is a usage error. The empty-input fork is
+still a fork and is still deliberately left as-is.
+
+The open question this entry left — 123 or a flat 1 — is answered in
+`design-decisions.md` §291, and the answer is **neither GNU's 123 nor a third
+value**: the child's own status is propagated unchanged. Two existing
+precedents settled it without a coin-flip.
+
+* **Why not 123.** GNU reserves 124–127 for "child exited 255", "child killed
+  by a signal", "not executable" and "not found", and 123 exists to keep those
+  four rows free. This shell produces none of them — an unknown command is a
+  flat 1 (`kshell.rs:7681`) — so adopting one row of a table whose other rows
+  we do not implement leaves a caller unable to tell which convention it is
+  reading. That is the same argument that kept the `Syntax error: …` sites at 1
+  rather than borrowing bash's 2.
+* **Why not §275's third value.** §275's trigger question is *"can this
+  command's 'no' mean either 'I checked' or 'I couldn't check'?"* For `xargs`
+  the answer is **no**: its non-zero is not an assertion about anything, it is
+  a relay of somebody else's. So there is nothing for a third value to
+  distinguish.
+* **Why `max` and not "any failure → 1".** Under §275 a larger status is a
+  worse one, so `max` propagates "I could not check" over "the answer is no" —
+  it carries §275's precedence out of a single command and into a batch,
+  without `xargs` knowing what any particular number means. It also makes
+  `cmd | xargs foo` behave exactly like `foo args` in the single-invocation
+  case, which is what the rest of the shell already does.
+
+**What reading this function for the fix taught, again:** a mechanical screen
+is a filter, not a verdict. The entry above asked for one thing (worst-status
+tracking) and the function held two more silent guesses. That is now three
+functions in a row (`cmd_xargs_input`, `parse_sed_command`, and the five pipe
+forms) where the filed bug was the smaller half of what was actually there.
+
+#### TD-A-CUT-ANSWERED-EVERY-UNREADABLE-ARGUMENT-BY-DROPPING-IT (lane A, 2026-08-25) — ✅ FIXED (`e43ef0307`)
+
+**In short:** `cut` had no error path at all. Any argument it could not read was
+*dropped* and the command carried on, so a mistake anywhere in the argument list
+came out as a confident, successful, wrong answer. Worst of the set: `cut` with
+no `-f`/`-c` left printed every line **verbatim** and exited 0, and `cut -f0`
+printed a **blank line per input line**, which makes the file look empty.
+
+**Where.** `parse_cut_args` and `cut_process` in `kernel/src/kshell.rs`. Found by
+reading the function after the `sed` fix (`da9e7a0ca`) landed, not from a report.
+
+**The whole set, every one of them exiting 0:**
+
+| written | what it did | what it looks like from outside |
+|---|---|---|
+| `cut file` | printed every line verbatim | `cut` succeeded, so the fields must be right |
+| `cut -f1,a,3 f` | cut fields 1 and 3 | a typo'd field number silently vanishes |
+| `cut -f0 f` | cut nothing; a blank line per line | the file appears to be empty |
+| `cut -f1-3 f` | printed every line verbatim | ranges were unimplemented, so nothing parsed, so pass-through |
+| `cut -c1,3 f` | printed every line verbatim | same, by way of the `-c` list |
+| `cut -c1-abc f` | cut to the end of the line | `abc` became `usize::MAX` via `unwrap_or` |
+| `cut -q -f1 f` | opened a file named `-q` | the real file was never read |
+| `cut -f1 a b` | cut `a` only | `b` silently ignored |
+| `cut -c1 -d:` | ignored `-d` | the delimiter looked honoured |
+| `cut -f3,1 f` | wrote field 3 then field 1 | POSIX writes selected input in *line* order, once each |
+
+**Why the pass-through row is the important one.** Four separate mistakes above
+reach it — no list, an unimplemented range, an unimplemented `-c` list, an
+unreadable item — and they all land on `cut_process`'s final
+`else { shell_println!("{}", line); }`, which is an identity transform reporting
+success. That is byte-for-byte the bug `0a785652a` fixed for the `sed`/`awk`
+pipe forms, sitting in a command nobody had re-read since.
+
+**What "distinguishing absent from unparseable" means here.** `-c-5` (from the
+first) and `-c3-` (to the last) are real forms in which an endpoint is *omitted*.
+The old parser reached those two defaults with `unwrap_or(1)` and
+`unwrap_or(usize::MAX)`, which cannot tell an omitted endpoint from an
+unreadable one — so `-c1-abc` silently became `-c1-`. The fix is not a tighter
+parse of the number; it is testing `is_empty()` before parsing at all.
+
+**Fixed.** `parse_cut_args` now returns `Result<CutSpec, CutParseError>` with ten
+named failures and GNU's wording for each. Along the way the parser moved to
+[`split_words`] (the old scan tested `starts_with("-f")` against the *remaining
+line*, so an operand's position decided whether it was read as a flag), `-f`/`-c`
+gained comma lists and `N-M`/`N-`/`-M` ranges, multiple file operands are all
+read with the worst status reported, `-s` is implemented, a line with no
+delimiter is written whole as POSIX requires instead of as a blank line, and a
+`-` operand names the pipe.
+
+**The `-` operand was a regression this lane introduced.** `bb9787783` made a
+file operand win over the pipe across five commands, which turned the
+conventional `cat f | cut -c1 -` into a request to open a file literally named
+`-`. Fixed for `cut` here; `fold`, `sed`, `awk` and `mapfile` still have it.
+
+Rung 37 covers all of it.
+
+#### TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK (lane A, 2026-08-25) — **open**
+
+**In short:** a boot test failed with `LIVENESS WATCHDOG failure detected` even
+though every self-test in that same boot passed and the run went on to reach
+`BOOT_OK`. Re-running the *identical* kernel (`boot-test.sh --no-build`) passed
+cleanly. So the report was false by direct evidence, not by inference — but it
+still costs a ~15-minute boot cycle and, worse, teaches whoever sees it to
+distrust a detector that is usually right.
+
+**Where it fired.** Between rung 27's label and rung 28's, i.e. inside
+`kshell::self_test` rung 27 (`find` over the `deep_fixture_path` tree).
+`kernel/src/sched/mod.rs` ~3157 emits the report.
+
+**What the CPU was actually doing.** The watchdog's own 16-sample RIP ring,
+symbolised with `scripts/symbolize.py`:
+
+| sample | symbol |
+|---|---|
+| `0xffffffff810c33ea` | `kernel::mm::heap::check_poison+0x1aa` |
+| `0xffffffff810c339f` | `kernel::mm::heap::check_poison+0x15f` |
+| `0xffffffff81fcf502` | `kernel::mm::rawmem::fill_u8+0x22` (×4) |
+| `0xffffffff810c5b1e` | `kernel::mm::heap::HeapInner::size_class_index` |
+| `0xffffffff822b0fb9` | `alloc::vec::Vec::push` |
+
+Every sample is in the debug heap's poison fill/check path. That is forward
+progress, just slow — not a hang.
+
+**Why the detector could not tell.** This is the blind spot its own doc comment
+names (`sched/mod.rs` ~2628): `USEFUL_WORK_TICKS` only advances for ticks that
+preempt ring-3 or a CPU with a queued task, and `kernel_progress_count()` counts
+only page faults and block I/O. A CPU-bound in-kernel loop touches neither, so
+it is indistinguishable from an in-kernel infinite loop. The comment is right
+that making kernel-mode ticks count as progress would blind the detector to its
+primary target, and the same false positive is already recorded there for the
+bzip2 self-test under KASAN.
+
+**But there is a third signal, and this is the one worth fixing.** The report
+also requires *no serial output*, and rung 27 produces none — not because it is
+silent, but because `capture_command` diverts `find`'s output into a buffer.
+A self-test that captures its output is invisible to a detector that watches the
+serial port. The tree has ~37 capturing rungs and this is the first one slow
+enough to matter, which is why it has only just appeared: `WALK_DEPTH_CAP` is
+now 48, so `deep_fixture_path` builds a 50-component path and every walk over it
+allocates proportionally.
+
+**Proper fix.** Emit a serial breadcrumb from inside the expensive capturing
+rungs — before the `mkdir_all` and between the `find` invocations in rung 27 —
+so the watchdog sees the output that is genuinely happening. That removes a
+false signal rather than dulling the detector, which is what raising the 15 s
+threshold would do. Do *not* wrap the rung in the `(self-test)` drill flag: that
+marks a deliberate drill, and this is not one — it would hide a real hang in
+rung 27 forever.
+
+**Severity.** Low correctness, medium friction: it fails a green tree at random
+and costs a full re-run to disprove each time.
+
+## TD-AWK-RUNTIME-DIAGNOSTICS-CARRY-NO-SOURCE-LOCATION (lane B, 2026-08-24) — **open**
+
+**In short:** when an `awk` program dies partway through — a division by zero,
+say — we print `awk: fatal: division by zero attempted` and stop. gawk prints
+`awk: cmd. line:1: fatal: division by zero attempted`, naming the line of the
+user's script that blew up. On a one-liner the difference is cosmetic; on a
+200-line `-f` script it is the difference between a fixable error and a hunt.
+
+**Where.** `userspace/coreutils/src/bin/awk/`. The gap is structural, not a
+missing `format!`: **nothing in the front end records a source position at
+all.** `lex.rs` tracks newlines only for their grammatical role (a newline
+terminates a statement), never as a counter; `ast.rs` has no line field on any
+node; so `interp.rs` has nothing to report even if it wanted to. The two
+`Fatal(...)` sites for division and modulo in `interp.rs` are representative —
+every runtime diagnostic in the file is in the same position.
+
+**Reproduce.**
+
+```
+$ awk 'BEGIN {x = 0; print 1 % x}'
+awk: fatal: division by zero attempted in `%'          # ours
+awk: cmd. line:1: fatal: division by zero attempted in `%'   # gawk
+```
+
+`scripts/awk-diff.sh` records both of these as xfails with this entry's reason;
+they will XPASS (and so fail the harness) the moment the locations land, which
+is the intended prompt to convert them back to `msg_case`.
+
+**What the target format is.** gawk's runtime diagnostic is
+
+```
+awk: <source>:<line>: [(FILENAME=<f> FNR=<n>) ]<severity>: <message>
+```
+
+where `<source>` is the literal `cmd. line` for a program given in argv or with
+`-e`, and the file name for one given with `-f`; the parenthesised input
+position is present only when a *main rule* is executing (not in `BEGIN`/`END`);
+`<severity>` is `fatal`, `error` or `warning`. Note that gawk emits it only once
+a rule has been entered — see the deliberate divergence already recorded in
+`awk-diff.sh` for the unopenable-second-operand case, where gawk's prefix is
+*stale* state pointing at a line unrelated to the failure. We should not
+reproduce that half: a location we print should be the location that failed.
+
+**Proper fix.** Thread a position through the front end: give `lex.rs` a line
+counter and attach it to each token, carry it into the statement and expression
+nodes in `ast.rs` that can fail at runtime, and have `interp.rs` hold a "current
+statement" position that its `Fatal` constructor reads. The source name is
+already known at that point — `main.rs` distinguishes an argv/`-e` program from
+a `-f` one when it assembles the text, and needs to keep that distinction rather
+than discarding it after concatenation. This is a tranche of its own, not a
+patch.
+
+**Severity.** Low for correctness — the exit status, the message text and
+everything already written to stdout all match gawk exactly. Medium for
+usability on long scripts, which is the case that most needs it.

@@ -61,6 +61,7 @@
 //! is why writing goes through [`Out`], which holds a newline back until it
 //! knows something follows it.
 
+use std::cmp::Ordering;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -85,6 +86,17 @@ use ere::{Regex, bre};
 /// these through one function, `panic()`, which is where the name below comes
 /// from.
 const EXIT_PANIC: i32 = 4;
+
+/// The GNU sed release whose behaviour this one tracks, and so the version `v`
+/// compares its argument against.
+///
+/// It is deliberately *not* the string `--version` prints: that names this
+/// implementation, and `v 4.2` is not a question about SlateOS coreutils but
+/// about which GNU extensions a script may use. A script guarded by `v 4.2`
+/// wants `\+`, `M`, `0,/re/` and the rest of the 4.2 set, all of which are
+/// here; raising this constant is a claim that the whole of a newer release's
+/// command set is here too, so it moves only when that is true.
+const SED_FEATURE_LEVEL: &str = "4.9";
 
 /// Print one diagnostic, with sed's pending output delivered first.
 ///
@@ -222,6 +234,9 @@ struct Subst {
     /// The `N` of `s/…/…/N`; 1 unless given. With `g`, the Nth match *onwards*.
     occurrence: usize,
     print: bool,
+    /// `s///e` — hand the substituted pattern space to the shell and keep the
+    /// output. See [`Action::Execute`], which is the same machinery.
+    eval: bool,
     wfile: Option<usize>,
 }
 
@@ -265,6 +280,18 @@ enum Action {
     /// 70. Zero means never wrap. Resolving here rather than at run time is
     /// sound because nothing can change `-l` once the script is compiled.
     List(usize),
+    /// `z` — empty the pattern space. Not the same as `s/.*//`, which is what
+    /// it exists to replace: `.*` is a *regex* over a pattern space that may
+    /// not be valid text in the current locale, and would then match nothing.
+    Zap,
+    /// `F` — print the name of the file the current line came from, or `-` for
+    /// standard input. (`--debug`'s `INPUT:` line writes `STDIN` for the same
+    /// thing; upstream spells them differently and so do we.)
+    FileName,
+    /// `e` — run a command through the shell. Empty means "run the pattern
+    /// space and replace it with the output"; otherwise the bytes are the
+    /// command, whose output goes straight out at this point in the cycle.
+    Execute(Vec<u8>),
     Quit {
         code: i32,
         print: bool,
@@ -275,6 +302,16 @@ struct Command {
     sel: Sel,
     negated: bool,
     act: Action,
+    /// How `--debug` writes this command back out: the address, the `!`, the
+    /// command letter and its argument, in upstream's canonical spelling rather
+    /// than the script's — `\,x,p` comes back as `/x/ p` and `s/a/b/gp3i` as
+    /// `s/a/b/igp3`. Built while parsing because that is the only moment the
+    /// text still exists: a compiled `Regex` cannot be printed, a label has been
+    /// resolved to an index, and `y`'s two strings have become a byte table.
+    ///
+    /// Empty unless `--debug`, which is what keeps the cost of carrying it at
+    /// one empty `Vec` per command.
+    dump: Vec<u8>,
 }
 
 struct Script {
@@ -309,11 +346,63 @@ struct Parser<'a> {
     /// read — a sandbox that let the first half of a script run would not be
     /// one.
     sandbox: bool,
+    /// `--debug`, which makes the parser render each command back out as it
+    /// reads it. See [`Command::dump`].
+    debug: bool,
+    /// The rendering of the command currently being read, cleared before each
+    /// one and moved into its [`Command`] when it is built.
+    dump: Vec<u8>,
     wfiles: Vec<String>,
     rfiles: Vec<String>,
 }
 
 impl Parser<'_> {
+    /// Append to the `--debug` rendering of the command being parsed.
+    ///
+    /// A no-op without `--debug`, so the call sites need no condition of their
+    /// own and cannot drift out of step with one.
+    fn d(&mut self, bytes: &[u8]) {
+        if self.debug {
+            self.dump.extend_from_slice(bytes);
+        }
+    }
+
+    fn d_num(&mut self, n: usize) {
+        if self.debug {
+            self.dump.extend_from_slice(n.to_string().as_bytes());
+        }
+    }
+
+    /// Append a regular expression the way `--debug` writes one.
+    ///
+    /// Always delimited by `/` whatever the script chose, so `\,x,p` dumps as
+    /// `/x/ p`; always the *normalized* pattern, so `s/\x41/y/` dumps as `s/A/y/`
+    /// rather than showing the escape; and always escaped by
+    /// [`debug_escape`] — with the one addition that a literal `/` becomes `\/`,
+    /// since the delimiter is no longer whatever kept it unambiguous. All
+    /// measured.
+    ///
+    /// The normalization cannot fail here: every caller has already run the same
+    /// pattern through [`Parser::compile`], which normalizes it and would have
+    /// returned the error first. The fallback prints the raw bytes rather than
+    /// panicking, because a debugging aid that aborts the run is worse than one
+    /// that shows the wrong escape.
+    fn d_re(&mut self, pat: &[u8]) {
+        if !self.debug {
+            return;
+        }
+        self.dump.push(b'/');
+        let norm = normalize_regex(pat).unwrap_or_else(|_| pat.to_vec());
+        for &b in &norm {
+            if b == b'/' {
+                self.dump.extend_from_slice(b"\\/");
+            } else {
+                debug_escape(&[b], &mut self.dump);
+            }
+        }
+        self.dump.push(b'/');
+    }
+
     fn peek(&self) -> Option<u8> {
         self.s.get(self.i).copied()
     }
@@ -554,13 +643,19 @@ impl Parser<'_> {
         match self.peek() {
             Some(b'$') => {
                 self.i = self.i.saturating_add(1);
+                self.d(b"$");
                 Ok(Some(Addr::Last))
             }
             Some(b'/') => {
                 self.i = self.i.saturating_add(1);
                 let pat = self.take_until(b'/', true, "address regex")?;
                 let ci = self.re_flags()?;
-                Ok(Some(Addr::Re(self.compile(&pat, ci)?)))
+                let re = self.compile(&pat, ci)?;
+                self.d_re(&pat);
+                if ci {
+                    self.d(b"I");
+                }
+                Ok(Some(Addr::Re(re)))
             }
             // `\cREc` — any delimiter, so a pattern full of slashes need not be
             // written full of backslashes.
@@ -571,7 +666,12 @@ impl Parser<'_> {
                     .ok_or_else(|| "expected a delimiter after `\\'".to_string())?;
                 let pat = self.take_until(d, true, "address regex")?;
                 let ci = self.re_flags()?;
-                Ok(Some(Addr::Re(self.compile(&pat, ci)?)))
+                let re = self.compile(&pat, ci)?;
+                self.d_re(&pat);
+                if ci {
+                    self.d(b"I");
+                }
+                Ok(Some(Addr::Re(re)))
             }
             Some(c) if c.is_ascii_digit() => {
                 let n = self.number()?;
@@ -581,10 +681,16 @@ impl Parser<'_> {
                     // the plain line number rather than carrying it — which is
                     // why `0~0p` is refused for using line 0 while `0~3p` is
                     // fine, and why `1~` (an absent step, hence zero) is line 1.
+                    // The dump follows the collapse, not the script: `1~0p`
+                    // comes back as `1 p`.
                     if step > 0 {
+                        self.d_num(n);
+                        self.d(b"~");
+                        self.d_num(step);
                         return Ok(Some(Addr::Step(n, step)));
                     }
                 }
+                self.d_num(n);
                 Ok(Some(Addr::Line(n)))
             }
             _ => Ok(None),
@@ -599,11 +705,18 @@ impl Parser<'_> {
         if !self.eat(b',') {
             return Ok(Sel::One(a1));
         }
+        self.d(b",");
         self.skip_blank();
         let end = if self.eat(b'+') {
-            EndAddr::Plus(self.number()?)
+            let n = self.number()?;
+            self.d(b"+");
+            self.d_num(n);
+            EndAddr::Plus(n)
         } else if self.eat(b'~') {
-            EndAddr::Multiple(self.number()?)
+            let n = self.number()?;
+            self.d(b"~");
+            self.d_num(n);
+            EndAddr::Multiple(n)
         } else {
             let Some(a2) = self.parse_addr()? else {
                 return Err("expected an address after `,'".to_string());
@@ -711,6 +824,30 @@ impl Parser<'_> {
             .map_err(|_| "file names given to sed must be text".to_string())
     }
 
+    /// The shell command of `e`, which runs to the end of the line exactly as a
+    /// file name does — a `;` in a command is a character in a command.
+    ///
+    /// Unlike [`Parser::parse_filename`] an empty argument is allowed and
+    /// means something else entirely: bare `e` runs the *pattern space*. And
+    /// unlike a file name it is bytes rather than text, because a shell command
+    /// is not required to be valid in the current locale any more than the data
+    /// it operates on is.
+    ///
+    /// A non-empty command keeps a trailing newline, which upstream adds and
+    /// which is visible in the `--debug` dump: `sed --debug 'e echo hi'` writes
+    /// `  e echo hi` and then a blank line, while bare `e` writes `  e ` and
+    /// nothing more. The shell does not care either way.
+    fn parse_command_text(&mut self) -> Vec<u8> {
+        self.skip_blank();
+        let start = self.i;
+        self.skip_to_eol();
+        let mut text = self.s.get(start..self.i).unwrap_or_default().to_vec();
+        if !text.is_empty() {
+            text.push(b'\n');
+        }
+        text
+    }
+
     /// Intern a `w` target so the same file opened twice is one handle, and
     /// two writes to it therefore append rather than truncate each other.
     ///
@@ -788,7 +925,11 @@ impl Parser<'_> {
         let mut occurrence = 0usize;
         let mut print = false;
         let mut ci = false;
+        let mut eval = false;
         let mut wfile = None;
+        // Kept beside the interned index only for the `--debug` dump, which
+        // prints the file name and not the slot it landed in.
+        let mut wpath: Option<String> = None;
         // Every rejection below is reported *after* consuming the offending
         // character, because that is where GNU reports it: `s/a/b/x` says char
         // 7 and the `x` is at 6. Blanks separate flags but do not end them —
@@ -816,6 +957,14 @@ impl Parser<'_> {
                     self.i = self.i.saturating_add(1);
                     ci = true;
                 }
+                // `e` reaches outside the script exactly as `e`, `r` and `w`
+                // do, so the sandbox refuses it with the same message — and
+                // refuses it here, at the flag, which is where GNU points.
+                Some(b'e') => {
+                    self.i = self.i.saturating_add(1);
+                    self.deny_in_sandbox()?;
+                    eval = true;
+                }
                 Some(b'm' | b'M') => {
                     self.i = self.i.saturating_add(1);
                     return Err("the `M' flag of `s' is not supported".to_string());
@@ -834,6 +983,7 @@ impl Parser<'_> {
                     self.i = self.i.saturating_add(1);
                     self.deny_in_sandbox()?;
                     let path = self.parse_filename()?;
+                    wpath = Some(path.clone());
                     wfile = Some(self.wfile(path));
                     break;
                 }
@@ -863,12 +1013,46 @@ impl Parser<'_> {
                 return Err(format!("invalid reference \\{n} on `s' command's RHS"));
             }
         }
+        // The flags come back in upstream's canonical order rather than the
+        // order they were written — `s/a/b/gp3i` dumps as `s/a/b/igp3` — because
+        // the dump is of the *compiled* command, which no longer remembers an
+        // order. `w` is last and takes no space before its file name, unlike the
+        // `w` command, which does. Measured; `m`/`M` would sit between `i` and
+        // `g` if this sed accepted them.
+        if self.debug {
+            self.d_re(&pat);
+            debug_replacement(&repl, &mut self.dump);
+            self.dump.push(b'/');
+            if ci {
+                self.dump.push(b'i');
+            }
+            if global {
+                self.dump.push(b'g');
+            }
+            if eval {
+                self.dump.push(b'e');
+            }
+            if print {
+                self.dump.push(b'p');
+            }
+            // Zero here means "no number was written", which is why this reads
+            // the local and not the `1` the `Subst` is about to be given.
+            if occurrence > 0 {
+                self.dump
+                    .extend_from_slice(occurrence.to_string().as_bytes());
+            }
+            if let Some(path) = wpath.as_deref() {
+                self.dump.push(b'w');
+                self.dump.extend_from_slice(path.as_bytes());
+            }
+        }
         Ok(Subst {
             re,
             repl,
             global,
             occurrence: occurrence.max(1),
             print,
+            eval,
             wfile,
         })
     }
@@ -882,6 +1066,19 @@ impl Parser<'_> {
         let to = unescape_y(&self.take_until(delim, false, "`y' command")?)?;
         if from.len() != to.len() {
             return Err("strings for `y' command are different lengths".to_string());
+        }
+        // Both strings go into the dump *unescaped and unquoted*: a tab is a
+        // tab and a newline is a newline, so `y/a\t/\nZ/` dumps across two
+        // lines. That is upstream's, not an oversight of ours — `y` is the one
+        // command whose dump is written with `fwrite` rather than through
+        // `debug_print_char`. Measured, including the delimiter always being `/`
+        // even when the result is then ambiguous (`y/a\//x\n/` → `y/a//x⏎/`).
+        if self.debug {
+            self.dump.push(b'/');
+            self.dump.extend_from_slice(&from);
+            self.dump.push(b'/');
+            self.dump.extend_from_slice(&to);
+            self.dump.push(b'/');
         }
         let mut table = Box::new([0u8; 256]);
         for (i, slot) in table.iter_mut().enumerate() {
@@ -1216,6 +1413,108 @@ enum ScriptFail {
     Label(String),
 }
 
+/// `strverscmp(3)`, which is how `v` decides whether the version a script asks
+/// for is newer than the one it got.
+///
+/// It is neither a byte compare nor a numeric one. A run of digits counts as a
+/// number, so `4.10` sorts *after* `4.9` where a byte compare would put it
+/// first — which is the whole reason the function exists. But a run with a
+/// leading zero is a *fraction* instead, compared digit by digit, so `4.007`
+/// sorts before `4.01`. The mixed cases (one side fractional, the other not)
+/// have no intuitive rule at all, which is why the two tables below are
+/// transcribed from glibc rather than reasoned out: `v` accepting or rejecting
+/// a script has to agree with GNU exactly, and the only way to be sure of that
+/// is to run the same state machine.
+///
+/// `S_N` is "no digits yet", `S_I` an integer run, `S_F` a fraction, `S_Z` a
+/// fraction so far made only of zeroes. `CMP` means the answer is the byte
+/// difference at the point the strings diverged; `LEN` means the longer digit
+/// run wins and the byte difference breaks a tie.
+fn strverscmp(a: &[u8], b: &[u8]) -> Ordering {
+    const S_N: usize = 0;
+    const S_I: usize = 3;
+    const S_F: usize = 6;
+    const S_Z: usize = 9;
+    const CMP: i8 = 2;
+    const LEN: i8 = 3;
+    #[rustfmt::skip]
+    const NEXT_STATE: [usize; 12] = [
+        /* state     x    d    0  */
+        /* S_N */  S_N, S_I, S_Z,
+        /* S_I */  S_N, S_I, S_I,
+        /* S_F */  S_N, S_F, S_F,
+        /* S_Z */  S_N, S_F, S_Z,
+    ];
+    #[rustfmt::skip]
+    const RESULT_TYPE: [i8; 36] = [
+        /* state   x/x  x/d  x/0  d/x  d/d  d/0  0/x  0/d  0/0 */
+        /* S_N */  CMP, CMP, CMP, CMP, LEN, CMP, CMP, CMP, CMP,
+        /* S_I */  CMP,  -1,  -1,   1, LEN, LEN,   1, LEN, LEN,
+        /* S_F */  CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP, CMP,
+        /* S_Z */  CMP,   1,   1,  -1, CMP, CMP,  -1, CMP, CMP,
+    ];
+
+    // The C walks NUL-terminated strings, and the terminator is load-bearing:
+    // it is a byte lower than every digit, so a string that ends is less than
+    // one that carries on. Reading past the end as 0 reproduces that.
+    let at = |s: &[u8], i: usize| -> u8 { s.get(i).copied().unwrap_or(0) };
+    let class = |c: u8| -> usize { usize::from(c == b'0') + usize::from(c.is_ascii_digit()) };
+    let sign = |d: i32| -> Ordering {
+        if d < 0 {
+            Ordering::Less
+        } else {
+            Ordering::Greater
+        }
+    };
+
+    let mut p1 = 0usize;
+    let mut p2 = 0usize;
+    let mut c1 = at(a, 0);
+    let mut c2 = at(b, 0);
+    let mut state = S_N.saturating_add(class(c1));
+    let mut diff = i32::from(c1) - i32::from(c2);
+    while diff == 0 {
+        if c1 == 0 {
+            return Ordering::Equal;
+        }
+        p1 = p1.saturating_add(1);
+        p2 = p2.saturating_add(1);
+        state = NEXT_STATE.get(state).copied().unwrap_or(S_N);
+        c1 = at(a, p1);
+        c2 = at(b, p2);
+        state = state.saturating_add(class(c1));
+        diff = i32::from(c1) - i32::from(c2);
+    }
+
+    match RESULT_TYPE
+        .get(state.saturating_mul(3).saturating_add(class(c2)))
+        .copied()
+        .unwrap_or(CMP)
+    {
+        CMP => sign(diff),
+        LEN => {
+            // Both sides are inside an integer run that has already diverged;
+            // whichever run has more digits left is the larger number.
+            let mut q1 = p1.saturating_add(1);
+            let mut q2 = p2.saturating_add(1);
+            while at(a, q1).is_ascii_digit() {
+                if !at(b, q2).is_ascii_digit() {
+                    return Ordering::Greater;
+                }
+                q1 = q1.saturating_add(1);
+                q2 = q2.saturating_add(1);
+            }
+            if at(b, q2).is_ascii_digit() {
+                Ordering::Less
+            } else {
+                sign(diff)
+            }
+        }
+        r if r < 0 => Ordering::Less,
+        _ => Ordering::Greater,
+    }
+}
+
 impl From<String> for ScriptFail {
     fn from(msg: String) -> ScriptFail {
         ScriptFail::Syntax(msg)
@@ -1232,6 +1531,7 @@ fn compile_script(
     ere: bool,
     line_len: usize,
     sandbox: bool,
+    debug: bool,
 ) -> Result<Script, ScriptError> {
     let mut p = Parser {
         s: script,
@@ -1239,6 +1539,8 @@ fn compile_script(
         ere,
         line_len,
         sandbox,
+        debug,
+        dump: Vec::new(),
         wfiles: Vec::new(),
         rfiles: Vec::new(),
     };
@@ -1283,6 +1585,7 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
 
     loop {
         p.skip_separators();
+        p.dump.clear();
         match p.peek() {
             None => break,
             Some(b'#') => {
@@ -1297,6 +1600,7 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                     sel: Sel::Always,
                     negated: false,
                     act: Action::BlockEnd,
+                    dump: if p.debug { b"}".to_vec() } else { Vec::new() },
                 });
                 if let Some(c) = cmds.get_mut(start) {
                     c.act = Action::Block(here.saturating_add(1));
@@ -1328,15 +1632,54 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 "invalid usage of line address 0".to_string(),
             ));
         }
-        let mut negated = false;
-        while p.eat(b'!') {
-            negated = !negated;
+        // One `!` and one only. It does not toggle: GNU reads the character
+        // after it and refuses a second outright, so `1!!p` is an error rather
+        // than `1p`. Blanks are skipped between them, so `1! !p` is refused
+        // too. The offset is just past the second `!` — measured, char 3.
+        let negated = p.eat(b'!');
+        if negated {
+            p.d(b"!");
             p.skip_blank();
+            if p.peek() == Some(b'!') {
+                p.i = p.i.saturating_add(1);
+                return Err(ScriptFail::SyntaxAt(
+                    Pos::At(p.i),
+                    "multiple `!'s".to_string(),
+                ));
+            }
+        }
+        // The one space in a dumped command line, and it belongs to the
+        // *address* rather than to the command: `1p` dumps as `1 p` and `1!p` as
+        // `1! p`, while `p` and `!p` get no space at all. Measured.
+        if !matches!(sel, Sel::Always) {
+            p.d(b" ");
         }
         let Some(c) = p.bump() else {
             return Err(ScriptFail::Syntax("missing command".to_string()));
         };
+        // `v` is not a command: it is a compile-time assertion that this sed is
+        // new enough, and it leaves nothing behind to execute. That is visible
+        // under `--debug`, whose program dump shows no line for it at all — not
+        // even an indent — which is why it is handled before a `Command` is
+        // built rather than as an `Action` that does nothing.
+        if c == b'v' {
+            let want = p.parse_label();
+            // An empty argument means 4.0, the release that introduced `v`.
+            let want = if want.is_empty() {
+                b"4.0".to_vec()
+            } else {
+                want
+            };
+            if strverscmp(&want, SED_FEATURE_LEVEL.as_bytes()) == Ordering::Greater {
+                return Err(ScriptFail::SyntaxAt(
+                    Pos::At(p.i),
+                    "expected newer version of sed".to_string(),
+                ));
+            }
+            continue;
+        }
         let here = cmds.len();
+        p.d(&[c]);
         let act = match c {
             b'{' => {
                 // `p.i` is just past the brace, so back up one to name it.
@@ -1350,11 +1693,21 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                     // GNU's wording, double quotes and all.
                     return Err(ScriptFail::Syntax("\":\" lacks a label".to_string()));
                 }
+                // No space after `:`, unlike `b`/`t`/`T` below. Upstream's
+                // asymmetry, measured both ways.
+                p.d(&name);
                 labels.push((name, here));
                 Action::Label
             }
             b'b' | b't' | b'T' => {
                 let name = p.parse_label();
+                // A space even when the script wrote none: `bx` dumps as `b x`.
+                // A bare `b` — a jump to the end of the script — gets neither
+                // space nor label.
+                if !name.is_empty() {
+                    p.d(b" ");
+                    p.d(&name);
+                }
                 branches.push((here, name));
                 match c {
                     b'b' => Action::Branch(0),
@@ -1375,27 +1728,58 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             b'g' => Action::Get,
             b'G' => Action::GetAppend,
             b'x' => Action::Exchange,
+            b'z' => Action::Zap,
+            b'F' => Action::FileName,
             b'=' => Action::LineNumber,
-            b'a' => Action::AppendText(p.parse_text()?),
-            b'i' => Action::InsertText(p.parse_text()?),
-            b'c' => Action::ChangeText(p.parse_text()?),
+            b'e' => {
+                p.deny_in_sandbox()?;
+                let text = p.parse_command_text();
+                // Always a space, even for bare `e`, which therefore dumps as
+                // `e ` with a trailing one. The text already ends in a newline
+                // when it is not empty, so the dumped line is followed by a
+                // blank one — the same shape `a`, `i` and `c` have below.
+                p.d(b" ");
+                p.d(&text);
+                Action::Execute(text)
+            }
+            b'a' | b'i' | b'c' => {
+                let text = p.parse_text()?;
+                // `a\` and then the text, whichever spelling the script used —
+                // upstream normalizes the one-liner back to POSIX's form.
+                p.d(b"\\");
+                p.d(&text);
+                match c {
+                    b'a' => Action::AppendText(text),
+                    b'i' => Action::InsertText(text),
+                    _ => Action::ChangeText(text),
+                }
+            }
             b'r' => {
                 p.deny_in_sandbox()?;
-                Action::ReadFile(p.parse_filename()?)
+                let path = p.parse_filename()?;
+                // A space before an `r`/`R` file name and none before a `w`/`W`
+                // one. Upstream's asymmetry again, and measured.
+                p.d(b" ");
+                p.d(path.as_bytes());
+                Action::ReadFile(path)
             }
             b'R' => {
                 p.deny_in_sandbox()?;
                 let path = p.parse_filename()?;
+                p.d(b" ");
+                p.d(path.as_bytes());
                 Action::ReadLine(p.rfile(path))
             }
             b'w' => {
                 p.deny_in_sandbox()?;
                 let path = p.parse_filename()?;
+                p.d(path.as_bytes());
                 Action::WriteFile(p.wfile(path))
             }
             b'W' => {
                 p.deny_in_sandbox()?;
                 let path = p.parse_filename()?;
+                p.d(path.as_bytes());
                 Action::WriteFirstLine(p.wfile(path))
             }
             b'l' => {
@@ -1403,8 +1787,14 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 // alone. `l 0` and `l0` are both spellings of "never wrap",
                 // which is also what `-l 0` means.
                 p.skip_blank();
+                // Only a number the script *wrote* is dumped, and then always
+                // with a space: `l0` comes back as `l 0` while a bare `l` comes
+                // back as `l` and not as the `-l` width it resolved to.
                 let width = if p.peek().is_some_and(|d| d.is_ascii_digit()) {
-                    p.number()?
+                    let n = p.number()?;
+                    p.d(b" ");
+                    p.d_num(n);
+                    n
                 } else {
                     p.line_len
                 };
@@ -1413,7 +1803,10 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             b'q' | b'Q' => {
                 p.skip_blank();
                 let code = if p.peek().is_some_and(|d| d.is_ascii_digit()) {
-                    i32::try_from(p.number()?).unwrap_or(i32::MAX)
+                    let n = p.number()?;
+                    p.d(b" ");
+                    p.d_num(n);
+                    i32::try_from(n).unwrap_or(i32::MAX)
                 } else {
                     0
                 };
@@ -1430,11 +1823,11 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             }
         };
         // GNU's `read_end_of_cmd`, run after every command that does not read to
-        // the end of its own line. `a`, `i`, `c`, `r`, `R`, `w`, `W`, `b`, `t`,
-        // `T` and `:` all take the rest of the line as their argument, so there
-        // is nothing left that could be junk; `s` ends with its own flag scan,
-        // which refuses junk in its own words (`unknown option to `s'`); and `{`
-        // is followed by more commands by definition.
+        // the end of its own line. `a`, `i`, `c`, `e`, `r`, `R`, `w`, `W`, `b`,
+        // `t`, `T` and `:` all take the rest of the line as their argument, so
+        // there is nothing left that could be junk; `s` ends with its own flag
+        // scan, which refuses junk in its own words (`unknown option to `s'`);
+        // and `{` is followed by more commands by definition.
         if !matches!(
             c,
             b'{' | b'}'
@@ -1446,6 +1839,7 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
                 | b'a'
                 | b'i'
                 | b'c'
+                | b'e'
                 | b'r'
                 | b'R'
                 | b'w'
@@ -1453,7 +1847,12 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
         ) {
             p.end_of_cmd()?;
         }
-        cmds.push(Command { sel, negated, act });
+        cmds.push(Command {
+            sel,
+            negated,
+            act,
+            dump: std::mem::take(&mut p.dump),
+        });
     }
 
     // The *innermost* unclosed brace, not the outermost: GNU pushes each open
@@ -1510,6 +1909,16 @@ struct Line {
     bytes: Vec<u8>,
     /// Whether the line ended with the separator, as opposed to end-of-file.
     had_sep: bool,
+    /// The operand this line came from, as it was written on the command line —
+    /// `-` for standard input, and interned so a million-line file costs one
+    /// copy of its name.
+    ///
+    /// It is stamped here rather than read from [`Input`] when it is wanted,
+    /// because the input reads one line *ahead*: by the time a line is being
+    /// executed, `Input`'s idea of the current file may already be the next
+    /// one. `F` and `--debug`'s `INPUT:` line would then name the wrong file at
+    /// every file boundary.
+    file: Rc<OsString>,
 }
 
 /// The lines of a list of files, read as one stream.
@@ -1524,18 +1933,28 @@ struct Input {
     /// What to call the file now open, in a read-error diagnostic. Upstream
     /// names standard input `stdin` there even though the operand was `-`.
     cur_name: OsString,
+    /// The *operand* the file now open was named by, which is what `F` and
+    /// `--debug` report — a different string from `cur_name` for standard
+    /// input, where upstream says `-` and `STDIN` respectively.
+    cur_file: Rc<OsString>,
+    /// Whether a `-` operand means standard input. It does everywhere except
+    /// under `-i`, where there is no sense in editing standard input in place
+    /// and upstream therefore opens a file whose name is one dash.
+    dash_is_stdin: bool,
     peeked: Option<Line>,
     sep: u8,
     had_error: bool,
 }
 
 impl Input {
-    fn new(paths: Vec<OsString>, sep: u8) -> Input {
+    fn new(paths: Vec<OsString>, sep: u8, dash_is_stdin: bool) -> Input {
         Input {
             paths,
             next_path: 0,
             cur: None,
             cur_name: OsString::from("stdin"),
+            cur_file: Rc::new(OsString::from("-")),
+            dash_is_stdin,
             peeked: None,
             sep,
             had_error: false,
@@ -1546,14 +1965,16 @@ impl Input {
         while let Some(path) = self.paths.get(self.next_path) {
             let path = path.clone();
             self.next_path = self.next_path.saturating_add(1);
-            if path == "-" {
+            if path == "-" && self.dash_is_stdin {
                 self.cur = Some(Box::new(BufReader::new(io::stdin())));
                 self.cur_name = OsString::from("stdin");
+                self.cur_file = Rc::new(path);
                 return true;
             }
             match File::open(&path) {
                 Ok(f) => {
                     self.cur = Some(Box::new(BufReader::new(f)));
+                    self.cur_file = Rc::new(path.clone());
                     self.cur_name = path;
                     return true;
                 }
@@ -1588,6 +2009,7 @@ impl Input {
                     self.peeked = Some(Line {
                         bytes: buf,
                         had_sep,
+                        file: Rc::clone(&self.cur_file),
                     });
                     return;
                 }
@@ -1627,9 +2049,48 @@ struct Out<'a> {
     w: &'a mut dyn Write,
     sep: u8,
     owed: bool,
+    /// Where `--debug`'s trace goes, or `None` when there is no trace.
+    trace_to: Option<Trace>,
+}
+
+/// Which descriptor a `--debug` trace line is written to.
+///
+/// Upstream always traces to *standard output*, which is the same place the
+/// edited text goes — except under `-i`, where the text goes to the file and
+/// the trace stays on the terminal. Both are measured, and the distinction has
+/// to be made here rather than by always naming standard output, because the
+/// ordinary case holds a `StdoutLock` for the whole run and a second handle
+/// would interleave against a buffer it does not own.
+#[derive(Clone, Copy)]
+enum Trace {
+    /// The same sink the output uses.
+    Inline,
+    /// Standard output while the output goes elsewhere — `-i`.
+    Stdout,
 }
 
 impl Out<'_> {
+    /// Whether a trace is being written, so a caller can skip building one.
+    fn tracing(&self) -> bool {
+        self.trace_to.is_some()
+    }
+
+    /// Write one `--debug` trace line.
+    ///
+    /// Deliberately *not* through the missing-separator bookkeeping that
+    /// [`Out::line`] and [`Out::raw`] use. Upstream's trace writes straight to
+    /// the descriptor and leaves the output state alone, so `printf a | sed
+    /// --debug p` emits `a`, then `END-OF-CYCLE:`, and only then the newline the
+    /// first `a` was owed. Measured, and routing the trace through `raw` would
+    /// quietly move that newline.
+    fn trace(&mut self, bytes: &[u8]) -> io::Result<()> {
+        match self.trace_to {
+            None => Ok(()),
+            Some(Trace::Inline) => self.w.write_all(bytes),
+            Some(Trace::Stdout) => io::stdout().write_all(bytes),
+        }
+    }
+
     fn line(&mut self, bytes: &[u8], sep: bool) -> io::Result<()> {
         if self.owed {
             self.w.write_all(&[self.sep])?;
@@ -1673,6 +2134,32 @@ fn text_out(out: &mut Out, t: &[u8]) -> io::Result<()> {
     out.line(t.strip_suffix(b"\n").unwrap_or(t), true)
 }
 
+/// Run `cmd` through the shell and hand back what it wrote to standard output.
+///
+/// This is the whole of `e`, `e COMMAND` and `s///e`; they differ only in where
+/// the bytes go afterwards. The command is not split here — see
+/// [`coreutils::shell`] for why a utility that takes a *shell command* must
+/// never tokenise it itself.
+///
+/// Standard input and standard error are inherited, as upstream's `popen(3)`
+/// leaves them; standard output is captured, because upstream reads the pipe
+/// and copies it into *its* output file rather than letting the child write to
+/// descriptor 1. That is what puts `sed -i 'e echo SIDE' f` into `f` instead of
+/// onto the terminal — measured, and the reason this cannot simply inherit.
+///
+/// A command that *runs* and fails is not an error — upstream discards the exit
+/// status, so `sed 'e false'` succeeds. A shell that will not start at all is,
+/// and stops the run, because every later `e` would fail the same way.
+fn shell_capture(cmd: &[u8]) -> Vec<u8> {
+    match coreutils::shell::shell_bytes(cmd)
+        .stderr(process::Stdio::inherit())
+        .output()
+    {
+        Ok(o) => o.stdout,
+        Err(e) => panic_out(&format!("couldn't exec command: {}", strerror(&e))),
+    }
+}
+
 // -------------------------------------------------------------- the executor
 
 /// What a run of the script decided about the current cycle.
@@ -1681,9 +2168,28 @@ enum Flow {
     Normal,
     /// `d` — the cycle ends with nothing printed.
     Deleted,
+    /// `D` with nothing left to keep, which does what `d` does — except that
+    /// it is still a `D`, and `D` is the one command that never reports an
+    /// `END-OF-CYCLE:`. Upstream tests the newline *after* taking the branch
+    /// that skips the marker, so the fall-back inherits the skip; measured,
+    /// and the only reason this is not simply [`Flow::Deleted`].
+    DeletedQuietly,
     /// `D` with an embedded newline — run the script again on what is left,
     /// without reading a new line.
     Restart,
+    /// `n` or `N` found no line to read, so the script stops here and the run
+    /// stops with it.
+    ///
+    /// This is not [`Flow::Quit`], and the difference is only visible under
+    /// `--debug`: running out of input still *ends a cycle*, so the trace gets
+    /// its `END-OF-CYCLE:` line, whereas `q` and `Q` cut the cycle short and
+    /// get none. `print` is false for `n`, which has already auto-printed on
+    /// its way to discovering there was nothing to read, and true for `N`,
+    /// which has not. (POSIXLY_CORRECT would make `N` false as well; we follow
+    /// GNU's default, as the rest of the file does.)
+    Ended {
+        print: bool,
+    },
     Quit {
         code: i32,
         print: bool,
@@ -1837,6 +2343,10 @@ struct Exec<'w> {
     hold: Vec<u8>,
     line_num: usize,
     had_sep: bool,
+    /// The operand the current line came from, carried on the line itself
+    /// rather than read back from [`Input`] — see [`Line::file`] for why.
+    /// `F` prints it, and so does `--debug`'s `INPUT:` line.
+    file: Rc<OsString>,
     sub_made: bool,
     appends: Vec<Pending>,
     last_re: Option<Rc<Regex>>,
@@ -1847,6 +2357,15 @@ struct Exec<'w> {
     /// Borrowed for the same reason as `wfiles`, and see [`open_rfiles`].
     rfiles: &'w mut Vec<RFile>,
     suppress: bool,
+    /// The block nesting `--debug`'s `COMMAND:` lines are indented by.
+    ///
+    /// It lives on the `Exec` rather than in `run` because upstream's does: the
+    /// counter is not reset between cycles, so a `b` that jumps out of a block
+    /// and skips its `}` leaves every later trace line one level deeper. That
+    /// drift is visible in real GNU output and is reproduced rather than fixed —
+    /// a trace that disagreed with upstream's would be worse than one that
+    /// shares its quirk. Starts at 0, where the program dump starts at 1.
+    indent: usize,
 }
 
 impl<'w> Exec<'w> {
@@ -1877,6 +2396,7 @@ impl<'w> Exec<'w> {
             hold: Vec::new(),
             line_num: 0,
             had_sep: true,
+            file: Rc::new(OsString::from("-")),
             sub_made: false,
             appends: Vec::new(),
             last_re: None,
@@ -1884,7 +2404,31 @@ impl<'w> Exec<'w> {
             wfiles,
             rfiles,
             suppress,
+            indent: 0,
         }
+    }
+
+    /// One `PATTERN:` trace line, or nothing when there is no trace.
+    fn trace_pattern(&self, out: &mut Out<'_>) -> io::Result<()> {
+        if !out.tracing() {
+            return Ok(());
+        }
+        let mut t = Vec::from(&b"PATTERN: "[..]);
+        debug_escape(&self.pattern, &mut t);
+        t.push(b'\n');
+        out.trace(&t)
+    }
+
+    /// One `HOLD:` trace line. The tag is padded to the same nine columns every
+    /// other tag occupies, which is why it carries four trailing spaces.
+    fn trace_hold(&self, out: &mut Out<'_>) -> io::Result<()> {
+        if !out.tracing() {
+            return Ok(());
+        }
+        let mut t = Vec::from(&b"HOLD:    "[..]);
+        debug_escape(&self.hold, &mut t);
+        t.push(b'\n');
+        out.trace(&t)
     }
 
     /// Resolve `//` and record what was tried, so the next `//` can find it.
@@ -2039,6 +2583,9 @@ impl<'w> Exec<'w> {
                     w: f,
                     sep,
                     owed: w.owed,
+                    // A `w` target is not where a trace goes; this borrows
+                    // `Out` only for its missing-separator bookkeeping.
+                    trace_to: None,
                 };
                 let r = o.line(bytes, had_sep);
                 let owed = o.owed;
@@ -2074,13 +2621,17 @@ impl<'w> Exec<'w> {
     }
 
     /// Apply one `s` command; returns whether anything was replaced.
-    fn substitute(&mut self, sub: &Subst) -> Run<bool> {
+    ///
+    /// `sink` is needed only by `--debug`, which reports the capture registers
+    /// of the first match from inside the search rather than after it.
+    fn substitute(&mut self, sub: &Subst, sink: &mut Out<'_>) -> Run<bool> {
         let re = self.resolve(sub.re.as_ref())?;
         let hay = std::mem::take(&mut self.pattern);
         let mut out: Vec<u8> = Vec::with_capacity(hay.len());
         let mut last = 0usize;
         let mut seen = 0usize;
         let mut did = false;
+        let mut traced = false;
 
         for caps in re.capture_spans_iter(&hay) {
             // The pattern space is restored before the error leaves, so a
@@ -2096,6 +2647,35 @@ impl<'w> Exec<'w> {
             let Some((s, e)) = caps.first().copied().flatten() else {
                 break;
             };
+            // Once per command, for the first match only, and whether or not
+            // that match is the one an occurrence count will replace. The text
+            // is written raw, not escaped — upstream's `fwrite` again, so a
+            // register holding a tab puts a tab in the trace.
+            //
+            // The list stops at the first group that did not participate rather
+            // than skipping it: upstream reads registers until one is `-1` and
+            // then gives up, so `s/\(a\)\(X\)\?\(Y\)/1/` on `aY` reports groups
+            // 0 and 1 and never mentions group 3. Measured.
+            if sink.tracing() && !traced {
+                traced = true;
+                let mut t = Vec::from(&b"MATCHED REGEX REGISTERS\n"[..]);
+                for (i, span) in caps.iter().enumerate() {
+                    let Some((gs, ge)) = *span else { break };
+                    t.extend_from_slice(b"  regex[");
+                    t.extend_from_slice(i.to_string().as_bytes());
+                    t.extend_from_slice(b"] = ");
+                    t.extend_from_slice(gs.to_string().as_bytes());
+                    t.push(b'-');
+                    t.extend_from_slice(ge.to_string().as_bytes());
+                    t.extend_from_slice(b" '");
+                    t.extend_from_slice(hay.get(gs..ge).unwrap_or_default());
+                    t.extend_from_slice(b"'\n");
+                }
+                if let Err(err) = sink.trace(&t) {
+                    self.pattern = hay;
+                    return Err(Stop::Io(err));
+                }
+            }
             seen = seen.saturating_add(1);
             let replace = if sub.global {
                 seen >= sub.occurrence
@@ -2122,9 +2702,22 @@ impl<'w> Exec<'w> {
     fn run(&mut self, cmds: &[Command], input: &mut Input, out: &mut Out<'_>) -> Run<Flow> {
         let mut pc = 0usize;
         while let Some(cmd) = cmds.get(pc) {
+            // Before the address is tested, not after it — so `sed --debug -n
+            // '1p;2p;/zz/d'` reports all three commands on every line, and a
+            // command that never runs still appears. Measured.
+            if out.tracing() {
+                let mut t = Vec::from(&b"COMMAND: "[..]);
+                debug_command_line(cmd, &mut self.indent, &mut t);
+                out.trace(&t)?;
+            }
             if !self.selected(pc, cmd, input)? {
                 pc = match cmd.act {
-                    Action::Block(after) => after,
+                    // One short of the index just past the block, so the
+                    // matching `}` is reached rather than jumped over. It is a
+                    // no-op either way; what it is *not* is invisible — under
+                    // `--debug` the `}` gets its own `COMMAND:` line, and the
+                    // indent this `{` just raised comes back down on it.
+                    Action::Block(after) => after.saturating_sub(1),
                     _ => pc.saturating_add(1),
                 };
                 continue;
@@ -2151,8 +2744,18 @@ impl<'w> Exec<'w> {
                     }
                 }
                 Action::Subst(sub) => {
-                    if self.substitute(sub)? {
+                    if self.substitute(sub, out)? {
                         self.sub_made = true;
+                        // Before `p` and before `w`, so both of them see the
+                        // command's output rather than the text that produced
+                        // it. Measured; upstream orders it the same way.
+                        if sub.eval {
+                            let mut o = shell_capture(&self.pattern);
+                            if o.last() == Some(&b'\n') {
+                                o.pop();
+                            }
+                            self.pattern = o;
+                        }
                         if sub.print {
                             out.line(&self.pattern.clone(), true)?;
                         }
@@ -2172,9 +2775,13 @@ impl<'w> Exec<'w> {
                     return Ok(match self.pattern.iter().position(|&b| b == out.sep) {
                         Some(i) => {
                             self.pattern.drain(..=i);
+                            // A `D` that restarts shows what it kept; one that
+                            // falls back to `d` shows nothing, and gets no
+                            // `END-OF-CYCLE:` either. Measured.
+                            self.trace_pattern(out)?;
                             Flow::Restart
                         }
-                        None => Flow::Deleted,
+                        None => Flow::DeletedQuietly,
                     });
                 }
                 Action::Print => {
@@ -2198,16 +2805,13 @@ impl<'w> Exec<'w> {
                         Some(l) => {
                             self.pattern = l.bytes;
                             self.had_sep = l.had_sep;
+                            self.file = l.file;
                             self.line_num = self.line_num.saturating_add(1);
+                            self.trace_pattern(out)?;
                         }
                         // No more input: sed stops, and the pattern space has
                         // already been printed by this very command.
-                        None => {
-                            return Ok(Flow::Quit {
-                                code: 0,
-                                print: false,
-                            });
-                        }
+                        None => return Ok(Flow::Ended { print: false }),
                     }
                 }
                 Action::AppendNext => {
@@ -2217,17 +2821,14 @@ impl<'w> Exec<'w> {
                             self.pattern.push(out.sep);
                             self.pattern.extend_from_slice(&l.bytes);
                             self.had_sep = l.had_sep;
+                            self.file = l.file;
                             self.line_num = self.line_num.saturating_add(1);
+                            self.trace_pattern(out)?;
                         }
                         // GNU prints what it has rather than dropping it, which
                         // is what makes `sed '$!N;s/\n/ /'` join pairs of lines
                         // without losing an odd last one.
-                        None => {
-                            return Ok(Flow::Quit {
-                                code: 0,
-                                print: true,
-                            });
-                        }
+                        None => return Ok(Flow::Ended { print: true }),
                     }
                 }
                 Action::Hold => self.hold.clone_from(&self.pattern),
@@ -2301,11 +2902,59 @@ impl<'w> Exec<'w> {
                     // one. `printf ab | sed -n l` ends in `$` *and* a newline.
                     out.line(&bytes, true)?;
                 }
+                Action::Zap => self.pattern.clear(),
+                // Terminated by the output separator, not by a newline: under
+                // `-z` upstream writes `-\0` and not `-\n`, the same as `=`
+                // does. Measured.
+                Action::FileName => {
+                    let name = os_bytes(&self.file).into_owned();
+                    out.line(&name, true)?;
+                }
+                Action::Execute(cmd) => {
+                    if cmd.is_empty() {
+                        // Bare `e`: the pattern space *is* the command, and its
+                        // output replaces it — less one trailing newline, so
+                        // that `e` on a one-line command leaves a one-line
+                        // pattern space rather than an empty second line.
+                        let mut o = shell_capture(&self.pattern);
+                        if o.last() == Some(&b'\n') {
+                            o.pop();
+                        }
+                        self.pattern = o;
+                    } else {
+                        let o = shell_capture(cmd);
+                        out.raw(&o)?;
+                    }
+                }
                 Action::Quit { code, print } => {
                     return Ok(Flow::Quit {
                         code: *code,
                         print: *print,
                     });
+                }
+            }
+            // What a command shows *after* running, which is not simply
+            // "whatever it changed". `s` reports the pattern space even when it
+            // matched nothing, and `g` reports the *hold* space — which it did
+            // not touch — where `G` reports the pattern space it did. The second
+            // is an upstream quirk and is copied rather than corrected, for the
+            // reason given on `Exec::indent`. `e` changes the pattern space and
+            // reports nothing at all. All measured.
+            //
+            // `n`, `N` and `D` are not here: each reports from inside its own
+            // arm, because each has a path that returns before reaching this.
+            if out.tracing() {
+                match &cmd.act {
+                    Action::Subst(_)
+                    | Action::Transliterate(_)
+                    | Action::GetAppend
+                    | Action::Zap => self.trace_pattern(out)?,
+                    Action::Hold | Action::HoldAppend | Action::Get => self.trace_hold(out)?,
+                    Action::Exchange => {
+                        self.trace_pattern(out)?;
+                        self.trace_hold(out)?;
+                    }
+                    _ => {}
                 }
             }
             pc = pc.saturating_add(1);
@@ -2325,12 +2974,32 @@ impl<'w> Exec<'w> {
         while let Some(line) = input.next_line() {
             self.pattern = line.bytes;
             self.had_sep = line.had_sep;
+            self.file = line.file;
             self.line_num = self.line_num.saturating_add(1);
             self.sub_made = false;
+
+            if out.tracing() {
+                // The operand as it was written, except that a `-` becomes
+                // `STDIN` — where `F`, which names the same thing, prints the
+                // `-`. Upstream spells them differently and so does this.
+                let mut t = Vec::from(&b"INPUT:   '"[..]);
+                let name = os_bytes(&self.file).into_owned();
+                if name == b"-" {
+                    t.extend_from_slice(b"STDIN");
+                } else {
+                    t.extend_from_slice(&name);
+                }
+                t.extend_from_slice(b"' line ");
+                t.extend_from_slice(self.line_num.to_string().as_bytes());
+                t.push(b'\n');
+                out.trace(&t)?;
+                self.trace_pattern(out)?;
+            }
 
             loop {
                 match self.run(cmds, input, out)? {
                     Flow::Normal => {
+                        out.trace(b"END-OF-CYCLE:\n")?;
                         if !self.suppress {
                             let bytes = std::mem::take(&mut self.pattern);
                             out.line(&bytes, self.had_sep)?;
@@ -2339,12 +3008,42 @@ impl<'w> Exec<'w> {
                         self.flush_appends(out)?;
                         break;
                     }
+                    // A deleted cycle is still a completed one, so it gets the
+                    // marker — the auto-print is what it loses, not the cycle.
+                    // `Flow::Restart` below gets none: `D` starts the script
+                    // over on the same cycle rather than ending it.
                     Flow::Deleted => {
+                        out.trace(b"END-OF-CYCLE:\n")?;
+                        self.flush_appends(out)?;
+                        break;
+                    }
+                    // …and `D` is the exception to that: it ends the cycle the
+                    // same way but is not traced as ending one. See
+                    // [`Flow::DeletedQuietly`].
+                    Flow::DeletedQuietly => {
                         self.flush_appends(out)?;
                         break;
                     }
                     Flow::Restart => {
                         self.flush_appends(out)?;
+                    }
+                    // The *input* ended rather than the script asking to stop,
+                    // so this returns `None` — "ran out", not "quit with a
+                    // status". Two things turn on the difference. Under `-s`
+                    // and `-i` each file is its own stream, and `sed -s -n
+                    // 'n;p' a b` must carry on into `b` after `n` runs off the
+                    // end of `a`; a `Some` would end the run there. And under
+                    // `--debug` the cycle is complete, so it gets the
+                    // `END-OF-CYCLE:` line that `q` and `Q` do not. Measured.
+                    Flow::Ended { print } => {
+                        out.trace(b"END-OF-CYCLE:\n")?;
+                        if print && !self.suppress {
+                            let bytes = std::mem::take(&mut self.pattern);
+                            out.line(&bytes, self.had_sep)?;
+                            self.pattern = bytes;
+                        }
+                        self.flush_appends(out)?;
+                        return Ok(None);
                     }
                     Flow::Quit { code, print } => {
                         if print && !self.suppress {
@@ -2423,6 +3122,180 @@ fn list_escape(bytes: &[u8], width: usize, sep: u8) -> Vec<u8> {
     }
     out.push(b'$');
     out
+}
+
+/// Escape bytes the way `--debug` writes them.
+///
+/// Close to [`list_escape`] but not the same, and the differences are all
+/// measured against GNU rather than chosen:
+///
+/// * A byte with no named escape becomes `\oNNN`, with the `o` that `l` does
+///   not print — `l` writes `\001` where `--debug` writes `\o001`.
+/// * `\b` is not one of the named escapes here, so a backspace is `\o010`
+///   while `l` gives it `\b`.
+/// * There is no wrapping and no trailing `$`; a trace line is as long as it
+///   is.
+///
+/// A byte above 0x7f is the one place we do *not* follow upstream. GNU passes a
+/// plain `char` to `printf("%o")`, which sign-extends on a platform where
+/// `char` is signed, so its trace renders 0x80 as `\o37777777600` — the octal
+/// of `(unsigned)(int)(char)0x80`. That is a bug, not a format: it prints a
+/// twelve-digit number for a one-byte value, and no reader could act on it. We
+/// print `\o200`. `scripts/sed-diff.sh` marks the case as differing on purpose;
+/// see `design-decisions.md`.
+fn debug_escape(bytes: &[u8], out: &mut Vec<u8>) {
+    const OCTAL: &[u8; 8] = b"01234567";
+    for &b in bytes {
+        match b {
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            0x07 => out.extend_from_slice(b"\\a"),
+            b'\t' => out.extend_from_slice(b"\\t"),
+            b'\n' => out.extend_from_slice(b"\\n"),
+            0x0b => out.extend_from_slice(b"\\v"),
+            0x0c => out.extend_from_slice(b"\\f"),
+            b'\r' => out.extend_from_slice(b"\\r"),
+            0x20..=0x7e => out.push(b),
+            _ => {
+                let v = usize::from(b);
+                out.extend_from_slice(b"\\o");
+                for shift in [6usize, 3, 0] {
+                    let d = v
+                        .checked_shr(u32::try_from(shift).unwrap_or(0))
+                        .unwrap_or(0)
+                        & 7;
+                    out.push(OCTAL.get(d).copied().unwrap_or(b'0'));
+                }
+            }
+        }
+    }
+}
+
+/// Write an `s` command's replacement the way `--debug` writes it.
+///
+/// Two things make this more than a copy of the source text. The literal parts
+/// are written **raw** — not through [`debug_escape`] — so a tab in a
+/// replacement is a tab in the dump, which is the opposite of what the *pattern*
+/// does. And the case-folding escapes are re-synthesised from the compiled
+/// state rather than echoed, which is why `s/a/\U&\E/` dumps as `s/a/\U&/` (the
+/// `\E` has nothing left to end) while `s/a/\l&\u&/` gains one it never had
+/// (`\l&\E\u&`).
+///
+/// The rule upstream implements, and this reproduces: each piece of the
+/// replacement carries a *type* — the current `\U`/`\L` state, or 0, combined
+/// with a pending `\u`/`\l` — and a marker is written only when that type
+/// differs from the last one written. A piece with an empty literal and no
+/// group therefore emits nothing at all, which is why a trailing `\E` can
+/// vanish. Verified against fifteen measured cases.
+fn debug_replacement(parts: &[Rep], out: &mut Vec<u8>) {
+    // 0 = as-is, 1 = `\U`, 2 = `\L`; plus 4 for a pending `\u` and 8 for `\l`.
+    let mut rest: u8 = 0;
+    let mut mods: u8 = 0;
+    let mut last: u8 = 0;
+    let mut pending: Vec<u8> = Vec::new();
+
+    fn emit(ty: u8, prefix: &[u8], id: Option<usize>, last: &mut u8, out: &mut Vec<u8>) {
+        if ty != *last {
+            out.push(b'\\');
+            out.push(match ty {
+                0 => b'E',
+                1 => b'U',
+                2 => b'L',
+                _ if ty & 12 == 4 => b'u',
+                _ => b'l',
+            });
+            *last = ty;
+        }
+        out.extend_from_slice(prefix);
+        match id {
+            // `&` and `\0` are the same group and upstream writes both as `&`.
+            Some(0) => out.push(b'&'),
+            Some(n) => {
+                out.push(b'\\');
+                out.push(b'0'.saturating_add(u8::try_from(n).unwrap_or(9)));
+            }
+            None => {}
+        }
+    }
+
+    for part in parts {
+        match part {
+            Rep::Lit(b) => pending.extend_from_slice(b),
+            Rep::Group(n) => {
+                emit(
+                    rest | mods,
+                    &std::mem::take(&mut pending),
+                    Some(*n),
+                    &mut last,
+                    out,
+                );
+                mods = 0;
+            }
+            Rep::Case(op) => {
+                emit(
+                    rest | mods,
+                    &std::mem::take(&mut pending),
+                    None,
+                    &mut last,
+                    out,
+                );
+                match op {
+                    CaseOp::RestUpper => {
+                        rest = 1;
+                        mods = 0;
+                    }
+                    CaseOp::RestLower => {
+                        rest = 2;
+                        mods = 0;
+                    }
+                    CaseOp::OneUpper => mods = 4,
+                    CaseOp::OneLower => mods = 8,
+                    CaseOp::End => {
+                        rest = 0;
+                        mods = 0;
+                    }
+                }
+            }
+        }
+    }
+    // Only if there is something left to write: a replacement that ends in a
+    // case escape has already emitted everything it is going to.
+    if !pending.is_empty() {
+        emit(rest | mods, &pending, None, &mut last, out);
+    }
+}
+
+/// The `SED PROGRAM:` block `--debug` prints before reading any input.
+///
+/// The indent starts at one level — two spaces — and a `{` adds a level *after*
+/// its own line while a `}` drops one *before* its own, so a block's contents
+/// sit one level in from both braces.
+fn debug_program(cmds: &[Command]) -> Vec<u8> {
+    let mut out = Vec::from(&b"SED PROGRAM:\n"[..]);
+    let mut level = 1usize;
+    for cmd in cmds {
+        debug_command_line(cmd, &mut level, &mut out);
+    }
+    out
+}
+
+/// One line of the program dump, or the tail of one `COMMAND:` trace line.
+///
+/// `level` is shared state on purpose: the trace reuses this function with a
+/// level that persists from cycle to cycle, so a branch that jumps over a `}`
+/// leaves the trace permanently indented — which is upstream's behaviour, and
+/// visible in its output.
+fn debug_command_line(cmd: &Command, level: &mut usize, out: &mut Vec<u8>) {
+    if matches!(cmd.act, Action::BlockEnd) {
+        *level = level.saturating_sub(1);
+    }
+    for _ in 0..*level {
+        out.extend_from_slice(b"  ");
+    }
+    out.extend_from_slice(&cmd.dump);
+    out.push(b'\n');
+    if matches!(cmd.act, Action::Block(_)) {
+        *level = level.saturating_add(1);
+    }
 }
 
 /// Expand a replacement against one match.
@@ -2546,6 +3419,8 @@ struct SedArgs {
     separate: bool,
     null_data: bool,
     sandbox: bool,
+    /// `--debug`: dump the compiled program, then trace every cycle.
+    debug: bool,
     /// `-l N`, defaulting to [`DEFAULT_LINE_LEN`]; 0 means never wrap.
     line_len: usize,
     /// `Some(suffix)` for `-i`; an empty suffix means no backup.
@@ -2563,6 +3438,7 @@ impl Default for SedArgs {
             separate: false,
             null_data: false,
             sandbox: false,
+            debug: false,
             line_len: DEFAULT_LINE_LEN,
             in_place: None,
             script_parts: Vec::new(),
@@ -2626,14 +3502,14 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 out.null_data = true;
             }
             Opt::Long("sandbox", _) => out.sandbox = true,
+            Opt::Long("debug", _) => out.debug = true,
             // Accepted and ignored, each for its own reason. `-u` asks for less
             // buffering, and this sed already flushes at every boundary that
             // matters. `-b` asks for binary mode, which is the only mode there
             // is here: nothing translates CR+LF. `--follow-symlinks` and
-            // `--posix` are answered in tranche 2c; `--debug` is a known gap,
-            // see `known-issues.md`.
+            // `--posix` are answered in tranche 2c.
             Opt::Short(b'u', _)
-            | Opt::Long("unbuffered" | "binary" | "posix" | "debug" | "follow-symlinks", _) => {}
+            | Opt::Long("unbuffered" | "binary" | "posix" | "follow-symlinks", _) => {}
             Opt::Short(b'i', value) | Opt::Long("in-place", value) => {
                 // `-i` takes an *optional* value, so it is never the next word:
                 // GNU reads `sed -i backup f` as an in-place edit of `backup`
@@ -2898,6 +3774,7 @@ fn main() {
         parsed.ere,
         parsed.line_len,
         parsed.sandbox,
+        parsed.debug,
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -2913,6 +3790,14 @@ fn main() {
             process::exit(e.code);
         }
     };
+
+    // The program dump comes out after the script compiles and before any input
+    // is read — a script that will not compile prints no dump at all — and it
+    // goes to standard output even under `-i`, where the edited text does not.
+    if parsed.debug {
+        let dump = debug_program(&script.cmds);
+        let _ = io::stdout().write_all(&dump);
+    }
 
     // `-i` rewrites the files it is given, so with none it has nothing to
     // mean; upstream refuses rather than quietly editing standard input.
@@ -2932,6 +3817,18 @@ fn main() {
         rfiles: open_rfiles(&script.rfiles),
         suppress: parsed.suppress || script.suppress,
         sep: if parsed.null_data { 0 } else { b'\n' },
+        // Under `-i` the output is a file and the trace is not, so the two part
+        // company; otherwise they share one descriptor and must share one
+        // handle to it. See [`Trace`].
+        trace: if parsed.debug {
+            Some(if parsed.in_place.is_some() {
+                Trace::Stdout
+            } else {
+                Trace::Inline
+            })
+        } else {
+            None
+        },
     };
 
     let status = if let Some(suffix) = parsed.in_place.as_ref() {
@@ -2955,6 +3852,8 @@ struct Job<'a> {
     rfiles: Vec<RFile>,
     suppress: bool,
     sep: u8,
+    /// Where `--debug`'s trace goes, or `None` without it.
+    trace: Option<Trace>,
 }
 
 impl Job<'_> {
@@ -2970,6 +3869,7 @@ impl Job<'_> {
             w: sink,
             sep: self.sep,
             owed: false,
+            trace_to: self.trace,
         };
         let quit = match exec.cycle(&self.script.cmds, input, &mut out) {
             Ok(q) => q,
@@ -3016,7 +3916,7 @@ impl Job<'_> {
     fn joined(&mut self, files: &[OsString]) -> i32 {
         let stdout = io::stdout();
         let mut sink = stdout.lock();
-        let mut input = Input::new(files.to_vec(), self.sep);
+        let mut input = Input::new(files.to_vec(), self.sep, true);
         let (quit, exec_err) = self.run_one(&mut input, &mut sink);
         let _ = sink.flush();
         status(quit, input.had_error || exec_err)
@@ -3033,7 +3933,7 @@ impl Job<'_> {
             // with both files rather than running off the end of `inc` during
             // the first. See [`rewind_rfiles`].
             rewind_rfiles(&mut self.rfiles);
-            let mut input = Input::new(vec![path.clone()], self.sep);
+            let mut input = Input::new(vec![path.clone()], self.sep, true);
             let (quit, exec_err) = self.run_one(&mut input, &mut sink);
             bad = bad || input.had_error || exec_err;
             if let Some(code) = quit {
@@ -3079,7 +3979,10 @@ impl Job<'_> {
             // `-i` implies `-s`, including for the `R` sources. See `separate`.
             rewind_rfiles(&mut self.rfiles);
             let mut buf: Vec<u8> = Vec::new();
-            let mut input = Input::new(vec![path.clone()], self.sep);
+            // `false`: the `File::open` above already treated a `-` operand as
+            // a file, and the reader has to agree — otherwise `-i` on a file
+            // named `-` would open it, then read standard input into it.
+            let mut input = Input::new(vec![path.clone()], self.sep, false);
             let (quit, exec_err) = self.run_one(&mut input, &mut buf);
             bad = bad || input.had_error || exec_err;
 
@@ -3164,11 +4067,74 @@ mod tests {
         items.iter().map(OsString::from).collect()
     }
 
+    /// An [`Input`] over bytes already in memory, standing in for the standard
+    /// input a real run reads. Built by hand rather than through
+    /// [`Input::new`], which only knows how to open paths.
+    fn over(bytes: Vec<u8>, sep: u8) -> Input {
+        Input {
+            paths: Vec::new(),
+            next_path: 0,
+            cur_name: OsString::from("stdin"),
+            cur_file: Rc::new(OsString::from("-")),
+            dash_is_stdin: true,
+            cur: Some(Box::new(BufReader::new(io::Cursor::new(bytes)))),
+            peeked: None,
+            sep,
+            had_error: false,
+        }
+    }
+
     /// [`compile_script`] with what `main` passes for a bare `sed 'script'`:
     /// the default `l` width, and no sandbox. The two tests that care about
     /// either of those call `compile_script` directly.
     fn compile(script: &[u8], ere: bool) -> Result<Script, ScriptError> {
-        compile_script(script, &[], ere, DEFAULT_LINE_LEN, false)
+        compile_script(script, &[], ere, DEFAULT_LINE_LEN, false, false)
+    }
+
+    /// [`compile`] with `--debug`, so the [`Command::dump`] of each command is
+    /// filled in and can be checked.
+    fn compile_debug(script: &[u8]) -> Script {
+        compile_script(script, &[], false, DEFAULT_LINE_LEN, false, true)
+            .unwrap_or_else(|e| panic!("compiling {}: {}", String::from_utf8_lossy(script), e.msg))
+    }
+
+    /// The `SED PROGRAM:` dump of `script`, as text.
+    fn program(script: &[u8]) -> String {
+        let compiled = compile_debug(script);
+        String::from_utf8_lossy(&debug_program(&compiled.cmds)).into_owned()
+    }
+
+    /// A script named in an assertion message. Scripts here are byte strings
+    /// and several are not valid UTF-8, so this is the one way to name one.
+    fn show(script: &[u8]) -> String {
+        String::from_utf8_lossy(script).into_owned()
+    }
+
+    /// The one command of a one-command `script`, as `--debug` writes it —
+    /// [`program`] without the header and the indent, which is what the
+    /// per-command tables below are actually about.
+    fn dump_of(script: &[u8]) -> String {
+        let compiled = compile_debug(script);
+        let cmd = compiled.cmds.first().expect("one command");
+        String::from_utf8_lossy(&cmd.dump).into_owned()
+    }
+
+    /// `script` run over `input` with `--debug`'s trace interleaved into the
+    /// output, which is where it goes when `-i` is not in play.
+    fn traced(script: &[u8], input: &[u8], suppress: bool) -> String {
+        let compiled = compile_debug(script);
+        let mut sink: Vec<u8> = Vec::new();
+        let mut inp = over(input.to_vec(), b'\n');
+        let mut job = Job {
+            script: &compiled,
+            wfiles: open_wfiles(&compiled.wfiles),
+            rfiles: open_rfiles(&compiled.rfiles),
+            suppress: suppress || compiled.suppress,
+            sep: b'\n',
+            trace: Some(Trace::Inline),
+        };
+        job.run_one(&mut inp, &mut sink);
+        String::from_utf8_lossy(&sink).into_owned()
     }
 
     /// Why [`compile`] refused `script`. Panics if it did not — `Script` has no
@@ -3199,21 +4165,14 @@ mod tests {
         let compiled = compile(script, ere)
             .unwrap_or_else(|e| panic!("compiling {}: {}", String::from_utf8_lossy(script), e.msg));
         let mut sink: Vec<u8> = Vec::new();
-        let mut inp = Input {
-            paths: Vec::new(),
-            next_path: 0,
-            cur_name: OsString::from("stdin"),
-            cur: Some(Box::new(BufReader::new(io::Cursor::new(input.to_vec())))),
-            peeked: None,
-            sep,
-            had_error: false,
-        };
+        let mut inp = over(input.to_vec(), sep);
         let mut job = Job {
             script: &compiled,
             wfiles: open_wfiles(&compiled.wfiles),
             rfiles: open_rfiles(&compiled.rfiles),
             suppress: suppress || compiled.suppress,
             sep,
+            trace: None,
         };
         job.run_one(&mut inp, &mut sink);
         sink
@@ -3229,17 +4188,7 @@ mod tests {
     fn run_stopping(script: &str, input: &str) -> Result<Vec<u8>, Vec<u8>> {
         let compiled = compile(script.as_bytes(), false)
             .unwrap_or_else(|e| panic!("compiling {script}: {}", e.msg));
-        let mut inp = Input {
-            paths: Vec::new(),
-            next_path: 0,
-            cur_name: OsString::from("stdin"),
-            cur: Some(Box::new(BufReader::new(io::Cursor::new(
-                input.as_bytes().to_vec(),
-            )))),
-            peeked: None,
-            sep: b'\n',
-            had_error: false,
-        };
+        let mut inp = over(input.as_bytes().to_vec(), b'\n');
         let mut wfiles = open_wfiles(&compiled.wfiles);
         let mut rfiles = open_rfiles(&compiled.rfiles);
         let mut sink: Vec<u8> = Vec::new();
@@ -3250,6 +4199,7 @@ mod tests {
                 w: &mut sink,
                 sep: b'\n',
                 owed: false,
+                trace_to: None,
             };
             match exec.cycle(&compiled.cmds, &mut inp, &mut out) {
                 Ok(_) => false,
@@ -3309,21 +4259,14 @@ mod tests {
         let compiled = compile(pat.as_bytes(), false).unwrap();
         let line = format!("{}\n", "a".repeat(300));
         let mut sink: Vec<u8> = Vec::new();
-        let mut inp = Input {
-            paths: Vec::new(),
-            next_path: 0,
-            cur_name: OsString::from("stdin"),
-            cur: Some(Box::new(BufReader::new(io::Cursor::new(line.into_bytes())))),
-            peeked: None,
-            sep: b'\n',
-            had_error: false,
-        };
+        let mut inp = over(line.into_bytes(), b'\n');
         let mut job = Job {
             script: &compiled,
             wfiles: Vec::new(),
             rfiles: Vec::new(),
             suppress: false,
             sep: b'\n',
+            trace: None,
         };
         let (status, _) = job.run_one(&mut inp, &mut sink);
         assert_eq!(status, Some(4), "a declined search must fail the run");
@@ -3661,21 +4604,14 @@ mod tests {
         let compiled = compile(b"s/b/B/", false).unwrap();
         let raw: Vec<u8> = vec![0xff, b'a', b'b', 0xfe, b'\n'];
         let mut sink: Vec<u8> = Vec::new();
-        let mut inp = Input {
-            paths: Vec::new(),
-            next_path: 0,
-            cur_name: OsString::from("stdin"),
-            cur: Some(Box::new(BufReader::new(io::Cursor::new(raw)))),
-            peeked: None,
-            sep: b'\n',
-            had_error: false,
-        };
+        let mut inp = over(raw, b'\n');
         let mut job = Job {
             script: &compiled,
             wfiles: Vec::new(),
             rfiles: Vec::new(),
             suppress: false,
             sep: b'\n',
+            trace: None,
         };
         job.run_one(&mut inp, &mut sink);
         assert_eq!(sink, vec![0xff, b'a', b'B', 0xfe, b'\n']);
@@ -3732,7 +4668,7 @@ mod tests {
         // `l 0` beats a narrow `-l`, and `l` with no number defers to it.
         // The width a one-command script's `l` resolved to, with `-l` set to 3.
         let width_of = |script: &[u8]| -> usize {
-            let s = compile_script(script, &[], false, 3, false).expect("compiling");
+            let s = compile_script(script, &[], false, 3, false, false).expect("compiling");
             match &s.cmds.first().expect("one command").act {
                 Action::List(w) => *w,
                 _ => panic!("{} did not parse as `l`", String::from_utf8_lossy(script)),
@@ -3823,25 +4759,33 @@ mod tests {
 
     #[test]
     fn the_sandbox_refuses_every_command_that_reaches_outside_the_script() {
-        // `e` and `s///e` belong in this list and are absent only because they
-        // are not implemented at all yet; see `known-issues.md`. When they
-        // arrive they must be added here and to `deny_in_sandbox`'s callers.
-        for script in [&b"r f"[..], b"R f", b"w f", b"W f", b"s/a/b/w f"] {
+        // `e` and `s///e` reach further than any of the others — they hand a
+        // string to a shell — so they are the two the sandbox exists for.
+        for script in [
+            &b"r f"[..],
+            b"R f",
+            b"w f",
+            b"W f",
+            b"s/a/b/w f",
+            b"e echo x",
+            b"e",
+            b"s/a/b/e",
+        ] {
             assert!(
-                compile_script(script, &[], false, DEFAULT_LINE_LEN, true).is_err(),
+                compile_script(script, &[], false, DEFAULT_LINE_LEN, true, false).is_err(),
                 "{} should be refused under --sandbox",
                 String::from_utf8_lossy(script)
             );
             // …and is a perfectly good script without it, so the refusal is
             // the sandbox's doing and not a parse failure in disguise.
             assert!(
-                compile_script(script, &[], false, DEFAULT_LINE_LEN, false).is_ok(),
+                compile_script(script, &[], false, DEFAULT_LINE_LEN, false, false).is_ok(),
                 "{} should compile without --sandbox",
                 String::from_utf8_lossy(script)
             );
         }
         // A script that reaches nowhere is unaffected.
-        assert!(compile_script(b"s/a/b/p", &[], false, DEFAULT_LINE_LEN, true).is_ok());
+        assert!(compile_script(b"s/a/b/p", &[], false, DEFAULT_LINE_LEN, true, false).is_ok());
     }
 
     // ---------------- `-z` ----------------
@@ -4477,5 +5421,354 @@ mod tests {
             compile_err(b"//Ip"),
             "cannot specify modifiers on empty regexp"
         );
+    }
+
+    // ---------------- `--debug`: the program dump ----------------
+
+    /// The dump is not the script echoed back — it is the script *re-spelled*
+    /// in one canonical form, so a delimiter, a modifier order and a label
+    /// spacing all come back as upstream would have written them. Every pair
+    /// below was measured against GNU sed 4.9.
+    #[test]
+    fn the_program_dump_re_spells_the_script_the_way_upstream_does() {
+        // The single space belongs to the address, not to the command: a
+        // command with no address gets none, and a `!` sits before the space.
+        for (script, want) in [
+            (&b"p"[..], "p"),
+            (b"1p", "1 p"),
+            (b"1!p", "1! p"),
+            (b"!p", "!p"),
+            (b"$p", "$ p"),
+            (b"1,2p", "1,2 p"),
+            (b"/a/p", "/a/ p"),
+            (b"/a/Ip", "/a/I p"),
+            // A `\,`-delimited address comes back as `/`-delimited…
+            (b"\\,x,p", "/x/ p"),
+            // …and a `/` inside one is escaped to keep it that way.
+            (b"\\,a/b,p", "/a\\/b/ p"),
+            (b"2,+3p", "2,+3 p"),
+            (b"2,~4p", "2,~4 p"),
+            (b"0~3p", "0~3 p"),
+            (b"0,/a/p", "0,/a/ p"),
+            (b"//p", "// p"),
+        ] {
+            assert_eq!(dump_of(script), want, "dumping {}", show(script));
+        }
+    }
+
+    /// Which commands take a space before their argument and which do not is
+    /// not a rule, it is a list; upstream's `debug.c` writes each by hand.
+    #[test]
+    fn each_command_dumps_its_argument_the_way_upstream_writes_it() {
+        for (script, want) in [
+            // A number the script did not write is not invented…
+            (&b"q"[..], "q"),
+            (b"Q", "Q"),
+            (b"l", "l"),
+            // …and one it did write is spaced off, however it was spelled.
+            (b"q5", "q 5"),
+            (b"q 5", "q 5"),
+            (b"l0", "l 0"),
+            // `w`/`W` take no space; `r`/`R` take one. Measured, not guessed.
+            (b"wout.txt", "wout.txt"),
+            (b"w out.txt", "wout.txt"),
+            (b"Wout.txt", "Wout.txt"),
+            (b"r inc.txt", "r inc.txt"),
+            (b"rinc.txt", "r inc.txt"),
+            (b"R inc.txt", "R inc.txt"),
+            // A label is written tight after `:` and spaced after `b`/`t`/`T`.
+            // (The `:x` these three carry is only there to be jumped to; the
+            // command under test is the first one.)
+            (b":x", ":x"),
+            (b"bx\n:x", "b x"),
+            (b"b x\n:x", "b x"),
+            (b"tx\n:x", "t x"),
+            (b"Tx\n:x", "T x"),
+            // …and a branch with no label is the bare letter.
+            (b"b", "b"),
+            (b"t", "t"),
+            (b"T", "T"),
+            // `y` is written raw: neither string is escaped or re-delimited.
+            (b"y/abc/xyz/", "y/abc/xyz/"),
+            (b"y,ab,xy,", "y/ab/xy/"),
+            (b"=", "="),
+            (b"F", "F"),
+            (b"z", "z"),
+            (b"n", "n"),
+            (b"N", "N"),
+            (b"D", "D"),
+            (b"P", "P"),
+            (b"h", "h"),
+            (b"x", "x"),
+        ] {
+            assert_eq!(dump_of(script), want, "dumping {}", show(script));
+        }
+    }
+
+    /// `a`, `i` and `c` write a backslash and then the stored text, which
+    /// already ends in a newline — so the dumped line is followed by a blank
+    /// one. Text-less `a\` has no newline to contribute and so has no blank
+    /// line, which is the whole reason this is worth a test of its own.
+    #[test]
+    fn the_text_commands_dump_a_backslash_and_then_the_text_verbatim() {
+        assert_eq!(program(b"a hello"), "SED PROGRAM:\n  a\\hello\n\n");
+        assert_eq!(program(b"i hello"), "SED PROGRAM:\n  i\\hello\n\n");
+        assert_eq!(program(b"c hello"), "SED PROGRAM:\n  c\\hello\n\n");
+        assert_eq!(program(b"a\\"), "SED PROGRAM:\n  a\\\n");
+        assert_eq!(program(b"a\\\nx\\\ny"), "SED PROGRAM:\n  a\\x\ny\n\n");
+        // `e` takes a space, and bare `e` keeps the space with nothing after
+        // it — again measured, and again not something a rule would predict.
+        assert_eq!(program(b"e echo hi"), "SED PROGRAM:\n  e echo hi\n\n");
+        assert_eq!(program(b"e"), "SED PROGRAM:\n  e \n");
+    }
+
+    /// `s` re-spells its pattern like an address, leaves its replacement
+    /// alone, and sorts its flags into upstream's fixed order regardless of
+    /// how the script wrote them.
+    #[test]
+    fn the_s_command_dumps_a_canonical_pattern_and_a_canonical_flag_order() {
+        assert_eq!(dump_of(b"s/a/b/"), "s/a/b/");
+        assert_eq!(dump_of(b"s,a/b,c/d,"), "s/a\\/b/c/d/");
+        // i, m, g, e, p, N, w — in that order, whatever order they arrived in.
+        assert_eq!(dump_of(b"s/a/b/gp3iI"), "s/a/b/igp3");
+        assert_eq!(dump_of(b"s/a/b/3g"), "s/a/b/g3");
+        // …and `w` goes last, tight against its path, like `w`'s own.
+        assert_eq!(dump_of(b"s/a/b/pw out.txt"), "s/a/b/pwout.txt");
+        // The numeric escapes are folded to the byte and re-spelled.
+        assert_eq!(
+            dump_of(b"s/\\t\\o101\\d65\\x41\\cA/x/"),
+            "s/\\tAAA\\o001/x/"
+        );
+    }
+
+    /// The replacement is dumped from the parsed node list, so the case
+    /// operators come back where the parse put them rather than where the
+    /// script wrote them — `\l&\u&` gains an `\E` and `\U&\E` keeps one only
+    /// when something follows. Fifteen pairs, all measured.
+    #[test]
+    fn the_replacement_dump_re_derives_the_case_operators_from_the_nodes() {
+        for (repl, want) in [
+            (&b"\\1"[..], "\\1"),
+            (b"x&y", "x&y"),
+            (b"\\U&", "\\U&"),
+            (b"\\U&\\E", "\\U&"),
+            (b"\\Ua\\Eb", "\\Ua\\Eb"),
+            (b"\\u&", "\\u&"),
+            (b"\\l&\\u&", "\\l&\\E\\u&"),
+            (b"\\U\\l&\\E]", "\\U\\l&\\U\\E]"),
+            (b"\\U\\1\\L\\2\\E", "\\U\\1\\L\\2"),
+            (b"\\Ex", "x"),
+            (b"\\uX\\EY", "\\uX\\EY"),
+            (b"\\\\", "\\"),
+            (b"\\&", "&"),
+            (b"a\\tb", "a\tb"),
+            (b"\\U&\\E!", "\\U&\\E!"),
+        ] {
+            // Two groups in the pattern, so `\1` and `\2` are both legal. The
+            // pattern *is* escaped, so its `\(` comes back as `\\(` — which
+            // the replacement, escaped by nothing, does not do. Measured.
+            let script = [b"s/\\(a\\)\\(b\\)/", repl, b"/"].concat();
+            assert_eq!(
+                dump_of(&script),
+                format!("s/\\\\(a\\\\)\\\\(b\\\\)/{want}/"),
+                "dumping {}",
+                show(&script)
+            );
+        }
+    }
+
+    /// Blocks indent by two, `}` unindents before it is written, and the
+    /// commands that carry no runtime behaviour — `v`, a comment, `#n` — are
+    /// not written at all, not even as an empty indented line.
+    #[test]
+    fn the_dump_indents_blocks_and_omits_the_commands_that_do_nothing() {
+        assert_eq!(program(b"{p}"), "SED PROGRAM:\n  {\n    p\n  }\n");
+        assert_eq!(
+            program(b"1{p;q}"),
+            "SED PROGRAM:\n  1 {\n    p\n    q\n  }\n"
+        );
+        assert_eq!(
+            program(b"1{2{p}}"),
+            "SED PROGRAM:\n  1 {\n    2 {\n      p\n    }\n  }\n"
+        );
+        assert_eq!(program(b"v"), "SED PROGRAM:\n");
+        assert_eq!(program(b"v 4.2"), "SED PROGRAM:\n");
+        assert_eq!(program(b"#comment"), "SED PROGRAM:\n");
+        assert_eq!(program(b""), "SED PROGRAM:\n");
+        assert_eq!(program(b"v;p"), "SED PROGRAM:\n  p\n");
+    }
+
+    // ---------------- `--debug`: the runtime trace ----------------
+
+    /// The shape of one whole cycle: the input line, the pattern space, each
+    /// command *before* its address is tested, the registers of a match, the
+    /// pattern space again after the `s`, and the end-of-cycle marker before
+    /// the auto-print.
+    #[test]
+    fn the_trace_reports_a_cycle_in_upstreams_order() {
+        assert_eq!(
+            traced(b"s/a/A/", b"a\n", false),
+            "INPUT:   'STDIN' line 1\n\
+             PATTERN: a\n\
+             COMMAND: s/a/A/\n\
+             MATCHED REGEX REGISTERS\n  regex[0] = 0-1 'a'\n\
+             PATTERN: A\n\
+             END-OF-CYCLE:\n\
+             A\n"
+        );
+    }
+
+    /// A command is traced whether or not its address selects the line, so a
+    /// script's shape is visible even on lines it does nothing to. The `}` of
+    /// an unselected block is traced too — that is what brings the indent back
+    /// down.
+    #[test]
+    fn a_command_is_traced_before_its_address_is_tested() {
+        assert_eq!(
+            traced(b"/zz/d", b"a\n", true),
+            "INPUT:   'STDIN' line 1\nPATTERN: a\nCOMMAND: /zz/ d\nEND-OF-CYCLE:\n"
+        );
+        assert_eq!(
+            traced(b"/zz/{p}", b"a\n", true),
+            "INPUT:   'STDIN' line 1\n\
+             PATTERN: a\n\
+             COMMAND: /zz/ {\n\
+             COMMAND: }\n\
+             END-OF-CYCLE:\n"
+        );
+    }
+
+    /// Which command prints which space afterwards is a list, not a rule, and
+    /// the odd one out is `g`: it overwrites the *pattern* space and reports
+    /// the *hold* one. Upstream quirk, reproduced deliberately.
+    #[test]
+    fn the_follow_up_dump_after_a_command_is_upstreams_list_quirks_and_all() {
+        // Only the tagged lines: a command that *prints* (`p`, `l`, `=`) puts
+        // its own output in among them, and that is not what is being asked.
+        let after = |script: &[u8]| -> String {
+            traced(script, b"a\n", true)
+                .lines()
+                .skip(3) // INPUT, PATTERN, COMMAND
+                .take_while(|l| *l != "END-OF-CYCLE:")
+                .filter(|l| l.starts_with("PATTERN: ") || l.starts_with("HOLD:    "))
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        assert_eq!(after(b"h"), "HOLD:    a");
+        // The embedded newline is escaped, which is what keeps a traced space
+        // on one line however many separators it has swallowed.
+        assert_eq!(after(b"H"), "HOLD:    \\na");
+        assert_eq!(after(b"g"), "HOLD:    ");
+        assert_eq!(after(b"G"), "PATTERN: a\\n");
+        assert_eq!(after(b"x"), "PATTERN: |HOLD:    a");
+        assert_eq!(after(b"z"), "PATTERN: ");
+        assert_eq!(after(b"y/a/b/"), "PATTERN: b");
+        // …and the many that report nothing at all.
+        for script in [&b"p"[..], b"=", b"F", b"l", b":x", b"b"] {
+            assert_eq!(after(script), "", "after {}", show(script));
+        }
+    }
+
+    /// The registers are reported once per `s`, for the *first* match only
+    /// even under `g`, and the list stops at the first group that did not
+    /// take part rather than skipping it.
+    #[test]
+    fn the_registers_are_reported_once_and_stop_at_the_first_gap() {
+        let regs = |script: &[u8], input: &[u8]| -> Vec<String> {
+            traced(script, input, true)
+                .lines()
+                .filter(|l| l.starts_with("  regex["))
+                .map(str::to_owned)
+                .collect()
+        };
+        assert_eq!(
+            regs(b"s/\\(a\\)\\(b\\)/x/", b"ab\n"),
+            [
+                "  regex[0] = 0-2 'ab'",
+                "  regex[1] = 0-1 'a'",
+                "  regex[2] = 1-2 'b'"
+            ]
+        );
+        // Two matches, one report — and it is the first match's span, not the
+        // span of everything `g` went on to replace.
+        assert_eq!(regs(b"s/a/x/g", b"aa\n"), ["  regex[0] = 0-1 'a'"]);
+        // Group 2 did not participate, so group 3 is not reported either.
+        assert_eq!(
+            regs(b"s/\\(a\\)\\(X\\)\\?\\(Y\\)/1/", b"aY\n"),
+            ["  regex[0] = 0-2 'aY'", "  regex[1] = 0-1 'a'"]
+        );
+        // No match, no report.
+        assert!(regs(b"s/zz/x/", b"a\n").is_empty());
+    }
+
+    /// `END-OF-CYCLE:` marks the end of the cycle *before* the auto-print, so
+    /// it precedes the line it belongs to — and it is printed for a cycle that
+    /// prints nothing, but not for one that `q` cut short.
+    #[test]
+    fn end_of_cycle_precedes_the_auto_print_and_skips_only_quit() {
+        assert!(traced(b"d", b"a\n", false).ends_with("END-OF-CYCLE:\n"));
+        // `p`'s own output stands *before* the marker; the auto-print's stands
+        // after it, which is the whole point of where the marker sits.
+        assert!(traced(b"p", b"a\n", false).ends_with("a\nEND-OF-CYCLE:\na\n"));
+        // `q` prints its line and stops without reaching the end of a cycle.
+        assert!(!traced(b"q", b"a\n", false).contains("END-OF-CYCLE:"));
+        assert!(!traced(b"Q", b"a\n", false).contains("END-OF-CYCLE:"));
+        // `D` reports none either way: not when it restarts the script on what
+        // it kept, and not when there was nothing to keep and it behaved as
+        // `d`. That second case is the surprising one, and is measured.
+        assert!(!traced(b"D", b"a\n", false).contains("END-OF-CYCLE:"));
+        // …and a restart is not an ending either, so `N;D` over two lines ends
+        // exactly once — when the restarted script's `N` runs out of input.
+        assert_eq!(
+            traced(b"N;D", b"a\nb\n", true)
+                .matches("END-OF-CYCLE:")
+                .count(),
+            1
+        );
+        // `n` and `N` at end of input end a cycle like any other.
+        assert!(traced(b"N", b"a\n", false).contains("END-OF-CYCLE:"));
+    }
+
+    /// The pattern space is escaped in the trace the way `--debug` escapes a
+    /// pattern: a control byte becomes its named escape or an octal one, and
+    /// the escaping is what makes an embedded newline readable.
+    #[test]
+    fn the_traced_spaces_are_escaped() {
+        assert_eq!(
+            traced(b"s/a/\\t/", b"a\n", true)
+                .lines()
+                .filter(|l| l.starts_with("PATTERN: "))
+                .collect::<Vec<_>>(),
+            ["PATTERN: a", "PATTERN: \\t"]
+        );
+    }
+
+    // ---------------- `v` and version comparison ----------------
+
+    /// `v` is a version *assertion*: it succeeds for anything up to what we
+    /// implement and fails the script otherwise. The comparison is glibc's
+    /// `strverscmp`, so `4.10` is newer than `4.9` rather than older.
+    #[test]
+    fn strverscmp_orders_versions_by_number_not_by_byte() {
+        assert_eq!(strverscmp(b"4.9", b"4.9"), Ordering::Equal);
+        assert_eq!(strverscmp(b"4.10", b"4.9"), Ordering::Greater);
+        assert_eq!(strverscmp(b"4.9", b"4.10"), Ordering::Less);
+        assert_eq!(strverscmp(b"4.2", b"4.9"), Ordering::Less);
+        // A leading zero is a fraction, and so sorts before a bare digit.
+        assert_eq!(strverscmp(b"4.08", b"4.8"), Ordering::Less);
+        assert_eq!(strverscmp(b"", b"4"), Ordering::Less);
+        assert_eq!(strverscmp(b"a", b"4"), Ordering::Greater);
+    }
+
+    #[test]
+    fn v_asserts_a_version_and_refuses_a_newer_one() {
+        assert!(compile(b"v", false).is_ok());
+        assert!(compile(b"v 4.2", false).is_ok());
+        assert!(compile(b"1v", false).is_ok());
+        assert!(compile(b"v;p", false).is_ok());
+        assert_eq!(compile_err(b"v 9.9"), "expected newer version of sed");
+        assert_eq!(compile_err(b"v abc"), "expected newer version of sed");
+        // It does nothing at run time, either — not even to the flow.
+        assert_eq!(run("v 4.2;s/a/b/", "a\n"), "b\n");
     }
 }

@@ -11576,7 +11576,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
 
         let path = "/tmp/kshell_sed_status.txt";
-        crate::fs::Vfs::write_file(path, b"old\n")?;
+        crate::fs::Vfs::write_file(path, b"zz_file_marker\n")?;
 
         // The token the failing cases are piped, chosen so that finding it in
         // the output can only mean the input was passed through. `old` would
@@ -11584,15 +11584,17 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // usage message would be indistinguishable to the assertion.
         let marker: &[u8] = b"zz_passthru_marker\n";
 
-        // `s/old` -- the pattern is opened and never closed, so
-        // `parse_sed_command` returns `None` and there is nothing to run.
+        // `s/nomatch` -- the pattern is opened and never closed, so
+        // `parse_sed_command` returns an error and there is nothing to run.
         // Running nothing is not the same as running an identity transform,
         // which is exactly what the old code could not tell apart.
         //
-        // (`s/old/new`, a trailing delimiter short, is *not* the example to
-        // use here: this parser accepts it where GNU does not. Both halves
-        // agree about that, so it is a separate question from this one.)
-        let out = piped("sed s/old", marker);
+        // The script's pattern is deliberately a word that appears in neither
+        // the pipe nor the file: the diagnostic quotes the offending script
+        // back, so a pattern shared with the data would make "the message
+        // mentioned it" and "the data came through" indistinguishable -- the
+        // same trap `old` set for the marker above.
+        let out = piped("sed s/nomatch", marker);
         assert_output_lacks(
             "a bad script does not pass the input through",
             &out,
@@ -11600,8 +11602,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         assert_eq!(last_exit(), 1, "cmd | sed: an unparseable script fails");
 
-        let out = capture_command(&alloc::format!("sed s/old {}", path));
-        assert_output_lacks("nor does the file form print the file", &out, b"old");
+        let out = capture_command(&alloc::format!("sed s/nomatch {}", path));
+        assert_output_lacks(
+            "nor does the file form print the file",
+            &out,
+            b"zz_file_marker",
+        );
         assert_eq!(
             last_exit(),
             1,
@@ -11631,8 +11637,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_contains("a good script still edits the pipe", &out, b"new");
         assert_eq!(last_exit(), 0, "cmd | sed: a good script is success");
 
-        let out = capture_command(&alloc::format!("sed s/old/new/ {}", path));
-        assert_output_contains("and still edits the file", &out, b"new");
+        let out = capture_command(&alloc::format!("sed s/zz_file_marker/zz_edited/ {}", path));
+        assert_output_contains("and still edits the file", &out, b"zz_edited");
         assert_eq!(last_exit(), 0, "sed SCRIPT FILE: a good script is success");
 
         // `awk` had the same silent pass-through for a missing program.
@@ -11654,6 +11660,429 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let out = piped("awk {print}", b"alpha\n");
         assert_output_contains("a real program still runs", &out, b"alpha");
         assert_eq!(last_exit(), 0, "cmd | awk: a real program is success");
+    }
+
+    serial_println!("  kshell::self_test 34: a named file wins over the pipe that feeds it");
+    // The same screen that found rung 33's bug found five commands whose piped
+    // halves parsed a file operand out of their arguments and then threw it
+    // away: `cut`, `fold`, `sed`, `awk` and `mapfile`. So `cat a | cut -f1 b`
+    // cut `a` and never opened `b` -- no error, no warning, exit 0. The other
+    // eleven paired commands all honour the operand, and so does GNU.
+    //
+    // Each check below pipes one token and names a file containing a *different*
+    // token, so the two possible answers are distinguishable in the output.
+    // Asserting only that the file's contents appear would not do it: a command
+    // that read both would pass that.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let file = "/tmp/kshell_operand.txt";
+        let pipe: &[u8] = b"zz_from_pipe\n";
+
+        crate::fs::Vfs::write_file(file, b"zz_from_file\n")?;
+        let out = piped(&alloc::format!("cut -c1-99 {}", file), pipe);
+        assert_output_contains("cut reads the named file", &out, b"zz_from_file");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        let out = piped(&alloc::format!("fold -w99 {}", file), pipe);
+        assert_output_contains("fold reads the named file", &out, b"zz_from_file");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        let out = piped(&alloc::format!("awk {{print}} {}", file), pipe);
+        assert_output_contains("awk reads the named file", &out, b"zz_from_file");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        // `sed` needs a script whose output distinguishes the two sources, so
+        // it substitutes on a word only the file contains.
+        let out = piped(
+            &alloc::format!("sed s/zz_from_file/zz_seen/ {}", file),
+            pipe,
+        );
+        assert_output_contains("sed reads the named file", &out, b"zz_seen");
+        assert_output_lacks("and not the pipe", &out, b"zz_from_pipe");
+
+        // `mapfile` stores rather than prints, so this reads the array back.
+        let _ = piped(&alloc::format!("mapfile -t ZZARR {}", file), pipe);
+        let out = capture_command("echo ${ZZARR[0]}");
+        assert_output_contains(
+            "mapfile fills the array from the file",
+            &out,
+            b"zz_from_file",
+        );
+        assert_output_lacks("and not from the pipe", &out, b"zz_from_pipe");
+
+        // With no file named, the pipe is still what gets read -- otherwise
+        // "the file wins" would have been implemented as "the pipe never wins".
+        let out = piped("cut -c1-99", pipe);
+        assert_output_contains(
+            "with no file, cut still reads the pipe",
+            &out,
+            b"zz_from_pipe",
+        );
+        assert_eq!(last_exit(), 0, "and that is a success");
+
+        // `sed -i` asks for a file to be rewritten. Given none, filtering the
+        // pipe and reporting success told the user a file had been edited that
+        // had not been -- the one case in this group that loses work.
+        let out = piped("sed -i s/zz_from_pipe/zz_seen/", pipe);
+        assert_output_lacks(
+            "sed -i with no file does not filter the pipe",
+            &out,
+            b"zz_seen",
+        );
+        assert_eq!(last_exit(), 1, "sed -i with nothing to edit is a failure");
+    }
+
+    serial_println!("  kshell::self_test 35: sed refuses a script it cannot honour");
+    // Rung 33 established that a script `parse_sed_command` *rejects* is a
+    // failure rather than a pass-through. This rung is about the scripts it
+    // used to *accept* while not honouring them, which is the worse half: a
+    // rejected script produces no output, but a mis-honoured one produces
+    // output that looks right.
+    //
+    // Three shapes, all of which used to succeed:
+    //
+    //   s/a/b      one delimiter short. `find_unescaped(..).unwrap_or(len)`
+    //              treated "no closing delimiter" as "closes at the end", so
+    //              the commonest sed typo there is ran as though correct.
+    //   s/a/b/i    an unimplemented flag, dropped in silence -- so a request
+    //              for a case-insensitive substitution performed a
+    //              case-sensitive one and reported success.
+    //   -e bad     one unparseable expression among good ones, dropped by
+    //              `filter_map` while the good ones ran.
+    //
+    // Each is a *wrong answer reported as success*, which is strictly worse
+    // than a missing answer: nothing downstream can detect it.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // `zz_keep` is the witness that sed produced *any* output at all: it
+        // matches nothing, so a run that edits or a run that passes through
+        // both emit it, and only a run that refuses omits it. It is named in
+        // none of the scripts below on purpose -- the diagnostics quote the
+        // offending script back, so a token shared with a script would make
+        // "the message mentioned it" and "sed emitted the line" the same
+        // observation. That is the trap rung 33's `old` set.
+        let data: &[u8] = b"zz_keep\nzz_subject\nzz_dup zz_dup\n";
+
+        let out = piped("sed s/zz_subject/zz_hit/", data);
+        assert_output_contains("a terminated script substitutes", &out, b"zz_hit");
+        assert_output_contains("and copies the lines it does not match", &out, b"zz_keep");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // `g` must still be honoured -- not merely tolerated -- or the flag
+        // check below would be satisfied by a parser that rejected every flag.
+        let out = piped("sed s/zz_dup/zz_one/g", data);
+        assert_output_contains(
+            "the g flag still replaces every match",
+            &out,
+            b"zz_one zz_one",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // One delimiter short. GNU: `unterminated 's' command`, exit 1.
+        let out = piped("sed s/zz_subject/zz_hit", data);
+        assert_output_lacks("an unterminated s/// emits nothing", &out, b"zz_keep");
+        assert_output_contains("and says why", &out, b"unterminated command");
+        assert_eq!(last_exit(), 1, "an unterminated s/// is a failure");
+
+        // A flag that is not `g`.
+        let out = piped("sed s/zz_subject/zz_hit/i", data);
+        assert_output_lacks("an unimplemented flag emits nothing", &out, b"zz_keep");
+        assert_output_contains("and says why", &out, b"unknown option");
+        assert_eq!(last_exit(), 1, "an unimplemented s/// flag is a failure");
+
+        // One bad expression among good ones. The good one must not run
+        // either: the old behaviour ran it and reported success, so asserting
+        // only on the status would pass against a version that still applied
+        // it. The expression number is asserted too, since counting from the
+        // wrong end is the obvious way to get this wrong.
+        let out = piped("sed -e s/zz_subject/zz_hit/ -e zz_nonsense", data);
+        assert_output_lacks(
+            "a bad -e expression stops the good ones too",
+            &out,
+            b"zz_keep",
+        );
+        assert_output_contains("and names which one is bad", &out, b"expression #2");
+        assert_eq!(last_exit(), 1, "one bad -e expression fails the invocation");
+
+        // Both good expressions still run, in order -- the second sees what the
+        // first produced.
+        let out = piped("sed -e s/zz_subject/zz_mid/ -e s/zz_mid/zz_end/", data);
+        assert_output_contains("two good -e expressions both run", &out, b"zz_end");
+        assert_eq!(last_exit(), 0, "and succeed");
+    }
+
+    serial_println!("  kshell::self_test 36: xargs reports the worst invocation, not the last");
+    // `xargs` runs a command many times and has one status to say how it went.
+    // It used to hand that status to whichever invocation happened to run last,
+    // so `printf 'bad\ngood\n' | xargs -n1 check && deploy` deployed on the
+    // strength of the final check while an earlier one had failed. A batch that
+    // reports only its last member's result is a batch whose failures are
+    // invisible in exactly the arrangement scripts are written in.
+    //
+    // The same read turned up `-n` swallowing an argument it could not parse:
+    // `xargs -n abc rm` consumed `abc`, left the batch size unset, and ran one
+    // invocation over every word -- the opposite of what was asked, reported as
+    // success. Same family as the `sed` flag in rung 35: a wrong answer, not a
+    // missing one.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let present = "/tmp/zz_xargs_present";
+        let missing = "/tmp/zz_xargs_missing";
+        crate::fs::Vfs::write_file(present, b"x\n")?;
+        // `test -e` is the probe because its status is its whole output, so
+        // nothing about these checks depends on what a command prints.
+        let _ = crate::fs::Vfs::remove(missing);
+
+        let both_ok = alloc::format!("{} {}\n", present, present);
+        let _ = piped("xargs -n1 test -e", both_ok.as_bytes());
+        assert_eq!(
+            last_exit(),
+            0,
+            "xargs -n1: every invocation succeeding is 0"
+        );
+
+        // The bug, in the arrangement that hid it: the *first* invocation
+        // fails and the last succeeds.
+        let bad_first = alloc::format!("{} {}\n", missing, present);
+        let _ = piped("xargs -n1 test -e", bad_first.as_bytes());
+        assert_eq!(
+            last_exit(),
+            1,
+            "xargs -n1: an earlier failure is not erased by a later success"
+        );
+
+        // The mirror image, which passed even before the fix. It is here so
+        // that "report the worst" cannot have been implemented as "report the
+        // first", which would satisfy the check above and break this one.
+        let bad_last = alloc::format!("{} {}\n", present, missing);
+        let _ = piped("xargs -n1 test -e", bad_last.as_bytes());
+        assert_eq!(last_exit(), 1, "xargs -n1: a later failure still counts");
+
+        // A single invocation propagates the child's own status verbatim, so
+        // `cmd | xargs foo` behaves as `foo args` does -- see the note on
+        // `cmd_xargs_input` for why this shell does not use GNU's 123.
+        let one = alloc::format!("{}\n", missing);
+        let _ = piped("xargs test -e", one.as_bytes());
+        assert_eq!(last_exit(), 1, "xargs: one failing invocation is a failure");
+
+        // `-n` must still batch, or every check above would be satisfied by an
+        // implementation that quietly stopped honouring it. The two words can
+        // only end up adjacent on one line if they went to one invocation, so
+        // the pair of checks below distinguishes the two readings without
+        // depending on how a line ends -- which the serial log is free to
+        // decide for itself.
+        let out = piped("xargs -n1 echo", b"zz_p zz_q\n");
+        assert_output_contains("xargs -n1 still runs the command", &out, b"zz_p");
+        assert_output_lacks(
+            "but one word per invocation, so never both together",
+            &out,
+            b"zz_p zz_q",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let out = piped("xargs echo", b"zz_p zz_q\n");
+        assert_output_contains(
+            "and without -n they share one invocation",
+            &out,
+            b"zz_p zz_q",
+        );
+
+        // A `-n` argument that is not a positive number is refused rather than
+        // swallowed. The command must not run at all: asserting only on the
+        // status would pass against a version that ran it and then failed.
+        let out = piped("xargs -n abc echo", b"zz_unrun\n");
+        assert_output_lacks("a bad -n does not run the command", &out, b"zz_unrun");
+        assert_output_contains("and says why", &out, b"invalid number");
+        assert_eq!(last_exit(), 1, "a bad -n is a usage error");
+
+        let out = piped("xargs -n 0 echo", b"zz_unrun\n");
+        assert_output_lacks("nor does -n 0", &out, b"zz_unrun");
+        assert_eq!(last_exit(), 1, "-n 0 is a usage error too");
+
+        let _ = crate::fs::Vfs::remove(present);
+    }
+
+    serial_println!("  kshell::self_test 37: cut refuses a list it cannot honour");
+    // The same silent-guess family as rung 35, in the command that had every
+    // member of it at once. `parse_cut_args` reported no errors whatsoever:
+    // an argument it could not read was *dropped*, and a `cut` with no list
+    // left prints each line verbatim -- so a mistake anywhere in the arguments
+    // came out as a successful identity transform. `cut -f0 f` was worse
+    // still, printing a blank line per input line: the file looked empty.
+    //
+    // Every check below asserts on `zz_a`, a token that appears only in the
+    // *data*. The diagnostics quote the offending argument back, so a witness
+    // shared with an argument would make "the message mentioned it" and "cut
+    // emitted a line" the same observation -- the trap rung 33 set and rung 35
+    // had to be redesigned around.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let data: &[u8] = b"zz_a:zz_b:zz_c\n";
+
+        // --- what must keep working, including three forms that used to be
+        // parsed as "no list at all" and therefore passed straight through.
+
+        let out = piped("cut -d: -f2", data);
+        assert_output_contains("a single field is cut", &out, b"zz_b");
+        assert_output_lacks("and the others are not", &out, b"zz_a");
+        assert_eq!(last_exit(), 0, "and it succeeds");
+
+        // A list is a set, not a sequence: selected input comes out in line
+        // order, once each. Written out of order is the only arrangement that
+        // can tell the two readings apart.
+        let out = piped("cut -d: -f3,1", data);
+        assert_output_contains(
+            "an out-of-order list comes out in line order",
+            &out,
+            b"zz_a:zz_c",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let out = piped("cut -d: -f1-2", data);
+        assert_output_contains("a closed range selects both ends", &out, b"zz_a:zz_b");
+        assert_output_lacks("and nothing past it", &out, b"zz_c");
+
+        let out = piped("cut -d: -f2-", data);
+        assert_output_contains("an open range runs to the last field", &out, b"zz_b:zz_c");
+        assert_output_lacks("and not before its start", &out, b"zz_a");
+
+        let out = piped("cut -d: -f-2", data);
+        assert_output_contains("and an open start runs from the first", &out, b"zz_a:zz_b");
+
+        // Positions 1-3 and 7 of `zz_abcd` are `zz_` and `d`. A `-c` *list*
+        // used to parse as nothing at all, so this printed `zz_abcd` whole.
+        let out = piped("cut -c1-3,7", b"zz_abcd\n");
+        assert_output_contains("a -c list joins its pieces", &out, b"zz_d");
+        assert_output_lacks("and drops what is between them", &out, b"zz_abcd");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // A line with no delimiter is one whole field and is written whole;
+        // `-s` is the request to drop it. The old code wrote a *blank* line
+        // for any field but the first, which is data loss disguised as data.
+        let mixed: &[u8] = b"zz_a:zz_b\nzz_plain\n";
+        let out = piped("cut -d: -f2", mixed);
+        assert_output_contains("an undelimited line is written whole", &out, b"zz_plain");
+        let out = piped("cut -d: -f2 -s", mixed);
+        assert_output_lacks("unless -s asks for it to be dropped", &out, b"zz_plain");
+        assert_output_contains("which does not touch the delimited ones", &out, b"zz_b");
+
+        // --- what must now be refused. Each of these used to succeed.
+
+        let out = piped("cut", data);
+        assert_output_lacks("no list at all is not an identity transform", &out, b"zz_a");
+        assert_output_contains("and says so", &out, b"must specify");
+        assert_eq!(last_exit(), 1, "cut with no list is a usage error");
+
+        let out = piped("cut -d: -f1,q", data);
+        assert_output_lacks(
+            "an unreadable list item stops the whole list",
+            &out,
+            b"zz_a",
+        );
+        assert_output_contains("and names it", &out, b"invalid field value");
+        assert_eq!(last_exit(), 1, "a bad field value is a usage error");
+
+        let out = piped("cut -d: -f0", data);
+        assert_output_lacks("field 0 names nothing, so it is refused", &out, b"zz_a");
+        assert_output_contains("and says why", &out, b"numbered from 1");
+        assert_eq!(last_exit(), 1, "field 0 is a usage error");
+
+        let out = piped("cut -c1-q", data);
+        assert_output_lacks("an unreadable endpoint is not an open range", &out, b"zz_a");
+        assert_output_contains("and says so", &out, b"invalid character value");
+        assert_eq!(last_exit(), 1, "a bad range endpoint is a usage error");
+
+        let out = piped("cut -c5-2", data);
+        assert_output_lacks(
+            "a decreasing range selects nothing, so it is refused",
+            &out,
+            b"zz_a",
+        );
+        assert_output_contains("and says so", &out, b"decreasing range");
+        assert_eq!(last_exit(), 1, "a decreasing range is a usage error");
+
+        let out = piped("cut -q -d: -f1", data);
+        assert_output_lacks("an unknown option is not a file name", &out, b"zz_a");
+        assert_output_contains("and is named", &out, b"unrecognized option");
+        assert_eq!(last_exit(), 1, "an unknown option is a usage error");
+
+        let out = piped("cut -d: -f1 -c1", data);
+        assert_output_lacks("the two list kinds cannot be combined", &out, b"zz_a");
+        assert_output_contains("and saying so beats picking one", &out, b"only one type");
+        assert_eq!(last_exit(), 1, "-f with -c is a usage error");
+
+        let out = piped("cut -c1 -d:", data);
+        assert_output_lacks(
+            "a delimiter means nothing when counting characters",
+            &out,
+            b"zz_a",
+        );
+        assert_output_contains(
+            "so it is refused rather than ignored",
+            &out,
+            b"only when operating on fields",
+        );
+        assert_eq!(last_exit(), 1, "-d with -c is a usage error");
+
+        let out = piped("cut -f1 -d", data);
+        assert_output_lacks("an option with no argument is not an option", &out, b"zz_a");
+        assert_output_contains("and says which", &out, b"requires an argument");
+        assert_eq!(last_exit(), 1, "a missing option argument is a usage error");
+
+        // --- operands: `-` is the pipe, every file is read, worst status wins.
+
+        let one = "/tmp/zz_cut_one";
+        let two = "/tmp/zz_cut_two";
+        let gone = "/tmp/zz_cut_missing";
+        crate::fs::Vfs::write_file(one, b"zz_one:x\n")?;
+        crate::fs::Vfs::write_file(two, b"zz_two:x\n")?;
+        let _ = crate::fs::Vfs::remove(gone);
+
+        let out = piped(&alloc::format!("cut -d: -f1 {} {}", one, two), data);
+        assert_output_contains("every operand is read, not just the first", &out, b"zz_one");
+        assert_output_contains("including the second", &out, b"zz_two");
+        assert_output_lacks("and a named file still wins over the pipe", &out, b"zz_a");
+        assert_eq!(last_exit(), 0, "and it succeeds");
+
+        // A readable operand after an unreadable one must not erase it -- the
+        // rule rung 36 applied to xargs invocations, applied to operands.
+        let out = piped(&alloc::format!("cut -d: -f1 {} {}", gone, one), data);
+        assert_output_contains("a later readable file is still read", &out, b"zz_one");
+        assert_eq!(last_exit(), 1, "but an earlier unreadable one still counts");
+
+        // `-` names the pipe. Without this the file-wins rule would have sent
+        // it to `Vfs::read_file("-")`.
+        let out = piped("cut -d: -f1 -", data);
+        assert_output_contains("a - operand reads the pipe", &out, b"zz_a");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let out = piped(&alloc::format!("cut -d: -f1 - {}", one), data);
+        assert_output_contains("and mixes with files, pipe first", &out, b"zz_a");
+        assert_output_contains("then the file", &out, b"zz_one");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let _ = crate::fs::Vfs::remove(one);
+        let _ = crate::fs::Vfs::remove(two);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -106294,127 +106723,417 @@ fn cmd_rev_input(args: &str, input: &[u8]) {
     }
 }
 
-/// `cut -d DELIM -f N [FILE]` — extract fields from each line.
-///
-/// Supports:
-/// - `-d C`: delimiter character (default tab)
-/// - `-f N` or `-f N,M,...`: field numbers (1-based)
-/// - `-c N-M`: character ranges
-#[allow(clippy::arithmetic_side_effects)]
-fn cmd_cut(args: &str) {
-    let (delim, fields, chars_range, file_path) = parse_cut_args(args);
+/// Which kind of list `cut` was asked for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CutMode {
+    /// `-f`: split each line on the delimiter and select whole fields.
+    Fields,
+    /// `-c`: select characters by position.
+    Chars,
+}
 
-    if let Some(path) = file_path {
-        let resolved = resolve_path(&path);
-        match crate::fs::Vfs::read_file(&resolved) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                cut_process(text, delim, &fields, chars_range);
+/// A parsed `cut` invocation.
+struct CutSpec {
+    mode: CutMode,
+    /// Inclusive, 1-based. `usize::MAX` as the end means "to the end of the
+    /// line", which is what the open `N-` form asks for. Order is irrelevant:
+    /// selected input is written in *line* order and exactly once, so this is
+    /// a set expressed as ranges, not a sequence.
+    ranges: Vec<(usize, usize)>,
+    delim: char,
+    /// `-s`: drop lines with no delimiter instead of writing them whole.
+    only_delimited: bool,
+    /// Operands in the order given. `-` means standard input.
+    files: Vec<String>,
+}
+
+/// Why a `cut` argument list could not be honoured.
+///
+/// `parse_cut_args` used to return no errors at all: every one of the cases
+/// below was answered by *dropping* the argument and carrying on, so `cut`
+/// produced a confident, successful, wrong answer for each. That is the same
+/// silent-guess failure as the `sed` flag that was ignored rather than refused
+/// (`da9e7a0ca`) and the pipe forms that passed their input through unchanged
+/// (`0a785652a`), and it is strictly worse than a missing answer because
+/// nothing downstream can detect it.
+///
+/// The full list of what used to be silent, all of them reported as success:
+///
+/// | written | what it did | what it looks like |
+/// |---|---|---|
+/// | `cut file` | printed every line **verbatim** | `cut` succeeded, so the fields must be right |
+/// | `cut -f1,a,3 f` | cut fields 1 and 3 | a typo'd field silently vanishes |
+/// | `cut -f0 f` | cut **nothing**, printed blank lines | the file appears to be empty |
+/// | `cut -f1-3 f` | printed every line verbatim | ranges were unimplemented, so no field parsed, so pass-through |
+/// | `cut -c1,3 f` | printed every line verbatim | same, via the `-c` list |
+/// | `cut -c1-abc f` | cut to the end of the line | `abc` became `usize::MAX` |
+/// | `cut -q -f1 f` | opened a file named `-q` | the real file was never read |
+/// | `cut -f1 a b` | cut `a` only | `b` silently ignored |
+enum CutParseError {
+    /// `-d`, `-f` or `-c` with nothing after it.
+    MissingArg(char),
+    /// `-d ab`. A delimiter is one character by definition.
+    MultiCharDelim(String),
+    /// A list item that is neither a number nor a range: `-f1,a,3`.
+    InvalidValue(char, String),
+    /// `-f0`. Positions are numbered from 1, so 0 names nothing.
+    ZeroValue(char),
+    /// `-c5-2`. An empty range is never what anyone meant. Unlike the errors
+    /// either side of it this carries no flag letter, because GNU's message
+    /// does not name one and the range text already says which list it is in.
+    DecreasingRange(String),
+    /// `-f` and `-c` together: the two count different things.
+    BothLists,
+    /// `-d` or `-s` without `-f`. Neither means anything when counting
+    /// characters, so accepting them would be accepting a mistake.
+    NeedsFields(char),
+    /// Neither `-f` nor `-c`. This is the pass-through case.
+    NoList,
+    /// A real `cut` option this one does not implement.
+    Unsupported(String, &'static str),
+    /// Anything else beginning with `-`.
+    UnknownOption(String),
+}
+
+impl CutParseError {
+    /// Print the diagnostic. Messages follow GNU's wording where GNU has one,
+    /// so a user who knows `cut` recognises what went wrong.
+    fn report(&self) {
+        match *self {
+            Self::MissingArg(f) => {
+                shell_println!("cut: option requires an argument -- '{}'", f);
             }
-            Err(e) => {
-                shell_println!("cut: {}: {:?}", path, e);
+            Self::MultiCharDelim(ref s) => {
+                shell_println!("cut: the delimiter must be a single character: '{}'", s);
+            }
+            Self::InvalidValue(f, ref s) => {
+                let what = if f == 'f' { "field" } else { "character" };
+                shell_println!("cut: invalid {} value '{}'", what, s);
+            }
+            Self::ZeroValue(f) => {
+                let what = if f == 'f' { "fields" } else { "characters" };
+                shell_println!("cut: {} are numbered from 1", what);
+            }
+            Self::DecreasingRange(ref s) => {
+                shell_println!("cut: invalid decreasing range '{}'", s);
+            }
+            Self::BothLists => {
+                shell_println!("cut: only one type of list may be specified");
+            }
+            Self::NeedsFields(f) => {
+                if f == 'd' {
+                    shell_println!(
+                        "cut: an input delimiter may be specified only when operating on fields"
+                    );
+                } else {
+                    shell_println!(
+                        "cut: suppressing non-delimited lines makes sense only when operating on fields"
+                    );
+                }
+            }
+            Self::NoList => {
+                shell_println!("cut: you must specify a list of characters or fields");
+                shell_println!(
+                    "Usage: cut -d DELIM -f FIELDS [file]...  or  cut -c RANGE [file]..."
+                );
+            }
+            Self::Unsupported(ref opt, hint) => {
+                shell_println!("cut: {} is not supported ({})", opt, hint);
+            }
+            Self::UnknownOption(ref opt) => {
+                shell_println!("cut: unrecognized option '{}'", opt);
+            }
+        }
+    }
+}
+
+/// Read the value of a short option that takes one: `-fVALUE` or `-f VALUE`.
+///
+/// `i` is the index of the word *after* `word`, and is advanced when the
+/// detached form consumes it. A missing value is an error rather than a
+/// default, which is the whole point: the old parser consumed the word
+/// whether or not it could read it.
+fn cut_opt_value(
+    word: &str,
+    words: &[String],
+    i: &mut usize,
+    flag: char,
+) -> Result<String, CutParseError> {
+    let attached = word.get(2..).unwrap_or("");
+    if !attached.is_empty() {
+        return Ok(String::from(attached));
+    }
+    let next = words.get(*i).ok_or(CutParseError::MissingArg(flag))?;
+    *i = i.saturating_add(1);
+    Ok(next.clone())
+}
+
+/// Parse one item of a `-f`/`-c` list: `N`, `N-M`, `N-` or `-M`.
+///
+/// Returns an inclusive 1-based pair, with `usize::MAX` for the open end.
+///
+/// The empty side of a range is a *form*, not a missing value — `-c-5` means
+/// "from the first" and `-c3-` means "to the last". The old parser reached the
+/// same two defaults by way of `unwrap_or`, which meant it could not tell an
+/// omitted endpoint from an unreadable one: `-c1-abc` became `1-usize::MAX`
+/// and quietly cut to the end of the line. Distinguishing "absent" from
+/// "unparseable" is the entire fix.
+fn parse_cut_item(item: &str, flag: char) -> Result<(usize, usize), CutParseError> {
+    let num = |s: &str| -> Result<usize, CutParseError> {
+        let n: usize = s
+            .parse()
+            .map_err(|_| CutParseError::InvalidValue(flag, String::from(item)))?;
+        if n == 0 {
+            return Err(CutParseError::ZeroValue(flag));
+        }
+        Ok(n)
+    };
+    match item.split_once('-') {
+        None => {
+            let n = num(item)?;
+            Ok((n, n))
+        }
+        Some((lo, hi)) => {
+            // A bare `-` names both endpoints as absent, i.e. nothing at all.
+            if lo.is_empty() && hi.is_empty() {
+                return Err(CutParseError::InvalidValue(flag, String::from(item)));
+            }
+            let start = if lo.is_empty() { 1 } else { num(lo)? };
+            let end = if hi.is_empty() { usize::MAX } else { num(hi)? };
+            if end < start {
+                return Err(CutParseError::DecreasingRange(String::from(item)));
+            }
+            Ok((start, end))
+        }
+    }
+}
+
+/// Parse `cut`'s arguments, or say why they cannot be honoured.
+///
+/// Words come from [`split_words`] rather than a hand-rolled scan of the raw
+/// string. That is not a tidy-up: the old scan tested `rest.starts_with("-f")`
+/// against the *remaining line*, so an operand's position in the line decided
+/// whether it was read as a flag, and anything the scan did not recognise fell
+/// into the `else` arm and became **the file name**.
+fn parse_cut_args(args: &str) -> Result<CutSpec, CutParseError> {
+    let words = split_words(args);
+    let mut delim: Option<char> = None;
+    let mut mode: Option<CutMode> = None;
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut only_delimited = false;
+    let mut files: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while let Some(word) = words.get(i) {
+        i = i.saturating_add(1);
+        let w = word.as_str();
+
+        // A lone `-` is the conventional name for standard input, not an
+        // option. Everything else without a leading `-` is a file.
+        if w == "-" || !w.starts_with('-') {
+            files.push(String::from(w));
+            continue;
+        }
+
+        let flag = w.as_bytes().get(1).copied().unwrap_or(b'\0');
+        match flag {
+            b'd' => {
+                let v = cut_opt_value(w, &words, &mut i, 'd')?;
+                let mut cs = v.chars();
+                let (Some(c), None) = (cs.next(), cs.next()) else {
+                    return Err(CutParseError::MultiCharDelim(v));
+                };
+                delim = Some(c);
+            }
+            b'f' | b'c' => {
+                let this = if flag == b'f' {
+                    CutMode::Fields
+                } else {
+                    CutMode::Chars
+                };
+                if mode.is_some_and(|prev| prev != this) {
+                    return Err(CutParseError::BothLists);
+                }
+                mode = Some(this);
+                let spec = cut_opt_value(w, &words, &mut i, char::from(flag))?;
+                // Two lists of the *same* kind merge rather than conflict:
+                // because selected input is written in line order and exactly
+                // once, `-f1 -f3` and `-f1,3` name the same set, so merging is
+                // not a guess about which one was meant.
+                for item in spec.split(',') {
+                    ranges.push(parse_cut_item(item.trim(), char::from(flag))?);
+                }
+            }
+            b's' if w == "-s" => only_delimited = true,
+            b'b' => {
+                return Err(CutParseError::Unsupported(
+                    String::from(w),
+                    "this cut counts characters; use -c",
+                ));
+            }
+            b'-' => {
+                return Err(CutParseError::Unsupported(
+                    String::from(w),
+                    "long options are not implemented; use -c, -f, -d, -s",
+                ));
+            }
+            _ => return Err(CutParseError::UnknownOption(String::from(w))),
+        }
+    }
+
+    let Some(mode) = mode else {
+        return Err(CutParseError::NoList);
+    };
+    // `-d` and `-s` describe fields. Silently ignoring them alongside `-c` is
+    // how `cut -c1 -d:` used to look like it had honoured the delimiter.
+    if mode == CutMode::Chars {
+        if delim.is_some() {
+            return Err(CutParseError::NeedsFields('d'));
+        }
+        if only_delimited {
+            return Err(CutParseError::NeedsFields('s'));
+        }
+    }
+
+    Ok(CutSpec {
+        mode,
+        ranges,
+        delim: delim.unwrap_or('\t'),
+        only_delimited,
+        files,
+    })
+}
+
+/// Whether position `n` (1-based) is selected.
+fn cut_selected(ranges: &[(usize, usize)], n: usize) -> bool {
+    ranges.iter().any(|&(s, e)| n >= s && n <= e)
+}
+
+/// Write the selected part of every line in `text`.
+///
+/// Selected input is written in the order it is *read*, and exactly once —
+/// `cut -f3,1` writes field 1 then field 3, and `cut -f1,1` writes it once.
+/// That is POSIX and GNU behaviour. The old loop walked the list as written,
+/// so it both reordered and duplicated; the difference only shows up when a
+/// list is out of order, which is exactly when it is hardest to notice.
+fn cut_process(text: &str, spec: &CutSpec) {
+    for line in text.lines() {
+        match spec.mode {
+            CutMode::Chars => {
+                let out: String = line
+                    .chars()
+                    .enumerate()
+                    .filter(|&(idx, _)| cut_selected(&spec.ranges, idx.saturating_add(1)))
+                    .map(|(_, c)| c)
+                    .collect();
+                shell_println!("{}", out);
+            }
+            CutMode::Fields => {
+                // A line with no delimiter is one whole field, and is written
+                // unchanged; `-s` is what asks for it to be dropped instead.
+                // The old code reached the same result for field 1 by accident
+                // and the wrong one for every other field, writing a blank
+                // line where the whole line belonged.
+                if !line.contains(spec.delim) {
+                    if !spec.only_delimited {
+                        shell_println!("{}", line);
+                    }
+                    continue;
+                }
+                let mut first = true;
+                for (idx, part) in line.split(spec.delim).enumerate() {
+                    if !cut_selected(&spec.ranges, idx.saturating_add(1)) {
+                        continue;
+                    }
+                    if !first {
+                        shell_print!("{}", spec.delim);
+                    }
+                    first = false;
+                    shell_print!("{}", part);
+                }
+                shell_println!();
+            }
+        }
+    }
+}
+
+/// Run a parsed `cut` over its operands, with `stdin` standing in for `-`.
+///
+/// `stdin` is `None` when there is no pipe feeding this command, which is a
+/// different thing from an empty pipe: the first has nothing to read and
+/// should say so, the second has read everything there was.
+fn cut_run(spec: &CutSpec, stdin: Option<&str>) {
+    if spec.files.is_empty() {
+        match stdin {
+            Some(text) => cut_process(text, spec),
+            None => {
+                shell_println!("cut: no file operand and no input to read");
                 set_exit(1);
             }
         }
-    } else {
-        shell_println!("Usage: cut -d DELIM -f FIELDS [file]  or  cut -c RANGE [file]");
-        set_exit(1);
+        return;
     }
-}
 
-fn cmd_cut_input(args: &str, input: &str) {
-    let (delim, fields, chars_range, _) = parse_cut_args(args);
-    cut_process(input, delim, &fields, chars_range);
-}
-
-/// Parsed `cut` arguments: (delimiter, field numbers, char range, file path).
-type CutArgs = (char, Vec<usize>, Option<(usize, usize)>, Option<String>);
-
-/// Parse cut command arguments.
-fn parse_cut_args(args: &str) -> CutArgs {
-    let mut delim = '\t';
-    let mut fields: Vec<usize> = Vec::new();
-    let mut chars_range: Option<(usize, usize)> = None;
-    let mut file_path: Option<String> = None;
-    let mut rest = args;
-
-    loop {
-        rest = rest.trim_start();
-        if rest.starts_with("-d") {
-            rest = rest.get(2..).unwrap_or("").trim_start();
-            if let Some(c) = rest.chars().next() {
-                delim = c;
-                rest = rest.get(c.len_utf8()..).unwrap_or("");
-            }
-        } else if rest.starts_with("-f") {
-            rest = rest.get(2..).unwrap_or("").trim_start();
-            // Parse field list: N or N,M,...
-            let end = rest.find([' ', '\t']).unwrap_or(rest.len());
-            let spec = rest.get(..end).unwrap_or("");
-            for part in spec.split(',') {
-                if let Ok(n) = part.trim().parse::<usize>() {
-                    if n > 0 {
-                        fields.push(n);
-                    }
+    let mut worst: u8 = 0;
+    for path in &spec.files {
+        if path == "-" {
+            match stdin {
+                Some(text) => cut_process(text, spec),
+                None => {
+                    shell_println!("cut: -: no input to read");
+                    worst = worst.max(1);
                 }
             }
-            rest = rest.get(end..).unwrap_or("");
-        } else if rest.starts_with("-c") {
-            rest = rest.get(2..).unwrap_or("").trim_start();
-            let end = rest.find([' ', '\t']).unwrap_or(rest.len());
-            let spec = rest.get(..end).unwrap_or("");
-            if let Some(dash) = spec.find('-') {
-                let start = spec
-                    .get(..dash)
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(1);
-                let end_val = spec
-                    .get(dash + 1..)
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(usize::MAX);
-                chars_range = Some((start.max(1), end_val));
-            } else if let Ok(n) = spec.parse::<usize>() {
-                chars_range = Some((n.max(1), n.max(1)));
+            continue;
+        }
+        let resolved = resolve_path(path);
+        match crate::fs::Vfs::read_file(&resolved) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data).unwrap_or("");
+                cut_process(text, spec);
             }
-            rest = rest.get(end..).unwrap_or("");
-        } else if !rest.is_empty() {
-            file_path = Some(String::from(rest.split_whitespace().next().unwrap_or("")));
-            break;
-        } else {
-            break;
+            Err(e) => {
+                // Every operand is attempted, and the worst status is reported
+                // — a later readable file must not erase an earlier missing
+                // one, the same rule the `xargs` fix applied to invocations.
+                shell_println!("cut: {}: {:?}", path, e);
+                worst = worst.max(1);
+            }
         }
     }
-
-    (delim, fields, chars_range, file_path)
+    set_exit(worst);
 }
 
-/// Process text with cut (field or character extraction).
-#[allow(clippy::arithmetic_side_effects)]
-fn cut_process(text: &str, delim: char, fields: &[usize], chars_range: Option<(usize, usize)>) {
-    for line in text.lines() {
-        if let Some((start, end)) = chars_range {
-            // Character range mode.
-            let chars: Vec<char> = line.chars().collect();
-            let s = start.saturating_sub(1); // 1-based to 0-based
-            let e = end.min(chars.len());
-            let slice: String = chars.get(s..e).unwrap_or(&[]).iter().collect();
-            shell_println!("{}", slice);
-        } else if !fields.is_empty() {
-            // Field mode.
-            let parts: Vec<&str> = line.split(delim).collect();
-            let mut first = true;
-            for &f in fields {
-                if !first {
-                    shell_print!("{}", delim);
-                }
-                first = false;
-                if let Some(part) = parts.get(f.saturating_sub(1)) {
-                    shell_print!("{}", part);
-                }
-            }
-            shell_println!();
-        } else {
-            shell_println!("{}", line);
+/// `cut -d DELIM -f LIST [FILE]...` — extract fields or characters.
+///
+/// - `-d C`: delimiter character (default tab), fields only
+/// - `-f LIST` / `-c LIST`: comma-separated `N`, `N-M`, `N-`, `-M`
+/// - `-s`: skip lines with no delimiter, fields only
+/// - `-`: read the pipe
+fn cmd_cut(args: &str) {
+    match parse_cut_args(args) {
+        Ok(spec) => cut_run(&spec, None),
+        Err(e) => {
+            e.report();
+            set_exit(1);
+        }
+    }
+}
+
+/// `cut` on piped input. A named file wins over the pipe, as it does in GNU
+/// and as it does for every other paired command here; this used to parse the
+/// file operand out of the arguments and then throw it away, so
+/// `cat a.txt | cut -f1 b.txt` cut `a.txt` and never opened `b.txt`.
+///
+/// A `-` operand names the pipe, so `cat a.txt | cut -f1 - b.txt` reads both,
+/// in that order. Without that, the file-wins rule (`bb9787783`) would have
+/// turned `-` into a request to open a file literally called `-`.
+fn cmd_cut_input(args: &str, input: &str) {
+    match parse_cut_args(args) {
+        Ok(spec) => cut_run(&spec, Some(input)),
+        Err(e) => {
+            e.report();
+            set_exit(1);
         }
     }
 }
@@ -106640,8 +107359,14 @@ fn cmd_fold(args: &str) {
     }
 }
 
+/// `fold` on piped input. As with [`cmd_cut_input`], a named file wins over
+/// the pipe rather than being parsed and discarded.
 fn cmd_fold_input(args: &str, input: &str) {
-    let (width, _) = parse_fold_args(args);
+    let (width, file) = parse_fold_args(args);
+    if file.is_some() {
+        cmd_fold(args);
+        return;
+    }
     fold_process(input, width);
 }
 
@@ -106773,6 +107498,32 @@ fn cmd_xargs(_args: &str) {
     set_exit(1);
 }
 
+/// `xargs` pipe-input variant: the form that actually runs anything.
+///
+/// The status is the **worst** of the invocations, not the last one's. It used
+/// to be the last one's by omission — the loop called [`execute`] and never
+/// looked at what it left in the exit slot — so
+/// `printf 'bad\ngood\n' | xargs -n1 check && deploy` deployed on the strength
+/// of the final invocation while an earlier one had failed. That is exactly the
+/// "batch operations must track and report the worst error, not just the last
+/// one" rule in `CLAUDE.md`.
+///
+/// **Why `max` is the right operator and not merely a convenient one.** Under
+/// the convention `design-decisions.md` §275 established, a larger status is a
+/// worse one: 2 ("I could not check") outranks 1 ("the answer is no") in
+/// `grep`, `cmp` and `diff`. Taking the maximum therefore propagates a failure
+/// to look over a negative finding, which is the same precedence §275 argues
+/// for within a single command.
+///
+/// **Why not GNU's 123.** GNU `xargs` maps every child failure onto 123 so that
+/// it can reserve 124–127 for "child exited 255", "child killed by a signal",
+/// "command not executable" and "command not found". This shell has none of
+/// those rows — an unknown command is a flat 1 here — so adopting the one row
+/// would leave a caller unable to tell which convention it is reading, which is
+/// the same reason the `Syntax error: …` sites were left at 1 rather than
+/// borrowing bash's 2. Propagating the child's own status instead makes
+/// `cmd | xargs foo` behave exactly like `foo args` in the single-invocation
+/// case, which is what the rest of the shell already does.
 fn cmd_xargs_input(args: &str, input: &str) {
     let mut max_args: Option<usize> = None;
     let mut rest = args.trim();
@@ -106781,32 +107532,56 @@ fn cmd_xargs_input(args: &str, input: &str) {
     if rest.starts_with("-n") {
         rest = rest.get(2..).unwrap_or("").trim_start();
         let end = rest.find([' ', '\t']).unwrap_or(rest.len());
-        max_args = rest.get(..end).and_then(|s| s.parse::<usize>().ok());
+        let num = rest.get(..end).unwrap_or("");
+        // The word is consumed whether or not it parsed, so a `parse().ok()`
+        // that failed used to leave `max_args` at `None` *and* swallow the
+        // word: `xargs -n abc rm` ran **one** invocation over every input word
+        // — the opposite of what was asked — and reported success. `-n 0` did
+        // the same by way of the `Some(n) if n > 0` guard falling through.
+        // Refusing is the only reading that cannot be mistaken for obedience.
+        match num.parse::<usize>() {
+            Ok(n) if n > 0 => max_args = Some(n),
+            _ => {
+                shell_println!("xargs: invalid number '{}' for -n option", num);
+                set_exit(1);
+                return;
+            }
+        }
         rest = rest.get(end..).unwrap_or("").trim_start();
     }
 
     let command = if rest.is_empty() { "echo" } else { rest };
 
     // Collect input words.
+    //
+    // Empty input runs nothing. GNU runs the command once unless `-r` is
+    // given; BSD/macOS `xargs` does not run it. There is no single correct
+    // answer to match here, and this is one of the two real ones — see the
+    // note under `TD-A-XARGS-…` in `known-issues.md` so this is not "fixed"
+    // into GNU's shape by someone who does not know the two differ.
     let words: Vec<&str> = input.split_whitespace().collect();
     if words.is_empty() {
         return;
     }
 
+    let mut worst: u8 = 0;
     match max_args {
-        Some(n) if n > 0 => {
+        Some(n) => {
             // Execute in batches of N words.
             for chunk in words.chunks(n) {
                 let full_cmd = alloc::format!("{} {}", command, chunk.join(" "));
                 execute(&full_cmd);
+                worst = worst.max(last_exit());
             }
         }
-        _ => {
+        None => {
             // All words in one invocation.
             let full_cmd = alloc::format!("{} {}", command, words.join(" "));
             execute(&full_cmd);
+            worst = last_exit();
         }
     }
+    set_exit(worst);
 }
 
 /// Pause for N milliseconds (busy-wait using APIC tick counter).
@@ -107517,11 +108292,23 @@ fn cmd_mapfile_input(args: &str, input: &str) {
         }
     }
 
-    let var_name = if rest.is_empty() {
-        "MAPFILE"
-    } else {
-        rest.split_whitespace().next().unwrap_or("MAPFILE")
-    };
+    let mut words = rest.split_whitespace();
+    let var_name = words.next().unwrap_or("MAPFILE");
+
+    // A file operand wins over the pipe, matching the rest of this shell's
+    // paired commands. This used to take only the first word and silently drop
+    // the rest, so `cat a | mapfile ARR b` filled ARR from `a`.
+    //
+    // Note bash's own `mapfile` takes no file operand at all and would reject
+    // this as "too many arguments"; the file operand is this shell's own
+    // extension, so the consistent reading of it is the one that agrees with
+    // `cmd_mapfile`, not the one that agrees with bash about a spelling bash
+    // does not have.
+    if words.next().is_some() {
+        cmd_mapfile(args);
+        return;
+    }
+
     mapfile_store(var_name, input, strip_newlines);
     set_exit(0);
 }
@@ -119325,9 +120112,68 @@ fn cmd_lz4(args: &str) {
 ///   sed '/pattern/d' file.txt          Delete matching lines
 ///   sed -n '/pattern/p' file.txt       Print matching lines (like grep)
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-fn cmd_sed(args: &str) {
+/// A `sed` argument string, classified into its four parts.
+struct SedArgs<'a> {
+    /// `-i` was given: edit the files in place rather than printing.
+    in_place: bool,
+    /// `-n` was given: print only what a `p` command asks for.
+    suppress: bool,
+    /// The script words, in the order they were given.
+    scripts: alloc::vec::Vec<alloc::string::String>,
+    /// Everything that is neither a flag nor the script: the file operands.
+    files: alloc::vec::Vec<&'a str>,
+}
+
+/// Split a `sed` argument string into flags, script and file operands.
+///
+/// Shared by [`cmd_sed`] and [`cmd_sed_input`] because they had two copies of
+/// this loop, and the copies had already drifted: the pipe copy dropped the
+/// `-i` arm and never collected files at all. So `cat f | sed -i 's/a/b/'`
+/// filtered the pipe, left `f` untouched, and reported success — the user
+/// asked for an in-place edit and got a filter. Two copies of a parser is how
+/// one command comes to disagree with itself, which is the fault this whole
+/// line of work has been chasing; one copy is the fix that stops it recurring.
+fn classify_sed_args(args: &str) -> SedArgs<'_> {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
+    let mut out = SedArgs {
+        in_place: false,
+        suppress: false,
+        scripts: alloc::vec::Vec::new(),
+        files: alloc::vec::Vec::new(),
+    };
+    let mut i = 0usize;
+
+    while let Some(&part) = parts.get(i) {
+        match part {
+            "-i" => out.in_place = true,
+            "-n" => out.suppress = true,
+            "-e" => {
+                i = i.saturating_add(1);
+                if let Some(&script) = parts.get(i) {
+                    out.scripts.push(alloc::string::String::from(script));
+                }
+            }
+            // The first word that looks like a script is the script; a later
+            // one is a file. That is why `sed 's/a/b/' 2d` reads `2d` as a
+            // filename even though it looks like a delete command — GNU reads
+            // it the same way, and both halves of this command now do too.
+            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
+                if out.scripts.is_empty() {
+                    out.scripts.push(alloc::string::String::from(s));
+                } else {
+                    out.files.push(s);
+                }
+            }
+            _ => out.files.push(part),
+        }
+        i = i.saturating_add(1);
+    }
+
+    out
+}
+
+fn cmd_sed(args: &str) {
+    if args.split_whitespace().next().is_none() {
         shell_println!("Usage: sed [-i] [-n] [-e CMD] 's/old/new/[g]' [file]");
         shell_println!("       sed [-i] [-n] '/pattern/d' [file]");
         shell_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
@@ -119335,35 +120181,12 @@ fn cmd_sed(args: &str) {
         return;
     }
 
-    let mut in_place = false;
-    let mut suppress = false;
-    let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-    let mut file_args: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
-    let mut i = 0;
-
-    while i < parts.len() {
-        match parts[i] {
-            "-i" => in_place = true,
-            "-n" => suppress = true,
-            "-e" => {
-                i += 1;
-                if i < parts.len() {
-                    commands.push(alloc::string::String::from(parts[i]));
-                }
-            }
-            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
-                if commands.is_empty() {
-                    commands.push(alloc::string::String::from(s));
-                } else {
-                    file_args.push(s);
-                }
-            }
-            _ => {
-                file_args.push(parts[i]);
-            }
-        }
-        i += 1;
-    }
+    let SedArgs {
+        in_place,
+        suppress,
+        scripts: commands,
+        files: file_args,
+    } = classify_sed_args(args);
 
     if commands.is_empty() {
         shell_println!("sed: no command specified");
@@ -119371,17 +120194,11 @@ fn cmd_sed(args: &str) {
         return;
     }
 
-    // Parse sed commands.
-    let parsed: alloc::vec::Vec<SedCmd> = commands
-        .iter()
-        .filter_map(|c| parse_sed_command(c))
-        .collect();
-
-    if parsed.is_empty() {
-        shell_println!("sed: invalid command syntax");
-        set_exit(1);
+    // Every script must parse. `filter_map` used to drop the ones that did not
+    // and run the rest, so one bad `-e` among good ones was invisible.
+    let Some(parsed) = parse_sed_scripts(&commands) else {
         return;
-    }
+    };
 
     // Process each file (or use empty content if no file given).
     if file_args.is_empty() {
@@ -119502,29 +120319,138 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> bool {
     }
 }
 
+/// Why a `sed` script could not be turned into a [`SedCmd`].
+///
+/// The parser used to answer every one of these with `None`, and both callers
+/// used to answer `None` with `filter_map` — so a bad script standing among
+/// good ones was silently *dropped* and only an all-bad script was reported at
+/// all. `sed -e 's/a/b/' -e 'nonsense' f` ran the first expression, ignored the
+/// second, and exited 0.
+///
+/// That is the same failure the pipe-form pass-through had (`0a785652a`): a
+/// script the shell cannot honour, honoured approximately, reported as success.
+/// Carrying the reason out of the parser is what lets the caller say *which*
+/// expression is wrong and *what* is wrong with it, as GNU sed does.
+enum SedParseError {
+    /// A delimiter was opened and never closed: `s/old`, `s/old/new`, `/pat`.
+    /// GNU: `unterminated 's' command` / `unterminated address regex`.
+    Unterminated,
+    /// The script does not begin with anything this parser recognises.
+    Unknown,
+    /// An `s///` flag suffix this parser cannot honour.
+    UnknownFlag(char),
+    /// Recognised in shape, but the bytes do not slice — a non-ASCII delimiter,
+    /// which this byte-wise scanner cannot walk without landing mid-character.
+    Invalid,
+}
+
+impl SedParseError {
+    /// Print the diagnostic for expression `n` (1-based, as GNU numbers them).
+    ///
+    /// The script text is quoted back because `#1` alone identifies nothing
+    /// when there is only one expression — which is the usual case. GNU prints
+    /// a character offset for the same reason; naming the expression is the
+    /// more useful half of that when the mistake is often *which string got
+    /// treated as a script* (`classify_sed_args` will read a bare `something`
+    /// as one, since it begins with `s`).
+    fn report(&self, n: usize, script: &str) {
+        match *self {
+            Self::Unterminated => {
+                shell_println!(
+                    "sed: -e expression #{}: unterminated command: {}",
+                    n,
+                    script
+                );
+            }
+            Self::Unknown => {
+                shell_println!("sed: -e expression #{}: unknown command: {}", n, script);
+            }
+            Self::UnknownFlag(c) => {
+                shell_println!(
+                    "sed: -e expression #{}: unknown option to 's': {} in {}",
+                    n,
+                    c,
+                    script
+                );
+            }
+            Self::Invalid => {
+                shell_println!(
+                    "sed: -e expression #{}: invalid command syntax: {}",
+                    n,
+                    script
+                );
+            }
+        }
+    }
+}
+
+/// Parse every script, or report the first one that cannot be parsed and fail.
+///
+/// Shared by [`cmd_sed`] and [`cmd_sed_input`] for the same reason
+/// [`classify_sed_args`] is shared: two copies of this logic drifted once
+/// already, and the drift is what let `-i` be parsed by one half and ignored by
+/// the other.
+///
+/// Returns `None` having already printed the diagnostic and set the status, so
+/// a caller's whole error path is `let Some(parsed) = … else { return };`.
+fn parse_sed_scripts(commands: &[alloc::string::String]) -> Option<alloc::vec::Vec<SedCmd>> {
+    let mut parsed = alloc::vec::Vec::with_capacity(commands.len());
+    for (idx, script) in commands.iter().enumerate() {
+        match parse_sed_command(script) {
+            Ok(cmd) => parsed.push(cmd),
+            Err(e) => {
+                e.report(idx.saturating_add(1), script);
+                set_exit(1);
+                return None;
+            }
+        }
+    }
+    Some(parsed)
+}
+
 /// Parse a sed command string into a `SedCmd`.
-fn parse_sed_command(cmd: &str) -> Option<SedCmd> {
+fn parse_sed_command(cmd: &str) -> Result<SedCmd, SedParseError> {
     let bytes = cmd.as_bytes();
 
     // Substitution: s/pattern/replacement/[g]
-    if bytes.first() == Some(&b's') && bytes.len() >= 4 {
-        let delim = bytes[1];
-        // Find pattern end.
-        let pat_start = 2;
-        let pat_end = find_unescaped(bytes, delim, pat_start)?;
-        let rep_start = pat_end + 1;
-        let rep_end = find_unescaped(bytes, delim, rep_start).unwrap_or(bytes.len());
-        let flags = if rep_end < bytes.len() {
-            &cmd[rep_end + 1..]
-        } else {
-            ""
+    if bytes.first() == Some(&b's') {
+        let Some(&delim) = bytes.get(1) else {
+            return Err(SedParseError::Unterminated);
         };
+        // The scan below walks bytes, so a multi-byte delimiter would have it
+        // stopping on a continuation byte and slicing mid-character. Refuse
+        // instead. GNU accepts any character as a delimiter; matching that
+        // needs a char-wise scanner, which this is not.
+        if !delim.is_ascii() {
+            return Err(SedParseError::Invalid);
+        }
+        let pat_start = 2;
+        let pat_end = find_unescaped(bytes, delim, pat_start).ok_or(SedParseError::Unterminated)?;
+        let rep_start = pat_end.saturating_add(1);
+        // The closing delimiter is *required*. This used to fall back to
+        // `bytes.len()`, so `s/old/new` — one delimiter short, and the
+        // commonest sed typo there is — ran as though the delimiter were
+        // present. GNU calls that `unterminated 's' command`. The user who
+        // dropped it meant something, and guessing which is not the parser's
+        // job: the guess is indistinguishable from a correct run.
+        let rep_end = find_unescaped(bytes, delim, rep_start).ok_or(SedParseError::Unterminated)?;
 
-        let pattern = alloc::string::String::from(cmd.get(pat_start..pat_end)?);
-        let replacement = alloc::string::String::from(cmd.get(rep_start..rep_end).unwrap_or(""));
+        let flags = cmd.get(rep_end.saturating_add(1)..).unwrap_or("");
+        // Only `g` is implemented, and an unrecognised flag used to be dropped
+        // in silence — so `s/a/b/i` performed a case-*sensitive* substitution
+        // and reported success. That is a wrong answer rather than a missing
+        // one, which is strictly worse: nothing downstream can detect it.
+        if let Some(c) = flags.chars().find(|c| *c != 'g') {
+            return Err(SedParseError::UnknownFlag(c));
+        }
+
+        let pattern =
+            alloc::string::String::from(cmd.get(pat_start..pat_end).ok_or(SedParseError::Invalid)?);
+        let replacement =
+            alloc::string::String::from(cmd.get(rep_start..rep_end).ok_or(SedParseError::Invalid)?);
         let global = flags.contains('g');
 
-        return Some(SedCmd::Substitute {
+        return Ok(SedCmd::Substitute {
             pattern,
             replacement,
             global,
@@ -119534,32 +120460,35 @@ fn parse_sed_command(cmd: &str) -> Option<SedCmd> {
 
     // Address commands: /pattern/d or /pattern/p
     if bytes.first() == Some(&b'/') {
-        let pat_end = find_unescaped(bytes, b'/', 1)?;
-        let pattern = alloc::string::String::from(cmd.get(1..pat_end)?);
-        let action = cmd.get(pat_end + 1..)?;
+        let pat_end = find_unescaped(bytes, b'/', 1).ok_or(SedParseError::Unterminated)?;
+        let pattern =
+            alloc::string::String::from(cmd.get(1..pat_end).ok_or(SedParseError::Invalid)?);
+        let action = cmd
+            .get(pat_end.saturating_add(1)..)
+            .ok_or(SedParseError::Invalid)?;
 
         return match action.trim() {
-            "d" => Some(SedCmd::Delete {
+            "d" => Ok(SedCmd::Delete {
                 addr: SedAddr::Pattern(pattern),
             }),
-            "p" => Some(SedCmd::Print {
+            "p" => Ok(SedCmd::Print {
                 addr: SedAddr::Pattern(pattern),
             }),
-            _ => None,
+            _ => Err(SedParseError::Unknown),
         };
     }
 
     // Line number commands: Nd
     if bytes.last() == Some(&b'd') {
-        let num_str = &cmd[..cmd.len().saturating_sub(1)];
+        let num_str = cmd.get(..cmd.len().saturating_sub(1)).unwrap_or("");
         if let Ok(n) = num_str.parse::<usize>() {
-            return Some(SedCmd::Delete {
+            return Ok(SedCmd::Delete {
                 addr: SedAddr::Line(n),
             });
         }
     }
 
-    None
+    Err(SedParseError::Unknown)
 }
 
 /// Find the position of an unescaped delimiter byte starting from `start`.
@@ -119605,37 +120534,41 @@ fn sed_replace_first(text: &str, pattern: &str, replacement: &str) -> alloc::str
 /// `cat config | sed 's/old' > config.new` wrote a file that looked plausible,
 /// was not edited at all, and reported success. GNU sed calls that
 /// `unterminated 's' command` and exits 1.
+///
+/// A file operand wins over the pipe, which is what `-i` needs in order to
+/// mean anything — see [`classify_sed_args`].
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_sed_input(args: &str, input: &str) {
-    let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
-    if parts.is_empty() {
+    if args.split_whitespace().next().is_none() {
         shell_println!("Usage: cmd | sed [-n] [-e CMD] 's/old/new/[g]'");
         shell_println!("       cmd | sed [-n] '/pattern/d'");
         shell_println!("       cmd | sed [-n] 'Nd'  (delete line N)");
         set_exit(1);
         return;
     }
-    let mut suppress = false;
-    let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-    let mut i = 0;
 
-    while i < parts.len() {
-        match parts[i] {
-            "-n" => suppress = true,
-            "-e" => {
-                i += 1;
-                if i < parts.len() {
-                    commands.push(alloc::string::String::from(parts[i]));
-                }
-            }
-            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
-                if commands.is_empty() {
-                    commands.push(alloc::string::String::from(s));
-                }
-            }
-            _ => {}
-        }
-        i += 1;
+    let SedArgs {
+        in_place,
+        suppress,
+        scripts: commands,
+        files,
+    } = classify_sed_args(args);
+
+    // A named file wins and the pipe is left unread, as it does for every
+    // other paired command here and as it does in GNU. `cmd_sed` re-parses the
+    // same string, which is a few microseconds and one source of truth.
+    if !files.is_empty() {
+        cmd_sed(args);
+        return;
+    }
+
+    // `-i` with nothing to edit. Silently filtering the pipe instead is the
+    // failure that made this worth fixing: the user asked for a file to be
+    // rewritten, no file was, and the status said it worked.
+    if in_place {
+        shell_println!("sed: no input files while in-place editing");
+        set_exit(1);
+        return;
     }
 
     if commands.is_empty() {
@@ -119646,16 +120579,11 @@ fn cmd_sed_input(args: &str, input: &str) {
         return;
     }
 
-    let parsed: alloc::vec::Vec<SedCmd> = commands
-        .iter()
-        .filter_map(|c| parse_sed_command(c))
-        .collect();
-
-    if parsed.is_empty() {
-        shell_println!("sed: invalid command syntax");
-        set_exit(1);
+    // Same rule as the file half, from the same function: any script that does
+    // not parse fails the whole invocation.
+    let Some(parsed) = parse_sed_scripts(&commands) else {
         return;
-    }
+    };
 
     let mut output = alloc::string::String::new();
     for (line_idx, line) in input.lines().enumerate() {
@@ -119833,7 +120761,15 @@ fn cmd_awk_input(args: &str, input: &str) {
         return;
     }
 
-    let (fs_char, program, _files) = parse_awk_args(args);
+    let (fs_char, program, files) = parse_awk_args(args);
+
+    // Named files win over the pipe, as in GNU. This used to bind them to
+    // `_files` and drop them, so `cat a | awk '{print}' b` printed `a`.
+    if !files.is_empty() {
+        cmd_awk(args);
+        return;
+    }
+
     if program.is_empty() {
         shell_println!("awk: no program specified");
         set_exit(1);

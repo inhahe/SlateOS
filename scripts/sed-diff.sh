@@ -364,7 +364,15 @@ run_stdin abc.txt $'s/b/x\\\ny/'
 # match them as bytes rather than dropping them.
 run_stdin bytes.txt 's/Z/z/'
 run_stdin bytes.txt 's/[[:print:]]//g'
-run_stdin bytes.txt 's/.*/[&]/'
+# `.` is the one place the two models of "a character" cannot both be right.
+# GNU matches with glibc's multibyte matcher, which in a UTF-8 locale cannot
+# decode `\x80` and so refuses to let `.` match it: `.*` stops dead at the
+# undecodable byte, and `[&]` closes in the middle of the line. Ours is
+# byte-based — `design-decisions.md` §322, the same decision `find -regex`
+# turns on — so `.*` takes the whole line. Every other case over this fixture
+# agrees; only the one whose answer depends on what a character *is* does not.
+xfail_stdin 'a byte-based `.` matches an undecodable byte; glibc'"'"'s does not' \
+  bytes.txt 's/.*/[&]/'
 
 # --- addresses ---------------------------------------------------------------
 run_stdin nums.txt '2d'
@@ -571,6 +579,134 @@ run_stdin abc.txt --sandbox 'w /tmp/x'
 run_stdin abc.txt -l 3 's/.*/aaaaaaaa/;l'
 run_stdin bytes.txt -n 'l'
 run_stdin abc.txt -n 'l 0'
+
+# --- v, and the version it asserts --------------------------------------------
+#
+# `v` is an assertion, not a request: it succeeds for any version up to the one
+# we implement and fails the *script* otherwise. The comparison it does is
+# glibc's `strverscmp`, so `4.10` has to come out newer than `4.9`.
+run_stdin abc.txt 'v'
+run_stdin abc.txt 'v 4.2'
+run_stdin abc.txt 'v4.2'
+run_stdin abc.txt '1v'
+run_stdin abc.txt 'v;p'
+run_stdin abc.txt 'v 9.9'
+run_stdin abc.txt 'v abc'
+run_stdin abc.txt 'v 4.10'
+
+# --- z and F ------------------------------------------------------------------
+run_stdin abc.txt 'z;s/^$/empty/'
+run_stdin abc.txt -n 'z;l'
+run_stdin abc.txt 'F'
+run_case 'F' abc.txt def.txt
+run_case -s 'F' abc.txt def.txt
+# `F` and `=` both end their line with the *output* separator, so `-z` makes
+# them NUL-terminated — the one detail a `println!` gets wrong.
+run_stdin abc.txt -z 'F'
+run_stdin abc.txt -z '='
+
+# --- e, and the s///e flag ----------------------------------------------------
+#
+# Both hand a string to `/bin/sh`, so both sides run the same shell and any
+# difference is sed's. `e` with no argument runs the *pattern space* and
+# replaces it with the output, minus one trailing newline.
+printf 'echo Y\n'                       > cmds.txt
+run_stdin abc.txt '1e echo X'
+run_stdin abc.txt -n '1{s/.*/echo Z/e;p}'
+run_stdin cmds.txt 'e'
+run_stdin abc.txt '1e false'
+run_stdin abc.txt --sandbox '1e echo X'
+run_stdin abc.txt --sandbox 's/a/b/e'
+
+# --- more than one ! ----------------------------------------------------------
+#
+# GNU takes exactly one, and the char offset it reports is the second one's.
+run_stdin abc.txt '1!!p'
+run_stdin abc.txt '1! !p'
+run_stdin abc.txt '!!p'
+
+# --- --debug ------------------------------------------------------------------
+#
+# `--debug` writes the script back out in a canonical spelling and then traces
+# every cycle, so it is the one option whose output is almost entirely text
+# that no other case produces. The dump re-delimits addresses, re-orders `s`
+# flags and re-escapes the pattern; the trace has a fixed order, a fixed column
+# width and several outright quirks (`g` reports the *hold* space; a command is
+# traced before its address is tested). Both halves are compared byte for byte.
+run_stdin abc.txt --debug -n 'p'
+run_stdin abc.txt --debug -n '1p;2p;/zz/d'
+run_stdin abc.txt --debug '1!G;h;$!d'
+run_stdin abc.txt --debug -n '/b/{s/b/B/;p}'
+run_stdin abc.txt --debug -n '/zz/{p;p}'
+run_stdin abc.txt --debug -n '\,b,p'
+run_stdin abc.txt --debug -n '/b/Ip'
+run_stdin abc.txt --debug -n '2,+1p;0~2p;$p'
+run_stdin abc.txt --debug -n '0,/b/p'
+run_stdin abc.txt --debug -n '2,~2p'
+run_stdin abc.txt --debug -n 's/\(a\)\(b\)\?/[\1]/gp2iI'
+run_stdin abc.txt --debug -n 's,a/b,c/d,'
+run_stdin abc.txt --debug -n 's/a/\U&\E!/p'
+run_stdin abc.txt --debug -n 's/a/\l&\u&/p'
+run_stdin abc.txt --debug -n 's/a/b/w /dev/null'
+run_stdin abc.txt --debug -n 's/\t\o101\d65\x41\cA/x/'
+run_stdin abc.txt --debug -n 'y/abc/xyz/'
+run_stdin abc.txt --debug -n 'y,ab,xy,'
+run_stdin abc.txt --debug -n ':x;s/a/b/;tx;p'
+run_stdin abc.txt --debug 'b;p'
+run_stdin abc.txt --debug -n '/a/bskip;p;:skip'
+run_stdin abc.txt --debug $'a\\\nAPP'
+run_stdin abc.txt --debug 'a\'
+run_stdin abc.txt --debug '1i INS'
+run_stdin abc.txt --debug '2c CHG'
+run_stdin abc.txt --debug -n 'h;H;g;G;x;z'
+run_stdin abc.txt --debug -n '$!N;P;D'
+run_stdin abc.txt --debug -n 'N;N;N'
+run_stdin abc.txt --debug 'v 4.2;p'
+run_stdin abc.txt --debug -n '#comment'
+run_stdin abc.txt --debug -n ''
+run_stdin abc.txt --debug '2q'
+run_stdin abc.txt --debug '2q5'
+run_stdin abc.txt --debug '2Q'
+run_stdin abc.txt --debug -n 'l'
+run_stdin abc.txt --debug -n 'l 3'
+run_stdin abc.txt --debug -n 'l0'
+run_stdin abc.txt --debug '='
+run_stdin abc.txt --debug 'F'
+run_stdin abc.txt --debug -n 'r def.txt'
+run_stdin abc.txt --debug -n 'R def.txt'
+run_stdin abc.txt --debug -n 'w /dev/null'
+run_stdin abc.txt --debug -n 'W /dev/null'
+run_stdin abc.txt --debug -z 's/a/A/'
+# The file name and the line numbering come from the *input*, so the joined and
+# the separate readings of two files have to be traced differently.
+run_case --debug -n '$p' abc.txt def.txt
+run_case --debug -s -n '$p' abc.txt def.txt
+run_case --debug -n 'F' abc.txt def.txt
+# Under `-i` the dump and the trace go to stdout while the edit goes to the
+# file, so this is the one case where the two streams are told apart.
+run_inplace '--debug with -i'     --debug -i 's/a/A/' abc.txt
+
+# GNU passes each byte of the pattern to `printf("\\o%03o", …)` through a
+# *signed* `char`, so a byte with the high bit set comes out sign-extended:
+# `\o200` is printed as `\o37777777600`. That is a bug in the printer, not a
+# spelling worth copying — reproducing it would put a nine-digit octal escape
+# in front of anyone debugging a Latin-1 script. See `design-decisions.md`.
+xfail_stdin 'a high byte in a --debug dump prints as \o200, not sign-extended' \
+  abc.txt --debug -n 's/\o200/x/'
+# The same printer renders the traced pattern space, so the same divergence
+# shows there — this fixture's `\x80\xff\xc3\xa9` become four eleven-character
+# escapes under GNU and four three-character ones under ours.
+xfail_stdin 'a high byte in a traced PATTERN: prints as \o200, not sign-extended' \
+  bytes.txt --debug -n 'p'
+
+# GNU's `e COMMAND` truncates its own stored text in place before handing it to
+# `popen`: the trailing newline becomes a NUL and is never put back. Every
+# later `--debug` dump of that command therefore prints `e echo X\0` — the dump
+# of a script that the *dumping* corrupted. Ours leaves the text alone, so the
+# second and third cycles still dump `e echo X`. Nothing can depend on the
+# corruption, which is why it is not copied.
+xfail_stdin 'GNU NUL-truncates the text of an e command after running it once' \
+  abc.txt --debug '1e echo X'
 
 # --- script errors ------------------------------------------------------------
 #

@@ -1,110 +1,262 @@
 #!/usr/bin/env bash
-# Differential test: our awk against the host's GNU awk.
+# Differential test: our awk against GNU awk, both run inside WSL.
 #
-# Each case is `run_case INPUT-NAME ARGS...`. Both awks get identical argv and
-# identical stdin; stdout and the exit status are compared byte for byte. This
-# is the check a unit test cannot make, because a unit test asserts what we
-# believe awk does rather than what awk does.
-#
-# `xfail_case REASON INPUT-NAME ARGS...` is a case where we differ deliberately
-# and the reason is written down — see the head of awk's `main.rs` for the list.
-# The script fails if a plain case differs, and also if an xfail *stops*
-# differing, because that means the recorded reason no longer describes reality.
-#
-# stderr only has to agree about *whether* there was a diagnostic. Matching
-# gawk's wording exactly would be fitting to its parser's internals, not to awk.
+# Each case gives both awks identical argv and identical stdin, and compares
+# stdout and the exit status byte for byte. This is the check a unit test
+# cannot make, because a unit test asserts what we believe awk does rather
+# than what awk does.
 #
 # gawk is not POSIX awk out of the box — it has `gensub`, `\y`, `RT`,
-# `IGNORECASE` and a longer list besides — so it is run with `--posix`, which is
-# the dialect we are actually claiming to implement.
+# `IGNORECASE` and a longer list besides — so it is run with `--posix`, which
+# is the dialect we are actually claiming to implement.
+#
+# ## The case helpers
+#
+# | helper | stdin | stderr compared as |
+# |---|---|---|
+# | `run_case INPUT ARGS...`  | fixture `INPUT` | presence |
+# | `msg_case INPUT ARGS...`  | fixture `INPUT` | text |
+# | `file_case ARGS...`       | `/dev/null`     | presence |
+# | `fmsg_case ARGS...`       | `/dev/null`     | text |
+# | `wfile_case LABEL ARGS...`| `/dev/null`     | text, plus every file the program wrote |
+#
+# and `xfail_*` for each, taking a REASON first. An xfail that *stops*
+# differing is reported too, because that means the recorded reason no longer
+# describes reality.
+#
+# ## Why stderr is not compared as text everywhere
+#
+# Most of awk's diagnostics are parse errors, and gawk's are a rendering of
+# its own parser's state — `cmd. line:1: ... ^ unexpected newline or end of
+# string`, with a caret column counted in gawk's tokens. Matching that would
+# be fitting to gawk's internals rather than to awk, and would freeze our
+# parser into gawk's shape. So the default is to agree only about *whether*
+# there was a diagnostic.
+#
+# The diagnostics that are not parser-internal — a file that will not open, a
+# bad option, a missing program text — are ordinary observable behaviour, and
+# those get `msg_case`, which compares the text. That comparison is only
+# possible at all because both sides now run under glibc *and* because gawk
+# takes its message prefix from `argv[0]`: reached through a symlink named
+# `awk` it says `awk: fatal: ...`, not `gawk: fatal: ...`. `diff-wsl.sh` puts
+# both binaries behind that one name for exactly this reason.
+#
+# ## Why both sides run inside WSL
+#
+# `scripts/diff-wsl.sh` gives the general reasons. The particular ones here:
+#
+#   * **The reference was the wrong gawk.** MSYS2's gawk is a Cygwin-derived
+#     build; its `| getline` runs a Windows shell, its `/dev/stdout` is
+#     emulated, and its idea of a locale is not glibc's.
+#
+#   * **The old harness ran in the C locale, and four xfails were nothing but
+#     that.** `length`, `substr`, `index` and `toupper` were recorded as
+#     deliberate divergences — "gawk in the C locale counts bytes". Under
+#     `C.UTF-8`, which is what `diff-wsl.sh` fixes, gawk counts characters and
+#     agrees with us on all four. They were never divergences; they were the
+#     harness's locale. They are ordinary cases below.
+#
+#   * **stdout went through `$(...)`, which strips trailing newlines.** Every
+#     `ORS`, `printf`-without-newline and unterminated-last-line case was
+#     therefore blind to the one byte it was about. stdout is compared as a
+#     hex dump now.
+#
+#   * **There were no file operands at all**, because the fixtures were shell
+#     strings piped in. `FILENAME`, `FNR`, `nextfile`, `var=value` operands,
+#     `getline < file`, `print > file` and the whole of `ARGV` handling could
+#     not be reached. They are fixture files now, and those sections exist.
+#
+# Run `OURS=/usr/bin/gawk ./scripts/awk-diff.sh` to confirm the harness still
+# discriminates: it should report every xfail as XPASS and nothing else.
 set -u
 
-# Our awk is a native Windows binary, so MSYS would helpfully rewrite an
-# argument that looks like a path — turning the program `$1 ~ /^\//` into
-# something with a drive letter in it.
-export MSYS2_ARG_CONV_EXCL='*'
+# Into WSL, build ours for Linux, find gawk, and put both behind the one name
+# `awk` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=awk
+# `command -v awk` is not good enough: on a Debian-family system `/usr/bin/awk`
+# is whatever `update-alternatives` last pointed at, and mawk is a legitimate
+# answer. mawk is not the reference — it has no `--posix`, no `ENVIRON`
+# ordering guarantees and a different `printf` — so gawk is named outright.
+DIFF_REF='/usr/bin/gawk /usr/local/bin/gawk /usr/bin/awk'
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils awk "${OURS:-}") || exit 1
-GNU=${GNU:-gawk}
 GNUFLAGS=${GNUFLAGS:---posix}
-
-declare -A INPUTS=(
-  [abc]=$'a\nb\nc\n'
-  [nums]=$'1\n2\n3\n4\n5\n'
-  [table]=$'alice 30 red\nbob 25 blue\ncarol 41 red\ndave 25 green\n'
-  [csv]=$'a:b:c\nd:e:f\n:g:\n'
-  [blanks]=$'a\n\n\n\nb\n\nc\n'
-  [spaces]=$'  lead\ttab  \n one \n'
-  [nonl]=$'a\nb'
-  [empty]=''
-  [mixed]=$'Alpha1\nbeta22\nGAMMA333\n'
-  [strnum]=$'0\n00\n0.0\n1e3\n abc\n+7\n'
-  [para]=$'one\ntwo\n\n\nthree\nfour\n'
-)
 
 pass=0; fail=0; xfail=0; xpass=0
 
-# Both awks, same argv and stdin. Sets AGREED=yes/no and the REPORT text.
-compare() {
-  local input_name="$1"; shift
-  local data="${INPUTS[$input_name]}"
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
+cd "$fixtures" >/dev/null || exit 1
 
-  local o_out g_out o_err g_err o_rc g_rc
-  o_err=$(mktemp); g_err=$(mktemp)
-  o_out=$(printf '%s' "$data" | "$OURS" "$@" 2>"$o_err"); o_rc=$?
-  g_out=$(printf '%s' "$data" | "$GNU" $GNUFLAGS "$@" 2>"$g_err"); g_rc=$?
+# The fixtures are files, and the stdin cases feed those same files. One
+# source of truth, so a case that reads `nums` on stdin and one that names
+# `nums.txt` as an operand are looking at identical bytes.
+printf 'a\nb\nc\n'                                          > abc.txt
+printf '1\n2\n3\n4\n5\n'                                    > nums.txt
+printf 'alice 30 red\nbob 25 blue\ncarol 41 red\ndave 25 green\n' > table.txt
+printf 'a:b:c\nd:e:f\n:g:\n'                                > csv.txt
+printf 'a\n\n\n\nb\n\nc\n'                                  > blanks.txt
+printf '  lead\ttab  \n one \n'                             > spaces.txt
+printf 'a\nb'                                               > nonl.txt
+: > empty.txt
+printf 'Alpha1\nbeta22\nGAMMA333\n'                         > mixed.txt
+printf '0\n00\n0.0\n1e3\n abc\n+7\n'                        > strnum.txt
+printf 'one\ntwo\n\n\nthree\nfour\n'                        > para.txt
+printf 'x\ny\nz\n'                                          > xyz.txt
+printf 'h\xc3\xa9llo\n\x80\xff raw\n'                       > bytes.txt
+
+# Program files, for -f.
+printf '{ print "P1:" $0 }\n'                               > p1.awk
+printf 'END { print "P2:" NR }\n'                           > p2.awk
+printf '#!/usr/bin/awk -f\nBEGIN { print "shebang" }\n'      > p3.awk
+
+# One invocation of one side. `$1` is `ours` or `gnu`; `$2` names a fixture to
+# feed on stdin, or `-` for none.
+#
+# The side's own directory comes first so that `awk` is the binary under test,
+# but the real directories follow it: awk can run a shell (`system()`,
+# `print | "cmd"`, `"cmd" | getline`), and with a one-entry PATH every such
+# case degenerates into two shells agreeing that `cat` does not exist — which
+# is a comparison of the harness against itself.
+run_side() {
+  local side=$1 stdin=$2 out=$3 err=$4; shift 4
+  local flags=
+  [ "$side" = gnu ] && flags=$GNUFLAGS
+  if [ "$stdin" = "-" ]; then
+    # shellcheck disable=SC2086
+    env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" </dev/null >"$out" 2>"$err"
+  else
+    # shellcheck disable=SC2086
+    env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" <"$stdin" >"$out" 2>"$err"
+  fi
+}
+
+# Sets AGREED (stdout + status + whether stderr was loud) and AGREED_MSG (the
+# same, but stderr compared as text), plus REPORT.
+compare() {
+  local stdin=$1; shift
+  local o_out g_out o_msg g_msg o_bin g_bin o_rc g_rc
+  o_err=$(mktemp); g_err=$(mktemp); o_bin=$(mktemp); g_bin=$(mktemp)
+  # stdout goes to a file, not through a pipe into `od`: in `x=$(awk | od)`
+  # the status recorded is od's, and `PIPESTATUS` is set inside the command
+  # substitution's subshell where it cannot be read — so every failing case
+  # would compare od's success against od's success and pass.
+  run_side ours "$stdin" "$o_bin" "$o_err" "$@"; o_rc=$?
+  run_side gnu  "$stdin" "$g_bin" "$g_err" "$@"; g_rc=$?
+  # A hex dump, because `$(...)` strips trailing newlines and eats NULs, and
+  # `ORS`, `printf` and the unterminated-last-line cases are about exactly
+  # those bytes.
+  o_out=$(od -An -tx1 <"$o_bin"); g_out=$(od -An -tx1 <"$g_bin")
+  o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
 
   local o_loud=no g_loud=no
   [ -s "$o_err" ] && o_loud=yes
   [ -s "$g_err" ] && g_loud=yes
+  rm -f "$o_bin" "$g_bin" "$o_err" "$g_err"
 
-  if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_loud" = "$g_loud" ]; then
+  local same_out=no
+  [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && same_out=yes
+
+  AGREED=no; AGREED_MSG=no
+  [ "$same_out" = yes ] && [ "$o_loud" = "$g_loud" ] && AGREED=yes
+  [ "$same_out" = yes ] && [ "$o_msg" = "$g_msg" ] && AGREED_MSG=yes
+
+  REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}' \
+    "$o_rc" "$(printf '%s' "$o_out" | tr -s ' \n' ' ')" "$(printf '%s' "$o_msg" | tr '\n' '|')" \
+    "$g_rc" "$(printf '%s' "$g_out" | tr -s ' \n' ' ')" "$(printf '%s' "$g_msg" | tr '\n' '|')")
+}
+
+# `report VERDICT LABEL` — VERDICT is yes/no.
+report() {
+  local verdict="$1" label="$2"
+  if [ "$verdict" = yes ]; then
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$label"
+  else
+    fail=$((fail+1))
+    printf 'DIFF %s\n%s\n' "$label" "$REPORT"
+  fi
+  return 0
+}
+
+# `report_x VERDICT REASON LABEL` — the case is known to differ. Listing these
+# as plain differences would train the reader to skim the output, and deleting
+# them would lose the coverage.
+report_x() {
+  local verdict="$1" reason="$2" label="$3"
+  if [ "$verdict" = no ]; then
+    xfail=$((xfail+1))
+    [ -n "${VERBOSE:-}" ] && printf 'XFAIL %s  (%s)\n' "$label" "$reason"
+  else
+    xpass=$((xpass+1))
+    printf 'XPASS %s\n  now agrees with gawk, so this reason is stale: %s\n' \
+      "$label" "$reason"
+  fi
+  return 0
+}
+
+# The fixture a case name refers to. `abc` is `abc.txt`; a name that is
+# already a path is taken as one.
+fx() { case $1 in */*|*.*) printf '%s' "$1" ;; *) printf '%s.txt' "$1" ;; esac; }
+
+run_case()  { local i="$1"; shift; compare "$(fx "$i")" "$@"; report     "$AGREED"     "[$i] awk $*"; }
+msg_case()  { local i="$1"; shift; compare "$(fx "$i")" "$@"; report     "$AGREED_MSG" "[$i] awk $*"; }
+file_case() { compare - "$@"; report "$AGREED" "awk $*"; }
+fmsg_case() { compare - "$@"; report "$AGREED_MSG" "awk $*"; }
+
+xfail_case() { local r="$1" i="$2"; shift 2; compare "$(fx "$i")" "$@"; report_x "$AGREED"     "$r" "[$i] awk $*"; }
+xmsg_case()  { local r="$1" i="$2"; shift 2; compare "$(fx "$i")" "$@"; report_x "$AGREED_MSG" "$r" "[$i] awk $*"; }
+xfail_file() { local r="$1"; shift;          compare - "$@";            report_x "$AGREED"     "$r" "awk $*"; }
+xfmsg_file() { local r="$1"; shift;          compare - "$@";            report_x "$AGREED_MSG" "$r" "awk $*"; }
+
+# `wfile_case LABEL ARGS...` — for a program that writes files of its own.
+# Each side runs in its own copy of the fixtures, and the comparison covers
+# every file left behind as well as stdout, stderr and the status. Without
+# this, `print > "out"` is indistinguishable from `print` discarded.
+wfile_case() {
+  local label="$1"; shift
+  local w=$DIFF_TMP/w side
+  rm -rf "$w"; mkdir -p "$w/ours" "$w/gnu"
+  local o_dump g_dump o_rc g_rc o_msg g_msg o_out g_out
+  for side in ours gnu; do
+    cp "$fixtures"/*.txt "$fixtures"/*.awk "$w/$side/"
+  done
+
+  ( cd "$w/ours" && run_side ours - out.stdout err.stderr "$@" ); o_rc=$?
+  ( cd "$w/gnu"  && run_side gnu  - out.stdout err.stderr "$@" ); g_rc=$?
+  o_msg=$(cat "$w/ours/err.stderr"); g_msg=$(cat "$w/gnu/err.stderr")
+  o_out=$(od -An -tx1 <"$w/ours/out.stdout"); g_out=$(od -An -tx1 <"$w/gnu/out.stdout")
+
+  # Only the files the program created: the fixtures are identical on both
+  # sides by construction, and dumping them would bury the one file that is
+  # the point of the case.
+  dump_new() {
+    ( cd "$1" && find . -type f ! -name '*.txt' ! -name '*.awk' \
+        ! -name out.stdout ! -name err.stderr | sort | while read -r f; do
+        printf '=== %s\n' "$f"; od -An -tx1 "$f"
+      done )
+  }
+  o_dump=$(dump_new "$w/ours"); g_dump=$(dump_new "$w/gnu")
+
+  if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] &&
+     [ "$o_msg" = "$g_msg" ] && [ "$o_dump" = "$g_dump" ]; then
     AGREED=yes
   else
     AGREED=no
   fi
-  REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}' \
-    "$o_rc" "$(printf '%s' "$o_out" | tr '\n' '|')" "$(tr '\n' '|' <"$o_err")" \
-    "$g_rc" "$(printf '%s' "$g_out" | tr '\n' '|')" "$(tr '\n' '|' <"$g_err")")
-  rm -f "$o_err" "$g_err"
+  REPORT=$(printf '  ours (rc=%s): %s  {%s}\n    files: %s\n  gnu  (rc=%s): %s  {%s}\n    files: %s' \
+    "$o_rc" "$(printf '%s' "$o_out" | tr -s ' \n' ' ')" "$(printf '%s' "$o_msg" | tr '\n' '|')" \
+    "$(printf '%s' "$o_dump" | tr -s ' \n' ' ')" \
+    "$g_rc" "$(printf '%s' "$g_out" | tr -s ' \n' ' ')" "$(printf '%s' "$g_msg" | tr '\n' '|')" \
+    "$(printf '%s' "$g_dump" | tr -s ' \n' ' ')")
+  rm -rf "$w"
+  report "$AGREED" "$label"
 }
 
-# `run_case INPUT ARGS...` — the two awks must agree.
-run_case() {
-  local input_name="$1"
-  compare "$@"
-  if [ "$AGREED" = yes ]; then
-    pass=$((pass+1))
-    [ -n "${VERBOSE:-}" ] && printf 'OK   [%s] %s\n' "$input_name" "${*:2}"
-  else
-    fail=$((fail+1))
-    printf 'DIFF [%s] %s\n%s\n' "$input_name" "${*:2}" "$REPORT"
-  fi
-}
-
-# `xfail_case REASON INPUT ARGS...` — the two awks are *known* to differ, and we
-# have decided our answer is the one we want. Listing these as plain differences
-# would train the reader to skim the output, and deleting them would lose the
-# coverage: an xfail that starts agreeing is reported too, because that means
-# either gawk or we have changed and the decision needs re-reading.
-xfail_case() {
-  local reason="$1"; shift
-  local input_name="$1"
-  compare "$@"
-  if [ "$AGREED" = no ]; then
-    xfail=$((xfail+1))
-    [ -n "${VERBOSE:-}" ] && printf 'XFAIL[%s] %s  (%s)\n' "$input_name" "${*:2}" "$reason"
-  else
-    xpass=$((xpass+1))
-    printf 'XPASS[%s] %s\n  now agrees with gawk; the divergence was: %s\n' \
-      "$input_name" "${*:2}" "$reason"
-  fi
-}
+echo "awk-diff:"
+echo "  ours: $OURS"
+echo "  gnu:  $gnu_real $GNUFLAGS"
 
 # --- patterns and the default action ----------------------------------------
 run_case abc '{print}'
@@ -207,7 +359,18 @@ run_case abc 'BEGIN {printf "%d %i %o %x %X %c %s\n", 42, 42, 8, 255, 255, 65, "
 run_case abc 'BEGIN {printf "%e %E %f %g %G\n", 1234.5, 1234.5, 1234.5, 1234.5, 0.000012345}'
 run_case abc 'BEGIN {printf "%*d|%-*d|%.*f\n", 5, 42, 5, 42, 2, 1.239}'
 xfail_case 'a missing printf argument is empty, as in bwk and mawk; gawk --posix makes it fatal' abc 'BEGIN {printf "%s\n"}'
-xfail_case '%c of a code point above 255 is that character; gawk in the C locale truncates to a byte' abc 'BEGIN {printf "%c%c\n", "abc", 9731}'
+
+# The four cases below were recorded as deliberate divergences for years on
+# the strength of "gawk in the C locale counts bytes". It does — but the C
+# locale was the old harness's, not a property of gawk. Under `C.UTF-8` gawk
+# counts characters and agrees with us, so these are plain cases now. They are
+# kept precisely because they were once wrong: they are the regression test
+# for the locale the harness runs in.
+run_case abc 'BEGIN {print length("héllo")}'
+run_case abc 'BEGIN {print substr("héllo", 2, 2)}'
+run_case abc 'BEGIN {print index("héllo", "l")}'
+run_case abc 'BEGIN {print toupper("héllo")}'
+run_case abc 'BEGIN {printf "%c%c\n", "abc", 9731}'
 
 # --- numeric builtins -------------------------------------------------------
 run_case abc 'BEGIN {print int(3.9), int(-3.9), int("12x")}'
@@ -222,37 +385,161 @@ run_case table '{print $1 $2}'
 run_case table '{print $1 " " $2}'
 run_case nums '{printf "%s", $1} END {print ""}'
 run_case abc '{print NR ": " $0}'
+# The trailing byte is the whole content of these, and it was invisible while
+# stdout went through `$(...)`.
+run_case abc 'BEGIN {ORS = ""} {print}'
+run_case abc '{printf "%s", $0}'
+run_case abc 'BEGIN {printf "no newline"}'
+run_case abc 'BEGIN {ORS = "\0"} {print}'
+run_case nonl '{print NR, $0}'
 
 # --- getline ----------------------------------------------------------------
 run_case nums 'NR == 1 {getline; print "got", $0} {print "main", $0}'
 run_case nums 'NR == 1 {getline x; print "got", x} {print "main", $0}'
 run_case abc 'BEGIN {while (("echo hi" | getline line) > 0) print "L:" line}'
 run_case abc 'BEGIN {print (getline junk < "/definitely/not/here")}'
+# getline from a *file*, which the old harness had no way to write.
+file_case 'BEGIN {while ((getline l < "abc.txt") > 0) print "F:" l}'
+file_case 'BEGIN {getline a < "abc.txt"; close("abc.txt"); getline b < "abc.txt"; print a, b}'
+file_case 'BEGIN {getline a < "abc.txt"; getline b < "abc.txt"; print a, b}'
+file_case 'BEGIN {print (getline x < "empty.txt")}'
+file_case 'BEGIN {n = 0; while ((getline < "table.txt") > 0) n++; print n, NF, $1}'
+file_case 'BEGIN {"echo piped" | getline v; print v; close("echo piped")}'
 
-# --- command line -----------------------------------------------------------
+# --- file operands ----------------------------------------------------------
+# None of this section could exist before: the fixtures were shell strings on
+# stdin, so FILENAME was always empty and FNR always tracked NR.
+file_case '{print FILENAME, FNR, NR}' abc.txt xyz.txt
+file_case 'END {print FILENAME, FNR, NR}' abc.txt xyz.txt
+file_case '{print}' abc.txt abc.txt
+file_case '{print}' empty.txt abc.txt empty.txt
+file_case 'FNR == 1 {print "head:" FILENAME}' abc.txt xyz.txt nums.txt
+file_case '{print NR, $0}' nonl.txt abc.txt
+file_case 'BEGIN {print ARGC; for (i = 0; i < ARGC; i++) print i, ARGV[i]}' abc.txt xyz.txt
+file_case 'BEGIN {ARGV[1] = "xyz.txt"} {print}' abc.txt
+file_case 'BEGIN {delete ARGV[1]} {print "read:" $0}' abc.txt xyz.txt
+# A `var=value` operand is assigned when it is *reached*, not up front.
+file_case '{print v, $0}' abc.txt v=set xyz.txt
+file_case 'BEGIN {print "b:" v} {print v}' v=1 abc.txt
+file_case '{print v}' 'v=a\tb' abc.txt
+run_case abc '{print FILENAME "|" $0}' -
+file_case '{print FILENAME, $0}' - abc.txt < abc.txt
+
+# --- -f, program files ------------------------------------------------------
+file_case -f p1.awk abc.txt
+file_case -f p1.awk -f p2.awk abc.txt
+file_case -f p2.awk -f p1.awk abc.txt
+file_case -f p3.awk /dev/null
+run_case abc -f p1.awk
+
+# --- -v and the command line ------------------------------------------------
 run_case table -v 'name=bob' '$1 == name'
 run_case table -v 'n=25' '$2 == n {print "num"} $2 == "25" {print "str"}'
 run_case csv -F: -v 'x=1' '{print x, NF}'
 run_case abc 'BEGIN {print ARGC, (ARGV[0] != "")}'
 run_case abc 'BEGIN {print (ENVIRON["PATH"] != "")}'
+run_case abc -v 'x=a\tb\n' 'BEGIN {printf "[%s]", x}'
+run_case abc -v 'x=\\' 'BEGIN {print length(x)}'
+run_case abc -v 'x=' 'BEGIN {print "[" x "]", (x == "")}'
+run_case abc -- '{print}'
+run_case abc -F '\t' '{print NF}'
+run_case spaces -F '\t' '{print NF}'
+run_case abc -F 'x' -F 'y' 'BEGIN {print FS}'
+
+# --- redirection to files ---------------------------------------------------
+# `print > "out"` is indistinguishable from a discarded `print` unless the
+# file is compared, which is what `wfile_case` is for.
+wfile_case 'print > file'          '{print > "out"}' abc.txt
+wfile_case 'print >> file'         'BEGIN {print "pre" > "out"} {print >> "out"}' abc.txt
+wfile_case 'two output files'      '{print > ($0 ".out")}' abc.txt
+wfile_case 'truncate once only'    '{print > "out"} END {print "last" > "out"}' abc.txt
+wfile_case 'close and reopen'      '{print > "out"; close("out")}' abc.txt
+wfile_case 'printf to a file'      '{printf "%s|", $0 > "out"}' abc.txt
+wfile_case 'pipe to a command'     '{print | "cat > out"}' abc.txt
+wfile_case 'stderr by name'        'BEGIN {print "e" > "/dev/stderr"}'
 
 # --- odd inputs -------------------------------------------------------------
-run_case nonl '{print NR, $0}'
 run_case empty '{print "never"} END {print NR}'
 run_case blanks '{print NR, NF}'
 run_case blanks 'NF'
-xfail_case 'length counts characters; gawk in the C locale counts bytes' abc 'BEGIN {print length("héllo")}'
-xfail_case 'substr counts characters; gawk in the C locale counts bytes' abc 'BEGIN {print substr("héllo", 2, 2)}'
-xfail_case 'index returns a character position; gawk in the C locale returns a byte offset' abc 'BEGIN {print index("héllo", "l")}'
-xfail_case 'toupper maps the whole character repertoire; gawk in the C locale maps only ASCII' abc 'BEGIN {print toupper("héllo")}'
+# A byte that is not valid UTF-8 is data, not an error. gawk warns about it
+# and — worse — `toupper` replaces it with U+FFFD, which is the silent data
+# corruption `from_utf8_lossy` performs and this project forbids outright
+# (CLAUDE.md's self-review item 7). We pass the byte through unchanged and say
+# nothing, which is `design-decisions.md` §322's byte-based model.
+#
+# Note that the *lengths* agree: both count 5 and 6. The divergence is only
+# the warning and the substitution, not the character model.
+xfail_case 'an undecodable byte is data; gawk warns about it' bytes '{print NR, length($0)}'
+xfail_case 'toupper passes an undecodable byte through; gawk replaces it with U+FFFD' bytes '{print toupper($0)}'
+run_case bytes '/raw/ {print "hit"}'
+xfail_file 'an undecodable byte in a file is data; gawk warns about it' '{print length($0)}' bytes.txt
+
+# --- diagnostics that are not parser-internal -------------------------------
+# These are ordinary observable behaviour rather than a rendering of gawk's
+# parser state, so the text is compared. See the header.
+fmsg_case '{print}' /definitely/not/here
+fmsg_case -f /definitely/not/here.awk abc.txt
+fmsg_case 'BEGIN {print (getline < "/definitely/not/here")}'
+# The *stdout* half of this one matters and is checked: the contents of
+# `abc.txt` must appear before the failure on the second operand, because a
+# fatal error does not retract what was already printed. That was a real bug —
+# `Interp::run` skipped its flush on the error path and `process::exit` runs no
+# destructors, so an entire run's buffered output vanished. See `interp.rs`.
+#
+# The *stderr* half differs, and deliberately. gawk prefixes this one with
+# `cmd. line:1:` and the first-operand case above with nothing — the location
+# is left over from the rule that last ran, and points at a line that has no
+# connection to the file that failed to open. Reproducing that means
+# reproducing stale interpreter state, which is the one thing this harness's
+# header says it will not fit itself to.
+xfmsg_file 'gawk tags this with `cmd. line:1:` — the location left over from the last rule to run, which has nothing to do with the file that failed' \
+  '{print}' abc.txt /definitely/not/here
 
 # --- errors -----------------------------------------------------------------
+# Parse errors: only *whether* there was a diagnostic is compared.
 run_case abc '{print'
 run_case abc 'function f() {} function f() {} BEGIN {f()}'
-xfail_case 'an undefined function is caught before the program runs (exit 1), not when first called (gawk: exit 2)' abc 'BEGIN {nosuch()}'
 run_case abc 'BEGIN {print 1 +}'
+run_case abc 'BEGIN {'
+run_case abc '}'
+run_case abc '/unterminated'
+run_case abc 'BEGIN {x = "unterminated}'
+xfail_case 'an undefined function is caught before the program runs (exit 1), not when first called (gawk: exit 2)' abc 'BEGIN {nosuch()}'
 xfail_case 'an array/scalar conflict is caught before the program runs (exit 1), not when first reached (gawk: exit 2)' abc 'BEGIN {x[1] = 1; y = x}'
 xfail_case 'a built-in called with the wrong number of arguments is caught before the program runs (exit 1)' abc 'BEGIN {split("a", b, "x", "y")}'
+# gawk constant-folds, so a *literal* `1/0` is a compile-time `error:` and
+# exit 1 — the program never runs at all, and `BEGIN {if (0) print 1/0}` fails
+# too, which is a surprising thing for a fold to do. Ours is a runtime fatal,
+# exit 2. The runtime case below is the one both agree on, and it is the one
+# that matters: it is what a real program hits.
+xfail_case 'gawk folds constant arithmetic, so a literal 1/0 is a compile error (exit 1); ours is a runtime fatal (exit 2)' \
+  abc 'BEGIN {print 1/0}'
+# The runtime fatals. Two verdicts are taken from each, because the two halves
+# have different standing.
+#
+# The stdout half is checked outright, and the `print "before"` is the whole
+# point of the first case: a fatal does not retract what was already printed.
+# It used to — `Interp::run` was one `?`-chain that skipped its flush on the
+# error path, and `process::exit` runs no destructors, so an entire run's
+# buffered output vanished with nothing to say it had. This is that bug's
+# regression test.
+#
+# The stderr half is an xfail, and this one is *our* gap rather than a
+# divergence we chose. gawk says `awk: cmd. line:1: fatal: …`; we say
+# `awk: fatal: …`, because our AST carries no line numbers at all — nothing
+# from `lex.rs` through `parse.rs` records where a statement came from, so
+# there is nothing for `interp.rs` to report. Unlike the stale `cmd. line:1:`
+# on the unopenable-second-operand case above, this location is correct and
+# useful: it is the line of the user's script that blew up. Tracked in
+# `known-issues.md`; when the source locations land these become `msg_case`.
+run_case abc 'BEGIN {x = 0; print "before"; print 1/x}'
+xmsg_case 'our runtime diagnostics carry no source location; gawk prefixes `cmd. line:N:`' \
+  abc 'BEGIN {x = 0; print "before"; print 1/x}'
+run_case abc 'BEGIN {x = 0; print 1 % x}'
+xmsg_case 'our runtime diagnostics carry no source location; gawk prefixes `cmd. line:N:`' \
+  abc 'BEGIN {x = 0; print 1 % x}'
+xfail_case 'an array/scalar conflict is caught before the program runs (exit 1), not when first reached (gawk: exit 2)' abc 'BEGIN {x = 1; x[2] = 3}'
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

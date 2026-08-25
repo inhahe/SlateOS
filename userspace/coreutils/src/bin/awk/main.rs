@@ -278,15 +278,23 @@ fn program_source(args: &Args) -> Result<Str, String> {
     }
     let mut out = Str::new();
     for name in &args.progfiles {
+        // `source file`, not `file`: gawk distinguishes a program it could not
+        // read from an *input* file it could not read, and the two failures are
+        // worth telling apart — one is a broken command line, the other a
+        // broken argument to a working one.
         let text = if name.as_slice() == b"-" {
             let mut buf = Str::new();
-            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf)
-                .map_err(|e| format!("can't open file -: {}", coreutils::errmsg::strerror(&e)))?;
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf).map_err(|e| {
+                format!(
+                    "fatal: cannot open source file `-' for reading: {}",
+                    coreutils::errmsg::strerror(&e)
+                )
+            })?;
             buf
         } else {
             std::fs::read(io::os_path(name)).map_err(|e| {
                 format!(
-                    "can't open file {}: {}",
+                    "fatal: cannot open source file `{}' for reading: {}",
                     String::from_utf8_lossy(name),
                     coreutils::errmsg::strerror(&e)
                 )

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # whoami-diff.sh — compare our `whoami` against the real GNU one, inside WSL.
 #
 # ## What this is checking

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # interleave-diff.sh — one question, asked of every utility that answers it:
 # when output and diagnostics go to the same place, do they arrive in the same
 # order GNU's do?

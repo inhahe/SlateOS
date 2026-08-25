@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 # write-error-diff.sh — one question, asked of every utility that answers it:
 # what happens when standard output or standard error cannot be written?
 #

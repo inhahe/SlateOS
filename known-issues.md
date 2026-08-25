@@ -73427,10 +73427,13 @@ converts its offsets through `drawn_offset` first, so a password field's caret
 and selection are measured in mask characters and never leak the secret's byte
 length. Reasoning in `design-decisions.md` §546.
 
-**One piece is deliberately not done: clicking in an `InputDialog` does not move
-its caret.** It cannot, and the reason is a separate defect —
+**One piece was deliberately not done at the time: clicking in an `InputDialog`
+did not move its caret.** It could not, and the reason was a separate defect —
 `TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED` below. The widget
-text field does support click-to-place, because a `Widget` has a layout box.
+text field did support click-to-place, because a `Widget` has a layout box.
+*(Closed later the same day: that entry is now fixed, and `InputDialog` places
+its caret from a click like any other field. The shared arithmetic lives in
+`textedit::cursor_at_click`, which both call.)*
 
 The original report follows.
 
@@ -73684,7 +73687,7 @@ change, but not one that breaks any current caller: no app in the tree routes
 events through `WidgetTree::handle_event` today — they were all doing their own
 key handling, which is itself a sign that this path was not usable.
 
-## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — **open**
+## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — **fixed 2026-08-24**
 
 `ModalOverlay` has a `content_rect` — the dialog's own rectangle, which
 `handle_mouse` tests a click against to decide whether it landed outside the
@@ -73754,6 +73757,43 @@ That last one is the reason the fix is a stored layout and not a parameter.
 and it *still* clicks in the wrong place — because the input the layout needs
 is not available where the click is handled. Threading it in would not have
 been "two copies of the arithmetic"; it would have been one copy fed a guess.
+
+### 2026-08-24 — fixed, with one change to the plan above and a fourth bug found on the way
+
+The layout step landed, but **not as the separate `fn layout(&mut self, …)` the
+plan asked for.** A separate call is a call that can be forgotten, and a
+forgotten one reproduces this entry exactly: hit areas that do not match what is
+on screen, compiling and rendering perfectly and failing only under the mouse.
+The tree already had the evidence — `ModalOverlay::set_content_rect` *was* that
+separate call, and in the whole repository only two unit tests ever made it.
+So instead `render` itself took `&mut self` and records where it put things as a
+side effect of drawing them; `handle_mouse` can consult nothing else. The
+reasoning, and the cost of `&mut self` on a draw method, are `design-decisions.md`
+§547.
+
+**The fourth bug, found while fixing the other three:** `content_rect` was a
+plain tuple starting at all zeroes, so before the first frame *every* point on
+screen is "outside the dialog". A dialog with `dismiss_on_click_outside` on —
+which is `ModalOverlay::new()`'s default — therefore dismissed itself if a click
+arrived between `show()` and its first frame, before the user had seen it. It is
+now `Option`, so "I do not know where I am" classifies no clicks rather than all
+of them.
+
+What is fixed:
+
+- `AlertDialog` hit-tests the rectangles it drew, at any parent size, and
+  `render_buttons` draws *from* those rectangles rather than re-deriving them.
+- `InputDialog` has working OK, Cancel and click-to-place-caret, the last of
+  those correct through a horizontal scroll (shared with `WidgetKind::TextInput`
+  via the new `textedit::cursor_at_click`) and through password masking (the
+  click is resolved against the row of marks and mapped back to a byte offset in
+  the secret, so it can never land inside a character).
+- `ProgressDialog` has an `Event::Mouse` arm and a clickable Cancel button.
+- `dismiss_on_click_outside` means what it says, and means nothing before the
+  first frame.
+
+Proved by `scripts/reintro-modal-geometry.py` — nineteen one-line defects, each
+of which compiles.
 
 ---
 

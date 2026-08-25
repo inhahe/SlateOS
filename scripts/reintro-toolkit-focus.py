@@ -428,22 +428,18 @@ DEFECTS = [
         "AB: a click puts the caret at the start of the field, not where it landed",
         WIDGET,
         [(
-            "                    *cursor = crate::text::cursor_at(\n"
-            "                        value,\n"
-            "                        mouse.x - content_x + scroll,",
-            "                    *cursor = crate::text::cursor_at(\n"
-            "                        value,\n"
-            "                        0.0 * (mouse.x - content_x + scroll),",
+            "                        mouse.x - content_x,",
+            "                        0.0 * (mouse.x - content_x),",
         )],
         GUITK,
         ["clicking_in_the_text_puts_the_caret_where_the_click_landed"],
     ),
     (
         "AC: a click ignores how far the field is scrolled",
-        WIDGET,
+        EDIT,
         [(
-            "                        mouse.x - content_x + scroll,",
-            "                        mouse.x - content_x,",
+            "    crate::text::cursor_at(text, dx + scroll, font_size, weight)",
+            "    crate::text::cursor_at(text, dx, font_size, weight)",
         )],
         GUITK,
         ["clicking_in_a_scrolled_field_accounts_for_what_has_scrolled_off"],

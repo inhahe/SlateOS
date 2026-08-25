@@ -960,15 +960,13 @@ impl Widget {
                 ..
             } => match &mouse.kind {
                 MouseEventKind::Press(_) => {
-                    let caret_px =
-                        crate::text::caret_x(value, *cursor, font_size, FontWeightHint::Regular);
-                    let text_w = crate::text::measure(value, font_size, FontWeightHint::Regular);
-                    let scroll = crate::textedit::horizontal_scroll(text_w, content_w, caret_px);
-                    *cursor = crate::text::cursor_at(
+                    *cursor = crate::textedit::cursor_at_click(
                         value,
-                        mouse.x - content_x + scroll,
+                        *cursor,
+                        content_w,
                         font_size,
                         FontWeightHint::Regular,
+                        mouse.x - content_x,
                     );
                     // A click starts a new selection wherever it lands, so
                     // whatever was selected stops being selected. Dragging is

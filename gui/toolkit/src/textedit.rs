@@ -124,6 +124,35 @@ pub fn horizontal_scroll(text_width: f32, avail: f32, caret_px: f32) -> f32 {
     (caret_px - avail + CARET_EDGE_MARGIN).clamp(0.0, text_width - avail)
 }
 
+/// Where in `text` a click lands, given how far it fell from the field's left
+/// edge.
+///
+/// `dx` is measured from the left edge of the area the text occupies — the same
+/// `x` [`draw`] is given — so the caller subtracts the field's own origin and
+/// nothing else. The scroll offset is added here, recomputed from the same
+/// caret and the same width that [`draw`] used, which is the whole point of
+/// this function existing: passing the drawn `x` straight to
+/// [`crate::text::cursor_at`] answers as though the string began at the field's
+/// left edge, so every click into a field that has scrolled lands that many
+/// pixels' worth of characters early.
+///
+/// The two computations have to stay in step frame by frame, and the only way
+/// to guarantee that is for both of them to be this one.
+#[must_use]
+pub fn cursor_at_click(
+    text: &str,
+    cursor: TextCursor,
+    width: f32,
+    font_size: f32,
+    weight: FontWeightHint,
+    dx: f32,
+) -> TextCursor {
+    let caret_px = crate::text::caret_x(text, cursor, font_size, weight);
+    let text_w = crate::text::measure(text, font_size, weight);
+    let scroll = horizontal_scroll(text_w, width, caret_px);
+    crate::text::cursor_at(text, dx + scroll, font_size, weight)
+}
+
 /// Draw the caret as a vertical rule of the line's height.
 pub fn push_caret(tree: &mut RenderTree, x: f32, y: f32, line_h: f32, color: Color) {
     tree.push(RenderCommand::Line {

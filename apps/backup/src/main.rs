@@ -31,13 +31,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 //
 // This file used to carry its own copy of SHA-256 -- one of twenty-six in the
 // tree. The algorithm and its FIPS 180-4 vectors now live in `sha2`, once. The
-// three wrappers below are all that remains, and they exist only to render a
+// two wrappers below are all that remains, and they exist only to render a
 // digest as a `String`: the crate returns a fixed-size `Hex` because it is
 // `no_std` and allocation-free, so that the kernel can use it too.
-
-fn sha256_bytes(data: &[u8]) -> [u8; 32] {
-    sha2::sha256(data)
-}
+//
+// There was a third, `sha256_bytes`, a one-line pass-through to `sha2::sha256`
+// returning `[u8; 32]`.  It rendered nothing, no caller outside the tests ever
+// wanted it, and the one test it had compared it against `sha256_hex` -- two
+// wrappers over the same `sha2` entry points, which is `sha2`'s FIPS vectors
+// restated at one remove.  Deleted with that test.
 
 fn sha256_hex(data: &[u8]) -> String {
     sha2::sha256_hex(data).as_str().to_string()
@@ -1140,24 +1142,20 @@ impl Progress {
 // Path Utilities
 // ============================================================================
 
-/// Normalize a path to use forward slashes and remove redundant components.
-fn normalize_path(path: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            p => parts.push(p),
-        }
-    }
-    if path.starts_with('/') {
-        format!("/{}", parts.join("/"))
-    } else {
-        parts.join("/")
-    }
-}
+// `normalize_path` was deleted here, together with its four tests.  It was
+// reachable from no path out of `main` -- only from those tests -- and it
+// answered the same question as `restore_path_within` below with the opposite
+// policy: it *sanitised* `..` away (`test_normalize_leading_dotdot` asserted
+// `"../a/b"` -> `"a/b"`, commented "Can't go above root"), where the live
+// check *refuses* the entry and makes the caller report it, for the reason
+// spelled out on that function -- silently relocating a file during a restore
+// puts the user's data somewhere they did not ask for and gives them no way
+// to notice.
+//
+// Deleting rather than leaving it: a dead function with four green tests is
+// not inert.  The next person who needs "normalise a manifest path" finds it,
+// reads the tests as a specification, and reintroduces the traversal the
+// live check exists to stop.  See known-issues.md lesson 45.
 
 /// Get relative path of `full` with respect to `base`.
 ///
@@ -1285,20 +1283,13 @@ impl ContentStore {
         Ok(true)
     }
 
-    /// Store raw bytes in the CAS.
-    fn store_bytes(&self, data: &[u8], hash: &str) -> io::Result<bool> {
-        if self.has_blob(hash) {
-            return Ok(false);
-        }
-
-        let blob_path = self.blob_path(hash);
-        if let Some(parent) = blob_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        safeio::write_atomically(&blob_path, data)?;
-        Ok(true)
-    }
+    // `store_bytes` was deleted here.  It stored a `&[u8]` in the CAS through
+    // `safeio::write_atomically` and was correct, but nothing outside the
+    // tests ever called it: `store_file` is how every blob this program
+    // writes gets there, and a symlink's target is carried in the manifest
+    // rather than as a blob.  Its test asserted that "both ways a blob enters
+    // the store" are atomic, which read as twice the coverage it was -- there
+    // is one way.  Re-add it with its caller, not before.
 
     /// Retrieve a blob's contents.
     fn read_blob(&self, hash: &str) -> io::Result<Vec<u8>> {
@@ -3204,8 +3195,12 @@ mod tests {
 
     // --- Blob-store write routing ---
 
-    /// Both ways a blob enters the content-addressed store go through
-    /// `safeio`, not `fs::write`/`fs::copy`.
+    /// The way a blob enters the content-addressed store goes through
+    /// `safeio`, not `fs::copy`.
+    ///
+    /// Singular: this test used to be `both_blob_store_paths_...` and drove
+    /// `store_bytes` as well, which read as twice the coverage it was --
+    /// `store_bytes` had no caller outside this test and has been deleted.
     ///
     /// A successful atomic write and a successful truncating one leave
     /// identical bytes at an identical path; they differ only when the write
@@ -3220,32 +3215,16 @@ mod tests {
     /// handing back short data forever, with no error anywhere. In the one
     /// application whose entire purpose is that the data survives.
     ///
-    /// `store_bytes` and `store_file` are asserted separately: they use
-    /// different `safeio` entry points (`write_atomically` vs
-    /// `copy_atomically`) and so are counted separately.
-    ///
-    /// The counters are process-global, so the checks compare a before and
+    /// The counters are process-global, so the check compares a before and
     /// after reading rather than an absolute, under `audit_lock` so that the
-    /// delta is this test's own and the comparisons can be equalities.
+    /// delta is this test's own and the comparison can be an equality.
     #[test]
-    fn both_blob_store_paths_go_through_safeio() {
+    fn the_blob_store_write_path_goes_through_safeio() {
         let _guard = audit_lock();
 
         let scratch = temp_dir("blob_routing");
         let dir = scratch.dir().to_path_buf();
         let store = ContentStore::new(&dir);
-
-        // store_bytes -> safeio::write_atomically
-        let data = b"blob contents that must never be half-written";
-        let hash = sha256_hex(data);
-        let before = safeio::writes_performed();
-        assert!(store.store_bytes(data, &hash).expect("store_bytes"));
-        assert_eq!(
-            safeio::writes_performed() - before,
-            1,
-            "store_bytes did not go through safeio -- it must not use std::fs::write"
-        );
-        assert_eq!(store.read_blob(&hash).expect("read back"), data);
 
         // store_file -> safeio::copy_atomically
         let source = dir.join("source.bin");
@@ -3319,14 +3298,6 @@ mod tests {
             let actual = sha2::hex(&hasher.finalize()).as_str().to_string();
             assert_eq!(actual, expected, "split at {split}");
         }
-    }
-
-    /// `sha256_bytes` and `sha256_hex` must be one digest in two renderings;
-    /// nothing else in this file checks that they agree.
-    #[test]
-    fn the_byte_and_hex_forms_agree() {
-        let digest = sha256_bytes(b"abc");
-        assert_eq!(sha2::hex(&digest).as_str(), sha256_hex(b"abc"));
     }
 
     // --- Glob Pattern Matching Tests ---
@@ -3861,34 +3832,6 @@ mod tests {
         let keep = compute_retention(&metas, &opts).keep;
         assert!(keep.contains("1"));
         assert!(keep.contains("2"));
-    }
-
-    // --- Path Normalization Tests ---
-
-    #[test]
-    fn test_normalize_simple() {
-        assert_eq!(normalize_path("a/b/c"), "a/b/c");
-        assert_eq!(normalize_path("/a/b/c"), "/a/b/c");
-    }
-
-    #[test]
-    fn test_normalize_dots() {
-        assert_eq!(normalize_path("a/./b/c"), "a/b/c");
-        assert_eq!(normalize_path("a/b/../c"), "a/c");
-        assert_eq!(normalize_path("/a/b/../c/./d"), "/a/c/d");
-    }
-
-    #[test]
-    fn test_normalize_redundant_slashes() {
-        assert_eq!(normalize_path("a//b///c"), "a/b/c");
-        assert_eq!(normalize_path("/a//b/c"), "/a/b/c");
-    }
-
-    #[test]
-    fn test_normalize_leading_dotdot() {
-        // Can't go above root
-        assert_eq!(normalize_path("../a/b"), "a/b");
-        assert_eq!(normalize_path("../../a"), "a");
     }
 
     // --- JSON Parser Tests ---

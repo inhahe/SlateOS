@@ -16,5 +16,12 @@ md5 = { path = "../../md5" }
 sha1 = { path = "../../sha1" }
 sha2 = { path = "../../sha2" }
 
+[dev-dependencies]
+# The file-open dialog is handed a real directory listing, so the tests that
+# drive it need a real directory that is theirs alone and goes away when they
+# end -- including when they fail, which is the case a cleanup line at the
+# bottom of a test body structurally cannot cover.
+scratchdir = { path = "../../userspace/scratchdir" }
+
 [lints]
 workspace = true

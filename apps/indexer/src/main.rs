@@ -44,12 +44,16 @@ const STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// service holds it rather than a passing `status` check.
 const LOCK_CONTENTION_GRACE: Duration = Duration::from_secs(1);
 const INDEX_MAGIC: &[u8; 4] = b"OIDX";
+/// Version 3 appends the content trigram index after the entries. Version 2
+/// did not store it, and nothing rebuilt it on load, so content search was
+/// empty after every restart even once something populated it.
+///
 /// Version 2 stores entry paths as their exact bytes. Version 1 wrote them
 /// through `to_string_lossy`, so any path that was not UTF-8 came back with
 /// U+FFFD where its bytes had been and no longer named a real file. The index
 /// is a derived cache, so a version bump needs no migration: `deserialize`
 /// rejects the old file and the caller reindexes.
-const INDEX_VERSION: u32 = 2;
+const INDEX_VERSION: u32 = 3;
 /// Bytes before the first entry: magic(4) + version(4) + count(8) +
 /// last_indexed(8) + dirs_scanned(8).
 const INDEX_HEADER_LEN: usize = 32;
@@ -455,6 +459,66 @@ impl IndexEntry {
 // Index
 // ============================================================================
 
+/// A bounds-checked forward reader over the on-disk index.
+///
+/// The alternative is `data[offset + 7]` guarded by a hand-written
+/// `if offset + N > data.len()`, which is what this file used to do. Each such
+/// pair is a panic whenever the guard is forgotten or written with the wrong
+/// N -- and one had been: the header guard tested 28 where the last header
+/// field ends at 32, so a 28-byte file passed it and then panicked on the
+/// read. Making the read itself checked removes the class, not the instance.
+struct Cursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    /// Take the next `n` bytes, or report the file as truncated.
+    fn take(&mut self, n: usize, what: &str) -> Result<&'a [u8], IndexError> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| IndexError::CorruptIndex(format!("{what}: length overflows")))?;
+        let slice = self
+            .data
+            .get(self.pos..end)
+            .ok_or_else(|| IndexError::CorruptIndex(format!("truncated {what}")))?;
+        self.pos = end;
+        Ok(slice)
+    }
+
+    fn u32(&mut self, what: &str) -> Result<u32, IndexError> {
+        let bytes: [u8; 4] = self
+            .take(4, what)?
+            .try_into()
+            .map_err(|_| IndexError::CorruptIndex(format!("truncated {what}")))?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn u64(&mut self, what: &str) -> Result<u64, IndexError> {
+        let bytes: [u8; 8] = self
+            .take(8, what)?
+            .try_into()
+            .map_err(|_| IndexError::CorruptIndex(format!("truncated {what}")))?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    /// A count read from the file, clamped to what the remaining bytes could
+    /// possibly hold. A corrupt file asking for 2^60 entries must not become a
+    /// 2^60-element `with_capacity`; the loop that follows will hit a genuine
+    /// truncation error at the right place instead.
+    fn count(&mut self, what: &str, min_bytes_each: usize) -> Result<usize, IndexError> {
+        let raw = usize::try_from(self.u64(what)?)
+            .map_err(|_| IndexError::CorruptIndex(format!("{what}: count too large")))?;
+        let remaining = self.data.len().saturating_sub(self.pos);
+        Ok(raw.min(remaining / min_bytes_each.max(1)))
+    }
+}
+
 /// The main file index structure.
 #[derive(Debug, Clone)]
 struct FileIndex {
@@ -533,18 +597,37 @@ impl FileIndex {
     // ---- Serialization ----
 
     /// Serialize the index to a binary format.
+    ///
+    /// `name_lookup` is deliberately not written: it is derived from `entries`
+    /// and `deserialize` rebuilds it. `trigram_index` is *not* derivable that
+    /// way -- rebuilding it means re-reading every indexed file from disk,
+    /// which is the cost the index exists to avoid -- so it is written out.
     fn serialize(&self) -> Vec<u8> {
+        // No `..` in this pattern, so a sixth field cannot be added to
+        // `FileIndex` without this function refusing to compile. That question
+        // -- "is this new field derivable from the entries, or does it have to
+        // be persisted?" -- is exactly the one that went unasked about
+        // `trigram_index`, which was neither written here nor rebuilt on load
+        // and so was empty in every process that did not itself populate it.
+        let Self {
+            entries,
+            name_lookup: _,
+            trigram_index,
+            last_indexed,
+            dirs_scanned,
+        } = self;
+
         let mut buf = Vec::new();
 
         // Header: magic + version + entry count + timestamp
         buf.extend_from_slice(INDEX_MAGIC);
         buf.extend_from_slice(&INDEX_VERSION.to_le_bytes());
-        buf.extend_from_slice(&(self.entries.len() as u64).to_le_bytes());
-        buf.extend_from_slice(&self.last_indexed.to_le_bytes());
-        buf.extend_from_slice(&self.dirs_scanned.to_le_bytes());
+        buf.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&last_indexed.to_le_bytes());
+        buf.extend_from_slice(&dirs_scanned.to_le_bytes());
 
         // Entries
-        for entry in &self.entries {
+        for entry in entries {
             // The exact bytes, not `to_string_lossy`: a path is a byte string
             // here, and an index entry whose path has been through U+FFFD
             // substitution no longer names the file it was built from.
@@ -556,99 +639,57 @@ impl FileIndex {
             buf.push(entry.file_type.as_byte());
         }
 
+        // Trigram index: count, then (trigram, posting-list) pairs. Written
+        // after the entries because its postings are positions in them, so a
+        // reader that stopped early would have the references without the
+        // things referred to.
+        buf.extend_from_slice(&(trigram_index.len() as u64).to_le_bytes());
+        for (trigram, postings) in trigram_index {
+            buf.extend_from_slice(trigram);
+            buf.extend_from_slice(&(postings.len() as u64).to_le_bytes());
+            for &posting in postings {
+                buf.extend_from_slice(&(posting as u64).to_le_bytes());
+            }
+        }
+
         buf
     }
 
     /// Deserialize the index from binary data.
+    ///
+    /// Every read goes through `Cursor`, so a truncated or corrupt file is an
+    /// `Err` naming the field that ran out rather than a panic.
     fn deserialize(data: &[u8]) -> Result<Self, IndexError> {
-        // 32, not 28: `dirs_scanned` is read from bytes 24..32, so a file of
-        // 28..=31 bytes passed this check and then panicked on the read.
-        if data.len() < INDEX_HEADER_LEN {
-            return Err(IndexError::CorruptIndex("header too short".into()));
-        }
+        let mut cur = Cursor::new(data);
 
-        let magic = &data[0..4];
-        if magic != INDEX_MAGIC {
+        if cur.take(4, "magic")? != INDEX_MAGIC {
             return Err(IndexError::CorruptIndex("invalid magic".into()));
         }
 
-        let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let version = cur.u32("version")?;
         if version != INDEX_VERSION {
             return Err(IndexError::CorruptIndex(format!(
-                "unsupported version: {}",
-                version
+                "unsupported version: {version}"
             )));
         }
 
-        let entry_count = u64::from_le_bytes([
-            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
-        ]) as usize;
+        // Smallest possible entry: 4-byte path length + 8 size + 8 mtime + 1
+        // type, with an empty path.
+        let entry_count = cur.count("entry count", 21)?;
+        let last_indexed = cur.u64("last_indexed")?;
+        let dirs_scanned = cur.u64("dirs_scanned")?;
 
-        let last_indexed = u64::from_le_bytes([
-            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
-        ]);
-
-        let dirs_scanned = u64::from_le_bytes([
-            data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
-        ]);
-
-        let mut offset = 32;
-        let mut entries = Vec::with_capacity(entry_count.min(1_000_000));
-
+        let mut entries = Vec::with_capacity(entry_count);
         for _ in 0..entry_count {
-            if offset + 4 > data.len() {
-                return Err(IndexError::CorruptIndex(
-                    "truncated entry path length".into(),
-                ));
-            }
-            let path_len = u32::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]) as usize;
-            offset += 4;
-
-            if offset + path_len > data.len() {
-                return Err(IndexError::CorruptIndex("truncated entry path".into()));
-            }
-            let path = PathBuf::from(os_string_from_bytes(
-                data[offset..offset + path_len].to_vec(),
-            ));
-            offset += path_len;
-
-            if offset + 17 > data.len() {
-                return Err(IndexError::CorruptIndex("truncated entry metadata".into()));
-            }
-            let size = u64::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-                data[offset + 4],
-                data[offset + 5],
-                data[offset + 6],
-                data[offset + 7],
-            ]);
-            offset += 8;
-
-            let mtime = u64::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-                data[offset + 4],
-                data[offset + 5],
-                data[offset + 6],
-                data[offset + 7],
-            ]);
-            offset += 8;
-
-            let file_type = FileType::from_byte(data[offset]);
-            offset += 1;
+            let path_len = cur.u32("entry path length")? as usize;
+            let path_bytes = cur.take(path_len, "entry path")?;
+            let path = PathBuf::from(os_string_from_bytes(path_bytes.to_vec()));
+            let size = cur.u64("entry size")?;
+            let mtime = cur.u64("entry mtime")?;
+            let type_byte = cur.take(1, "entry type")?;
+            let file_type = FileType::from_byte(type_byte.first().copied().unwrap_or(0));
 
             let filename = filename_key(&path);
-
             entries.push(IndexEntry {
                 path,
                 filename,
@@ -661,6 +702,36 @@ impl FileIndex {
         let mut index = Self::build_from_entries(entries);
         index.last_indexed = last_indexed;
         index.dirs_scanned = dirs_scanned;
+
+        // Trigram index. Files written before version 3 have no such section,
+        // but the version check above has already rejected those, so a missing
+        // one here means truncation rather than age.
+        let entry_count_actual = index.entries.len();
+        let trigram_count = cur.count("trigram count", 11)?;
+        for _ in 0..trigram_count {
+            let key = cur.take(3, "trigram key")?;
+            let trigram: [u8; 3] = key
+                .try_into()
+                .map_err(|_| IndexError::CorruptIndex("truncated trigram key".into()))?;
+
+            let posting_count = cur.count("trigram posting count", 8)?;
+            let mut postings = Vec::with_capacity(posting_count);
+            for _ in 0..posting_count {
+                let posting = usize::try_from(cur.u64("trigram posting")?)
+                    .map_err(|_| IndexError::CorruptIndex("trigram posting out of range".into()))?;
+                // A posting is a position in `entries`; past the end means the
+                // file disagrees with itself. Dropped rather than kept: a
+                // wrong-but-valid position would return the wrong file, which
+                // is worse than returning none.
+                if posting < entry_count_actual {
+                    postings.push(posting);
+                }
+            }
+            if !postings.is_empty() {
+                index.trigram_index.insert(trigram, postings);
+            }
+        }
+
         Ok(index)
     }
 
@@ -722,6 +793,53 @@ fn index_file_content(index: &mut FileIndex, entry_idx: usize, content: &str) {
             .entry(trigram)
             .or_default()
             .push(entry_idx);
+    }
+}
+
+/// Read every regular file in the index and add its content trigrams.
+///
+/// This is the production caller of `index_file_content`, and until it existed
+/// there was none: `index_contents = true` set a flag that nothing acted on, so
+/// `trigram_index` stayed empty, `search_content` could only ever return an
+/// empty vector, and the content-search fallback in `cmd_search` printed "No
+/// results found" for every query. The unit test passed throughout because it
+/// called `index_file_content` itself -- it was testing a function, not the
+/// feature. See known-issues.md lesson 45.
+///
+/// Runs after the entries are in the index because `index_file_content` keys
+/// trigrams by position in `index.entries`, which is not known while scanning.
+///
+/// Files that are not valid UTF-8 are skipped rather than lossily converted:
+/// trigrams over U+FFFD runs would match nothing a user could type, and this
+/// is how binary files are excluded without a content-sniffing heuristic.
+fn index_all_contents(index: &mut FileIndex, config: &Config, stats: &mut ScanStats) {
+    // Collected first because reading borrows `index` immutably while
+    // `index_file_content` needs it mutably.
+    let targets: Vec<(usize, PathBuf)> = index
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.file_type == FileType::Regular && e.size <= config.max_file_size)
+        .map(|(i, e)| (i, e.path.clone()))
+        .collect();
+
+    for (idx, path) in targets {
+        // `read` then `from_utf8`, not `read_to_string`: the latter reports an
+        // unreadable file and a binary one as the same error, and only the
+        // first is worth counting against the scan.
+        let bytes = match fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => {
+                stats.errors += 1;
+                continue;
+            }
+        };
+        let Ok(text) = String::from_utf8(bytes) else {
+            stats.files_skipped += 1;
+            continue;
+        };
+        index_file_content(index, idx, &text);
+        stats.files_content_indexed += 1;
     }
 }
 
@@ -1091,6 +1209,11 @@ struct ScanStats {
     dirs_scanned: u64,
     files_skipped: u64,
     errors: u64,
+    /// Files whose contents were read and trigram-indexed. Zero whenever
+    /// `index_contents` is off, which is what distinguishes "the option is
+    /// disabled" from "the option is on and did nothing" -- the latter was
+    /// the state of this program until content indexing was wired up.
+    files_content_indexed: u64,
 }
 
 impl fmt::Display for ScanStats {
@@ -1099,7 +1222,13 @@ impl fmt::Display for ScanStats {
             f,
             "Files: {}, Dirs: {}, Skipped: {}, Errors: {}",
             self.files_found, self.dirs_scanned, self.files_skipped, self.errors
-        )
+        )?;
+        // Only shown when content indexing ran, so the common case reads
+        // exactly as before.
+        if self.files_content_indexed > 0 {
+            write!(f, ", Contents: {}", self.files_content_indexed)?;
+        }
+        Ok(())
     }
 }
 
@@ -1118,6 +1247,9 @@ fn scan(config: &Config) -> (FileIndex, ScanStats) {
 
     let mut index = FileIndex::build_from_entries(entries);
     index.dirs_scanned = stats.dirs_scanned;
+    if config.index_contents {
+        index_all_contents(&mut index, config, &mut stats);
+    }
     (index, stats)
 }
 
@@ -1268,6 +1400,15 @@ fn scan_incremental(config: &Config, existing: &mut FileIndex) -> ScanStats {
 
     existing.last_indexed = current_timestamp();
     existing.rebuild_lookup();
+    if config.index_contents {
+        // `rebuild_lookup` above renumbers `name_lookup` because the
+        // incremental scan may have removed entries; `trigram_index` is keyed
+        // by the same positions and would otherwise be left pointing at
+        // whatever moved into each slot -- content hits for the wrong files,
+        // which is worse than no content hits at all.
+        existing.trigram_index.clear();
+        index_all_contents(existing, config, &mut stats);
+    }
     stats
 }
 
@@ -1752,6 +1893,16 @@ fn cmd_reindex(path: Option<&str>, config: &Config) {
             index.add_entry(entry);
         }
         index.last_indexed = current_timestamp();
+        if config.index_contents {
+            // `remove_path_prefix` above dropped entries, which shifts every
+            // later index, so the trigram positions carried over from the
+            // loaded file no longer point at the entries they were built
+            // from. Rebuilding the whole map is the only correct response --
+            // a partial update would leave the survivors pointing at
+            // whichever entry now occupies their old slot.
+            index.trigram_index.clear();
+            index_all_contents(&mut index, config, &mut stats);
+        }
         println!("Reindex complete. {}", stats);
 
         if let Err(e) = index.save() {
@@ -2286,6 +2437,35 @@ exclude_extensions = .o, .tmp
         assert!(FileIndex::deserialize(&data).is_err());
     }
 
+    /// The two tests above each pick one place to cut. This cuts a real index
+    /// at *every* byte, so it covers the entry section and the trigram section
+    /// added in version 3 without anyone having to remember to extend it when
+    /// a section is added -- the index it truncates is whatever `serialize`
+    /// currently writes.
+    #[test]
+    fn a_cut_at_any_byte_is_an_error_not_a_panic() {
+        let scratch = ScratchDir::new("indexer_truncate");
+        let dir = scratch.dir();
+        fs::write(dir.join("alpha.txt"), b"the quick brown fox").unwrap();
+        fs::write(dir.join("beta.txt"), b"a sleeping hound").unwrap();
+        let (index, _) = scan(&content_config(dir, true));
+        let full = index.serialize();
+        assert!(
+            full.len() > INDEX_HEADER_LEN,
+            "the fixture must have entries and trigrams to be worth cutting"
+        );
+
+        for len in 0..full.len() {
+            // Not `is_err()`: a prefix could in principle deserialize to a
+            // valid smaller index. The property under test is only that it
+            // returns rather than panics.
+            let _ = FileIndex::deserialize(&full[..len]);
+        }
+        // The uncut original must still load, so that a test which passes by
+        // rejecting everything is distinguishable from one that passes.
+        assert!(FileIndex::deserialize(&full).is_ok());
+    }
+
     /// The index stores the path it will later hand back to whoever opens the
     /// file, so it must store bytes. Written through `to_string_lossy`, a name
     /// that is not UTF-8 came back with U+FFFD in place of its bytes and no
@@ -2733,6 +2913,127 @@ exclude_extensions = .o, .tmp
 
         let results = search_content(&index, "world", 50);
         assert_eq!(results.len(), 2);
+    }
+
+    // ---- Content indexing, through the production path ----
+
+    /// Build a config pointing at one scratch directory, contents on or off.
+    fn content_config(dir: &Path, index_contents: bool) -> Config {
+        Config {
+            index_paths: vec![dir.to_string_lossy().into_owned()],
+            index_contents,
+            ..Config::default()
+        }
+    }
+
+    /// The test above this one passes against a build in which content search
+    /// does not work at all, because it calls `index_file_content` itself and
+    /// then asks whether the entries it just inserted are there. That is
+    /// lesson 42 -- it proves its own copy. For the whole time it was green,
+    /// `index_contents = true` did nothing: no production code path called
+    /// `index_file_content`, so `trigram_index` was empty in the real program
+    /// and the content-search fallback in `cmd_search` printed "No results
+    /// found" for every query.
+    ///
+    /// This one starts from files on disk and goes through `scan`, so it fails
+    /// unless the feature actually exists.
+    #[test]
+    fn a_real_scan_finds_a_file_by_words_that_are_only_in_its_contents() {
+        let scratch = ScratchDir::new("indexer_content_scan");
+        let dir = scratch.dir();
+        // The search term appears nowhere in either *filename*, so a hit can
+        // only come from the contents.
+        fs::write(dir.join("alpha.txt"), b"the quick brown fox").unwrap();
+        fs::write(dir.join("beta.txt"), b"a sleeping hound").unwrap();
+
+        let (index, stats) = scan(&content_config(dir, true));
+
+        assert_eq!(
+            stats.files_content_indexed, 2,
+            "both files should have been read for content"
+        );
+        assert!(
+            !index.trigram_index.is_empty(),
+            "the scan produced no trigrams, so `index_contents` did nothing"
+        );
+
+        let hits = search_content(&index, "brown", DEFAULT_RESULT_LIMIT);
+        assert_eq!(
+            hits.iter()
+                .map(|h| h.entry.filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha.txt"],
+            "content search did not find the one file containing the word"
+        );
+    }
+
+    /// Turning the option off has to leave the work undone, not merely leave
+    /// the results empty -- otherwise "off" and "broken" are the same state,
+    /// which is the confusion that hid this bug in the first place.
+    #[test]
+    fn contents_are_not_read_when_the_option_is_off() {
+        let scratch = ScratchDir::new("indexer_content_off");
+        let dir = scratch.dir();
+        fs::write(dir.join("alpha.txt"), b"the quick brown fox").unwrap();
+
+        let (index, stats) = scan(&content_config(dir, false));
+
+        assert_eq!(stats.files_content_indexed, 0);
+        assert!(index.trigram_index.is_empty());
+        assert!(search_content(&index, "brown", DEFAULT_RESULT_LIMIT).is_empty());
+    }
+
+    /// The second half of the same defect: even once something populated the
+    /// trigram index, `serialize` did not write it and `deserialize` did not
+    /// rebuild it, so every restart silently emptied it. The indexer is a
+    /// program you run again later by definition, so an index that only works
+    /// in the process that built it does not work.
+    #[test]
+    fn content_search_still_works_after_the_index_is_saved_and_reloaded() {
+        let scratch = ScratchDir::new("indexer_content_persist");
+        let dir = scratch.dir();
+        fs::write(dir.join("alpha.txt"), b"the quick brown fox").unwrap();
+        fs::write(dir.join("beta.txt"), b"a sleeping hound").unwrap();
+
+        let (index, _) = scan(&content_config(dir, true));
+        let reloaded = FileIndex::deserialize(&index.serialize()).unwrap();
+
+        assert_eq!(
+            reloaded.trigram_index, index.trigram_index,
+            "the trigram index did not survive the round trip through the file"
+        );
+        let hits = search_content(&reloaded, "brown", DEFAULT_RESULT_LIMIT);
+        assert_eq!(
+            hits.iter()
+                .map(|h| h.entry.filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha.txt"],
+            "content search came back empty from a reloaded index"
+        );
+    }
+
+    /// Binary files are skipped rather than lossily decoded. Trigrams taken
+    /// over U+FFFD runs match nothing a user could type, so they would be
+    /// pure index bloat.
+    #[test]
+    fn a_file_that_is_not_utf8_is_skipped_rather_than_mangled() {
+        let scratch = ScratchDir::new("indexer_content_binary");
+        let dir = scratch.dir();
+        fs::write(dir.join("text.txt"), b"the quick brown fox").unwrap();
+        fs::write(dir.join("blob.bin"), [0xff_u8, 0xfe, 0x00, 0x01, 0x80]).unwrap();
+
+        let (index, stats) = scan(&content_config(dir, true));
+
+        assert_eq!(
+            stats.files_content_indexed, 1,
+            "only the text file should have been indexed"
+        );
+        // U+FFFD is EF BF BD; no trigram of it can be present if nothing was
+        // lossily decoded.
+        assert!(
+            !index.trigram_index.contains_key(b"\xef\xbf\xbd"),
+            "a replacement character reached the index, so a binary file was decoded lossily"
+        );
     }
 
     // ---- Exclusion Pattern Tests ----

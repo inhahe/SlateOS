@@ -2943,6 +2943,7 @@ version = "0.1.0"
 dependencies = [
  "guitk",
  "md5",
+ "scratchdir",
  "sha1",
  "sha2",
 ]

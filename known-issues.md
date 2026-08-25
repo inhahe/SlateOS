@@ -76309,22 +76309,29 @@ once. A completely clean run is what a harness that cannot fail looks like from
 the outside. `timeout` now comes before `env`, and `DIFF_NEED` names both it and
 `sort` so a missing one skips the run instead of greening it.
 
-**Diagnostic wording** — five kinds, eight `?` cases, every one of lower value
-than the above: `grep` with no operands answers `grep: missing PATTERN` where GNU
-prints the usage summary; `--zzz` is `unknown option: --zzz` against GNU's
-`unrecognized option '--zzz'`; `-m x` names the offending value where GNU's does
-not; `-d bogus` prints gnulib's argmatch block but stops before the
-`Usage:`/`Try 'grep --help'` pair and exits 2 where GNU exits 1; and a leading
-quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU also warns
-`grep: warning: * at start of expression` on stderr while still exiting 0. All
-but the last belong with `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`
-rather than with grep. (`-D bogus` is *not* among them: GNU does not use argmatch
-for it, and we reproduce its one-liner and its status exactly.)
+**Diagnostic wording** — four kinds, four `?` cases, every one of lower value
+than the above, and all four now belong with
+`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` rather than with grep:
+`grep` with no operands answers `grep: missing PATTERN` where GNU prints the
+usage summary; `--zzz` is `unknown option: --zzz` against GNU's `unrecognized
+option '--zzz'`; `-m x` names the offending value where GNU's does not; and `-d
+bogus` prints gnulib's argmatch block but stops before the `Usage:`/`Try 'grep
+--help'` pair and exits 2 where GNU exits 1. (`-D bogus` is *not* among them: GNU
+does not use argmatch for it, and we reproduce its one-liner and its status
+exactly.)
+
+The fifth kind was the leading quantifier under `-E`: `grep -E '*a'` matched the
+same lines GNU's does but said nothing, where GNU also writes `grep: warning: *
+at start of expression`. **Fixed 2026-08-25** (`9a570ca64`). It was the one of
+the five that was not merely wording — that line is the only thing telling a
+user their pattern is not doing what they think — and it needed a parser change
+rather than a message change, so it is recorded in design-decisions.md §384
+along with the measured rule for *which* patterns warn.
 
 **Severity.** Low, and only wording is left. Every feature this entry was opened
 for is implemented and pinned by plain cases in `scripts/grep-diff.sh`, which now
-runs **435 agreeing cases** against GNU 3.11 with five deliberate divergences and
-eight wording gaps. The deliberate five are the two choices recorded elsewhere:
+runs **467 agreeing cases** against GNU 3.11 with five deliberate divergences and
+four wording gaps. The deliberate five are the two choices recorded elsewhere:
 we never suppress binary output, and we list a directory sorted where GNU uses
 readdir order (design-decisions.md §380).
 
@@ -78373,6 +78380,155 @@ desktop paints only palette roles", so the phase cannot arrive as a colour the
 sweep was never told about. A single `E0027` is a nudge; a chain that terminates
 at the invariant is a guarantee.
 
+### Lesson 45: a feature with no production caller is a feature that does not exist
+
+`apps/indexer` had a config option, `index_contents`, that did nothing at all.
+Setting it to `true` caused no file to be read, no trigram to be stored, and no
+content search ever to match. `cmd_search` had a whole fallback branch for
+content hits that could not be reached, and printed "No results found" instead.
+The option had been in the config file, the `Display` for `Config`, the
+serializer and the docs for as long as they had existed.
+
+What made it invisible was the test. `test_search_content` built an index, then
+called `index_file_content` itself for two entries, then searched and found
+them. Every line of it passes against a build in which nothing in the program
+ever calls `index_file_content` -- which was the actual state of affairs. It is
+lesson 42 one level up: not a test that re-derives an expected *value*, but a
+test that supplies the *step the program was supposed to perform*. It tested
+that a function works. Nobody had tested that it is called.
+
+The tell is available without reading any test: **grep the callers of the
+function that does the work.** `index_file_content` had exactly two, both
+inside `#[cfg(test)]`. A production function whose only callers are tests is
+either dead code or an unwired feature, and the two are worth telling apart
+because the second is a bug with a config key advertising it.
+
+Two smaller findings from the same fix, both worth generalising:
+
+- **"Off" and "broken" must not be the same observable state.** With
+  `index_contents` on, the program did exactly what it did with it off. The
+  new `ScanStats::files_content_indexed` counter exists so the two are
+  distinguishable at a glance, and the regression test asserts the count and
+  not merely that the search came back empty. Any option whose failure mode is
+  "produces nothing" needs some positive evidence that it ran.
+- **A derived cache is only derived if something re-derives it.**
+  `trigram_index` was not written by `serialize`, on the reasonable-sounding
+  grounds that it is a cache -- but nothing rebuilt it on load either, so it was
+  empty in every process that had not just built it. `name_lookup` next to it
+  *is* rebuilt, by `build_from_entries`, which is what made the omission look
+  deliberate. When a field is left out of a writer, the question is not "is it
+  derivable?" but "where, in the code, is it actually re-derived?"
+
+The check that would have caught all of it is cheap and mechanical: for each
+field a serializer omits, name the line that reconstructs it. If there is no
+such line, the omission is a defect regardless of how derivable the field is
+in principle.
+
+### Lesson 46: a crate-wide `#![allow(dead_code)]` disarms the one lint that finds lesson 45
+
+`apps/diskimager` shipped a complete ISO 9660 volume descriptor parser, a
+Browse tab that draws the image's directory tree, and an info card showing
+format, volume label and creation date. None of it could run. `load_image` --
+the single entry point to all three -- had no caller outside `#[cfg(test)]`,
+and there was no key, button or drop target anywhere in the program that
+reached it. Meanwhile the Write tab rendered, in as many words, *"No image
+loaded. Open an .iso, .img, or .bin file."* -- an instruction for an action
+the program did not offer.
+
+The compiler knew. `dead_code` names this exact condition, and in a binary
+crate it analyses `pub` items too, because a bin has no external callers. It
+said nothing because line 18 of the file was `#![allow(dead_code)]`.
+
+That allow was not put there to hide this. It is the kind of line added early,
+while a file is half-built and every second item is legitimately unused, and
+then never removed -- and once it is in place it costs nothing to add the
+nineteenth unreachable function under it. When the allow came out, the crate
+was **already clean**: every item in it was reachable once `load_image` had a
+caller. So the allow had not been earning anything for a long time; it was
+purely suppressing the one diagnostic that mattered.
+
+Two things generalise:
+
+- **Check that a lint you rely on is armed, not merely quiet.** Removing the
+  allow produced zero warnings, which is the same output as a lint that is
+  still off. The way to tell them apart is to add a deliberately unreachable
+  function and confirm it warns, then delete it. That was done here.
+- **A crate-wide allow is a different object from a targeted one.** A
+  `#[allow(dead_code)]` on one item, with a comment naming what will call it,
+  is a claim about that item that a reader can check. The crate-wide form is a
+  standing exemption for code that has not been written yet, and it applies to
+  the code that was.
+
+The companion finding is the widget on the other end: `guitk::dialog::
+FileDialog` is 1758 lines, fully tested, and had **zero users in the entire
+tree** until this fix. Two halves of one feature, each complete, with nothing
+joining them. `scripts/scan-unwired.py` exists to find this shape; it reports
+per binary with the share of the program `main` reaches, because the
+overwhelmingly common cause of an unreachable function in lane C is a
+placeholder `main` (`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`), which is one
+debt and not one finding per function.
+
+A third finding fell out of writing the test, and is worth keeping separate
+because it is a plain bug rather than a wiring one: `extract_iso_string`
+trimmed whitespace only. ECMA-119 §8.4.6 pads these fields with spaces, so a
+conformant image was fine -- but a tool that zeroes the descriptor and writes
+the label over the front produces NUL padding, and that went into the info
+card as `SLATEOS_LIVE\0\0\0...`. The first fixture written for the end-to-end
+test had exactly this shape, by accident, because `vec![0; n]` is the natural
+way to build one; the test caught the parser rather than the fixture. A disk
+imager reads the images that exist, not the ones the standard describes, so
+the trim now covers NUL and a named test pins it.
+
+### TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE — 2026-08-25 — OPEN
+
+**Where:** `gui/toolkit/src/dialog.rs` — `DirEntry::name`, `DialogAction::Selected(String)`,
+`DialogAction::NavigatedTo(String)`, `FileDialog::with_initial_path(&str)`. First
+embedder: `apps/diskimager/src/main.rs` `read_directory` / `dispatch_to_open_dialog`.
+
+**What it is.** The dialog's whole path surface is `String`. An embedder listing a
+real directory therefore has to convert `OsString` to `String`, and the only
+total conversion is `to_string_lossy`, which replaces every byte it cannot decode
+with U+FFFD. `read_directory` does exactly that. A file whose name is not valid
+UTF-8 is listed under a name that is *not the name on disk*, and the string the
+dialog hands back on `Selected` no longer identifies it: `fs::read` on it fails
+with "not found" if nothing else matches, or — worse — succeeds against a
+different file that happens to contain a literal U+FFFD in the same position.
+
+This directly violates `CLAUDE.md` self-review item 7: *"Never force UTF-8 on
+filesystem paths... No `from_utf8_lossy` — that's silent data corruption. Our
+paths allow all bytes except `/` and `\0`."* SlateOS deliberately permits every
+byte but those two in a filename, so this is not a corner case imported from
+another OS's rules; it is a filename our own filesystem is specified to accept.
+
+**Why it is debt and not a fix in this commit.** The defect is in the toolkit's
+API, not in the embedder. `apps/diskimager` was the first program ever to use
+`FileDialog` (the widget had zero callers tree-wide until 2026-08-25 — see
+lesson 46), so it is also the first to hit this. Changing `DirEntry::name` and
+the `DialogAction` payloads from `String` to `PathBuf`/`OsString` touches the
+dialog's rendering (which measures and elides the name), its filter matching,
+its sort comparators and its 40-odd tests. That is a lane-C change and squarely
+ours to make — it was separated from the wiring commit so that "the parser now
+has a caller" and "the toolkit's path type is wrong" are two reviewable changes,
+not one.
+
+**The proper fix.** `DirEntry::name: OsString`; `DialogAction::Selected(PathBuf)`
+and `NavigatedTo(PathBuf)`; `with_initial_path(impl AsRef<Path>)`. Rendering
+converts to a display string *at the draw call and nowhere else*, which is the
+one place lossy conversion is correct because it is producing glyphs, not a
+lookup key. Filter matching moves to `Path::extension` on the `OsStr`. Then
+`read_directory` in diskimager drops its `to_string_lossy` entirely and
+`load_image_from_path` takes a `&Path`.
+
+**Test that should exist and cannot yet.** A file created with an invalid-UTF-8
+name, listed, selected, and read back byte-identically. Note this needs a host
+filesystem that permits such a name — on Windows it does not, so the test
+belongs with the SlateOS-target suite, not the host one. Until then a unit test
+on the type signatures is the most that can be pinned.
+
+**Severity while open:** low frequency, silent, and wrong-file rather than
+crash. Nothing in lane C currently *creates* non-UTF-8 filenames, so the way to
+meet it today is an image copied from another system.
+
 ---
 
 ## `A-KSHELL-SED-GUESSES-WHICH-WORD-IS-THE-SCRIPT` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (`ba47c7086`)
@@ -78795,3 +78951,94 @@ one of the two files, and none is invented by a decoder.
 - `column` still decodes lossily (~14868, ~14908). It is a display formatter
   writing only to stdout, so a mangled character is visible as mangled rather
   than mistaken for data — the lowest severity of the four and the last to do.
+---
+
+### Lesson 47: an app that keeps time but never receives the clock (lane C, 2026-08-25)
+
+**In short:** five lane-C programs measured time, and none of them was given
+any. A stopwatch that sat at 00:00.00, a metronome that never beat, a typing
+tutor whose every speed reading was zero, toasts that never left the screen,
+and a speed test that finished in a single frame. All five had a correct,
+well-tested function to advance the clock. Nothing in production ever called
+it. Every one of them still laid out, still repainted, still answered the
+keyboard — they just showed a plausible zero.
+
+A GUI program's clock arrives as one event:
+
+```rust
+Event::Tick { elapsed_ms }
+```
+
+`oswindow` computes `now - this window's previous tick` and sends that
+interval to the window. An app that ages anything has to route that event to
+whatever advances its state. If `handle_event` does not name `Event::Tick`,
+the event lands in the `_ => {}` arm and the state is frozen for the life of
+the process.
+
+**Why this is lesson 45 wearing a disguise the compiler cannot see through.**
+Lesson 45 is "a feature with no production caller is a feature that does not
+exist," and `dead_code` is the lint that finds it. `dead_code` cannot find
+this one, because the function *is* called — by the tests. And a test can
+always reach it, because a test passes the timestamp in by hand:
+
+```rust
+#[test]
+fn test_auto_dismiss_on_timeout() {
+    toasts.tick(3001);          // the daemon never does this
+    assert!(toasts[0].dismissing);
+}
+```
+
+That test passed for the entire time notifications were broken. It asserts
+something true about `tick`. It asserts nothing whatever about the program.
+
+**The rule that follows: test a wiring through the entry point, not the
+target.** Every fix here got a test that goes in through `handle_event` and
+was then *falsified* — delete the match arm, confirm that test and only that
+test fails, restore, re-run green. That is the only construction that can
+distinguish a wired app from an unwired one.
+
+**The five, and what each was actually showing the user.**
+
+| App | Symptom |
+|---|---|
+| `apps/stopwatch` | 00:00.00, running. The countdown never counted either. |
+| `apps/metronome` | No beat, and `T` (tap tempo) was an empty match arm whose comment read "in a real app this would use system time". |
+| `apps/typingtutor` | Every WPM figure and every duration read zero — on the live screen, on the results screen, and in the saved history. |
+| `gui/notifications` | Toasts never aged, so they never left the screen. |
+| `apps/speedtest` | Start ran latency, download and upload inside one call and returned `Complete`. The live graph arrived full; the phase strip's running-highlight and Escape's cancel were unreachable code. |
+
+Four of the five were found by hand in one afternoon. Four for four is not a
+coincidence — it is the default outcome of an event enum with a `_ =>` arm.
+
+**The gate: `scripts/check-tick-wiring.py`.** It reports a file when all three
+hold: it defines `fn handle_event`; it defines a function taking a named time
+parameter (`delta_ms`, `elapsed_ms`, `current_ms`, `delta_secs`, …); and it
+never mentions `Event::Tick` **in production code**. `--self-test` runs 13
+fixture cases; exit status is 1 on findings, so it can be run as a gate. It
+found `apps/speedtest`, which the hand search had missed.
+
+**Two things about the gate that are worth more than the gate.**
+
+- **The three conditions are tight on purpose.** Flagging every file with a
+  `_ms` constant would report dozens of non-problems, and a gate that cries
+  wolf is a gate that gets commented out. A `format_time(total_ms)` helper is
+  not asking to be driven; a parameter called `delta_ms` is.
+- **"In production code" is the whole difference between a gate and a
+  decoration, and the first draft did not have it.** Comments and
+  `#[cfg(test)]` items are blanked before the search, because every file this
+  check causes to be fixed acquires a comment explaining the fix and a test
+  constructing an `Event::Tick`. If either counted as evidence of wiring, the
+  file would be permanently exempt from the check that found it — delete the
+  arm again and the test written to catch exactly that would still hold the
+  file green. Caught by falsifying the first draft against the live tree:
+  removing `apps/stopwatch`'s arm produced no finding.
+
+That second point generalises past this check. **A static gate must be
+falsified against the tree it guards, not only against its own fixtures.** A
+fixture proves the gate can see; only a live falsification proves it is still
+looking at the thing you think it is. This is the same failure lane A logged
+in `A-GATES-SILENTLY-STOPPED-CHECKING` — four gates parsing a fraction of the
+tree and reporting "clean" — arrived at from the opposite direction: not a
+gate that stopped reading the files, but a gate that read them and was talked
+out of its finding by the evidence of its own success.

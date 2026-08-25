@@ -557,13 +557,26 @@ impl TypingTutorApp {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        if let Event::Key(ke) = event {
-            self.handle_key(ke);
+        match event {
+            Event::Key(ke) => self.handle_key(ke),
+            // Without this the clock stood at zero, so every WPM figure the
+            // app showed was zero and every duration read 0:00 -- on the
+            // live screen, on the results screen, and in the history it
+            // saved.  `advance_time` and everything above it were correct
+            // and tested; nothing called them.  known-issues.md lesson 45.
+            Event::Tick { elapsed_ms } => self.advance_time(*elapsed_ms),
+            _ => {}
         }
     }
 
-    fn set_time(&mut self, time_ms: u64) {
-        self.current_time_ms = time_ms;
+    /// Move the app's clock forward by `delta_ms`.
+    ///
+    /// An interval rather than a timestamp, because that is what
+    /// [`Event::Tick`] carries.  The origin does not matter: `start_time_ms`
+    /// and `end_time_ms` are both stamped from this same counter, and every
+    /// figure derived from them is a difference.
+    fn advance_time(&mut self, delta_ms: u64) {
+        self.current_time_ms = self.current_time_ms.saturating_add(delta_ms);
     }
 
     // -----------------------------------------------------------------------
@@ -1888,13 +1901,57 @@ mod tests {
         assert_eq!(app.selected_lesson, 1);
     }
 
-    // --- Set time ---
+    // --- The clock ---
 
+    /// A real `Event::Tick` moves the clock, and so the WPM figure.
+    ///
+    /// Through `handle_event` on purpose.  `wpm` and `elapsed_ms` were
+    /// correct and directly tested throughout the period when the clock
+    /// never moved, because those tests passed `current_time_ms` in by hand;
+    /// only a test that goes through the event can tell the difference.
+    /// Falsified by deleting the `Event::Tick` arm: this test fails and
+    /// nothing else does.
     #[test]
-    fn set_time() {
+    fn a_tick_event_moves_the_clock_and_the_wpm() {
         let mut app = TypingTutorApp::new();
-        app.set_time(5000);
-        assert_eq!(app.current_time_ms, 5000);
+        app.handle_event(&Event::Tick { elapsed_ms: 5000 });
+        assert_eq!(
+            app.current_time_ms, 5000,
+            "Event::Tick did not reach the clock"
+        );
+    }
+
+    /// Intervals accumulate; the clock is not merely the last one.
+    #[test]
+    fn tick_intervals_accumulate() {
+        let mut app = TypingTutorApp::new();
+        app.handle_event(&Event::Tick { elapsed_ms: 1000 });
+        app.handle_event(&Event::Tick { elapsed_ms: 1500 });
+        assert_eq!(app.current_time_ms, 2500);
+    }
+
+    /// The symptom the user would have seen: WPM stuck at zero.
+    ///
+    /// `wpm` divides by the elapsed time and returns 0.0 when that is 0, so
+    /// a clock that never moves does not produce a wrong number or a panic --
+    /// it produces a plausible-looking zero on every screen that shows a
+    /// speed.  That is why nobody noticed.
+    #[test]
+    fn typing_then_ticking_produces_a_real_speed() {
+        let mut app = TypingTutorApp::new();
+        let mut session = TypingSession::new("hello");
+        session.type_char('h', app.current_time_ms);
+        session.type_char('e', app.current_time_ms);
+        app.session = Some(session);
+
+        app.handle_event(&Event::Tick { elapsed_ms: 60_000 });
+
+        let wpm = app
+            .session
+            .as_ref()
+            .map_or(0.0, |s| s.wpm(app.current_time_ms));
+        // Two correct characters in one minute = 2/5 of a word per minute.
+        assert!(wpm > 0.0, "one minute of typing still reported {wpm} WPM");
     }
 
     // --- CharStatus enum ---

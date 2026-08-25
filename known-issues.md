@@ -77760,3 +77760,218 @@ palette so each defect names every test that catches it.
 114. The swept corpus stands at **2949 tests, 2314 unproved -- 21.5 % proved, 0
 dangling, 204 single-prover**; the figure recorded above after module 85 was
 21.0 %.
+
+
+## MODULE 87 (lane C, 2026-08-25) -- the keyboard half of the desktop shell
+
+**In short:** module 83 swept `gui/desktop/src/lib.rs`'s *pointer* handling and
+left the keyboard alone, so the chord table in `DesktopAction::for_chord`, the
+Alt-Tab switcher's four stepping methods, `run_desktop_action`'s arms and the
+virtual-desktop bounds had never been asked a question. Fifty-three of the
+file's tests had never been named by any defect. Twenty-six deliberate faults,
+twenty-two caught. Three of the four escapes are one shape -- **the recovery
+code is unreachable from every fixture, because no fixture ever builds the state
+it recovers from** -- and one of those three had a test named for exactly the
+property it failed to prove. The fourth escape is a different and worse thing:
+a test that copies the production expression into its own body.
+
+**The pass, 26 defects:**
+
+```
+26 defects: 22 caught, 4 escaped, 0 never asked, 0 under-caught,
+14 under-declared
+```
+
+Caught: the one-window switcher guard, the opening index, the stepping direction
+both ways, the release path's outcome, Shift+Alt+Tab's binding, Alt+F4's, Super+D's,
+Super+Right's and Super+Down's, the historic loose-chord regression on both
+arrows (the `Super+Right` binding that stopped naming Ctrl and swallowed
+`Ctrl+Super+Right` again), the desktop-switch direction, Escape's binding and its
+arm, Super+D's desktop filter, the maximised-window test, the focused-window
+`?`, the taskbar's desktop filter and its sort order, and the off-by-one past
+the last virtual desktop.
+
+### Lesson 41: a test named for a hazard is not evidence the hazard was built
+
+Two escapes, `E` and `G`, are both in code that exists only to survive a state
+the ordinary path does not produce -- windows closing while the Alt-Tab switcher
+is open, leaving its index past the end of a list that is recomputed on every
+step.
+
+`E` removes the clamp from `prev_alt_tab`:
+
+```rust
+-            self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index.min(last));
++            self.alt_tab_index = step::wrapping_before(count, self.alt_tab_index);
+```
+
+The suite already had a test named for this, written when the clamp was added:
+
+```rust
+    /// Stepping backwards from a stale index must land inside the list, not on
+    /// another index past the end.
+    #[test]
+    fn stepping_backwards_survives_the_windows_closing_underneath_it() {
+        let ids = ...four windows...;
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        shell.next_alt_tab();
+        for id in &ids[1..] { close(&mut shell, *id); }
+        shell.prev_alt_tab();
+        assert!(shell.alt_tab_index < shell.taskbar_windows().len());
+    }
+```
+
+The assertion is right, the name is right, and the test is green with the clamp
+deleted. `start_alt_tab` on four windows opens on index 2; two `next_alt_tab`
+calls go 3, then **wrap to 0**. So by the time the windows close, the index is
+already 0 -- and 0 is in range for every non-empty list, so `wrapping_before`
+gives the same answer clamped or not. The fixture never produced a stale index
+at all. It is a test about recovering from a hazard that never constructs the
+hazard.
+
+`G` is the same failure in the same subsystem. It moves `finish_alt_tab`'s
+`self.alt_tab_active = false` below the `?` that finds the window:
+
+```rust
+-        self.alt_tab_active = false;
+-        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;
++        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;
++        self.alt_tab_active = false;
+```
+
+Now a switcher whose window closed under it never closes -- the `?` returns
+before the flag is cleared, and the Alt release that would have ended it has
+already been spent, so the overlay sits over every window for the rest of the
+session. `alt_tab_survives_the_windows_closing_underneath_it` reaches
+`finish_alt_tab` through `next_alt_tab`, which wraps and therefore always lands
+in range, so the `?` never fires and the two orderings are the same code.
+
+**The remedy is one line, and it is not another assertion at the end.** It is an
+assertion in the *middle*, that the precondition of the hazard holds before the
+recovery is exercised. Both closing tests carry one:
+
+```rust
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 3, "the last row, not a wrapped one");
+```
+
+Without it the fixture's arithmetic is invisible: nothing in the test says which
+index it is recovering *from*, so a change to `start_alt_tab`'s opening index --
+which module 87's own defect `C` makes -- silently turns the test back into one
+that proves nothing. With it, the test fails loudly instead. This generalises:
+**whenever a test is written for a failure path, assert that the failure state
+was reached.** The assertion costs a line and is the only thing standing between
+a regression test and a tautology.
+
+### Lesson 42: a test that re-derives the answer proves its own copy
+
+Escape `T` widens the predicate `run_desktop_action` uses for Super+D:
+
+```rust
+-                    .filter(|w| w.on_glass() && w.desktop == self.current_desktop)
++                    .filter(|w| w.mapped && w.desktop == self.current_desktop)
+```
+
+`on_glass()` means mapped *and not minimised*, so the widened version asks a
+window that is already minimised to minimise again -- a request the compositor
+must ignore and, worse, one the user has to undo twice to get back where they
+were. There is a test named for exactly this, `show_desktop_does_not_ask_an_
+already_minimized_window_to_minimize`, with a comment explaining why the narrow
+predicate is the right one. It was green.
+
+Its body was:
+
+```rust
+    let asked: Vec<WindowId> = shell
+        .windows
+        .values()
+        .filter(|w| w.on_glass() && w.desktop == shell.current_desktop)
+        .map(|w| w.id)
+        .collect();
+    assert_eq!(asked, [still_here], "...");
+```
+
+It never pressed Super+D. It copied the production filter into the test body and
+asserted against its own copy -- so it proved the copy, and the copy was not
+changed by the defect. This is a worse failure than an untested branch, and it
+is worth being precise about why: **an untested branch is invisible, whereas a
+test like this is visibly wrong in the other direction.** It appears in the
+coverage listing, it carries the right name, it has a comment arguing for the
+right design, and it will be counted by anyone auditing whether the property is
+covered. It is coverage-shaped and proves nothing.
+
+The rewrite presses the chord and reads what the shell asked for:
+
+```rust
+    let outcome = shell.handle_hotkey(&super_d);
+    assert!(outcome.consumed);
+    let asked: Vec<WindowId> = outcome.requests.iter().map(...).collect();
+    assert_eq!(asked, [still_here], "...");
+```
+
+Note that grep is a poor detector for this. The copied line is not literally
+identical to the production one (`self.current_desktop` versus
+`shell.current_desktop`), it sits in a different file from the code it
+duplicates, and there is nothing syntactically wrong with a test that filters a
+collection -- four other tests in this crate do it legitimately. The
+reintroduction sweep is the detector, because the sweep asks the only question
+that distinguishes the two cases: *does changing the production code change the
+test's answer?* A test that re-derives the answer says no, by construction.
+
+### Lesson 43: a name containing "only" is a universal claim, and needs a negative case
+
+Escape `H` drops the key from the release guard:
+
+```rust
+-            if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {
++            if self.alt_tab_active {
+```
+
+Alt+Tab is *held*: Alt stays down while Tab is pressed and released, over and
+over, and the switch is committed by the **Alt** release. Under the defect the
+first Tab release commits instead, so every use of Alt+Tab lands on the second
+window and the user can never reach the third.
+
+Exactly one test in the crate released a key at all:
+`a_key_release_only_ends_the_window_switcher`. It releases LeftAlt with no
+switcher open (nothing happens), then opens the switcher and releases LeftAlt
+(it finishes). Both halves are right. Neither can see the defect, because the
+only key either half releases is the one key for which naming Alt and not naming
+it agree.
+
+The name says *only*. That is a claim about every key, and the body is two
+examples of the one key the claim exempts. The general form is worth stating:
+**a test whose name contains "only", "just", "never" or "nothing else" is
+asserting a universal, and a suite of positive examples cannot discharge one.**
+The negative case is the whole content of the claim. The closing test supplies
+it -- release Tab, assert the switcher is still up and has not moved -- and then
+releases Alt as well, so it says what the rule *is* and not merely what it is
+not.
+
+### Result
+
+```
+26 defects: 26 caught, 0 escaped, 0 never asked, 0 under-caught, 4 under-declared
+```
+
+Four closing tests: three new ones in `gui/desktop/src/lib.rs`
+(`stepping_backwards_from_the_end_lands_in_the_list_not_past_it`,
+`a_switcher_whose_window_closed_under_it_still_closes`,
+`releasing_tab_does_not_end_the_window_switcher`) and one **rewrite** in
+`gui/desktop/src/pointer_tests.rs`. The rewrite is worth flagging as such: the
+count of tests did not go up, and the honest description of the change is not
+"added coverage" but "replaced a test that proved nothing with one that proves
+the thing its name always claimed". All eighteen under-declared catchers across
+the two passes were folded back into the palette, which is what dropped the
+corpus's single-prover count by twenty.
+
+Unlike module 86, no production bug fell out: every defect here was a fault the
+sweep invented, and the shell's keyboard handling was correct as written. What
+was wrong was the evidence for it.
+
+`gui/desktop/src/lib.rs` is now 33 of 64 tests never-asked, down from 53 of 61.
+The swept corpus stands at **2952 tests, 2310 unproved -- 21.7 % proved, 0
+dangling, 184 single-prover**; the figures recorded above after module 86 were
+21.5 % and 204.

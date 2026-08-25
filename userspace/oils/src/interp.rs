@@ -42134,10 +42134,10 @@ impl Shell {
     ///
     /// A directory is a failure, not an empty file: POSIX lets `open` succeed on
     /// one and then fails the `read` with `EISDIR`, so glibc bash answers
-    /// `bind -f adir` with `bind: adir: cannot read: Is a directory` and status
-    /// 1. This once returned emptiness and status 0, from a measurement taken
-    /// against a Cygwin bash, where the open is refused before the read and the
-    /// builtin swallows it.
+    /// `bind -f adir` with `bind: adir: cannot read: Is a directory`, and exits
+    /// with status 1. This once returned emptiness and status 0, from a
+    /// measurement taken against a Cygwin bash, where the open is refused before
+    /// the read and the builtin swallows it.
     ///
     /// Windows refuses the open outright and calls it `ERROR_ACCESS_DENIED`, so
     /// [`open_error`] is what makes the development host say `EISDIR` too.

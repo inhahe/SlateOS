@@ -660,11 +660,80 @@ fi
 # missing-python skip above: a hook that breaks pushing gets uninstalled.
 command -v rustfmt >/dev/null 2>&1 || skip_fmt=1
 
+# Report on one file, and return 1 if it needs reformatting.
+#
+# Why this does not simply print `rustfmt --check`'s own diff: rustfmt builds
+# that diff with an O(n*m)-memory algorithm (the `diff` crate's full DP table),
+# so on kernel/src/kshell.rs — 120k lines — it tries to allocate 36 GB and
+# aborts, printing an allocation-failure stack trace where the diff should
+# have been. The *verdict* was still right, but the report is the part that
+# makes a verdict actionable, and a stack trace names no file and no line.
+#
+# Note it only blows up when there is drift: a clean file of that same size
+# checks in 2.5s, because rustfmt skips the diff entirely when the text is
+# unchanged. So the unusable report appeared precisely when it was needed, and
+# never during the runs that would have exposed it earlier.
+#
+# Formatting a *copy* never reaches the diff emitter, and system `diff` walks
+# 120k lines without complaint. The copy is also the reason rustfmt may fail
+# here for an innocent file: it resolves `mod` declarations relative to the
+# file it is handed, and a lone copy in a temp directory has no siblings to
+# resolve them against. So the copy's verdict is trusted only when rustfmt
+# succeeded on it; otherwise this falls back to rustfmt's own report, which
+# for a module root — always a small file — is a real diff.
+fmt_report_one() {
+    fmt_one=$1
+    fmt_tmp="${TMPDIR:-/tmp}/pre-push-fmt.$$.rs"
+    if cp "$fmt_one" "$fmt_tmp" 2>/dev/null &&
+        rustfmt --edition 2024 "$fmt_tmp" >/dev/null 2>&1
+    then
+        if cmp -s "$fmt_one" "$fmt_tmp"; then
+            rm -f "$fmt_tmp"
+            # Fine on its own; something else in the batch was not.
+            return 0
+        fi
+        printf '\nDiff in %s:\n' "$fmt_one" >&2
+        if command -v diff >/dev/null 2>&1; then
+            diff -u "$fmt_one" "$fmt_tmp" >&2
+        else
+            printf '  (no `diff` on this machine — run: rustfmt --edition 2024 %s)\n' \
+                "$fmt_one" >&2
+        fi
+        rm -f "$fmt_tmp"
+        return 1
+    fi
+    rm -f "$fmt_tmp"
+    rustfmt --edition 2024 --check "$fmt_one" >&2 && return 0
+    return 1
+}
+
 # One batch of paths. A function is how a POSIX shell passes a built-up
 # argument list without re-splitting it on spaces.
+#
+# The batch run is only a verdict — its output is discarded, because on a large
+# file it is the 36 GB stack trace described above. When it says no, the report
+# is rebuilt one file at a time by `fmt_report_one`.
 fmt_check() {
     [ "$#" -gt 0 ] || return 0
-    rustfmt --edition 2024 --check "$@"
+    rustfmt --edition 2024 --check "$@" >/dev/null 2>&1 && return 0
+
+    fmt_batch_named=0
+    for fmt_path in "$@"; do
+        fmt_report_one "$fmt_path" || fmt_batch_named=1
+    done
+
+    # A batch that failed while every file in it passed individually is still a
+    # failure. rustfmt refused for a reason this hook could not attribute, and
+    # of the three possible outcomes — refuse with a report, refuse without
+    # one, let it through — the last is the only unrecoverable one.
+    if [ "$fmt_batch_named" = "0" ]; then
+        printf '\npre-push: rustfmt refused this batch, but no single file in it\n' >&2
+        printf '          reproduces the refusal. Re-run these by hand:\n' >&2
+        for fmt_path in "$@"; do
+            printf '            %s\n' "$fmt_path" >&2
+        done
+    fi
+    return 1
 }
 
 fmt_failed=0

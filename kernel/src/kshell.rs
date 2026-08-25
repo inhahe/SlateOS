@@ -6869,6 +6869,12 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         "tac" => cmd_tac_input(args, input),
         "tee" => cmd_tee_input(args, input),
         "paste" => cmd_paste_input(args, input),
+        // `fold` reads bytes and writes the same bytes with newlines inserted.
+        // In column mode it decodes incrementally and treats a byte that is
+        // part of no valid character as one column of its own, so an
+        // undecodable pipe folds rather than being refused — and `fold -b -w76`
+        // over base64, the reason people reach for `-b`, is exact.
+        "fold" => cmd_fold_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
@@ -6880,15 +6886,14 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // cope with it. Converting one more of these is a matter of moving its
         // arm up into the block above.
         //
-        // `grep`, `cut`, `tr` and `fold` are `char`-oriented (character
-        // classes, field indices, display width); `sed` and `awk` are real
-        // text interpreters; `xargs` and `column` re-parse into words and
-        // measure display width. `mapfile` is blocked on something else rather
-        // than on itself — it stores its lines as `String`s in the shell
-        // environment, which is still a `String` map, so converting it here
-        // would only move the decode one call deeper.
-        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "fold" | "xargs" | "column" | "sed"
-        | "awk" => {
+        // `grep`, `cut` and `tr` are `char`-oriented (character classes, field
+        // indices, display width); `sed` and `awk` are real text interpreters;
+        // `xargs` and `column` re-parse into words and measure display width.
+        // `mapfile` is blocked on something else rather than on itself — it
+        // stores its lines as `String`s in the shell environment, which is
+        // still a `String` map, so converting it here would only move the
+        // decode one call deeper.
+        "grep" | "mapfile" | "readarray" | "cut" | "tr" | "xargs" | "column" | "sed" | "awk" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -6898,7 +6903,6 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
                 "mapfile" | "readarray" => cmd_mapfile_input(args, text),
                 "cut" => cmd_cut_input(args, text),
                 "tr" => cmd_tr_input(args, text),
-                "fold" => cmd_fold_input(args, text),
                 "xargs" => cmd_xargs_input(args, text),
                 "column" => cmd_column_input(args, text),
                 "sed" => cmd_sed_input(args, text),
@@ -12290,6 +12294,39 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "-b counts bytes, so three bytes is `zz` plus the first byte of alpha"
         );
 
+        // Input that is not valid UTF-8 is folded, not refused and not
+        // silently emptied. `fold` used to be narrowed through
+        // `shell_bytes_as_str` before it ever saw the pipe, so this whole
+        // group was a diagnostic and exit 1; the file half was worse still,
+        // with `from_utf8(&data).unwrap_or("")` turning an undecodable file
+        // into an empty one and reporting success.
+        let out = piped("fold -w2", b"\xff\xfe\xfd\xfc");
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\xfe\n\xfd\xfc",
+            "a byte that is part of no character counts one column and is written back as itself"
+        );
+        assert_eq!(last_exit(), 0, "and folding it is success, not a refusal");
+
+        // The decoder resynchronises after an undecodable byte: alpha is still
+        // one unit, so a width of 1 puts it on its own line whole rather than
+        // splitting it.
+        let out = piped("fold -w1", b"\xff\xce\xb1\n");
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\n\xce\xb1\n",
+            "a bad byte does not derail the character that follows it"
+        );
+
+        // A sequence cut short by the end of input is written back as the bytes
+        // it is -- neither dropped nor completed with a replacement character.
+        let out = piped("fold -w2", b"zz\xce");
+        assert_eq!(
+            out.as_slice(),
+            b"zz\n\xce",
+            "a truncated sequence at end of input survives as its own bytes"
+        );
+
         // A tab advances to the next multiple of 8 rather than counting as one
         // column -- unless `-b` was asked for, where every byte is one column.
         let out = piped("fold -w8", b"zz\tzz\n");
@@ -12437,8 +12474,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
         assert_eq!(last_exit(), 1, "and it is a failure");
 
+        // The file half must be as byte-clean as the pipe half. This is the
+        // case `from_utf8(&data).unwrap_or("")` answered with *nothing at all*
+        // and an exit status of 0 -- a file silently reported as empty, which
+        // is the worst shape a wrong answer can take because the caller has no
+        // way to tell it from a file that really was empty.
+        let bad = "/tmp/zz_fold_bad";
+        assert!(
+            crate::fs::Vfs::write_file(bad, b"\xff\xfe\xfd\xfc\n").is_ok(),
+            "writing the undecodable fold fixture must succeed"
+        );
+        let out = plain(&alloc::format!("fold -w2 {bad}"));
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\xfe\n\xfd\xfc\n",
+            "a file of undecodable bytes is folded, not silently emptied"
+        );
+        assert_eq!(last_exit(), 0, "and reading it is success");
+
         let _ = crate::fs::Vfs::remove(a);
         let _ = crate::fs::Vfs::remove(b);
+        let _ = crate::fs::Vfs::remove(bad);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -107889,33 +107945,101 @@ fn parse_fold_args(args: &str) -> Result<FoldSpec, FoldParseError> {
     })
 }
 
+/// One whole character, classified: written as itself, and moving the column
+/// the way GNU's `adjust_column` moves it.
+///
+/// Written once, rather than inline in [`fold_units`], because the three
+/// special cases are the sort of table that drifts when it exists twice — see
+/// `TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP`.
+fn fold_char_unit(c: char) -> FoldUnit {
+    FoldUnit {
+        piece: FoldPiece::Ch(c),
+        adj: match c {
+            '\t' => FoldAdj::Tab,
+            '\u{8}' => FoldAdj::Backspace,
+            '\r' => FoldAdj::Return,
+            _ => FoldAdj::Plain,
+        },
+        blank: c == ' ' || c == '\t',
+    }
+}
+
+/// One byte, standing for itself and counting one column.
+///
+/// Used for every byte under `-b`, and in column mode for a byte that is not
+/// part of any valid character.
+fn fold_byte_unit(b: u8) -> FoldUnit {
+    FoldUnit {
+        piece: FoldPiece::Byte(b),
+        // One column, tabs included: that is what `-b` means, and an
+        // undecodable byte has no width anyone can know.
+        adj: FoldAdj::Plain,
+        // A tab is still a blank, so `-bs` may break after one. No UTF-8
+        // continuation byte can be confused for one: they are all >= 0x80.
+        blank: b == b' ' || b == b'\t',
+    }
+}
+
 /// Split one input line into the units `fold` may not break apart.
-fn fold_units(line: &str, count_bytes: bool) -> Vec<FoldUnit> {
+///
+/// The line arrives as bytes, not as `&str`, because a file is bytes and a
+/// pipe is bytes. Narrowing to `&str` first is how `fold` used to turn a file
+/// it could not decode into an *empty* one — `from_utf8(&data).unwrap_or("")`,
+/// reported as success. That is the same silent-guess failure the rest of this
+/// rewrite removed, arriving by a different door.
+///
+/// In column mode the bytes are decoded incrementally, and a byte that is part
+/// of no valid character becomes a one-column unit of its own. That is what
+/// GNU does in the C locale: the byte is neither dropped nor replaced with
+/// U+FFFD, both of which would change the bytes on the way through a program
+/// whose job is to insert newlines and nothing else.
+fn fold_units(line: &[u8], count_bytes: bool) -> Vec<FoldUnit> {
     let mut units = Vec::new();
     if count_bytes {
-        for &b in line.as_bytes() {
-            units.push(FoldUnit {
-                piece: FoldPiece::Byte(b),
-                // `-b` counts every byte as one column, tabs included...
-                adj: FoldAdj::Plain,
-                // ...but a tab is still a blank, so `-bs` may break after one.
-                // No UTF-8 continuation byte can be confused for one: they are
-                // all >= 0x80.
-                blank: b == b' ' || b == b'\t',
-            });
+        for &b in line {
+            units.push(fold_byte_unit(b));
         }
-    } else {
-        for c in line.chars() {
-            units.push(FoldUnit {
-                piece: FoldPiece::Ch(c),
-                adj: match c {
-                    '\t' => FoldAdj::Tab,
-                    '\u{8}' => FoldAdj::Backspace,
-                    '\r' => FoldAdj::Return,
-                    _ => FoldAdj::Plain,
-                },
-                blank: c == ' ' || c == '\t',
-            });
+        return units;
+    }
+
+    let mut rest = line;
+    while !rest.is_empty() {
+        match core::str::from_utf8(rest) {
+            Ok(s) => {
+                for c in s.chars() {
+                    units.push(fold_char_unit(c));
+                }
+                break;
+            }
+            Err(e) => {
+                let good = e.valid_up_to();
+                // Infallible in practice — `valid_up_to` is by definition a
+                // character boundary — but written so a wrong answer here
+                // cannot silently drop the prefix.
+                if let Some(s) = rest.get(..good).and_then(|b| core::str::from_utf8(b).ok()) {
+                    for c in s.chars() {
+                        units.push(fold_char_unit(c));
+                    }
+                }
+                // `error_len() == None` means the input simply ended inside a
+                // sequence. Everything left is then undecodable, and is written
+                // back as the bytes it is.
+                let bad = match e.error_len() {
+                    Some(n) => n,
+                    None => rest.len().saturating_sub(good),
+                };
+                let bad_end = good.saturating_add(bad);
+                for &b in rest.get(good..bad_end).unwrap_or(&[]) {
+                    units.push(fold_byte_unit(b));
+                }
+                // Both arms above give `bad >= 1`: `error_len` is never
+                // `Some(0)`, and a `None` only happens when at least one byte
+                // follows the valid prefix. So this loop always consumes.
+                match rest.get(bad_end..) {
+                    Some(r) => rest = r,
+                    None => break,
+                }
+            }
         }
     }
     units
@@ -107950,7 +108074,7 @@ fn fold_flush(out: &mut Vec<u8>, pending: &[FoldUnit]) {
 /// standing lesson in what two copies of one loop become
 /// (`TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP`).
 ///
-/// Lines are split on `\n` alone, with [`str::split_inclusive`] rather than
+/// Lines are split on `\n` alone, with `split_inclusive` rather than
 /// [`str::lines`], for two reasons: `lines` also strips a `\r`, which GNU
 /// treats as data *and* as a column reset; and it cannot tell `"a\nb"` from
 /// `"a\nb\n"`, so a loop built on it invents a final newline for input that had
@@ -107959,11 +108083,11 @@ fn fold_flush(out: &mut Vec<u8>, pending: &[FoldUnit]) {
 /// The break rule is GNU's `fold_file` restated without its `goto`: measure the
 /// next unit, and if it would overrun the width, end the line and measure that
 /// same unit again against the fresh column.
-fn fold_process(text: &str, spec: &FoldSpec) -> Vec<u8> {
+fn fold_process(text: &[u8], spec: &FoldSpec) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
 
-    for chunk in text.split_inclusive('\n') {
-        let (line, newline) = match chunk.strip_suffix('\n') {
+    for chunk in text.split_inclusive(|&b| b == b'\n') {
+        let (line, newline) = match chunk.strip_suffix(b"\n") {
             Some(l) => (l, true),
             None => (chunk, false),
         };
@@ -108031,7 +108155,7 @@ fn fold_process(text: &str, spec: &FoldSpec) -> Vec<u8> {
 /// `stdin` is `None` when there is no pipe feeding this command, which is a
 /// different thing from an empty pipe: the first has nothing to read and should
 /// say so, the second has read everything there was.
-fn fold_run(spec: &FoldSpec, stdin: Option<&str>) {
+fn fold_run(spec: &FoldSpec, stdin: Option<&[u8]>) {
     if spec.files.is_empty() {
         match stdin {
             Some(text) => shell_write_bytes(&fold_process(text, spec)),
@@ -108057,10 +108181,10 @@ fn fold_run(spec: &FoldSpec, stdin: Option<&str>) {
         }
         let resolved = resolve_path(path);
         match crate::fs::Vfs::read_file(&resolved) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                shell_write_bytes(&fold_process(text, spec));
-            }
+            // Straight from the VFS, undecoded. This used to be
+            // `from_utf8(&data).unwrap_or("")`, which turned a file `fold`
+            // could not decode into an empty one and exited 0.
+            Ok(data) => shell_write_bytes(&fold_process(&data, spec)),
             Err(e) => {
                 // Every operand is attempted and the worst status reported: a
                 // later readable file must not erase an earlier missing one.
@@ -108091,7 +108215,7 @@ fn cmd_fold(args: &str) {
 /// `fold` on piped input. A named file wins over the pipe, as in GNU and as in
 /// every other paired command here; a `-` operand names the pipe, so
 /// `cat a | fold - b` reads both, in that order.
-fn cmd_fold_input(args: &str, input: &str) {
+fn cmd_fold_input(args: &str, input: &[u8]) {
     match parse_fold_args(args) {
         Ok(spec) => fold_run(&spec, Some(input)),
         Err(e) => {

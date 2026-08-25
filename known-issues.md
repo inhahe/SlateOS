@@ -73520,3 +73520,46 @@ drop for want of a working compressor.
 `zstd`/`unzstd` and `lz4`/`unlz4` each have separate `cmd_*` functions and
 separate dispatch arms; the `un*`/`*cat` arms are decompress-only aliases. Only
 gzip/gunzip ever conflated the two directions, which is why only it could guess.
+
+### TD-A-COMPRESSORS-KEEP-THE-INPUT-FILE-WHERE-GNU-REPLACES-IT (lane A, 2026-08-24)
+
+**In short:** typing `gzip big.log` leaves you with **both** `big.log` and
+`big.log.gz`. On Linux you would be left with only `big.log.gz` — GNU `gzip`
+deletes the original once it has written the compressed copy, and `gunzip`
+likewise deletes the `.gz` once it has unpacked it. So someone compressing a
+directory to reclaim disk space reclaims none of it, and a script that compresses
+a log and then counts files finds one more than it expected.
+
+**Where.** `kernel/src/kshell.rs`. It applies to the whole family, not one
+command: there is no `Vfs::remove` call anywhere in the compressor region, so
+`gzip`/`gunzip`, `bzip2`/`bunzip2`, `xz`/`unxz`, `zstd`/`unzstd` and
+`lz4`/`unlz4` all write the output and leave the input untouched. The behaviour
+is at least *uniform*, which is why this is one entry and not five.
+
+**How it was found.** Self-test rung 30 asserted that a refused `gunzip` had
+written no archive, and the assertion failed even though the code under test was
+correct — the archive it found was a leftover from the rung's own earlier
+compress step, still present because `gzip` had not removed it. Cost one boot
+cycle (`aed60824f`). The rung now deletes the file first (`a6155cb82`), which is
+also what makes the assertion mean what it says.
+
+**Is it a bug?** Genuinely arguable, which is why it is filed as tech debt rather
+than fixed on sight:
+
+* *For matching GNU:* it is what every script and every user expects, and the
+  surprise is silent — you only notice when the disk does not empty.
+* *For keeping the input:* deleting the user's original file is destructive, and
+  this shell has no `--keep`/`-k` flag to opt out of it yet, so adopting GNU's
+  behaviour without that flag would make the safe case unreachable. The current
+  behaviour is the conservative half of the tradeoff.
+
+**Proper fix.** Add `-k`/`--keep` to the family, then make removal the default so
+the commands match GNU, with `-k` preserving today's behaviour. Removal must
+happen only after the output write has been confirmed to succeed — otherwise a
+write error midway through would delete the input and leave nothing behind,
+which converts a harmless failure into data loss. Doing it in the other order is
+the whole reason this is worth writing down rather than just doing.
+
+**Severity.** Low and non-destructive as it stands — the divergence costs disk
+space and script compatibility, never data. Note that fixing it moves it *toward*
+being destructive, so the fix needs more care than the bug does.

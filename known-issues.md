@@ -75142,3 +75142,115 @@ is a filter, not a verdict. The entry above asked for one thing (worst-status
 tracking) and the function held two more silent guesses. That is now three
 functions in a row (`cmd_xargs_input`, `parse_sed_command`, and the five pipe
 forms) where the filed bug was the smaller half of what was actually there.
+
+#### TD-A-CUT-ANSWERED-EVERY-UNREADABLE-ARGUMENT-BY-DROPPING-IT (lane A, 2026-08-25) — ✅ FIXED (`e43ef0307`)
+
+**In short:** `cut` had no error path at all. Any argument it could not read was
+*dropped* and the command carried on, so a mistake anywhere in the argument list
+came out as a confident, successful, wrong answer. Worst of the set: `cut` with
+no `-f`/`-c` left printed every line **verbatim** and exited 0, and `cut -f0`
+printed a **blank line per input line**, which makes the file look empty.
+
+**Where.** `parse_cut_args` and `cut_process` in `kernel/src/kshell.rs`. Found by
+reading the function after the `sed` fix (`da9e7a0ca`) landed, not from a report.
+
+**The whole set, every one of them exiting 0:**
+
+| written | what it did | what it looks like from outside |
+|---|---|---|
+| `cut file` | printed every line verbatim | `cut` succeeded, so the fields must be right |
+| `cut -f1,a,3 f` | cut fields 1 and 3 | a typo'd field number silently vanishes |
+| `cut -f0 f` | cut nothing; a blank line per line | the file appears to be empty |
+| `cut -f1-3 f` | printed every line verbatim | ranges were unimplemented, so nothing parsed, so pass-through |
+| `cut -c1,3 f` | printed every line verbatim | same, by way of the `-c` list |
+| `cut -c1-abc f` | cut to the end of the line | `abc` became `usize::MAX` via `unwrap_or` |
+| `cut -q -f1 f` | opened a file named `-q` | the real file was never read |
+| `cut -f1 a b` | cut `a` only | `b` silently ignored |
+| `cut -c1 -d:` | ignored `-d` | the delimiter looked honoured |
+| `cut -f3,1 f` | wrote field 3 then field 1 | POSIX writes selected input in *line* order, once each |
+
+**Why the pass-through row is the important one.** Four separate mistakes above
+reach it — no list, an unimplemented range, an unimplemented `-c` list, an
+unreadable item — and they all land on `cut_process`'s final
+`else { shell_println!("{}", line); }`, which is an identity transform reporting
+success. That is byte-for-byte the bug `0a785652a` fixed for the `sed`/`awk`
+pipe forms, sitting in a command nobody had re-read since.
+
+**What "distinguishing absent from unparseable" means here.** `-c-5` (from the
+first) and `-c3-` (to the last) are real forms in which an endpoint is *omitted*.
+The old parser reached those two defaults with `unwrap_or(1)` and
+`unwrap_or(usize::MAX)`, which cannot tell an omitted endpoint from an
+unreadable one — so `-c1-abc` silently became `-c1-`. The fix is not a tighter
+parse of the number; it is testing `is_empty()` before parsing at all.
+
+**Fixed.** `parse_cut_args` now returns `Result<CutSpec, CutParseError>` with ten
+named failures and GNU's wording for each. Along the way the parser moved to
+[`split_words`] (the old scan tested `starts_with("-f")` against the *remaining
+line*, so an operand's position decided whether it was read as a flag), `-f`/`-c`
+gained comma lists and `N-M`/`N-`/`-M` ranges, multiple file operands are all
+read with the worst status reported, `-s` is implemented, a line with no
+delimiter is written whole as POSIX requires instead of as a blank line, and a
+`-` operand names the pipe.
+
+**The `-` operand was a regression this lane introduced.** `bb9787783` made a
+file operand win over the pipe across five commands, which turned the
+conventional `cat f | cut -c1 -` into a request to open a file literally named
+`-`. Fixed for `cut` here; `fold`, `sed`, `awk` and `mapfile` still have it.
+
+Rung 37 covers all of it.
+
+#### TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK (lane A, 2026-08-25) — **open**
+
+**In short:** a boot test failed with `LIVENESS WATCHDOG failure detected` even
+though every self-test in that same boot passed and the run went on to reach
+`BOOT_OK`. Re-running the *identical* kernel (`boot-test.sh --no-build`) passed
+cleanly. So the report was false by direct evidence, not by inference — but it
+still costs a ~15-minute boot cycle and, worse, teaches whoever sees it to
+distrust a detector that is usually right.
+
+**Where it fired.** Between rung 27's label and rung 28's, i.e. inside
+`kshell::self_test` rung 27 (`find` over the `deep_fixture_path` tree).
+`kernel/src/sched/mod.rs` ~3157 emits the report.
+
+**What the CPU was actually doing.** The watchdog's own 16-sample RIP ring,
+symbolised with `scripts/symbolize.py`:
+
+| sample | symbol |
+|---|---|
+| `0xffffffff810c33ea` | `kernel::mm::heap::check_poison+0x1aa` |
+| `0xffffffff810c339f` | `kernel::mm::heap::check_poison+0x15f` |
+| `0xffffffff81fcf502` | `kernel::mm::rawmem::fill_u8+0x22` (×4) |
+| `0xffffffff810c5b1e` | `kernel::mm::heap::HeapInner::size_class_index` |
+| `0xffffffff822b0fb9` | `alloc::vec::Vec::push` |
+
+Every sample is in the debug heap's poison fill/check path. That is forward
+progress, just slow — not a hang.
+
+**Why the detector could not tell.** This is the blind spot its own doc comment
+names (`sched/mod.rs` ~2628): `USEFUL_WORK_TICKS` only advances for ticks that
+preempt ring-3 or a CPU with a queued task, and `kernel_progress_count()` counts
+only page faults and block I/O. A CPU-bound in-kernel loop touches neither, so
+it is indistinguishable from an in-kernel infinite loop. The comment is right
+that making kernel-mode ticks count as progress would blind the detector to its
+primary target, and the same false positive is already recorded there for the
+bzip2 self-test under KASAN.
+
+**But there is a third signal, and this is the one worth fixing.** The report
+also requires *no serial output*, and rung 27 produces none — not because it is
+silent, but because `capture_command` diverts `find`'s output into a buffer.
+A self-test that captures its output is invisible to a detector that watches the
+serial port. The tree has ~37 capturing rungs and this is the first one slow
+enough to matter, which is why it has only just appeared: `WALK_DEPTH_CAP` is
+now 48, so `deep_fixture_path` builds a 50-component path and every walk over it
+allocates proportionally.
+
+**Proper fix.** Emit a serial breadcrumb from inside the expensive capturing
+rungs — before the `mkdir_all` and between the `find` invocations in rung 27 —
+so the watchdog sees the output that is genuinely happening. That removes a
+false signal rather than dulling the detector, which is what raising the 15 s
+threshold would do. Do *not* wrap the rung in the `(self-test)` drill flag: that
+marks a deliberate drill, and this is not one — it would hide a real hang in
+rung 27 forever.
+
+**Severity.** Low correctness, medium friction: it fails a green tree at random
+and costs a full re-run to disprove each time.

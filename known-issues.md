@@ -76518,7 +76518,27 @@ than a bug: the fix is for `net::http` and `kshell` to share one, most
 naturally in a small `base64` module, and the `net/websocket.rs` caller at
 `:193` moves with it.
 
-#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — filed, blocked on `ere` going `no_std`
+#### TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH (lane A, 2026-08-25) — ⚠️ **awk fixed, `sed` still open**
+
+**Update, 2026-08-25.** Lane B made `ere` unconditionally `no_std` (their reply
+is `requests/b-a-ere-is-no-std-now-take-it.md`; no feature flag, because Cargo
+*unions* features across a build graph and `default-features = false` in one
+crate cannot stop another from turning `std` back on). The kernel now depends
+on it, and **`awk`'s `/pattern/` is a real POSIX extended regular expression**:
+`awk_compile_pattern` builds an `ere::Regex` when the *program* is read, so an
+invalid regexp is refused before any input is opened, and nothing recompiles
+per record. `kshell::self_test` rung 45 pins the three rows lane B asked for —
+`/^err/` anchors, `/a.c/` matches `abc`/`axc`, `/x*/` matches every line — plus
+brackets, alternation, groups, an undecodable record, and the two distinct
+refusals (`invalid regular expression` vs `unsupported pattern`).
+
+**Still open: `sed`.** `sed_addr_matches` and `sed_replace_first`/
+`sed_replace_all` are still `str::contains` / `str::find`, so `sed '/^a/d'` and
+`sed 's/a.c/x/'` are both substring operations that exit 0. Those want
+`ere::bre::compile` and **not** the ERE entry point: without `-E`, sed's
+addresses and `s///` patterns are *basic* regular expressions, where `a+b` is
+three literal characters rather than a repetition. They are the next commit;
+this entry flips to FIXED when they land.
 
 **In short:** `awk '/^err/ {print}'` in the kernel shell does not match lines
 that *start* with `err`. It matches lines that *contain* the four characters
@@ -76667,10 +76687,10 @@ first.
 Covered by self-test rung 41, which asserts whole byte strings rather than
 searching them.
 
-**Left standing:** `/re/` is still a substring match — see
-`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`, blocked on
-`ere` gaining a `no_std` build — and the statement executor still ignores
-anything it cannot run, below.
+**Left standing at the time:** `/re/` was still a substring match, and the
+statement executor still ignored anything it could not run. Both are closed —
+the statements by the entry below, and `/re/` by the `ere` dependency, under
+`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
 
 #### TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN (lane A, 2026-08-25) — ✅ FIXED
 
@@ -76700,12 +76720,17 @@ Three things came with it:
   that is the one case where echoing the text and evaluating it provably agree
   — a decimal is not, since awk formats `5.0` through `OFMT` and prints `5`.
 
-**Still not refused: `/pattern/`**, which remains a substring match. That is the
-separate `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`,
-blocked on the `ere` crate gaining a `no_std` build; refusing every `/…/` with
-a metacharacter is the documented fallback if that request is declined, and is
-not done pre-emptively because it would break working invocations while the
-request is open.
+**`/pattern/`, the carve-out this entry left standing, is now closed** — not by
+a refusal but by the engine, which was always the better answer. The kernel
+links `ere`, and `awk_compile_pattern` builds a real `ere::Regex` from the
+pattern text. That also turned §294's check from a convention into a type:
+`awk_validate_program` used to evaluate each pattern against a dummy empty
+record and ask only whether an answer came back, which was sound only because
+of a hand-written invariant ("whether an answer exists depends on the pattern
+alone") that nothing enforced and that rung 42 had to pin by hand. It is now
+`awk_compile_program`, whose *output* is what runs, and
+`awk_compile_pattern(&str)` cannot see a record at all. See
+`TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
 
 The original entry follows.
 

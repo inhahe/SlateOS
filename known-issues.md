@@ -78938,11 +78938,18 @@ one of the two files, and none is invented by a decoder.
 
 **Still open, deliberately left out of this change:**
 
-- `comm` never checks that its input is sorted. GNU prints `comm: file 1 is not
-  in sorted order` and exits 1; this one answers confidently either way. The
-  conversion makes `comm` agree with `sort` about the ordering, which removes
-  the way *we* broke the precondition, but a user who hands it unsorted input
-  still gets a wrong answer with exit 0. Its own change.
+- ~~`comm` never checks that its input is sorted.~~ ✅ **DONE, 2026-08-25.**
+  It refuses now: three diagnostic lines naming the file, the line number and
+  the remedy, exit 1, and — unlike GNU, which warns and carries on — **nothing
+  of the merge is printed**, because a prefix of a merge that went wrong is
+  indistinguishable from a short but complete one. It also checks less than
+  "are both files sorted": only the adjacent pairs up to and including the index
+  the merge stopped at, so disorder confined to a tail (where every remaining
+  line goes to the same column regardless) is not refused. That boundary is not
+  a nicety — the pair *at* the exit index is the one an in-merge check cannot
+  see, and it is the one that misfiles a line. Rationale in
+  **design-decisions.md §295**; pinned by self-test rung 56, whose third case
+  exists to fail if the check is ever widened to whole files.
 - `diff` has no `Binary files X and Y differ`. A byte-exact line diff of a
   binary file is now *correct*, but it is unreadable and floods a serial
   console. GNU's rule is a NUL in the first buffer. That is a judgement about

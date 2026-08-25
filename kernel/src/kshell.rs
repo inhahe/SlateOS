@@ -14493,6 +14493,81 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = crate::fs::Vfs::remove(b);
     }
 
+    serial_println!(
+        "  kshell::self_test 56: comm refuses unsorted input instead of guessing at it"
+    );
+    {
+        let a = "/tmp/kshell_cmp_a";
+        let b = "/tmp/kshell_cmp_b";
+        let write = |p: &str, d: &[u8]| crate::fs::Vfs::write_file(p, d);
+
+        // File 1 out of order. The merge is a two-stream walk that advances
+        // whichever side compares Less and never looks back, so it does not
+        // degrade gracefully here -- it put `zz_a` in the file-1-only column
+        // while `zz_a` sat in file 2 as well, and reported exit 0.
+        write(a, b"zz_b\nzz_a\nzz_c\n")?;
+        write(b, b"zz_a\nzz_b\nzz_c\n")?;
+        let out = capture_command(&alloc::format!("comm {a} {b}"));
+        assert_eq!(last_exit(), 1, "an unsorted file 1 is refused, not merged");
+        assert_output_contains("naming which file", &out, b"file 1:");
+        assert_output_contains("and which one that is", &out, b"kshell_cmp_a");
+        assert_output_contains("and which line broke the order", &out, b"line 2");
+        // The three `lacks` are the assertions that fail on the old build: it
+        // emitted all three lines, in the wrong columns. A refusal that still
+        // printed its partial merge would be the worse half of both -- a wrong
+        // answer next to a correct exit status -- so what is pinned here is that
+        // *nothing* of the merge escapes, not merely that the diagnostic is
+        // present. None of the three appears in the path, so none of these can
+        // be satisfied by the diagnostic itself.
+        assert_output_lacks("and printing no part of the wrong merge", &out, b"zz_a");
+        assert_output_lacks("no part at all", &out, b"zz_b");
+        assert_output_lacks("none of it", &out, b"zz_c");
+
+        // File 2 out of order, at the one index an in-merge check cannot reach.
+        // File 1 runs out on the pass that consumes `zz_c`, so the loop exits
+        // with file 2 sitting at `zz_b` -- a line that had already lost a
+        // comparison, and that sorts before the `zz_c` consumed before it. Its
+        // twin in file 1 went past unmatched, so `zz_b` appeared in *both*
+        // single-file columns. The check runs after the merge precisely so this
+        // straddling pair is covered.
+        write(a, b"zz_a\nzz_b\nzz_c\n")?;
+        write(b, b"zz_a\nzz_c\nzz_b\n")?;
+        let out = capture_command(&alloc::format!("comm {a} {b}"));
+        assert_eq!(last_exit(), 1, "an unsorted file 2 is refused too");
+        assert_output_contains("naming file 2", &out, b"file 2:");
+        assert_output_contains("by path", &out, b"kshell_cmp_b");
+        assert_output_contains(
+            "at the line that straddles the merge's exit",
+            &out,
+            b"line 3",
+        );
+        assert_output_lacks("and nothing of the merge", &out, b"zz_b");
+
+        // ...and the other half, which is what stops the check being a nuisance.
+        // Disorder that lies wholly inside a tail changes nothing: once file 2
+        // is exhausted, every remaining line of file 1 goes to column 1 whatever
+        // order it arrives in. `zz_b` after `zz_z` is such a pair, and the
+        // answer below is correct despite it. A check that scanned whole files
+        // instead of stopping at the merge's exit would refuse this -- and a
+        // gate that refuses correct input is one that gets switched off.
+        write(a, b"zz_a\nzz_z\nzz_b\n")?;
+        write(b, b"zz_a\n")?;
+        let out = capture_command(&alloc::format!("comm {a} {b}"));
+        assert_eq!(
+            last_exit(),
+            0,
+            "disorder confined to the tail is not refused"
+        );
+        assert_eq!(
+            out.as_slice(),
+            b"\t\tzz_a\nzz_z\nzz_b\n",
+            "and the answer it declined to refuse is the right one"
+        );
+
+        let _ = crate::fs::Vfs::remove(a);
+        let _ = crate::fs::Vfs::remove(b);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -119556,6 +119631,35 @@ fn cmd_glob(args: &str) {
     }
 }
 
+/// The 1-based number of the first line of `lines` that sorts before the line
+/// above it — considering only the pairs whose order [`cmd_comm`]'s merge
+/// actually relied on. `None` if there is no such line.
+///
+/// `merged` is the index the merge loop stopped at: lines `0..merged` were each
+/// assigned a column by a comparison against the other file, and `merged..` is
+/// the tail the caller copies out verbatim.
+///
+/// **Why the scan stops at `merged` and not at the end of the file.** A pair
+/// lying wholly inside the tail may be out of order without changing anything:
+/// once one file is exhausted, every remaining line of the other goes to the
+/// same column whatever order they arrive in, so refusing there would be crying
+/// wolf over an answer that is correct. But the pair that *straddles* the exit
+/// does matter, and it is the one an in-merge check cannot see — line `merged`
+/// lost the comparison that ended the loop, and if it sorts before a line
+/// already consumed then its twin in the other file went past unmatched. Since
+/// `windows(2)` yields one fewer pair than there are lines, `take(merged)` with
+/// `merged == lines.len()` is simply "all of them", which is right: a fully
+/// consumed file has no tail to exempt.
+fn comm_first_unsorted(lines: &[&[u8]], merged: usize) -> Option<usize> {
+    lines
+        .windows(2)
+        .take(merged)
+        .position(|w| matches!(w, [prev, cur] if prev > cur))
+        // `position` counts pairs, and pair `k` is (line `k`, line `k+1`); the
+        // offending line is the second of the pair, so 1-based it is `k + 2`.
+        .map(|k| k.saturating_add(2))
+}
+
 /// Compare two sorted files line by line.
 ///
 /// Usage: `comm [-1] [-2] [-3] FILE1 FILE2`
@@ -119567,6 +119671,13 @@ fn cmd_glob(args: &str) {
 ///
 /// `-1` suppresses column 1, `-2` suppresses column 2, `-3` suppresses column 3.
 /// `comm -12 FILE1 FILE2` shows only lines common to both.
+///
+/// **Sorted input is a precondition, and it is checked.** This is a two-stream
+/// merge: it advances whichever side compares `Less` and never looks back, so on
+/// unsorted input it does not degrade gracefully — it puts lines in the wrong
+/// columns, silently, with exit 0. Given an out-of-order line it refuses:
+/// nothing is printed but the diagnostic, and the exit status is 1. See §295 for
+/// why that is a refusal rather than GNU's warning-and-continue.
 ///
 /// Reference: POSIX comm(1).
 fn cmd_comm(args: &str) {
@@ -119658,57 +119769,113 @@ fn cmd_comm(args: &str) {
     // One place that writes a column, so the prefix and the body cannot drift
     // apart. The body goes out as bytes: formatting it would require it to be
     // a `str` again, which is the defect being removed.
-    let emit = |prefix: &str, line: &[u8]| {
-        shell_write_bytes(prefix.as_bytes());
-        shell_write_bytes(line);
-        shell_write_bytes(b"\n");
+    //
+    // It accumulates rather than writing through, so that the sortedness check
+    // below can refuse *before* anything reaches the terminal. GNU prints as it
+    // goes and dies where it notices, which leaves the reader holding a prefix
+    // of a wrong answer alongside a correct exit status -- the worse half of
+    // both. The buffer is bounded by the two files, which are already resident.
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // The block ends `emit`'s mutable borrow of `out` at the brace rather than
+    // at the end of the function, which is what lets `shell_write_bytes` borrow
+    // it below. It yields the pair of indices the merge stopped at — the one
+    // thing the check afterwards needs and cannot recover for itself, since by
+    // then the tail loops have walked `i` and `j` to the ends of their files.
+    let (merged1, merged2) = {
+        let mut emit = |prefix: &str, line: &[u8]| {
+            out.extend_from_slice(prefix.as_bytes());
+            out.extend_from_slice(line);
+            out.push(b'\n');
+        };
+
+        let empty: &[u8] = &[];
+        while i < lines1.len() && j < lines2.len() {
+            let a = lines1.get(i).copied().unwrap_or(empty);
+            let b = lines2.get(j).copied().unwrap_or(empty);
+            match a.cmp(b) {
+                core::cmp::Ordering::Less => {
+                    // Line only in file 1.
+                    if show1 {
+                        emit("", a);
+                    }
+                    i = i.saturating_add(1);
+                }
+                core::cmp::Ordering::Greater => {
+                    // Line only in file 2.
+                    if show2 {
+                        emit(col2_prefix, b);
+                    }
+                    j = j.saturating_add(1);
+                }
+                core::cmp::Ordering::Equal => {
+                    // Line in both files.
+                    if show3 {
+                        emit(col3_prefix, a);
+                    }
+                    i = i.saturating_add(1);
+                    j = j.saturating_add(1);
+                }
+            }
+        }
+
+        // Where the merge stopped. Everything below these indices was placed in a
+        // column by a comparison against the other file; everything at or above
+        // them is tail, copied out verbatim below.
+        let stopped = (i, j);
+
+        // Remaining lines from file 1.
+        while i < lines1.len() {
+            if show1 {
+                emit("", lines1.get(i).copied().unwrap_or(empty));
+            }
+            i = i.saturating_add(1);
+        }
+
+        // Remaining lines from file 2.
+        while j < lines2.len() {
+            if show2 {
+                emit(col2_prefix, lines2.get(j).copied().unwrap_or(empty));
+            }
+            j = j.saturating_add(1);
+        }
+
+        stopped
     };
 
-    let empty: &[u8] = &[];
-    while i < lines1.len() && j < lines2.len() {
-        let a = lines1.get(i).copied().unwrap_or(empty);
-        let b = lines2.get(j).copied().unwrap_or(empty);
-        match a.cmp(b) {
-            core::cmp::Ordering::Less => {
-                // Line only in file 1.
-                if show1 {
-                    emit("", a);
-                }
-                i = i.saturating_add(1);
-            }
-            core::cmp::Ordering::Greater => {
-                // Line only in file 2.
-                if show2 {
-                    emit(col2_prefix, b);
-                }
-                j = j.saturating_add(1);
-            }
-            core::cmp::Ordering::Equal => {
-                // Line in both files.
-                if show3 {
-                    emit(col3_prefix, a);
-                }
-                i = i.saturating_add(1);
-                j = j.saturating_add(1);
-            }
-        }
+    // The precondition, checked after the fact and before anything is printed.
+    //
+    // Checking here rather than inside the merge is not laziness: the pair that
+    // matters most straddles the loop's exit. When one file runs out, the other
+    // file's *next* line is still one the merge decided about -- it lost the
+    // last comparison -- so if it sorts before a line already consumed, it
+    // reaches a column of its own instead of pairing with its twin. An in-loop
+    // check never sees that pair, because the loop has already exited.
+    // `comm_first_unsorted` takes the exit index and so covers exactly the pairs
+    // whose order changed an answer, and no others.
+    let found = comm_first_unsorted(&lines1, merged1)
+        .map(|n| (1usize, &path1, n))
+        .or_else(|| comm_first_unsorted(&lines2, merged2).map(|n| (2usize, &path2, n)));
+    if let Some((which, path, line_no)) = found {
+        // Deliberately not `out`: a prefix of a merge that went wrong reads
+        // exactly like a short answer, and the point of refusing is that
+        // nothing here can be mistaken for output.
+        shell_println!(
+            "comm: file {}: {}: not in sorted order",
+            which,
+            path.display()
+        );
+        shell_println!(
+            "comm: line {} sorts before the line above it, and comm is a merge that never looks back",
+            line_no
+        );
+        shell_println!(
+            "comm: sort both files first (sort orders by bytes, which is what comm compares)"
+        );
+        set_exit(1);
+        return;
     }
 
-    // Remaining lines from file 1.
-    while i < lines1.len() {
-        if show1 {
-            emit("", lines1.get(i).copied().unwrap_or(empty));
-        }
-        i = i.saturating_add(1);
-    }
-
-    // Remaining lines from file 2.
-    while j < lines2.len() {
-        if show2 {
-            emit(col2_prefix, lines2.get(j).copied().unwrap_or(empty));
-        }
-        j = j.saturating_add(1);
-    }
+    shell_write_bytes(&out);
 }
 
 /// Display file contents in various dump formats.

@@ -78160,3 +78160,37 @@ and a future non-colour cannot slip in behind them. Prefer this to a check
 script wherever the shape allows it -- an error at the omission beats a report
 about it, which is the same reason `check-variant-lists.py` documents its own
 deletion for the day `variant_count` stabilises.
+
+#### What the destructure does and does not buy (measured, same method)
+
+Applying the remedy a third time -- to `DynamicTheme::schedule` in
+`gui/desktop/src/wallpaper.rs` -- turned up its limit, by the same means: add a
+sixth phase field, build, read the errors.
+
+`E0027` fires on a field the pattern does not *mention*. Mention it and then
+not use it and the result is `unused_variables`, a **warning**. So the
+guarantee is precisely "the author is brought to this line", not "the author
+does the right thing once here" -- a distinction worth writing into the comment,
+because the stronger claim is exactly the kind of overstatement this lesson is
+about. It still holds in practice on this tree, since the finish checklist
+requires a warning-free build, but that is a project convention doing the work,
+not the compiler, and the two should not be described as if they were the same.
+
+The `schedule` case is also the first of the three that was a **production**
+defect rather than a test one. `schedule` is the only place that says what hour
+each phase begins, so a phase omitted from it is a colour that is set, saved,
+round-tripped through the config, and never painted -- no test involved. The
+lesson-42 audit found this shape by looking for stale *test* lists; that it also
+occurs in production code is the more useful half of the finding, and the reason
+to look at every hand-written list over a struct's fields rather than only the
+ones under `#[cfg(test)]`.
+
+The chain the destructure starts there is worth recording as the shape to aim
+for, because each link is a compile error and the last one lands on the safety
+property: `E0027` at the destructure -> the array grows and no longer matches
+its `[...; PHASE_COUNT]` return type (`E0308`) -> `PHASE_COUNT` is bumped ->
+`from_palette`'s parameter and the test's hand-written `SKY` exemption table
+both stop compiling. `SKY` is the membership sweep's one exemption from "the
+desktop paints only palette roles", so the phase cannot arrive as a colour the
+sweep was never told about. A single `E0027` is a nudge; a chain that terminates
+at the invariant is a guarantee.

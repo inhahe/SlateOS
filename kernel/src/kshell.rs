@@ -12484,9 +12484,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_contains(
             "an unknown flag is reported",
             &out,
-            b"unrecognized option '-q'",
+            b"invalid option -- 'q'",
         );
         assert_output_lacks("and the input is not written out", &out, b"zz_data");
+        assert_eq!(last_exit(), 1, "and it is a failure");
+
+        // ...and it is reported by the *letter*, not by the bundle it was found
+        // in. `-sq20` is `-s`, a bad `q` and a width; quoting the whole word
+        // back names something that is not an option and leaves the reader to
+        // find which character was the problem. `-s` and `-w` are both valid,
+        // so this cannot be satisfied by refusing the bundle wholesale.
+        let out = piped("fold -sq20", b"zz_data\n");
+        assert_output_contains(
+            "the bad letter is named, not the bundle",
+            &out,
+            b"invalid option -- 'q'",
+        );
+        assert_output_lacks("and the bundle is not quoted back", &out, b"-sq20");
         assert_eq!(last_exit(), 1, "and it is a failure");
 
         // Flags bundle the way getopt's do, and `-N` is the obsolete spelling
@@ -13268,10 +13282,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
 
         // Anything else beginning with `-` is unrecognised rather than SET1.
+        // A short option is named by its letter in GNU's short-option wording;
+        // the long form gets the other wording, because there is no letter to
+        // name. Keeping the two apart is the point -- one message for both
+        // would have to pick a phrasing that is wrong for one of them.
         let out = piped("tr -q a b", b"abc\n");
         assert!(
-            out.windows(21).any(|w| w == b"unrecognized option '"),
-            "an unknown option is refused: {out:?}"
+            out.windows(22).any(|w| w == b"invalid option -- 'q'\n"),
+            "an unknown short option is named by its letter: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is a failure");
+
+        let out = piped("tr --nope a b", b"abc\n");
+        assert!(
+            out.windows(29)
+                .any(|w| w == b"unrecognized option '--nope'\n"),
+            "an unknown long option is quoted whole: {out:?}"
         );
         assert_eq!(last_exit(), 1, "and refusing is a failure");
 
@@ -109372,8 +109398,14 @@ enum TrParseError {
     /// point: the old parser used the flag word as SET1, so `tr -s ab` gave a
     /// wrong answer where it should have given none.
     Unsupported(char, &'static str),
-    /// Anything else beginning with `-`.
-    UnknownOption(String),
+    /// A short option that is not one of `tr`'s, named by its letter. Separate
+    /// from the long form below because GNU words the two differently, and the
+    /// wording is the part that tells a reader which kind of thing to go and
+    /// look for.
+    InvalidOption(char),
+    /// A `--long` option that is not one of `tr`'s, quoted whole — there is no
+    /// single letter to name.
+    UnknownLongOption(String),
     /// No SET1 at all.
     NoSets,
     /// `tr a` — a translation needs a SET2 as well.
@@ -109417,7 +109449,10 @@ impl TrParseError {
             Self::Unsupported(opt, hint) => {
                 shell_println!("tr: -{} is not supported ({})", opt, hint);
             }
-            Self::UnknownOption(ref opt) => {
+            Self::InvalidOption(c) => {
+                shell_println!("tr: invalid option -- '{}'", c);
+            }
+            Self::UnknownLongOption(ref opt) => {
                 shell_println!("tr: unrecognized option '{}'", opt);
             }
             Self::NoSets => {
@@ -109537,7 +109572,7 @@ fn parse_tr_args(args: &str) -> Result<TrSpec, TrParseError> {
             _ => {}
         }
         if word.starts_with("--") {
-            return Err(TrParseError::UnknownOption(word.clone()));
+            return Err(TrParseError::UnknownLongOption(word.clone()));
         }
         // Short options, bundled or not. Each is reported by its own letter,
         // so `-ds` names `-s` rather than the bundle.
@@ -109562,7 +109597,7 @@ fn parse_tr_args(args: &str) -> Result<TrSpec, TrParseError> {
                         "this tr pads SET2 with its last character instead",
                     ));
                 }
-                _ => return Err(TrParseError::UnknownOption(alloc::format!("-{c}"))),
+                _ => return Err(TrParseError::InvalidOption(c)),
             }
         }
     }
@@ -110316,8 +110351,12 @@ enum FoldParseError {
     InvalidWidth(String),
     /// A real `fold` option this one does not implement.
     Unsupported(String, &'static str),
-    /// Anything else beginning with `-`.
-    UnknownOption(String),
+    /// Anything else beginning with `-`, named by the **letter** that was not
+    /// recognised rather than by the word it was found in. `fold -sq20` is
+    /// three options, one of which is wrong, and quoting the bundle back makes
+    /// the reader find it; a `char` here makes it impossible to report the
+    /// bundle by mistake, which is what this variant used to do.
+    InvalidOption(char),
 }
 
 impl FoldParseError {
@@ -110333,8 +110372,8 @@ impl FoldParseError {
             Self::Unsupported(ref opt, hint) => {
                 shell_println!("fold: {} is not supported ({})", opt, hint);
             }
-            Self::UnknownOption(ref opt) => {
-                shell_println!("fold: unrecognized option '{}'", opt);
+            Self::InvalidOption(c) => {
+                shell_println!("fold: invalid option -- '{}'", c);
             }
         }
     }
@@ -110414,7 +110453,7 @@ fn parse_fold_args(args: &str) -> Result<FoldSpec, FoldParseError> {
                     width = Some(fold_width(&value)?);
                     rest = "";
                 }
-                _ => return Err(FoldParseError::UnknownOption(String::from(w))),
+                _ => return Err(FoldParseError::InvalidOption(flag)),
             }
         }
     }

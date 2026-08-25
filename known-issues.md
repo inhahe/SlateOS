@@ -75003,7 +75003,48 @@ rather than delegate to a file form this shell invented.
 **Severity.** Medium. Silent and plausible — the output looks like a result, and
 in the `-i` case the user believes a file was edited that was not.
 
-#### TD-A-SED-ACCEPTS-AN-UNTERMINATED-SUBSTITUTION (lane A, 2026-08-24) — **open**
+#### TD-A-SED-ACCEPTS-AN-UNTERMINATED-SUBSTITUTION (lane A, 2026-08-24) — ✅ **FIXED same day (`da9e7a0ca`, boot-verified `6e7a6ced7`)**
+
+> **Fixed, and two more of the same shape were found in the same function
+> while fixing it.** The entry below asked only for `find_unescaped(...)?`. The
+> unterminated `s///` turned out to be one of three ways this parser answered a
+> script it could not honour by honouring it approximately:
+>
+> | Script | Old behaviour | Now |
+> |---|---|---|
+> | `s/a/b` | ran as though the delimiter were there | `unterminated command`, exit 1 |
+> | `s/a/b/i` | flag dropped; a **case-sensitive** substitution reported as success | `unknown option to 's'`, exit 1 |
+> | `-e good -e bad` | the bad one dropped by `filter_map`, the good one ran | fails, naming `expression #2` |
+>
+> The third is the one worth remembering: `parsed.is_empty()` only caught an
+> **all**-bad invocation, so a single bad `-e` standing among good ones was
+> invisible. All three are *wrong answers reported as success*, which is
+> strictly worse than missing ones — nothing downstream can detect them.
+>
+> **What changed structurally.** `parse_sed_command` returns
+> `Result<SedCmd, SedParseError>`; both halves share one `parse_sed_scripts`,
+> for the same reason `classify_sed_args` is shared (two copies of this drifted
+> once already, and that drift is what let `-i` be parsed by one half and
+> ignored by the other). The diagnostic quotes the offending script back
+> because `#1` identifies nothing when there is only one expression — the usual
+> case — and because the commonest confusion here is *which string got read as
+> a script*: `classify_sed_args` will take a bare `something` for one, since it
+> begins with `s`.
+>
+> **The entry's own prediction held.** It said tightening would *simplify*
+> rather than complicate, because the flag-suffix slice `&cmd[rep_end + 1..]`
+> already assumed a terminator. It did: the `rep_end < bytes.len()` branch is
+> gone, and so is the `bytes.len() >= 4` guard, which had been sending `s` and
+> `s/` to `unknown command` instead of `unterminated`.
+>
+> **One test-design consequence.** Quoting the script back means a token shared
+> between a script and the data makes "the message mentioned it" and "sed
+> emitted the line" the same observation. Rung 33's file content therefore moved
+> off `old`, and rung 35's witness `zz_keep` is named in none of its scripts —
+> it is asserted *absent* to prove a refused run emits neither an edit nor a
+> pass-through.
+>
+> The original entry follows unchanged.
 
 **In short:** `sed 's/old/new'` — a trailing `/` short — is an error on Linux
 (`unterminated 's' command`) and runs happily here, substituting `new` for

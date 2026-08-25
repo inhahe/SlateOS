@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 # Differential test: our paste against GNU paste.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `paste` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, whose `getopt` words every option diagnostic differently
-# (`unknown option -- x` against `invalid option -- 'x'`). A harness pointed at
-# it would certify sentences no GNU/Linux system prints. See `known-issues.md`
-# → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `fold-diff.sh`, `expand-diff.sh`, `head-diff.sh`,
-# `wc-diff.sh`, `cut-diff.sh`, `uniq-diff.sh` and `nl-diff.sh`.
+# `scripts/diff-wsl.sh` gives the reasons. The reference has to be glibc's: the
+# host's `paste` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll` rather
+# than glibc, whose `getopt` words every option diagnostic differently
+# (`unknown option -- x` against `invalid option -- 'x'`), so a harness pointed
+# at it certifies sentences no GNU/Linux system prints (`known-issues.md` →
+# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`). This file already
+# avoided that by reaching for `wsl -e env LC_ALL=C.UTF-8 paste`, at the cost of
+# a WSL process per case and a probe to check that `wsl`'s inherited Windows cwd
+# landed on the same bytes under `/mnt/...`.
+#
+# The subject moving with it is the part that changed an answer — see the two
+# directory-operand cases at the foot of this file, which were expected
+# differences only because a Windows `File::open` refuses a directory outright.
 #
 # Run `OURS=/usr/bin/paste ./scripts/paste-diff.sh` to confirm the harness still
-# discriminates: it should report dozens of differences, not zero.
+# discriminates: every expected difference should turn into an XPASS.
 #
 # ## Why `od -An -c`
 #
@@ -31,10 +37,9 @@
 # their stdout, their stderr *and* the order of the two, which is why the
 # missing-file section runs each case both ways.
 #
-# ## Cases that differ on purpose
+# ## The two cases that differ on purpose
 #
-# `--help` and `--version`, whose text is ours rather than the GNU project's,
-# plus a directory operand, which a Windows host refuses to open at all.
+# `--help` and `--version`, whose text is ours rather than the GNU project's.
 #
 # One further asymmetry is not tested here at all. With standard input closed,
 # `paste -s - A 0<&-` prints `paste: -: Bad file descriptor` **twice**: once
@@ -52,25 +57,19 @@
 # reference would be wrong.
 set -u
 
-# Our paste is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils paste "${OURS:-}") || exit 1
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `paste` so `argv[0]` matches. See `scripts/diff-wsl.sh`.  `timeout` is
+# named because every invocation below is bounded with it; see `run_side`.
+DIFF_PROG=paste
+DIFF_NEED=timeout
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 
 # Every invocation is bounded, on both sides. `paste`'s parallel loop terminates
 # only when the last file closes, so an implementation that failed to close a
@@ -78,21 +77,10 @@ case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 # the specific failure this timeout exists for, and it is why the *reference* is
 # wrapped too: a harness that only bounded our side would hang on the day the
 # reference was the buggy one.
-run_ours() { timeout -k 2 30 "$OURS_ABS" "$@"; }
-run_gnu()  { local loc=$1; shift; timeout -k 2 30 wsl -e env "LC_ALL=$loc" paste "$@"; }
-
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands on
-# the same bytes under `/mnt/c/...`. Verified rather than assumed, because a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-printf 'p\nq\n' > .probe
-if [ "$(run_gnu C.UTF-8 -s .probe 2>/dev/null)" = "$(printf 'p\tq')" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "paste-diff: glibc paste not reachable in this directory; skipping"
-fi
-rm -f .probe
+# One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
+# a symlink named `paste` in a directory that is the whole of `PATH` for that
+# one invocation, so `argv[0]` is the bare word on both sides.
+run_side() { local side=$1; shift; timeout -k 2 30 env PATH="$bindir/$side" paste "$@"; }
 
 # --- fixtures ----------------------------------------------------------------
 # Three files of decreasing length, so every combination of "which column ran
@@ -124,18 +112,18 @@ printf 'a,b\na;b\n'        > commas.txt
 mkdir subdir
 
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc stdin=$1 loc=$2; shift 2
+  local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift
   o_err=$(mktemp); g_err=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(paste | od)` the recorded status
   # is od's, and `PIPESTATUS` is set in the substitution's subshell where it
   # cannot be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
   if [ "$stdin" = "-" ]; then
-    run_ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    run_gnu "$loc" "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    printf '%b' "$stdin" | run_ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | run_gnu "$loc" "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | run_side ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | run_side gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -169,20 +157,18 @@ report() {
   return 0
 }
 
-run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - C.UTF-8 "$@"; report "paste $*"; }
+run_case()  { compare - "$@"; report "paste $*"; }
 run_stdin() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
-  compare "$input" C.UTF-8 "$@"
+  compare "$input" "$@"
   report "printf '$input' | paste $*"
 }
 # A case we expect to differ, with the reason. Counted separately so that a case
 # that starts agreeing is reported too — an xfail that silently becomes correct
 # is a stale note in the harness.
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local why="$1"; shift
-  compare - C.UTF-8 "$@"
+  compare - "$@"
   if [ "$AGREED" = yes ]; then
     xpass=$((xpass+1)); printf 'XPASS paste %s  (expected to differ: %s)\n' "$*" "$why"
   else
@@ -392,17 +378,19 @@ run_case -s -- a.txt
 run_case -- -d
 run_case a.txt -- -d
 
-# --- differ on purpose -------------------------------------------------------
-# On SlateOS, and on any POSIX host, opening a directory succeeds and the *read*
+# A directory operand in each mode, which used to be an expected difference and
+# is not one any more: opening a directory succeeds on POSIX and the *read*
 # fails, so GNU says `subdir: Is a directory` — with status 1 and, in serial
-# mode, a bare newline already on stdout. This harness runs a Windows build,
-# where `File::open` of a directory fails outright and the errno is the host's.
-# The difference is the host's, not the code's — see the same trap in
-# `cut-diff.sh` and in `filekind.rs`, where a Windows `is_file()` calls a pipe a
-# regular file.
-xfail_case 'a directory operand cannot be opened on a Windows host' subdir
-xfail_case 'a directory operand cannot be opened on a Windows host' -s subdir
+# mode, a bare newline already on stdout — and so do we. They differed only
+# while the subject was a Windows build, where `File::open` refuses a directory
+# outright and the errno was the host's; see the same trap in `filekind.rs`,
+# where a Windows `is_file()` calls a pipe a regular file. Moving both sides
+# into WSL deleted them, as it did the identical case in `cut-diff.sh`,
+# `fold-diff.sh`, `expand-diff.sh`, `unexpand-diff.sh` and `uniq-diff.sh`.
+run_case subdir
+run_case -s subdir
 
+# --- differ on purpose -------------------------------------------------------
 xfail_case 'our --help omits the GNU project ancillary block' --help
 xfail_case 'our --version names SlateOS' --version
 # The abbreviated spellings are here too, and as xfails rather than as ordinary
@@ -414,9 +402,7 @@ xfail_case 'our --version names SlateOS' --version
 xfail_case 'an abbreviation of --help reaches our help text' --h a.txt
 xfail_case 'an abbreviation of --version reaches our version text' --v a.txt
 
-if [ "$HAVE_GNU" = yes ]; then
-  printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
-  [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
-  printf '\n'
-fi
+printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
+[ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
+printf '\n'
 [ "$fail" -eq 0 ] || exit 1

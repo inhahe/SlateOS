@@ -80393,7 +80393,7 @@ bare-number `-size` uses.
 
 ---
 
-### A-SERIAL-REENTRANCY-FLAG-IS-CLEARED-ONE-STATEMENT-TOO-EARLY. `with_serial` drops its "this CPU is printing" flag *before* releasing the console lock, opening a window in which a nested exception would deadlock — for a cross-CPU reason that cannot exist — 2026-08-25 — OPEN
+### A-SERIAL-REENTRANCY-FLAG-IS-CLEARED-ONE-STATEMENT-TOO-EARLY. `with_serial` drops its "this CPU is printing" flag *before* releasing the console lock, opening a window in which a nested exception would deadlock — for a cross-CPU reason that cannot exist — 2026-08-25 — ✅ **FIXED** 2026-08-25
 
 **In short:** The kernel's serial-print path has a safety net: if a CPU is
 already halfway through printing and something interrupts it and tries to print
@@ -80444,6 +80444,12 @@ replace the comment with why *that* order is right: the flag must outlive the
 lock, because the condition it encodes is "this CPU is inside the critical
 section", and the CPU is still inside it until the guard is gone.
 
+**Fixed.** The two statements are swapped and the comment now states the rule
+(*the flag must outlive the guard, never the other way round*) together with
+why the old justification was unreachable. Boot-tested green: `BOOT_OK` after
+370 s, zero `!! ` lines, `kshell::self_test PASSED`. The existing
+`reentrancy_self_test` covers this path and still passes.
+
 **How it was found.** A survey (not a report) for the class of bug behind
 `B-FORKEXEC-BOOT-HANG`: a lock that is acquired inside
 `crate::cpu::without_interrupts` at some sites and bare at others in the same
@@ -80470,7 +80476,7 @@ tree it barely looked at. Wiring one is deferred until the resolver exists.
 
 ---
 
-### TD-A-PCPU-REFILL-AND-DRAIN-REQUIRE-INTERRUPTS-OFF-BUT-NOTHING-CHECKS-IT — 2026-08-25 — OPEN
+### TD-A-PCPU-REFILL-AND-DRAIN-REQUIRE-INTERRUPTS-OFF-BUT-NOTHING-CHECKS-IT — 2026-08-25 — ✅ **FIXED** 2026-08-25
 
 **In short:** Two functions in the page allocator only work if the caller has
 already turned interrupts off. That requirement is written in a comment and
@@ -80506,5 +80512,14 @@ has *already* disabled interrupts, and `without_interrupts` costs a
 `pushfq`/`cli`/`popfq` per call on a path whose reason for existing is to avoid
 per-frame overhead. The assertion keeps the fast path and still makes the
 premise false-able.
+
+**Fixed.** Both functions now open with
+`debug_assert!(!crate::cpu::interrupts_enabled(), ...)`, each `// SAFETY:`
+comment cites the assertion rather than the caller's good intentions, and
+`pcpu_refill`'s doc comment records why the wrap is omitted so the omission
+stays a decision. Boot-tested green (`BOOT_OK` after 370 s) with **neither
+assertion firing** — which is the useful half of the result: the precondition
+was not merely documented-and-hoped-for, it holds at every call the boot path
+makes, and now a future call that breaks it says so instead of hanging.
 
 ---

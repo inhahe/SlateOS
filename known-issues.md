@@ -77567,6 +77567,34 @@ has in this file (`CutSpec` / `CutParseError` / `parse_cut_args`):
    set-to-set correspondence cannot express anyway. An unrecognised `[:name:]`
    is an error, not a literal.
 
+   **Commits 1 and 2 have landed. Commit 3 split in two**, because the escapes
+   and the bracket constructs turned out to be independent and the escape half
+   was the one with a live wrong answer in it.
+
+   - **3a — escapes: done** (kshell self-test rung 49). `expand_tr_set` now
+     returns a `Result`, which threads into the `TrParseError` path commit 1
+     built. `\a \b \f \v` and octal `\NNN` were all falling into the
+     "escaped character stands for itself" arm, so `tr -d '\a'` deleted every
+     letter `a`, and `tr -d '\0'` — the example this file's own byte-table
+     documentation gives as a common shape — deleted the digit `0`. `\101`
+     was read as the three characters `1`, `0`, `1`.
+
+     **One deliberate divergence from GNU**: an octal escape above `\177` is
+     *refused*. Above that point an octal escape names a byte in every other
+     `tr`, and this one's sets are code points — which is not an oversight but
+     the choice that makes `à-â` a range of three characters rather than of
+     six bytes (commit 2). No single value of `\303` is right under both
+     readings, so answering U+00C3 would be a silent guess of exactly the kind
+     this entry exists to remove. Refusing is a missing answer, which is the
+     acceptable one.
+
+   - **3b — bracket constructs: still open.** `[:class:]`, `[=c=]`, `[x*n]`,
+     `[x*]`, the rule that a `[` which does not begin a valid construct is a
+     literal `[`, and the restriction that only `[:upper:]` and `[:lower:]`
+     may appear in SET2 and only opposite their counterpart in SET1. Until
+     this lands, row 6 of the table above is still true: `tr -d '[:space:]'`
+     deletes the letters of the word `space`.
+
 **Not a regression.** All five have been true since the command was written.
 They are recorded together because they are one command's worth of the same
 failure class, and because fixing any one of them in isolation would leave a

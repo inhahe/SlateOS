@@ -14104,6 +14104,129 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(out.as_slice(), b"", "-n with no p prints nothing");
     }
 
+    serial_println!("  kshell::self_test 53: sed takes its script by position, not by shape");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // The row this rung exists for, and the reason it was worth doing
+        // first: an unrecognised option fell through to the operand list, an
+        // operand is a file, and so `sed -q -i 's/a/b/' f` **rewrote f** while
+        // printing that `-q` was not a file. Under `-i` that is unrecoverable,
+        // which is the one property that separates it from an ordinary wrong
+        // answer. The pipe form is asserted here because it is the one a self
+        // test can run without a fixture file; the file form shares the parser
+        // and refuses before it reaches the branch that opens anything.
+        let out = piped("sed -q -i 's/a/b/'", b"a\n");
+        assert_eq!(last_exit(), 1, "an unrecognised option is a failure");
+        assert_output_lacks("and edits nothing", &out, b"b");
+        assert_output_contains("named by its own letter", &out, b"invalid option -- 'q'");
+
+        // A bundle is reported by the letter that was wrong, not by the bundle
+        // the user typed -- `-nq` is `-n` and `-q`, and only one of them is a
+        // mistake.
+        let out = piped("sed -nq 's/a/b/'", b"a\n");
+        assert_eq!(last_exit(), 1, "a bad letter in a bundle is a failure");
+        assert_output_contains("reported by its letter", &out, b"invalid option -- 'q'");
+
+        // `-e` with nothing after it. This used to collect no script and run
+        // the ones it had, so a truncated command line looked wholly obeyed.
+        let out = piped("sed -e 's/a/X/' -e", b"a\n");
+        assert_eq!(last_exit(), 1, "-e with no argument is a failure");
+        assert_output_lacks("and nothing is run", &out, b"X");
+        assert_output_contains("says which option", &out, b"requires an argument -- 'e'");
+
+        // Position, not shape — and the case that made it worth changing. The
+        // old classifier scanned forward for the first *script-shaped* word, so
+        // in `sed -i FILE 2d` it read `FILE` as a file (it looks like one) and
+        // `2d` as the script (it ends in `d`), then rewrote the user's file
+        // with a script found in the wrong position. GNU reads the first
+        // operand as the script, finds `FILE` is not a command, and refuses. A
+        // rewrite is the one outcome that cannot be undone by re-running, so
+        // this is asserted against a real file rather than a message.
+        let path = "/tmp/kshell_sed_positional.txt";
+        crate::fs::Vfs::write_file(path, b"zz_keep\nzz_gone\n")?;
+        let out = capture_command(&alloc::format!("sed -i {path} 2d"));
+        assert_eq!(
+            last_exit(),
+            1,
+            "the first operand is the script, and it does not parse"
+        );
+        assert_output_contains(
+            "and is named as the expression, not as a file",
+            &out,
+            b"unknown command",
+        );
+        match crate::fs::Vfs::read_file(path) {
+            Ok(d) => assert_eq!(
+                d.as_slice(),
+                b"zz_keep\nzz_gone\n",
+                "a refused command line rewrites nothing"
+            ),
+            Err(e) => panic!("re-reading the sed positional fixture failed: {e:?}"),
+        }
+        let _ = crate::fs::Vfs::remove(path);
+
+        // The other direction, unchanged and pinned so it stays that way: once
+        // an `-e` is given every operand is a file, so a later script-shaped
+        // word is a filename and not a second script. `2d` here is a missing
+        // file, which is a failure; what must not happen is line 2 vanishing.
+        let out = piped("sed -e 's/a/X/' 2d", b"a\nb\n");
+        assert_eq!(last_exit(), 1, "an operand after -e is a file, and missing");
+        assert_output_lacks("so nothing was edited", &out, b"X");
+
+        // A GNU option this sed does not have is refused by name, with what it
+        // would have done. `-E` is the one that matters: silently ignoring it
+        // leaves the pattern read as a BRE, so `sed -E 's/a+/X/'` matches the
+        // literal `a+` and answers -- the silent-guess shape exactly.
+        let out = piped("sed -E 's/a+/X/'", b"aaa\n");
+        assert_eq!(last_exit(), 1, "-E is refused, not ignored");
+        assert_output_lacks("and nothing is edited", &out, b"X");
+        assert_output_contains("with the dialect named", &out, b"basic regular expression");
+
+        // `-i` takes an attached backup suffix in GNU. Ignoring it would
+        // delete the copy the user asked for at the moment it overwrites the
+        // original, so it is refused rather than dropped.
+        let out = piped("sed -i.bak 's/a/b/'", b"a\n");
+        assert_eq!(last_exit(), 1, "-i with a suffix is refused");
+        assert_output_contains("quoting the suffix back", &out, b".bak");
+
+        // `--` ends the options, which is the only way to write a script or
+        // name a file that begins with `-`. A parser that reads `--` as a file
+        // cannot be handed either.
+        let out = piped("sed -n -- '/a/p'", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"a\n", "-- ends the options");
+
+        // Long forms, both spellings of the argument.
+        let out = piped("sed --quiet --expression=/a/p", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"a\n", "--expression=SCRIPT");
+        let out = piped("sed --silent --expression /a/p", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"a\n", "--expression SCRIPT, and --silent");
+        let out = piped("sed --quite /a/p", b"a\nb\n");
+        assert_eq!(last_exit(), 1, "a mistyped long option is a failure");
+        assert_output_contains("quoted whole", &out, b"unrecognized option '--quite'");
+
+        // A bundle whose last letter is `e` takes the next word, and one with
+        // the script attached takes the rest of its own. Both are GNU's, and
+        // both are how a script gets past a bundle at all.
+        let out = piped("sed -ne /a/p", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"a\n", "-ne SCRIPT");
+        let out = piped("sed -n -e/a/p", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"a\n", "-eSCRIPT attached");
+
+        // What must not change: the forms rung 52 pinned, which all reach the
+        // parser through the path this commit rewrote.
+        let out = piped("sed '/a/p'", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"a\na\nb\n", "p still duplicates");
+        let out = piped("sed 's/a/X/g'", b"aa\nb\n");
+        assert_eq!(out.as_slice(), b"XX\nb\n", "plain substitution");
+        let out = piped("sed '2d'", b"a\nb\nc\n");
+        assert_eq!(out.as_slice(), b"a\nc\n", "delete by line number");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -123594,6 +123717,66 @@ struct SedArgs {
     files: alloc::vec::Vec<alloc::string::String>,
 }
 
+/// Why a `sed` argument line cannot be honoured.
+///
+/// An enum with one `report()` rather than a `shell_println!` at each refusal
+/// site, for the reason [`classify_sed_args`] exists at all: `cmd_sed` and
+/// `cmd_sed_input` both call the parser, and two copies of a diagnostic drift
+/// exactly the way two copies of a parser did.
+enum SedArgsError {
+    /// A real GNU option this `sed` does not implement. Refused by name, with
+    /// what it would have done, because the alternative — treating `-r` as a
+    /// filename — is how `sed -r 's/a+/X/' f` came to report that `-r` did not
+    /// exist while quietly running the script in the wrong dialect.
+    Unsupported(&'static str, &'static str),
+    /// A short option that is not one of ours. GNU's wording.
+    InvalidOption(char),
+    /// A `--long` option that is not one of ours. GNU words this one
+    /// differently from the short form, and it is worth matching: the two
+    /// messages are how a user tells which of the two they mistyped.
+    UnknownLongOption(String),
+    /// `-e` with nothing after it. Previously the script was simply not
+    /// collected, so `sed -e 's/a/b/' -e` ran the first expression and exited
+    /// 0 — a truncated command line that looked like it had all been obeyed.
+    MissingArgument(char),
+    /// `-i.bak` — GNU's optional backup suffix. Refused rather than ignored:
+    /// ignoring it destroys the backup the user asked for at the same moment
+    /// it overwrites the original, which is the one edit that cannot be undone.
+    BackupSuffix(String),
+    /// No script anywhere: no `-e` and no operands at all.
+    NoScript,
+}
+
+impl SedArgsError {
+    fn report(&self) {
+        match *self {
+            Self::Unsupported(opt, hint) => {
+                shell_println!("sed: {} is not supported ({})", opt, hint);
+            }
+            Self::InvalidOption(c) => {
+                shell_println!("sed: invalid option -- '{}'", c);
+                shell_println!("      known: -n (quiet), -i (in place), -e SCRIPT");
+            }
+            Self::UnknownLongOption(ref opt) => {
+                shell_println!("sed: unrecognized option '{}'", opt);
+                shell_println!("      known: --quiet/--silent, --in-place, --expression=SCRIPT");
+            }
+            Self::MissingArgument(c) => {
+                shell_println!("sed: option requires an argument -- '{}'", c);
+            }
+            Self::BackupSuffix(ref suffix) => {
+                shell_println!("sed: -i takes no backup suffix here (got '{}')", suffix);
+                shell_println!("      GNU would keep the original as the edited name plus that");
+                shell_println!("      suffix; this sed cannot, and ignoring it would delete the");
+                shell_println!("      copy you asked for at the moment it overwrites the file");
+            }
+            Self::NoScript => {
+                shell_println!("sed: no command specified");
+            }
+        }
+    }
+}
+
 /// Split a `sed` argument string into flags, script and file operands.
 ///
 /// Shared by [`cmd_sed`] and [`cmd_sed_input`] because they had two copies of
@@ -123613,43 +123796,195 @@ struct SedArgs {
 /// command, so the whole invocation was refused. Now that patterns are real
 /// regular expressions (`cbc37cfe2`) the same applies to a bracket expression:
 /// `s/[a-z] [0-9]/x/` cannot be written without a space in it.
-fn classify_sed_args(args: &str) -> SedArgs {
-    let parts = split_words(args);
+///
+/// # The script is positional, not shape-matched
+///
+/// This function used to decide which word was the script by looking at it:
+///
+/// ```text
+/// s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => …
+/// ```
+///
+/// Three wrong answers came out of that, and all three reported success:
+///
+/// | typed | it did | GNU |
+/// |---|---|---|
+/// | `sed -n stuff.txt other.txt` | read `stuff.txt` as the script `s/uff./x/` | `no command specified` |
+/// | `sed -q -i 's/a/b/' f` | **rewrote `f`**, then said `-q` was not a file | refuse `-q`, touch nothing |
+/// | `sed -e 's/a/b/' -e` | ran the first expression, exit 0 | `option requires an argument` |
+///
+/// The middle one is the reason this was worth doing ahead of the others: an
+/// unrecognised option fell through to the operand list, and an operand is a
+/// file, so a typo turned into a rewrite of the user's data under `-i`.
+///
+/// The rule now is POSIX's, and it is about *position*: options first (`--`
+/// ends them), then — **if and only if no `-e` was given** — the first operand
+/// is the script and everything after it is a file. With an `-e`, every
+/// operand is a file. So `sed 's/a/b/' 2d` still reads `2d` as a filename, and
+/// `sed -e 's/a/b/' 2d` does too, which is what GNU does for both.
+fn classify_sed_args(args: &str) -> Result<SedArgs, SedArgsError> {
+    let words = split_words(args);
     let mut out = SedArgs {
         in_place: false,
         suppress: false,
         scripts: alloc::vec::Vec::new(),
         files: alloc::vec::Vec::new(),
     };
+    let mut operands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
+    let mut flags_done = false;
     let mut i = 0usize;
 
-    while let Some(part) = parts.get(i) {
-        match part.as_str() {
-            "-i" => out.in_place = true,
-            "-n" => out.suppress = true,
-            "-e" => {
-                i = i.saturating_add(1);
-                if let Some(script) = parts.get(i) {
-                    out.scripts.push(script.clone());
-                }
-            }
-            // The first word that looks like a script is the script; a later
-            // one is a file. That is why `sed 's/a/b/' 2d` reads `2d` as a
-            // filename even though it looks like a delete command — GNU reads
-            // it the same way, and both halves of this command now do too.
-            s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
-                if out.scripts.is_empty() {
-                    out.scripts.push(alloc::string::String::from(s));
-                } else {
-                    out.files.push(alloc::string::String::from(s));
-                }
-            }
-            _ => out.files.push(part.clone()),
-        }
+    while let Some(word) = words.get(i) {
         i = i.saturating_add(1);
+
+        // A lone `-` is an operand (GNU reads it as standard input), and `--`
+        // ends the options — which is the only way to name a file that begins
+        // with `-`, or to write a script that does.
+        if flags_done || !word.starts_with('-') || word.len() < 2 {
+            operands.push(word.clone());
+            continue;
+        }
+        if word == "--" {
+            flags_done = true;
+            continue;
+        }
+
+        if let Some(long) = word.strip_prefix("--") {
+            // `--expression=s/a/b/` and `--expression s/a/b/` are both GNU's.
+            let (name, attached) = match long.split_once('=') {
+                Some((n, v)) => (n, Some(v)),
+                None => (long, None),
+            };
+            match name {
+                "quiet" | "silent" => out.suppress = true,
+                "in-place" => {
+                    if let Some(suffix) = attached {
+                        return Err(SedArgsError::BackupSuffix(alloc::string::String::from(
+                            suffix,
+                        )));
+                    }
+                    out.in_place = true;
+                }
+                "expression" => {
+                    let script = match attached {
+                        Some(v) => alloc::string::String::from(v),
+                        None => {
+                            let Some(next) = words.get(i) else {
+                                return Err(SedArgsError::MissingArgument('e'));
+                            };
+                            i = i.saturating_add(1);
+                            next.clone()
+                        }
+                    };
+                    out.scripts.push(script);
+                }
+                "regexp-extended" => {
+                    return Err(SedArgsError::Unsupported(
+                        "--regexp-extended",
+                        "patterns here are POSIX basic regular expressions; \\+ is the repetition",
+                    ));
+                }
+                "file" => {
+                    return Err(SedArgsError::Unsupported(
+                        "--file",
+                        "this sed cannot read a script from a file; pass it with -e",
+                    ));
+                }
+                "separate" => {
+                    return Err(SedArgsError::Unsupported(
+                        "--separate",
+                        "this sed already treats each file separately",
+                    ));
+                }
+                "null-data" => {
+                    return Err(SedArgsError::Unsupported(
+                        "--null-data",
+                        "this sed splits input on newlines only",
+                    ));
+                }
+                _ => return Err(SedArgsError::UnknownLongOption(word.clone())),
+            }
+            continue;
+        }
+
+        // Short options, bundled or not: `-ne 's/a/b/'` is `-n -e s/a/b/`.
+        // Each is reported by its own letter, so `-nq` names `-q` rather than
+        // the bundle the user typed.
+        let letters: alloc::vec::Vec<char> = word.chars().skip(1).collect();
+        let mut k = 0usize;
+        while let Some(&c) = letters.get(k) {
+            k = k.saturating_add(1);
+            match c {
+                'n' => out.suppress = true,
+                'i' => {
+                    // GNU's `-i` takes an *attached* optional suffix, so the
+                    // rest of the bundle belongs to it rather than being more
+                    // flags. Refused, not ignored — see `BackupSuffix`.
+                    let rest: alloc::string::String =
+                        letters.get(k..).unwrap_or(&[]).iter().collect();
+                    if !rest.is_empty() {
+                        return Err(SedArgsError::BackupSuffix(rest));
+                    }
+                    out.in_place = true;
+                }
+                'e' => {
+                    // The remainder of the word if there is one (`-es/a/b/`),
+                    // otherwise the next word. Both are GNU's.
+                    let rest: alloc::string::String =
+                        letters.get(k..).unwrap_or(&[]).iter().collect();
+                    if rest.is_empty() {
+                        let Some(next) = words.get(i) else {
+                            return Err(SedArgsError::MissingArgument('e'));
+                        };
+                        i = i.saturating_add(1);
+                        out.scripts.push(next.clone());
+                    } else {
+                        out.scripts.push(rest);
+                    }
+                    k = letters.len();
+                }
+                'E' | 'r' => {
+                    return Err(SedArgsError::Unsupported(
+                        "-E/-r",
+                        "patterns here are POSIX basic regular expressions; \\+ is the repetition",
+                    ));
+                }
+                'f' => {
+                    return Err(SedArgsError::Unsupported(
+                        "-f",
+                        "this sed cannot read a script from a file; pass it with -e",
+                    ));
+                }
+                's' => {
+                    return Err(SedArgsError::Unsupported(
+                        "-s",
+                        "this sed already treats each file separately",
+                    ));
+                }
+                'z' => {
+                    return Err(SedArgsError::Unsupported(
+                        "-z",
+                        "this sed splits input on newlines only",
+                    ));
+                }
+                _ => return Err(SedArgsError::InvalidOption(c)),
+            }
+        }
     }
 
-    out
+    // Position, not shape. With no `-e`, the first operand is the script; with
+    // one, every operand is a file. Anything else is a guess, and a guess that
+    // picks a data file as the script runs it as one.
+    let mut rest = operands.into_iter();
+    if out.scripts.is_empty() {
+        let Some(script) = rest.next() else {
+            return Err(SedArgsError::NoScript);
+        };
+        out.scripts.push(script);
+    }
+    out.files.extend(rest);
+
+    Ok(out)
 }
 
 /// `sed` command — stream editor for text transformation.
@@ -123694,13 +124029,14 @@ fn cmd_sed(args: &str) {
         suppress,
         scripts: commands,
         files: file_args,
-    } = classify_sed_args(args);
-
-    if commands.is_empty() {
-        shell_println!("sed: no command specified");
-        set_exit(1);
-        return;
-    }
+    } = match classify_sed_args(args) {
+        Ok(spec) => spec,
+        Err(e) => {
+            e.report();
+            set_exit(1);
+            return;
+        }
+    };
 
     // Every script must parse. `filter_map` used to drop the ones that did not
     // and run the rest, so one bad `-e` among good ones was invisible.
@@ -123980,9 +124316,11 @@ impl SedParseError {
     /// The script text is quoted back because `#1` alone identifies nothing
     /// when there is only one expression — which is the usual case. GNU prints
     /// a character offset for the same reason; naming the expression is the
-    /// more useful half of that when the mistake is often *which string got
-    /// treated as a script* (`classify_sed_args` will read a bare `something`
-    /// as one, since it begins with `s`).
+    /// more useful half of that when the mistake is often that a *file* landed
+    /// in the script position. `classify_sed_args` chooses by position, so
+    /// `sed -i notes.txt 2d` takes `notes.txt` as the script; quoting it back
+    /// is what makes that visible rather than leaving "unknown command" to be
+    /// read as a complaint about `2d`.
     fn report(&self, n: usize, script: &str) {
         match *self {
             Self::Unterminated => {
@@ -124429,7 +124767,18 @@ fn cmd_sed_input(args: &str, input: &str) {
         suppress,
         scripts: commands,
         files,
-    } = classify_sed_args(args);
+    } = match classify_sed_args(args) {
+        Ok(spec) => spec,
+        Err(e) => {
+            // Reported here rather than deferred to `cmd_sed` below, because a
+            // bad option must not reach the branch that dispatches on whether
+            // a file was named: that is the path that rewrote a file while
+            // complaining about the option.
+            e.report();
+            set_exit(1);
+            return;
+        }
+    };
 
     // A named file wins and the pipe is left unread, as it does for every
     // other paired command here and as it does in GNU. `cmd_sed` re-parses the
@@ -124444,14 +124793,6 @@ fn cmd_sed_input(args: &str, input: &str) {
     // rewritten, no file was, and the status said it worked.
     if in_place {
         shell_println!("sed: no input files while in-place editing");
-        set_exit(1);
-        return;
-    }
-
-    if commands.is_empty() {
-        // Byte-identical to `cmd_sed`'s: the complaint is about the script,
-        // which is the same script whichever end the text arrives from.
-        shell_println!("sed: no command specified");
         set_exit(1);
         return;
     }

@@ -78263,3 +78263,108 @@ The check that would have caught all of it is cheap and mechanical: for each
 field a serializer omits, name the line that reconstructs it. If there is no
 such line, the omission is a defect regardless of how derivable the field is
 in principle.
+
+### Lesson 46: a crate-wide `#![allow(dead_code)]` disarms the one lint that finds lesson 45
+
+`apps/diskimager` shipped a complete ISO 9660 volume descriptor parser, a
+Browse tab that draws the image's directory tree, and an info card showing
+format, volume label and creation date. None of it could run. `load_image` --
+the single entry point to all three -- had no caller outside `#[cfg(test)]`,
+and there was no key, button or drop target anywhere in the program that
+reached it. Meanwhile the Write tab rendered, in as many words, *"No image
+loaded. Open an .iso, .img, or .bin file."* -- an instruction for an action
+the program did not offer.
+
+The compiler knew. `dead_code` names this exact condition, and in a binary
+crate it analyses `pub` items too, because a bin has no external callers. It
+said nothing because line 18 of the file was `#![allow(dead_code)]`.
+
+That allow was not put there to hide this. It is the kind of line added early,
+while a file is half-built and every second item is legitimately unused, and
+then never removed -- and once it is in place it costs nothing to add the
+nineteenth unreachable function under it. When the allow came out, the crate
+was **already clean**: every item in it was reachable once `load_image` had a
+caller. So the allow had not been earning anything for a long time; it was
+purely suppressing the one diagnostic that mattered.
+
+Two things generalise:
+
+- **Check that a lint you rely on is armed, not merely quiet.** Removing the
+  allow produced zero warnings, which is the same output as a lint that is
+  still off. The way to tell them apart is to add a deliberately unreachable
+  function and confirm it warns, then delete it. That was done here.
+- **A crate-wide allow is a different object from a targeted one.** A
+  `#[allow(dead_code)]` on one item, with a comment naming what will call it,
+  is a claim about that item that a reader can check. The crate-wide form is a
+  standing exemption for code that has not been written yet, and it applies to
+  the code that was.
+
+The companion finding is the widget on the other end: `guitk::dialog::
+FileDialog` is 1758 lines, fully tested, and had **zero users in the entire
+tree** until this fix. Two halves of one feature, each complete, with nothing
+joining them. `scripts/scan-unwired.py` exists to find this shape; it reports
+per binary with the share of the program `main` reaches, because the
+overwhelmingly common cause of an unreachable function in lane C is a
+placeholder `main` (`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`), which is one
+debt and not one finding per function.
+
+A third finding fell out of writing the test, and is worth keeping separate
+because it is a plain bug rather than a wiring one: `extract_iso_string`
+trimmed whitespace only. ECMA-119 §8.4.6 pads these fields with spaces, so a
+conformant image was fine -- but a tool that zeroes the descriptor and writes
+the label over the front produces NUL padding, and that went into the info
+card as `SLATEOS_LIVE\0\0\0...`. The first fixture written for the end-to-end
+test had exactly this shape, by accident, because `vec![0; n]` is the natural
+way to build one; the test caught the parser rather than the fixture. A disk
+imager reads the images that exist, not the ones the standard describes, so
+the trim now covers NUL and a named test pins it.
+
+### TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE — 2026-08-25 — OPEN
+
+**Where:** `gui/toolkit/src/dialog.rs` — `DirEntry::name`, `DialogAction::Selected(String)`,
+`DialogAction::NavigatedTo(String)`, `FileDialog::with_initial_path(&str)`. First
+embedder: `apps/diskimager/src/main.rs` `read_directory` / `dispatch_to_open_dialog`.
+
+**What it is.** The dialog's whole path surface is `String`. An embedder listing a
+real directory therefore has to convert `OsString` to `String`, and the only
+total conversion is `to_string_lossy`, which replaces every byte it cannot decode
+with U+FFFD. `read_directory` does exactly that. A file whose name is not valid
+UTF-8 is listed under a name that is *not the name on disk*, and the string the
+dialog hands back on `Selected` no longer identifies it: `fs::read` on it fails
+with "not found" if nothing else matches, or — worse — succeeds against a
+different file that happens to contain a literal U+FFFD in the same position.
+
+This directly violates `CLAUDE.md` self-review item 7: *"Never force UTF-8 on
+filesystem paths... No `from_utf8_lossy` — that's silent data corruption. Our
+paths allow all bytes except `/` and `\0`."* SlateOS deliberately permits every
+byte but those two in a filename, so this is not a corner case imported from
+another OS's rules; it is a filename our own filesystem is specified to accept.
+
+**Why it is debt and not a fix in this commit.** The defect is in the toolkit's
+API, not in the embedder. `apps/diskimager` was the first program ever to use
+`FileDialog` (the widget had zero callers tree-wide until 2026-08-25 — see
+lesson 46), so it is also the first to hit this. Changing `DirEntry::name` and
+the `DialogAction` payloads from `String` to `PathBuf`/`OsString` touches the
+dialog's rendering (which measures and elides the name), its filter matching,
+its sort comparators and its 40-odd tests. That is a lane-C change and squarely
+ours to make — it was separated from the wiring commit so that "the parser now
+has a caller" and "the toolkit's path type is wrong" are two reviewable changes,
+not one.
+
+**The proper fix.** `DirEntry::name: OsString`; `DialogAction::Selected(PathBuf)`
+and `NavigatedTo(PathBuf)`; `with_initial_path(impl AsRef<Path>)`. Rendering
+converts to a display string *at the draw call and nowhere else*, which is the
+one place lossy conversion is correct because it is producing glyphs, not a
+lookup key. Filter matching moves to `Path::extension` on the `OsStr`. Then
+`read_directory` in diskimager drops its `to_string_lossy` entirely and
+`load_image_from_path` takes a `&Path`.
+
+**Test that should exist and cannot yet.** A file created with an invalid-UTF-8
+name, listed, selected, and read back byte-identically. Note this needs a host
+filesystem that permits such a name — on Windows it does not, so the test
+belongs with the SlateOS-target suite, not the host one. Until then a unit test
+on the type signatures is the most that can be pinned.
+
+**Severity while open:** low frequency, silent, and wrong-file rather than
+crash. Nothing in lane C currently *creates* non-UTF-8 filenames, so the way to
+meet it today is an image copied from another system.

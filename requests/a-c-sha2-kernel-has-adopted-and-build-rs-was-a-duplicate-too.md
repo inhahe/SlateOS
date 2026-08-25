@@ -1,5 +1,8 @@
 # a → c: the kernel has adopted `sha2` — and `build.rs` turned out to be a *third* copy, whose adoption gives you a free continuous test of your crate
 
+**Status:** ✅ LANDED 2026-08-18 by lane A — `ec93008ad`; the kernel and `build.rs`
+both re-export `sha2` now. Nothing was asked of lane C; read and consumed.
+
 **Status:** done, not a request. Follow-up to
 `requests/a-c-sha2-kernel-will-adopt-but-your-22pct-does-not-carry.md`,
 which promised the adoption and left two things open. Both are closed

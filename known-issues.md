@@ -74688,3 +74688,120 @@ the whole reason this is worth writing down rather than just doing.
 **Severity.** Low and non-destructive as it stands — the divergence costs disk
 space and script compatibility, never data. Note that fixing it moves it *toward*
 being destructive, so the fix needs more care than the bug does.
+
+---
+
+### 2026-08-24 — the split-brain screen: what the `tee` lead actually found (lane A)
+
+The `tee` entry above closed with a lead: *"any command with a piped and a
+non-piped implementation (`dispatch_with_input` vs `dispatch`) is a candidate
+for the same split-brain."* This is what came of following it. Two of the
+findings are fixed (`0a785652a`); three are recorded below and not fixed.
+
+**How the screen was run, and why its output is not a verdict.** All 19 paired
+commands were enumerated from `dispatch_with_input`'s match arms, and a script
+counted `set_exit(1)` calls in each `cmd_X` against its `cmd_X_input`. Fourteen
+pairs came back with a non-zero count on one side and zero on the other. **Only
+two of those fourteen were bugs.** A `cmd_X_input` with no `set_exit` at all is
+usually *correct*: the file half's only failures are file-open errors, which
+have no piped analogue — the pipe supplied the bytes, so there is nothing left
+to fail at. Every one of the fourteen was read by hand against its twin before
+any verdict was reached, which is the same discipline the earlier sweeps needed
+and the reason this count is described here as a *filter* rather than a result.
+
+**Fixed: `sed` and `awk` printed the input verbatim and exited 0 for a script
+they could not run.** See `0a785652a` and self-test rung 33. This is a worse
+shape than `tee`'s — `tee` at least printed its error, whereas these produce
+plausible output, so `cat config | sed 's/old' > config.new` writes an unedited
+copy and reports success.
+
+**Correct, on inspection:** `sort`, `uniq`, `head`, `tail`, `wc`, `nl`, `rev`
+and `tac` all delegate to the file form when the argument names a file and have
+no failure mode left on the pipe path; `paste`, `tr`, `column` and `grep`
+already set a status. `cmd_tr_input` is the model the `sed`/`awk` fix followed.
+
+#### TD-A-FIVE-PIPE-FORMS-SILENTLY-DISCARD-A-FILE-OPERAND (lane A, 2026-08-24) — **open**
+
+**In short:** `cat a.txt | cut -f1 b.txt` cuts fields out of `a.txt` and ignores
+`b.txt` entirely — no error, no warning, exit 0. On Linux the named file wins
+and the pipe is left unread. Five commands do this: `cut`, `fold`, `sed`, `awk`
+and `mapfile`. Their piped implementations parse the file operand out of the
+arguments and then throw it away.
+
+**Where.** `kernel/src/kshell.rs`: `cmd_cut_input` (discards `parse_cut_args`'s
+fourth return value), `cmd_fold_input` (same, `parse_fold_args`), `cmd_sed_input`
+(never collects `file_args` at all), `cmd_awk_input` (binds `_files` and drops
+it), `cmd_mapfile_input` (takes only the first word as the array name).
+
+**Why it is a bug and not a design choice.** The other eleven paired commands in
+this shell — `sort`, `uniq`, `head`, `tail`, `wc`, `nl`, `rev`, `tac`, `grep`,
+`tee`, `paste` — all handle it, and they handle it two different but deliberate
+ways: eight delegate wholesale to the file form, `grep` delegates once it sees a
+second positional word, `paste` reads the file as an extra column (which is what
+GNU `paste - file` does). So there is an established convention, stated in the
+comment above the pipe-input block, and these five are simply outside it.
+
+**The `sed -i` corollary, which is the sharp edge.** `cat f | sed -i 's/a/b/'`
+parses `-i` in the file form and *silently ignores* it in the pipe form. The
+user asked for an in-place edit of a file and got a filtered pipe instead — the
+file is untouched, and exit status is 0. GNU refuses this outright (`sed: no
+input files while in-place editing`). This is the one case in the entry that
+loses work rather than merely diverging.
+
+**Proper fix.** Delegate, following `grep`'s shape rather than the blanket one:
+decide *before* flag parsing whether a file operand is present, and if so hand
+the whole argument string to the file form and leave the pipe unread. `grep`'s
+own comment explains why the order matters — the two halves do not accept the
+same flag set, so rejecting flags first would break a legitimate invocation that
+merely has a pipe attached. `mapfile` is the exception: bash's `mapfile` takes
+no file operand at all, so the right answer there is to reject a second word
+rather than delegate to a file form this shell invented.
+
+**Severity.** Medium. Silent and plausible — the output looks like a result, and
+in the `-i` case the user believes a file was edited that was not.
+
+#### TD-A-SED-ACCEPTS-AN-UNTERMINATED-SUBSTITUTION (lane A, 2026-08-24) — **open**
+
+**In short:** `sed 's/old/new'` — a trailing `/` short — is an error on Linux
+(`unterminated 's' command`) and runs happily here, substituting `new` for
+`old`. Both halves of the command agree about this, so it is not a split-brain;
+it is a lenient parser.
+
+**Where.** `parse_sed_command` in `kernel/src/kshell.rs`: the replacement's end
+delimiter is found with `find_unescaped(...).unwrap_or(bytes.len())`, so a
+missing one silently means "to the end of the script".
+
+**Why it was not fixed with `0a785652a`.** That commit's whole subject was the
+two halves *disagreeing*; this is the two halves agreeing on something GNU
+rejects. Fixing it changes the behaviour of a command that currently works, for
+every caller, which is a separate change with a separate risk — a script relying
+on the leniency would start failing. Rung 33 documents the distinction inline so
+the next reader does not mistake one for the other.
+
+**Proper fix.** Require the closing delimiter (`find_unescaped(...)?`), and add
+a rung asserting `sed 's/old/new'` fails while `sed 's/old/new/'` succeeds.
+Note the flag suffix parsing already assumes a terminator is present when it
+slices `&cmd[rep_end + 1..]`, so tightening this simplifies the code rather than
+complicating it.
+
+**Severity.** Low. The current reading is the one the user almost certainly
+meant; the cost is that a genuinely truncated script runs instead of failing.
+
+#### TD-A-XARGS-REPORTS-THE-LAST-COMMANDS-STATUS-NOT-THE-WORST (lane A, 2026-08-24) — **open**
+
+**In short:** `printf 'good\nbad\n' | xargs check && deploy` runs `deploy` if
+the *last* invocation succeeded, even when an earlier one failed. GNU `xargs`
+exits 123 if any invocation exits non-zero, precisely so that a batch failure
+cannot hide behind a final success.
+
+**Where.** `cmd_xargs_input` in `kernel/src/kshell.rs` calls `execute(&full_cmd)`
+in a loop and never inspects the status, so whatever the final `execute` left in
+the exit slot is what the pipeline reports.
+
+**Proper fix.** Track the worst status across the loop and set it once at the
+end — the "batch operations must track and report the worst error, not just the
+last one" rule from `CLAUDE.md`. Whether to use GNU's 123 or a flat 1 should
+follow whatever the `cmp`/`diff` entry above settled for multi-valued statuses,
+so the shell speaks one convention rather than two.
+
+**Severity.** Medium in scripts, invisible interactively.

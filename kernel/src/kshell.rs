@@ -12352,22 +12352,38 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // to fold at some width nobody asked for and report success: `-w abc`
         // at 80, `-w0` at 1.
         let out = piped("fold -w abc", b"zz_data\n");
-        assert_output_contains("an unreadable width is reported", &out, b"invalid number of columns");
+        assert_output_contains(
+            "an unreadable width is reported",
+            &out,
+            b"invalid number of columns",
+        );
         assert_output_lacks("and nothing is folded at a guessed width", &out, b"zz_data");
         assert_eq!(last_exit(), 1, "and it is a failure");
 
         let out = piped("fold -w0", b"zz_data\n");
-        assert_output_contains("a zero width is reported", &out, b"invalid number of columns: '0'");
+        assert_output_contains(
+            "a zero width is reported",
+            &out,
+            b"invalid number of columns: '0'",
+        );
         assert_output_lacks("and is not clamped to 1", &out, b"zz_data");
         assert_eq!(last_exit(), 1, "and it is a failure");
 
         let out = piped("fold -w", b"zz_data\n");
-        assert_output_contains("-w with nothing after it is reported", &out, b"requires an argument");
+        assert_output_contains(
+            "-w with nothing after it is reported",
+            &out,
+            b"requires an argument",
+        );
         assert_eq!(last_exit(), 1, "and it is a failure");
 
         // An unknown flag is refused, not folded into the file name.
         let out = piped("fold -q", b"zz_data\n");
-        assert_output_contains("an unknown flag is reported", &out, b"unrecognized option '-q'");
+        assert_output_contains(
+            "an unknown flag is reported",
+            &out,
+            b"unrecognized option '-q'",
+        );
         assert_output_lacks("and the input is not written out", &out, b"zz_data");
         assert_eq!(last_exit(), 1, "and it is a failure");
 
@@ -12414,7 +12430,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // Nothing to read at all is an error, not an empty success.
         let out = plain("fold -w99");
-        assert_output_contains("no operand and no pipe is reported", &out, b"no file operand");
+        assert_output_contains(
+            "no operand and no pipe is reported",
+            &out,
+            b"no file operand",
+        );
         assert_eq!(last_exit(), 1, "and it is a failure");
 
         let _ = crate::fs::Vfs::remove(a);
@@ -107975,9 +107995,7 @@ fn fold_process(text: &str, spec: &FoldSpec) -> Vec<u8> {
                         // a blank, so the next pass through here finds none and
                         // falls through to the plain break. That is what stops
                         // this looping.
-                        column = pending
-                            .iter()
-                            .fold(0usize, |c, &u| fold_advance(c, u));
+                        column = pending.iter().fold(0usize, |c, &u| fold_advance(c, u));
                         continue;
                     }
                 }

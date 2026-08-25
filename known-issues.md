@@ -75700,3 +75700,79 @@ is also at fault.
 a debug-only path harms nothing a user sees. Medium friction: it inflates every
 boot test, and it inflates it specifically in a silent stretch, which is what
 turned it into two false hang reports and two wasted ~15-minute cycles.
+
+#### TD-A-FOLD-GUESSED-AT-EVERY-ARGUMENT-IT-COULD-NOT-READ (lane A, 2026-08-25) — ✅ FIXED (`6490dae29`)
+
+**In short:** `fold` wraps long lines to a width you give it. Ours ignored most
+of what you could type at it and carried on as if it had understood — a bad
+width silently became 80, `-w0` silently became 1, a second file name was glued
+onto the first, and any flag it did not know became part of the file name. Worse
+than any of those: a line containing an accented or non-Latin character could
+come out **empty**, with `fold` reporting success. All of it is fixed, and a
+self-test rung now pins each case.
+
+**Where.** `kernel/src/kshell.rs`: `parse_fold_args` and `fold_process`, both
+rewritten, plus `cmd_fold`/`cmd_fold_input`.
+
+**What was silent.** Every row reported exit 0:
+
+| written | what it did | what it looks like |
+|---|---|---|
+| `fold -w abc f` | folded at **80** | the width you asked for was honoured |
+| `fold -w0 f` | folded at **1** (`w.max(1)`) | ditto |
+| `fold -s -w20 f` | opened a file named `-s -w20 f` | `-s` was unimplemented, and so was the error |
+| `fold f1 f2` | opened one file named `f1 f2` | two operands became one name |
+| `fold f -w20` | folded at 80, then failed to open `f -w20` | flags were recognised only at the *start* of the line |
+| `fold -q f` | opened a file named `-q f` | an unknown flag became part of the name |
+| `printf 'zzα' \| fold -w3` | printed **nothing at all** | see below |
+
+The last one is the reason this moved to the front of the queue. `fold_process`
+measured the line in bytes (`line.len()`) and then sliced it with
+`line.get(pos..end)` — and when a chunk boundary landed inside a multi-byte
+character, `get` returned `None`, whose arm wrote nothing. The chunk was not
+truncated or mangled; it was **dropped**, silently, and `fold` exited 0. Any
+text that is not pure ASCII could lose whole runs of characters at a width that
+happened to land wrong.
+
+**Fixed by** the shape the `cut` rewrite established (`e43ef0307`):
+`FoldSpec { width, spaces, bytes, files }`, a `FoldParseError` whose `report()`
+uses GNU's wording, `split_words` instead of a position-dependent scan of the
+raw argument line, and a `fold_run(spec, stdin)` that attempts every operand and
+reports the worst status. `-` names the pipe. `-s` and `-b` are implemented
+rather than ignored, short flags bundle as getopt's do, and `fold -20` is
+accepted as GNU's obsolete spelling of `fold -w20`.
+
+The measuring loop is now a restatement of GNU's `fold_file` without its `goto`:
+input is split into indivisible units — a whole character, or one byte under
+`-b` — each unit is measured against the width, and a unit that would overrun
+ends the line and is measured again against the fresh column. A unit wider than
+the whole width (a tab under `-w4`) gets a line to itself rather than vanishing
+or looping. Columns follow GNU's `adjust_column`: a tab advances to the next
+multiple of 8, a backspace retreats one, a carriage return returns to the left
+margin, everything else counts one.
+
+Two further faults were found while writing the single loop:
+
+- **The final newline was invented.** `shell_println!` per line meant
+  `printf 'abcd' | fold -w2` wrote `ab\ncd\n`, where GNU writes `ab\ncd`. Same
+  class as the `sed` trailing-newline drift (`5e523d20a`), and fixed the same
+  way — the newline that was read is the newline that is written.
+- **`str::lines` ate a carriage return.** It strips a `\r` that precedes the
+  `\n`, which GNU treats as data *and* as a column reset. Splitting with
+  `split_inclusive('\n')` keeps it.
+
+Covered by self-test rung 39, which asserts whole byte strings rather than
+searching them: the failures here are about *where* the breaks fall and *which*
+bytes survive, and only a byte comparison can see either.
+
+**Left standing:** `-b` still cannot read input that is not valid UTF-8, because
+the pipe is narrowed to `&str` before `fold` sees it (`shell_bytes_as_str`, the
+`char`-oriented arm of `dispatch_with_input`). That is the shared byte-clean
+issue, not a `fold` one; what `-b` changes here is where the breaks fall, which
+is the reason people reach for it (`fold -b -w76` over base64), and that case is
+exact.
+
+**Noticed in passing:** `parse_cut_args` does not bundle short options, so
+`cut -sd: -f1` is refused as an unrecognized option where getopt would accept
+it. The fix is `parse_fold_args`'s flag loop. Not urgent — a refusal is honest,
+not a silent guess — but it is a gratuitous difference from every other `cut`.

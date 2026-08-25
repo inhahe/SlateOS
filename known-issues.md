@@ -77500,6 +77500,12 @@ them exits 0.
 | `tr -d x binaryfile` | prints **nothing at all** | say the file is not text |
 | `tr -d '[:space:]'` | deletes `[`, `:`, `s`, `p`, `a`, `c`, `e`, `]` | delete whitespace |
 
+**Status (2026-08-25): every row of that table is now fixed.** The entry stays
+open for one thing the table never listed — the `[x*n]` / `[x*]` repeat
+constructs, which are still read as literals, so `tr 'abc' '[x*]'` maps
+`a`→`[`, `b`→`x`, `c`→`*` and exits 0. That is the same failure class, so the
+entry does not close until it is gone. See item 3c below.
+
 **Why, one at a time.**
 
 1. **A set cannot contain a space.** `tr` is not on
@@ -77588,12 +77594,38 @@ has in this file (`CutSpec` / `CutParseError` / `parse_cut_args`):
      this entry exists to remove. Refusing is a missing answer, which is the
      acceptable one.
 
-   - **3b — bracket constructs: still open.** `[:class:]`, `[=c=]`, `[x*n]`,
-     `[x*]`, the rule that a `[` which does not begin a valid construct is a
-     literal `[`, and the restriction that only `[:upper:]` and `[:lower:]`
-     may appear in SET2 and only opposite their counterpart in SET1. Until
-     this lands, row 6 of the table above is still true: `tr -d '[:space:]'`
-     deletes the letters of the word `space`.
+   - **3b — classes and equivalence classes: done** (kshell self-test rung
+     50). `tr_class_members` gives the twelve POSIX names their ASCII members
+     in ascending code-point order, `tr_bracket` reads `[:name:]` and `[=c=]`,
+     and a `[` that begins neither stays a literal `[` — which is the only
+     reading under which `tr -d '[]'` means anything. **Row 6 of the table
+     above is no longer true**: `tr -d '[:space:]'` deletes whitespace.
+
+     The rule that pays for itself here is *not a construct* vs *a malformed
+     construct*. `[abc]` is the first, so it is five literal characters;
+     `[:alhpa:]` is the second — right shape, bad name — so it is an error.
+     Falling back to literals for a typo would quietly delete brackets,
+     colons and the letters of the misspelling, which is the same failure
+     class one level down.
+
+     Two GNU restrictions are kept (only `[:upper:]`/`[:lower:]` in SET2;
+     no `[=c=]` in SET2, since it names a *set* and so names no single
+     replacement). **One is deliberately not**: GNU refuses
+     `tr 'abc' '[:upper:]'` as a "misaligned construct", and we accept it,
+     because a class here is always the same fixed ordered list so the
+     misalignment that check guards against cannot arise. See
+     `design-decisions.md` §276 — the argument is that accepting more than
+     GNU cannot change what an already-working script means, whereas the
+     other two directions can.
+
+   - **3c — the repeat constructs: still open.** `[x*n]` (x repeated n times,
+     allowed in either set) and `[x*]` (SET2 only, pad SET2 to SET1's length
+     with x). Currently both are read as literals: `tr 'abc' '[x*]'` maps
+     `a`→`[`, `b`→`x`, `c`→`*` and reports success, so this row of the class
+     is *not* yet closed. `[x*]` needs `expand_tr_set` to learn SET1's
+     length, which is why it did not ride along with 3b — and GNU's own
+     message for the misuse (`the [c*] repeat construct may not appear in
+     string1`) is the shape of the error to emit for the SET1 case.
 
 **Not a regression.** All five have been true since the command was written.
 They are recorded together because they are one command's worth of the same

@@ -136,9 +136,9 @@ struct StopwatchApp {
     // History
     history: Vec<SessionRecord>,
     history_scroll: usize,
-
-    // Tick tracking
-    last_tick_ms: u64,
+    // No `last_tick_ms`: `Event::Tick` already carries the interval since
+    // this window's previous tick, so there is nothing for the app to
+    // subtract.  See `tick`.
 }
 
 impl StopwatchApp {
@@ -158,7 +158,6 @@ impl StopwatchApp {
             countdown_finished: false,
             history: Vec::new(),
             history_scroll: 0,
-            last_tick_ms: 0,
         }
     }
 
@@ -236,27 +235,41 @@ impl StopwatchApp {
         }
     }
 
-    fn tick(&mut self, current_ms: u64) {
+    /// Advance the clock by `delta_ms`, the interval since the previous tick.
+    ///
+    /// This takes an *interval*, not a timestamp, because that is what
+    /// [`Event::Tick`] carries: `oswindow`'s event loop computes
+    /// `now - since_last_tick_for_this_window` and puts the result in
+    /// `elapsed_ms`.  It used to take an absolute `current_ms` and subtract a
+    /// `last_tick_ms` field of its own, which is the same subtraction done
+    /// twice -- and, once wired to the real event, would have read
+    /// `16 - 16 = 0` on every tick, i.e. a stopwatch that sits at zero while
+    /// claiming to run.  The tests passed throughout, because they fed it the
+    /// timestamps its own convention wanted.  See known-issues.md lesson 45:
+    /// the function had no caller, so nothing had ever disagreed with it.
+    ///
+    /// A tick that arrives while stopped or paused is dropped, which is the
+    /// whole reason the app can ignore wall-clock time: there is no gap to
+    /// skip over on resume, because the interval is measured per tick and the
+    /// ones we discard were never added.
+    fn tick(&mut self, delta_ms: u64) {
         if self.state != TimerState::Running {
-            self.last_tick_ms = current_ms;
             return;
         }
-        let delta = current_ms.saturating_sub(self.last_tick_ms);
-        self.last_tick_ms = current_ms;
 
         match self.mode {
             AppMode::Stopwatch => {
-                self.elapsed_ms = self.elapsed_ms.saturating_add(delta);
+                self.elapsed_ms = self.elapsed_ms.saturating_add(delta_ms);
             }
             AppMode::Countdown => {
                 if self.countdown_remaining_ms > 0 {
-                    if delta >= self.countdown_remaining_ms {
+                    if delta_ms >= self.countdown_remaining_ms {
                         self.countdown_remaining_ms = 0;
                         self.countdown_finished = true;
                         self.state = TimerState::Paused;
                     } else {
                         self.countdown_remaining_ms =
-                            self.countdown_remaining_ms.saturating_sub(delta);
+                            self.countdown_remaining_ms.saturating_sub(delta_ms);
                     }
                 }
             }
@@ -396,8 +409,15 @@ impl StopwatchApp {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        if let Event::Key(ke) = event {
-            self.handle_key(ke);
+        match event {
+            Event::Key(ke) => self.handle_key(ke),
+            // The event that makes a stopwatch a stopwatch.  It was not
+            // handled here until 2026-08-25: `tick` existed, was correct on
+            // its own terms, and had eight tests, but nothing outside them
+            // called it, so the running clock never advanced.  That is
+            // known-issues.md lesson 45 in its most literal form.
+            Event::Tick { elapsed_ms } => self.tick(*elapsed_ms),
+            _ => {}
         }
     }
 
@@ -976,12 +996,26 @@ mod tests {
 
     // --- Tick ---
 
+    /// The clock advances when a real `Event::Tick` arrives.
+    ///
+    /// Through `handle_event`, not `tick`, deliberately: `tick` was correct
+    /// and thoroughly tested for months while `handle_event` dropped the
+    /// event, so a test that calls `tick` directly cannot tell a wired
+    /// stopwatch from an unwired one.  This is the one that can -- checked by
+    /// deleting the `Event::Tick` arm and confirming it, and only it, fails.
+    #[test]
+    fn a_tick_event_advances_the_clock() {
+        let mut app = StopwatchApp::new();
+        app.start();
+        app.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert_eq!(app.elapsed_ms, 500, "Event::Tick did not reach the clock");
+    }
+
     #[test]
     fn tick_running() {
         let mut app = StopwatchApp::new();
-        app.last_tick_ms = 1000;
         app.start();
-        app.tick(1500);
+        app.tick(500);
         assert_eq!(app.elapsed_ms, 500);
     }
 
@@ -991,15 +1025,13 @@ mod tests {
         app.start();
         app.elapsed_ms = 1000;
         app.pause();
-        app.last_tick_ms = 5000;
-        app.tick(6000);
+        app.tick(1000);
         assert_eq!(app.elapsed_ms, 1000);
     }
 
     #[test]
     fn tick_stopped_no_change() {
         let mut app = StopwatchApp::new();
-        app.last_tick_ms = 0;
         app.tick(1000);
         assert_eq!(app.elapsed_ms, 0);
     }
@@ -1007,12 +1039,28 @@ mod tests {
     #[test]
     fn tick_accumulates() {
         let mut app = StopwatchApp::new();
-        app.last_tick_ms = 0;
         app.start();
         app.tick(100);
-        app.tick(300);
-        app.tick(500);
+        app.tick(200);
+        app.tick(200);
         assert_eq!(app.elapsed_ms, 500);
+    }
+
+    /// Time that passes while paused is not silently credited on resume.
+    ///
+    /// The old timestamp-taking `tick` needed a `last_tick_ms` field kept up
+    /// to date on every dropped tick to get this right; with intervals it is
+    /// automatic, because a dropped tick's interval is simply never added.
+    #[test]
+    fn a_pause_does_not_bank_time() {
+        let mut app = StopwatchApp::new();
+        app.start();
+        app.tick(1000);
+        app.pause();
+        app.tick(60_000);
+        app.start(); // resume
+        app.tick(1000);
+        assert_eq!(app.elapsed_ms, 2000, "the paused minute was credited");
     }
 
     // --- Laps ---
@@ -1148,7 +1196,6 @@ mod tests {
         // start() recomputes the target from setup_values (h, m, s) in Countdown
         // mode, so configure 10 seconds there rather than poking the derived field.
         app.countdown_setup_values = [0, 0, 10];
-        app.last_tick_ms = 0;
         app.start();
         app.tick(3000);
         assert_eq!(app.countdown_remaining_ms, 7000);
@@ -1160,7 +1207,6 @@ mod tests {
         app.mode = AppMode::Countdown;
         // start() recomputes the target from setup_values in Countdown mode.
         app.countdown_setup_values = [0, 0, 5];
-        app.last_tick_ms = 0;
         app.start();
         app.tick(6000);
         assert_eq!(app.countdown_remaining_ms, 0);

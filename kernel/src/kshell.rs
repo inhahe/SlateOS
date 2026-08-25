@@ -46,6 +46,7 @@ use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Output capture for redirection and piping
@@ -65,6 +66,10 @@ use alloc::vec::Vec;
 /// → `TD-KSHELL-LINE-EDITOR-IS-UTF8`, which names this sink as the binding
 /// constraint on the rest of the byte-clean conversion.
 static SHELL_OUTPUT: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+
+/// Running total of bytes written into [`SHELL_OUTPUT`] while a capture is
+/// active. Read by the liveness watchdog — see [`captured_output_count`].
+static CAPTURED_OUTPUT_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// A capture in progress, holding the enclosing capture it displaced.
 ///
@@ -181,10 +186,61 @@ pub fn shell_write_bytes(bytes: &[u8]) {
     let mut guard = SHELL_OUTPUT.lock();
     if let Some(ref mut buf) = *guard {
         buf.extend_from_slice(bytes);
+        // Captured output is still output. See [`captured_output_count`].
+        CAPTURED_OUTPUT_BYTES.fetch_add(bytes.len() as u64, Ordering::Relaxed);
     } else {
         drop(guard);
         crate::console::write_bytes(bytes);
     }
+}
+
+/// Bytes the shell has written into a capture buffer since boot.
+///
+/// The liveness watchdog decides a boot has hung from three signals, and a
+/// captured command defeats all three at once. `kernel_progress_count` sums
+/// page faults and block I/O; `USEFUL_WORK_TICKS` only advances for ticks that
+/// preempt ring-3 or a CPU with a queued task; a CPU-bound in-kernel loop
+/// touches neither. The third signal — serial output — is the one that normally
+/// saves such a loop from being called a hang, and [`shell_write_bytes`] takes
+/// it away the moment a capture is running, because the bytes go into a `Vec`
+/// instead of out of the port.
+///
+/// So the watchdog's question is "is anything happening?", the honest answer is
+/// "yes, the shell is writing", and the counter it consults says "no". That is
+/// not a threshold that needs raising — raising it would dull a gate whose
+/// whole job is to notice a boot that stopped — it is a signal that is simply
+/// not being reported. This counter reports it.
+///
+/// It matters well beyond the self-test that exposed it. `capture_command` is
+/// what serves `$(...)` substitution and the SSH and telnet servers, so a
+/// remote user running any long pipeline is invisible to the watchdog in
+/// exactly the same way. A fix aimed only at the self-test — breadcrumbs inside
+/// the expensive rung — would have left every one of those cases blind.
+///
+/// This cannot mask a real hang. A captured command that writes and then blocks
+/// forever advances this counter once and then stops, so the silence resumes
+/// and the report follows. What it does mask is a captured command that loops
+/// while writing without bound — which is not a hang but a runaway, is caught
+/// by the allocator rather than the watchdog, and is already unreported in the
+/// *uncaptured* case for the same reason. Making the two agree is the point.
+pub fn captured_output_count() -> u64 {
+    CAPTURED_OUTPUT_BYTES.load(Ordering::Relaxed)
+}
+
+/// Write `bytes` through the capture branch of [`shell_write_bytes`] and throw
+/// them away, so the scheduler's liveness drill can assert that captured output
+/// registers as output.
+///
+/// Exists because [`Capture`] is deliberately private — the whole point of that
+/// type is that a call site cannot forget the restore — so the drill cannot open
+/// and close one itself. Driving the real write path rather than poking
+/// [`CAPTURED_OUTPUT_BYTES`] directly is what makes the drill worth having: it
+/// has to fail if a later edit moves the increment off this branch or drops it,
+/// and a test that incremented the counter itself would pass either way.
+pub fn write_captured_for_liveness_drill(bytes: &[u8]) {
+    let capture = capture_start();
+    shell_write_bytes(bytes);
+    drop(capture.finish());
 }
 
 /// Write raw bytes followed by a newline.

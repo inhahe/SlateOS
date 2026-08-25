@@ -2844,12 +2844,29 @@ fn armed_relative_deadline_ns(budget_ns: u64, arm_ns: u64) -> Option<u64> {
 /// asserting the invariant directly rather than hoping a drill stumbles on it.
 static LIVENESS_SELF_OUTPUT: AtomicU64 = AtomicU64::new(0);
 
-/// Serial output count with the watchdog's own writes discounted.
+/// Output-progress count with the watchdog's own writes discounted.
 ///
 /// The only value [`liveness_check`] and [`liveness_arm`] may use for the
 /// silence test. See [`LIVENESS_SELF_OUTPUT`].
+///
+/// Counts shell output that went into a *capture buffer* as well as bytes that
+/// reached the port, because a captured command is producing output by any
+/// reading of the word — `capture_command` merely changes where it lands. Left
+/// out, this detector had a blind spot exactly the width of `$(…)`
+/// substitution, every pipeline stage, and every command served over SSH or
+/// telnet: those all run captured, so a slow one is silent on the wire while
+/// being anything but stalled. It cost two false `SYSTEM HANG` reports on boots
+/// whose self-tests all passed
+/// (`TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK`), and would
+/// have cost a remote user the same verdict for a long pipeline.
+///
+/// This adds no way for a genuine hang to hide: a captured command that writes
+/// once and then blocks advances the sum once, after which the silence resumes
+/// and the report follows on schedule. See [`crate::kshell::captured_output_count`].
 fn kernel_output_count() -> u64 {
-    crate::serial::output_count().wrapping_sub(LIVENESS_SELF_OUTPUT.load(Ordering::Relaxed))
+    crate::serial::output_count()
+        .wrapping_add(crate::kshell::captured_output_count())
+        .wrapping_sub(LIVENESS_SELF_OUTPUT.load(Ordering::Relaxed))
 }
 
 /// Emit watchdog diagnostics without letting them register as kernel progress.
@@ -8162,6 +8179,33 @@ fn test_liveness_watchdog() -> KernelResult<()> {
             serial_println!(
                 "[sched]   FAIL: ordinary serial output did not reset the stall \
                  counter (still {reset}) — the silence test is blind"
+            );
+            return false;
+        }
+
+        // Shell output written into a *capture buffer* must count too.  This is
+        // the half that was missing: `capture_command` redirects the shell's
+        // bytes into a `Vec` instead of the port, so a captured command is
+        // silent on the wire while being anything but stalled.  Every `$(…)`
+        // substitution, every pipeline stage and every command served over SSH
+        // or telnet runs that way, and so does self-test rung 27 — which spent
+        // two boots being reported as a `SYSTEM HANG` while its own assertions
+        // all passed.
+        //
+        // Driven through `shell_write_bytes` rather than by poking the counter,
+        // so the drill fails if a future edit moves the increment off the
+        // capture path or drops it.  Nothing is captured here, so the bytes
+        // would go to the console; `capture_start`/`finish` is what puts the
+        // write on the branch under test and swallows the output.
+        crate::kshell::write_captured_for_liveness_drill(b"(self-test) captured output\n");
+        LIVENESS_LAST_KWORK.store(kernel_progress_count(), Ordering::Relaxed);
+        liveness_check();
+        let captured_reset = LIVENESS_STALL_COUNT.load(Ordering::Relaxed);
+        if captured_reset != 0 {
+            serial_println!(
+                "[sched]   FAIL: captured shell output did not reset the stall \
+                 counter (still {captured_reset}) — every $(…), pipeline stage \
+                 and remote command is invisible to the silence test"
             );
             return false;
         }

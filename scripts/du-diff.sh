@@ -1,27 +1,29 @@
 #!/usr/bin/env bash
 # Differential test: our du against GNU du.
 #
-# ## Why this one is not shaped like the others
+# ## Why this one had to run inside WSL first
 #
-# Every other `*-diff.sh` builds a *Windows* binary and pipes text at it. That
+# Every `*-diff.sh` used to build a *Windows* binary and pipe text at it. That
 # cannot work here. `du`'s entire answer is derived from `st_dev`, `st_ino` and
 # `st_blocks` — which device a file is on, which inode it is, how many 512-byte
 # blocks it actually occupies — and Windows has none of the three. Our `du.rs`
 # says so out loud: the whole `RealTree` is behind `#[cfg(unix)]`, and the
 # Windows `main` is a two-line stub that prints "unix-only utility". Pointing
-# the usual harness at it would compare GNU's output against that stub.
+# the usual harness at it would have compared GNU's output against that stub.
 #
-# So this harness runs *inside* WSL, on both sides, over a fixture tree built
-# in WSL's own ext4. That last part is not incidental either: a tree built on
-# `/mnt/d` is 9p, where `st_blocks` is synthesised and hard links do not behave,
-# so the two properties this utility exists to report would both be fiction.
+# So this was the first harness to run *inside* WSL on both sides, and the
+# prediction this comment used to make — that the benefit was not confined to
+# `du`, since `ls`, `find`, `stat`, `df` and `ln` all answer questions only a
+# real inode can answer — turned out to understate it. *Every* harness wants
+# it: `coreutils::stdfd` is `#[cfg(target_os = "linux")]`, so no Windows-hosted
+# harness could exercise it, and the MSYS2 reference the others used has a
+# getopt that is not glibc's. `scripts/diff-wsl.sh` is this file's outer half
+# made shared, and this file now sources it like the rest.
 #
-# The cost is a second Rust toolchain, in WSL, which this script installs
-# nothing to obtain — it expects `~/.cargo/bin/cargo` and skips loudly if it is
-# absent, with the one command that fixes that in the message. The benefit is
-# not confined to `du`: `ls`, `find`, `stat`, `df` and `ln` all answer
-# questions that only a real inode can answer, and this is the road for them
-# too.
+# The fixture tree still has to be in WSL's own ext4, and is: `$DIFF_TMP` is a
+# `mktemp -d` under `/tmp`. A tree built on `/mnt/d` is 9p, where `st_blocks`
+# is synthesised and hard links do not behave, so the two properties this
+# utility exists to report would both be fiction.
 #
 # ## What is compared
 #
@@ -40,106 +42,43 @@
 #
 set -u
 
-# ------------------------------------------------------------------ outer ---
-# Run from MSYS, this half only hands the whole job to WSL and gets out of the
-# way. `wsl` inherits the Windows cwd translated to `/mnt/...`, which is why
-# the relative path below resolves — an absolute MSYS path would be mangled.
-if [ "${DU_DIFF_INNER:-}" != 1 ]; then
-    cd "$(dirname "$0")/.." || exit 1
-    if ! wsl -e true >/dev/null 2>&1; then
-        echo "du-diff: WSL is not available; SKIPPED"
-        exit 0
-    fi
-    exec wsl -e env DU_DIFF_INNER=1 "OURS=${OURS:-}" LC_ALL=C.UTF-8 \
-        bash ./scripts/du-diff.sh
-fi
+# Into WSL, build ours for Linux, find GNU's, and put both behind the one name
+# `du` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+#
+# This harness had all of that written out for itself -- it was the first one
+# that had to run inside WSL, and the preamble is largely its outer half
+# generalised. What it gains by handing the job over is the build-freshness
+# guard, which its own copy of the build did not have: a `cargo build` that
+# exits 0 having replayed a stale library is a harness certifying a binary
+# nobody built, and `diff-wsl.sh` refuses rather than runs.
+#
+# `dd` and `truncate` are named because the fixture tree is not decoration:
+# `t/sparse` is the one file where `--apparent-size` and the default cannot
+# agree, and without `truncate` it would silently be an ordinary empty file
+# that both sides report as 0.
+DIFF_PROG=du
+DIFF_NEED="dd truncate"
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
-# ------------------------------------------------------------------ inner ---
-export LC_ALL=C.UTF-8
 # `du` reads three of these and would otherwise inherit whatever the operator's
 # shell has set, which would change both sides but is not what we mean to test.
 unset DU_BLOCK_SIZE BLOCK_SIZE BLOCKSIZE POSIXLY_CORRECT
 
-# Resolved to a path here, while `du` still means the system's — a few lines
-# below it becomes a shell function and `command -v du` would answer "du".
-GNU=${GNU:-$(command -v du)}
-OURS=${OURS:-}
-
-if [ -z "$OURS" ]; then
-    export PATH="$HOME/.cargo/bin:$PATH"
-    if ! command -v cargo >/dev/null 2>&1; then
-        cat >&2 <<'MISSING'
-du-diff: no cargo inside WSL, so our du cannot be built for Linux.
-
-Install one (a per-user toolchain, nothing system-wide):
-
-  wsl -e sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --profile minimal"
-
-MISSING
-        echo "du-diff: cargo missing inside WSL; SKIPPED"
-        exit 0
-    fi
-    # Built every run, from the package named, for the same reason
-    # `scripts/diff-subject.sh` gives: a harness that merely *runs* a path
-    # measures whatever was last written there, which need not be current and
-    # need not even be this crate.
-    #
-    # The target directory is under WSL's own home rather than the repository:
-    # the repository is on 9p through `/mnt/d`, where a Rust build is an order
-    # of magnitude slower, and a second `target/` inside the tree would be a
-    # tens-of-gigabytes surprise for whoever next runs `du -sh` on the
-    # worktree.
-    #
-    # It is *shared* with the other WSL-built harnesses -- find-diff, ls-diff,
-    # cmp-diff. They build different binaries out of the same workspace for the
-    # same triple, so their dependency artifacts are identical, and a directory
-    # each stored the same objects four times over. See design-decisions.md
-    # §374. Delete it with `wsl rm -rf ~/.cache/slateos-diff-target`.
-    #
-    # Built from the workspace *root*, not from `userspace/coreutils`. Cargo
-    # searches for config upwards from the cwd, and `userspace/.cargo/config.
-    # toml` turns on `build-std` -- which this build does not want (Linux has a
-    # prebuilt std) and which fails outright unless the `rust-src` component is
-    # installed for the active toolchain. Running from the root avoids the zone
-    # config entirely; `-p coreutils` picks the same package.
-    root=$(cd "$(dirname "$0")/.." && pwd) || exit 1
-    ( cd "$root" \
-      && CARGO_TARGET_DIR="$HOME/.cache/slateos-diff-target" \
-         cargo build -p coreutils --bin du --target x86_64-unknown-linux-gnu ) >&2 || {
-        echo "du-diff: the build failed"
-        exit 1
-    }
-    OURS="$HOME/.cache/slateos-diff-target/x86_64-unknown-linux-gnu/debug/du"
-fi
-
-if [ ! -x "$OURS" ]; then
-    echo "du-diff: $OURS is not executable"
-    exit 1
-fi
-
-# Both are about to become the target of a symlink in a directory that is not
-# this one, and a relative `OURS=` — which the override exists to accept — would
-# then point at nothing.
-GNU=$(cd "$(dirname "$GNU")" && pwd)/$(basename "$GNU") || exit 1
-OURS=$(cd "$(dirname "$OURS")" && pwd)/$(basename "$OURS") || exit 1
+echo "du-diff:"
+echo "  ours: $OURS"
+echo "  gnu:  $gnu_real"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d /tmp/du-diff.XXXXXX) || exit 1
-trap 'rm -rf "$fixtures"' EXIT
-
-# Each implementation gets a directory of its own containing one symlink named
-# `du`, and a case is run with that directory first on `PATH`. The point is
-# `argv[0]`: see the comment on the `du` function below. The directories are
-# under `$fixtures` so the existing trap removes them, but *not* under the tree
-# the cases walk — a `bin` directory inside `t` would change every size in
-# every expectation.
-mkdir -p "$fixtures/bin-gnu" "$fixtures/bin-ours" || exit 1
-ln -s "$GNU" "$fixtures/bin-gnu/du" || exit 1
-ln -s "$OURS" "$fixtures/bin-ours/du" || exit 1
-GNU_PATH="$fixtures/bin-gnu:$PATH"
-OURS_PATH="$fixtures/bin-ours:$PATH"
+# The fixture tree is *not* under the directories holding the two symlinks: a
+# `bin` directory inside `t` would change every size in every expectation. The
+# preamble puts its `$bindir` beside this rather than inside it, which is what
+# makes that true.
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures" || exit 1
+GNU_PATH="$bindir/gnu:$PATH"
+OURS_PATH="$bindir/ours:$PATH"
 
 mkdir -p "$fixtures/tree" || exit 1
 cd "$fixtures/tree" || exit 1
@@ -214,6 +153,9 @@ printf 't/f\0' > "sp ace list"
 # sides, which is also what the shell will do on the target.
 du() { PATH=$DU_PATH command du "$@"; }
 
+a_file=$DIFF_TMP/gnu.out
+b_file=$DIFF_TMP/ours.out
+
 run_case() {
     line=$1
     expect_diff=0
@@ -227,10 +169,17 @@ run_case() {
             ;;
     esac
 
-    a=$(DU_PATH=$GNU_PATH; eval "$line" 2>&1; printf 'rc=%s' "$?")
-    b=$(DU_PATH=$OURS_PATH; eval "$line" 2>&1; printf 'rc=%s' "$?")
+    # Captured into files, not into `$(...)`. Command substitution deletes NUL
+    # bytes and trailing newlines, and this file's whole `-0` section is about
+    # which byte ends a row: under `$(...)` both sides lost their NULs
+    # identically, so every one of those cases compared equal no matter what
+    # either side emitted. bash even said so, four times a run --
+    # `warning: command substitution: ignored null byte in input` -- while the
+    # summary reported them as passes.
+    ( DU_PATH=$GNU_PATH;  eval "$line"; printf 'rc=%s' "$?" ) >"$a_file" 2>&1
+    ( DU_PATH=$OURS_PATH; eval "$line"; printf 'rc=%s' "$?" ) >"$b_file" 2>&1
 
-    if [ "$a" = "$b" ]; then
+    if cmp -s "$a_file" "$b_file"; then
         if [ "$expect_diff" = 1 ]; then
             xpass=$((xpass + 1))
             printf 'XPASS  %s\n     (expected to differ: %s)\n' "$line" "$reason"
@@ -245,10 +194,12 @@ run_case() {
     fi
     fail=$((fail + 1))
     printf 'FAIL   %s\n' "$line"
-    printf '  gnu:  %s\n' "$(printf '%s' "$a" | sed -n '1,12p' | cat -v | sed 's/^/        /')"
-    printf '  ours: %s\n' "$(printf '%s' "$b" | sed -n '1,12p' | cat -v | sed 's/^/        /')"
+    # `cat -v` before anything else looks at the bytes: it is what makes a NUL
+    # visible as `^@` rather than vanishing into the terminal or the pipe.
+    printf '  gnu:\n%s\n'  "$(cat -v <"$a_file" | sed -n '1,12p' | sed 's/^/        /')"
+    printf '  ours:\n%s\n' "$(cat -v <"$b_file" | sed -n '1,12p' | sed 's/^/        /')"
     printf '  ---- unified ----\n'
-    diff <(printf '%s\n' "$a" | cat -v) <(printf '%s\n' "$b" | cat -v) \
+    diff <(cat -v <"$a_file") <(cat -v <"$b_file") \
         | sed 's/^/        /' | sed -n '1,24p'
 }
 

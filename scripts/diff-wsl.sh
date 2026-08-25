@@ -31,6 +31,41 @@
 # between harnesses and kept out of the repository's `target/` so the Linux and
 # Windows builds do not invalidate each other (design-decisions.md §374).
 #
+# ## Why the subject is built, every run
+#
+# A harness that names a path under the target directory and then merely *runs*
+# it is not measuring the tree -- it is measuring whatever was last written to
+# that path, which can be arbitrarily old and need not even come from the same
+# crate. Both failure modes have happened here, and the second cost a day:
+#
+#   * **Stale.** `cargo test` and `cargo clippy` do not refresh a binary. A fix
+#     verified by a unit test and then "measured" by the harness was measured
+#     against the *previous* build. That was found in `printf-diff.sh`, and for
+#     a while the fix -- build every run -- was applied to `printf` and `seq`
+#     only.
+#
+#   * **The wrong program entirely.** Forty-two binary names in this workspace
+#     are produced by *two* packages -- `coreutils` and a superseded standalone
+#     `userspace/<name>` crate -- which cargo warns about ("output filename
+#     collision") and then resolves by letting whichever built last win. So
+#     `debug/bc` was sometimes `userspace/bc` and sometimes
+#     `coreutils/src/bin/bc.rs`, two different implementations of bc. On
+#     2026-08-21 `calc-diff.sh` reported "95 passed, 105 differed" and three
+#     bugs were written up in `known-issues.md` against a bc that nobody
+#     intends to ship; the bc that is shipped passes all 200. See
+#     `known-issues.md` -> `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`.
+#
+# Naming the package (`DIFF_PKG`) as well as the binary is what closes the
+# second hole. Building immediately before the harness reads the path closes
+# the first -- and it is done every run, not only when the file is missing,
+# because "is it there?" is exactly the question that lets a stale binary
+# through, and a stale binary yields a *confident wrong answer* rather than an
+# obvious failure.
+#
+# (This section used to live in `scripts/diff-subject.sh`, the host-side
+# ancestor of this file. It was deleted once every harness had moved here --
+# see design-decisions.md §382 -- and the reasoning was moved rather than lost.)
+#
 # ## Using it
 #
 # Set the knobs, then source it, before anything else in the harness:
@@ -44,10 +79,11 @@
 # | knob | default | meaning |
 # |---|---|---|
 # | `DIFF_PROG`      | *required* | the utility's name: used for messages, for finding the reference, and as the one name both binaries are reached by |
-# | `DIFF_PKG`       | `coreutils` | the cargo package to build from |
-# | `DIFF_BINS`      | `$DIFF_PROG` | the `--bin` names to build; more than one for a harness that compares a family |
+# | `DIFF_PKG`       | `coreutils` | the cargo package(s) to build from; more than one for a harness whose subjects do not share a crate |
+# | `DIFF_BINS`      | `$DIFF_PROG`, or empty if `DIFF_EXAMPLES` is set | the `--bin` names to build; more than one for a harness that compares a family |
+# | `DIFF_EXAMPLES`  | (none) | `--example` names to build, for a harness whose subject is a test instrument rather than a shipped utility. `extfloat-probe` is one: it exposes a *library* to a C reference, and a `src/bin/*.rs` would be installed into the image |
 # | `DIFF_FORWARD`   | (none) | extra environment variable names to carry across the re-exec, beyond `OURS` and `VERBOSE` |
-# | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared |
+# | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared. Single-binary harnesses only |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
 # | `DIFF_NO_REF`    | (unset) | do not look for a reference; the harness finds its own |
 # | `DIFF_NO_BINDIR` | (unset) | do not build the `PATH` directories; the harness makes its own |
@@ -58,11 +94,13 @@
 # |---|---|
 # | `root`       | the repository root |
 # | `target_dir` | the shared Linux target directory |
-# | `OURS`       | our binary, absolute (single `DIFF_BINS` only) |
-# | `gnu_real`   | the reference binary, absolute (unless `DIFF_NO_REF`) |
+# | `OURS`       | our binary, absolute (a single `DIFF_BINS`, or a single `DIFF_EXAMPLES` and no `DIFF_BINS`) |
+# | `gnu_real`   | the reference binary, absolute (single `DIFF_BINS`, unless `DIFF_NO_REF`) |
 # | `DIFF_TMP`   | a scratch directory, removed on exit |
-# | `bindir`     | `$DIFF_TMP/bin`, holding `ours/$DIFF_PROG` and `gnu/$DIFF_PROG` |
+# | `bindir`     | `$DIFF_TMP/bin`, holding `ours/NAME` and `gnu/NAME` for each of `DIFF_BINS` |
+# | `DIFF_SKIPPED` | the `DIFF_BINS` entries with no reference on this host (multi-binary only) |
 # | `diff_ours`  | `diff_ours NAME` -> the path of another built binary |
+# | `diff_ours_example` | the same for a `DIFF_EXAMPLES` name |
 #
 # A harness's own fixtures belong under `$DIFF_TMP`, so that the one `EXIT`
 # trap set here cleans up everything. Setting a second `trap ... EXIT` would
@@ -78,7 +116,16 @@ if [ -z "${DIFF_PROG:-}" ]; then
   exit 1
 fi
 : "${DIFF_PKG:=coreutils}"
-: "${DIFF_BINS:=$DIFF_PROG}"
+: "${DIFF_EXAMPLES:=}"
+# A harness whose subject is an example need build no binary at all, so
+# `DIFF_BINS` only falls back to the utility's name when there is nothing else
+# to build. Defaulting it unconditionally would ask cargo for a `--bin
+# extfloat` that does not exist.
+if [ -n "$DIFF_EXAMPLES" ]; then
+  : "${DIFF_BINS:=}"
+else
+  : "${DIFF_BINS:=$DIFF_PROG}"
+fi
 : "${DIFF_FORWARD:=}"
 : "${DIFF_REF:=}"
 : "${DIFF_NEED:=}"
@@ -171,6 +218,11 @@ diff_ours() {
   printf '%s/x86_64-unknown-linux-gnu/debug/%s' "$target_dir" "$1"
 }
 
+# The same, for a `--example`, which cargo puts one directory deeper.
+diff_ours_example() {
+  printf '%s/x86_64-unknown-linux-gnu/debug/examples/%s' "$target_dir" "$1"
+}
+
 # Did the build above actually rebuild what changed?
 #
 # `cargo build` exiting 0 is not that promise. On 2026-08-24 this target
@@ -185,10 +237,10 @@ diff_ours() {
 #
 # A compile error is the *lucky* shape of that bug. The unlucky shape is a
 # harness whose subject compiles against a stale library and passes, certifying
-# a binary nobody built. `diff-subject.sh` argues at length that a harness must
-# not merely run whatever path it was given; this is the same argument one
-# level down, because a build that silently did nothing is a path that was
-# merely run.
+# a binary nobody built. "Why the subject is built, every run" above argues
+# that a harness must not merely run whatever path it was given; this is the
+# same argument one level down, because a build that silently did nothing is a
+# path that was merely run.
 #
 # The check is the invariant a successful `cargo build` establishes: cargo's
 # freshness for a path dependency is mtime-based, so any source file newer than
@@ -213,13 +265,29 @@ diff_newer_than() {
        -name '*.rs' -newer "$1" -print -quit 2>/dev/null
 }
 
-# The package's library artifact, or nothing if it has none.
+# One library artifact per package in `DIFF_PKG`, or nothing for a package that
+# has no library.
 #
 # `deps/` holds one per build hash; the newest is the one the binaries above
 # were just linked against.
-diff_lib_artifact() {
-  ls -t "$target_dir/x86_64-unknown-linux-gnu/debug/deps/lib${DIFF_PKG}-"*.rlib \
-    2>/dev/null | head -1
+diff_lib_artifacts() {
+  for diff_p in $DIFF_PKG; do
+    ls -t "$target_dir/x86_64-unknown-linux-gnu/debug/deps/lib${diff_p}-"*.rlib \
+      2>/dev/null | head -1
+  done
+}
+
+# Print `ARTIFACT|NEWER-FILE` and succeed if $1 is stale; fail silently if not.
+diff_stale_one() {
+  local diff_late
+  if [ ! -f "$1" ]; then
+    printf '%s|<the build left nothing here>\n' "$1"
+    return 0
+  fi
+  diff_late=$(diff_newer_than "$1")
+  [ -z "$diff_late" ] && return 1
+  printf '%s|%s\n' "$1" "$diff_late"
+  return 0
 }
 
 # `BINARY|NEWER-FILE` for the first stale artifact, or nothing.
@@ -243,25 +311,20 @@ diff_lib_artifact() {
 # the artifact that actually holds the shared code is checked on its own.
 diff_first_stale() {
   local diff_b diff_bin diff_late diff_lib
-  diff_lib=$(diff_lib_artifact)
-  if [ -n "$diff_lib" ]; then
+  for diff_lib in $(diff_lib_artifacts); do
     diff_late=$(diff_newer_than "$diff_lib")
     if [ -n "$diff_late" ]; then
       printf '%s|%s\n' "$diff_lib" "$diff_late"
       return 0
     fi
-  fi
+  done
   for diff_b in $DIFF_BINS; do
     diff_bin=$(diff_ours "$diff_b")
-    if [ ! -f "$diff_bin" ]; then
-      printf '%s|<the build left nothing here>\n' "$diff_bin"
-      return 0
-    fi
-    diff_late=$(diff_newer_than "$diff_bin")
-    if [ -n "$diff_late" ]; then
-      printf '%s|%s\n' "$diff_bin" "$diff_late"
-      return 0
-    fi
+    diff_stale_one "$diff_bin" && return 0
+  done
+  for diff_b in $DIFF_EXAMPLES; do
+    diff_bin=$(diff_ours_example "$diff_b")
+    diff_stale_one "$diff_bin" && return 0
   done
   return 0
 }
@@ -273,10 +336,12 @@ diff_assert_fresh() {
 
   echo "$DIFF_PROG-diff: ${diff_stale%%|*}" >&2
   echo "  is older than ${diff_stale#*|} -- the build cache is stale. Cleaning." >&2
-  ( cd "$root" && cargo clean -p "$DIFF_PKG" \
-      --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2
+  for diff_p in $DIFF_PKG; do
+    ( cd "$root" && cargo clean -p "$diff_p" \
+        --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2
+  done
   # shellcheck disable=SC2086
-  ( cd "$root" && cargo build -p "$DIFF_PKG" $diff_args \
+  ( cd "$root" && cargo build $diff_args \
       --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || return 1
 
   diff_stale=$(diff_first_stale)
@@ -296,21 +361,32 @@ if [ -z "$OURS" ]; then
     echo "  install one with:  wsl -e sh -c 'curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal'"
     exit 0
   fi
-  # Built every run, for the reason `diff-subject.sh` spells out at length: a
-  # harness that merely *runs* a path measures whatever was written there last,
-  # which need not be current and need not even be this crate. One `cargo
-  # build` for the whole family rather than one per binary, so the output does
-  # not read as though something were rebuilt between two halves of a run.
+  # Built every run, for the reason the header gives under "Why the subject is
+  # built, every run": a harness that merely *runs* a path measures whatever was
+  # written there last, which need not be current and need not even be this
+  # crate. One `cargo build` for the whole family rather than one per binary, so
+  # the output does not read as though something were rebuilt between two halves
+  # of a run.
   diff_args=
+  for diff_p in $DIFF_PKG; do diff_args="$diff_args -p $diff_p"; done
   for diff_b in $DIFF_BINS; do diff_args="$diff_args --bin $diff_b"; done
+  for diff_b in $DIFF_EXAMPLES; do diff_args="$diff_args --example $diff_b"; done
   # shellcheck disable=SC2086
-  ( cd "$root" && cargo build -p "$DIFF_PKG" $diff_args \
+  ( cd "$root" && cargo build $diff_args \
       --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
   diff_assert_fresh || exit 1
+  # One subject gets named in `OURS`; a family does not, and its harness picks
+  # what it needs with `diff_ours` / `diff_ours_example`.
   case $DIFF_BINS in
-    *' '*) ;;   # a family: the harness picks binaries with `diff_ours`
+    ''|*' '*) ;;
     *) OURS=$(diff_ours "$DIFF_BINS") ;;
   esac
+  if [ -z "$OURS" ] && [ -z "$DIFF_BINS" ]; then
+    case $DIFF_EXAMPLES in
+      *' '*) ;;
+      *) OURS=$(diff_ours_example "$DIFF_EXAMPLES") ;;
+    esac
+  fi
 fi
 if [ -n "$OURS" ]; then
   if [ ! -x "$OURS" ]; then
@@ -337,12 +413,84 @@ diff_cleanup() {
 }
 trap diff_cleanup EXIT
 
+# --- 7. running one side without the shell's own commentary -------------------
+# Run "$@" with its stderr going wherever the caller redirected *this
+# function's* stderr, and with the shell's own job-status commentary going
+# nowhere.
+#
+# A harness calls its `run_side` as
+#
+#     run_side ours "$@" 2>"$o_err"
+#
+# and a redirection on a *function call* redirects the shell's stderr for the
+# duration of the call, not merely the child's. So when the child dies of a
+# signal, bash's announcement of it -- `Aborted (core dumped)`, carrying the pid
+# and the literal text of the command line -- lands in the very file the harness
+# is about to compare byte for byte. Two sides that both abort then "differ",
+# by pid, on every run forever.
+#
+# `od -w0` is exactly that: GNU 9.4 reaches `abort()` there, so the two sides
+# were only ever both signalled under `OURS=/usr/bin/od`, where every case is
+# the same binary and nothing should differ at all. That is the run that found
+# this, and it is the argument for making that run part of the routine.
+#
+# fd 4 carries the caller's stderr past the shell's own, so the child still
+# writes where the harness expects and only bash's messages are dropped.
+# Nothing else writes to that stream: the command word is a symlink this file
+# has already resolved and checked, so there is no `command not found` to lose.
+diff_run() { { "$@" 2>&4; } 4>&2 2>/dev/null; }
+
 bindir=$DIFF_TMP/bin
+DIFF_SKIPPED=
 if [ -z "${DIFF_NO_BINDIR:-}" ]; then
-  # Each binary is reached through a symlink named `$DIFF_PROG`, in a directory
-  # that is the whole of `PATH` for that one invocation, so `argv[0]` is the
-  # bare word on both sides and the `prog: ` prefix on every diagnostic matches.
+  # Each binary is reached through a symlink named after the utility, in a
+  # directory that is the whole of `PATH` for that one invocation, so `argv[0]`
+  # is the bare word on both sides and the `prog: ` prefix on every diagnostic
+  # matches.
   mkdir -p "$bindir/ours" "$bindir/gnu"
-  ln -s "$OURS" "$bindir/ours/$DIFF_PROG"
-  ln -s "$gnu_real" "$bindir/gnu/$DIFF_PROG"
+  case $DIFF_BINS in
+    '')
+      # Only reachable from a harness whose subject is an example, since that
+      # is the one case `DIFF_BINS` is allowed to be empty -- and such a
+      # subject has no same-named reference to be symlinked beside.
+      echo "diff-wsl.sh: DIFF_BINS is empty, so there is nothing to put on PATH" >&2
+      echo "  (set DIFF_NO_BINDIR=1: an example has no counterpart in /usr/bin)" >&2
+      exit 1
+      ;;
+    *' '*|*'	'*|*'
+'*)
+      # A family, or a harness whose subjects live in different crates. Each
+      # name gets its own pair, and its own reference found by that name --
+      # `DIFF_REF` names one path and so cannot describe more than one binary.
+      #
+      # A name with no reference on this host is *skipped*, not fatal: a family
+      # harness is still worth running over the rest, and `DIFF_SKIPPED` says
+      # out loud which ones did not run. That is the opposite of the
+      # single-binary rule below, where no reference means there is nothing
+      # left for the harness to do at all.
+      for diff_b in $DIFF_BINS; do
+        diff_gnu=
+        for diff_cand in "/usr/bin/$diff_b" "/bin/$diff_b"; do
+          [ -x "$diff_cand" ] && { diff_gnu=$diff_cand; break; }
+        done
+        # `OURS` names a *directory* for a multi-binary harness, since there is
+        # no single subject for it to name.
+        if [ -n "$OURS" ] && [ -d "$OURS" ]; then
+          diff_bin=$OURS/$diff_b
+        else
+          diff_bin=$(diff_ours "$diff_b")
+        fi
+        if [ -z "$diff_gnu" ] || [ ! -x "$diff_bin" ]; then
+          DIFF_SKIPPED="$DIFF_SKIPPED $diff_b"
+          continue
+        fi
+        ln -s "$diff_bin" "$bindir/ours/$diff_b"
+        ln -s "$diff_gnu" "$bindir/gnu/$diff_b"
+      done
+      ;;
+    *)
+      ln -s "$OURS" "$bindir/ours/$DIFF_PROG"
+      ln -s "$gnu_real" "$bindir/gnu/$DIFF_PROG"
+      ;;
+  esac
 fi

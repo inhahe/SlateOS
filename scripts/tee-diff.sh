@@ -88,9 +88,14 @@ mkdir -p "$scratch"
 # them `xfail` instead would throw away the thing they are there to test, since
 # an xfail passes however the two differ — including if ours had rejected the
 # abbreviation as ambiguous.
-SETUP=; STDIN=; STDIN_FILE=; STDIN_CLOSED=; SKIP_STDOUT=
+#
+# `PARTIAL` names files — as `find` prints them, so `./out` — whose *length* is
+# not specified by anything and so must not be compared. See `render`.
+SETUP=; STDIN=; STDIN_FILE=; STDIN_CLOSED=; SKIP_STDOUT=; PARTIAL=
 
-reset_knobs() { SETUP=; STDIN=; STDIN_FILE=; STDIN_CLOSED=; SKIP_STDOUT=; }
+reset_knobs() {
+  SETUP=; STDIN=; STDIN_FILE=; STDIN_CLOSED=; SKIP_STDOUT=; PARTIAL=
+}
 
 # --- what a directory looks like afterwards ----------------------------------
 # Names, types, sizes and contents. Contents in full for anything small enough
@@ -106,6 +111,29 @@ render() {
   # `stat` needs no read permission, so the size is still reported and only
   # the contents are withheld.
   sz=$(stat -c %s "$f" 2>/dev/null) || { printf '<unstattable>\n'; return 0; }
+  # A file named by `PARTIAL` is one its case *expects* to be cut short by a
+  # broken pipe, and nothing specifies where the cut falls: tee copies in
+  # fixed-size blocks, and which block draws the EPIPE depends on when the
+  # reader's exit happens to be scheduled. Both sides race, independently —
+  # measured over twenty runs of `--output-error=exit out`, ours produced 8192
+  # and 32768 bytes for the same case while GNU produced 16384 and 24576, and
+  # the harness went red on 11 of the 20. Comparing the exact length there is
+  # comparing a coin flip.
+  #
+  # So report what the case is actually for, which is that the copy *stopped*.
+  # This keeps the case's teeth rather than excusing it: a mode that wrongly
+  # kept going reads `<complete>` against the other side's `<partial>` and
+  # still fails, which is the difference between `warn` and `exit` that these
+  # cases exist to measure.
+  case " $PARTIAL " in
+    *" $f "*)
+      if   [ "$sz" -eq 0 ];             then printf '<empty>\n'
+      elif [ "$sz" -ge "$PIPE_INPUT" ]; then printf '<complete>\n'
+      else                                   printf '<partial>\n'
+      fi
+      return 0
+      ;;
+  esac
   printf '%s bytes\n' "$sz"
   if [ ! -r "$f" ]; then printf '  <unreadable>\n'
   elif [ "$sz" -le 512 ]; then od -An -c <"$f"
@@ -224,6 +252,13 @@ xfail_case() {
 # `nopipe` mode with a surviving file operand tee is *supposed* to keep copying
 # after stdout dies, so an endless `yes` would hang here exactly as it did
 # during the measurements this file is built from.
+#
+# Named rather than spelled twice, because `render` compares a `PARTIAL` file's
+# length against it to decide whether the copy ran to completion. Two literals
+# would let the input and the threshold drift apart, and the symptom would be a
+# case that silently stopped testing anything.
+PIPE_INPUT=4000000
+
 pipe_compare() {
   local od gd o_rc g_rc
   od=$scratch/o; gd=$scratch/g
@@ -236,7 +271,7 @@ pipe_compare() {
     if [ "$side" = ours ]; then dir=$od; err=$o_err; else dir=$gd; err=$g_err; fi
     ( cd "$dir" && eval "$SETUP" ) >/dev/null 2>&1
     ( cd "$dir" \
-      && head -c 4000000 /dev/zero \
+      && head -c "$PIPE_INPUT" /dev/zero \
          | timeout -k 2 60 env PATH="$bindir/$side" tee "$@" 2>"$err" \
          | head -c 1 >/dev/null
       printf '%s' "${PIPESTATUS[1]}" >"$dir.rc" )
@@ -375,7 +410,13 @@ STDIN='x\n'; run_case --output-error=exit-nopipe nodir/bad good
 pipe_case --output-error=warn out
 pipe_case --output-error=warn-nopipe out
 pipe_case -p out
-pipe_case --output-error=exit out
+# The only case in the file where tee stops in the *middle* of the copy: `exit`
+# treats the broken pipe as fatal, where `warn`/`-p` carry on and `exit-nopipe`
+# does not count EPIPE as an error at all, so all three of those write the whole
+# input to `out` and its length is fixed. Here it is whichever block drew the
+# EPIPE, which is scheduling — hence `PARTIAL`, and see `render` for the
+# measurement that established it races on both sides.
+PARTIAL=./out; pipe_case --output-error=exit out
 pipe_case --output-error=exit-nopipe out
 # With no file operand there is nothing left to write to, so every mode stops —
 # but they still differ in whether they say why, and in the status.

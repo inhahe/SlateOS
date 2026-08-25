@@ -11917,6 +11917,174 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = crate::fs::Vfs::remove(present);
     }
 
+    serial_println!("  kshell::self_test 37: cut refuses a list it cannot honour");
+    // The same silent-guess family as rung 35, in the command that had every
+    // member of it at once. `parse_cut_args` reported no errors whatsoever:
+    // an argument it could not read was *dropped*, and a `cut` with no list
+    // left prints each line verbatim -- so a mistake anywhere in the arguments
+    // came out as a successful identity transform. `cut -f0 f` was worse
+    // still, printing a blank line per input line: the file looked empty.
+    //
+    // Every check below asserts on `zz_a`, a token that appears only in the
+    // *data*. The diagnostics quote the offending argument back, so a witness
+    // shared with an argument would make "the message mentioned it" and "cut
+    // emitted a line" the same observation -- the trap rung 33 set and rung 35
+    // had to be redesigned around.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let data: &[u8] = b"zz_a:zz_b:zz_c\n";
+
+        // --- what must keep working, including three forms that used to be
+        // parsed as "no list at all" and therefore passed straight through.
+
+        let out = piped("cut -d: -f2", data);
+        assert_output_contains("a single field is cut", &out, b"zz_b");
+        assert_output_lacks("and the others are not", &out, b"zz_a");
+        assert_eq!(last_exit(), 0, "and it succeeds");
+
+        // A list is a set, not a sequence: selected input comes out in line
+        // order, once each. Written out of order is the only arrangement that
+        // can tell the two readings apart.
+        let out = piped("cut -d: -f3,1", data);
+        assert_output_contains(
+            "an out-of-order list comes out in line order",
+            &out,
+            b"zz_a:zz_c",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let out = piped("cut -d: -f1-2", data);
+        assert_output_contains("a closed range selects both ends", &out, b"zz_a:zz_b");
+        assert_output_lacks("and nothing past it", &out, b"zz_c");
+
+        let out = piped("cut -d: -f2-", data);
+        assert_output_contains("an open range runs to the last field", &out, b"zz_b:zz_c");
+        assert_output_lacks("and not before its start", &out, b"zz_a");
+
+        let out = piped("cut -d: -f-2", data);
+        assert_output_contains("and an open start runs from the first", &out, b"zz_a:zz_b");
+
+        // Positions 1-3 and 7 of `zz_abcd` are `zz_` and `d`. A `-c` *list*
+        // used to parse as nothing at all, so this printed `zz_abcd` whole.
+        let out = piped("cut -c1-3,7", b"zz_abcd\n");
+        assert_output_contains("a -c list joins its pieces", &out, b"zz_d");
+        assert_output_lacks("and drops what is between them", &out, b"zz_abcd");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        // A line with no delimiter is one whole field and is written whole;
+        // `-s` is the request to drop it. The old code wrote a *blank* line
+        // for any field but the first, which is data loss disguised as data.
+        let mixed: &[u8] = b"zz_a:zz_b\nzz_plain\n";
+        let out = piped("cut -d: -f2", mixed);
+        assert_output_contains("an undelimited line is written whole", &out, b"zz_plain");
+        let out = piped("cut -d: -f2 -s", mixed);
+        assert_output_lacks("unless -s asks for it to be dropped", &out, b"zz_plain");
+        assert_output_contains("which does not touch the delimited ones", &out, b"zz_b");
+
+        // --- what must now be refused. Each of these used to succeed.
+
+        let out = piped("cut", data);
+        assert_output_lacks("no list at all is not an identity transform", &out, b"zz_a");
+        assert_output_contains("and says so", &out, b"must specify");
+        assert_eq!(last_exit(), 1, "cut with no list is a usage error");
+
+        let out = piped("cut -d: -f1,q", data);
+        assert_output_lacks(
+            "an unreadable list item stops the whole list",
+            &out,
+            b"zz_a",
+        );
+        assert_output_contains("and names it", &out, b"invalid field value");
+        assert_eq!(last_exit(), 1, "a bad field value is a usage error");
+
+        let out = piped("cut -d: -f0", data);
+        assert_output_lacks("field 0 names nothing, so it is refused", &out, b"zz_a");
+        assert_output_contains("and says why", &out, b"numbered from 1");
+        assert_eq!(last_exit(), 1, "field 0 is a usage error");
+
+        let out = piped("cut -c1-q", data);
+        assert_output_lacks("an unreadable endpoint is not an open range", &out, b"zz_a");
+        assert_output_contains("and says so", &out, b"invalid character value");
+        assert_eq!(last_exit(), 1, "a bad range endpoint is a usage error");
+
+        let out = piped("cut -c5-2", data);
+        assert_output_lacks(
+            "a decreasing range selects nothing, so it is refused",
+            &out,
+            b"zz_a",
+        );
+        assert_output_contains("and says so", &out, b"decreasing range");
+        assert_eq!(last_exit(), 1, "a decreasing range is a usage error");
+
+        let out = piped("cut -q -d: -f1", data);
+        assert_output_lacks("an unknown option is not a file name", &out, b"zz_a");
+        assert_output_contains("and is named", &out, b"unrecognized option");
+        assert_eq!(last_exit(), 1, "an unknown option is a usage error");
+
+        let out = piped("cut -d: -f1 -c1", data);
+        assert_output_lacks("the two list kinds cannot be combined", &out, b"zz_a");
+        assert_output_contains("and saying so beats picking one", &out, b"only one type");
+        assert_eq!(last_exit(), 1, "-f with -c is a usage error");
+
+        let out = piped("cut -c1 -d:", data);
+        assert_output_lacks(
+            "a delimiter means nothing when counting characters",
+            &out,
+            b"zz_a",
+        );
+        assert_output_contains(
+            "so it is refused rather than ignored",
+            &out,
+            b"only when operating on fields",
+        );
+        assert_eq!(last_exit(), 1, "-d with -c is a usage error");
+
+        let out = piped("cut -f1 -d", data);
+        assert_output_lacks("an option with no argument is not an option", &out, b"zz_a");
+        assert_output_contains("and says which", &out, b"requires an argument");
+        assert_eq!(last_exit(), 1, "a missing option argument is a usage error");
+
+        // --- operands: `-` is the pipe, every file is read, worst status wins.
+
+        let one = "/tmp/zz_cut_one";
+        let two = "/tmp/zz_cut_two";
+        let gone = "/tmp/zz_cut_missing";
+        crate::fs::Vfs::write_file(one, b"zz_one:x\n")?;
+        crate::fs::Vfs::write_file(two, b"zz_two:x\n")?;
+        let _ = crate::fs::Vfs::remove(gone);
+
+        let out = piped(&alloc::format!("cut -d: -f1 {} {}", one, two), data);
+        assert_output_contains("every operand is read, not just the first", &out, b"zz_one");
+        assert_output_contains("including the second", &out, b"zz_two");
+        assert_output_lacks("and a named file still wins over the pipe", &out, b"zz_a");
+        assert_eq!(last_exit(), 0, "and it succeeds");
+
+        // A readable operand after an unreadable one must not erase it -- the
+        // rule rung 36 applied to xargs invocations, applied to operands.
+        let out = piped(&alloc::format!("cut -d: -f1 {} {}", gone, one), data);
+        assert_output_contains("a later readable file is still read", &out, b"zz_one");
+        assert_eq!(last_exit(), 1, "but an earlier unreadable one still counts");
+
+        // `-` names the pipe. Without this the file-wins rule would have sent
+        // it to `Vfs::read_file("-")`.
+        let out = piped("cut -d: -f1 -", data);
+        assert_output_contains("a - operand reads the pipe", &out, b"zz_a");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let out = piped(&alloc::format!("cut -d: -f1 - {}", one), data);
+        assert_output_contains("and mixes with files, pipe first", &out, b"zz_a");
+        assert_output_contains("then the file", &out, b"zz_one");
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let _ = crate::fs::Vfs::remove(one);
+        let _ = crate::fs::Vfs::remove(two);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -106555,31 +106723,400 @@ fn cmd_rev_input(args: &str, input: &[u8]) {
     }
 }
 
-/// `cut -d DELIM -f N [FILE]` — extract fields from each line.
-///
-/// Supports:
-/// - `-d C`: delimiter character (default tab)
-/// - `-f N` or `-f N,M,...`: field numbers (1-based)
-/// - `-c N-M`: character ranges
-#[allow(clippy::arithmetic_side_effects)]
-fn cmd_cut(args: &str) {
-    let (delim, fields, chars_range, file_path) = parse_cut_args(args);
+/// Which kind of list `cut` was asked for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CutMode {
+    /// `-f`: split each line on the delimiter and select whole fields.
+    Fields,
+    /// `-c`: select characters by position.
+    Chars,
+}
 
-    if let Some(path) = file_path {
-        let resolved = resolve_path(&path);
-        match crate::fs::Vfs::read_file(&resolved) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                cut_process(text, delim, &fields, chars_range);
+/// A parsed `cut` invocation.
+struct CutSpec {
+    mode: CutMode,
+    /// Inclusive, 1-based. `usize::MAX` as the end means "to the end of the
+    /// line", which is what the open `N-` form asks for. Order is irrelevant:
+    /// selected input is written in *line* order and exactly once, so this is
+    /// a set expressed as ranges, not a sequence.
+    ranges: Vec<(usize, usize)>,
+    delim: char,
+    /// `-s`: drop lines with no delimiter instead of writing them whole.
+    only_delimited: bool,
+    /// Operands in the order given. `-` means standard input.
+    files: Vec<String>,
+}
+
+/// Why a `cut` argument list could not be honoured.
+///
+/// `parse_cut_args` used to return no errors at all: every one of the cases
+/// below was answered by *dropping* the argument and carrying on, so `cut`
+/// produced a confident, successful, wrong answer for each. That is the same
+/// silent-guess failure as the `sed` flag that was ignored rather than refused
+/// (`da9e7a0ca`) and the pipe forms that passed their input through unchanged
+/// (`0a785652a`), and it is strictly worse than a missing answer because
+/// nothing downstream can detect it.
+///
+/// The full list of what used to be silent, all of them reported as success:
+///
+/// | written | what it did | what it looks like |
+/// |---|---|---|
+/// | `cut file` | printed every line **verbatim** | `cut` succeeded, so the fields must be right |
+/// | `cut -f1,a,3 f` | cut fields 1 and 3 | a typo'd field silently vanishes |
+/// | `cut -f0 f` | cut **nothing**, printed blank lines | the file appears to be empty |
+/// | `cut -f1-3 f` | printed every line verbatim | ranges were unimplemented, so no field parsed, so pass-through |
+/// | `cut -c1,3 f` | printed every line verbatim | same, via the `-c` list |
+/// | `cut -c1-abc f` | cut to the end of the line | `abc` became `usize::MAX` |
+/// | `cut -q -f1 f` | opened a file named `-q` | the real file was never read |
+/// | `cut -f1 a b` | cut `a` only | `b` silently ignored |
+enum CutParseError {
+    /// `-d`, `-f` or `-c` with nothing after it.
+    MissingArg(char),
+    /// `-d ab`. A delimiter is one character by definition.
+    MultiCharDelim(String),
+    /// A list item that is neither a number nor a range: `-f1,a,3`.
+    InvalidValue(char, String),
+    /// `-f0`. Positions are numbered from 1, so 0 names nothing.
+    ZeroValue(char),
+    /// `-c5-2`. An empty range is never what anyone meant. Unlike the errors
+    /// either side of it this carries no flag letter, because GNU's message
+    /// does not name one and the range text already says which list it is in.
+    DecreasingRange(String),
+    /// `-f` and `-c` together: the two count different things.
+    BothLists,
+    /// `-d` or `-s` without `-f`. Neither means anything when counting
+    /// characters, so accepting them would be accepting a mistake.
+    NeedsFields(char),
+    /// Neither `-f` nor `-c`. This is the pass-through case.
+    NoList,
+    /// A real `cut` option this one does not implement.
+    Unsupported(String, &'static str),
+    /// Anything else beginning with `-`.
+    UnknownOption(String),
+}
+
+impl CutParseError {
+    /// Print the diagnostic. Messages follow GNU's wording where GNU has one,
+    /// so a user who knows `cut` recognises what went wrong.
+    fn report(&self) {
+        match *self {
+            Self::MissingArg(f) => {
+                shell_println!("cut: option requires an argument -- '{}'", f);
             }
-            Err(e) => {
-                shell_println!("cut: {}: {:?}", path, e);
+            Self::MultiCharDelim(ref s) => {
+                shell_println!("cut: the delimiter must be a single character: '{}'", s);
+            }
+            Self::InvalidValue(f, ref s) => {
+                let what = if f == 'f' { "field" } else { "character" };
+                shell_println!("cut: invalid {} value '{}'", what, s);
+            }
+            Self::ZeroValue(f) => {
+                let what = if f == 'f' { "fields" } else { "characters" };
+                shell_println!("cut: {} are numbered from 1", what);
+            }
+            Self::DecreasingRange(ref s) => {
+                shell_println!("cut: invalid decreasing range '{}'", s);
+            }
+            Self::BothLists => {
+                shell_println!("cut: only one type of list may be specified");
+            }
+            Self::NeedsFields(f) => {
+                if f == 'd' {
+                    shell_println!(
+                        "cut: an input delimiter may be specified only when operating on fields"
+                    );
+                } else {
+                    shell_println!(
+                        "cut: suppressing non-delimited lines makes sense only when operating on fields"
+                    );
+                }
+            }
+            Self::NoList => {
+                shell_println!("cut: you must specify a list of characters or fields");
+                shell_println!(
+                    "Usage: cut -d DELIM -f FIELDS [file]...  or  cut -c RANGE [file]..."
+                );
+            }
+            Self::Unsupported(ref opt, hint) => {
+                shell_println!("cut: {} is not supported ({})", opt, hint);
+            }
+            Self::UnknownOption(ref opt) => {
+                shell_println!("cut: unrecognized option '{}'", opt);
+            }
+        }
+    }
+}
+
+/// Read the value of a short option that takes one: `-fVALUE` or `-f VALUE`.
+///
+/// `i` is the index of the word *after* `word`, and is advanced when the
+/// detached form consumes it. A missing value is an error rather than a
+/// default, which is the whole point: the old parser consumed the word
+/// whether or not it could read it.
+fn cut_opt_value(
+    word: &str,
+    words: &[String],
+    i: &mut usize,
+    flag: char,
+) -> Result<String, CutParseError> {
+    let attached = word.get(2..).unwrap_or("");
+    if !attached.is_empty() {
+        return Ok(String::from(attached));
+    }
+    let next = words.get(*i).ok_or(CutParseError::MissingArg(flag))?;
+    *i = i.saturating_add(1);
+    Ok(next.clone())
+}
+
+/// Parse one item of a `-f`/`-c` list: `N`, `N-M`, `N-` or `-M`.
+///
+/// Returns an inclusive 1-based pair, with `usize::MAX` for the open end.
+///
+/// The empty side of a range is a *form*, not a missing value — `-c-5` means
+/// "from the first" and `-c3-` means "to the last". The old parser reached the
+/// same two defaults by way of `unwrap_or`, which meant it could not tell an
+/// omitted endpoint from an unreadable one: `-c1-abc` became `1-usize::MAX`
+/// and quietly cut to the end of the line. Distinguishing "absent" from
+/// "unparseable" is the entire fix.
+fn parse_cut_item(item: &str, flag: char) -> Result<(usize, usize), CutParseError> {
+    let num = |s: &str| -> Result<usize, CutParseError> {
+        let n: usize = s
+            .parse()
+            .map_err(|_| CutParseError::InvalidValue(flag, String::from(item)))?;
+        if n == 0 {
+            return Err(CutParseError::ZeroValue(flag));
+        }
+        Ok(n)
+    };
+    match item.split_once('-') {
+        None => {
+            let n = num(item)?;
+            Ok((n, n))
+        }
+        Some((lo, hi)) => {
+            // A bare `-` names both endpoints as absent, i.e. nothing at all.
+            if lo.is_empty() && hi.is_empty() {
+                return Err(CutParseError::InvalidValue(flag, String::from(item)));
+            }
+            let start = if lo.is_empty() { 1 } else { num(lo)? };
+            let end = if hi.is_empty() { usize::MAX } else { num(hi)? };
+            if end < start {
+                return Err(CutParseError::DecreasingRange(String::from(item)));
+            }
+            Ok((start, end))
+        }
+    }
+}
+
+/// Parse `cut`'s arguments, or say why they cannot be honoured.
+///
+/// Words come from [`split_words`] rather than a hand-rolled scan of the raw
+/// string. That is not a tidy-up: the old scan tested `rest.starts_with("-f")`
+/// against the *remaining line*, so an operand's position in the line decided
+/// whether it was read as a flag, and anything the scan did not recognise fell
+/// into the `else` arm and became **the file name**.
+fn parse_cut_args(args: &str) -> Result<CutSpec, CutParseError> {
+    let words = split_words(args);
+    let mut delim: Option<char> = None;
+    let mut mode: Option<CutMode> = None;
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut only_delimited = false;
+    let mut files: Vec<String> = Vec::new();
+
+    let mut i = 0usize;
+    while let Some(word) = words.get(i) {
+        i = i.saturating_add(1);
+        let w = word.as_str();
+
+        // A lone `-` is the conventional name for standard input, not an
+        // option. Everything else without a leading `-` is a file.
+        if w == "-" || !w.starts_with('-') {
+            files.push(String::from(w));
+            continue;
+        }
+
+        let flag = w.as_bytes().get(1).copied().unwrap_or(b'\0');
+        match flag {
+            b'd' => {
+                let v = cut_opt_value(w, &words, &mut i, 'd')?;
+                let mut cs = v.chars();
+                let (Some(c), None) = (cs.next(), cs.next()) else {
+                    return Err(CutParseError::MultiCharDelim(v));
+                };
+                delim = Some(c);
+            }
+            b'f' | b'c' => {
+                let this = if flag == b'f' {
+                    CutMode::Fields
+                } else {
+                    CutMode::Chars
+                };
+                if mode.is_some_and(|prev| prev != this) {
+                    return Err(CutParseError::BothLists);
+                }
+                mode = Some(this);
+                let spec = cut_opt_value(w, &words, &mut i, char::from(flag))?;
+                // Two lists of the *same* kind merge rather than conflict:
+                // because selected input is written in line order and exactly
+                // once, `-f1 -f3` and `-f1,3` name the same set, so merging is
+                // not a guess about which one was meant.
+                for item in spec.split(',') {
+                    ranges.push(parse_cut_item(item.trim(), char::from(flag))?);
+                }
+            }
+            b's' if w == "-s" => only_delimited = true,
+            b'b' => {
+                return Err(CutParseError::Unsupported(
+                    String::from(w),
+                    "this cut counts characters; use -c",
+                ));
+            }
+            b'-' => {
+                return Err(CutParseError::Unsupported(
+                    String::from(w),
+                    "long options are not implemented; use -c, -f, -d, -s",
+                ));
+            }
+            _ => return Err(CutParseError::UnknownOption(String::from(w))),
+        }
+    }
+
+    let Some(mode) = mode else {
+        return Err(CutParseError::NoList);
+    };
+    // `-d` and `-s` describe fields. Silently ignoring them alongside `-c` is
+    // how `cut -c1 -d:` used to look like it had honoured the delimiter.
+    if mode == CutMode::Chars {
+        if delim.is_some() {
+            return Err(CutParseError::NeedsFields('d'));
+        }
+        if only_delimited {
+            return Err(CutParseError::NeedsFields('s'));
+        }
+    }
+
+    Ok(CutSpec {
+        mode,
+        ranges,
+        delim: delim.unwrap_or('\t'),
+        only_delimited,
+        files,
+    })
+}
+
+/// Whether position `n` (1-based) is selected.
+fn cut_selected(ranges: &[(usize, usize)], n: usize) -> bool {
+    ranges.iter().any(|&(s, e)| n >= s && n <= e)
+}
+
+/// Write the selected part of every line in `text`.
+///
+/// Selected input is written in the order it is *read*, and exactly once —
+/// `cut -f3,1` writes field 1 then field 3, and `cut -f1,1` writes it once.
+/// That is POSIX and GNU behaviour. The old loop walked the list as written,
+/// so it both reordered and duplicated; the difference only shows up when a
+/// list is out of order, which is exactly when it is hardest to notice.
+fn cut_process(text: &str, spec: &CutSpec) {
+    for line in text.lines() {
+        match spec.mode {
+            CutMode::Chars => {
+                let out: String = line
+                    .chars()
+                    .enumerate()
+                    .filter(|&(idx, _)| cut_selected(&spec.ranges, idx.saturating_add(1)))
+                    .map(|(_, c)| c)
+                    .collect();
+                shell_println!("{}", out);
+            }
+            CutMode::Fields => {
+                // A line with no delimiter is one whole field, and is written
+                // unchanged; `-s` is what asks for it to be dropped instead.
+                // The old code reached the same result for field 1 by accident
+                // and the wrong one for every other field, writing a blank
+                // line where the whole line belonged.
+                if !line.contains(spec.delim) {
+                    if !spec.only_delimited {
+                        shell_println!("{}", line);
+                    }
+                    continue;
+                }
+                let mut first = true;
+                for (idx, part) in line.split(spec.delim).enumerate() {
+                    if !cut_selected(&spec.ranges, idx.saturating_add(1)) {
+                        continue;
+                    }
+                    if !first {
+                        shell_print!("{}", spec.delim);
+                    }
+                    first = false;
+                    shell_print!("{}", part);
+                }
+                shell_println!();
+            }
+        }
+    }
+}
+
+/// Run a parsed `cut` over its operands, with `stdin` standing in for `-`.
+///
+/// `stdin` is `None` when there is no pipe feeding this command, which is a
+/// different thing from an empty pipe: the first has nothing to read and
+/// should say so, the second has read everything there was.
+fn cut_run(spec: &CutSpec, stdin: Option<&str>) {
+    if spec.files.is_empty() {
+        match stdin {
+            Some(text) => cut_process(text, spec),
+            None => {
+                shell_println!("cut: no file operand and no input to read");
                 set_exit(1);
             }
         }
-    } else {
-        shell_println!("Usage: cut -d DELIM -f FIELDS [file]  or  cut -c RANGE [file]");
-        set_exit(1);
+        return;
+    }
+
+    let mut worst: u8 = 0;
+    for path in &spec.files {
+        if path == "-" {
+            match stdin {
+                Some(text) => cut_process(text, spec),
+                None => {
+                    shell_println!("cut: -: no input to read");
+                    worst = worst.max(1);
+                }
+            }
+            continue;
+        }
+        let resolved = resolve_path(path);
+        match crate::fs::Vfs::read_file(&resolved) {
+            Ok(data) => {
+                let text = core::str::from_utf8(&data).unwrap_or("");
+                cut_process(text, spec);
+            }
+            Err(e) => {
+                // Every operand is attempted, and the worst status is reported
+                // — a later readable file must not erase an earlier missing
+                // one, the same rule the `xargs` fix applied to invocations.
+                shell_println!("cut: {}: {:?}", path, e);
+                worst = worst.max(1);
+            }
+        }
+    }
+    set_exit(worst);
+}
+
+/// `cut -d DELIM -f LIST [FILE]...` — extract fields or characters.
+///
+/// - `-d C`: delimiter character (default tab), fields only
+/// - `-f LIST` / `-c LIST`: comma-separated `N`, `N-M`, `N-`, `-M`
+/// - `-s`: skip lines with no delimiter, fields only
+/// - `-`: read the pipe
+fn cmd_cut(args: &str) {
+    match parse_cut_args(args) {
+        Ok(spec) => cut_run(&spec, None),
+        Err(e) => {
+            e.report();
+            set_exit(1);
+        }
     }
 }
 
@@ -106587,103 +107124,16 @@ fn cmd_cut(args: &str) {
 /// and as it does for every other paired command here; this used to parse the
 /// file operand out of the arguments and then throw it away, so
 /// `cat a.txt | cut -f1 b.txt` cut `a.txt` and never opened `b.txt`.
+///
+/// A `-` operand names the pipe, so `cat a.txt | cut -f1 - b.txt` reads both,
+/// in that order. Without that, the file-wins rule (`bb9787783`) would have
+/// turned `-` into a request to open a file literally called `-`.
 fn cmd_cut_input(args: &str, input: &str) {
-    let (delim, fields, chars_range, file) = parse_cut_args(args);
-    if file.is_some() {
-        cmd_cut(args);
-        return;
-    }
-    cut_process(input, delim, &fields, chars_range);
-}
-
-/// Parsed `cut` arguments: (delimiter, field numbers, char range, file path).
-type CutArgs = (char, Vec<usize>, Option<(usize, usize)>, Option<String>);
-
-/// Parse cut command arguments.
-fn parse_cut_args(args: &str) -> CutArgs {
-    let mut delim = '\t';
-    let mut fields: Vec<usize> = Vec::new();
-    let mut chars_range: Option<(usize, usize)> = None;
-    let mut file_path: Option<String> = None;
-    let mut rest = args;
-
-    loop {
-        rest = rest.trim_start();
-        if rest.starts_with("-d") {
-            rest = rest.get(2..).unwrap_or("").trim_start();
-            if let Some(c) = rest.chars().next() {
-                delim = c;
-                rest = rest.get(c.len_utf8()..).unwrap_or("");
-            }
-        } else if rest.starts_with("-f") {
-            rest = rest.get(2..).unwrap_or("").trim_start();
-            // Parse field list: N or N,M,...
-            let end = rest.find([' ', '\t']).unwrap_or(rest.len());
-            let spec = rest.get(..end).unwrap_or("");
-            for part in spec.split(',') {
-                if let Ok(n) = part.trim().parse::<usize>() {
-                    if n > 0 {
-                        fields.push(n);
-                    }
-                }
-            }
-            rest = rest.get(end..).unwrap_or("");
-        } else if rest.starts_with("-c") {
-            rest = rest.get(2..).unwrap_or("").trim_start();
-            let end = rest.find([' ', '\t']).unwrap_or(rest.len());
-            let spec = rest.get(..end).unwrap_or("");
-            if let Some(dash) = spec.find('-') {
-                let start = spec
-                    .get(..dash)
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(1);
-                let end_val = spec
-                    .get(dash + 1..)
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(usize::MAX);
-                chars_range = Some((start.max(1), end_val));
-            } else if let Ok(n) = spec.parse::<usize>() {
-                chars_range = Some((n.max(1), n.max(1)));
-            }
-            rest = rest.get(end..).unwrap_or("");
-        } else if !rest.is_empty() {
-            file_path = Some(String::from(rest.split_whitespace().next().unwrap_or("")));
-            break;
-        } else {
-            break;
-        }
-    }
-
-    (delim, fields, chars_range, file_path)
-}
-
-/// Process text with cut (field or character extraction).
-#[allow(clippy::arithmetic_side_effects)]
-fn cut_process(text: &str, delim: char, fields: &[usize], chars_range: Option<(usize, usize)>) {
-    for line in text.lines() {
-        if let Some((start, end)) = chars_range {
-            // Character range mode.
-            let chars: Vec<char> = line.chars().collect();
-            let s = start.saturating_sub(1); // 1-based to 0-based
-            let e = end.min(chars.len());
-            let slice: String = chars.get(s..e).unwrap_or(&[]).iter().collect();
-            shell_println!("{}", slice);
-        } else if !fields.is_empty() {
-            // Field mode.
-            let parts: Vec<&str> = line.split(delim).collect();
-            let mut first = true;
-            for &f in fields {
-                if !first {
-                    shell_print!("{}", delim);
-                }
-                first = false;
-                if let Some(part) = parts.get(f.saturating_sub(1)) {
-                    shell_print!("{}", part);
-                }
-            }
-            shell_println!();
-        } else {
-            shell_println!("{}", line);
+    match parse_cut_args(args) {
+        Ok(spec) => cut_run(&spec, Some(input)),
+        Err(e) => {
+            e.report();
+            set_exit(1);
         }
     }
 }

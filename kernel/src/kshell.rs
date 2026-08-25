@@ -1376,12 +1376,20 @@ fn remove_quotes(s: &str) -> String {
 /// exactly the fact that quote removal destroys. [`cmd_trap`] has always had
 /// a correct quote-aware parser; it simply never received a quote.
 ///
+/// `awk`, `fold` and `base64` are here because each now parses its own line
+/// with [`split_words`], which both respects quotes and removes them. For
+/// `awk` the quoting is not a nicety: the program is one argument whose
+/// interior spaces are load-bearing, so `awk 'BEGIN{print "hi"}'` arrives
+/// dequoted as `BEGIN{print hi}` — two words, an unterminated brace block,
+/// and an action of `print` that prints an empty record. For `fold` and
+/// `base64` it is the ordinary case of a file name with a space in it.
+///
 /// The list is the migration path, not a special case: a command moves onto
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
 /// See `known-issues.md` → `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`.
 fn command_parses_own_quotes(cmd: &str) -> bool {
-    matches!(cmd, "trap")
+    matches!(cmd, "trap" | "awk" | "fold" | "base64")
 }
 
 /// Expand a `${...}` brace expression.
@@ -119870,7 +119878,7 @@ fn b64_decode_char(c: u8) -> Option<u8> {
 ///
 /// Trailing bits that the padding says are absent are **not** rejected — `Zh==`
 /// decodes to `f`, discarding the low four bits of `h`, exactly as GNU's does.
-/// See design-decisions §276 for why compatibility wins over RFC 4648's
+/// See design-decisions §292 for why compatibility wins over RFC 4648's
 /// optional canonical-form check.
 fn base64_group(quantum: &[u8; 4], out: &mut Vec<u8>) -> Result<bool, ()> {
     // `=` is not in the alphabet, so `b64_decode_char` rejects a group that

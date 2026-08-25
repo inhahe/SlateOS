@@ -74539,7 +74539,7 @@ spent. Everywhere else in the shell a usage error is still 1, and the 17
 `"Syntax error: …"` sites remain queued for flat `set_exit(1)` exactly as
 originally planned.
 
-### 2026-08-24 — `gunzip FILE` compresses a file that isn't gzip, instead of refusing
+### 2026-08-24 — `gunzip FILE` compresses a file that isn't gzip, instead of refusing — ✅ FIXED same day (lane A, `4d9990f4c`)
 
 **In short:** typing `gunzip notes.txt` does not report "that isn't a gzip
 file". It *compresses* `notes.txt` and writes `notes.txt.gz` — the exact
@@ -74585,3 +74585,79 @@ commit would make both harder to review and to revert. Queued as the next task.
 **Severity.** Data-affecting but not destructive: the original file is not
 removed, so the outcome is a spurious `.gz` alongside it and a command that
 reported success for doing the reverse of its name.
+
+**Fixed 2026-08-24 in `4d9990f4c`**, along the lines proposed above but with one
+deliberate departure. The proposal kept the magic-byte sniff "as the tie-break
+for `gzip` with no flags (where it is genuinely useful — `gzip file.gz` should
+not double-compress)". That would have left the guess deciding the direction in
+exactly one case, and the case it decides is one where the two possible answers
+are *compress again* and *decompress* — i.e. it would still silently do the
+reverse of what `gzip` means, just from a narrower doorway. The fix instead
+makes the name decide unconditionally and answers `gzip file.gz` by **refusing**
+(`already gzip-compressed, not compressing again`, exit 1), which is what GNU
+gzip does. The magic bytes now decide nothing; they are only consulted where the
+direction is already settled, to ask whether the file is consistent with it.
+
+The refusal is keyed on the header rather than on a `.gz` suffix — a suffix is a
+claim and the header is the fact — and `-o` bypasses it, since naming the output
+explicitly reads as deliberate.
+
+Also fixed the `-d` half: `"-d" => {}` became `"-d" | "--decompress"` setting a
+real flag, so the flag that had been documented in the command's own usage text
+all along now does what the text says.
+
+The two loose ends the entry raised are both closed. Self-test **rung 30**
+covers all five directions, each on a file whose contents point the other way,
+so the old guess cannot satisfy any of them; the round-trip is asserted on the
+recovered bytes rather than on the success line. Rung 29's `-t` workaround is
+kept, but now as a test of the sweep rather than a way around this bug, and its
+comment says so. Rung 30 also picks up the `-t`-success assertion rung 29 had to
+drop for want of a working compressor.
+
+**The sibling pairs were checked and are fine.** `bzip2`/`bunzip2`, `xz`/`unxz`,
+`zstd`/`unzstd` and `lz4`/`unlz4` each have separate `cmd_*` functions and
+separate dispatch arms; the `un*`/`*cat` arms are decompress-only aliases. Only
+gzip/gunzip ever conflated the two directions, which is why only it could guess.
+
+### TD-A-COMPRESSORS-KEEP-THE-INPUT-FILE-WHERE-GNU-REPLACES-IT (lane A, 2026-08-24)
+
+**In short:** typing `gzip big.log` leaves you with **both** `big.log` and
+`big.log.gz`. On Linux you would be left with only `big.log.gz` — GNU `gzip`
+deletes the original once it has written the compressed copy, and `gunzip`
+likewise deletes the `.gz` once it has unpacked it. So someone compressing a
+directory to reclaim disk space reclaims none of it, and a script that compresses
+a log and then counts files finds one more than it expected.
+
+**Where.** `kernel/src/kshell.rs`. It applies to the whole family, not one
+command: there is no `Vfs::remove` call anywhere in the compressor region, so
+`gzip`/`gunzip`, `bzip2`/`bunzip2`, `xz`/`unxz`, `zstd`/`unzstd` and
+`lz4`/`unlz4` all write the output and leave the input untouched. The behaviour
+is at least *uniform*, which is why this is one entry and not five.
+
+**How it was found.** Self-test rung 30 asserted that a refused `gunzip` had
+written no archive, and the assertion failed even though the code under test was
+correct — the archive it found was a leftover from the rung's own earlier
+compress step, still present because `gzip` had not removed it. Cost one boot
+cycle (`aed60824f`). The rung now deletes the file first (`a6155cb82`), which is
+also what makes the assertion mean what it says.
+
+**Is it a bug?** Genuinely arguable, which is why it is filed as tech debt rather
+than fixed on sight:
+
+* *For matching GNU:* it is what every script and every user expects, and the
+  surprise is silent — you only notice when the disk does not empty.
+* *For keeping the input:* deleting the user's original file is destructive, and
+  this shell has no `--keep`/`-k` flag to opt out of it yet, so adopting GNU's
+  behaviour without that flag would make the safe case unreachable. The current
+  behaviour is the conservative half of the tradeoff.
+
+**Proper fix.** Add `-k`/`--keep` to the family, then make removal the default so
+the commands match GNU, with `-k` preserving today's behaviour. Removal must
+happen only after the output write has been confirmed to succeed — otherwise a
+write error midway through would delete the input and leave nothing behind,
+which converts a harmless failure into data loss. Doing it in the other order is
+the whole reason this is worth writing down rather than just doing.
+
+**Severity.** Low and non-destructive as it stands — the divergence costs disk
+space and script compatibility, never data. Note that fixing it moves it *toward*
+being destructive, so the fix needs more care than the bug does.

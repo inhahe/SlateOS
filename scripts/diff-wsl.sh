@@ -337,6 +337,33 @@ diff_cleanup() {
 }
 trap diff_cleanup EXIT
 
+# --- 7. running one side without the shell's own commentary -------------------
+# Run "$@" with its stderr going wherever the caller redirected *this
+# function's* stderr, and with the shell's own job-status commentary going
+# nowhere.
+#
+# A harness calls its `run_side` as
+#
+#     run_side ours "$@" 2>"$o_err"
+#
+# and a redirection on a *function call* redirects the shell's stderr for the
+# duration of the call, not merely the child's. So when the child dies of a
+# signal, bash's announcement of it -- `Aborted (core dumped)`, carrying the pid
+# and the literal text of the command line -- lands in the very file the harness
+# is about to compare byte for byte. Two sides that both abort then "differ",
+# by pid, on every run forever.
+#
+# `od -w0` is exactly that: GNU 9.4 reaches `abort()` there, so the two sides
+# were only ever both signalled under `OURS=/usr/bin/od`, where every case is
+# the same binary and nothing should differ at all. That is the run that found
+# this, and it is the argument for making that run part of the routine.
+#
+# fd 4 carries the caller's stderr past the shell's own, so the child still
+# writes where the harness expects and only bash's messages are dropped.
+# Nothing else writes to that stream: the command word is a symlink this file
+# has already resolved and checked, so there is no `command not found` to lose.
+diff_run() { { "$@" 2>&4; } 4>&2 2>/dev/null; }
+
 bindir=$DIFF_TMP/bin
 if [ -z "${DIFF_NO_BINDIR:-}" ]; then
   # Each binary is reached through a symlink named `$DIFF_PROG`, in a directory

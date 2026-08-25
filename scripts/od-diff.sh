@@ -6,15 +6,22 @@
 # compared byte for byte through `od -An -c`. Trimming whitespace would erase
 # the one thing this implementation had to get right: the padding.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `od` is MSYS2's, a Cygwin derivative linking `msys-2.0.dll` rather
-# than glibc. Three things about it are wrong for this purpose at once: its
-# `getopt` words every option diagnostic differently (`unknown option -- x`
-# against `invalid option -- 'x'`), its `long double` is not the x87 80-bit
-# format `-t fL` is about, and its `isprint` is its own. See
-# `known-issues.md` → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`,
-# and the identical note at the top of `tr-diff.sh` and `wc-diff.sh`.
+# `scripts/diff-wsl.sh` gives the reasons. The reference has to be glibc's, and
+# for `od` the host's — MSYS2's, a Cygwin derivative linking `msys-2.0.dll`
+# rather than glibc — is wrong three ways at once: its `getopt` words every
+# option diagnostic differently (`unknown option -- x` against `invalid option
+# -- 'x'`), its `long double` is not the x87 80-bit format `-t fL` is about,
+# and its `isprint` is its own. See `known-issues.md` →
+# `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.
+#
+# This file already reached past MSYS2 to `wsl -e env LC_ALL=… od`, at the cost
+# of a WSL process per case and a probe that the Windows cwd `wsl` inherited
+# landed on the same bytes under `/mnt/...`. The subject moves in with it now.
+# Every operand below is a regular file or `-`, so this harness has no argument
+# whose *kind* the two platforms disagree about, and the tally is unchanged by
+# the move.
 #
 # ## Why `LC_ALL=C` for the dumps and `C.UTF-8` for the diagnostics
 #
@@ -32,40 +39,29 @@
 # answer to B-Q2 is what turned the sidestep into a wrong reference.
 set -u
 
-# Our od is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path — and `-t`, `+OFFSET` and `--endian=big` all can.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils od "${OURS:-}") || exit 1
-GNU=${GNU:-"wsl -e env LC_ALL=C od"}
-GNU_UTF8=${GNU_UTF8:-"wsl -e env LC_ALL=C.UTF-8 od"}
-export LC_ALL=${LC_ALL:-C}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `od` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=od
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands
-# on the same bytes under `/mnt/c/...`. Verified rather than assumed: a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-printf 'probe' > .probe
-if [ "$($GNU -An -c .probe 2>/dev/null | tr -s ' ' ' ')" = " p r o b e" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "od-diff: glibc od not reachable in this directory (tried: $GNU); skipping"
-fi
-rm -f .probe
+# One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
+# a symlink named `od` in a directory that is the whole of `PATH` for that one
+# invocation, so `argv[0]` is the bare word on both sides. The locale stays a
+# per-case argument — the section above is entirely about why two of them are
+# needed — and is spliced into the same `env` that narrows `PATH`. It replaced
+# two references held as *strings* and word-split at every call site, which is
+# why `compare` now takes a locale where it used to take a reference.
+run_side() {
+  local side=$1 loc=$2; shift 2
+  diff_run env "LC_ALL=$loc" PATH="$bindir/$side" od "$@"
+}
 
 # --- fixtures -----------------------------------------------------------------
 
@@ -118,18 +114,18 @@ printf 'no terminator here'                                >> strings.bin
 # --- comparison ---------------------------------------------------------------
 
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc stdin=$1 ref=$2; shift 2
+  local o_out g_out o_err g_err o_rc g_rc stdin=$1 loc=$2; shift 2
   o_err=$(mktemp); g_err=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(od | od)` the recorded status is
   # the outer od's, and `PIPESTATUS` is set in the substitution's subshell
   # where it cannot be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
   if [ "$stdin" = "-" ]; then
-    "$OURS_ABS" "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    $ref "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$loc" "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$loc" "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    "$OURS_ABS" "$@" <"$stdin" >"$o_bin" 2>"$o_err"; o_rc=$?
-    $ref "$@" <"$stdin" >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$loc" "$@" <"$stdin" >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$loc" "$@" <"$stdin" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -175,7 +171,7 @@ report() {
 }
 
 # A case whose operands name files, or which needs no input at all.
-run_case() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "od $*"; }
+run_case() { compare - C "$@"; report "od $*"; }
 
 # A case that gets as far as a diagnostic and no further, referenced under
 # `C.UTF-8` rather than the `C` everything else here needs. The header's reason
@@ -184,20 +180,18 @@ run_case() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "o
 # column. What it does reach is §351, which made our `quote()` print
 # U+2018/U+2019 in every locale; GNU prints those under a UTF-8 locale and ASCII
 # under `C`, so `C` is the setting in which the reference would now be wrong.
-run_diag() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU_UTF8" "$@"; report "od $* [C.UTF-8]"; }
+run_diag() { compare - C.UTF-8 "$@"; report "od $* [C.UTF-8]"; }
 
 # A case fed through stdin from a fixture file.
 run_in() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local file="$1"; shift
-  compare "$file" "$GNU" "$@"
+  compare "$file" C "$@"
   report "od $* < $file"
 }
 
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local reason="$1"; shift
-  compare - "$GNU" "$@"
+  compare - C "$@"
   if [ "$AGREED" = no ]; then
     xfail=$((xfail+1))
     [ -n "${VERBOSE:-}" ] && printf 'XFAIL od %s  (%s)\n' "$*" "$reason"
@@ -215,11 +209,15 @@ xfail_case() {
 # 73 lines — every option's spelling, every indent, the SIZE and BYTES
 # paragraphs — unchecked, which is precisely the part a hand-written help text
 # gets wrong.
+#
+# It is the one check here that necessarily reports a difference under
+# `OURS=/usr/bin/od`: the tail is stripped from the reference side only, so
+# pointing `OURS` at the reference compares a text with its tail against the
+# same text without one. That is a property of the check, not a failure of it.
 help_body() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local ours gnu
-  ours=$("$OURS_ABS" --help 2>&1)
-  gnu=$($GNU --help 2>&1 | sed '/^GNU coreutils online help:/,$d' | sed -e :a -e '/^$/{$d;N;ba' -e '}')
+  ours=$(run_side ours C --help 2>&1)
+  gnu=$(run_side gnu C --help 2>&1 | sed '/^GNU coreutils online help:/,$d' | sed -e :a -e '/^$/{$d;N;ba' -e '}')
   if [ "$ours" = "$gnu" ]; then
     pass=$((pass+1))
     [ -n "${VERBOSE:-}" ] && printf 'OK   od --help (body)\n'
@@ -236,9 +234,9 @@ help_body() {
 selfsame() {
   local a="$1" b="$2" x y xr yr
   # shellcheck disable=SC2086  # both are option words by construction
-  x=$("$OURS_ABS" $a three.bin 2>&1); xr=$?
+  x=$(run_side ours C $a three.bin 2>&1); xr=$?
   # shellcheck disable=SC2086
-  y=$("$OURS_ABS" $b three.bin 2>&1); yr=$?
+  y=$(run_side ours C $b three.bin 2>&1); yr=$?
   if [ "$x" = "$y" ] && [ "$xr" = "$yr" ]; then
     pass=$((pass+1))
     [ -n "${VERBOSE:-}" ] && printf 'OK   od %s == od %s\n' "$a" "$b"
@@ -471,10 +469,6 @@ xfail_case "--help tail names the GNU project" --help
 xfail_case "--version banner names GNU coreutils 9.4" --version
 
 # --- summary ------------------------------------------------------------------
-if [ "$HAVE_GNU" = no ]; then
-  echo "od-diff: skipped (no glibc reference)"
-  exit 0
-fi
 printf '\n%d passed, %d differed' "$pass" "$fail"
 [ "$xfail" -gt 0 ] && printf ', %d differ on purpose' "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ' "$xpass"

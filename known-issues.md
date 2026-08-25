@@ -78219,3 +78219,84 @@ both stop compiling. `SKY` is the membership sweep's one exemption from "the
 desktop paints only palette roles", so the phase cannot arrive as a colour the
 sweep was never told about. A single `E0027` is a nudge; a chain that terminates
 at the invariant is a guarantee.
+
+---
+
+## `A-KSHELL-SED-GUESSES-WHICH-WORD-IS-THE-SCRIPT` (lane A, 2026-08-25) — **open**
+
+**Where.** `kernel/src/kshell.rs` — `classify_sed_args` (~123228).
+
+**What.** `sed` has no option parser. It has a `match` over three known flags
+and, for everything else, a guess about *shape*:
+
+```rust
+s if s.starts_with('s') || s.starts_with('/') || s.ends_with('d') => {
+    if out.scripts.is_empty() { /* it's the script */ } else { /* it's a file */ }
+}
+_ => out.files.push(part.clone()),
+```
+
+Three wrong answers fall out of that, all of them exit-0 or worse.
+
+| typed | what it does | what it should do |
+|---|---|---|
+| `sed -e 's/a/b/' -e` | runs the first expression, exit 0 | `-e option requires an argument` |
+| `sed -q -i 's/a/b/' f` | **rewrites `f`**, complains that `-q` is not a file | refuse the option and touch nothing |
+| `sed -n stuff.txt other.txt` | reads `stuff.txt` as the script `s/uff./x/` and applies it to `other.txt` | `no command specified` |
+
+**Why, one at a time.**
+
+1. **`-e` with no argument is dropped in silence.** The arm advances the index
+   and pushes only `if let Some(script) = parts.get(i)`. With nothing there it
+   pushes nothing and the loop moves on. `sed -e` *alone* is caught downstream
+   by the "no command specified" check, which is what has hidden this: the
+   failing case is `-e` given **after** a good expression, where the script list
+   is already non-empty. The user wrote an expression they meant to supply, got
+   a partial run, and got exit 0 to say it went fine.
+
+2. **An unrecognised option becomes a file operand.** There is no rejection path
+   at all, so `-q` falls to the catch-all and is opened as a file. That produces
+   an error — but the *wrong* one, and, decisively, **not before the other files
+   are processed**: the loop in `cmd_sed` `continue`s past a file it cannot read.
+   Under `-i` that means an unrecognised option still rewrites every file that
+   does exist. GNU refuses the invocation and edits nothing. This is the one with
+   a real cost attached: the edit is not recoverable.
+
+3. **A filename can become the script.** The shape guess has no notion of
+   position, so the first operand starting with `s` is taken as a script
+   whenever none has been seen yet — and `s` is the first letter of the
+   commonest sed command *and* of a great many filenames. `sed -n stuff.txt
+   other.txt` compiles `stuff.txt` as `s`-with-delimiter-`t`, which parses
+   cleanly to `s/uff./x/`, and applies it to `other.txt`. Nothing about that
+   run looks wrong from the outside.
+
+   It survives today mostly by luck — most filenames do not parse as an `s`
+   command, and the ones that fail are refused loudly. `stuff.txt` is not a
+   contrived example, though, and neither is the `-f` case: `sed -f script.sed
+   f` sends `-f` to the file list and `script.sed` to the script slot.
+
+**What the proper fix looks like.** The same shape `parse_tr_args` already has,
+which is the pattern this file has been converging on:
+
+- A real flag loop: `--` ends the options, `--long` forms named, short options
+  bundled (`-ni` is `-n -i`), and **anything unrecognised is an error** rather
+  than data. `-E`/`-r`, `-f`, `-s` and `-z` are real `sed` options this shell
+  does not implement, and each should be refused by name — with, for `-E`, the
+  note that the dialect is BRE (`sed_dialect_note` already has the wording).
+- `-e` requires its argument. `MissingArgument('e')`.
+- **The script is positional, not shape-matched**: if no `-e` was given, the
+  first non-flag operand is the script and every later one is a file. If `-e`
+  *was* given, every non-flag operand is a file. That is POSIX's rule and GNU's,
+  and it removes the guess entirely.
+- Errors carried out as a `SedArgsError` enum with a `report()`, the way
+  `TrParseError` and `SedParseError` are, so `cmd_sed` and `cmd_sed_input`
+  cannot drift apart on which ones they mention.
+
+**Not a regression.** All three have been true since the command was written.
+Item 2 is the one to fix first if they are ever split up, because it is the only
+one that destroys data.
+
+**Related.** Same root as
+`TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`: `sed` is already on
+`command_parses_own_quotes`, so the *words* are right — what is missing is the
+grammar over them.

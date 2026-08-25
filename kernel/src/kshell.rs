@@ -14023,6 +14023,87 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(out.as_slice(), b"ab\n", "octal escapes still decode");
     }
 
+    serial_println!("  kshell::self_test 52: sed runs a cycle, so p duplicates and d ends it");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // The row this rung exists for. `p` writes where it stands and the
+        // end-of-cycle write is a second copy, so a matching line appears
+        // twice. This printed it once, which is a wrong answer that exits 0 —
+        // and a quiet one, because printing each line once is exactly what a
+        // reader expects a filter to do.
+        let out = piped("sed '/a/p'", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"a\na\nb\n", "p without -n duplicates");
+
+        // `-n` turns off the end-of-cycle write, leaving only the p copy.
+        // This is the assertion that gives `-n` a job: if p never duplicated,
+        // the two forms would be indistinguishable on this input.
+        let out = piped("sed -n '/a/p'", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"a\n", "-n leaves only the p copy");
+
+        // p writes the pattern space *as it stands at that point*, which a
+        // flag set now and acted on after the script cannot express.
+        let out = piped("sed -e '/a/p' -e 's/a/X/'", b"a\nb\n");
+        assert_eq!(
+            out.as_slice(),
+            b"a\nX\nb\n",
+            "p prints the pattern space now"
+        );
+        // And an address is matched against the pattern space, not the input
+        // line, so reversing the two changes what matches.
+        let out = piped("sed -e 's/a/X/' -e '/a/p'", b"a\nb\n");
+        assert_eq!(
+            out.as_slice(),
+            b"X\nb\n",
+            "by then there is no `a` to match"
+        );
+
+        // `d` ends the cycle: nothing after it runs on this line, and there is
+        // no end-of-cycle write. The same two commands in the other order give
+        // a different answer, which is the whole point.
+        let out = piped("sed -e '/a/d' -e '/a/p'", b"a\nb\n");
+        assert_eq!(out.as_slice(), b"b\n", "d ends the cycle before p");
+        let out = piped("sed -e '/a/p' -e '/a/d'", b"a\nb\n");
+        assert_eq!(
+            out.as_slice(),
+            b"a\nb\n",
+            "p ran, then d suppressed the auto-print"
+        );
+
+        // A missing final newline is a missing *separator*, not a missing
+        // terminator: writing the line twice must give two lines, not one long
+        // one. Dropping the newline outright would give `aa`, which was never
+        // in the input.
+        let out = piped("sed '/a/p'", b"a");
+        assert_eq!(
+            out.as_slice(),
+            b"a\na",
+            "two lines, still no trailing newline"
+        );
+        let out = piped("sed -n '/b/p'", b"a\nb");
+        assert_eq!(out.as_slice(), b"b", "and one copy keeps it missing");
+        // The line that lacked the newline being deleted does not make the
+        // surviving line lose its own.
+        let out = piped("sed '/b/d'", b"a\nb");
+        assert_eq!(
+            out.as_slice(),
+            b"a\n",
+            "a keeps the newline it arrived with"
+        );
+
+        // What must not change: the forms that never involved p.
+        let out = piped("sed 's/a/X/g'", b"aa\nb\n");
+        assert_eq!(out.as_slice(), b"XX\nb\n", "plain substitution");
+        let out = piped("sed '2d'", b"a\nb\nc\n");
+        assert_eq!(out.as_slice(), b"a\nc\n", "delete by line number");
+        let out = piped("sed -n 's/a/X/'", b"a\n");
+        assert_eq!(out.as_slice(), b"", "-n with no p prints nothing");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -123473,6 +123554,8 @@ fn sed_usage() {
     shell_println!("       sed [-i] [-n] '/pattern/[I]d' [file]");
     shell_println!("       sed [-i] [-n] '/pattern/[I]p' [file]");
     shell_println!("       sed [-i] [-n] 'Nd' [file]  (delete line N)");
+    shell_println!("p prints where it stands, so without -n a matching line");
+    shell_println!("appears twice; -n is what leaves only the p copy.");
     sed_dialect_note();
 }
 
@@ -123573,18 +123656,24 @@ fn classify_sed_args(args: &str) -> SedArgs {
 ///
 /// Supported commands:
 ///   `s/pattern/replacement/[gi]` — substitute (first or all; `i`/`I` fold case)
-///   `/pattern/[I]d`              — delete matching lines
-///   `/pattern/[I]p`              — print matching lines (with `-n`)
+///   `/pattern/[I]d`              — delete matching lines, and end the cycle
+///   `/pattern/[I]p`              — print the pattern space here and now
 ///   `Nd`                         — delete line N
 ///
 /// Flags:
 ///   `-i`   In-place edit (modify file directly)
-///   `-n`   Suppress default output
+///   `-n`   Suppress the end-of-cycle print
 ///   `-e CMD`  Specify command (can repeat)
 ///
 /// A pattern is a POSIX **basic** regular expression, as sed's are without
 /// `-E`: `a+b` is three literal characters and `a\+b` is the repetition. In a
 /// replacement, `&` is the whole match and `\1`…`\9` are groups.
+///
+/// `p` and `-n` are a pair, and neither reads right without the other. Each
+/// line is written out at the end of its cycle unless `-n` says otherwise, so
+/// `p` — which writes immediately — produces a *second* copy: `sed '/x/p'`
+/// duplicates matching lines and `sed -n '/x/p'` is the filter. See
+/// [`sed_apply`], which is where the cycle actually lives.
 ///
 /// Examples:
 ///   sed 's/old/new/g' file.txt         Replace all occurrences
@@ -123592,6 +123681,7 @@ fn classify_sed_args(args: &str) -> SedArgs {
 ///   sed 's/old/new/I' file.txt         Substitute, ignoring case
 ///   sed '/pattern/d' file.txt          Delete matching lines
 ///   sed -n '/pattern/Ip' file.txt      Print matching lines, ignoring case
+///   sed '/pattern/p' file.txt          Print the whole file, matches twice
 fn cmd_sed(args: &str) {
     if split_words(args).is_empty() {
         sed_usage();
@@ -123743,6 +123833,27 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> Result<bool,
 /// final newline for input that had none. A newline follows every emitted line
 /// *except* the last line of an input that did not end in one — which is a
 /// property of the input, not of whether that line survived the script.
+///
+/// **This is a cycle, not a filter**, and the difference is what `p` and `d`
+/// mean. Each line is read into the pattern space, the script runs over it, and
+/// at the end of the cycle the pattern space is written out unless `-n` said
+/// not to. So:
+///
+/// - `p` writes *there and then*, and the end-of-cycle write is a **second**
+///   copy. `sed '/x/p'` duplicates every matching line; `sed -n '/x/p'` prints
+///   it once. This loop used to set a flag and print once either way, so the
+///   first form quietly lost a copy — and the idiom `sed -n '/x/p'` exists
+///   precisely because `-n` is what turns the duplication off, which is not
+///   something a reader can discover from a `sed` that never duplicates.
+/// - `p` writes the pattern space *as it stands at that point*, so
+///   `sed -e '/a/p' -e 's/a/b/'` writes `a` and then `b`. A flag set now and
+///   acted on after the loop cannot express that; only writing at the command
+///   itself can.
+/// - `d` **ends the cycle**. Nothing after it in the script runs on this line,
+///   and there is no end-of-cycle write. `sed -e '/a/d' -e '/a/p'` prints
+///   nothing, where reversing the two prints one copy. The old loop ran the
+///   whole script regardless, which was unobservable only because `p` did not
+///   yet write anything of its own.
 fn sed_apply(
     text: &str,
     script: &[SedCmd],
@@ -123752,11 +123863,19 @@ fn sed_apply(
     let total = text.lines().count();
     let mut output = alloc::string::String::new();
 
+    // Set when the last thing written came from a line that had no trailing
+    // newline. See [`sed_emit`] — a line can now be written more than once, and
+    // that is what makes the distinction observable.
+    let mut owed = false;
+
     for (line_idx, line) in text.lines().enumerate() {
         let line_num = line_idx.wrapping_add(1);
+        // Whether this line arrived with a newline is a property of its
+        // position in the input, so it is the same for the `p` copy and the
+        // end-of-cycle copy, and is decided once here.
+        let has_newline = final_newline || line_num != total;
         let mut current = alloc::string::String::from(line);
         let mut deleted = false;
-        let mut print_this = false;
 
         for cmd in script {
             match cmd {
@@ -123773,25 +123892,49 @@ fn sed_apply(
                 SedCmd::Delete { addr } => {
                     if sed_addr_matches(addr, line_num, &current)? {
                         deleted = true;
+                        // `d` ends the cycle: the rest of the script does not
+                        // run on this line.
+                        break;
                     }
                 }
                 SedCmd::Print { addr } => {
                     if sed_addr_matches(addr, line_num, &current)? {
-                        print_this = true;
+                        sed_emit(&mut output, &mut owed, &current, has_newline);
                     }
                 }
             }
         }
 
-        if !deleted && (!suppress || print_this) {
-            output.push_str(&current);
-            if final_newline || line_num != total {
-                output.push('\n');
-            }
+        // The end-of-cycle write. `-n` turns it off; `d` skipped past it.
+        if !deleted && !suppress {
+            sed_emit(&mut output, &mut owed, &current, has_newline);
         }
     }
 
     Ok(output)
+}
+
+/// Write one copy of the pattern space, honouring a missing final newline.
+///
+/// The rule is GNU's, and it is subtler than "omit the newline on the last
+/// line": what a line without a trailing newline is missing is the *separator*,
+/// not the terminator. So the newline is owed rather than dropped — if anything
+/// is written after such a line, it reappears.
+///
+/// This only became observable when `p` started writing a copy of its own. A
+/// line can now be written twice, and `printf 'a' | sed '/a/p'` must give
+/// `a\na` — two lines, no trailing newline — where dropping the newline outright
+/// would give `aa`, one line that was never in the input.
+fn sed_emit(out: &mut alloc::string::String, owed: &mut bool, text: &str, has_newline: bool) {
+    if core::mem::replace(owed, false) {
+        out.push('\n');
+    }
+    out.push_str(text);
+    if has_newline {
+        out.push('\n');
+    } else {
+        *owed = true;
+    }
 }
 
 /// Why a `sed` script could not be turned into a [`SedCmd`].
@@ -124274,6 +124417,8 @@ fn cmd_sed_input(args: &str, input: &str) {
         shell_println!("       cmd | sed [-n] '/pattern/[I]d'");
         shell_println!("       cmd | sed [-n] '/pattern/[I]p'");
         shell_println!("       cmd | sed [-n] 'Nd'  (delete line N)");
+        shell_println!("p prints where it stands, so without -n a matching line");
+        shell_println!("appears twice; -n is what leaves only the p copy.");
         sed_dialect_note();
         set_exit(1);
         return;

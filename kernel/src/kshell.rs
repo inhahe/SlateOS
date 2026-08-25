@@ -6930,6 +6930,12 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // inside a multi-byte sequence, so the byte pass is exact, and it is
         // the only reading defined on a pipe that is not text.
         "tr" => cmd_tr_input(args, input),
+        // `sed`'s pattern space is a byte string and always was: `ere` matches
+        // over bytes, so the decode this used to do bought nothing and cost
+        // everything. A pipe it could not decode was refused outright, and the
+        // *file* path was worse -- it silently became an empty file, which
+        // under `-i` was written back over the original.
+        "sed" => cmd_sed_input(args, input),
         "cat" if args.is_empty() => {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
@@ -6942,12 +6948,12 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // arm up into the block above.
         //
         // `grep` is `char`-oriented (character classes, code-point ranges);
-        // `sed` is a real text interpreter; `xargs` and `column` re-parse into
-        // words and measure display width. `mapfile` is blocked on something
-        // else rather than on itself — it stores its lines as `String`s in the
-        // shell environment, which is still a `String` map, so converting it
-        // here would only move the decode one call deeper.
-        "grep" | "mapfile" | "readarray" | "xargs" | "column" | "sed" => {
+        // `xargs` and `column` re-parse into words and measure display width.
+        // `mapfile` is blocked on something else rather than on itself — it
+        // stores its lines as `String`s in the shell environment, which is
+        // still a `String` map, so converting it here would only move the
+        // decode one call deeper.
+        "grep" | "mapfile" | "readarray" | "xargs" | "column" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -6957,7 +6963,6 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
                 "mapfile" | "readarray" => cmd_mapfile_input(args, text),
                 "xargs" => cmd_xargs_input(args, text),
                 "column" => cmd_column_input(args, text),
-                "sed" => cmd_sed_input(args, text),
                 // Unreachable: the outer arm lists exactly these names.
                 _ => dispatch(line),
             }
@@ -14286,6 +14291,107 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(out.as_slice(), b"XX\nb\n", "plain substitution");
         let out = piped("sed '2d'", b"a\nb\nc\n");
         assert_eq!(out.as_slice(), b"a\nc\n", "delete by line number");
+    }
+
+    serial_println!(
+        "  kshell::self_test 54: sed's pattern space is bytes, and survives being them"
+    );
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // The destructive case, and the reason this rung is against a file
+        // rather than a pipe. `cmd_sed` read its operand with
+        // `from_utf8(&data).unwrap_or("")`, so a file it could not decode
+        // became an *empty* file -- and `-i` then wrote that emptiness back
+        // over the original and exited 0. `sed -i 's/a/b/' photo.jpg`
+        // destroyed photo.jpg and said nothing. Nothing about that is
+        // recoverable by re-running, which is what separates it from a wrong
+        // answer on stdout.
+        //
+        // The script here matches nothing in the file on purpose: the old code
+        // did not need a match to truncate, so a fixture that matched would
+        // have tested the smaller half.
+        let path = "/tmp/kshell_sed_bytes.bin";
+        let binary: &[u8] = b"\x00\x01\xff\xfe zz_keep \x80\xc3\n\xed\xa0\x80 tail\n";
+        crate::fs::Vfs::write_file(path, binary)?;
+        let out = capture_command(&alloc::format!("sed -i s/zz_nomatch/zz_new/ {path}"));
+        assert_eq!(last_exit(), 0, "a file that is not UTF-8 is still editable");
+        assert_output_lacks("and says nothing about it", &out, b"sed:");
+        match crate::fs::Vfs::read_file(path) {
+            Ok(d) => assert_eq!(
+                d.as_slice(),
+                binary,
+                "every byte survives a no-op in-place edit"
+            ),
+            Err(e) => panic!("re-reading the sed binary fixture failed: {e:?}"),
+        }
+
+        // And with a match, so that the bytes around the edit are shown to be
+        // carried rather than merely left alone by a run that did nothing.
+        let out = capture_command(&alloc::format!("sed -i s/zz_keep/zz_new/ {path}"));
+        assert_eq!(last_exit(), 0, "and a real substitution succeeds");
+        assert_output_lacks("quietly", &out, b"sed:");
+        match crate::fs::Vfs::read_file(path) {
+            Ok(d) => assert_eq!(
+                d.as_slice(),
+                b"\x00\x01\xff\xfe zz_new \x80\xc3\n\xed\xa0\x80 tail\n",
+                "the undecodable bytes on either side are copied through"
+            ),
+            Err(e) => panic!("re-reading the edited sed binary fixture failed: {e:?}"),
+        }
+        let _ = crate::fs::Vfs::remove(path);
+
+        // CRLF, which is the half of this bug that hit ordinary text files.
+        // The line splitter was `str::lines`, which *strips* a trailing `\r`,
+        // so a DOS-ending file run through `sed -i` came back with Unix
+        // endings whether or not anything matched -- a whole-file rewrite
+        // nobody asked for. To sed a `\r` is an ordinary character of the
+        // pattern space: matchable, and untouched otherwise.
+        let out = piped("sed s/zz_a/zz_b/", b"zz_a\r\nzz_c\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_b\r\nzz_c\r\n",
+            "CRLF endings round-trip through a substitution"
+        );
+
+        // ...and being ordinary, it is matchable. `tr -d '\r'` is the usual
+        // way to do this, but a sed that cannot see the character at all
+        // would have to answer this one wrongly. The class is used rather than
+        // a `\r` escape because `ere` has no such escape -- the CR is the only
+        // control character left in the pattern space once the newline has
+        // been taken off, so the class names it exactly here.
+        let out = piped("sed 's/[[:cntrl:]]$//'", b"zz_a\r\nzz_c\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a\nzz_c\n",
+            "and \\r is a character the script can match"
+        );
+
+        // The pipe form, which had the politer version of the same bug: it
+        // took `&str`, so an undecodable pipe was refused before sed saw it.
+        // A refusal is not data loss, but it is still an answer sed did not
+        // need to give.
+        let out = piped("sed s/zz_a/zz_b/", b"\xff\xfezz_a\x80\n");
+        assert_eq!(last_exit(), 0, "an undecodable pipe is not refused");
+        assert_eq!(
+            out.as_slice(),
+            b"\xff\xfezz_b\x80\n",
+            "and passes through with only the match replaced"
+        );
+
+        // A line with no final newline still has none, on input that only the
+        // byte path can carry. This is the interaction most likely to be lost
+        // in a rewrite of the splitter, since `str::lines` hid it.
+        let out = piped("sed s/zz_a/zz_b/", b"\xffzz_a");
+        assert_eq!(
+            out.as_slice(),
+            b"\xffzz_b",
+            "a missing final newline is still missing"
+        );
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -124155,7 +124261,13 @@ fn cmd_sed(args: &str) {
             }
         };
 
-        let text = core::str::from_utf8(&data).unwrap_or("");
+        // The bytes go in as they came off disk. This used to be
+        // `from_utf8(&data).unwrap_or("")`, which turned a file sed could not
+        // decode into an *empty* one -- and under `-i` wrote that emptiness
+        // back over the original, exit 0. `sed -i 's/a/b/' photo.jpg` destroyed
+        // photo.jpg and said nothing. `ere` matches over byte strings, so
+        // nothing was gained by decoding in the first place.
+        let text = data.as_slice();
         // A declined match is not "no match": the engine hit its work limit and
         // has no verdict. Folding that into `false` would silently keep a line
         // that `d` was asked to delete, so the file is left exactly as it was
@@ -124171,7 +124283,7 @@ fn cmd_sed(args: &str) {
         };
 
         if in_place {
-            match crate::fs::Vfs::write_file(&path, output.as_bytes()) {
+            match crate::fs::Vfs::write_file(&path, &output) {
                 Ok(()) => {}
                 Err(e) => {
                     shell_println!("sed: write '{}': {:?}", path.display(), e);
@@ -124185,7 +124297,11 @@ fn cmd_sed(args: &str) {
             // for a non-empty output, and a spurious blank line for an empty
             // one, so `sed '/./d' f` printed a line where it should print
             // nothing at all.
-            shell_print!("{}", output);
+            //
+            // Written as bytes, so a line sed did not need to decode is not
+            // decoded on the way out either. `shell_print!("{}", …)` would
+            // require a `str` and put us back where this started.
+            shell_write_bytes(&output);
         }
     }
 }
@@ -124238,11 +124354,11 @@ enum SedAddr {
 /// verdict can select a line for `d`, so folding a declined match into `false`
 /// would keep a line the script asked to delete, or (for the negated forms this
 /// shell does not yet have) delete one it asked to keep.
-fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> Result<bool, ere::MatchLimit> {
+fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &[u8]) -> Result<bool, ere::MatchLimit> {
     match addr {
         SedAddr::All => Ok(true),
         SedAddr::Line(n) => Ok(line_num == *n),
-        SedAddr::Regex(re) => re.is_match(line.as_bytes()),
+        SedAddr::Regex(re) => re.is_match(line),
     }
 }
 
@@ -124283,27 +124399,24 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &str) -> Result<bool,
 ///   nothing, where reversing the two prints one copy. The old loop ran the
 ///   whole script regardless, which was unobservable only because `p` did not
 ///   yet write anything of its own.
-fn sed_apply(
-    text: &str,
-    script: &[SedCmd],
-    suppress: bool,
-) -> Result<alloc::string::String, ere::MatchLimit> {
-    let final_newline = text.ends_with('\n');
-    let total = text.lines().count();
-    let mut output = alloc::string::String::new();
+fn sed_apply(text: &[u8], script: &[SedCmd], suppress: bool) -> Result<Vec<u8>, ere::MatchLimit> {
+    let final_newline = text.last() == Some(&b'\n');
+    let lines = sed_lines(text);
+    let total = lines.len();
+    let mut output: Vec<u8> = Vec::new();
 
     // Set when the last thing written came from a line that had no trailing
     // newline. See [`sed_emit`] — a line can now be written more than once, and
     // that is what makes the distinction observable.
     let mut owed = false;
 
-    for (line_idx, line) in text.lines().enumerate() {
+    for (line_idx, line) in lines.into_iter().enumerate() {
         let line_num = line_idx.wrapping_add(1);
         // Whether this line arrived with a newline is a property of its
         // position in the input, so it is the same for the `p` copy and the
         // end-of-cycle copy, and is decided once here.
         let has_newline = final_newline || line_num != total;
-        let mut current = alloc::string::String::from(line);
+        let mut current: Vec<u8> = line.to_vec();
         let mut deleted = false;
 
         for cmd in script {
@@ -124343,6 +124456,35 @@ fn sed_apply(
     Ok(output)
 }
 
+/// Split input into lines on `\n` alone, keeping every other byte.
+///
+/// This replaces `str::lines`, which is wrong here in two separate ways. It
+/// **strips a trailing `\r`**, so a CRLF file run through `sed -i` came back
+/// with Unix endings whether or not any line had matched — a whole-file rewrite
+/// nobody asked for. To sed, `\r` is an ordinary character of the pattern
+/// space, matchable by `.` and by `[[:cntrl:]]`, and it must survive a round
+/// trip untouched. It also requires `&str`, which is the other half of the same
+/// bug: a file that is not UTF-8 had no lines at all.
+///
+/// A trailing `\n` terminates the last line rather than starting an empty one,
+/// which is why `a\n` is one line and not two. Whether that newline was present
+/// is the caller's business — see `final_newline` — because it is what decides
+/// if the output owes a separator.
+fn sed_lines(text: &[u8]) -> Vec<&[u8]> {
+    let mut out: Vec<&[u8]> = Vec::new();
+    let mut start = 0usize;
+    for (i, &b) in text.iter().enumerate() {
+        if b == b'\n' {
+            out.push(text.get(start..i).unwrap_or(&[]));
+            start = i.saturating_add(1);
+        }
+    }
+    if start < text.len() {
+        out.push(text.get(start..).unwrap_or(&[]));
+    }
+    out
+}
+
 /// Write one copy of the pattern space, honouring a missing final newline.
 ///
 /// The rule is GNU's, and it is subtler than "omit the newline on the last
@@ -124354,13 +124496,13 @@ fn sed_apply(
 /// line can now be written twice, and `printf 'a' | sed '/a/p'` must give
 /// `a\na` — two lines, no trailing newline — where dropping the newline outright
 /// would give `aa`, one line that was never in the input.
-fn sed_emit(out: &mut alloc::string::String, owed: &mut bool, text: &str, has_newline: bool) {
+fn sed_emit(out: &mut Vec<u8>, owed: &mut bool, text: &[u8], has_newline: bool) {
     if core::mem::replace(owed, false) {
-        out.push('\n');
+        out.push(b'\n');
     }
-    out.push_str(text);
+    out.extend_from_slice(text);
     if has_newline {
-        out.push('\n');
+        out.push(b'\n');
     } else {
         *owed = true;
     }
@@ -124765,13 +124907,12 @@ fn find_unescaped(bytes: &[u8], delim: u8, start: usize) -> Option<usize> {
 /// match at all, and `sed_replace_all`'s loop got that right only by accident
 /// of its structure.
 fn sed_substitute(
-    text: &str,
+    hay: &[u8],
     re: &ere::Regex,
     repl: &[SedRepl],
     global: bool,
-) -> Result<alloc::string::String, ere::MatchLimit> {
-    let hay = text.as_bytes();
-    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(hay.len());
+) -> Result<Vec<u8>, ere::MatchLimit> {
+    let mut out: Vec<u8> = Vec::with_capacity(hay.len());
     let mut last = 0usize;
 
     for caps in re.capture_spans_iter(hay) {
@@ -124788,21 +124929,13 @@ fn sed_substitute(
     }
     out.extend_from_slice(hay.get(last..).unwrap_or_default());
 
-    // The subject was a `str`, every span the engine reports is on a character
-    // boundary, and every literal spliced in came from a `str`, so the result
-    // is valid UTF-8 by construction. It is still checked rather than assumed:
-    // `from_utf8_unchecked` here would make an engine bug into undefined
-    // behaviour in the kernel, and the cost is a linear scan of one line.
-    Ok(match alloc::string::String::from_utf8(out) {
-        Ok(s) => s,
-        // Unreachable for the reason above. Returning the line unedited would
-        // be a silent wrong answer, so say what happened and keep going with
-        // the closest honest thing: the input.
-        Err(_) => {
-            shell_println!("sed: internal error: substitution produced invalid text");
-            alloc::string::String::from(text)
-        }
-    })
+    // No UTF-8 round trip on the way out. This used to rebuild a `String` and
+    // carry a branch for the case where that failed, described as unreachable
+    // because the subject had been a `str`. The subject is now bytes, so the
+    // question no longer arises: the engine reports spans into `hay`, and every
+    // byte written here is either copied from `hay` or from the replacement
+    // template. An undecodable byte passes through as itself.
+    Ok(out)
 }
 
 /// Expand a parsed replacement template for one match.
@@ -124841,8 +124974,14 @@ fn sed_render(
 ///
 /// A file operand wins over the pipe, which is what `-i` needs in order to
 /// mean anything — see [`classify_sed_args`].
+///
+/// The pipe arrives as bytes and is never decoded. It used to be `&str`, so a
+/// pipe carrying anything that is not UTF-8 was refused before sed saw it —
+/// which was the *polite* half of the same bug: the file half turned an
+/// undecodable file into an empty one instead. `ere` matches over byte
+/// strings, so the decode was never buying a capability.
 #[allow(clippy::arithmetic_side_effects)]
-fn cmd_sed_input(args: &str, input: &str) {
+fn cmd_sed_input(args: &str, input: &[u8]) {
     if split_words(args).is_empty() {
         shell_println!("Usage: cmd | sed [-n] [-e CMD] 's/old/new/[g]'");
         shell_println!("       cmd | sed [-n] '/pattern/[I]d'");
@@ -124904,7 +125043,7 @@ fn cmd_sed_input(args: &str, input: &str) {
     // partial edit that exits 0 is exactly the silent guess this wiring exists
     // to remove.
     match sed_apply(input, &parsed, suppress) {
-        Ok(output) => shell_print!("{}", output),
+        Ok(output) => shell_write_bytes(&output),
         Err(_) => {
             shell_println!("sed: {}", ere::MatchLimit);
             set_exit(1);

@@ -78541,7 +78541,7 @@ out of `a24d8f5fa` so that bundling and end-of-options stayed separate changes.
 
 ---
 
-## `A-KSHELL-SED-I-TRUNCATES-A-FILE-IT-CANNOT-DECODE` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-SED-I-TRUNCATES-A-FILE-IT-CANNOT-DECODE` (lane A, 2026-08-25) — ✅ **FIXED** (`1500fdb62`, 2026-08-25)
 
 **Where.** `kernel/src/kshell.rs` — `cmd_sed` (~124158), `sed_apply` (~124286).
 
@@ -78598,3 +78598,155 @@ genuinely are needed: report and skip the line, do not empty the file.
 
 **Severity.** Data destruction, silently, exit 0. This should be fixed before
 any remaining cosmetic item in the coreutils queue.
+
+### Fixed
+
+`1500fdb62`, in the shape sketched above and with nothing asked of lane B —
+`ere` really was already a byte engine, so the whole change was lane A's.
+
+| | was | is |
+|---|---|---|
+| `sed -i 's/x/y/' photo.jpg` | file emptied, exit 0, no output | edited or left alone byte-for-byte, exit 0 |
+| `sed 's/x/y/' photo.jpg` | prints nothing, exit 0 | prints the file with the edit applied |
+| `sed -i 's/x/y/' dos.txt` | every `\r\n` becomes `\n`, matched or not | `\r` survives; it is an ordinary character of the pattern space |
+| `sed 's/[[:cntrl:]]$//'` on CRLF | could not see the `\r` to match it | strips it, as GNU does |
+| `cat photo.jpg \| sed 's/x/y/'` | refused, exit 1 | runs |
+
+`sed_lines` replaces `str::lines` and splits on `\n` alone; `sed_apply`,
+`sed_emit`, `sed_substitute` and `sed_addr_matches` are `&[u8]` throughout.
+`sed_substitute` lost its UTF-8 round trip on the way out *and* the branch that
+guarded it, which had been commented as unreachable because the subject had
+been a `str` — with a byte subject the question does not arise, since every
+byte written is copied from the subject or from the replacement template.
+`dispatch_with_input` moves `sed` from the "still text-only" group into the
+byte-clean one, and `cmd_sed_input` takes `&[u8]`.
+
+**Pinned by** self-test rung 54, which is deliberately built on the two shapes
+that hid this for the whole life of the suite: a fixture file of real
+undecodable bytes (`\x00\x01\xff\xfe … \x80\xc3 … \xed\xa0\x80`) edited in
+place, and CRLF text. The in-place case is run **twice**, first with a script
+that matches nothing — the old code did not need a match to truncate, so a
+fixture that matched would have tested the smaller half of the bug.
+
+---
+
+## `A-KSHELL-DIFF-BLAMES-THE-TRAILING-NEWLINE-FOR-ANY-DIFFERENCE-IT-CANNOT-SEE` (lane A, 2026-08-25) — **open**
+
+**Where.** `kernel/src/kshell.rs` — `cmd_diff` (~98986), specifically the decode
+at ~99024 and the fallback message at ~99215.
+
+**What.** `diff` establishes that the files differ by comparing their *bytes*:
+
+```rust
+if data1 == data2 { return; }          // exit 0, identical
+```
+
+and then does the actual work on a *lossy decode* of those same bytes:
+
+```rust
+let text1 = String::from_utf8_lossy(&data1);
+let lines1: Vec<&str> = text1.lines().collect();
+```
+
+The two views disagree, and every case where they disagree ends at one line:
+
+```rust
+if hunks.is_empty() {
+    // Should not happen since data1 != data2, but could if only trailing
+    // newline differs. Show a minimal note.
+    shell_println!("(files differ only in trailing newline)");
+}
+```
+
+That message is a **guess about the cause, printed as a finding**. The comment
+above it says "should not happen", which is the tell: the author knew the byte
+compare and the line compare could disagree, could not enumerate the ways, and
+picked the one benign explanation. Exit is 1, correctly — the files do differ.
+What is wrong is the sentence, which names a cause nobody checked.
+
+**The all-ASCII path, which needs no exotic input at all.** `str::lines` splits
+on `\n` *and strips a trailing `\r`*. So for a DOS file against its Unix
+twin — the single most common reason to reach for `diff` — every line decodes
+identically, no hunk is produced, and the user is told:
+
+```
+$ diff dos.txt unix.txt
+(files differ only in trailing newline)
+```
+
+They differ on *every* line, in the line ending, which is exactly what the user
+was trying to find out. This is the same `str::lines` defect just fixed in
+`sed` (`A-KSHELL-SED-I-TRUNCATES-A-FILE-IT-CANNOT-DECODE`), reached through a
+different door.
+
+**The undecodable path is worse, because it corrupts a diff that does print.**
+`from_utf8_lossy` maps *every* invalid byte to the same U+FFFD. So `\xff` and
+`\xfe` become the same character, and two lines that differ in nothing else
+compare **equal** in the LCS. The result is not a missing hunk but a wrong
+one: the differing lines are classified `Edit::Keep` and printed with a leading
+space, i.e. reported as *context that both files share*. A caller reading the
+hunk is told the opposite of the truth about those lines, and the surrounding
+line numbers in the `@@` header are computed from the same wrong classification.
+
+**Why the byte compare does not save it.** It only ever produces the exit
+status. Once past it, nothing re-checks; the printed diff comes entirely from
+the decoded view. So the status is right and the output is wrong — which is a
+worse combination than both being wrong, because the status is what a script
+tests and the output is what a human reads.
+
+**Why it survived.** Same reason as sed's: every `diff` test in the suite is
+ASCII with LF endings, the one shape in which the decoded view and the byte
+view agree exactly.
+
+**What the proper fix looks like.** The same shape as the sed fix, and it can
+reuse the helper that fix introduced:
+
+- Split both files with `sed_lines` (or a shared rename of it) — `&[u8]`
+  slices, split on `\n` alone, `\r` kept. That alone fixes the CRLF case and
+  the U+FFFD collision together, since byte slices compare byte-wise.
+- `lines1`/`lines2` become `Vec<&[u8]>`; the LCS table and backtrack are
+  unchanged (`==` on `&[u8]` is what is wanted), and hunk printing goes through
+  `shell_write_bytes` for the line body with the prefix written separately.
+- Delete the trailing-newline guess. With byte lines, `data1 != data2` and zero
+  hunks can still happen for exactly one reason — a difference in the *final*
+  newline, which `sed_lines` does not represent — so the message becomes true
+  rather than a guess, and should be derived (`data1.last() != data2.last()`)
+  rather than assumed.
+- Consider GNU's `Binary files X and Y differ` for files containing a NUL: a
+  correct byte-level line diff of a binary file is correct but unreadable, and
+  floods a serial console. GNU's rule is a NUL in the first buffer. This is a
+  separate judgement from the correctness fix and should not be smuggled into
+  it.
+
+**`comm` has the identical defect** (~119460): `from_utf8_lossy` on both files,
+then `lines()`, then equality on the decoded lines. Two lines differing only in
+undecodable bytes are reported in the "common to both" column — a wrong answer
+with exit 0. It should be converted in the same pass, since it is the same three
+lines of code.
+
+**…and `comm` has a second one that the decode causes rather than shares.**
+`comm` is a merge of two streams and is only correct on **sorted** input — it
+advances whichever side compares Less and never looks back. `sort` orders by
+bytes. `comm` orders by the *decoded* line, and `from_utf8_lossy` does not
+preserve that order: a `\xff` byte becomes U+FFFD, which is the three bytes
+`EF BF BD`, so it sorts *below* `\xfe` where the raw byte sorted above it. A
+file that `sort` produced can therefore look unsorted to `comm`, at which point
+the merge silently emits lines in the wrong columns — not because the lines
+compare wrongly one at a time, but because the algorithm's precondition has
+been broken underneath it.
+
+Converting to byte lines fixes this as a side effect, because `<[u8]>::cmp` is
+the ordering `sort` used. Worth noting separately anyway, because it is the
+case where the two commands *disagree with each other* rather than either being
+wrong alone — and because `comm` never checks its precondition at all. GNU
+prints `comm: file 1 is not in sorted order` and exits 1; this one has no such
+check, so even after the conversion an unsorted input is still answered
+confidently. That check is a small separate change and should be its own.
+
+**`column` shares the decode** (~14868, ~14908) but not the severity: it is a
+display formatter writing only to stdout, so a mangled character is visible as
+mangled. It is still worth converting for consistency, last.
+
+**Severity.** Wrong output with a correct exit status, on ordinary text files
+(the CRLF case) with no unusual input required. Below sed's data destruction,
+above the option-wording items.

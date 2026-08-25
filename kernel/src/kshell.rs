@@ -11554,6 +11554,108 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "tee < input: a good write is success");
     }
 
+    serial_println!(
+        "  kshell::self_test 33: a sed/awk script the shell cannot run is not a success"
+    );
+    // The lead rung 32 left behind -- "any command with a piped and a
+    // non-piped implementation is a candidate for the same split-brain" --
+    // found `sed` and `awk`, and their version is worse than `tee`'s.
+    //
+    // `tee` at least printed its error; these two answered a script they could
+    // not parse by **printing the input verbatim and exiting 0**. So
+    // `cat config | sed 's/old/new' > config.new` -- one slash short, the
+    // commonest sed typo there is -- wrote a file that looked edited, was
+    // byte-for-byte the original, and reported success. The file halves have
+    // always rejected the same scripts with status 1, which is why each check
+    // below asks both halves the same question instead of asserting about one.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let path = "/tmp/kshell_sed_status.txt";
+        crate::fs::Vfs::write_file(path, b"old\n")?;
+
+        // The token the failing cases are piped, chosen so that finding it in
+        // the output can only mean the input was passed through. `old` would
+        // not do: the usage banner contains the word, so a pass-through and a
+        // usage message would be indistinguishable to the assertion.
+        let marker: &[u8] = b"zz_passthru_marker\n";
+
+        // `s/old` -- the pattern is opened and never closed, so
+        // `parse_sed_command` returns `None` and there is nothing to run.
+        // Running nothing is not the same as running an identity transform,
+        // which is exactly what the old code could not tell apart.
+        //
+        // (`s/old/new`, a trailing delimiter short, is *not* the example to
+        // use here: this parser accepts it where GNU does not. Both halves
+        // agree about that, so it is a separate question from this one.)
+        let out = piped("sed s/old", marker);
+        assert_output_lacks(
+            "a bad script does not pass the input through",
+            &out,
+            b"zz_passthru_marker",
+        );
+        assert_eq!(last_exit(), 1, "cmd | sed: an unparseable script fails");
+
+        let out = capture_command(&alloc::format!("sed s/old {}", path));
+        assert_output_lacks("nor does the file form print the file", &out, b"old");
+        assert_eq!(
+            last_exit(),
+            1,
+            "sed SCRIPT FILE: an unparseable script fails"
+        );
+
+        // No script at all. Only the pipe form is spelled here: `sed /abs/path`
+        // reads the path as an address command, because it starts with `/` --
+        // which is GNU's reading of it too (`unterminated address regex`), so
+        // there is no way to hand the file form a file and no script.
+        let out = piped("sed", marker);
+        assert_output_lacks(
+            "a missing script does not pass input through",
+            &out,
+            b"zz_passthru_marker",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "cmd | sed: no script at all is a usage error"
+        );
+
+        // A script that does parse still runs, in both halves -- otherwise a
+        // blanket `set_exit(1)` would satisfy every assertion above while
+        // breaking the command outright.
+        let out = piped("sed s/old/new/", b"old\n");
+        assert_output_contains("a good script still edits the pipe", &out, b"new");
+        assert_eq!(last_exit(), 0, "cmd | sed: a good script is success");
+
+        let out = capture_command(&alloc::format!("sed s/old/new/ {}", path));
+        assert_output_contains("and still edits the file", &out, b"new");
+        assert_eq!(last_exit(), 0, "sed SCRIPT FILE: a good script is success");
+
+        // `awk` had the same silent pass-through for a missing program.
+        let out = piped("awk", marker);
+        assert_output_lacks(
+            "no program does not pass the input through",
+            &out,
+            b"zz_passthru_marker",
+        );
+        assert_eq!(last_exit(), 1, "cmd | awk: no program is a usage error");
+
+        let out = capture_command("awk");
+        assert_output_contains("and the file form says so too", &out, b"Usage:");
+        assert_eq!(last_exit(), 1, "awk: no program is a usage error there too");
+
+        // Note this goes through `dispatch_with_input` rather than `execute`:
+        // `{print}` would otherwise meet the shell's own brace handling before
+        // awk ever saw it.
+        let out = piped("awk {print}", b"alpha\n");
+        assert_output_contains("a real program still runs", &out, b"alpha");
+        assert_eq!(last_exit(), 0, "cmd | awk: a real program is success");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -119494,9 +119596,25 @@ fn sed_replace_first(text: &str, pattern: &str, replacement: &str) -> alloc::str
 }
 
 /// `sed` pipe-input variant: processes piped text instead of a file.
+///
+/// Rejects the same malformed invocations [`cmd_sed`] rejects, with the same
+/// status. This form used to accept all of them and **print the input
+/// verbatim**, which is worse than the `tee` disagreement that led here: `tee`
+/// at least printed its error. A script this parser cannot read — `s/old`,
+/// whose pattern is never closed — produced the unedited input and exit 0, so
+/// `cat config | sed 's/old' > config.new` wrote a file that looked plausible,
+/// was not edited at all, and reported success. GNU sed calls that
+/// `unterminated 's' command` and exits 1.
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_sed_input(args: &str, input: &str) {
     let parts: alloc::vec::Vec<&str> = args.split_whitespace().collect();
+    if parts.is_empty() {
+        shell_println!("Usage: cmd | sed [-n] [-e CMD] 's/old/new/[g]'");
+        shell_println!("       cmd | sed [-n] '/pattern/d'");
+        shell_println!("       cmd | sed [-n] 'Nd'  (delete line N)");
+        set_exit(1);
+        return;
+    }
     let mut suppress = false;
     let mut commands: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     let mut i = 0;
@@ -119520,13 +119638,22 @@ fn cmd_sed_input(args: &str, input: &str) {
         i += 1;
     }
 
+    if commands.is_empty() {
+        // Byte-identical to `cmd_sed`'s: the complaint is about the script,
+        // which is the same script whichever end the text arrives from.
+        shell_println!("sed: no command specified");
+        set_exit(1);
+        return;
+    }
+
     let parsed: alloc::vec::Vec<SedCmd> = commands
         .iter()
         .filter_map(|c| parse_sed_command(c))
         .collect();
 
     if parsed.is_empty() {
-        shell_print!("{}", input);
+        shell_println!("sed: invalid command syntax");
+        set_exit(1);
         return;
     }
 
@@ -119691,11 +119818,25 @@ fn cmd_awk(args: &str) {
 }
 
 /// `awk` pipe-input variant.
+///
+/// Rejects a missing program with the same status [`cmd_awk`] does. As with
+/// `cmd_sed_input`, this form used to print the input verbatim and exit 0, so
+/// `cat log | awk` was a silent `cat` that claimed to have run a program.
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_awk_input(args: &str, input: &str) {
+    if args.trim().is_empty() {
+        shell_println!("Usage: cmd | awk [-F sep] 'program'");
+        shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
+        shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
+        shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+        set_exit(1);
+        return;
+    }
+
     let (fs_char, program, _files) = parse_awk_args(args);
     if program.is_empty() {
-        shell_print!("{}", input);
+        shell_println!("awk: no program specified");
+        set_exit(1);
         return;
     }
 

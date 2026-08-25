@@ -6767,6 +6767,42 @@ generator exports it, the module doc records the two numbers, and the corpus
 case exports it too — otherwise bash reads `/etc/inputrc` while osh does not and
 the two diverge for a reason that has nothing to do with osh.
 
+**Addendum 2026-08-25 — two more conditions, and the numbers above are the
+wrong reference's.** `INPUTRC` turned out to be one of *three* things a capture
+has to pin, and the original capture pinned only it. The reference bash was the
+MSYS one on the developer's PATH, and the locale was whatever the generator
+inherited:
+
+- **The platform decides the function list.** A Cygwin readline is configured
+  with `paste-from-clipboard`, a Windows clipboard call, and a Linux one is not
+  — 174 names against 173. osh answered `bind -l` with the Cygwin list for
+  three weeks.
+- **The locale decides `convert-meta`, and `convert-meta` decides the escape
+  spelling.** readline's `_rl_init_eightbit` takes the eight-bit branch for any
+  `LC_CTYPE` that is not exactly `C` or `POSIX` (nls.c:168-186), turning
+  `convert-meta` off, and that variable is what decides whether a listing names
+  the escape sub-map after the modifier it stands for (`\M-b`) or writes the
+  byte as itself (`\eb`). Measured four ways: MSYS bash and glibc bash agree
+  with each other in each locale and disagree with themselves across the two,
+  so this is *not* a platform difference — it was simply never pinned, which
+  made the capture irreproducible. The committed table had drifted into
+  describing both at once: its variables had been hand-corrected to the
+  eight-bit set while its key sequences were still C-locale captures.
+
+The generator now pins `LC_ALL=C.UTF-8` — the locale osh actually runs in,
+since osh is UTF-8-only (§104) — and **refuses** rather than warns: it asks the
+reference shell for `$MACHTYPE` and stops unless it says `linux`, and it reads
+`convert-meta` back out of the capture rather than trusting that the request
+took effect, because a system without `C.UTF-8` falls back to `C` silently. A
+warning would be the wrong instrument here: the output is committed and nobody
+re-derives it, so anything short of a refusal leaves a wrong table in the tree.
+
+Re-measured against glibc bash 5.2.21: 173 function names, 487 emacs bindings
+(494 with `/etc/inputrc` loaded, and `bind -s` empty either way rather than 10),
+46 variables. The tests now derive these from the table rather than spelling
+them out — nine assertions had the number 174 written into them, so re-capturing
+broke them all at once while saying nothing about which count was right.
+
 **Why its own module.** `interp.rs` is already large enough that adding ~1200
 lines of table to it ran rustc out of memory under `--test`
 (`STATUS_STACK_BUFFER_OVERRUN`). That is recorded in known-issues; the split is

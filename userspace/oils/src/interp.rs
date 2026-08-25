@@ -41741,7 +41741,7 @@ impl Shell {
         // The rest runs in bash's fixed phase order, not the order the options
         // were written. The keymap is checked *before* any listing — `bind -l -m
         // nosuchmap` prints not one function name — while `-f` and the name
-        // queries come *after* it, so `bind -f /nosuch -l` still prints all 174.
+        // queries come *after* it, so `bind -f /nosuch -l` still prints them all.
         //
         // `-m`, `-f` and `-u` return the moment they fail. `-q` and `-x` do not:
         // they assign the status rather than or-ing into it, so a later phase
@@ -68316,6 +68316,17 @@ mod tests {
     use super::*;
     use crate::parser::parse;
 
+    /// How many function names `bind -l` prints.
+    ///
+    /// Derived rather than written, because the number is a property of the
+    /// reference readline and not of this shell: it was 174 while the tables
+    /// were captured from a Cygwin bash, whose readline carries an extra
+    /// `paste-from-clipboard` — a Windows clipboard call — and is 173 on the
+    /// Linux readline SlateOS targets. Nine assertions spelled the number out,
+    /// so re-capturing the tables broke them all at once while saying nothing
+    /// about which of the two counts was right.
+    const FUNCTION_COUNT: usize = crate::bind_tables::FUNCTION_NAMES.len();
+
     /// Every `help` topic has a long body, and no body is orphaned.
     ///
     /// [`HELP_TABLE`] and [`HELP_BODIES`] are two lists that have to name the
@@ -85369,7 +85380,7 @@ st=1
         assert_eq!(run("compgen -A binding zzz").1, 1);
         // The whole list is the whole list, warning and all.
         let (names, _) = run("compgen -A binding");
-        assert_eq!(names.lines().count(), 174);
+        assert_eq!(names.lines().count(), FUNCTION_COUNT);
         assert_eq!(names, run("bind -l 2>/dev/null").0);
         // `binding` sorts before `builtin` in the action table, so its names
         // come first whichever way round the two are written.
@@ -100637,11 +100648,11 @@ st=1
         let (out, code) = run("bind -l 2>&1 >/dev/null");
         assert_eq!(code, 0);
         assert_eq!(out, "osh: bind: warning: line editing not enabled\n");
-        // `-l` is readline's function list: 174 names, sorted, one per line.
+        // `-l` is readline's function list: every name, sorted, one per line.
         let (out, code) = run("bind -l 2>/dev/null");
         assert_eq!(code, 0);
         let names: Vec<&str> = out.lines().collect();
-        assert_eq!(names.len(), 174);
+        assert_eq!(names.len(), FUNCTION_COUNT);
         assert_eq!(names.first(), Some(&"abort"));
         assert_eq!(names.last(), Some(&"yank-pop"));
         // An unknown letter names itself, then the synopsis *unprefixed* —
@@ -100674,12 +100685,18 @@ st=1
             "got {out:?}"
         );
         // A known keymap is accepted, attached to the letter or not.
-        assert_eq!(run("bind -m vi -l 2>/dev/null").0.lines().count(), 174);
-        assert_eq!(run("bind -mvi -l 2>/dev/null").0.lines().count(), 174);
+        assert_eq!(
+            run("bind -m vi -l 2>/dev/null").0.lines().count(),
+            FUNCTION_COUNT
+        );
+        assert_eq!(
+            run("bind -mvi -l 2>/dev/null").0.lines().count(),
+            FUNCTION_COUNT
+        );
         // `-f` runs *after* the listing, so both happen.
         let (out, code) = run("bind -f /nosuch/file -l 2>/dev/null");
         assert_eq!(code, 1);
-        assert_eq!(out.lines().count(), 174);
+        assert_eq!(out.lines().count(), FUNCTION_COUNT);
         let (out, _) = run("bind -f /nosuch/file 2>&1 >/dev/null");
         assert!(
             out.contains("bind: /nosuch/file: cannot read: No such file"),
@@ -100769,13 +100786,24 @@ st=1
     /// the whole reason `bind_tables` is captured rather than transcribed.
     #[test]
     fn bind_listings_come_from_readlines_tables() {
+        // The tables are only readline's own if the startup inputrc adds
+        // nothing to them, and that read happens before the first `bind`
+        // answers whether or not there is a line editor — so on a host that
+        // ships an `/etc/inputrc`, as every Debian-family one does, these
+        // listings are that machine's and not readline's: 494 emacs lines
+        // rather than 487 (measured, bash 5.2.21). Exporting `INPUTRC` at a
+        // file with nothing in it is the same guard every corpus `bind` case
+        // opens with, and it is what makes these counts a fact about the
+        // captured tables rather than about the machine running the test.
+        let run = |script: &str| run(&format!("export INPUTRC=/dev/null\n{script}"));
         // Each listing has a fixed size, and `-s`, `-S` and `-X` are empty
         // because a pristine readline has no macros and no `-x` bindings.
         for (opt, want) in [
-            ("l", 174),
-            // `-p` and `-P` both open with a blank line of readline's own.
-            ("p", 488),
-            ("P", 175),
+            ("l", FUNCTION_COUNT),
+            // `-p` and `-P` both open with a blank line of readline's own,
+            // which is why `-P` is one more than there are functions.
+            ("p", 487),
+            ("P", 1 + FUNCTION_COUNT),
             ("v", 46),
             ("V", 46),
             ("s", 0),
@@ -100790,20 +100818,20 @@ st=1
         // in any, and together they are just the parts end to end.
         let (both, code) = run("bind -lpvsPVSX 2>/dev/null");
         assert_eq!(code, 0);
-        assert_eq!(both.lines().count(), 929);
+        assert_eq!(both.lines().count(), 926);
         assert_eq!(run("bind -pv 2>/dev/null").0, run("bind -vp 2>/dev/null").0);
         // Every keymap `-m` accepts has its own bindings; several names are
-        // aliases and so share one table. `-P` names all 174 functions whatever
+        // aliases and so share one table. `-P` names every function whatever
         // the keymap, because it lists the unbound ones too.
         for (map, want) in [
-            ("emacs", 488),
-            ("emacs-standard", 488),
-            ("emacs-meta", 225),
-            ("emacs-ctlx", 200),
-            ("vi", 221),
-            ("vi-move", 221),
-            ("vi-command", 221),
-            ("vi-insert", 422),
+            ("emacs", 487),
+            ("emacs-standard", 487),
+            ("emacs-meta", 224),
+            ("emacs-ctlx", 199),
+            ("vi", 220),
+            ("vi-move", 220),
+            ("vi-command", 220),
+            ("vi-insert", 421),
         ] {
             let (out, code) = run(&format!("bind -m {map} -p 2>/dev/null"));
             assert_eq!(code, 0, "{map}");
@@ -100818,7 +100846,7 @@ st=1
                     .0
                     .lines()
                     .count(),
-                175,
+                1 + FUNCTION_COUNT,
                 "{map}"
             );
         }

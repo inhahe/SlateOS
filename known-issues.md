@@ -10842,19 +10842,79 @@ teardown, read back on the very next line after that process was destroyed.
 the shape shared by both occurrences — the forkexec harness read a capture
 file with the same timing.
 
-**One concrete lead worth checking first.** Step 2 calls
-`thread::on_thread_exit(task_id)` on a task that has *already* run
-`on_thread_exit` itself — the log proves it, because `[thread] Process 420 has
+**A lead that looked good and is RULED OUT — do not re-derive it.**
+Step 2 calls `thread::on_thread_exit(task_id)` on a task that has *already* run
+`on_thread_exit` itself: the log proves it, because `[thread] Process 420 has
 no threads left — now zombie` is printed from inside that very function and
-appears two lines before the freeze. So the function runs twice per hosted-cc
-rung. It takes `THREAD_JOIN_WAITERS`, `THREAD_OWNERS` and the pcb lock, and
-calls `thread_clone::on_thread_exit_hook`, which touches user memory —
-against an address space the first call already detached. A second pass that
-is not fully idempotent (a double removal, a double wake, or a hook that
-faults on a detached address space with no working mapping to report it) fits
-every property of the symptom: silent, intermittent, and located between those
-two prints. Audit `on_thread_exit` and `on_thread_exit_hook` for
-re-entry-with-already-detached-state before looking anywhere else.
+appears two lines before the freeze. So the function does run twice per
+hosted-cc rung, the second time against an address space the first pass
+detached — which looks exactly like a double-teardown bug. It is not. Reading
+the second pass end to end:
+
+- `thread_clone::on_thread_exit_hook` opens with an **AS-active guard**
+  (`thread_clone.rs:287`) computed from `thread::owner_process(task_id)`. The
+  first pass already removed the `THREAD_OWNERS` entry, so the second gets
+  `None` → `as_active = false` → every user-memory pass (the PI-futex handoff,
+  the robust-list walk, the ctid zero-write, the ctid futex wake) is skipped.
+  The three table removals that do run — `ROBUST_LIST`, `RSEQ`,
+  `CLEAR_CHILD_TID` — are `BTreeMap::remove`, idempotent by construction, and
+  the `CLEAR_CHILD_TID` miss returns early.
+- `sched::detach_address_space` documents and implements idempotence
+  (`sched/mod.rs:1789`): it only acts on `pml4_phys != 0`, and rewrites CR3
+  only when `task_id == load_current_task()` — which the harness's own task
+  is not.
+- `on_thread_exit` then hits `THREAD_OWNERS.lock().remove(&task_id)?` and
+  returns `None` on the missing entry, so `release_irqs_for_task`,
+  `pcb::remove_thread`, `exit_close_fds` and everything below never run twice.
+
+The second pass is a clean no-op. Cross it off.
+
+**[A] The decisive narrowing: the BSP stopped taking timer interrupts.**
+`sched::liveness_boot_deadline_check` (`sched/mod.rs:3049`) runs on **every BSP
+tick** — deliberately not on the 500-tick cadence — and prints a
+`[liveness] boot-window breadcrumb: Ns armed (…)` line each time armed-elapsed
+crosses a 30 s boundary. The healthy re-run emitted 11 of them, the last at
+`330s armed`. The hung boot sat for roughly 600 s past its freeze point and
+emitted **none**.
+
+Nothing between the interrupt entry and that breadcrumb can block: the tick
+path is `rcu::quiescent_state`, `PER_CPU_SCHED.tick`, some relaxed atomic
+counters, `hardlockup::kick` (a no-op unless armed), and a **`SCHED.try_lock()`**
+— explicitly non-blocking, with the comment saying a missed tick is fine. And
+`watchdog_diagnostic` is unconditional; it only counts the bytes the closure
+emits. So a breadcrumb is emitted unless the tick itself never happens.
+
+That rules out the whole family of hypotheses this entry has accumulated
+around *lock* wedges. A `crate::sync::Mutex`, a `PreemptSpinMutex` and a raw
+`spin::Mutex` all spin with **IF still set**; the timer keeps firing, and the
+breadcrumb keeps printing, whatever they are doing. Twenty missed breadcrumbs
+means the CPU was not taking interrupts at all — the "BSP-dead total-silence
+hang the timer-driven watchdogs cannot see" that `hardlockup::kick`'s own
+comment describes.
+
+**Where that points.** Look for an `IF=0` region on the post-reap path, not a
+lock. `pcb::destroy` → `destroy_user_address_space` frees every frame of the
+address space, and `kernel/src/mm/frame.rs` wraps its allocator critical
+sections in `cpu::without_interrupts` in fifteen places (plus six more in
+`mm/quarantine.rs`). A free-list walk that loops — a corrupted or cyclic list,
+which is history-dependent and therefore intermittent — inside one of those is
+silent by construction, cannot be preempted, cannot report itself, and freezes
+exactly where both occurrences froze. Neither `blkdev.rs` nor `virtio/` uses
+`without_interrupts` at all, so the `Vfs::read_file` suspect from the older
+narrowing is the *less* likely half of step 4; the frame-freeing half is the
+more likely.
+
+**The next occurrence must produce a RIP, and today's could not.** The only
+detectors that can see an `IF=0` wedge are host-side or NMI-driven, and both
+are opt-in: `--hard-lockup-watchdog` (§61, kept opt-in by operator decision so
+the guest's PCI topology is unchanged on shared runs) and `--stall-secs=N`
+(host-side `info registers` via the QEMU monitor, which changes nothing in the
+guest at all). Neither was on, because nobody knows in advance which boot will
+be the one in a few dozen that hangs.
+
+**Repro status: intermittent, ~1 in a few dozen.** The immediately-following
+boot of the *identical* tree, run with `--hard-lockup-watchdog` specifically to
+capture the wedged guest RIP, reached `BOOT_OK` in 395 s with the `inline-asm`
 
 **Repro status: intermittent, ~1 in a few dozen.** The immediately-following
 boot of the *identical* tree, run with `--hard-lockup-watchdog` specifically to

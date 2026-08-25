@@ -78564,6 +78564,25 @@ undecodable bytes are reported in the "common to both" column — a wrong answer
 with exit 0. It should be converted in the same pass, since it is the same three
 lines of code.
 
+**…and `comm` has a second one that the decode causes rather than shares.**
+`comm` is a merge of two streams and is only correct on **sorted** input — it
+advances whichever side compares Less and never looks back. `sort` orders by
+bytes. `comm` orders by the *decoded* line, and `from_utf8_lossy` does not
+preserve that order: a `\xff` byte becomes U+FFFD, which is the three bytes
+`EF BF BD`, so it sorts *below* `\xfe` where the raw byte sorted above it. A
+file that `sort` produced can therefore look unsorted to `comm`, at which point
+the merge silently emits lines in the wrong columns — not because the lines
+compare wrongly one at a time, but because the algorithm's precondition has
+been broken underneath it.
+
+Converting to byte lines fixes this as a side effect, because `<[u8]>::cmp` is
+the ordering `sort` used. Worth noting separately anyway, because it is the
+case where the two commands *disagree with each other* rather than either being
+wrong alone — and because `comm` never checks its precondition at all. GNU
+prints `comm: file 1 is not in sorted order` and exits 1; this one has no such
+check, so even after the conversion an unsorted input is still answered
+confidently. That check is a small separate change and should be its own.
+
 **`column` shares the decode** (~14868, ~14908) but not the severity: it is a
 display formatter writing only to stdout, so a mangled character is visible as
 mangled. It is still worth converting for consistency, last.

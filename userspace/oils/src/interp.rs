@@ -93784,8 +93784,15 @@ st=1
         // whole before any of it runs.
         // (Every capture wraps the whole thing in a group: the report goes to
         // the *shell's* stderr, not the timed command's.)
+        //
+        // `PATH=` is what makes "goes looking for an external `time`" observable
+        // as a fixed answer rather than as a fact about the machine: a Linux
+        // host has GNU `time` in `/usr/bin`, so the search *succeeds* there and
+        // `time -p echo hi` prints `hi` and exits 0. Emptying the path is not
+        // arranging for the failure — the search happening at all is the thing
+        // under test, and only its outcome is pinned.
         for w in ["-p echo hi", "-- echo hi", "-x echo hi", "-"] {
-            let (o, rc) = run(&format!("set -o posix\n{{ time {w} ; }} 2>&1"));
+            let (o, rc) = run(&format!("set -o posix\nPATH=\n{{ time {w} ; }} 2>&1"));
             assert_eq!(rc, 127, "time {w}: {o:?}");
             assert!(o.contains("time: command not found"), "time {w}: {o:?}");
         }
@@ -93793,7 +93800,7 @@ st=1
         // forms keep the reserved word and time a command named `-p`.
         for w in ["\"-p\"", "\\-p", "$D"] {
             let (o, rc) = run(&format!(
-                "set -o posix\nD=-p\n{{ time {w} echo hi ; }} 2>&1"
+                "set -o posix\nPATH=\nD=-p\n{{ time {w} echo hi ; }} 2>&1"
             ));
             assert_eq!(rc, 127, "time {w}: {o:?}");
             assert!(o.contains("-p: command not found"), "time {w}: {o:?}");

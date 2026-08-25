@@ -1391,12 +1391,19 @@ fn remove_quotes(s: &str) -> String {
 /// naming an argument the user never wrote as a delimiter. Splitting on spaces
 /// is the single most common thing anyone asks `cut` to do.
 ///
+/// `tr` is the same shape as `cut` but worse, because it failed *silently*.
+/// Both of its sets can be a space — `tr ' ' '_'` and `tr -d ' '` — and
+/// dequoted the first of those is `  _`, whose words are the empty string and
+/// `_`. An empty SET1 matches nothing, so `tr` copied its input out unchanged
+/// and exited 0: the one outcome indistinguishable from a file that needed no
+/// translating.
+///
 /// The list is the migration path, not a special case: a command moves onto
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
 /// See `known-issues.md` → `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`.
 fn command_parses_own_quotes(cmd: &str) -> bool {
-    matches!(cmd, "trap" | "awk" | "fold" | "base64" | "cut")
+    matches!(cmd, "trap" | "awk" | "fold" | "base64" | "cut" | "tr")
 }
 
 /// Expand a `${...}` brace expression.
@@ -13160,6 +13167,130 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = crate::fs::Vfs::remove(spaced);
 
         let _ = crate::fs::Vfs::remove(bin);
+    }
+
+    serial_println!(
+        "  kshell::self_test 44: tr reads its own quotes, and refuses what it cannot do"
+    );
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        fn plain(cmd: &str) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch(cmd);
+            capture.finish()
+        }
+
+        // The bug this rung exists for. `tr` was not on
+        // `command_parses_own_quotes`, so `' ' '_'` arrived as `  _`, whose
+        // `splitn(2, ' ')` halves are "" and " _". An empty SET1 matches
+        // nothing, so the input came back *unchanged* at exit 0 -- the one
+        // outcome indistinguishable from a text that needed no translating.
+        let out = piped("tr ' ' '_'", b"a b c\n");
+        assert_eq!(out.as_slice(), b"a_b_c\n", "a quoted space is a set of one");
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // The same fault on the delete side, which took the other branch of
+        // the split and so failed loudly instead -- two halves of one command
+        // disagreeing about what had happened.
+        let out = piped("tr -d ' '", b"a b c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"abc\n",
+            "and so is a quoted space to delete"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // There was no flag loop at all: the first word was compared against
+        // the literal "-d" and *otherwise used as SET1*. So the three real tr
+        // options this one does not implement became data, silently.
+        // `tr -s ab` translated `-` into `a` and `s` into `b`.
+        let out = piped("tr -s ab", b"-s-s\n");
+        assert!(
+            out.windows(4).any(|w| w == b"-s i"),
+            "-s is refused by name, not used as a set: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is a failure");
+        assert!(
+            !out.windows(5).any(|w| w == b"abab\n"),
+            "and above all it does not answer"
+        );
+
+        for (line, want) in [
+            ("tr -c a b", &b"-c i"[..]),
+            ("tr -C a b", &b"-c i"[..]),
+            ("tr -t a b", &b"-t i"[..]),
+            ("tr --complement a b", &b"-c i"[..]),
+        ] {
+            let out = piped(line, b"abc\n");
+            assert!(
+                out.windows(4).any(|w| w == want),
+                "`{line}` names the option it cannot honour: {out:?}"
+            );
+            assert_eq!(last_exit(), 1, "`{line}` is a failure");
+        }
+
+        // A bundle names the offending letter, not the bundle.
+        let out = piped("tr -ds ab", b"abc\n");
+        assert!(
+            out.windows(4).any(|w| w == b"-s i"),
+            "a bundle reports the letter that is unsupported: {out:?}"
+        );
+
+        // Anything else beginning with `-` is unrecognised rather than SET1.
+        let out = piped("tr -q a b", b"abc\n");
+        assert!(
+            out.windows(21).any(|w| w == b"unrecognized option '"),
+            "an unknown option is refused: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is a failure");
+
+        // Operand counting. `splitn(2, ' ')` swept everything after the first
+        // word into SET2, so `tr a b c d` expanded `b c d` -- spaces included.
+        let out = piped("tr a b c d", b"abcd\n");
+        assert!(
+            out.windows(14).any(|w| w == b"extra operand "),
+            "a fourth operand is refused, not absorbed into SET2: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is a failure");
+
+        let out = piped("tr abc", b"abc\n");
+        assert!(
+            out.windows(16).any(|w| w == b"missing operand "),
+            "a translation with no SET2 is refused: {out:?}"
+        );
+        assert_eq!(last_exit(), 1, "and refusing is a failure");
+
+        // `-d` is satisfied by one set, so the same word count is fine there.
+        let out = piped("tr -d abc", b"abcd\n");
+        assert_eq!(out.as_slice(), b"d\n", "one set is all `-d` needs");
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // `--` is how a set that begins with `-` is written.
+        let out = piped("tr -- -x _y", b"a-b\n");
+        assert_eq!(out.as_slice(), b"a_b\n", "`--` ends the options");
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // The file form. A file name with a space in it is one operand, and
+        // the file is the operand *after* the sets rather than a third set.
+        let spaced = "/tmp/zz tr spaced";
+        crate::fs::Vfs::write_file(spaced, b"a b\n")?;
+        let out = plain(&alloc::format!("tr ' ' '-' '{spaced}'"));
+        assert_eq!(
+            out.as_slice(),
+            b"a-b\n",
+            "the file operand follows both sets"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+        let _ = crate::fs::Vfs::remove(spaced);
+
+        // `expand_tr_set` no longer strips an outer quote pair, because
+        // `split_words` has already removed the quoting and what is left is
+        // data. Two apostrophes are a set of two apostrophes.
+        assert_eq!(expand_tr_set("''"), alloc::vec!['\'', '\'']);
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -108255,80 +108386,248 @@ fn cmd_cut_input(args: &str, input: &[u8]) {
     }
 }
 
-/// `tr SET1 SET2` — translate characters.
-///
-/// Replaces each character in SET1 with the corresponding character in SET2.
-/// `tr -d SET1` deletes characters in SET1.
-fn cmd_tr(args: &str) {
-    // tr needs piped input; standalone usage reads a file.
-    let mut parts = args.splitn(3, ' ');
-    let set1_or_flag = parts.next().unwrap_or("");
-    let set2_or_file = parts.next().unwrap_or("");
-    let file = parts.next().unwrap_or("").trim();
+/// What a `tr` command line asked for, once it has been parsed.
+struct TrSpec {
+    /// Expanded SET1: the characters to translate *from*, or to delete.
+    set1: Vec<char>,
+    /// Expanded SET2. Empty in delete mode, where there is no SET2 to give.
+    set2: Vec<char>,
+    /// `-d`: delete the members of SET1 rather than translating them.
+    delete: bool,
+    /// The optional file operand.
+    ///
+    /// GNU's `tr` has none — it reads standard input and nothing else — so
+    /// this is a deliberate extension, kept because the kernel shell's
+    /// pipelines are shallow and `tr -d '\r' file` is worth having without
+    /// one. The cost is that `tr a b c` is a translation of file `c` here
+    /// where GNU calls it an extra operand.
+    file: Option<String>,
+}
 
-    if set1_or_flag == "-d" {
-        // Delete mode: tr -d SET1 FILE
-        if set2_or_file.is_empty() {
-            shell_println!("Usage: tr -d CHARS [file]  or pipe: cmd | tr -d CHARS");
-            set_exit(1);
-            return;
+/// Why a `tr` command line could not be honoured.
+///
+/// `cmd_tr` used to return no errors of this kind at all: there was no flag
+/// loop and no operand count: the first word was compared against the literal
+/// `"-d"` and *otherwise used as SET1*, and everything after the second word
+/// was swept into SET2 by a `splitn`. So each of the cases below was answered
+/// rather than reported, and every one of them exited 0:
+///
+/// | written | what it did |
+/// |---|---|
+/// | `tr -s ab` | translated `-`→`a` and `s`→`b` — the flag became the set |
+/// | `tr -c a b` | translated `-`→`a` and `c`→`b`, then took `b` as a file |
+/// | `tr a b c d` | expanded `b c d`, spaces and all, as SET2 |
+/// | `tr ' ' '_'` | SET1 was **empty**, so the input passed through unchanged |
+///
+/// The last of those is the quote-removal boundary rather than the parser:
+/// see [`command_parses_own_quotes`], which `tr` now qualifies for.
+enum TrParseError {
+    /// A real `tr` option that this one does not implement. Naming it is the
+    /// point: the old parser used the flag word as SET1, so `tr -s ab` gave a
+    /// wrong answer where it should have given none.
+    Unsupported(char, &'static str),
+    /// Anything else beginning with `-`.
+    UnknownOption(String),
+    /// No SET1 at all.
+    NoSets,
+    /// `tr a` — a translation needs a SET2 as well.
+    MissingSet2(String),
+    /// More operands than there are places to put them.
+    ExtraOperand(String),
+}
+
+impl TrParseError {
+    /// Print the diagnostic. GNU's wording where GNU has one, so a user who
+    /// knows `tr` recognises what went wrong.
+    fn report(&self) {
+        match *self {
+            Self::Unsupported(opt, hint) => {
+                shell_println!("tr: -{} is not supported ({})", opt, hint);
+            }
+            Self::UnknownOption(ref opt) => {
+                shell_println!("tr: unrecognized option '{}'", opt);
+            }
+            Self::NoSets => {
+                shell_println!("tr: missing operand");
+                shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d SET1 [file]");
+            }
+            Self::MissingSet2(ref set1) => {
+                shell_println!("tr: missing operand after '{}'", set1);
+                shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d SET1 [file]");
+            }
+            Self::ExtraOperand(ref word) => {
+                shell_println!("tr: extra operand '{}'", word);
+            }
         }
-        if !file.is_empty() {
-            let resolved = resolve_path(file);
-            match crate::fs::Vfs::read_file(&resolved) {
-                Ok(data) => {
-                    let text = core::str::from_utf8(&data).unwrap_or("");
-                    tr_delete(text, set2_or_file);
+    }
+}
+
+/// Parse `tr`'s arguments, or say why they cannot be honoured.
+///
+/// Words come from [`split_words`], which respects quotes and removes them.
+/// That is what makes a space expressible as a set at all: `tr ' ' '_'` used
+/// to be dequoted at the dispatch boundary into `  _`, whose `splitn(2, ' ')`
+/// halves are the empty string and ` _` — an empty SET1 that matches nothing,
+/// so the input was copied out unchanged and reported as a success.
+fn parse_tr_args(args: &str) -> Result<TrSpec, TrParseError> {
+    let words = split_words(args);
+    let mut delete = false;
+    let mut operands: Vec<String> = Vec::new();
+    let mut flags_done = false;
+
+    for word in &words {
+        // A lone `-` is an operand, not a flag; `--` ends the options, which
+        // is how a set that begins with `-` is written.
+        if flags_done || !word.starts_with('-') || word.len() < 2 {
+            operands.push(word.clone());
+            continue;
+        }
+        match word.as_str() {
+            "--" => {
+                flags_done = true;
+                continue;
+            }
+            "--delete" => {
+                delete = true;
+                continue;
+            }
+            "--squeeze-repeats" => {
+                return Err(TrParseError::Unsupported(
+                    's',
+                    "this tr does not squeeze repeated characters",
+                ));
+            }
+            "--complement" => {
+                return Err(TrParseError::Unsupported(
+                    'c',
+                    "this tr does not complement a set",
+                ));
+            }
+            "--truncate-set1" => {
+                return Err(TrParseError::Unsupported(
+                    't',
+                    "this tr pads SET2 with its last character instead",
+                ));
+            }
+            _ => {}
+        }
+        if word.starts_with("--") {
+            return Err(TrParseError::UnknownOption(word.clone()));
+        }
+        // Short options, bundled or not. Each is reported by its own letter,
+        // so `-ds` names `-s` rather than the bundle.
+        for c in word.chars().skip(1) {
+            match c {
+                'd' => delete = true,
+                's' => {
+                    return Err(TrParseError::Unsupported(
+                        's',
+                        "this tr does not squeeze repeated characters",
+                    ));
                 }
-                Err(e) => {
-                    shell_println!("tr: {}: {:?}", file, e);
-                    set_exit(1);
+                'c' | 'C' => {
+                    return Err(TrParseError::Unsupported(
+                        'c',
+                        "this tr does not complement a set",
+                    ));
                 }
-            }
-        } else {
-            shell_println!("Usage: tr -d CHARS [file]");
-            set_exit(1);
-        }
-    } else if set1_or_flag.is_empty() || set2_or_file.is_empty() {
-        shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d CHARS [file]");
-        set_exit(1);
-    } else if !file.is_empty() {
-        let resolved = resolve_path(file);
-        match crate::fs::Vfs::read_file(&resolved) {
-            Ok(data) => {
-                let text = core::str::from_utf8(&data).unwrap_or("");
-                tr_translate(text, set1_or_flag, set2_or_file);
-            }
-            Err(e) => {
-                shell_println!("tr: {}: {:?}", file, e);
-                set_exit(1);
+                't' => {
+                    return Err(TrParseError::Unsupported(
+                        't',
+                        "this tr pads SET2 with its last character instead",
+                    ));
+                }
+                _ => return Err(TrParseError::UnknownOption(alloc::format!("-{c}"))),
             }
         }
+    }
+
+    // `-d` takes SET1 and an optional file; a translation takes both sets and
+    // an optional file. Counting is the whole difference between refusing an
+    // extra operand and quietly expanding it as part of a set.
+    let wanted = if delete { 1 } else { 2 };
+    if operands.is_empty() {
+        return Err(TrParseError::NoSets);
+    }
+    if operands.len() < wanted {
+        let set1 = operands.first().cloned().unwrap_or_default();
+        return Err(TrParseError::MissingSet2(set1));
+    }
+    if let Some(extra) = operands.get(wanted.saturating_add(1)) {
+        return Err(TrParseError::ExtraOperand(extra.clone()));
+    }
+
+    let set1 = expand_tr_set(operands.first().map_or("", String::as_str));
+    let set2 = if delete {
+        Vec::new()
     } else {
-        shell_println!("Usage: tr SET1 SET2 [file]  or pipe: cmd | tr SET1 SET2");
-        set_exit(1);
+        expand_tr_set(operands.get(1).map_or("", String::as_str))
+    };
+    Ok(TrSpec {
+        set1,
+        set2,
+        delete,
+        file: operands.get(wanted).cloned(),
+    })
+}
+
+/// `tr SET1 SET2` — translate characters; `tr -d SET1` — delete them.
+fn cmd_tr(args: &str) {
+    match parse_tr_args(args) {
+        Ok(spec) => tr_run(&spec, None),
+        Err(e) => {
+            e.report();
+            set_exit(1);
+        }
     }
 }
 
 fn cmd_tr_input(args: &str, input: &str) {
-    let mut parts = args.splitn(2, ' ');
-    let set1_or_flag = parts.next().unwrap_or("");
-    let set2 = parts.next().unwrap_or("");
-
-    if set1_or_flag == "-d" {
-        tr_delete(input, set2);
-    } else if !set2.is_empty() {
-        tr_translate(input, set1_or_flag, set2);
-    } else {
-        shell_println!("Usage: cmd | tr SET1 SET2  or  cmd | tr -d CHARS");
-        set_exit(1);
+    match parse_tr_args(args) {
+        Ok(spec) => tr_run(&spec, Some(input)),
+        Err(e) => {
+            e.report();
+            set_exit(1);
+        }
     }
 }
 
-fn tr_translate(text: &str, set1: &str, set2: &str) {
-    let s1: Vec<char> = expand_tr_set(set1);
-    let s2: Vec<char> = expand_tr_set(set2);
+/// Run a parsed `tr` over its file operand, or over the pipe if there is none.
+fn tr_run(spec: &TrSpec, stdin: Option<&str>) {
+    match spec.file {
+        Some(ref path) => {
+            let resolved = resolve_path(path);
+            match crate::fs::Vfs::read_file(&resolved) {
+                Ok(data) => {
+                    let text = core::str::from_utf8(&data).unwrap_or("");
+                    tr_apply(spec, text);
+                }
+                Err(e) => {
+                    shell_println!("tr: {}: {:?}", path, e);
+                    set_exit(1);
+                }
+            }
+        }
+        None => match stdin {
+            Some(text) => tr_apply(spec, text),
+            None => {
+                shell_println!("Usage: tr SET1 SET2 [file]  or  tr -d SET1 [file]");
+                shell_println!("       cmd | tr SET1 SET2  or  cmd | tr -d SET1");
+                set_exit(1);
+            }
+        },
+    }
+}
 
+fn tr_apply(spec: &TrSpec, text: &str) {
+    if spec.delete {
+        tr_delete(text, &spec.set1);
+    } else {
+        tr_translate(text, &spec.set1, &spec.set2);
+    }
+}
+
+fn tr_translate(text: &str, s1: &[char], s2: &[char]) {
     let mut result = String::with_capacity(text.len());
     for ch in text.chars() {
         if let Some(pos) = s1.iter().position(|&c| c == ch) {
@@ -108342,8 +108641,7 @@ fn tr_translate(text: &str, set1: &str, set2: &str) {
     shell_print!("{}", result);
 }
 
-fn tr_delete(text: &str, set1: &str) {
-    let s1: Vec<char> = expand_tr_set(set1);
+fn tr_delete(text: &str, s1: &[char]) {
     let mut result = String::with_capacity(text.len());
     for ch in text.chars() {
         if !s1.contains(&ch) {
@@ -108362,8 +108660,14 @@ fn tr_delete(text: &str, set1: &str) {
 /// Latin-1 characters `Ã` and `©`, neither of which appears in decoded input,
 /// so the translation silently did nothing. Ranges were worse: `start..=end`
 /// over bytes could run from half of one character into half of another.
+///
+/// This no longer calls `strip_quotes`. It used to, because `tr` received a
+/// line that had already been dequoted at the dispatch boundary and a quote
+/// could only have arrived as `\'` — but now [`parse_tr_args`] splits with
+/// [`split_words`], which removes the quoting itself, so a quote reaching here
+/// is data. Stripping it would eat the outer pair of `tr "''" x`, which is how
+/// you ask to translate two apostrophes.
 fn expand_tr_set(set: &str) -> Vec<char> {
-    let set = strip_quotes(set);
     let src: Vec<char> = set.chars().collect();
     let len = src.len();
     let mut chars = Vec::new();

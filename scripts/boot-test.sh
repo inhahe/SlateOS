@@ -2670,6 +2670,57 @@ check_query_status() {
 
 check_query_status
 
+# Keep every option word either understood or refused (design-decisions.md §600).
+#
+# The two gates above are about what a command *says*.  This one is about what
+# it does with a word it could not read, and the answer must never be "carry on
+# as though it were not there".  A dropped word runs a different command --
+# successfully -- and the difference is nearly always in the direction of doing
+# more, because the word that fell out was a filter or a restriction.
+#
+# It is here rather than in code review because the rule was broken in nine
+# commands at once and nobody saw it: `batch delete --dry-runn a b` deleted `a`
+# and `b` for real, the typo matching no flag and then being filtered out of the
+# file list, so it was neither a dry run nor an error.  Each half of that was
+# individually reasonable; only the pair was a bug, and the pair is invisible
+# from inside either function.
+check_option_refusal() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== option-refusal check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that an option word is refused, not discarded ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-option-refusal.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A command-line word is either understood" >&2
+    echo "or refused; it is never discarded, and a value is never invented for" >&2
+    echo "one that could not be read." >&2
+    echo "" >&2
+    echo "For a parser with no way to say no: give the catch-all arm a" >&2
+    echo "shell_println! naming the word, set_exit(1), and a return -- and add" >&2
+    echo "a '--' end-of-options marker, since refusing dash-leading words is" >&2
+    echo "what makes a file named '-x' otherwise unnameable." >&2
+    echo "" >&2
+    echo "For an invented value: an absent argument may take a default; a" >&2
+    echo "present but unparseable one may not.  Split the two cases." >&2
+    echo "" >&2
+    echo "If a site is genuinely right, add it to ALLOWED in the script with a" >&2
+    echo "written reason.  Do NOT add a function to option-refusal-ledger.txt" >&2
+    echo "to silence new code -- that ledger only ever shrinks." >&2
+    exit 1
+}
+
+check_option_refusal
+
 # Keep self-test skips honest: looked up, and reported.
 #
 # A self-test may legitimately skip -- there is no second CPU to offline on a

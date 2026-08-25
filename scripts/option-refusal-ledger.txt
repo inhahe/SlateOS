@@ -1,0 +1,141 @@
+# The counted `guessed-value` backlog for scripts/check-option-refusal.py.
+#
+# Each line is `<enclosing function> <count>`: that many places inside that
+# function read a word the user typed, fail to parse it, and substitute a
+# default -- design-decisions.md §600's second prohibited shape. They are
+# recorded rather than exempted, so that:
+#
+#   * the number is visible and can only go down;
+#   * a NEW site in a function not listed here, or one site too many in a
+#     function that is, fails the check immediately;
+#   * an entry claiming MORE sites than exist is itself reported, because
+#     that means the site was fixed (lower the count) or the function was
+#     renamed (the entry now exempts something it was never meant to).
+#
+# Keyed by function, never by line number: line numbers drift on every edit,
+# and an allowlist that rots is a rubber stamp.
+#
+# Do not add a function here to buy silence for new code. The only legitimate
+# edits are downward, and deleting a line entirely is the goal.
+#
+# Burn-down is tracked in known-issues.md as
+# `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+<top> 1
+cmd_apppermissions 1
+cmd_appstore 1
+cmd_assoc 1
+cmd_audio 2
+cmd_audioeq 3
+cmd_audiomux 1
+cmd_audit 2
+cmd_authbroker 1
+cmd_autostart 1
+cmd_backupsched 2
+cmd_battery 1
+cmd_cal 2
+cmd_certmgr 10
+cmd_cgroup 1
+cmd_cgroupfs 3
+cmd_cliphistory 1
+cmd_clipsync 1
+cmd_colorpicker 7
+cmd_colortemp 7
+cmd_datausage 5
+cmd_defaultapps 4
+cmd_deskicons 2
+cmd_dictation 1
+cmd_directio 3
+cmd_diskquota 6
+cmd_displayarrange 4
+cmd_displaycal 3
+cmd_dmevent 1
+cmd_dnssettings 1
+cmd_dpiscaling 3
+cmd_elog 5
+cmd_energysaver 1
+cmd_eventlog 4
+cmd_fdtable 6
+cmd_filerules 1
+cmd_fileshare 2
+cmd_filevault 1
+cmd_firewall 4
+cmd_fontmgr 6
+cmd_fsbench 5
+cmd_fstune 17
+cmd_fswatch 1
+cmd_fwsettings 1
+cmd_gamemode 2
+cmd_hdrdisplay 2
+cmd_head_input 1
+cmd_hexdump 2
+cmd_httpd 3
+cmd_installer 18
+cmd_iolatency 1
+cmd_ionice 1
+cmd_iotdevice 2
+cmd_ipclog 3
+cmd_iperf 6
+cmd_kstat 1
+cmd_mdns 2
+cmd_memtest 1
+cmd_mobilelink 1
+cmd_monitors 13
+cmd_namespace 1
+cmd_nc 1
+cmd_netns 2
+cmd_netsettings 1
+cmd_netsyslog 4
+cmd_netusage 2
+cmd_nightlight 1
+cmd_pacct 1
+cmd_peninput 1
+cmd_pftrack 3
+cmd_pidns 1
+cmd_prefetch 2
+cmd_printf 5
+cmd_printqueue 1
+cmd_prochistory 3
+cmd_prociso 6
+cmd_procstat 4
+cmd_raidmgr 1
+cmd_reclaim 2
+cmd_remotedesktop 1
+cmd_reslimit 10
+cmd_screensaver 1
+cmd_secpolicy 1
+cmd_secureboot 1
+cmd_seq 2
+cmd_service_limits 4
+cmd_sharesheet 1
+cmd_shmem 7
+cmd_slabstat 1
+cmd_splice 5
+cmd_splitview 9
+cmd_sshd 1
+cmd_strings 2
+cmd_surroundsound 3
+cmd_svcstart 2
+cmd_sysanimations 1
+cmd_syslog 1
+cmd_tail_input 1
+cmd_taskbar 3
+cmd_tasksched 1
+cmd_telnetd 2
+cmd_timezone 3
+cmd_touchscreen 1
+cmd_trace 1
+cmd_tracemon 2
+cmd_udp6 1
+cmd_upnp 3
+cmd_userns 10
+cmd_vmguest 2
+cmd_vpnprofile 1
+cmd_widgets 4
+cmd_wifiscan 1
+cmd_writeback 1
+dispatch 1
+eval_test 2
+expand_braces_token 1
+extract_json_u64 1
+parse_size_arg 1
+tokenize_arith 1

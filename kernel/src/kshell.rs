@@ -13025,15 +13025,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "and is a success");
 
         // The invariant that makes validating with a dummy record sound:
-        // whether a pattern or an expression can be evaluated is a function of
-        // the program text alone. Same fragments, two unlike records.
-        for pattern in ["", "/alpha/", "NR > 2", "NF == 2", "$1 > 5", "junk"] {
-            assert_eq!(
-                awk_pattern_eval(pattern, b"", 0, 0).is_some(),
-                awk_pattern_eval(pattern, b"7 beta", 9, 2).is_some(),
-                "pattern recognition must not depend on the record"
-            );
-        }
+        // whether a fragment can be evaluated is a function of the program text
+        // alone. Same fragments, two unlike records.
+        //
+        // Patterns no longer need an assertion for this: `awk_compile_pattern`
+        // takes the pattern text and nothing else, so a record cannot reach the
+        // decision. The loop that used to pin it by hand was deleted when the
+        // invariant moved into the signature. Expressions still go through
+        // `awk_format_print`, which does see a record, so theirs stays.
         for expr in ["\"s\"", "NR", "NF", "$0", "$NF", "$9", "42", "5.0", "total"] {
             assert_eq!(
                 awk_format_print(expr, b"", &[], 0, 0).is_some(),
@@ -13373,6 +13372,131 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
 
         let _ = crate::fs::Vfs::remove(bin);
+    }
+
+    serial_println!("  kshell::self_test 45: awk's /pattern/ is a regular expression");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // The three rows lane B asked to have pinned when `ere` landed in the
+        // kernel (requests/a-b-ere-is-std-only-....md and the reply beside it).
+        // Each of them used to answer, and to exit 0 doing it.
+        let data = b"err one\nnot err two\nabc\naxc\nadc\n" as &[u8];
+
+        // `/^err/` anchors. It used to match every line *containing* the four
+        // characters `^err` -- which is none of them, so a filter that should
+        // select one line selected nothing and called that success.
+        let out = piped("awk '/^err/ {print}'", data);
+        assert_eq!(
+            out.as_slice(),
+            b"err one\n",
+            "^ anchors to the start of the record"
+        );
+        assert_eq!(last_exit(), 0, "and a matching program is a success");
+
+        // `.` is any character, not a full stop.
+        let out = piped("awk '/a.c/ {print}'", data);
+        assert_eq!(
+            out.as_slice(),
+            b"abc\naxc\nadc\n",
+            ". matches any character, and does not mean a literal dot"
+        );
+
+        // `/x*/` matches everything -- zero or more. As a substring search for
+        // the two characters `x*` it matched nothing at all, which is the exact
+        // inversion that makes this class of bug so hard to notice.
+        let out = piped("awk '/x*/ {print}'", data);
+        assert_eq!(
+            out.as_slice(),
+            data,
+            "a pattern that matches everything matches every line"
+        );
+
+        // The metacharacters that make the substring reading wrong, from the
+        // other direction: a bracket, an alternation, a group, a bound.
+        for (prog, want) in [
+            ("awk '/^[an]/ {print}'", b"not err two\nabc\naxc\nadc\n" as &[u8]),
+            ("awk '/one|two/ {print}'", b"err one\nnot err two\n"),
+            ("awk '/^(err|abc)$/ {print}'", b"abc\n"),
+            ("awk '/^a.c$/ {print}'", b"abc\naxc\nadc\n"),
+            ("awk '/a[bd]c/ {print}'", b"abc\nadc\n"),
+        ] {
+            let out = piped(prog, data);
+            assert_eq!(out.as_slice(), want, "{}", prog);
+            assert_eq!(last_exit(), 0, "and each is a success");
+        }
+
+        // A literal that happens to contain no metacharacter still behaves as
+        // it always did, so the change is not a regression for plain text.
+        let out = piped("awk '/err/ {print}'", data);
+        assert_eq!(out.as_slice(), b"err one\nnot err two\n", "a plain literal");
+
+        // An empty regexp is still the whole-record match awk says it is.
+        let out = piped("awk '// {print}'", b"x\ny\n");
+        assert_eq!(out.as_slice(), b"x\ny\n", "// matches every record");
+
+        // A record that is not text is matched byte-for-byte rather than being
+        // dropped: the engine takes bytes, as `awk_feed` already had them.
+        let out = piped("awk '/^a/ {print}'", b"a\xffb\nz\xffb\n");
+        assert_eq!(
+            out.as_slice(),
+            b"a\xffb\n",
+            "matching does not require the record to decode"
+        );
+
+        // A regexp the engine rejects is refused before any input is read, and
+        // it is refused as a *regexp* error rather than as an unsupported
+        // pattern -- the two are different failures and say so.
+        let out = piped("awk '/a[b/ {print}'", data);
+        assert_output_contains(
+            "an unclosed bracket is a regexp error",
+            &out,
+            b"invalid regular expression",
+        );
+        assert_eq!(last_exit(), 2, "and is refused, not run");
+        assert!(
+            !out.windows(4).any(|w| w == b"abc\n"),
+            "and no record is printed by a program that was refused"
+        );
+
+        // A pattern this shell cannot evaluate at all is still the other
+        // message: `$1 > 5` never reaches the engine.
+        let out = piped("awk '$1 > 5 {print}'", data);
+        assert_output_contains(
+            "a non-regexp pattern is still 'unsupported pattern'",
+            &out,
+            b"unsupported pattern",
+        );
+        assert_eq!(last_exit(), 2, "and is refused");
+
+        // Compilation is a function of the pattern text alone -- the property
+        // that lets a program be refused before a single record is read. This
+        // is now enforced by `awk_compile_pattern`'s signature; the assertion
+        // here pins the *classification*, i.e. which of the three outcomes each
+        // pattern gets.
+        for (pattern, ok, bad_regex) in [
+            ("", true, false),
+            ("/alpha/", true, false),
+            ("/x*/", true, false),
+            ("NR > 2", true, false),
+            ("NF == 2", true, false),
+            ("$1 > 5", false, false),
+            ("junk", false, false),
+            ("/a[b/", false, true),
+        ] {
+            let got = awk_compile_pattern(pattern);
+            assert_eq!(got.is_ok(), ok, "pattern '{}' acceptance", pattern);
+            assert_eq!(
+                matches!(got, Err(AwkPatternError::BadRegex(_))),
+                bad_regex,
+                "pattern '{}' failure kind",
+                pattern
+            );
+        }
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -123136,11 +123260,32 @@ fn text_records(data: &[u8]) -> alloc::vec::Vec<&[u8]> {
     body.split(|&b| b == b'\n').collect()
 }
 
+/// A match the engine declined to decide, naming the pattern that caused it.
+///
+/// Its own type rather than a bare `MatchLimit` so the message can point at the
+/// rule: a multi-rule program gives the user no other way to tell which pattern
+/// ran out of budget.
+struct AwkMatchAbort(alloc::string::String);
+
+impl AwkMatchAbort {
+    fn report(&self) {
+        shell_println!("awk: {}: {}", self.0, ere::MatchLimit);
+    }
+}
+
 /// Run every rule over one source's records, advancing `nr` across sources.
 ///
 /// `nr` is threaded rather than reset per file because awk's `NR` counts
 /// records over the whole run; `FNR` (per-file) is not implemented.
-fn awk_feed(data: &[u8], rules: &[AwkRule], fs: &AwkFs, nr: &mut usize) {
+///
+/// Stops at the first match the engine declines to decide rather than treating
+/// it as "no match" — see [`AwkPattern::matches`].
+fn awk_feed(
+    data: &[u8],
+    rules: &[AwkCompiled],
+    fs: &AwkFs,
+    nr: &mut usize,
+) -> Result<(), AwkMatchAbort> {
     for record in text_records(data) {
         *nr = nr.saturating_add(1);
         let fields = awk_split_fields(record, fs);
@@ -123149,16 +123294,69 @@ fn awk_feed(data: &[u8], rules: &[AwkRule], fs: &AwkFs, nr: &mut usize) {
             if rule.is_begin || rule.is_end {
                 continue;
             }
-            // `unwrap_or(false)` is unreachable for a validated program:
-            // `awk_validate_program` has already refused every pattern this
-            // returns `None` for. A rule that somehow escaped it is skipped
-            // rather than substring-matched, which is the honest reading of
-            // "cannot evaluate".
-            if awk_pattern_eval(&rule.pattern, record, *nr, nf).unwrap_or(false) {
-                awk_exec_action(&rule.action, record, &fields, *nr, nf);
+            match rule.pattern.matches(record, *nr, nf) {
+                Ok(true) => awk_exec_action(&rule.action, record, &fields, *nr, nf),
+                Ok(false) => {}
+                Err(_) => {
+                    return Err(AwkMatchAbort(alloc::string::String::from(rule.text.as_str())));
+                }
             }
         }
     }
+    Ok(())
+}
+
+/// Read every input source in order, returning the worst read status.
+///
+/// Split out of [`awk_run`] so that a declined match can stop the run with `?`
+/// from any of the three places input arrives, instead of three copies of the
+/// same report-and-return — the duplicated-arm shape that has already produced
+/// two of this file's recorded bugs.
+fn awk_feed_inputs(
+    spec: &AwkSpec,
+    stdin: Option<&[u8]>,
+    rules: &[AwkCompiled],
+    fs: &AwkFs,
+    nr: &mut usize,
+) -> Result<u8, AwkMatchAbort> {
+    let mut worst: u8 = 0;
+
+    if spec.files.is_empty() {
+        match stdin {
+            Some(data) => awk_feed(data, rules, fs, nr)?,
+            None => {
+                shell_println!("awk: no file operand and no input to read");
+                worst = worst.max(1);
+            }
+        }
+        return Ok(worst);
+    }
+
+    for path in &spec.files {
+        if path == "-" {
+            match stdin {
+                Some(data) => awk_feed(data, rules, fs, nr)?,
+                None => {
+                    shell_println!("awk: -: no input to read");
+                    worst = worst.max(1);
+                }
+            }
+            continue;
+        }
+        let resolved = resolve_path(path);
+        match crate::fs::Vfs::read_file(&resolved) {
+            // Straight from the VFS, undecoded.
+            Ok(data) => awk_feed(&data, rules, fs, nr)?,
+            Err(e) => {
+                // Every operand is attempted and the worst status reported: a
+                // later readable file must not erase an earlier missing one.
+                shell_println!("awk: {}: {:?}", path, e);
+                worst = worst.max(1);
+            }
+        }
+    }
+
+    Ok(worst)
 }
 
 /// The one `awk` driver, shared by the file and pipe forms.
@@ -123184,17 +123382,19 @@ fn awk_run(spec: &AwkSpec, stdin: Option<&[u8]>) {
         }
     };
 
-    let rules = parse_awk_program(&spec.program);
-
     // Before anything runs, and before any file is opened: a program with a
-    // statement or pattern this shell cannot execute is refused whole. Running
-    // the recognised parts would produce output that looks like a result — see
+    // statement or pattern this shell cannot execute is refused whole, and so
+    // is one whose regular expression does not compile. Running the recognised
+    // parts would produce output that looks like a result — see
     // design-decisions §294.
-    if let Err(e) = awk_validate_program(&rules) {
-        e.report();
-        set_exit(2);
-        return;
-    }
+    let rules = match awk_compile_program(parse_awk_program(&spec.program)) {
+        Ok(rules) => rules,
+        Err(e) => {
+            e.report();
+            set_exit(2);
+            return;
+        }
+    };
 
     let mut nr: usize = 0;
 
@@ -123210,38 +123410,14 @@ fn awk_run(spec: &AwkSpec, stdin: Option<&[u8]>) {
     let mut worst: u8 = 0;
 
     if needs_input {
-        if spec.files.is_empty() {
-            match stdin {
-                Some(data) => awk_feed(data, &rules, &fs, &mut nr),
-                None => {
-                    shell_println!("awk: no file operand and no input to read");
-                    worst = worst.max(1);
-                }
-            }
-        } else {
-            for path in &spec.files {
-                if path == "-" {
-                    match stdin {
-                        Some(data) => awk_feed(data, &rules, &fs, &mut nr),
-                        None => {
-                            shell_println!("awk: -: no input to read");
-                            worst = worst.max(1);
-                        }
-                    }
-                    continue;
-                }
-                let resolved = resolve_path(path);
-                match crate::fs::Vfs::read_file(&resolved) {
-                    // Straight from the VFS, undecoded.
-                    Ok(data) => awk_feed(&data, &rules, &fs, &mut nr),
-                    Err(e) => {
-                        // Every operand is attempted and the worst status
-                        // reported: a later readable file must not erase an
-                        // earlier missing one.
-                        shell_println!("awk: {}: {:?}", path, e);
-                        worst = worst.max(1);
-                    }
-                }
+        match awk_feed_inputs(spec, stdin, &rules, &fs, &mut nr) {
+            Ok(w) => worst = worst.max(w),
+            Err(e) => {
+                // A declined match stops the run: `END` must not report an `NR`
+                // for records whose rules never got a verdict.
+                e.report();
+                set_exit(2);
+                return;
             }
         }
     }
@@ -123266,7 +123442,8 @@ fn awk_usage(piped: bool) {
     shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
     shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
     shell_println!("  Stmts:  print, print <expr>[, <expr>...] -- and nothing else");
-    shell_println!("  Pttrns: empty, /text/, NR <op> N, NF <op> N (<op>: > >= < <= == !=)");
+    shell_println!("  Pttrns: empty, /regexp/, NR <op> N, NF <op> N (<op>: > >= < <= == !=)");
+    shell_println!("  /regexp/ is a POSIX extended regular expression.");
     shell_println!("  A program outside that set is refused, not partly run (exit 2).");
     shell_println!("  `-` as an operand names the pipe.");
 }
@@ -123288,14 +123465,16 @@ fn awk_usage(piped: bool) {
 /// before it runs — `awk: unsupported statement: '…'`, exit 2 — rather than
 /// having the unrecognised parts skipped, which is what it used to do while
 /// still reporting success. See design-decisions §294 for why refusal beats a
-/// partial implementation here, and `awk_validate_program` for the check.
+/// partial implementation here, and [`awk_compile_program`] for the check.
 ///
-/// **`/pattern/` is a substring match, not a regular expression.** The kernel
-/// shell has no regex engine, so `/^err/` matches the literal `^err`. This is
-/// tracked as `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`
-/// and is blocked on the `ere` crate gaining a `no_std` build. It is the one
-/// wrong answer the refusal above deliberately leaves in place, because the fix
-/// is the engine, not a refusal.
+/// **`/pattern/` is a real POSIX extended regular expression.** It used to be a
+/// substring search — `/^err/` matched lines *containing* those four
+/// characters, and `/x*/`, which matches everything, matched almost nothing —
+/// recorded as `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`
+/// and blocked on the `ere` crate gaining a `no_std` build. Lane B made `ere`
+/// unconditionally `no_std`, so the kernel now links the same engine userspace's
+/// `grep`, `sed`, `awk` and `expr` use, rather than carrying a second one that
+/// would have to agree with it forever.
 ///
 /// Examples:
 ///   awk '{ print $1 }' file.txt            First field of each line
@@ -123522,8 +123701,33 @@ fn awk_split_fields<'a>(record: &'a [u8], fs: &AwkFs) -> alloc::vec::Vec<&'a [u8
     }
 }
 
-/// Evaluate `<var> <op> <integer>`, where the variable's value is already
-/// resolved, or `None` if `rest` is not a comparison this shell can evaluate.
+/// The comparison in an `NR`/`NF` pattern, once parsed.
+#[derive(Clone, Copy)]
+enum AwkOp {
+    Ge,
+    Le,
+    Eq,
+    Ne,
+    Gt,
+    Lt,
+}
+
+impl AwkOp {
+    /// Apply the operator to an already-resolved variable value.
+    fn eval(self, value: usize, n: usize) -> bool {
+        match self {
+            Self::Ge => value >= n,
+            Self::Le => value <= n,
+            Self::Eq => value == n,
+            Self::Ne => value != n,
+            Self::Gt => value > n,
+            Self::Lt => value < n,
+        }
+    }
+}
+
+/// Parse `<op> <integer>`, or `None` if `rest` is not a comparison this shell
+/// can evaluate.
 ///
 /// One chain serves both `NR` and `NF`. There used to be two, and they had
 /// already drifted: the `NR` copy handled all six operators and the `NF` copy
@@ -123534,63 +123738,129 @@ fn awk_split_fields<'a>(record: &'a [u8], fs: &AwkFs) -> alloc::vec::Vec<&'a [u8
 ///
 /// The two-character operators are tested before the one-character ones, so
 /// `>=` is never read as `>` followed by a stray `=`.
-fn awk_compare(value: usize, rest: &str) -> Option<bool> {
+fn awk_parse_cmp(rest: &str) -> Option<(AwkOp, usize)> {
     let rest = rest.trim();
-    for op in [">=", "<=", "==", "!=", ">", "<"] {
-        let Some(n_str) = rest.strip_prefix(op) else {
+    for (text, op) in [
+        (">=", AwkOp::Ge),
+        ("<=", AwkOp::Le),
+        ("==", AwkOp::Eq),
+        ("!=", AwkOp::Ne),
+        (">", AwkOp::Gt),
+        ("<", AwkOp::Lt),
+    ] {
+        let Some(n_str) = rest.strip_prefix(text) else {
             continue;
         };
-        let n = n_str.trim().parse::<usize>().ok()?;
-        return Some(match op {
-            ">=" => value >= n,
-            "<=" => value <= n,
-            "==" => value == n,
-            "!=" => value != n,
-            ">" => value > n,
-            _ => value < n,
-        });
+        return Some((op, n_str.trim().parse::<usize>().ok()?));
     }
     None
 }
 
-/// Evaluate a pattern against the current record, or `None` if this shell
-/// cannot evaluate it at all.
+/// Which record counter an `NR`/`NF` pattern compares.
+#[derive(Clone, Copy)]
+enum AwkVar {
+    Nr,
+    Nf,
+}
+
+/// A pattern this shell's `awk` can evaluate, with any regular expression
+/// already compiled.
 ///
-/// The `None` arm is the point of the function. It used to be a fall-through
-/// to a substring search, so `awk '$1 > 5 { print }'` searched each record for
-/// the seven characters `$1 > 5`, found none, printed nothing, and exited 0 —
-/// a filter that silently matched nothing rather than saying it could not run.
+/// Compiling happens once, when the program is read and before any input file
+/// is opened. That is worth two things beyond speed: `awk '/[/ {print}'` is
+/// refused up front instead of once per record, and a pattern that reaches
+/// [`Self::matches`] is one the engine has already accepted.
 ///
-/// **Invariant:** whether this returns `Some` depends on `pattern` alone; the
-/// record, `nr` and `nf` affect only the value inside. That is what lets
-/// [`awk_validate_program`] ask the question with a dummy record before any
-/// rule has run, and `kshell::self_test` rung 42 pins it by evaluating the same
-/// patterns against two unlike records and comparing only `is_some()`.
+/// This type is also what makes design-decisions §294's whole-program check
+/// *structural* rather than conventional. The check used to evaluate each
+/// pattern against a dummy empty record and ask only whether an answer existed,
+/// which was sound only because of a hand-written invariant — "whether an
+/// answer exists depends on the pattern text alone" — that nothing enforced,
+/// and which `kshell::self_test` rung 42 had to pin by hand. Building a pattern
+/// from text, with no record in sight, puts that invariant in the signature:
+/// there is now no way to run a pattern that was not accepted first.
+enum AwkPattern {
+    /// No pattern — every record matches.
+    Always,
+    /// `/re/` — a POSIX **extended** regular expression, as in every awk.
+    Regex(ere::Regex),
+    /// `NR <op> N` or `NF <op> N`.
+    Count { var: AwkVar, op: AwkOp, n: usize },
+}
+
+/// Why a pattern could not be compiled.
+enum AwkPatternError {
+    /// Not a pattern this shell can evaluate at all — `$1 > 5`, `/a/ && /b/`.
+    Unsupported,
+    /// `/re/`, but the regular expression itself is invalid.
+    BadRegex(ere::EreError),
+}
+
+/// Turn one pattern's source text into something runnable.
 ///
-/// The `/.../` arm is a **substring** match, not a regular expression; see
-/// `cmd_awk`'s doc comment and
-/// `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
-fn awk_pattern_eval(pattern: &str, line: &[u8], nr: usize, nf: usize) -> Option<bool> {
+/// The `Unsupported` arm is the point of the function. It used to be a
+/// fall-through to a substring search, so `awk '$1 > 5 { print }'` searched
+/// each record for the seven characters `$1 > 5`, found none, printed nothing,
+/// and exited 0 — a filter that silently matched nothing rather than saying it
+/// could not run.
+///
+/// The `/re/` arm used to be the same silent guess by the other door: it *was*
+/// the substring search, so `/^err/` matched lines containing those four
+/// characters, `/a.c/` matched only the literal `a.c`, and `/x*/` — a pattern
+/// that matches every line — matched almost none. It now goes to the one shared
+/// engine that userspace's `grep`, `sed`, `awk` and `expr` use, so the kernel
+/// shell and userspace cannot disagree about what a pattern means.
+/// [`ere::Regex::new`] is `Syntax::POSIX_EXTENDED`, which is what awk wants;
+/// `Syntax::EGREP` exists for `grep -E`'s two measured GNU deviations and is
+/// not awk's dialect.
+fn awk_compile_pattern(pattern: &str) -> Result<AwkPattern, AwkPatternError> {
     if pattern.is_empty() {
-        return Some(true); // No pattern — match all.
+        return Ok(AwkPattern::Always);
     }
 
-    // /regex/ pattern — literal string match.
     if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
-        let pat = pattern
+        let body = pattern
             .get(1..pattern.len().saturating_sub(1))
             .unwrap_or("");
-        return Some(awk_bytes_contain(line, pat.as_bytes()));
+        return match ere::Regex::new(body.as_bytes()) {
+            Ok(re) => Ok(AwkPattern::Regex(re)),
+            Err(e) => Err(AwkPatternError::BadRegex(e)),
+        };
     }
 
-    if let Some(rest) = pattern.strip_prefix("NR") {
-        return awk_compare(nr, rest);
-    }
-    if let Some(rest) = pattern.strip_prefix("NF") {
-        return awk_compare(nf, rest);
+    for (name, var) in [("NR", AwkVar::Nr), ("NF", AwkVar::Nf)] {
+        let Some(rest) = pattern.strip_prefix(name) else {
+            continue;
+        };
+        let (op, n) = awk_parse_cmp(rest).ok_or(AwkPatternError::Unsupported)?;
+        return Ok(AwkPattern::Count { var, op, n });
     }
 
-    None
+    Err(AwkPatternError::Unsupported)
+}
+
+impl AwkPattern {
+    /// Whether this pattern selects the current record.
+    ///
+    /// `Err` is *not* folded into `false`. A pattern containing a backreference
+    /// runs on a backtracker with a step budget, and it can decline to answer;
+    /// reporting "did not match" for a question the engine refused to decide
+    /// would be a wrong answer dressed as a real one, which is the whole shape
+    /// this command has spent three commits removing. The caller stops and says
+    /// so instead.
+    fn matches(&self, record: &[u8], nr: usize, nf: usize) -> Result<bool, ere::MatchLimit> {
+        match self {
+            Self::Always => Ok(true),
+            Self::Regex(re) => re.is_match(record),
+            Self::Count { var, op, n } => Ok(op.eval(
+                match var {
+                    AwkVar::Nr => nr,
+                    AwkVar::Nf => nf,
+                },
+                *n,
+            )),
+        }
+    }
 }
 
 /// The statements this shell's `awk` can run.
@@ -123666,6 +123936,10 @@ fn awk_exec_action(action: &str, line: &[u8], fields: &[&[u8]], nr: usize, nf: u
 enum AwkUnsupported {
     Pattern(alloc::string::String),
     Statement(alloc::string::String),
+    /// `/re/` reached the engine and the engine rejected it. Distinct from
+    /// `Pattern`, which means this shell never got as far as the engine: one
+    /// says "awk cannot do that", the other says "that is not a regexp".
+    Regex(alloc::string::String, &'static str),
 }
 
 impl AwkUnsupported {
@@ -123675,31 +123949,60 @@ impl AwkUnsupported {
         match self {
             Self::Pattern(p) => shell_println!("awk: unsupported pattern: '{}'", p),
             Self::Statement(s) => shell_println!("awk: unsupported statement: '{}'", s),
+            // glibc's own sentence for the failure, via `EreError::message`, so
+            // the kernel shell words a bad regexp the way userspace does.
+            Self::Regex(p, msg) => shell_println!("awk: invalid regular expression {}: {}", p, msg),
         }
     }
 }
 
-/// Check that every rule in a parsed program can actually be run.
+/// A rule whose pattern is compiled and whose statements have been checked:
+/// everything needed to run it, and nothing left that could still fail to
+/// parse.
+struct AwkCompiled {
+    /// The pattern's source text. Kept only so a run-time refusal can name it;
+    /// nothing reads it to decide anything.
+    text: alloc::string::String,
+    pattern: AwkPattern,
+    action: alloc::string::String,
+    is_begin: bool,
+    is_end: bool,
+}
+
+/// Compile every rule in a parsed program, or refuse the program.
 ///
-/// This runs once, before any rule executes, so the verdict depends only on the
-/// program text — a program that would have been mis-run on some inputs is
-/// refused on all of them, including the inputs where the wrong answer would
-/// have looked right. See design-decisions §294.
+/// This runs once, before any rule executes and before any file is opened, so
+/// the verdict depends only on the program text — a program that would have
+/// been mis-run on some inputs is refused on all of them, including the inputs
+/// where the wrong answer would have looked right. See design-decisions §294.
 ///
-/// Patterns are checked by evaluating them against a dummy empty record and
-/// asking only whether the answer exists. That is sound because of
-/// [`awk_pattern_eval`]'s documented invariant: whether it returns `Some`
-/// depends on the pattern alone. The same holds for [`awk_format_print`].
-fn awk_validate_program(rules: &[AwkRule]) -> Result<(), AwkUnsupported> {
+/// Compiling *is* the check. This used to be `awk_validate_program`, which
+/// evaluated each pattern against a dummy empty record and asked only whether
+/// an answer came back; what then ran was the same untyped strings the check
+/// had inspected, so nothing but a comment stopped a later edit from running a
+/// pattern the check had never approved. Now the check's *output* is what runs.
+/// Statements stay a textual check because [`awk_classify_stmt`] is already the
+/// single classifier both the checker and the executor go through, and it
+/// borrows from the action rather than owning anything.
+///
+/// Takes the rules by value so actions and pattern texts are moved, not copied.
+fn awk_compile_program(
+    rules: alloc::vec::Vec<AwkRule>,
+) -> Result<alloc::vec::Vec<AwkCompiled>, AwkUnsupported> {
+    let mut out = alloc::vec::Vec::with_capacity(rules.len());
     for rule in rules {
         // BEGIN and END carry no pattern of their own; `rule.pattern` is empty
-        // for both, and an empty pattern is always evaluable, so checking it
+        // for both, and an empty pattern always compiles, so compiling it
         // unconditionally is correct as well as simpler.
-        if awk_pattern_eval(&rule.pattern, b"", 0, 0).is_none() {
-            return Err(AwkUnsupported::Pattern(alloc::string::String::from(
-                rule.pattern.as_str(),
-            )));
-        }
+        let pattern = match awk_compile_pattern(&rule.pattern) {
+            Ok(p) => p,
+            Err(AwkPatternError::Unsupported) => {
+                return Err(AwkUnsupported::Pattern(rule.pattern));
+            }
+            Err(AwkPatternError::BadRegex(e)) => {
+                return Err(AwkUnsupported::Regex(rule.pattern, e.message()));
+            }
+        };
         for stmt in rule.action.split(';') {
             let stmt = stmt.trim();
             if stmt.is_empty() {
@@ -123717,8 +124020,15 @@ fn awk_validate_program(rules: &[AwkRule]) -> Result<(), AwkUnsupported> {
                 }
             }
         }
+        out.push(AwkCompiled {
+            text: rule.pattern,
+            pattern,
+            action: rule.action,
+            is_begin: rule.is_begin,
+            is_end: rule.is_end,
+        });
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Evaluate a print expression, expanding $N, NR, NF, and string literals.

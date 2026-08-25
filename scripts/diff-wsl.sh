@@ -468,6 +468,12 @@ if [ -z "${DIFF_NO_BINDIR:-}" ]; then
       # out loud which ones did not run. That is the opposite of the
       # single-binary rule below, where no reference means there is nothing
       # left for the harness to do at all.
+      #
+      # The reference is looked for on the *filesystem*, not with `command -v`,
+      # and that is not a stylistic preference: `command -v echo` -- and
+      # `printf`, and `true` -- answers with the shell's own builtin, which is
+      # not the program being compared and has neither its options nor its
+      # diagnostics. `write-error-diff.sh` carries all three in `DIFF_BINS`.
       for diff_b in $DIFF_BINS; do
         diff_gnu=
         for diff_cand in "/usr/bin/$diff_b" "/bin/$diff_b"; do

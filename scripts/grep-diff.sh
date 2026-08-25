@@ -17,40 +17,77 @@
 # question is still open for `-G` (`RE_SYNTAX_GREP`), and this file is how it
 # gets answered: by asking the real grep, one pattern at a time.
 #
-# ## Why it runs on the host rather than inside WSL
+# ## Why it moved into WSL
 #
-# Unlike `find`, nothing `grep` does needs an inode. It reads bytes and writes
-# lines, `grep.rs` has no `#[cfg(unix)]` in it, and the host has a GNU grep. So
-# this takes the ordinary `*-diff.sh` shape — build a native binary, run both
-# side by side — and not `find-diff.sh`'s WSL detour.
+# It used to argue that it did not need to: unlike `find`, nothing grep does
+# needs an inode, `grep.rs` has no `#[cfg(unix)]` in it, and the Windows host
+# has a GNU grep. Both halves of that were wrong.
+#
+# **The reference was MSYS2's**, which is Cygwin-derived — a different libc, a
+# different regex build, and getopt diagnostics glibc does not print. A harness
+# that certifies against it certifies wording no GNU/Linux system produces.
+#
+# **The subject being a Windows binary was corrupting the results**, and
+# visibly: *six* cases were recorded as deliberate divergences whose entire
+# stated reason was "the Windows build joins recursive paths with `\`". They
+# were not divergences at all. They were the harness measuring its own host, and
+# they made the whole of `-r` — the flag people actually use grep with — into a
+# blind spot. Inside WSL the separator is `/` on both sides and every one of
+# them is now a plain case.
+#
+# The second reason `diff-wsl.sh` gives applies too, even though `grep.rs`
+# itself is portable: `coreutils::stdfd`, which is what makes `grep pat >&-`
+# behave rather than crash, is `#[cfg(target_os = "linux")]`. A Windows-hosted
+# harness cannot exercise a line of it.
 #
 # ## What is compared
 #
-# stdout and the exit status, byte for byte. stderr only has to agree about
-# *whether* there was a diagnostic, for the reason `sed-diff.sh` gives: the
-# wording of a regex error comes from glibc on GNU's side and from `ere` on
-# ours, and matching glibc's phrasing would be fitting to its parser's
-# internals rather than to grep. What matters — and what is compared exactly —
-# is that a pattern GNU refuses is a pattern we refuse, with the same status.
+# stdout and the exit status, byte for byte, always.
+#
+# stderr text is compared **by default**, which is the change from the old
+# harness — it compared presence only, for every case. The reason it gave is
+# real but narrow: the wording of a *pattern* error comes from glibc's regcomp
+# on GNU's side and from `ere` on ours, and matching glibc's phrasing would fit
+# us to its parser's internals rather than to grep. That argument covers about
+# fifteen cases. It does not cover `grep: /nonexistent: No such file or
+# directory`, or `grep: invalid max count`, or an unknown-option diagnostic,
+# which are plain reports a script may reasonably grep for and which nothing
+# here had ever checked.
+#
+# So the rule is inverted: text is pinned unless a case opts out with `~`.
+#
+# ## The case-list markers
+#
+# | prefix | meaning |
+# |---|---|
+# | (none) | stdout, status and stderr text must all match |
+# | `~REASON\|` | stderr text is glibc's to choose; compare only whether there was a diagnostic |
+# | `!REASON\|` | differs **on purpose**; the run fails if it stops differing |
+# | `?REASON\|` | differs because we have not built it **yet** |
+#
+# `!` and `?` behave identically — both expect a difference and both fail the
+# run when the difference goes away, which is what makes them self-deleting.
+# They are spelled differently because they mean opposite things to a reader
+# deciding whether to open a bug: `!` is a decision, `?` is a debt. Counting
+# them together, as this harness did when every `!` was really a `?`, is how
+# six cases spent months labelled "deliberate" while describing a defect.
 set -u
-
-# Our grep is a native Windows binary, so MSYS would helpfully rewrite an
-# argument that looks like a path — turning the pattern `/x/` into `X:\`.
-export MSYS2_ARG_CONV_EXCL='*'
 
 # grep reads these, and inheriting them from the operator's shell would change
 # both sides at once — the worst kind of difference, because it agrees.
 unset GREP_OPTIONS GREP_COLOR GREP_COLORS POSIXLY_CORRECT
-export LC_ALL=C
 
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils grep "${OURS:-}") || exit 1
-GNU=${GNU:-$(command -v grep)}
+DIFF_PROG=grep
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
-pass=0; fail=0; xfail=0; xpass=0
+pass=0; fail=0; xfail=0; xgap=0; xpass=0
 
-fixtures=$(mktemp -d) || exit 1
-trap 'rm -rf "$fixtures"' EXIT
+# Under `$DIFF_TMP`, so that `diff-wsl.sh`'s one EXIT trap removes it. A second
+# `trap ... EXIT` here would replace that one rather than add to it, and leak
+# the scratch directory every run.
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures" || exit 1
 cd "$fixtures" || exit 1
 
 # ---------------------------------------------------------------- fixtures ---
@@ -66,14 +103,16 @@ cd "$fixtures" || exit 1
 #   mixed        case and digits, for -i and the character classes
 #   nonl         no trailing newline: does the last line still get one
 #   empty        no lines at all
-#   binfile      a NUL byte, which GNU calls binary and we deliberately do not.
-#                *Not* named `nul`: that is a reserved device name on Windows,
-#                so MSYS's `>` made a real file while our native binary opened
-#                the null device and reported an empty file. The harness then
-#                blamed grep for a difference the fixture had created.
+#   binfile      a NUL byte, which GNU calls binary and we deliberately do not
 #   zsep         NUL-separated records, for -z
 #   pats         a pattern file for -f, including an empty line (which matches
 #                everything, and is the classic -f footgun)
+#   accent       the same word in two cases with a two-byte character in it:
+#                what `-i`, `.` and `[[:alpha:]]` do to a character that is not
+#                one byte. Only meaningful now that the locale is `C.UTF-8` on
+#                both sides rather than whatever the Windows host had.
+#   ctx          eight numbered lines with two well-separated hits, so -A, -B
+#                and -C have room to overlap or not
 printf 'a\nb\nc\n'                              > abc
 printf 'foo bar\nbaz foo foo\nqux\nfoofoo\n'    > words
 printf 'a{b}\n{b}a\na{}\nab\na\naaa\na{1,2}\n'  > braces
@@ -83,23 +122,63 @@ printf 'a\nb'                                   > nonl
 printf 'bin\0ary\nplain\n'                      > binfile
 printf 'foo\0bar\0foo bar\0'                    > zsep
 printf 'foo\n\nqux\n'                           > pats
+printf 'caf\303\251\nCAF\303\211\ncafe\n'       > accent
+printf '1\n2\nHIT\n4\n5\n6\nHIT\n8\n'           > ctx
+
+# The recursion fixtures. `sub` is the plain tree; `symdir` exists because -r
+# and -R differ over exactly one thing — a symlink met *during* the walk, which
+# -r skips and -R follows — and neither could be tested at all while the subject
+# was a Windows binary.
 mkdir -p sub/deep
 printf 'foo\n'  > sub/s1
 printf 'bar\n'  > sub/deep/s2
+mkdir -p symdir
+printf 'foo\n' > symdir/plain
+ln -s ../sub  symdir/tosub
+ln -s ../abc  symdir/tofile
+ln -s /nowhere-at-all symdir/dangling
+
+# A tree that contains a link back to its own root, which is an infinite tree to
+# anything that follows links: `-R` must notice and say so, and `-r` must never
+# reach the question. Ours did reach it, and did not terminate.
+#
+# The link points at `loopdir`, not at the fixture directory above it, so that
+# the loop cases stay about the loop. Pointed one level higher it walked the
+# entire fixture tree, which meant each of them also compared binary-file
+# suppression and directory ordering — and would have needed re-marking every
+# time a fixture was added anywhere in this file.
+mkdir -p loopdir/inner
+printf 'foo\n' > loopdir/inner/leaf
+ln -s .. loopdir/inner/up
+
+# Exactly one matching file under a directory, which is the case that separates
+# "prefix because there are several files" from "prefix because -r was pointed
+# at a directory". Ours counted the expansion and so got this one wrong.
+mkdir -p onefile
+printf 'foo\n' > onefile/only
 
 # ------------------------------------------------------------------- cases ---
 #
 # One shell command line per case, `grep` standing for whichever grep is
-# running. Blank lines and `#` lines are ignored; a line beginning `!` is a case
-# expected to differ, and the text between `!` and `|` says why.
+# running. Blank lines and `#` lines are ignored; the marker table in the header
+# says what a leading `~` or `!` means.
 #
 # `grep` is a *function* rather than a textual substitution, so that a case can
 # put something before it (`GREP_COLORS=… grep …`) and so that a pattern
 # containing the word `grep` is not rewritten.
-grep() { "$SUBJ" "$@"; }
+#
+# It goes through `env PATH=…` rather than naming the binary, because the
+# diagnostic prefix is `argv[0]`: run as `/home/x/.cache/…/debug/grep` our side
+# would print that whole path where GNU prints `grep`, and every stderr
+# comparison below would fail for a reason that is the harness's doing. The
+# directory holds one symlink and is the whole of `PATH` for that one process —
+# safe here because grep runs no subprocess, so there is nothing else it could
+# need to find.
+grep() { env PATH="$bindir/$CAP_SIDE" grep "$@"; }
 
-# Everything observable about one run: stdout, the exit status, and whether
-# there was a diagnostic — but not its text. See the header.
+# Everything observable about one run, left in globals rather than printed,
+# because the stderr *text* and the mere fact of a diagnostic are two different
+# answers and `run_case` picks between them per case.
 #
 # `</dev/null` is not tidiness. A case that names no file — `grep a`, or plain
 # `grep` — reads *stdin*, and stdin here is the case list itself: the first
@@ -113,38 +192,59 @@ grep() { "$SUBJ" "$@"; }
 # the whole NUL-delimited half of grep would agree by construction. `\002` is a
 # byte neither implementation writes. The exit status is folded into the same
 # capture (after a `\001`) because it has to survive the pipeline that the `tr`
-# introduces.
+# introduces. stderr goes through the same `tr` for the same reason.
 capture() {
-    SUBJ=$1
-    local body err loud
-    err=$(mktemp)
-    body=$( { eval "$2" </dev/null 2>"$err"; printf '\001rc=%s' "$?"; } | tr '\0' '\002' )
-    loud=quiet
-    [ -s "$err" ] && loud=loud
+    CAP_SIDE=$1
+    local err=$DIFF_TMP/err
+    CAP_BODY=$( { eval "$2" </dev/null 2>"$err"; printf '\001rc=%s' "$?"; } | tr '\0' '\002' )
+    CAP_MSG=$(tr '\0' '\002' <"$err")
+    CAP_LOUD=quiet
+    [ -s "$err" ] && CAP_LOUD=loud
     rm -f "$err"
-    printf '%s loud=%s' "$body" "$loud"
+}
+
+# The single string a case is judged on: stdout and status always, then either
+# the diagnostic's text or only whether there was one.
+capture_key() {
+    if [ "$1" = text ]; then
+        printf '%s\001msg=%s' "$CAP_BODY" "$CAP_MSG"
+    else
+        printf '%s\001%s' "$CAP_BODY" "$CAP_LOUD"
+    fi
 }
 
 # Render a capture for a human: `|` for a newline, `@` for a NUL.
 show() { printf '%s' "$1" | tr '\n\002\001' '|@ '; }
 
 run_case() {
-    local line=$1 expect_diff=0 reason=""
+    local line=$1 mode=text expect_diff="" reason=""
     case $line in
+        '~'*)
+            mode=presence
+            reason=${line#\~}
+            reason=${reason%%|*}
+            line=${line#*|}
+            ;;
         '!'*)
-            expect_diff=1
+            expect_diff=purpose
             reason=${line#!}
+            reason=${reason%%|*}
+            line=${line#*|}
+            ;;
+        '?'*)
+            expect_diff=gap
+            reason=${line#\?}
             reason=${reason%%|*}
             line=${line#*|}
             ;;
     esac
 
     local a b
-    a=$(capture "$GNU" "$line")
-    b=$(capture "$OURS" "$line")
+    capture gnu  "$line"; a=$(capture_key "$mode")
+    capture ours "$line"; b=$(capture_key "$mode")
 
     if [ "$a" = "$b" ]; then
-        if [ "$expect_diff" = 1 ]; then
+        if [ -n "$expect_diff" ]; then
             xpass=$((xpass + 1))
             printf 'XPASS  %s\n     (expected to differ: %s)\n' "$line" "$reason"
         else
@@ -152,10 +252,10 @@ run_case() {
         fi
         return
     fi
-    if [ "$expect_diff" = 1 ]; then
-        xfail=$((xfail + 1))
-        return
-    fi
+    case $expect_diff in
+        purpose) xfail=$((xfail + 1)); return ;;
+        gap)     xgap=$((xgap + 1));   return ;;
+    esac
     fail=$((fail + 1))
     printf 'FAIL   %s\n' "$line"
     printf '  gnu  | %s\n' "$(show "$a")"
@@ -182,7 +282,12 @@ grep a abc empty
 grep a /nonexistent
 grep -s a /nonexistent
 grep a
-grep
+# GNU answers a missing operand with the usage summary and `Try 'grep --help'`;
+# we answer `grep: missing PATTERN`. Ours names the actual fault and GNU's does
+# not, but GNU's is the shape every other utility on the system uses, and a
+# harness is not the place to relitigate it. Tracked with the rest of the
+# getopt-diagnostic shape work in known-issues.md.
+?our missing-operand diagnostic is a sentence, not GNU's usage summary (TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE)|grep
 
 # --- stdin, which is what "no file" means ---
 grep a < abc
@@ -221,19 +326,29 @@ grep '\(a\)\1' braces
 grep '\(a\)b' braces
 grep '\.' braces
 grep '\\' braces
-grep 'a[' braces
-grep 'a\{2' braces
-grep 'a\{2,1\}' braces
-grep '\(a' braces
-grep 'a\)' braces
+~glibc regcomp's wording, not grep's|grep 'a[' braces
+~glibc regcomp's wording, not grep's|grep 'a\{2' braces
+~glibc regcomp's wording, not grep's|grep 'a\{2,1\}' braces
+~glibc regcomp's wording, not grep's|grep '\(a' braces
+~glibc regcomp's wording, not grep's|grep 'a\)' braces
 grep '*a' braces
 grep '\w' mixed
 grep '\W' words
 grep '\s' words
 grep '\S' words
-!we refuse \< \> \b \B: the engine has no word-boundary matcher, and there is no spelling that would quietly do the wrong thing (bre.rs)|grep '\<foo' words
-!we refuse \< \> \b \B: the engine has no word-boundary matcher, and there is no spelling that would quietly do the wrong thing (bre.rs)|grep 'foo\>' words
-!we refuse \< \> \b \B: the engine has no word-boundary matcher, and there is no spelling that would quietly do the wrong thing (bre.rs)|grep '\bfoo' words
+# \< \> \b \B were three deliberate divergences until the ere/bre word-boundary
+# operators landed (todo item 10). They are plain cases now, and the harness
+# fails if either side stops agreeing about them again.
+grep '\<foo' words
+grep 'foo\>' words
+grep '\bfoo' words
+grep 'foo\b' words
+grep '\Bfoo' words
+grep '\<o' words
+grep -E '\<foo' words
+grep -E 'foo\>' words
+grep -E '\bfoo' words
+grep -E '\Bo' words
 
 # --- -E, the egrep dialect: the two syntax bits, measured ---
 grep -E 'a+' braces
@@ -245,12 +360,16 @@ grep -E 'a{2,}' braces
 grep -E 'a{1,2}' braces
 grep -E '[abc]+' abc
 # RE_CONTEXT_INDEP_OPS: a quantifier with nothing to quantify repeats the empty
-# expression rather than being REG_BADRPT.
-grep -E '*a' braces
-grep -E '+a' braces
-grep -E '?a' braces
+# expression rather than being REG_BADRPT. The *answer* agreed from the first
+# run; what did not is that GNU also prints `grep: warning: * at start of
+# expression` to stderr while still exiting 0. That warning is the only thing
+# telling a user their pattern is not doing what they think, so it is a gap and
+# not a difference of opinion.
+?we accept a leading quantifier silently; GNU warns `* at start of expression` on stderr and still exits 0|grep -E '*a' braces
+?we accept a leading quantifier silently; GNU warns `+ at start of expression` on stderr and still exits 0|grep -E '+a' braces
+?we accept a leading quantifier silently; GNU warns `? at start of expression` on stderr and still exits 0|grep -E '?a' braces
 grep -E 'a^*b' braces
-grep -E '^*' abc
+?we accept a leading quantifier silently; GNU warns `* at start of expression` on stderr and still exits 0|grep -E '^*' abc
 # RE_INVALID_INTERVAL_ORD: a `{` that does not open a well-formed interval is a
 # literal brace.
 grep -E 'a{b}' braces
@@ -258,13 +377,13 @@ grep -E 'a{' braces
 grep -E '{b}' braces
 grep -E 'a{,}' braces
 # A well-formed-looking but wrong interval stays an error in both dialects.
-grep -E 'a{}' braces
-grep -E 'a{1,2,3}' braces
-grep -E 'a{2,1}' braces
-grep -E 'a{99999999}' braces
-grep -E 'a(' braces
-grep -E 'a)' braces
-grep -E 'a[' braces
+~glibc regcomp's wording, not grep's|grep -E 'a{}' braces
+~glibc regcomp's wording, not grep's|grep -E 'a{1,2,3}' braces
+~glibc regcomp's wording, not grep's|grep -E 'a{2,1}' braces
+~glibc regcomp's wording, not grep's|grep -E 'a{99999999}' braces
+~glibc regcomp's wording, not grep's|grep -E 'a(' braces
+~glibc regcomp's wording, not grep's|grep -E 'a)' braces
+~glibc regcomp's wording, not grep's|grep -E 'a[' braces
 # GNU is two engines here — at the start of an expression glibc regcomp skips
 # the offending token while dfa.c makes it a literal — so these exit 1 with no
 # diagnostic. They were written as expected-to-differ and turned out to agree:
@@ -332,22 +451,94 @@ grep -e -a braces
 grep -ivn a mixed
 grep -in a mixed
 grep -Z a abc
-grep --zzz a abc
-grep -m x foo words
+?ours is `unknown option: --zzz`; GNU is `unrecognized option '--zzz'` plus the usage summary (TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE)|grep --zzz a abc
+?ours names the offending value (`invalid max count: x`); GNU's message does not|grep -m x foo words
 
 # --- recursion ---
 #
-# A recursive hit is named `sub/s1` by GNU and `sub\s1` by us *in this harness
-# only*: the path is built with `Path::join`, which uses the host separator,
-# and the subject here is the Windows build. On the target — where `/` is the
-# separator and the Windows build does not exist — the two agree. `grep foo
-# sub` (no -r) is the unmarked control: it names no child path, and passes.
-!the Windows build joins recursive paths with `\`; the target build joins with `/`|grep -r foo sub
-!the Windows build joins recursive paths with `\`; the target build joins with `/`|grep -rn foo sub
-!the Windows build joins recursive paths with `\`; the target build joins with `/`|grep -rl foo sub
-!the Windows build joins recursive paths with `\`; the target build joins with `/`|grep -rc foo sub
-!the Windows build joins recursive paths with `\`; the target build joins with `/`|grep -r foo .
+# Every case here used to be a deliberate divergence, on the stated grounds
+# that "the Windows build joins recursive paths with `\`". That was never a
+# divergence in grep; it was the harness measuring the host it ran on, and it
+# made the flag people actually use grep with into a blind spot. Inside WSL the
+# separator is `/` on both sides, so the whole section is plain cases — and the
+# section has grown, because -r is now testable at all.
+grep -r foo sub
+grep -rn foo sub
+grep -rl foo sub
+grep -rL foo sub
+grep -rc foo sub
+grep -rh foo sub
+# `.` sweeps in `zsep`, which has NUL bytes in it, so this case differs for the
+# binary reason at the bottom of the file — and it is also the one case whose
+# output is long enough to show that we list a directory in sorted order where
+# GNU lists it in readdir order (design-decisions.md §380). Both are choices;
+# neither is a defect, which is why this is `!` and not `?`.
+!we never suppress binary output, and we list a directory sorted where GNU uses readdir order|grep -r foo .
+grep -r foo sub/deep
 grep foo sub
+grep -r foo sub/s1
+grep -r foo /nonexistent
+?-d is not implemented; GNU's `-d recurse` is -r and `-d skip` ignores directories silently|grep -d recurse foo sub
+?-d is not implemented; GNU's `-d recurse` is -r and `-d skip` ignores directories silently|grep -d skip foo sub
+grep -r foo sub empty
+?--include is not implemented|grep -r --include='s1' foo .
+?--exclude is not implemented|grep -r --exclude='s1' foo .
+?--exclude-dir is not implemented|grep -r --exclude-dir='deep' bar .
+
+# -r and -R differ over exactly one thing: a symlink met during the walk. -r
+# skips it, -R follows it. A symlink named on the command line is followed by
+# both. None of this could be tested while the subject was a Windows binary,
+# and the first run inside WSL found that we did not make the distinction at
+# all — we followed during the walk, so `symdir/tosub/s1` was reported that GNU
+# does not report, and `-r` on a tree with a loop in it did not terminate.
+grep -r foo symdir
+grep -R foo symdir
+grep -r foo symdir/tosub
+grep -r a symdir/tofile
+grep -rl foo symdir
+grep -Rl foo symdir
+grep -r foo symdir/dangling
+grep -R foo symdir/dangling
+grep -Rs foo symdir
+grep -r foo loopdir
+grep -R foo loopdir
+grep -Rl foo loopdir
+
+# The loop warning has three separate properties, and we had all three wrong at
+# once. It is silenced by -s; it does *not* raise the exit status, so a -R that
+# found nothing in a looping tree still exits 1 and not 2; and it names the
+# link, not what the link resolves to.
+grep -Rs foo loopdir
+grep -R zzz loopdir
+grep -Rc foo loopdir
+
+# -q stops at the first match, and the walk has to be *streaming* for that to
+# be visible: what it means is that the files after the match are never looked
+# at, so the diagnostics they would have produced never appear. Expanding the
+# tree into a list first produced the warning either way, because the expansion
+# had already finished before the first file was read. The pair below is the
+# whole test: same tree, same flags, and the warning appears only in the one
+# that had to walk all of it.
+grep -Rq foo loopdir
+grep -Rq zzz loopdir
+grep -rq foo sub
+
+# -q asks one question, and an error reading some other file does not unanswer
+# it: POSIX says a selected line means status 0 "even if an error was
+# detected". The three below separate that from the ordinary rule — the first
+# reports the missing file and still exits 0, the second exits 0 without ever
+# reaching it, and the third has no match to outrank the error and so exits 2.
+grep -q foo nonexistent words
+grep -q foo words nonexistent
+grep -q zzz nonexistent words
+
+# The filename prefix under -r is not "more than one file": it is "the operand
+# was a directory". These two say so, and they disagreed before the walk was
+# rewritten — the second printed a bare `foo`.
+grep -r foo onefile
+grep -r a symdir/tofile
+grep -rH foo onefile
+grep -rh foo onefile
 
 # --- -Z and -z, the NUL-delimited pair ---
 grep -Z a abc
@@ -372,8 +563,111 @@ grep -z foo words
 grep -a ary binfile
 grep -c ary binfile
 grep -q ary binfile
+
+# --- context, which nothing here had ever exercised ---
+#
+# `ctx` has its two hits six lines apart so that -C 1 leaves a gap and -C 3
+# closes it: the `--` separator between non-adjacent groups, and its absence
+# when the groups touch, is the part of this that is easy to get wrong.
+?context selection (-A -B -C) is not implemented|grep -A 1 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -B 1 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -C 1 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -C 3 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -A 99 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -C 0 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -nC 1 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -A 1 HIT ctx ctx
+?context selection (-A -B -C) is not implemented|grep -cC 1 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -vC 1 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -A1 HIT ctx
+?context selection (-A -B -C) is not implemented|grep -A 1 -m 1 HIT ctx
+?context selection (-A -B -C) is not implemented|grep --group-separator=XX -C 1 HIT ctx
+?context selection (-A -B -C) is not implemented|grep --no-group-separator -C 1 HIT ctx
+
+# --- byte offsets and the other output decorations ---
+?-b is not implemented|grep -b a abc
+?-b is not implemented|grep -bn a abc
+?-b is not implemented|grep -bo foo words
+?-b is not implemented|grep -bH a abc
+?-b is not implemented|grep -b foo zsep
+?-T is not implemented|grep -T a abc
+?-T is not implemented|grep -Tn a abc
+
+# --- colour, which is escape sequences on stdout and therefore comparable ---
+#
+# The `;` in GREP_COLORS is quoted because an unquoted one ends the command:
+# the first draft of this case ran `GREP_COLORS=mt=01` and then `32 grep …`,
+# which failed identically on both sides and was recorded as a pass.
+?--color is not implemented|grep --color=never foo words
+?--color is not implemented|grep --color=always foo words
+?--color is not implemented|grep --color=always -o foo words
+?--color is not implemented|grep --color=always -n foo words
+?--color is not implemented|grep --color=always -i alpha mixed
+?--color is not implemented|grep --color=auto foo words
+?--color is not implemented|GREP_COLORS='mt=01;32' grep --color=always foo words
+
+# --- a character that is not one byte, now that the locale is C.UTF-8 ---
+grep -i cafe accent
+grep -i café accent
+grep -i CAFÉ accent
+grep café accent
+grep 'caf.' accent
+grep -o '.' accent
+grep '[[:alpha:]]' accent
+grep -c '[[:alpha:]]' accent
+grep -w café accent
+grep -x café accent
+grep -o 'caf.' accent
+grep -E 'caf.' accent
+
+# --- a closed descriptor, which is what `coreutils::stdfd` exists for ---
+#
+# `close_stdout` is called and still we exit 0 with nothing said: the write to
+# the closed descriptor fails and the failure is dropped somewhere between the
+# match loop and the exit status. GNU exits 2 and says `grep: write error: Bad
+# file descriptor`. The two cases that write nothing pass, which locates it in
+# the writing rather than in the setup.
+grep a abc >&-
+grep -c a abc >&-
+grep -q a abc >&-
+grep z abc >&-
+grep -l a abc >&-
+grep -o a abc >&-
+grep -r foo sub >&-
+grep a /nonexistent 2>&-
 CASES
 
-printf '\n%d passed, %d differed, %d deliberate, %d unexpectedly agreed\n' \
-    "$pass" "$fail" "$xfail" "$xpass"
+# --- the cases that only mean something as an ordinary user -------------------
+#
+# `chmod 000` does not stop root, so as root these would pass by reading the
+# file successfully on both sides — a green that certifies nothing. They are
+# skipped instead, loudly, rather than quietly turned into their own opposite.
+if [ "$(id -u)" != 0 ]; then
+    printf 'secret\n' > noread
+    chmod 000 noread
+    mkdir -p nolist/inner
+    printf 'foo\n' > nolist/inner/f
+    chmod 000 nolist
+    run_case 'grep a noread'
+    run_case 'grep -s a noread'
+    run_case 'grep a noread abc'
+    # Two separate faults, both found on the first run inside WSL and both
+    # fixed by giving the recursive walk the error path the file case already
+    # had: an unopenable directory left the status at 1, and -s did not cover
+    # it. The plain-file cases above passed throughout, which is what said it
+    # was the walk and not the shared path.
+    run_case 'grep -r foo nolist'
+    run_case 'grep -rs foo nolist'
+    run_case 'grep -r foo nolist abc'
+    run_case 'grep -R foo nolist'
+    # Restore, so `diff_cleanup` can descend even if the chmod -R there ever
+    # stops covering a case.
+    chmod 755 nolist
+else
+    printf 'note: running as root inside WSL; the unreadable-file cases are skipped\n'
+    printf '      (root reads them anyway, so they would agree for the wrong reason)\n'
+fi
+
+printf '\n%d passed, %d differed, %d on purpose, %d not built yet, %d unexpectedly agreed\n' \
+    "$pass" "$fail" "$xfail" "$xgap" "$xpass"
 [ "$fail" -eq 0 ] && [ "$xpass" -eq 0 ]

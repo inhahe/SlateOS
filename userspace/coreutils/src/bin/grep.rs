@@ -62,13 +62,20 @@ use coreutils::stdfd;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 // Aliased: this file already has a `Syntax` — the `-G`/`-E`/`-F` selector —
 // and `ere::Syntax` is the dialect that selector maps *onto*.
 use ere::{MatchLimit, Regex, Syntax as EreSyntax, bre};
+
+// Before `main`, so that `stdfd::restore` still sees a caller's `grep … >&-` as
+// the closed descriptor it is rather than the `/dev/null` the Rust runtime
+// substitutes for it before `main` runs. Without it `grep a abc >&-` prints
+// nothing and exits 0, where GNU says `grep: write error: Bad file descriptor`
+// and exits 2.
+coreutils::guard_std_fds!();
 
 /// Which language the patterns are written in.
 #[derive(Clone, Copy, Default)]
@@ -95,6 +102,14 @@ struct Options {
     count_only: bool,
     line_numbers: bool,
     recursive: bool,
+    /// `-R`: also follow a symbolic link found *during* the walk.
+    ///
+    /// `-r` and `-R` differ over exactly this. Both follow a link named on the
+    /// command line — `grep -r foo link-to-dir` descends it — and only `-R`
+    /// follows one it discovers. Ours followed them always until 2026-08-25,
+    /// which reported files GNU does not and, on a tree containing a link back
+    /// to one of its own ancestors, did not terminate.
+    deref_links: bool,
     quiet: bool,
     /// `-w`: the match must be bounded by non-word characters.
     word: bool,
@@ -217,7 +232,11 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 'v' => opts.invert = true,
                 'c' => opts.count_only = true,
                 'n' => opts.line_numbers = true,
-                'r' | 'R' => opts.recursive = true,
+                'r' => opts.recursive = true,
+                'R' => {
+                    opts.recursive = true;
+                    opts.deref_links = true;
+                }
                 'w' => opts.word = true,
                 'x' => opts.whole_line = true,
                 'o' => opts.only_matching = true,
@@ -302,7 +321,11 @@ fn parse_long(
         "invert-match" => opts.invert = true,
         "count" => opts.count_only = true,
         "line-number" => opts.line_numbers = true,
-        "recursive" | "dereference-recursive" => opts.recursive = true,
+        "recursive" => opts.recursive = true,
+        "dereference-recursive" => {
+            opts.recursive = true;
+            opts.deref_links = true;
+        }
         "word-regexp" => opts.word = true,
         "line-regexp" => opts.whole_line = true,
         "only-matching" => opts.only_matching = true,
@@ -529,6 +552,28 @@ fn display_name(path: &str) -> &str {
     }
 }
 
+/// Whether every printed line is prefixed with the name of the file it came
+/// from.
+///
+/// `explicit` is `-H`/`-h`, which settle it outright. Otherwise the rule is not
+/// "more than one file was searched" but **"more than one file was *named*, or
+/// `-r` was pointed at a directory"** — which is a question about the operands,
+/// not about what they expand to. Measured, GNU grep 3.11:
+///
+/// | command | prefix? | why |
+/// |---|---|---|
+/// | `grep -r foo dir` where `dir` holds one file | yes | an operand was a directory |
+/// | `grep -r foo link-to-file` | no | one operand, and not a directory |
+/// | `grep foo a b` | yes | two operands |
+///
+/// Counting the expansion instead got the first row wrong. It is also the only
+/// formulation that can be answered *before* the walk begins, which the walk
+/// now requires: it streams, so by the time the size of the expansion is known,
+/// lines have already been printed with or without a prefix.
+fn wants_filename(explicit: Option<bool>, operands: usize, named_a_directory: bool) -> bool {
+    explicit.unwrap_or(operands > 1 || named_a_directory)
+}
+
 /// The prefix shown before a printed line: file name, line number, both or
 /// neither.
 ///
@@ -565,6 +610,7 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<String> = env::args().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(p) => p,
@@ -599,81 +645,163 @@ fn run_main() -> ExitCode {
         }
     };
 
-    let mut files = parsed.files;
-    if parsed.opts.recursive {
-        let mut expanded: Vec<String> = Vec::new();
-        for f in &files {
-            let path = Path::new(f);
-            if path.is_dir() {
-                collect_files_recursive(path, &mut expanded);
-            } else {
-                expanded.push(f.clone());
-            }
+    let named_a_directory = parsed.opts.recursive
+        && parsed.files.iter().any(|f| {
+            // `is_dir` follows a symlink, matching what `Run::operand` does
+            // with the same operand a moment later.
+            Path::new(f).is_dir()
+        });
+    let show_filename = wants_filename(parsed.opts.filename, parsed.files.len(), named_a_directory);
+
+    let mut run = Run {
+        // `Stream`, not `io::stdout().lock()`, because the verdict on the
+        // output is part of the answer: `grep a file >&-` wrote into a buffer
+        // that was discarded by a final `let _ = out.flush()` and exited 0
+        // having printed nothing. `Stream` records the failure instead of
+        // returning it — so no write below can fail — and `close_stdout_with`
+        // reports it as `grep: write error: …` and exits 2, as GNU does.
+        out: stdfd::Stream::stdout(),
+        pats: &pats,
+        opts: &parsed.opts,
+        show_filename,
+        any_match: false,
+        had_error: false,
+        done: false,
+    };
+
+    for f in &parsed.files {
+        run.operand(f);
+        if run.done {
+            break;
         }
-        files = expanded;
     }
 
-    // More than one file to search means each line needs to say which file it
-    // came from — unless `-H`/`-h` settled the question.
-    let show_filename = parsed.opts.filename.unwrap_or(files.len() > 1);
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let mut any_match = false;
-    let mut had_error = false;
+    let earned = if run.any_match && parsed.opts.quiet {
+        // `-q` asks one question — "is there a match?" — and an error reading
+        // some *other* file does not unanswer it. POSIX says so outright
+        // ("exit with zero status if an input line is selected, even if an
+        // error was detected"), and it is measurable: `grep -q foo nonexistent
+        // words` prints the diagnostic and still exits 0, where the same
+        // command without `-q` exits 2.
+        ExitCode::SUCCESS
+    } else if run.had_error {
+        // Otherwise an error outranks both answers: a script that
+        // distinguishes 0 from 1 is asking about the content of files it
+        // believes were all read.
+        ExitCode::from(2)
+    } else if run.any_match {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    };
+    // grep's `exit_failure` is 2, not the family's 1.
+    stdfd::close_stdout_with("grep", run.out, earned, 2)
+}
 
-    for path in &files {
+/// Everything one run carries from file to file.
+///
+/// It is a struct rather than a handful of locals because the recursive walk
+/// has to **stream**: GNU searches each file at the moment it reaches it, so
+/// the walk and the searching are one traversal and not two phases. Collecting
+/// the tree into a `Vec` first — which is what this did until 2026-08-25 — got
+/// two observable things wrong:
+///
+/// * `grep -rq foo dir` stops at the first match and never looks at what comes
+///   after it, so it never emits the diagnostics those files would have
+///   produced. Measured: on a tree holding a symlink loop, `grep -Rq foo L`
+///   prints nothing, while `grep -Rq zzz L` prints the loop warning — the
+///   difference being only how far the walk got.
+/// * A diagnostic about one file belongs *between* the matches of its
+///   neighbours. Expanding first put every diagnostic before every match.
+struct Run<'a> {
+    out: stdfd::Stream,
+    pats: &'a [Pat],
+    opts: &'a Options,
+    show_filename: bool,
+    any_match: bool,
+    had_error: bool,
+    /// Set once `-q` has its answer. Every remaining file and directory is
+    /// then skipped — including the diagnostics they would have produced,
+    /// which is the point.
+    done: bool,
+}
+
+impl Run<'_> {
+    /// Handle one command-line operand.
+    fn operand(&mut self, f: &str) {
+        // `is_dir`, which follows a symlink — deliberately, and unlike the
+        // walk. A link named on the command line is followed by `-r` as well
+        // as `-R`; it is only a link *discovered* by the walk that `-r` skips.
+        if self.opts.recursive && Path::new(f).is_dir() {
+            let mut ancestors: Vec<PathBuf> = Vec::new();
+            self.walk(Path::new(f), &mut ancestors);
+        } else {
+            self.search(f);
+        }
+    }
+
+    /// Search one named file — or standard input, spelled `-`.
+    fn search(&mut self, path: &str) {
         let reader: Box<dyn Read> = if path == "-" {
             Box::new(io::stdin())
         } else {
             if Path::new(path).is_dir() {
-                if !parsed.opts.recursive {
-                    if !parsed.opts.no_messages {
-                        diag!("grep: {}: Is a directory", quotef_os(path));
-                    }
-                    // Named but not searched, so the run's answer is about
-                    // less than it was asked about — status 2, as for a file
-                    // that could not be opened.
-                    had_error = true;
+                // Only reachable without `-r`; with it, `operand` walked the
+                // directory instead of arriving here.
+                if !self.opts.no_messages {
+                    diag!("grep: {}: Is a directory", quotef_os(path));
                 }
-                continue;
+                // Named but not searched, so the run's answer is about less
+                // than it was asked about — status 2, as for a file that could
+                // not be opened.
+                self.had_error = true;
+                return;
             }
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    if !parsed.opts.no_messages {
+                    if !self.opts.no_messages {
                         diag!("grep: {}: {}", quotef_os(path), strerror(&e));
                     }
                     // A file that could not be read is an error, not an absence
                     // of matches: exiting 1 would tell a script the file has
                     // been searched and found wanting.
-                    had_error = true;
-                    continue;
+                    self.had_error = true;
+                    return;
                 }
             }
         };
 
         let shown = display_name(path);
-        match search_stream(&mut out, reader, &pats, shown, show_filename, &parsed.opts) {
+        match search_stream(
+            &mut self.out,
+            reader,
+            self.pats,
+            shown,
+            self.show_filename,
+            self.opts,
+        ) {
             Ok(matched) => {
                 if matched {
-                    any_match = true;
-                    if parsed.opts.quiet {
+                    self.any_match = true;
+                    if self.opts.quiet {
                         // `-q` is a question, and it has been answered.
-                        break;
+                        self.done = true;
+                        return;
                     }
                 }
                 // `-l` and `-L` name the file rather than the lines; which of
                 // the two asked decides which answer is worth naming.
-                let name_it = (parsed.opts.files_with_matches && matched)
-                    || (parsed.opts.files_without_match && !matched);
+                let name_it = (self.opts.files_with_matches && matched)
+                    || (self.opts.files_without_match && !matched);
                 if name_it {
                     // NUL after the name under `-Z`, newline otherwise — and
                     // *not* `-z`'s separator, which describes the input. This
                     // is the half of `-Z` that matters: `grep -rlZ | xargs -0`
                     // is the only listing of paths that survives a path
                     // containing a newline, which this system permits.
-                    let _ = out.write_all(shown.as_bytes());
-                    let _ = out.write_all(if parsed.opts.null_name {
+                    let _ = self.out.write_all(shown.as_bytes());
+                    let _ = self.out.write_all(if self.opts.null_name {
                         &b"\0"[..]
                     } else {
                         &b"\n"[..]
@@ -681,25 +809,158 @@ fn run_main() -> ExitCode {
                 }
             }
             Err(e) => {
-                if !parsed.opts.no_messages {
+                if !self.opts.no_messages {
                     diag!("grep: {}: {}", quotef_os(path), strerror(&e));
                 }
-                had_error = true;
+                self.had_error = true;
             }
         }
     }
 
-    let _ = out.flush();
-    // An error outranks both answers: a script that distinguishes 0 from 1 is
-    // asking about the content of files it believes were all read.
-    if had_error {
-        return ExitCode::from(2);
-    }
-    if !any_match {
-        return ExitCode::from(1);
+    /// Search a file the walk found, rather than one the command line named.
+    ///
+    /// `to_string_lossy` is a known defect and not a choice: every path in this
+    /// program is a `String`, so a path holding a byte that is not valid UTF-8
+    /// — which this system permits in a filename — is corrupted on the way in
+    /// and printed back wrong. It is one entry in the argv-UTF-8 backlog
+    /// (`known-issues.md`); fixing it means moving the whole program onto
+    /// `OsString`, which is a change to `search_stream`'s signature and to
+    /// every prefix it builds. Isolated into a named method so that the fix is
+    /// a change to one line, and so that the defect is not silently spelled
+    /// inline in the middle of the walk.
+    fn search_found(&mut self, path: &Path) {
+        let shown = path.to_string_lossy().into_owned();
+        self.search(&shown);
     }
 
-    ExitCode::SUCCESS
+    /// Walk one directory, searching what it holds, deepest-last and in sorted
+    /// order.
+    ///
+    /// # Which symlinks are followed
+    ///
+    /// A symlink met *during* the walk is skipped by `-r` and followed by `-R`
+    /// — that single difference is the whole of what separates the two flags.
+    /// A symlink *named on the command line* is followed by both, which is why
+    /// [`Run::operand`] asks `is_dir` (following) where this asks
+    /// `symlink_metadata` (not following).
+    ///
+    /// # The loop
+    ///
+    /// `-R` on a tree containing a link back to one of its own ancestors
+    /// describes an infinite tree. GNU prints
+    /// `grep: PATH: warning: recursive directory loop` and carries on.
+    /// Measured, and all three halves of that matter: the message is
+    /// suppressed by `-s`, it does **not** change the exit status (`grep -R zzz
+    /// loop-tree` exits 1, not 2), and it names the link rather than what the
+    /// link resolves to.
+    ///
+    /// # Ordering
+    ///
+    /// Sorted, where GNU emits readdir order. See `design-decisions.md` §380:
+    /// the order a directory hands back its entries is a property of the
+    /// filesystem, so GNU's output is not reproducible between two machines
+    /// holding the same files, whereas a sorted listing is stable and
+    /// diffable.
+    fn walk(&mut self, dir: &Path, ancestors: &mut Vec<PathBuf>) {
+        if self.done {
+            return;
+        }
+        if self.opts.deref_links {
+            // Identity by resolved path: two names for one directory are one
+            // directory, and it is the resolved form that says so. A failure
+            // to resolve is not fatal here — the `read_dir` below will report
+            // it properly — so the unresolvable path stands in for itself.
+            let real = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            if ancestors.contains(&real) {
+                if !self.opts.no_messages {
+                    diag!(
+                        "grep: {}: warning: recursive directory loop",
+                        quotef_os(dir)
+                    );
+                }
+                return;
+            }
+            ancestors.push(real);
+        }
+
+        self.walk_entries(dir, ancestors);
+
+        if self.opts.deref_links {
+            ancestors.pop();
+        }
+    }
+
+    /// The body of [`Run::walk`], split out so that the ancestor pushed by the
+    /// caller is popped on every path out of it.
+    fn walk_entries(&mut self, dir: &Path, ancestors: &mut Vec<PathBuf>) {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                if !self.opts.no_messages {
+                    diag!("grep: {}: {}", quotef_os(dir), strerror(&e));
+                }
+                self.had_error = true;
+                return;
+            }
+        };
+
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(e) => paths.push(e.path()),
+                Err(e) => {
+                    if !self.opts.no_messages {
+                        diag!("grep: {}: {}", quotef_os(dir), strerror(&e));
+                    }
+                    self.had_error = true;
+                }
+            }
+        }
+        paths.sort();
+
+        for path in paths {
+            if self.done {
+                return;
+            }
+            // `symlink_metadata`, not `metadata`: the question here is what the
+            // entry *is*, not what it points at.
+            let md = match fs::symlink_metadata(&path) {
+                Ok(md) => md,
+                Err(e) => {
+                    if !self.opts.no_messages {
+                        diag!("grep: {}: {}", quotef_os(&path), strerror(&e));
+                    }
+                    self.had_error = true;
+                    continue;
+                }
+            };
+
+            if md.file_type().is_symlink() {
+                if !self.opts.deref_links {
+                    // `-r` passes over it in silence — including a dangling
+                    // one, which it never asks about and so never reports.
+                    continue;
+                }
+                match fs::metadata(&path) {
+                    Ok(target) if target.is_dir() => self.walk(&path, ancestors),
+                    Ok(_) => self.search_found(&path),
+                    Err(e) => {
+                        if !self.opts.no_messages {
+                            diag!("grep: {}: {}", quotef_os(&path), strerror(&e));
+                        }
+                        self.had_error = true;
+                    }
+                }
+                continue;
+            }
+
+            if md.is_dir() {
+                self.walk(&path, ancestors);
+            } else {
+                self.search_found(&path);
+            }
+        }
+    }
 }
 
 /// Search one stream, printing what the options ask for. Returns whether any
@@ -797,28 +1058,6 @@ fn search_stream(
     }
 
     Ok(match_count > 0)
-}
-
-fn collect_files_recursive(dir: &Path, result: &mut Vec<String>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => {
-            diag!("grep: {}: {}", quotef_os(dir), strerror(&e));
-            return;
-        }
-    };
-
-    let mut paths: Vec<std::path::PathBuf> =
-        entries.filter_map(Result::ok).map(|e| e.path()).collect();
-    paths.sort();
-
-    for path in paths {
-        if path.is_dir() {
-            collect_files_recursive(&path, result);
-        } else {
-            result.push(path.to_string_lossy().into_owned());
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1008,6 +1247,35 @@ mod tests {
     #[test]
     fn parse_recursive_with_no_operand_walks_here() {
         assert_eq!(parse_args(&s(&["-r", "foo"])).unwrap().files, vec!["."]);
+    }
+
+    /// `-r` and `-R` are not synonyms, and the whole of the difference is one
+    /// flag: whether a symbolic link *found during the walk* is followed.
+    /// Treating them as synonyms made `-r` report files GNU does not, and made
+    /// it run forever on a tree containing a link back to one of its own
+    /// ancestors.
+    #[test]
+    fn parse_capital_r_is_the_dereferencing_one() {
+        let lower = parse_args(&s(&["-r", "foo"])).unwrap().opts;
+        assert!(lower.recursive);
+        assert!(!lower.deref_links);
+
+        let upper = parse_args(&s(&["-R", "foo"])).unwrap().opts;
+        assert!(upper.recursive);
+        assert!(upper.deref_links);
+
+        // The long spellings say the same thing at more length, and
+        // `--dereference-recursive` implies `--recursive` rather than needing
+        // it alongside.
+        let long = parse_args(&s(&["--recursive", "foo"])).unwrap().opts;
+        assert!(long.recursive);
+        assert!(!long.deref_links);
+
+        let long_deref = parse_args(&s(&["--dereference-recursive", "foo"]))
+            .unwrap()
+            .opts;
+        assert!(long_deref.recursive);
+        assert!(long_deref.deref_links);
     }
 
     // ---------------- patterns are patterns ----------------
@@ -1249,6 +1517,22 @@ mod tests {
             line_prefix(display_name("-"), 0, true, &pfx_opts(false, false)),
             b"(standard input):"
         );
+    }
+
+    /// The prefix rule is about the operands, not the expansion: one directory
+    /// operand prefixes even when it holds a single file, and one symlink-to-a-
+    /// file operand does not prefix at all. Ours counted the expansion, so
+    /// `grep -r foo dir-with-one-file` printed a bare line where GNU prints
+    /// `dir/file:line`.
+    #[test]
+    fn a_directory_operand_earns_the_prefix_however_little_is_in_it() {
+        assert!(wants_filename(None, 1, true));
+        assert!(!wants_filename(None, 1, false));
+        assert!(wants_filename(None, 2, false));
+        assert!(!wants_filename(None, 0, false));
+        // -H and -h outrank the count either way.
+        assert!(wants_filename(Some(true), 1, false));
+        assert!(!wants_filename(Some(false), 9, true));
     }
 
     #[test]

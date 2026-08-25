@@ -75287,6 +75287,40 @@ rung 27 forever.
 **Severity.** Low correctness, medium friction: it fails a green tree at random
 and costs a full re-run to disprove each time.
 
+**Resolution (`bd40ac82e`) — not the fix proposed above.** The proposal was
+serial breadcrumbs inside rung 27. That would have worked for rung 27 and for
+nothing else. `capture_command` is also what serves `$(…)` substitution, every
+pipeline stage, and the SSH and telnet servers — so a *remote user* running any
+slow pipeline is invisible to the watchdog in exactly the same way, and no
+amount of instrumentation inside a self-test reaches them. The blind spot is the
+width of the capture mechanism, not of one rung.
+
+The real defect is that `shell_write_bytes`, on the capture branch, is the shell
+producing output and reports nothing. `kernel_output_count` now adds
+`kshell::captured_output_count()` to the serial byte count, so the honest answer
+to "is anything happening?" is the one the detector reads.
+
+This is not a raised threshold, and the distinction matters: tolerating a longer
+silence dulls a gate whose whole job is noticing that a boot stopped, whereas
+this reports a signal that was already there. Nor can it hide a real hang — a
+captured command that writes once and then blocks advances the sum once, the
+silence resumes, and the report follows on schedule. What it stops reporting is
+a captured command that loops *while writing*, which is a runaway rather than a
+hang, is caught by the allocator, and was already unreported in the uncaptured
+case for the same reason.
+
+Regression-tested by a third phase in `test_breadcrumb_does_not_certify_liveness`,
+driven through `shell_write_bytes` rather than by poking the counter — a drill
+that incremented the counter itself would pass whether or not the increment was
+still on the capture branch.
+
+**Left standing:** the underlying blind spot in `kernel_progress_count`
+(`sched/mod.rs`) is untouched and still real. A CPU-bound in-kernel loop that
+writes *nothing at all*, captured or otherwise, remains indistinguishable from a
+hang. The doc comment there argues correctly against closing it by counting
+kernel-mode ticks, and this change does not revisit that; it only stops the case
+where output existed and was not being counted.
+
 ## TD-AWK-RUNTIME-DIAGNOSTICS-CARRY-NO-SOURCE-LOCATION (lane B, 2026-08-24) — **open**
 
 **In short:** when an `awk` program dies partway through — a division by zero,
@@ -75342,40 +75376,6 @@ patch.
 **Severity.** Low for correctness — the exit status, the message text and
 everything already written to stdout all match gawk exactly. Medium for
 usability on long scripts, which is the case that most needs it.
-
-**Resolution (`bd40ac82e`) — not the fix proposed above.** The proposal was
-serial breadcrumbs inside rung 27. That would have worked for rung 27 and for
-nothing else. `capture_command` is also what serves `$(…)` substitution, every
-pipeline stage, and the SSH and telnet servers — so a *remote user* running any
-slow pipeline is invisible to the watchdog in exactly the same way, and no
-amount of instrumentation inside a self-test reaches them. The blind spot is the
-width of the capture mechanism, not of one rung.
-
-The real defect is that `shell_write_bytes`, on the capture branch, is the shell
-producing output and reports nothing. `kernel_output_count` now adds
-`kshell::captured_output_count()` to the serial byte count, so the honest answer
-to "is anything happening?" is the one the detector reads.
-
-This is not a raised threshold, and the distinction matters: tolerating a longer
-silence dulls a gate whose whole job is noticing that a boot stopped, whereas
-this reports a signal that was already there. Nor can it hide a real hang — a
-captured command that writes once and then blocks advances the sum once, the
-silence resumes, and the report follows on schedule. What it stops reporting is
-a captured command that loops *while writing*, which is a runaway rather than a
-hang, is caught by the allocator, and was already unreported in the uncaptured
-case for the same reason.
-
-Regression-tested by a third phase in `test_breadcrumb_does_not_certify_liveness`,
-driven through `shell_write_bytes` rather than by poking the counter — a drill
-that incremented the counter itself would pass whether or not the increment was
-still on the capture branch.
-
-**Left standing:** the underlying blind spot in `kernel_progress_count`
-(`sched/mod.rs`) is untouched and still real. A CPU-bound in-kernel loop that
-writes *nothing at all*, captured or otherwise, remains indistinguishable from a
-hang. The doc comment there argues correctly against closing it by counting
-kernel-mode ticks, and this change does not revisit that; it only stops the case
-where output existed and was not being counted.
 
 #### TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP (lane A, 2026-08-25) — ✅ FIXED (`5e523d20a`)
 
@@ -75433,3 +75433,99 @@ file and the post-`pop` string to the terminal).
 carry their own copy of the BEGIN/record/END driver, and
 `cmd_mapfile`/`cmd_mapfile_input` each carry their own copy of the `-t` flag
 scan. Both are the same accident waiting for its first divergence.
+
+## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **open** (the missing features; the defects below were fixed the same day)
+
+**In short:** our `grep` handles matching well and is missing a lot of the
+things people actually type at it. `grep -C 3 pattern file` — show three lines
+either side of each hit, the single most-used grep option after `-i` — is not
+implemented; neither is `--color`, `-b` (print each hit's byte offset), `-T`
+(line up the output in columns), `-d` (what to do when an operand is a
+directory), or `--include`/`--exclude`/`--exclude-dir` (search only some of the
+files a recursive search would reach). Typing any of them gets `grep: unknown
+option`, so a script that uses one fails outright rather than degrading. Four
+further things were wrong rather than absent — the recursive walk followed
+symbolic links it should have skipped, an unreadable directory did not raise
+the exit status, a failed write to a closed output was thrown away, and `-q`
+stopped too late — and all four were fixed on 2026-08-25; they are kept below
+because the fix for each is what the harness now pins.
+
+**How they were found.** All of it in one run, by `scripts/grep-diff.sh`'s
+first execution after it was moved onto `diff-wsl.sh` (2026-08-25). None of it
+was visible before, because the harness had been comparing a Windows build
+against MSYS2's Cygwin-derived grep on a Windows host; six cases were even
+recorded as *deliberate* divergences over a path separator the harness itself
+had introduced. Each item below is a live case in that harness carrying a `?`
+marker, which means the harness fails the moment the gap closes — deleting the
+marker is part of closing it, and nothing here can be fixed and forgotten.
+
+**Missing features**, in the order worth doing them:
+
+| | What it does | Harness cases |
+|---|---|---|
+| `-A N` `-B N` `-C N` | print N lines after / before / around each hit, `--` between non-adjacent groups, `-` instead of `:` on a context line's prefix | 14 |
+| `--color=never\|always\|auto` + `GREP_COLORS` | wrap the matched text in SGR escapes; `auto` means "only if stdout is a terminal" | 7 |
+| `-b` | prefix each output line with the byte offset it starts at | 5 |
+| `--include=GLOB` `--exclude=GLOB` `--exclude-dir=GLOB` | filter what a recursive search descends into and reports | 3 |
+| `-d ACTION` | `read` (the default), `skip`, or `recurse` for a directory operand | 2 |
+| `-T` | pad the filename/line-number prefix so the text lines up | 2 |
+
+The context group is by far the largest and is the one to do first: `-C` is
+ordinary daily usage, and its output shape interacts with `-n`, `-H`, `-c`,
+`-v`, `-m` and multiple file operands, all of which the harness already pins.
+
+**Defects — all fixed 2026-08-25**, and each now pinned by plain (unmarked)
+cases in `scripts/grep-diff.sh`, so a regression fails the harness:
+
+1. **`-r` followed a symlink met during the walk.** GNU follows a symlink met
+   during the walk only under `-R`; both flags follow one *named on the command
+   line*. Ours did not make the distinction, so `grep -r foo symdir` reported
+   `symdir/tosub/s1` that GNU does not — and a tree containing a link back to
+   one of its own ancestors did not terminate. *Fixed:* `-R` now sets its own
+   `deref_links` flag; the walk asks `symlink_metadata` (which does not follow)
+   and skips a symlink unless `deref_links` is set, while the operand loop asks
+   `is_dir` (which does). `-R` additionally keeps a stack of canonicalised
+   ancestors and reports `grep: PATH: warning: recursive directory loop` on
+   re-entry — measured against GNU 3.11 as a warning that `-s` silences and
+   that does *not* raise the exit status.
+
+2. **An unreadable directory left the exit status at 1.** `grep -r foo nolist`
+   on a `chmod 000` directory printed the right message and exited 1; GNU exits
+   2, and `-s` silences it as it does for an unreadable file. *Fixed:* the
+   walk's `read_dir` failure now goes through the same "note an error, honour
+   `no_messages`" path as an unopenable file, and the error raises the status.
+
+3. **A failed write to a closed stdout was discarded.** `grep a abc >&-` exited
+   0 having said nothing; GNU exits 2 with `grep: write error: Bad file
+   descriptor`. Two separate causes: the old code ended in `let _ =
+   out.flush()`, and the Rust runtime reopens a closed descriptor 1 on
+   `/dev/null` before `main` so the write would have succeeded anyway.
+   *Fixed:* `coreutils::guard_std_fds!()` plus `stdfd::restore()` recover the
+   real descriptor table, and the run writes through `stdfd::Stream` and ends
+   at `stdfd::close_stdout_with("grep", …, 2)`.
+
+4. **`-q` answered too late, and could be outranked by an unrelated error.**
+   Two halves. The walk collected the whole tree before searching any of it, so
+   `grep -Rq foo tree` emitted diagnostics for files GNU never opens — visible
+   on a looping tree, where GNU prints the loop warning for `-Rq zzz` and not
+   for `-Rq foo`. And `grep -q foo nonexistent words` exited 2, where POSIX
+   requires 0: a selected line answers the question "even if an error was
+   detected". *Fixed:* the walk streams — searching each file as it reaches it,
+   which also puts each diagnostic between its neighbours' matches rather than
+   ahead of all of them — and a `-q` that found a match reports 0 regardless of
+   `had_error`.
+
+**Diagnostic wording** (four more `?` cases, lower value than the above):
+`grep` with no operands answers `grep: missing PATTERN` where GNU prints the
+usage summary; `--zzz` is `unknown option: --zzz` against GNU's `unrecognized
+option '--zzz'`; `-m x` names the offending value where GNU's does not; and a
+leading quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU
+also warns `grep: warning: * at start of expression` on stderr while still
+exiting 0. The first two belong with
+`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` rather than with grep.
+
+**Severity.** Medium, and lower than it was: the four defects are gone, which
+removes the only hang and the only silently-wrong exit status. What is left
+produces no wrong answer to a query that works — the matching itself agrees
+with GNU across 217 cases — but `-C` and `--color` are common enough that a
+script or a habit that uses them simply does not run.

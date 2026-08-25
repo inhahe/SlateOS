@@ -4,7 +4,7 @@
 # This is not a style preference. `bash` treats a CR as part of the token it
 # ends, so a CRLF script fails in ways that look like the script being wrong:
 # `set -u` becomes `set -u$'\r'` ("invalid option"), and `. "$(dirname
-# "$0")/diff-subject.sh"` looks for a file whose name ends in a carriage
+# "$0")/diff-wsl.sh"` looks for a file whose name ends in a carriage
 # return. Twenty-three of this tree's differential harnesses were unrunnable
 # from a Windows worktree for exactly that reason, and silently so — with
 # `core.autocrlf=input` the CRLF is normalised away on commit, so `git status`
@@ -20,3 +20,22 @@
 *.py text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
+
+# The shared documents, for a different reason: to override git's guess.
+#
+# `core.autocrlf=input` normalises line endings only in files git believes are
+# text, and its test is a scan of the whole blob for a NUL byte. `known-issues.md`
+# had two, ~4.5 MB in, inside backtick spans quoting what `grep -Z` puts after a
+# filename. So git called the file binary and stopped normalising it — and on
+# 2026-08-25 an edit script that rewrote it through Python's default text mode
+# (which on Windows turns `\n` into `\r\n`) committed 4.5 MB of CRLF with no
+# warning and no visible diff hunk. The next merge saw every line as changed,
+# conflicted on the entire file, and had no three-way to offer.
+#
+# `text eol=lf` is not a guess: it *asserts* these are text, so the NUL heuristic
+# is not consulted. The NULs themselves are gone too — a document that quotes a
+# control byte should spell it — but the attribute is the part that holds if one
+# comes back. These files are the ones three lanes append to concurrently, which
+# is exactly where an unmergeable 4.5 MB conflict is most expensive.
+*.md text eol=lf
+*.txt text eol=lf

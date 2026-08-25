@@ -29549,6 +29549,58 @@ while fixing them, times the arguments that exercise each. Note also that the
 *old* harness scored these same 33 cases as passing, because it was comparing
 against MSYS2's `sort` — which is the whole point of the correction above.
 
+### Follow-up (2026-08-25) — the whole suite reaches glibc now, not just this one section
+
+The correction above repaired *one* harness, and repaired it by adding a second
+reference to it: `sort-diff.sh` grew a `$GLIBC` that shelled out to `wsl -e env
+LC_ALL=C sort` for the option section, while `$GNU` stayed pointed at the host's
+MSYS2 `sort` for everything else. That was the narrowest fix that could work, and
+it left the diagnosis — "a differential harness is only as good as the thing it
+differs against" — applying word for word to the other forty-four harnesses,
+every one of which was still reading MSYS2.
+
+All 45 now source `scripts/diff-wsl.sh`, which re-execs the whole harness inside
+WSL and resolves the reference there:
+
+```
+$ for f in scripts/*-diff.sh; do
+    [ "$f" = scripts/all-diff.sh ] && continue
+    grep -q '^\. "\$(dirname "\$0")/diff-wsl.sh"' "$f" || echo "NOT MIGRATED: $f"
+  done
+$                      # no output
+```
+
+There is no longer a `$GNU` anywhere in `scripts/` that can be MSYS2's. The
+two-references-in-one-tree hazard named at the end of the correction above is
+gone structurally, not harness by harness — which is the difference between a
+fixed bug and a bug that cannot recur. A new harness written tomorrow inherits
+the glibc reference by sourcing the preamble; there is no step it can forget.
+
+Three things that came with it, all relevant to this entry:
+
+- **The subject moved as well as the reference.** `diff-wsl.sh` builds ours for
+  `x86_64-unknown-linux-gnu` rather than `x86_64-pc-windows-gnu`. The old Windows
+  build was not a different compilation of the same program — `coreutils::stdfd`
+  is `#[cfg(target_os = "linux")]`, so the harnesses were measuring a binary with
+  no write-error exit path in it.
+- **The reference is now version-pinned by being a real one.** This entry closes
+  by noting that `tests/quotearg-gnu.txt` names `sort (GNU coreutils) 9.4` while
+  the harness was reading 8.32. Both sides of that mismatch were host artifacts;
+  the WSL reference reports its own version and `DIFF_NEED` skips loudly rather
+  than silently agreeing when it is absent.
+- **A stale subject can no longer pass.** `diff_assert_fresh` compares the built
+  artifacts against every source file that feeds them and refuses to run if a
+  source is newer. The old path had no such check — see
+  `B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES` and §382 in
+  `design-decisions.md`.
+
+**Still outstanding, and it is the same bug one subsystem over.**
+`scripts/osh-bash-diff.py` compares a Windows `osh.exe` against
+Git-for-Windows' `bash.exe`, which is the identical mistake this entry is about:
+a Cygwin-derived reference certifying a Windows-porting artifact. Four entries in
+this file exist only because of it. Tracked as
+`TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH`.
+
 ## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open (module landed; 18 of 85 converted)**
 
 **In short:** GNU lets you shorten a long option to any unambiguous prefix —
@@ -60069,7 +60121,10 @@ when the three changes are written.
 right that the harness is the measure, and the harness did report 0 differed —
 the moment it was pointed at the right binary. "Measured against the harness" is
 only worth anything if the harness builds what it measures, which is what
-`scripts/diff-subject.sh` now guarantees for all twenty-seven of them.)*
+`scripts/diff-subject.sh` now guarantees for all twenty-seven of them. That
+guarantee moved to `scripts/diff-wsl.sh` on 2026-08-25, unchanged in substance
+and now covering all forty-five; `diff-subject.sh` itself is gone. See
+design-decisions.md §382.)*
 
 ---
 
@@ -60127,6 +60182,10 @@ not the home). It is not a delete-41-directories change.
    `scripts/diff-subject.sh` builds the subject from a named package
    immediately before the comparison, and all 27 `*-diff.sh` harnesses use it.
    That removes the way this defect was actually hurting us.
+   *(2026-08-25: the mechanism is now `scripts/diff-wsl.sh`, which subsumed
+   `diff-subject.sh` when every harness moved into WSL, and it covers all 45
+   harnesses rather than 27. Naming the package is unchanged — it is the
+   `DIFF_PKG` knob. See design-decisions.md §382.)*
 2. **`bc`'s two implementations are merged**, which was the substance of the
    `bc` problem regardless of where the survivor lives: the August rewrite on
    `bignum::Decimal` (200/200 against GNU) is the one that survives, and the
@@ -76082,10 +76141,15 @@ their absence are now 33 plain cases. Both were measured against GNU 3.11 with
   < file` is *not* that case, because redirected stdin is a regular file. This
   is why `scripts/grep-diff.sh` grew a `w99` fixture: every other fixture is
   small enough that a hardcoded width of 1 would pass.
-* **The tab goes after the last separator, with no backspace.** GNU's
-  `print_line_head` reads as if it emitted `"	"` *before* the separator;
-  the dump says `a.txt: 1:	foo`. And `-Z` does not suppress it —
-  `a.txt  1:	foo`, and `a.txt 	foo` with no numbers at all. What *does*
+* **The tab goes after the last separator, with no backspace.** (`\t`, `\b`
+  and `\0` below are this entry's notation for the bytes themselves; grep
+  emits the bytes. They were written literally here until 2026-08-25, and the
+  two raw NULs made git treat the whole 4.5 MB file as binary -- so it stopped
+  normalising line endings in it, and a CRLF-rewriting edit script went
+  straight into the object store unnoticed.) GNU's
+  `print_line_head` reads as if it emitted `"\t\b"` *before* the separator;
+  the dump says `a.txt: 1:\tfoo`. And `-Z` does not suppress it —
+  `a.txt\0 1:\tfoo`, and `a.txt\0\tfoo` with no numbers at all. What *does*
   suppress it is having no field to follow: bare `-T` prints no tab, and
   neither do `-c`, `-l` or `-L`, which print no line prefix.
 * **`-b` reports the offset of what is printed, not of the line.** Under `-o`
@@ -77660,6 +77724,95 @@ failure class, and because fixing any one of them in isolation would leave a
 **No caller is affected.** Nothing in `kernel/` invokes `tr` — no self-test
 rung, no script — so the stricter parser cannot turn something green red.
 
+
+### TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH. `scripts/osh-bash-diff.py` compares a Windows `osh.exe` against Git-for-Windows bash, so every osh behaviour it certifies was learned from a Cygwin port — 2026-08-25 — OPEN
+
+**Where:** `scripts/osh-bash-diff.py`. Two lists decide what is compared:
+
+```python
+OSH_CANDIDATES = [
+    REPO / "target" / "x86_64-pc-windows-gnu" / "release" / "osh.exe",
+    ...
+]
+BASH_CANDIDATES = [
+    Path("C:/Program Files/Git/usr/bin/bash.exe"),
+    Path("/usr/bin/bash"),
+    Path("/bin/bash"),
+]
+```
+
+On this host the first entry of each wins, so the subject is a Windows binary
+and the reference is MSYS bash. `/usr/bin/bash` is reached only on a machine
+that has no Git for Windows.
+
+**What:** this is the same structural fault that
+`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` recorded for `sort`, one
+subsystem over, and it is still live. MSYS is a Cygwin derivative: it links
+`msys-2.0.dll`, not glibc. Its getopt wording, its signal table, its locale
+handling and its process model are all Cygwin's. A differential harness whose
+reference is MSYS certifies behaviour that no GNU/Linux system has — and
+SlateOS is a GNU/Linux-shaped target, so the wrong reference is wrong in the
+direction that matters.
+
+**This is not news to the tree, and that is the point.** `TOOL-OSH-BASH-DIFF`
+(above) says so plainly and resolves it by waiving: "Cases hitting those need an
+`# EXPECT-DIFF` waiver." That was the right call when there was no way to reach
+a glibc bash from a harness. There is now — every one of the twenty-five
+`scripts/*-diff.sh` coreutils harnesses reaches glibc through
+`scripts/diff-wsl.sh`, which re-execs into WSL, builds the subject for
+`x86_64-unknown-linux-gnu`, and refuses to run against a stale build. The shell
+harness was not part of that migration only because it is Python and does not
+match the `*-diff.sh` glob.
+
+**Four entries in this file exist because of it**, and each is a case the
+corpus cannot currently ask:
+
+| entry | what the MSYS reference costs |
+|---|---|
+| `TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS` | the signal table is untestable; the corpus tests only behaviour, never a number |
+| `TD-OILS-MSYS-CHMOD-TYPE-A` | `type -a` cannot be used on a file the case created, because MSYS `chmod +x` does not make `test -x` true |
+| `TD-OILS-HOST-ARGV0` | `argv[0]` for an external command is the resolved path, not the word typed |
+| `TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST` | a child sees `\xef\xbf\xbd` where bash's child sees `\xff` |
+
+The last two are *subject*-side, not reference-side: they are artifacts of osh
+being built for Windows, and would go away with the subject rather than with the
+reference. That is worth stating because it means the migration fixes both
+halves, not one.
+
+**What the fix looks like.** The Python equivalent of `diff-wsl.sh`, which is
+mostly the same six steps:
+
+1. Re-exec into WSL if not already there, carrying the harness's arguments.
+2. Build `osh` for `x86_64-unknown-linux-gnu` into
+   `$HOME/.cache/slateos-diff-target` — the same shared target directory the
+   shell harnesses use (design-decisions.md §374).
+3. Take the reference from `/usr/bin/bash`, and skip rather than fall back.
+4. Pin `LC_ALL=C.UTF-8`.
+5. Keep the newest-binary rule and the `write_bytes` rule, both of which are
+   still load-bearing (see `TOOL-OSH-BASH-DIFF`).
+6. Add the staleness guard: `osh` is one binary out of a package, and a cargo
+   cache that replays a library unit while relinking the binary is exactly the
+   failure `diff_assert_fresh` was written for.
+
+**The first measurement, before any of that**, is whether `userspace/oils`
+builds for `x86_64-unknown-linux-gnu` at all. It has never been asked to; it is
+built for `x86_64-pc-windows-gnu` on the host and for `x86_64-slateos` for the
+image. If it does not build, that is the finding and it comes first.
+
+**Expect a wave of differences, and treat each as a finding.** Roughly 150
+corpus cases have been written, run and waived against MSYS. Some fraction were
+tuned to MSYS behaviour and will differ against glibc — every such case is a
+place where osh was shaped by a Cygwin port, which is the whole reason to do
+this. Budget the triage, not just the migration. The four entries above should
+be re-examined at the same time: two should become testable and two should
+disappear.
+
+**Risk of leaving it.** It compounds. Every corpus case added between now and
+the migration is another case written against the wrong reference, and every
+`# EXPECT-DIFF` waiver added is a divergence pinned into the corpus as though
+it were behaviour. `sort` is the precedent: eleven option cases sat green for
+weeks while the implementation faithfully copied a Windows porting artifact.
+
 ---
 
 ## MODULE 86 (lane C, 2026-08-25) -- the calendar's event store, its file format and its reminders
@@ -78371,9 +78524,24 @@ meet it today is an image copied from another system.
 
 ---
 
-## `A-KSHELL-SED-GUESSES-WHICH-WORD-IS-THE-SCRIPT` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-SED-GUESSES-WHICH-WORD-IS-THE-SCRIPT` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (`ba47c7086`)
 
 **Where.** `kernel/src/kshell.rs` — `classify_sed_args` (~123228).
+
+**Correction to this entry before the fix is described.** Row 3 of the table
+below, as originally written, was **wrong about GNU**, and the correction is
+worth more than the row was. It claimed `sed -n stuff.txt other.txt` should
+answer `no command specified`. It should not: GNU takes the first operand as
+the script *unconditionally*, so GNU also compiles `stuff.txt` as an `s`
+command and also applies it to `other.txt`. That example is a case where the
+shape guess and the positional rule happen to **agree**, not a divergence —
+picked, embarrassingly, because it reads alarmingly rather than because it was
+checked. The row is replaced below with the case that is genuinely wrong, which
+is the same one reversed: `sed -i notes.txt 2d`.
+
+The lesson is the entry's own subject matter turned on itself. "It starts with
+`s`, so it is a script" and "it looks like a divergence, so it is one" are the
+same move.
 
 **What.** `sed` has no option parser. It has a `match` over three known flags
 and, for everything else, a guess about *shape*:
@@ -78391,7 +78559,8 @@ Three wrong answers fall out of that, all of them exit-0 or worse.
 |---|---|---|
 | `sed -e 's/a/b/' -e` | runs the first expression, exit 0 | `-e option requires an argument` |
 | `sed -q -i 's/a/b/' f` | **rewrites `f`**, complains that `-q` is not a file | refuse the option and touch nothing |
-| `sed -n stuff.txt other.txt` | reads `stuff.txt` as the script `s/uff./x/` and applies it to `other.txt` | `no command specified` |
+| `sed -i notes.txt 2d` | takes `2d` as the script (it ends in `d`) and **rewrites `notes.txt`** | `notes.txt` is the script; `unknown command`, edit nothing |
+| `sed -i.bak 's/a/b/' f` | ignores `.bak`, treats it as plain `-i` | either honour the suffix or refuse; never silently drop it |
 
 **Why, one at a time.**
 
@@ -78411,17 +78580,20 @@ Three wrong answers fall out of that, all of them exit-0 or worse.
    does exist. GNU refuses the invocation and edits nothing. This is the one with
    a real cost attached: the edit is not recoverable.
 
-3. **A filename can become the script.** The shape guess has no notion of
-   position, so the first operand starting with `s` is taken as a script
-   whenever none has been seen yet — and `s` is the first letter of the
-   commonest sed command *and* of a great many filenames. `sed -n stuff.txt
-   other.txt` compiles `stuff.txt` as `s`-with-delimiter-`t`, which parses
-   cleanly to `s/uff./x/`, and applies it to `other.txt`. Nothing about that
-   run looks wrong from the outside.
+3. **A file and a script can swap places.** The shape guess has no notion of
+   position, so which operand becomes the script depends on how the two words
+   are *spelled*, not on which came first. `sed -i notes.txt 2d` is the case
+   that costs something: `2d` ends in `d`, so it wins the script slot, and
+   `notes.txt` — the word GNU would have compiled and choked on — becomes a
+   file that `-i` then rewrites. The user mistyped the argument order and got a
+   successful in-place edit of the file they were describing.
 
-   It survives today mostly by luck — most filenames do not parse as an `s`
-   command, and the ones that fail are refused loudly. `stuff.txt` is not a
-   contrived example, though, and neither is the `-f` case: `sed -f script.sed
+   The reverse ordering is where the guess is accidentally right, which is why
+   it survived: `sed -n stuff.txt other.txt` takes `stuff.txt` as the script,
+   and so does GNU. Agreeing in the common ordering is exactly what let the
+   disagreement in the uncommon one go unnoticed.
+
+   The `-f` case is the same defect without the reordering: `sed -f script.sed
    f` sends `-f` to the file list and `script.sed` to the script slot.
 
 **What the proper fix looks like.** The same shape `parse_tr_args` already has,
@@ -78441,7 +78613,7 @@ which is the pattern this file has been converging on:
   `TrParseError` and `SedParseError` are, so `cmd_sed` and `cmd_sed_input`
   cannot drift apart on which ones they mention.
 
-**Not a regression.** All three have been true since the command was written.
+**Not a regression.** All of them have been true since the command was written.
 Item 2 is the one to fix first if they are ever split up, because it is the only
 one that destroys data.
 
@@ -78449,6 +78621,277 @@ one that destroys data.
 `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`: `sed` is already on
 `command_parses_own_quotes`, so the *words* are right — what is missing is the
 grammar over them.
+
+### Fixed — `ba47c7086`
+
+`classify_sed_args` returns `Result<SedArgs, SedArgsError>` and chooses by
+position. Options first, `--` ends them, short options bundle, `-e`/`-i` take
+attached or following arguments, long options take `=VALUE` or a following
+word — and then, **if and only if no `-e` was given**, the first operand is the
+script and every operand after it is a file.
+
+| was | is |
+|---|---|
+| unknown short option → file operand | `sed: invalid option -- 'q'`, exit 1, nothing opened |
+| unknown long option → file operand | `sed: unrecognized option '--quite'`, exit 1 |
+| `-e` with nothing after it → dropped | `sed: option requires an argument -- 'e'` |
+| `-i.bak` → suffix discarded | refused by name, with what the suffix would have meant |
+| `-E`/`-r`, `-f`, `-s`, `-z` → file operands | refused each with its own reason |
+| script chosen by first letter | first operand, or every operand is a file under `-e` |
+
+`-E` is worth singling out: ignoring it is not a missing feature but a wrong
+answer, because these patterns are BREs, so `a+` silently stops meaning
+"one or more `a`" and starts meaning "an `a` followed by a plus sign" — and
+matches things. Refusing says so.
+
+**What it did not fix.** Nothing about the *script* grammar. A bare `p` is
+still `unknown command` and `s///p` is still an unknown flag; the parser only
+decides which word is handed to `parse_sed_command`. For kshell's current
+grammar every *valid* script also satisfied the old shape test, so the payoff
+here is entirely in the option loop and the reorder case — which is why rung 53
+tests those and not new scripts.
+
+**Covered by** rung 53, `sed takes its script by position, not by shape`. The
+reorder case is run against a real file in `/tmp` and the file's bytes are
+compared afterwards, because "refused" and "rewrote it anyway" are
+indistinguishable from the diagnostic alone.
+
+---
+
+## `A-KSHELL-CUT-AND-FOLD-HAVE-NO-END-OF-OPTIONS-MARKER` (lane A, 2026-08-25) — **open**
+
+**Where.** `kernel/src/kshell.rs` — `parse_cut_args`, `parse_fold_args`.
+
+**What.** Neither treats `--` as the end of the options, so a file whose name
+begins with `-` cannot be named at all. `cut -f1 -- -weird.txt` refuses the
+`--`, and without the `--` the name is parsed as options.
+
+**Why it is small but not nothing.** It is a refusal, not a wrong answer: the
+command fails loudly and nothing is misread as data. That is what keeps it out
+of the silent-guess class and off the front of the queue. But `-` is a legal
+leading character for a filename here (our paths allow every byte except `/`
+and NUL), so this is a reachable file that two commands cannot open, and the
+usual workaround — `./-weird.txt` — depends on the caller knowing to write it.
+
+**What the proper fix looks like.** The same three lines `tr` and `sed` already
+have: a `flags_done` flag set by a bare `--`, tested at the top of the word
+loop before the `starts_with('-')` test. Both parsers already have the loop
+shape for it; `cut`'s gained the bundling structure in `a24d8f5fa`.
+
+**Not a regression.** True since both commands were written. Deliberately left
+out of `a24d8f5fa` so that bundling and end-of-options stayed separate changes.
+
+---
+
+## `A-KSHELL-SED-I-TRUNCATES-A-FILE-IT-CANNOT-DECODE` (lane A, 2026-08-25) — ✅ **FIXED** (`1500fdb62`, 2026-08-25)
+
+**Where.** `kernel/src/kshell.rs` — `cmd_sed` (~124158), `sed_apply` (~124286).
+
+**What.** This is the worst of the silent-guess family found so far, because it
+does not merely report a wrong answer — it **destroys the file** and reports
+success.
+
+```rust
+let text = core::str::from_utf8(&data).unwrap_or("");
+```
+
+A file that is not valid UTF-8 becomes the **empty string**. `sed_apply` then
+has no lines to work on and returns an empty result, and under `-i`:
+
+```rust
+crate::fs::Vfs::write_file(&path, output.as_bytes())
+```
+
+writes zero bytes over the original. `sed -i 's/a/b/' photo.jpg` empties
+`photo.jpg` and **exits 0**. Nothing in the run says anything happened.
+
+Without `-i` the same input prints nothing and exits 0, which is the ordinary
+silent-guess shape — indistinguishable from a file that really was empty.
+
+**The second bug, same cause.** `sed_apply` iterates `text.lines()`. Rust's
+`str::lines` splits on `\n` *and strips a trailing `\r`*, so every CRLF line
+ending is silently converted to LF. `sed -i 's/a/b/' dos.txt` rewrites the whole
+file with Unix endings whether or not any line matched. GNU sed does not do
+this: to sed, `\r` is an ordinary character in the pattern space.
+
+**Why it survived.** Every existing sed test uses ASCII text with LF endings —
+the one shape in which both bugs are invisible. This is the same reason the
+whole `str::contains` regex family survived its own suite.
+
+**What the proper fix looks like.** No new dependency: `ere` is **already a byte
+engine**. Its own docs say "POSIX regular expressions over byte strings"; `Ch`
+is a decoded scalar *or* one undecodable byte, and `Regex::is_match`/`find`/
+`captures` all take `BStr<'_>` = `&[u8]`. kshell's sed converts to `&str` purely
+to hand back bytes at the far end, discarding the capability on the way through.
+
+So the change is confined to lane A's own tree — `userspace/ere` needs nothing:
+
+- `sed_apply(&[u8], …) -> Vec<u8>`, `sed_emit`, `sed_substitute` and
+  `sed_addr_matches` all on bytes.
+- Split lines on `\n` only, keeping `\r` as an ordinary byte of the pattern
+  space, so CRLF survives a round trip.
+- `cmd_sed` passes `&data` straight in; the `from_utf8` disappears rather than
+  gaining a fallback.
+- `cmd_sed_input` currently takes `input: &str`, so the same conversion is
+  happening one level up at its caller; that goes too.
+
+The `-c` half of the `cut` fix is the precedent for what to do where characters
+genuinely are needed: report and skip the line, do not empty the file.
+
+**Severity.** Data destruction, silently, exit 0. This should be fixed before
+any remaining cosmetic item in the coreutils queue.
+
+### Fixed
+
+`1500fdb62`, in the shape sketched above and with nothing asked of lane B —
+`ere` really was already a byte engine, so the whole change was lane A's.
+
+| | was | is |
+|---|---|---|
+| `sed -i 's/x/y/' photo.jpg` | file emptied, exit 0, no output | edited or left alone byte-for-byte, exit 0 |
+| `sed 's/x/y/' photo.jpg` | prints nothing, exit 0 | prints the file with the edit applied |
+| `sed -i 's/x/y/' dos.txt` | every `\r\n` becomes `\n`, matched or not | `\r` survives; it is an ordinary character of the pattern space |
+| `sed 's/[[:cntrl:]]$//'` on CRLF | could not see the `\r` to match it | strips it, as GNU does |
+| `cat photo.jpg \| sed 's/x/y/'` | refused, exit 1 | runs |
+
+`sed_lines` replaces `str::lines` and splits on `\n` alone; `sed_apply`,
+`sed_emit`, `sed_substitute` and `sed_addr_matches` are `&[u8]` throughout.
+`sed_substitute` lost its UTF-8 round trip on the way out *and* the branch that
+guarded it, which had been commented as unreachable because the subject had
+been a `str` — with a byte subject the question does not arise, since every
+byte written is copied from the subject or from the replacement template.
+`dispatch_with_input` moves `sed` from the "still text-only" group into the
+byte-clean one, and `cmd_sed_input` takes `&[u8]`.
+
+**Pinned by** self-test rung 54, which is deliberately built on the two shapes
+that hid this for the whole life of the suite: a fixture file of real
+undecodable bytes (`\x00\x01\xff\xfe … \x80\xc3 … \xed\xa0\x80`) edited in
+place, and CRLF text. The in-place case is run **twice**, first with a script
+that matches nothing — the old code did not need a match to truncate, so a
+fixture that matched would have tested the smaller half of the bug.
+
+---
+
+## `A-KSHELL-DIFF-BLAMES-THE-TRAILING-NEWLINE-FOR-ANY-DIFFERENCE-IT-CANNOT-SEE` (lane A, 2026-08-25) — **open**
+
+**Where.** `kernel/src/kshell.rs` — `cmd_diff` (~98986), specifically the decode
+at ~99024 and the fallback message at ~99215.
+
+**What.** `diff` establishes that the files differ by comparing their *bytes*:
+
+```rust
+if data1 == data2 { return; }          // exit 0, identical
+```
+
+and then does the actual work on a *lossy decode* of those same bytes:
+
+```rust
+let text1 = String::from_utf8_lossy(&data1);
+let lines1: Vec<&str> = text1.lines().collect();
+```
+
+The two views disagree, and every case where they disagree ends at one line:
+
+```rust
+if hunks.is_empty() {
+    // Should not happen since data1 != data2, but could if only trailing
+    // newline differs. Show a minimal note.
+    shell_println!("(files differ only in trailing newline)");
+}
+```
+
+That message is a **guess about the cause, printed as a finding**. The comment
+above it says "should not happen", which is the tell: the author knew the byte
+compare and the line compare could disagree, could not enumerate the ways, and
+picked the one benign explanation. Exit is 1, correctly — the files do differ.
+What is wrong is the sentence, which names a cause nobody checked.
+
+**The all-ASCII path, which needs no exotic input at all.** `str::lines` splits
+on `\n` *and strips a trailing `\r`*. So for a DOS file against its Unix
+twin — the single most common reason to reach for `diff` — every line decodes
+identically, no hunk is produced, and the user is told:
+
+```
+$ diff dos.txt unix.txt
+(files differ only in trailing newline)
+```
+
+They differ on *every* line, in the line ending, which is exactly what the user
+was trying to find out. This is the same `str::lines` defect just fixed in
+`sed` (`A-KSHELL-SED-I-TRUNCATES-A-FILE-IT-CANNOT-DECODE`), reached through a
+different door.
+
+**The undecodable path is worse, because it corrupts a diff that does print.**
+`from_utf8_lossy` maps *every* invalid byte to the same U+FFFD. So `\xff` and
+`\xfe` become the same character, and two lines that differ in nothing else
+compare **equal** in the LCS. The result is not a missing hunk but a wrong
+one: the differing lines are classified `Edit::Keep` and printed with a leading
+space, i.e. reported as *context that both files share*. A caller reading the
+hunk is told the opposite of the truth about those lines, and the surrounding
+line numbers in the `@@` header are computed from the same wrong classification.
+
+**Why the byte compare does not save it.** It only ever produces the exit
+status. Once past it, nothing re-checks; the printed diff comes entirely from
+the decoded view. So the status is right and the output is wrong — which is a
+worse combination than both being wrong, because the status is what a script
+tests and the output is what a human reads.
+
+**Why it survived.** Same reason as sed's: every `diff` test in the suite is
+ASCII with LF endings, the one shape in which the decoded view and the byte
+view agree exactly.
+
+**What the proper fix looks like.** The same shape as the sed fix, and it can
+reuse the helper that fix introduced:
+
+- Split both files with `sed_lines` (or a shared rename of it) — `&[u8]`
+  slices, split on `\n` alone, `\r` kept. That alone fixes the CRLF case and
+  the U+FFFD collision together, since byte slices compare byte-wise.
+- `lines1`/`lines2` become `Vec<&[u8]>`; the LCS table and backtrack are
+  unchanged (`==` on `&[u8]` is what is wanted), and hunk printing goes through
+  `shell_write_bytes` for the line body with the prefix written separately.
+- Delete the trailing-newline guess. With byte lines, `data1 != data2` and zero
+  hunks can still happen for exactly one reason — a difference in the *final*
+  newline, which `sed_lines` does not represent — so the message becomes true
+  rather than a guess, and should be derived (`data1.last() != data2.last()`)
+  rather than assumed.
+- Consider GNU's `Binary files X and Y differ` for files containing a NUL: a
+  correct byte-level line diff of a binary file is correct but unreadable, and
+  floods a serial console. GNU's rule is a NUL in the first buffer. This is a
+  separate judgement from the correctness fix and should not be smuggled into
+  it.
+
+**`comm` has the identical defect** (~119460): `from_utf8_lossy` on both files,
+then `lines()`, then equality on the decoded lines. Two lines differing only in
+undecodable bytes are reported in the "common to both" column — a wrong answer
+with exit 0. It should be converted in the same pass, since it is the same three
+lines of code.
+
+**…and `comm` has a second one that the decode causes rather than shares.**
+`comm` is a merge of two streams and is only correct on **sorted** input — it
+advances whichever side compares Less and never looks back. `sort` orders by
+bytes. `comm` orders by the *decoded* line, and `from_utf8_lossy` does not
+preserve that order: a `\xff` byte becomes U+FFFD, which is the three bytes
+`EF BF BD`, so it sorts *below* `\xfe` where the raw byte sorted above it. A
+file that `sort` produced can therefore look unsorted to `comm`, at which point
+the merge silently emits lines in the wrong columns — not because the lines
+compare wrongly one at a time, but because the algorithm's precondition has
+been broken underneath it.
+
+Converting to byte lines fixes this as a side effect, because `<[u8]>::cmp` is
+the ordering `sort` used. Worth noting separately anyway, because it is the
+case where the two commands *disagree with each other* rather than either being
+wrong alone — and because `comm` never checks its precondition at all. GNU
+prints `comm: file 1 is not in sorted order` and exits 1; this one has no such
+check, so even after the conversion an unsorted input is still answered
+confidently. That check is a small separate change and should be its own.
+
+**`column` shares the decode** (~14868, ~14908) but not the severity: it is a
+display formatter writing only to stdout, so a mangled character is visible as
+mangled. It is still worth converting for consistency, last.
+
+**Severity.** Wrong output with a correct exit status, on ordinary text files
+(the CRLF case) with no unusual input required. Below sed's data destruction,
+above the option-wording items.
 
 ---
 

@@ -7,16 +7,21 @@
 # copied *without* one being added (and still counts as one of the N), and that
 # `-z` changes what a terminator is.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `tail` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, whose `getopt` words every option diagnostic differently
-# (`unknown option -- x` against `invalid option -- 'x'`). A harness pointed at
-# it would certify sentences no GNU/Linux system prints. See `known-issues.md`
-# → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `head-diff.sh`.
+# `scripts/diff-wsl.sh` gives the reasons. The reference has to be glibc's: the
+# host's `tail` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll` rather
+# than glibc, whose `getopt` words every option diagnostic differently
+# (`unknown option -- x` against `invalid option -- 'x'`), so a harness pointed
+# at it would certify sentences no GNU/Linux system prints. See
+# `known-issues.md` → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.
 #
-# ## Why every invocation is wrapped in a timeout, and why the signal is KILL
+# The move also retires the directory case at the foot of this file: on Windows
+# `File::open` of a directory fails outright, so `tail -n1 .` said `cannot
+# open` where POSIX opens it and fails the *read*. That was an expected
+# difference against the host and never against the target, and it now passes.
+#
+# ## Why every invocation is wrapped in a timeout
 #
 # `-f` does not terminate, and `-f` is reachable from more places than it looks:
 # the obsolete word hides one (`tail -2f`), and so does a long-option
@@ -25,20 +30,26 @@
 # one side and not the other shows up as the status difference it is instead of
 # stopping the harness.
 #
-# The signal must be `KILL`, and that is not a preference. Our binary is a
-# *native Windows* process launched from MSYS, and Cygwin can only deliver a
-# signal to a non-Cygwin child by calling `TerminateProcess`, which it does for
-# `SIGKILL` and for nothing else. A plain `timeout 3` therefore expires, sends a
-# SIGTERM that goes nowhere, and leaves our `tail -f` running forever — measured:
-# the first `-f` case pinned the harness for five minutes with the child still
-# accumulating memory. `timeout -s KILL 3` tears it down in three seconds.
+# `timeout -k 2 3` is three seconds, then SIGTERM, then SIGKILL two seconds
+# later if the first was ignored. Both sides then report `timeout`'s own 124,
+# and a side that had to be killed reports 137 where the other reports 124 —
+# which is a difference worth seeing rather than one worth folding away.
 #
-# The two sides then report that kill differently — MSYS's bash gives 137
-# (128 + SIGKILL) and `wsl.exe` gives the bare 9 — so `norm_rc` folds both onto
-# `timeout`'s own 124. No real `tail` status is 9 or 137, so nothing else is
-# conflated. What is *not* normalised is stdout: both implementations flush
-# before they start following, so a killed `-f` still has to have printed the
-# same bytes, and that is compared as strictly as any other case.
+# It used to be `timeout -s KILL 3` with a `norm_rc` that folded 9 and 137 onto
+# 124, and both are gone. The KILL was forced: our binary was a *native
+# Windows* process launched from MSYS, and Cygwin can deliver a signal to a
+# non-Cygwin child only by calling `TerminateProcess`, which it does for
+# `SIGKILL` and nothing else, so a plain `timeout 3` expired, sent a SIGTERM
+# that went nowhere, and left `tail -f` running — measured: five minutes,
+# the child still accumulating memory. The folding was forced by the two sides
+# being started from two different shells, MSYS's bash reporting that kill as
+# 137 and `wsl.exe` as a bare 9. Ours is a Linux process now, started by the
+# same shell as the reference, so SIGTERM reaches it and one status shape
+# describes both sides.
+#
+# What is *not* normalised is stdout: both implementations flush before they
+# start following, so a killed `-f` still has to have printed the same bytes,
+# and that is compared as strictly as any other case.
 #
 # The locale is `C.UTF-8` throughout. Nothing `tail` does is locale-dependent —
 # it never decodes a byte — and the quote marks gnulib puts round a bad number
@@ -49,42 +60,33 @@
 # the reference would be wrong.
 set -u
 
-# Our tail is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils tail "${OURS:-}") || exit 1
-GNU=${GNU:-"wsl -e timeout -s KILL 3 env LC_ALL=C.UTF-8 tail"}
-export LC_ALL=${LC_ALL:-C.UTF-8}
-
-# A case that had to be killed, however the two shells chose to say so.
-norm_rc() { case $1 in 9|137) printf '124\n' ;; *) printf '%s\n' "$1" ;; esac; }
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `tail` so `argv[0]` matches. See `scripts/diff-wsl.sh`. `timeout` is
+# named because every invocation below is bounded with it; see `run_side`.
+DIFF_PROG=tail
+DIFF_NEED=timeout
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands
-# on the same bytes under `/mnt/c/...`. Verified rather than assumed, because a
-# reference that silently ran somewhere else would report every file operand as
-# missing and still "agree" on the ones fed through stdin.
-printf 'probe\n' > .probe
-if [ "$($GNU -n1 .probe 2>/dev/null)" = "probe" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "tail-diff: glibc tail not reachable in this directory (tried: $GNU); skipping"
-fi
-rm -f .probe
+# One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
+# a symlink named `tail` in a directory that is the whole of `PATH` for that
+# one invocation, so `argv[0]` is the bare word on both sides. `timeout` comes
+# *before* `env`, since `env PATH=... timeout` would look for `timeout` in the
+# one-entry `PATH` that is about to be the whole search path.
+#
+# `diff_run` keeps bash's own announcement of a child that died of a signal out
+# of the stderr the caller captures; `diff-wsl.sh` says why. Every `-f` case
+# here ends that way if the SIGTERM is ignored, so it is not hypothetical.
+run_side() {
+  local side=$1; shift
+  diff_run timeout -k 2 3 env PATH="$bindir/$side" tail "$@"
+}
 
 # --- fixtures ----------------------------------------------------------------
 printf 'l1\nl2\nl3\nl4\nl5\n'                   > five.txt
@@ -102,26 +104,19 @@ printf 'q\n'                                    > w1.txt
 seq 1 40000                                     > big.txt
 
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc stdin=$1 ref=$2; shift 2
+  local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift
   o_err=$(mktemp); g_err=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(tail | od)` the recorded status
   # is od's, and `PIPESTATUS` is set in the substitution's subshell where it
   # cannot be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
-  # The subshell is not decoration: bash announces a foreground child killed by
-  # a signal ("… Killed …") on *its own* stderr, which no redirection of the
-  # child's streams can catch. Running it one level down puts that announcement
-  # on the subshell's stderr, where `2>/dev/null` reaches it, and every `-f`
-  # case is killed by construction.
   if [ "$stdin" = "-" ]; then
-    ( timeout -s KILL 3 "$OURS_ABS" "$@" </dev/null >"$o_bin" 2>"$o_err" ) 2>/dev/null; o_rc=$?
-    $ref "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    ( printf '%b' "$stdin" | timeout -s KILL 3 "$OURS_ABS" "$@" >"$o_bin" 2>"$o_err" ) 2>/dev/null
-    o_rc=$?
-    printf '%b' "$stdin" | $ref "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | run_side ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | run_side gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
-  o_rc=$(norm_rc "$o_rc"); g_rc=$(norm_rc "$g_rc")
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
 
@@ -154,18 +149,16 @@ report() {
   return 0
 }
 
-run_case()  { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "tail $*"; }
+run_case()  { compare - "$@"; report "tail $*"; }
 run_stdin() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
-  compare "$input" "$GNU" "$@"
+  compare "$input" "$@"
   report "printf '$input' | tail $*"
 }
 
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local reason="$1"; shift
-  compare - "$GNU" "$@"
+  compare - "$@"
   if [ "$AGREED" = no ]; then
     xfail=$((xfail+1))
     [ -n "${VERBOSE:-}" ] && printf 'XFAIL tail %s  (%s)\n' "$*" "$reason"
@@ -183,8 +176,8 @@ xfail_case() {
 selfsame() {
   local a="$1" b="$2" x y xr yr
   # shellcheck disable=SC2086  # both are single options by construction
-  x=$( ( timeout -s KILL 3 "$OURS_ABS" $a </dev/null 2>&1 ) 2>/dev/null ); xr=$(norm_rc $?)
-  y=$( ( timeout -s KILL 3 "$OURS_ABS" $b </dev/null 2>&1 ) 2>/dev/null ); yr=$(norm_rc $?)
+  x=$(run_side ours $a </dev/null 2>&1); xr=$?
+  y=$(run_side ours $b </dev/null 2>&1); yr=$?
   if [ "$x" = "$y" ] && [ "$xr" = "$yr" ]; then
     pass=$((pass+1))
     [ -n "${VERBOSE:-}" ] && printf 'OK   tail %s == tail %s\n' "$a" "$b"
@@ -485,12 +478,11 @@ xfail_case version-names-slateos-coreutils-not-gnu-coreutils --vers
 selfsame --h --help
 selfsame --vers --version
 selfsame --hel --help
-# A directory: POSIX lets it open and fails the *read*, which is what GNU
-# reports. Our host build is Windows, where `File::open` of a directory fails
-# outright, so the sentence is `cannot open` rather than `error reading`. On
-# SlateOS — which presents as `linux-musl` — this case takes the POSIX path and
-# agrees.
-xfail_case windows-refuses-to-open-a-directory-where-posix-fails-the-read -n1 .
+# A directory: POSIX lets it open and fails the *read*, which is what both
+# sides report. This was an xfail while ours was a Windows binary, where
+# `File::open` of a directory fails outright and the sentence was `cannot open`
+# rather than `error reading`.
+run_case -n1 .
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ' "$xpass"

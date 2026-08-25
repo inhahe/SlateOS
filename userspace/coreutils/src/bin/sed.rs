@@ -15,14 +15,15 @@
 //! | `-s` | treat the files as separate streams rather than one |
 //! | `-z` | lines are separated by NUL rather than newline |
 //! | `-u`, `-b` | accepted and ignored: nothing here buffers or translates |
-//! | `-l N` | accepted; the `l` command it sizes is not implemented yet |
+//! | `-l N` | the width `l` wraps at; 0 never wraps, and the default is 70 |
+//! | `--sandbox` | refuse `r`, `R`, `w`, `W` and `s///w` while compiling |
 //! | `--` | end of options; what follows is a file |
 //!
 //! Long options are resolved by [`coreutils::getopt`], so they abbreviate to
 //! any unambiguous prefix as every GNU utility's do: `--expr=p` works and
 //! `--s` is refused as ambiguous between `--silent`, `--sandbox` and
-//! `--separate`. `--posix`, `--debug`, `--sandbox` and `--follow-symlinks` are
-//! accepted and do nothing yet; see `known-issues.md`.
+//! `--separate`. `--posix`, `--debug` and `--follow-symlinks` are accepted and
+//! do nothing yet; see `known-issues.md`.
 //!
 //! Exit status: 0 normally, 1 for a bad script or usage, 2 for an input file
 //! that could not be opened (the rest are still processed), 4 for a failure
@@ -63,7 +64,7 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::process;
 use std::rc::Rc;
 
@@ -233,7 +234,15 @@ enum Action {
     InsertText(Vec<u8>),
     ChangeText(Vec<u8>),
     ReadFile(String),
+    /// `R` — one line per cycle from a shared handle. See [`RFile`].
+    ReadLine(usize),
     WriteFile(usize),
+    /// `W` — like `w`, but only as far as the first separator.
+    WriteFirstLine(usize),
+    /// `l` — the wrap width, already resolved against `-l` and the default of
+    /// 70. Zero means never wrap. Resolving here rather than at run time is
+    /// sound because nothing can change `-l` once the script is compiled.
+    List(usize),
     Quit {
         code: i32,
         print: bool,
@@ -249,6 +258,7 @@ struct Command {
 struct Script {
     cmds: Vec<Command>,
     wfiles: Vec<String>,
+    rfiles: Vec<String>,
     /// Set by a `#n` first line, which is POSIX's in-script spelling of `-n`.
     suppress: bool,
 }
@@ -259,7 +269,15 @@ struct Parser<'a> {
     s: &'a [u8],
     i: usize,
     ere: bool,
+    /// The width `l` uses when it is given no number of its own: `-l N`, or 70.
+    line_len: usize,
+    /// `--sandbox`. It is the *parser* that enforces it, not the executor, so
+    /// that a script naming a forbidden command is refused before any input is
+    /// read — a sandbox that let the first half of a script run would not be
+    /// one.
+    sandbox: bool,
     wfiles: Vec<String>,
+    rfiles: Vec<String>,
 }
 
 impl Parser<'_> {
@@ -539,7 +557,10 @@ impl Parser<'_> {
         self.skip_to_eol();
         let raw = self.s.get(start..self.i).unwrap_or_default();
         if raw.is_empty() {
-            return Err("expected a file name".to_string());
+            // Upstream's wording, which names all four commands that take a
+            // file rather than the one that was written. Kept verbatim because
+            // scripts and test suites match on it.
+            return Err("missing filename in r/R/w/W commands".to_string());
         }
         String::from_utf8(raw.to_vec())
             .map_err(|_| "file names given to sed must be text".to_string())
@@ -547,12 +568,41 @@ impl Parser<'_> {
 
     /// Intern a `w` target so the same file opened twice is one handle, and
     /// two writes to it therefore append rather than truncate each other.
+    ///
+    /// `w` and `W` share this table, as upstream's do: `sed -n 'N;W f;w f'`
+    /// must produce one file holding both writes in order, not two handles
+    /// racing to truncate each other.
     fn wfile(&mut self, path: String) -> usize {
         if let Some(i) = self.wfiles.iter().position(|p| *p == path) {
             return i;
         }
         self.wfiles.push(path);
         self.wfiles.len().saturating_sub(1)
+    }
+
+    /// Intern an `R` source, for the same reason [`Parser::wfile`] interns a
+    /// target — but the consequence is the opposite and more visible. Two `R`s
+    /// naming one file share its read position, so in one cycle the first takes
+    /// line 1 and the second line 2, rather than both taking line 1.
+    fn rfile(&mut self, path: String) -> usize {
+        if let Some(i) = self.rfiles.iter().position(|p| *p == path) {
+            return i;
+        }
+        self.rfiles.push(path);
+        self.rfiles.len().saturating_sub(1)
+    }
+
+    /// Refuse a command that reaches outside the script, under `--sandbox`.
+    ///
+    /// Upstream's wording names `e/r/w` for every one of them, including `R`
+    /// and `W`, so the message is a category rather than the command that
+    /// tripped it. The position is the parser's own, which puts it just past
+    /// the command letter — or, for `s///w`, just past the flag.
+    fn deny_in_sandbox(&self) -> Result<(), String> {
+        if self.sandbox {
+            return Err("e/r/w commands disabled in sandbox mode".to_string());
+        }
+        Ok(())
     }
 
     fn parse_label(&mut self) -> Vec<u8> {
@@ -615,6 +665,7 @@ impl Parser<'_> {
                 }
                 Some(b'w') => {
                     self.i = self.i.saturating_add(1);
+                    self.deny_in_sandbox()?;
                     let path = self.parse_filename()?;
                     wfile = Some(self.wfile(path));
                     break;
@@ -773,12 +824,20 @@ impl From<String> for ScriptFail {
 ///
 /// The `-e` fragments and `-f` files are joined with newlines and parsed once,
 /// because a `{` may be opened in one fragment and closed in the next.
-fn compile_script(script: &[u8], ere: bool) -> Result<Script, ScriptError> {
+fn compile_script(
+    script: &[u8],
+    ere: bool,
+    line_len: usize,
+    sandbox: bool,
+) -> Result<Script, ScriptError> {
     let mut p = Parser {
         s: script,
         i: 0,
         ere,
+        line_len,
+        sandbox,
         wfiles: Vec::new(),
+        rfiles: Vec::new(),
     };
     match parse_body(&mut p, script) {
         Ok(s) => Ok(s),
@@ -888,10 +947,36 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
             b'a' => Action::AppendText(p.parse_text()),
             b'i' => Action::InsertText(p.parse_text()),
             b'c' => Action::ChangeText(p.parse_text()),
-            b'r' => Action::ReadFile(p.parse_filename()?),
+            b'r' => {
+                p.deny_in_sandbox()?;
+                Action::ReadFile(p.parse_filename()?)
+            }
+            b'R' => {
+                p.deny_in_sandbox()?;
+                let path = p.parse_filename()?;
+                Action::ReadLine(p.rfile(path))
+            }
             b'w' => {
+                p.deny_in_sandbox()?;
                 let path = p.parse_filename()?;
                 Action::WriteFile(p.wfile(path))
+            }
+            b'W' => {
+                p.deny_in_sandbox()?;
+                let path = p.parse_filename()?;
+                Action::WriteFirstLine(p.wfile(path))
+            }
+            b'l' => {
+                // The number is optional and overrides `-l` for this command
+                // alone. `l 0` and `l0` are both spellings of "never wrap",
+                // which is also what `-l 0` means.
+                p.skip_blank();
+                let width = if p.peek().is_some_and(|d| d.is_ascii_digit()) {
+                    p.number()?
+                } else {
+                    p.line_len
+                };
+                Action::List(width)
             }
             b'q' | b'Q' => {
                 p.skip_blank();
@@ -947,6 +1032,7 @@ fn parse_body(p: &mut Parser<'_>, script: &[u8]) -> Result<Script, ScriptFail> {
     Ok(Script {
         cmds,
         wfiles: std::mem::take(&mut p.wfiles),
+        rfiles: std::mem::take(&mut p.rfiles),
         suppress,
     })
 }
@@ -1121,6 +1207,11 @@ enum Flow {
 enum Pending {
     Text(Vec<u8>),
     File(String),
+    /// One line already read by `R`, separator and all — or without one, if it
+    /// was the last line of a file that had none. Distinct from `Text` because
+    /// `a`'s text is a line that *needs* a separator adding, while this one
+    /// carries its own and must not be given a second.
+    Raw(Vec<u8>),
 }
 
 /// Where a `w` (or `s///w`) target sends its lines.
@@ -1175,6 +1266,47 @@ fn open_wfiles(paths: &[String]) -> Vec<WFile> {
         .collect()
 }
 
+/// One `R` source: a handle that yields a single line per execution.
+///
+/// A missing or unopenable file is `None` rather than an error. That is
+/// upstream's behaviour and it is deliberate on both sides: `R` is an
+/// inclusion, and a script that runs before its optional include exists should
+/// produce the text without it, not a diagnostic. (`r` agrees; `w` does not,
+/// because a write that goes nowhere loses data.)
+struct RFile {
+    r: Option<BufReader<File>>,
+}
+
+/// Open every `R` source the script names, before a line of input is read.
+///
+/// Eagerly, like [`open_wfiles`], and for the second of that function's two
+/// reasons: the handle carries a read position that has to survive the
+/// per-input-file [`Exec`], or `R` would restart from line 1 on every input
+/// file even without `-s`.
+fn open_rfiles(paths: &[String]) -> Vec<RFile> {
+    paths
+        .iter()
+        .map(|path| RFile {
+            r: File::open(path).ok().map(BufReader::new),
+        })
+        .collect()
+}
+
+/// Return every `R` source to its first line.
+///
+/// `-s` (and `-i`, which implies it) makes each input file a fresh stream, and
+/// upstream extends that to the `R` sources: `sed -s 'R inc' a b` pairs `inc`'s
+/// first lines with *both* files rather than continuing through it. A handle
+/// that cannot seek is left where it is, which is the best available answer for
+/// a pipe or a device.
+fn rewind_rfiles(rfiles: &mut [RFile]) {
+    for f in rfiles {
+        if let Some(r) = f.r.as_mut() {
+            let _ = r.rewind();
+        }
+    }
+}
+
 struct RangeState {
     active: bool,
     /// For `addr,N`, `addr,+N` and `addr,~N`: the line the range closes on.
@@ -1220,12 +1352,19 @@ struct Exec<'w> {
     /// Borrowed, not owned: the `w` targets are opened once for the whole run
     /// and survive every `Exec` built over them. See [`open_wfiles`].
     wfiles: &'w mut Vec<WFile>,
+    /// Borrowed for the same reason as `wfiles`, and see [`open_rfiles`].
+    rfiles: &'w mut Vec<RFile>,
     suppress: bool,
     had_error: bool,
 }
 
 impl<'w> Exec<'w> {
-    fn new(script: &Script, suppress: bool, wfiles: &'w mut Vec<WFile>) -> Exec<'w> {
+    fn new(
+        script: &Script,
+        suppress: bool,
+        wfiles: &'w mut Vec<WFile>,
+        rfiles: &'w mut Vec<RFile>,
+    ) -> Exec<'w> {
         let mut ranges: Vec<RangeState> = Vec::with_capacity(script.cmds.len());
         for cmd in &script.cmds {
             // `0,/re/` is the one range that is open before any line is read;
@@ -1252,6 +1391,7 @@ impl<'w> Exec<'w> {
             last_re: None,
             ranges,
             wfiles,
+            rfiles,
             suppress,
             had_error: false,
         }
@@ -1366,6 +1506,21 @@ impl<'w> Exec<'w> {
         // `b`, not `b\n` — the missing final separator is a property of the
         // text, and every copy of it made anywhere has to keep it.
         let had_sep = self.had_sep;
+        self.write_wfile_sep(idx, bytes, had_sep, out)
+    }
+
+    /// [`Exec::write_wfile`] for a caller that knows better than `had_sep`.
+    ///
+    /// `W` is that caller: when the pattern space holds an embedded separator,
+    /// the first line ends *at* one, so it gets a separator whatever the input
+    /// line ended with.
+    fn write_wfile_sep(
+        &mut self,
+        idx: usize,
+        bytes: &[u8],
+        had_sep: bool,
+        out: &mut Out<'_>,
+    ) -> io::Result<()> {
         let sep = out.sep;
         let Some(w) = self.wfiles.get_mut(idx) else {
             return Ok(());
@@ -1411,6 +1566,7 @@ impl<'w> Exec<'w> {
         for p in std::mem::take(&mut self.appends) {
             match p {
                 Pending::Text(t) => out.line(&t, true)?,
+                Pending::Raw(t) => out.raw(&t)?,
                 Pending::File(path) => {
                     // GNU ignores a file it cannot read here: `r` is an
                     // inclusion, and a missing one is not an error in a script
@@ -1619,9 +1775,39 @@ impl<'w> Exec<'w> {
                     return Ok(Flow::Deleted);
                 }
                 Action::ReadFile(path) => self.appends.push(Pending::File(path.clone())),
+                Action::ReadLine(idx) => {
+                    // Read now, not at flush time. `R /dev/stdin` in a script
+                    // whose input is a pipe interleaves with the cycle that
+                    // asked for it, and deferring the read would reorder that.
+                    let sep = out.sep;
+                    if let Some(r) = self.rfiles.get_mut(*idx).and_then(|f| f.r.as_mut()) {
+                        let mut buf = Vec::new();
+                        // A read failure is as silent as a missing file, for
+                        // the reason given on `RFile`. Exhaustion arrives here
+                        // as `Ok(0)` and is likewise a no-op, which is what
+                        // makes `R` on a short file simply stop contributing.
+                        if r.read_until(sep, &mut buf).is_ok() && !buf.is_empty() {
+                            self.appends.push(Pending::Raw(buf));
+                        }
+                    }
+                }
                 Action::WriteFile(idx) => {
                     let bytes = self.pattern.clone();
                     self.write_wfile(*idx, &bytes, out)?;
+                }
+                Action::WriteFirstLine(idx) => {
+                    let (bytes, sep) = match self.pattern.iter().position(|&b| b == b'\n') {
+                        Some(i) => (self.pattern.get(..i).unwrap_or_default().to_vec(), true),
+                        None => (self.pattern.clone(), self.had_sep),
+                    };
+                    self.write_wfile_sep(*idx, &bytes, sep, out)?;
+                }
+                Action::List(width) => {
+                    let bytes = list_escape(&self.pattern, *width, out.sep);
+                    // Always with a separator: `l`'s output is a rendering, not
+                    // a copy, so it does not inherit the input line's missing
+                    // one. `printf ab | sed -n l` ends in `$` *and* a newline.
+                    out.line(&bytes, true)?;
                 }
                 Action::Quit { code, print } => {
                     return Ok(Flow::Quit {
@@ -1681,6 +1867,70 @@ impl<'w> Exec<'w> {
         }
         Ok(None)
     }
+}
+
+/// Render the pattern space the way `l` shows it: every byte unambiguous, and
+/// a `$` marking where the text ends.
+///
+/// The escaping is by *byte*, not by character, even in a UTF-8 locale —
+/// `printf 'café\n' | sed -n l` prints `caf\303\251$` under GNU sed too. That
+/// is the point of the command: it is asked for when a line looks right and
+/// behaves wrong, which is exactly when the encoding is what one needs to see.
+///
+/// `width` counts output columns and 0 disables wrapping. Two details of the
+/// wrap are upstream's and are load-bearing:
+///
+/// * The `+ 1` reserves the column the continuation `\` will occupy, so a line
+///   that would exactly fill the width breaks one escape early rather than
+///   letting the backslash spill past it. This is why `-l 1` opens with a bare
+///   `\` and a break — no escape can ever fit in `1 - 1` columns.
+/// * The test is made once per *escape*, not once per byte, so `\303` is never
+///   torn in half by a break. A reader who had to reassemble an octal escape
+///   from two lines would be worse off than with no wrapping at all.
+///
+/// `sep` is the output separator, which the wrap and the final `$` both use:
+/// under `-z` the breaks are NUL-terminated like everything else.
+fn list_escape(bytes: &[u8], width: usize, sep: u8) -> Vec<u8> {
+    const OCTAL: &[u8; 8] = b"01234567";
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len().saturating_add(2));
+    let mut col = 0usize;
+    let mut esc: Vec<u8> = Vec::with_capacity(4);
+    for &b in bytes {
+        esc.clear();
+        match b {
+            b'\\' => esc.extend_from_slice(b"\\\\"),
+            0x07 => esc.extend_from_slice(b"\\a"),
+            0x08 => esc.extend_from_slice(b"\\b"),
+            b'\t' => esc.extend_from_slice(b"\\t"),
+            b'\n' => esc.extend_from_slice(b"\\n"),
+            0x0b => esc.extend_from_slice(b"\\v"),
+            0x0c => esc.extend_from_slice(b"\\f"),
+            b'\r' => esc.extend_from_slice(b"\\r"),
+            // Printable ASCII stands for itself. Space is included and DEL is
+            // not, which is `isprint` in the C locale.
+            0x20..=0x7e => esc.push(b),
+            _ => {
+                let v = usize::from(b);
+                esc.push(b'\\');
+                for shift in [6usize, 3, 0] {
+                    let d = v
+                        .checked_shr(u32::try_from(shift).unwrap_or(0))
+                        .unwrap_or(0)
+                        & 7;
+                    esc.push(OCTAL.get(d).copied().unwrap_or(b'0'));
+                }
+            }
+        }
+        if width > 0 && col.saturating_add(esc.len()).saturating_add(1) > width {
+            out.push(b'\\');
+            out.push(sep);
+            col = 0;
+        }
+        out.extend_from_slice(&esc);
+        col = col.saturating_add(esc.len());
+    }
+    out.push(b'$');
+    out
 }
 
 /// Expand a replacement against one match.
@@ -1793,18 +2043,40 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("follow-symlinks", Takes::Nothing),
 ];
 
-#[derive(Default)]
+/// The width `l` wraps at when `-l` says nothing. Upstream's, and not a round
+/// number by accident: 70 leaves a `$` and a `\` inside a 72-column terminal.
+const DEFAULT_LINE_LEN: usize = 70;
+
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct SedArgs {
     suppress: bool,
     ere: bool,
     separate: bool,
     null_data: bool,
+    sandbox: bool,
+    /// `-l N`, defaulting to [`DEFAULT_LINE_LEN`]; 0 means never wrap.
+    line_len: usize,
     /// `Some(suffix)` for `-i`; an empty suffix means no backup.
     in_place: Option<OsString>,
     /// The `-e` fragments and `-f` files, in the order they were given.
     script_parts: Vec<ScriptPart>,
     files: Vec<OsString>,
+}
+
+impl Default for SedArgs {
+    fn default() -> SedArgs {
+        SedArgs {
+            suppress: false,
+            ere: false,
+            separate: false,
+            null_data: false,
+            sandbox: false,
+            line_len: DEFAULT_LINE_LEN,
+            in_place: None,
+            script_parts: Vec::new(),
+            files: Vec::new(),
+        }
+    }
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -1861,17 +2133,15 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(b'z', _) | Opt::Long("null-data" | "zero-terminated", _) => {
                 out.null_data = true;
             }
+            Opt::Long("sandbox", _) => out.sandbox = true,
             // Accepted and ignored, each for its own reason. `-u` asks for less
             // buffering, and this sed already flushes at every boundary that
             // matters. `-b` asks for binary mode, which is the only mode there
             // is here: nothing translates CR+LF. `--follow-symlinks` and
-            // `--posix` are answered in tranche 2b and 2c; `--debug` and
-            // `--sandbox` are known gaps, see `known-issues.md`.
+            // `--posix` are answered in tranche 2c; `--debug` is a known gap,
+            // see `known-issues.md`.
             Opt::Short(b'u', _)
-            | Opt::Long(
-                "unbuffered" | "binary" | "posix" | "debug" | "sandbox" | "follow-symlinks",
-                _,
-            ) => {}
+            | Opt::Long("unbuffered" | "binary" | "posix" | "debug" | "follow-symlinks", _) => {}
             Opt::Short(b'i', value) | Opt::Long("in-place", value) => {
                 // `-i` takes an *optional* value, so it is never the next word:
                 // GNU reads `sed -i backup f` as an in-place edit of `backup`
@@ -1889,16 +2159,13 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                     .push(ScriptPart::File(value.unwrap_or_default()));
                 have_script = true;
             }
-            // Accepted, and with nothing yet to apply it to: the `l` command
-            // this sets the wrap width for is not implemented. The width is
-            // discarded rather than stored so that no field claims to carry a
-            // setting nothing reads. Tracked as TD-B-SED-MISSING-COMMANDS.
-            //
-            // Upstream reads it with `atoi`, which has no way to report a
-            // failure, so `sed -l x` is measured to be accepted and to mean 0
-            // rather than to be a usage error — worth recording here, because
-            // it is the reason this arm validates nothing.
-            Opt::Short(b'l', _) | Opt::Long("line-length", _) => {}
+            // Upstream reads this with `atoi`, which has no way to report a
+            // failure: `sed -l x` is measured to be accepted and to mean 0
+            // (never wrap), and `sed -l 3x` to mean 3. That is why this parses
+            // a leading run of digits and stops, rather than validating.
+            Opt::Short(b'l', value) | Opt::Long("line-length", value) => {
+                out.line_len = value.as_deref().map_or(0, atoi);
+            }
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
             // See [`Request::BadUsage`].
@@ -1924,6 +2191,22 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
 /// An argv word as the bytes it was given.
 fn as_bytes(word: OsString) -> Vec<u8> {
     os_bytes(&word).into_owned()
+}
+
+/// `atoi(3)` over an argv word: leading digits, and 0 for anything else.
+///
+/// Deliberately not `str::parse`. Upstream reads `-l` with `atoi`, so `-l 3x`
+/// means 3 and `-l x` means 0, and neither is an error. Saturating rather than
+/// wrapping on a very long run of digits, which upstream leaves undefined and
+/// where a wrap would silently turn "never wrap" into some narrow width.
+fn atoi(word: &OsStr) -> usize {
+    os_bytes(word)
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .fold(0usize, |acc, b| {
+            acc.saturating_mul(10)
+                .saturating_add(usize::from(b.wrapping_sub(b'0')))
+        })
 }
 
 /// What `--help` prints, and what every usage error prints beneath its sentence.
@@ -2036,7 +2319,7 @@ fn main() {
         }
     };
 
-    let script = match compile_script(&script_text, parsed.ere) {
+    let script = match compile_script(&script_text, parsed.ere, parsed.line_len, parsed.sandbox) {
         Ok(s) => s,
         Err(e) => {
             match e.at {
@@ -2062,6 +2345,7 @@ fn main() {
         script: &script,
         // Opened before a line is read, and once for the whole run.
         wfiles: open_wfiles(&script.wfiles),
+        rfiles: open_rfiles(&script.rfiles),
         suppress: parsed.suppress || script.suppress,
         sep: if parsed.null_data { 0 } else { b'\n' },
     };
@@ -2084,6 +2368,7 @@ fn main() {
 struct Job<'a> {
     script: &'a Script,
     wfiles: Vec<WFile>,
+    rfiles: Vec<RFile>,
     suppress: bool,
     sep: u8,
 }
@@ -2091,7 +2376,12 @@ struct Job<'a> {
 impl Job<'_> {
     /// Wire one `Input` to one `Out` and run the script over it.
     fn run_one(&mut self, input: &mut Input, sink: &mut dyn Write) -> (Option<i32>, bool) {
-        let mut exec = Exec::new(self.script, self.suppress, &mut self.wfiles);
+        let mut exec = Exec::new(
+            self.script,
+            self.suppress,
+            &mut self.wfiles,
+            &mut self.rfiles,
+        );
         let mut out = Out {
             w: sink,
             sep: self.sep,
@@ -2134,6 +2424,11 @@ impl Job<'_> {
         let mut sink = stdout.lock();
         let mut bad = false;
         for path in files {
+            // Upstream rewinds every `R` source when a new input file starts
+            // under `-s`, so `sed -s 'R inc' a b` pairs `inc`'s first lines
+            // with both files rather than running off the end of `inc` during
+            // the first. See [`rewind_rfiles`].
+            rewind_rfiles(&mut self.rfiles);
             let mut input = Input::new(vec![path.clone()], self.sep);
             let (quit, exec_err) = self.run_one(&mut input, &mut sink);
             bad = bad || input.had_error || exec_err;
@@ -2177,6 +2472,8 @@ impl Job<'_> {
                     }
                 },
             }
+            // `-i` implies `-s`, including for the `R` sources. See `separate`.
+            rewind_rfiles(&mut self.rfiles);
             let mut buf: Vec<u8> = Vec::new();
             let mut input = Input::new(vec![path.clone()], self.sep);
             let (quit, exec_err) = self.run_one(&mut input, &mut buf);
@@ -2263,13 +2560,20 @@ mod tests {
         items.iter().map(OsString::from).collect()
     }
 
+    /// [`compile_script`] with what `main` passes for a bare `sed 'script'`:
+    /// the default `l` width, and no sandbox. The two tests that care about
+    /// either of those call `compile_script` directly.
+    fn compile(script: &[u8], ere: bool) -> Result<Script, ScriptError> {
+        compile_script(script, ere, DEFAULT_LINE_LEN, false)
+    }
+
     /// Run a script over some text and return what it wrote.
     fn run(script: &str, input: &str) -> String {
         run_opts(script, input, false, false)
     }
 
     fn run_opts(script: &str, input: &str, suppress: bool, ere: bool) -> String {
-        let compiled = compile_script(script.as_bytes(), ere)
+        let compiled = compile(script.as_bytes(), ere)
             .unwrap_or_else(|e| panic!("compiling {script:?}: {}", e.msg));
         let mut sink: Vec<u8> = Vec::new();
         let mut inp = Input {
@@ -2286,6 +2590,7 @@ mod tests {
         let mut job = Job {
             script: &compiled,
             wfiles: open_wfiles(&compiled.wfiles),
+            rfiles: open_rfiles(&compiled.rfiles),
             suppress: suppress || compiled.suppress,
             sep: b'\n',
         };
@@ -2339,7 +2644,7 @@ mod tests {
         // not read that as "did not match": `/re/!d` deletes every line the
         // pattern does *not* match, so a wrong answer here destroys data.
         let pat = r"/\(a*\)\(a*\)\(a*\)\(a*\)\(a*\)\1\2\3\4\5b/!d";
-        let compiled = compile_script(pat.as_bytes(), false).unwrap();
+        let compiled = compile(pat.as_bytes(), false).unwrap();
         let line = format!("{}\n", "a".repeat(300));
         let mut sink: Vec<u8> = Vec::new();
         let mut inp = Input {
@@ -2354,6 +2659,7 @@ mod tests {
         let mut job = Job {
             script: &compiled,
             wfiles: Vec::new(),
+            rfiles: Vec::new(),
             suppress: false,
             sep: b'\n',
         };
@@ -2602,7 +2908,7 @@ mod tests {
 
     #[test]
     fn a_line_that_is_not_text_passes_through() {
-        let compiled = compile_script(b"s/b/B/", false).unwrap();
+        let compiled = compile(b"s/b/B/", false).unwrap();
         let raw: Vec<u8> = vec![0xff, b'a', b'b', 0xfe, b'\n'];
         let mut sink: Vec<u8> = Vec::new();
         let mut inp = Input {
@@ -2617,6 +2923,7 @@ mod tests {
         let mut job = Job {
             script: &compiled,
             wfiles: Vec::new(),
+            rfiles: Vec::new(),
             suppress: false,
             sep: b'\n',
         };
@@ -2624,17 +2931,180 @@ mod tests {
         assert_eq!(sink, vec![0xff, b'a', b'B', 0xfe, b'\n']);
     }
 
+    // ---------------- `l` ----------------
+
+    /// [`list_escape`] as a string, for tests whose expectation is readable.
+    fn listed(input: &[u8], width: usize) -> String {
+        String::from_utf8_lossy(&list_escape(input, width, b'\n')).into_owned()
+    }
+
+    #[test]
+    fn l_escapes_by_byte_and_marks_the_end() {
+        // Every one of these was checked against GNU sed rather than recalled.
+        assert_eq!(listed(b"a\tb\\c\r", 0), "a\\tb\\\\c\\r$");
+        assert_eq!(listed(b"\x07\x08\x0b\x0c\n", 0), "\\a\\b\\v\\f\\n$");
+        // Byte-wise even for text that is perfectly good UTF-8: `l` is asked
+        // for precisely when one needs to see the encoding.
+        assert_eq!(listed("café".as_bytes(), 0), "caf\\303\\251$");
+        // Space is printable and DEL is not, which is `isprint` in C.
+        assert_eq!(listed(b" ~\x7f", 0), " ~\\177$");
+    }
+
+    #[test]
+    fn l_wraps_whole_escapes_and_reserves_the_continuation_column() {
+        // `-l 1` can never fit an escape in `1 - 1` columns, so it opens with a
+        // bare `\` and a break. GNU does this too; it is the `+ 1` showing.
+        assert_eq!(listed(b"\x01abc", 1), "\\\n\\001\\\na\\\nb\\\nc$");
+        // At 3, `\001` still does not fit beside anything, but `ab` does.
+        assert_eq!(listed(b"\x01abc", 3), "\\\n\\001\\\nab\\\nc$");
+        // At 5 the four-column escape fits on the first line — the escape is
+        // never torn in half to fill the width exactly.
+        assert_eq!(listed(b"\x01abc", 5), "\\001\\\nabc$");
+        assert_eq!(listed(b"aaaaaaaa", 3), "aa\\\naa\\\naa\\\naa$");
+        // 0 is not "wrap at 0", it is "never wrap".
+        assert_eq!(listed(&[b'a'; 200], 0), format!("{}$", "a".repeat(200)));
+        // The default width breaks after 69, leaving the 70th column for `\`.
+        assert_eq!(
+            listed(&[b'a'; 80], DEFAULT_LINE_LEN),
+            format!("{}\\\n{}$", "a".repeat(69), "a".repeat(11))
+        );
+    }
+
+    #[test]
+    fn l_wraps_on_the_output_separator_so_dash_z_stays_nul_terminated() {
+        // Measured: `printf 'abc\0' | sed -z -n 'l 2'` gives `a\<NUL>b\<NUL>c$`.
+        // One column per line, because the second is reserved for the `\`.
+        assert_eq!(list_escape(b"abc", 2, 0), b"a\\\0b\\\0c$".to_vec());
+    }
+
+    #[test]
+    fn l_takes_a_width_of_its_own_that_overrides_dash_l() {
+        // `l 0` beats a narrow `-l`, and `l` with no number defers to it.
+        // The width a one-command script's `l` resolved to, with `-l` set to 3.
+        let width_of = |script: &[u8]| -> usize {
+            let s = compile_script(script, false, 3, false).expect("compiling");
+            match &s.cmds.first().expect("one command").act {
+                Action::List(w) => *w,
+                _ => panic!("{} did not parse as `l`", String::from_utf8_lossy(script)),
+            }
+        };
+        assert_eq!(width_of(b"l 0"), 0);
+        assert_eq!(width_of(b"l0"), 0);
+        assert_eq!(width_of(b"l 9"), 9);
+        // With no number of its own, `l` takes `-l`'s.
+        assert_eq!(width_of(b"l"), 3);
+    }
+
+    #[test]
+    fn l_prints_a_separator_even_when_the_input_line_had_none() {
+        // `l` renders rather than copies, so it does not inherit a missing
+        // final newline the way `p` does — `p` on the same input does.
+        assert_eq!(run_opts("l", "ab", true, false), "ab$\n");
+        assert_eq!(run_opts("p", "ab", true, false), "ab");
+    }
+
+    // ---------------- `W` ----------------
+
+    #[test]
+    fn capital_w_writes_as_far_as_the_first_separator() {
+        let dir = std::env::temp_dir().join("sed-w-test");
+        let _ = fs::create_dir_all(&dir);
+        let target = dir.join("first.txt");
+        let path = target.to_string_lossy().into_owned();
+        let _ = fs::remove_file(&target);
+
+        // Two lines joined by `N`, so the pattern space holds an embedded
+        // separator: `W` takes the first line and terminates it, whatever the
+        // input's own final separator was.
+        let script = format!("$!N;W {path}");
+        run_opts(&script, "a\nb", true, false);
+        assert_eq!(fs::read(&target).expect("W wrote nothing"), b"a\n");
+
+        // With no embedded separator, `W` writes the whole pattern space and
+        // inherits the input line's missing separator, exactly like `w`.
+        let _ = fs::remove_file(&target);
+        run_opts(&format!("W {path}"), "a", true, false);
+        assert_eq!(fs::read(&target).expect("W wrote nothing"), b"a");
+        let _ = fs::remove_file(&target);
+    }
+
+    // ---------------- `R` ----------------
+
+    #[test]
+    fn capital_r_takes_one_line_per_cycle_from_a_shared_position() {
+        let dir = std::env::temp_dir().join("sed-r-test");
+        let _ = fs::create_dir_all(&dir);
+        let inc = dir.join("inc.txt");
+        fs::write(&inc, b"A\nB\nC\n").expect("writing the include");
+        let path = inc.to_string_lossy().into_owned();
+
+        // One `R` per cycle, in order.
+        assert_eq!(run(&format!("R {path}"), "1\n2\n"), "1\nA\n2\nB\n");
+
+        // Two `R`s naming one file share the position, so a single cycle takes
+        // two *different* lines rather than the same one twice.
+        assert_eq!(
+            run(&format!("R {path}\nR {path}"), "1\n2\n"),
+            "1\nA\nB\n2\nC\n"
+        );
+
+        // Running off the end is a silent no-op, not an error and not a blank.
+        assert_eq!(
+            run(&format!("R {path}"), "1\n2\n3\n4\n"),
+            "1\nA\n2\nB\n3\nC\n4\n"
+        );
+
+        // A file with no final separator hands its last line over as it is.
+        let short = dir.join("short.txt");
+        fs::write(&short, b"Z").expect("writing the include");
+        assert_eq!(
+            run(&format!("R {}", short.to_string_lossy()), "1\n"),
+            "1\nZ"
+        );
+
+        // A missing file is an inclusion that is not there, which is not a
+        // failure: the text comes out without it.
+        assert_eq!(run(&format!("R {path}.nosuch"), "1\n2\n"), "1\n2\n");
+        let _ = fs::remove_file(&inc);
+        let _ = fs::remove_file(&short);
+    }
+
+    // ---------------- `--sandbox` ----------------
+
+    #[test]
+    fn the_sandbox_refuses_every_command_that_reaches_outside_the_script() {
+        // `e` and `s///e` belong in this list and are absent only because they
+        // are not implemented at all yet; see `known-issues.md`. When they
+        // arrive they must be added here and to `deny_in_sandbox`'s callers.
+        for script in [&b"r f"[..], b"R f", b"w f", b"W f", b"s/a/b/w f"] {
+            assert!(
+                compile_script(script, false, DEFAULT_LINE_LEN, true).is_err(),
+                "{} should be refused under --sandbox",
+                String::from_utf8_lossy(script)
+            );
+            // …and is a perfectly good script without it, so the refusal is
+            // the sandbox's doing and not a parse failure in disguise.
+            assert!(
+                compile_script(script, false, DEFAULT_LINE_LEN, false).is_ok(),
+                "{} should compile without --sandbox",
+                String::from_utf8_lossy(script)
+            );
+        }
+        // A script that reaches nowhere is unaffected.
+        assert!(compile_script(b"s/a/b/p", false, DEFAULT_LINE_LEN, true).is_ok());
+    }
+
     // ---------------- compile errors ----------------
 
     #[test]
     fn a_bad_script_is_refused_rather_than_guessed_at() {
-        assert!(compile_script(b"Z", false).is_err());
-        assert!(compile_script(b"s/a", false).is_err());
-        assert!(compile_script(b"{p", false).is_err());
-        assert!(compile_script(b"p}", false).is_err());
-        assert!(compile_script(b"b nowhere", false).is_err());
-        assert!(compile_script(b"y/ab/x/", false).is_err());
-        assert!(compile_script(b"s/[a/x/", false).is_err());
+        assert!(compile(b"Z", false).is_err());
+        assert!(compile(b"s/a", false).is_err());
+        assert!(compile(b"{p", false).is_err());
+        assert!(compile(b"p}", false).is_err());
+        assert!(compile(b"b nowhere", false).is_err());
+        assert!(compile(b"y/ab/x/", false).is_err());
+        assert!(compile(b"s/[a/x/", false).is_err());
     }
 
     #[test]
@@ -2649,7 +3119,7 @@ mod tests {
             "2{h;d}",
         ] {
             assert!(
-                compile_script(script.as_bytes(), false).is_ok(),
+                compile(script.as_bytes(), false).is_ok(),
                 "{script} should compile"
             );
         }
@@ -2815,15 +3285,42 @@ mod tests {
             "-b",
             "--posix",
             "--debug",
-            "--sandbox",
             "--follow-symlinks",
-            "-l",
-            "5",
             "p",
             "f",
         ]);
         assert_eq!(a.script_parts, vec![text("p")]);
         assert_eq!(a.files, names(&["f"]));
+    }
+
+    #[test]
+    fn the_options_that_l_and_the_sandbox_read_reach_the_compiler() {
+        let a = run_args(&["--sandbox", "-l", "5", "p", "f"]);
+        assert!(a.sandbox);
+        assert_eq!(a.line_len, 5);
+        assert_eq!(a.script_parts, vec![text("p")]);
+        assert_eq!(a.files, names(&["f"]));
+        // Absent, `-l` is 70 and the sandbox is open.
+        let a = run_args(&["p"]);
+        assert!(!a.sandbox);
+        assert_eq!(a.line_len, DEFAULT_LINE_LEN);
+    }
+
+    /// `-l` is read with `atoi`, which cannot report a failure, so none of these
+    /// is an error. Every one was measured against GNU sed.
+    #[test]
+    fn a_line_length_is_read_the_way_atoi_reads_it() {
+        assert_eq!(atoi(OsStr::new("5")), 5);
+        assert_eq!(atoi(OsStr::new("3x")), 3);
+        assert_eq!(atoi(OsStr::new("x")), 0);
+        assert_eq!(atoi(OsStr::new("")), 0);
+        assert_eq!(atoi(OsStr::new("-1")), 0);
+        // Saturating rather than wrapping: a wrap here would turn a number
+        // meaning "very wide" into some narrow width, which would silently
+        // mangle output rather than merely disagree about it.
+        assert_eq!(atoi(OsStr::new(&"9".repeat(40))), usize::MAX);
+        assert_eq!(run_args(&["-l", "3x", "p"]).line_len, 3);
+        assert_eq!(run_args(&["-lx", "p"]).line_len, 0);
     }
 
     /// The usage block is what a usage error prints, so its first line has to

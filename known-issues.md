@@ -74103,7 +74103,7 @@ originally planned.
 
 ---
 
-## TD-B-SED-MISSING-COMMANDS — `l`, `W` and `R` are unimplemented, so `-l N` and `--sandbox` have nothing to act on (lane B, 2026-08-24) — **open**
+## TD-B-SED-MISSING-COMMANDS — `l`, `W` and `R` are unimplemented, so `-l N` and `--sandbox` have nothing to act on (lane B, 2026-08-24) — RESOLVED 2026-08-24
 
 **What it is.** Our `sed` implements most of the GNU command set, but three
 commands are missing outright, and two options exist only to be accepted:
@@ -74148,3 +74148,72 @@ something to act on:
    command starts.
 
 Scoped as sed tranche 2b.
+
+**Resolution (2026-08-24).** All five done as described, each measured against
+GNU sed rather than written from the description above — which was wrong in one
+place worth recording. The wrap width is applied *per escape*, not per byte:
+GNU tests `output_width + escape_len + 1 > line_len` before emitting a whole
+escape, so `\303` is never torn across a break, and the `+ 1` reserves the
+column the continuation `\` will sit in. That is why `-l 1` opens with a bare
+`\` and a break — no escape can fit in `1 - 1` columns. Point 1 above says
+"at most `N` columns *including* the continuation `\`", which is the same rule
+stated in a way that does not tell you what to do with an escape that straddles
+the boundary.
+
+Two further behaviours were measured and are now implemented, neither of them
+guessable from the manual:
+
+* Two `R`s naming one file **share its read position**, so one cycle takes two
+  different lines rather than the same line twice. The handles are interned by
+  name at parse time for exactly this reason.
+* `-s` (and `-i`, which implies it) **rewinds every `R` source** at each new
+  input file, so `sed -s 'R inc' a b` pairs `inc`'s *first* lines with both
+  files.
+
+`-l` is read with `atoi`, which cannot fail: `-l 3x` means 3 and `-l x`, `-l ''`
+and `-l -1` all mean 0 — never wrap. None is an error, on either side.
+
+`sed-diff.sh` went from 166 passed / 21 differed to 175 passed / 12 differed;
+all seven cases named under **Reproduce** above are green, as are `sed w` and
+`sed r`, whose message was aligned to GNU's `missing filename in r/R/w/W
+commands` while in the area. The remaining 12 are tranches 2c and 2d, and the
+`e` gap below.
+
+---
+
+## TD-B-SED-E-AND-DEBUG — the `e` command and `--debug` are still missing (lane B, 2026-08-24) — **open**
+
+**What it is.** Two gaps are left in `sed` after TD-B-SED-MISSING-COMMANDS
+closed the other five:
+
+| Missing | What GNU does | What ours does |
+|---|---|---|
+| `e` / `e COMMAND` / `s///e` | runs the pattern space (or COMMAND) through the shell and substitutes the output | ``unknown command: `e'`` (status 1) |
+| `--debug` | prints an annotated trace: the parsed program, then `INPUT:`/`PATTERN:`/`COMMAND:`/`MATCHED REGEX REGISTERS`/`END-OF-CYCLE:` per cycle | accepted and ignored, so the run's ordinary output appears instead |
+
+**Why they are still out.** `e` needs a shell to hand the command to, and the
+one question it raises — *which* shell, and what happens when there is none —
+is a policy question rather than a coding one on an OS that does not have
+`/bin/sh` at a fixed path yet. `--debug` is a large, exactly-specified output
+format whose only consumer is a person reading it; it is worth doing, but it is
+worth doing after the wording tranches (2c) that share its error-reporting
+machinery.
+
+**Reproduce.** `bash scripts/sed-diff.sh` — the case `sed --debug s/a/A/`
+reports DIFF, showing our ordinary output against GNU's trace. `e` has no
+harness case because there is nothing yet to compare.
+
+**The proper fix.**
+
+1. `e` — spawn the shell with the pattern space as its command, replace the
+   pattern space with its stdout, and drop one trailing separator. `s///e` does
+   the same to the *result* of the substitution. Both must be refused by
+   `Parser::deny_in_sandbox`, which already exists and already carries the
+   message naming them; add the two call sites and extend
+   `the_sandbox_refuses_every_command_that_reaches_outside_the_script`, which
+   names this entry in a comment.
+2. `--debug` — a flag on `Exec` and a writer that renders the compiled program
+   back to text. The rendering is the bulk of it: it must round-trip every
+   command, which is a useful check on the parser in its own right.
+
+Scoped as sed tranche 2d.

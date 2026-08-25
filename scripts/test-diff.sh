@@ -80,6 +80,10 @@ set -u
 # what is compared. `/usr/bin/test` is the real binary.
 DIFF_PROG=test
 DIFF_REF='/usr/bin/test /bin/test'
+# There is no coreutils way to create a bound unix socket, and `-S` against a
+# path with no socket on it is a case that passes by agreeing the file is
+# missing. Skipping loudly is the lesser evil; see the `sock` fixture below.
+DIFF_NEED=python3
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -92,16 +96,81 @@ cd "$work" >/dev/null || exit 1
 
 # --- fixtures -----------------------------------------------------------------
 #
-# Deliberately plain. Anything exotic (symlinks, device nodes, setuid bits) is
-# either unrepresentable on this host or represented differently by MSYS and
-# WSL, and a fixture the two sides disagree about tests the harness, not `test`.
-# The operators that need those fixtures are listed under "not covered" at the
-# bottom of this file rather than being tested against a fiction.
+# `test` is almost entirely *about* the filesystem, so the fixtures are most of
+# what this harness is. They live under `$DIFF_TMP`, which since the move to
+# `diff-wsl.sh` is a real Linux `/tmp` directory rather than a `/mnt/c` view of
+# an MSYS one — and that is what makes the exotic types below representable at
+# all. Before, a symlink or a fifo meant different things to the two sides, so
+# every case using one would have tested the harness rather than `test`, and
+# they were listed as "not covered" at the foot of this file instead.
+#
+# Every fixture is *asserted*, not hoped for, because a fixture that silently
+# failed to appear does not fail a case: both sides would then agree the file is
+# absent and the case would **pass** while testing nothing. Vacuous agreement is
+# the one failure mode a differential harness cannot see in its own output, so
+# it is caught here at the only point where it is still visible.
+have() {
+  local what=$1; shift
+  if ! test "$@"; then
+    echo "test-diff: the $what fixture is not what it should be; refusing to run" >&2
+    echo "  the cases that use it would otherwise pass by agreeing it is absent." >&2
+    exit 1
+  fi
+}
 
 : > empty            # exists, regular, zero length: -e -f -s
 printf 'x' > full    # exists, regular, one byte:    -s is the difference
 mkdir -p adir        # exists, directory:            -d
 # `missing` is deliberately never created.
+
+mkfifo fifo                                   ; have fifo -p fifo
+ln -s full link                               ; have symlink -h link
+ln -s adir dirlink                            ; have dirlink -h dirlink
+ln -s missing dangling                        ; have dangling -h dangling
+cp full suid      && chmod u+s suid           ; have setuid -u suid
+cp full sgid      && chmod g+s sgid           ; have setgid -g sgid
+mkdir -p stickydir && chmod +t stickydir      ; have sticky -k stickydir
+cp full exe       && chmod +x exe             ; have executable -x exe
+
+# The permission pair is asserted only to *exist*. `chmod` is deterministic but
+# its effect on `-r`/`-w` is not: root may read and write both regardless, and
+# the case then degenerates to another `-r` on a readable file. That is a less
+# interesting comparison, not a vacuous one — both sides still stat and access a
+# real file — so it is not worth refusing to run over.
+cp full noread    && chmod a-r noread         ; have noread -f noread
+cp full nowrite   && chmod a-w nowrite        ; have nowrite -f nowrite
+
+# `-nt`/`-ot` need an ordering that does not depend on how fast the fixtures
+# were written. Two explicit timestamps, decades apart, rather than two files
+# created in the same millisecond.
+touch -d '2001-01-01T00:00:00' older          ; have older -f older
+touch -d '2030-01-01T00:00:00' newer          ; have newer -f newer
+have ordering newer -nt older
+
+# `-N` is "modified since last read", i.e. mtime > atime. Both stamps are set
+# explicitly rather than relying on the mount's atime policy, which under
+# `relatime` would make the answer depend on when the file was last opened.
+: > mod_since_read
+touch -a -d '2001-01-01T00:00:00' mod_since_read
+touch -m -d '2002-01-01T00:00:00' mod_since_read ; have mod_since_read -N mod_since_read
+: > read_since_mod
+touch -m -d '2001-01-01T00:00:00' read_since_mod
+touch -a -d '2002-01-01T00:00:00' read_since_mod ; have read_since_mod '!' -N read_since_mod
+
+# A bound unix socket. `python3` is the reason `DIFF_NEED` names it: there is no
+# coreutils way to make one, and a `-S` case with no socket to point at is a
+# case that agrees the file is missing.
+python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.bind(sys.argv[1])' sock                     ; have socket -S sock
+
+# Device nodes are not created here — that needs root — but they exist. A
+# character device is guaranteed by POSIX; a block device is not, so the first
+# one on the host is found rather than named, and its absence is an abort rather
+# than a case that quietly compares two "no such file" answers.
+chardev=/dev/null                             ; have chardev -c "$chardev"
+blockdev=$(find /dev -maxdepth 1 -type b -print -quit 2>/dev/null)
+have blockdev -b "$blockdev"
 
 # --- machinery ----------------------------------------------------------------
 
@@ -240,6 +309,48 @@ t -G empty
 t -L empty
 t -h empty
 t -N empty
+
+# The same operators against a fixture that makes them *true*. Until both sides
+# ran on one Linux filesystem these were unrepresentable, and the false forms
+# above were the whole of the coverage — which pins "does not crash, does not
+# claim yes" and nothing else. An implementation that answered "no" to every
+# file-type question would have passed all of them.
+t -p fifo
+t -S sock
+t -c "$chardev"
+t -b "$blockdev"
+t -u suid
+t -g sgid
+t -k stickydir
+t -x exe
+t -r noread
+t -w nowrite
+t -N mod_since_read
+t -N read_since_mod
+
+# Symlinks, where the question is whether the operator follows the link. `-h`
+# and `-L` are the two that must not; every other operator must. A dangling
+# link is where the distinction is visible without owning two inodes: it exists
+# as a link and does not exist as a file.
+t -h link
+t -L link
+t -f link
+t -d dirlink
+t -h dirlink
+t -h dangling
+t -L dangling
+t -e dangling
+t -f dangling
+t -s dangling
+t -r dangling
+
+# Ownership. `empty` was just created by this process, so both are true of it;
+# a root-owned system file gives the other answer under the uid this runs as,
+# and under root gives the same answer on both sides, which is still a
+# comparison.
+t -O /etc/passwd
+t -G /etc/passwd
+
 t -t 1
 t -t 0
 t -t x
@@ -297,6 +408,26 @@ t empty -ef full
 t empty -nt full
 t empty -ot full
 t missing -ef missing
+
+# The three-argument file comparisons against fixtures whose answer is known by
+# construction rather than by how fast the fixtures were written. `older` and
+# `newer` are stamped decades apart; `link` and `full` are one inode reached two
+# ways, which is what `-ef` is for and what a `stat` on the link rather than the
+# target would get wrong.
+t newer -nt older
+t older -nt newer
+t older -ot newer
+t newer -ot older
+t empty -nt empty
+t empty -ot empty
+t older -nt missing
+t missing -nt older
+t older -ot missing
+t missing -ot older
+t link -ef full
+t full -ef link
+t link -ef empty
+t dangling -ef dangling
 t x -eq y
 t x -badop y
 t '!' -n x
@@ -476,22 +607,6 @@ paste -d "$RS" "$labels" "$whys" "$work/ours.lines" "$work/gnu.lines" \
 rc=$?
 
 # --- not covered, and why ------------------------------------------------------
-#
-# `-b -c -p -S` (block/character/fifo/socket) and `-g -u -k` (setgid/setuid/
-# sticky) appear above only in their *false* form, against a plain file, which
-# pins "does not crash, does not claim yes" and nothing more. `-L -h -N -O -G`
-# are in the same position.
-#
-# That used to be forced: MSYS could not create the file types, and one made in
-# WSL under /mnt/c was not seen as such by a native Windows binary, so a fixture
-# the two sides disagreed about would have tested the harness rather than
-# `test`. Since the move to `diff-wsl.sh` both sides read one real Linux
-# filesystem, so `mkfifo`, `ln -s`, `chmod u+s` and a dangling symlink are all
-# representable and all mean the same thing to both. The true-form cases are
-# therefore now *possible* and merely absent; adding them is worth a commit of
-# its own, since it is new coverage rather than the same coverage moved.
-# (`-O`/`-G` and `-N` still need care: the first two are true of everything this
-# harness creates, and the third needs an atime the mount option may not update.)
 #
 # `-t` is tested only for the answers that do not depend on the terminal: both
 # sides run with stdin, stdout and stderr redirected, so every `-t N` is false,

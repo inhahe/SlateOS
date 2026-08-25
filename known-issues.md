@@ -75231,7 +75231,7 @@ conventional `cat f | cut -c1 -` into a request to open a file literally named
 
 Rung 37 covers all of it.
 
-#### TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK (lane A, 2026-08-25) — ✅ FIXED (`bd40ac82e`)
+#### TD-A-LIVENESS-WATCHDOG-FALSE-FIRES-ON-CAPTURED-SELF-TEST-WORK (lane A, 2026-08-25) — ✅ FIXED (`bd40ac82e`, then properly by `d5025a8d9`)
 
 **In short:** a boot test failed with `LIVENESS WATCHDOG failure detected` even
 though every self-test in that same boot passed and the run went on to reach
@@ -75320,6 +75320,68 @@ writes *nothing at all*, captured or otherwise, remains indistinguishable from a
 hang. The doc comment there argues correctly against closing it by counting
 kernel-mode ticks, and this change does not revisit that; it only stops the case
 where output existed and was not being counted.
+
+**That "left standing" paragraph was the whole remaining bug, and it bit on the
+very next boot.** The merged tree failed again — `[liveness] SYSTEM HANG`
+between rung 27's label and rung 28's, same place, with `bd40ac82e` in it. The
+reason is stated above without being recognised: rung 27 runs `find` looking for
+names that *are not there*. It produces no output, captured or otherwise,
+because there is nothing to produce. Counting captured bytes cannot help a
+command whose correct byte count is zero.
+
+**Resolution, part two (`d5025a8d9`).** With output silent by right, the
+total-hang branch falls back on `kernel_progress_count()`, whose claim is "no
+task-level forward progress of any kind". Its two sources — resolved page faults
+and completed block I/O — are the trace left by work that touches *a mapping or
+a disk*. A kernel-side computation over data already mapped and already resident
+leaves neither, so the counter stood still for 15 s while the kernel was working
+as hard as it ever does.
+
+Allocation is the trace that work *does* leave: a directory walk allocates a
+path per component per level, and the RIP ring above is four-fifths inside
+`heap::check_poison` and `Vec::push`. `mm::heap::alloc_progress_count()` sums
+`SLAB_ALLOCS`, `LARGE_ALLOCS` and every per-CPU cache's own `slab_allocs`,
+lock-free — this runs from the timer tick, and a watchdog that blocked could
+deadlock against the hang it exists to report — and `kernel_progress_count()`
+adds it.
+
+Allocations only, never frees. A loop that allocated and released one block for
+ever is a *livelock*, and the busy-livelock branch makes a separate claim about
+those; this counter exists to refute "nothing at all is happening". A hang
+spinning on a lock allocates nothing, so nothing the branch exists to catch is
+hidden by counting them. As with part one, this is not a raised threshold: it
+reports a signal that was there all along.
+
+**A second defect surfaced while hardening the drill for it.** Each of the four
+phases of `test_breadcrumb_does_not_certify_liveness` pins `LIVENESS_LAST_KWORK`
+so the progress discount is a no-op and the phase measures the *output* discount
+it names. `liveness_check` then takes its own fresh reading, and
+`without_interrupts` silences only the local core — so the pin was never
+airtight. It held while the sources were faults and block I/O, which an idle AP
+does not generate; an allocation on another core breaks it, and breaks it
+*invisibly*: a breadcrumb that wrongly counted as output and a cross-CPU
+allocation both leave the stall counter at 0. The drill would have reported the
+first when it saw the second, and phases 3 and 4 — which assert a *reset* —
+would have passed vacuously on exactly the boots where they were needed.
+
+The pin is now verified rather than assumed. `liveness_check` swaps its own
+reading into `LIVENESS_LAST_KWORK` *before* it branches, so reading the static
+back afterwards says exactly what it compared against, with no second sample and
+so no second race. A broken pin restarts the drill rather than failing it — that
+is the watchdog being right, not the code under test being wrong — bounded at 32
+restarts so a future change that makes every interval busy (a `serial_println!`
+that allocates, say) fails loudly instead of spinning under a `cli`.
+
+**Noticed in passing.** `mm::heap::stats` indexes `PCPU_SLAB_CACHES` with a bare
+`cpu_count().max(1)`, justified by a SAFETY comment resting on an invariant held
+a long way from there. `alloc_progress_count` clamps to `HEAP_MAX_CPUS` instead:
+the timer tick is not where that invariant should be discovered to have lapsed.
+
+**Still left standing, and now genuinely narrow:** a kernel loop that faults
+nothing, reads no block, allocates nothing and writes nothing is still
+indistinguishable from a hang — which is correct, because that description also
+fits a hang. The remaining false-positive risk is a long stretch of pure
+arithmetic over a fixed buffer, which no rung currently does.
 
 ## TD-AWK-RUNTIME-DIAGNOSTICS-CARRY-NO-SOURCE-LOCATION (lane B, 2026-08-24) — **open**
 

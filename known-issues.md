@@ -73428,14 +73428,32 @@ joined; `grep` wants words; `trap` wants word 1 as a command string and word 2
 as a signal. Each conversion is a small semantic decision, and there are no
 per-command tests to catch getting one wrong.
 
-### Two smaller bugs found in the same area, not yet fixed
+### Two smaller bugs found in the same area
 
-- **`parse_inline_assignment` splits the first word on raw whitespace**
-  (`line.find([' ', '\t'])`, kshell.rs 6131), so `FOO='a b'` is read as
-  `first_word = FOO='a`, `command = b'` — it tries to run `b'`. It was equally
-  broken before the quoting fix (it read `FOO=a` and ran `b`); the fix changed
-  the wrong answer, not its wrongness. It needs the same quote-aware scan
-  `expand_braces` now uses.
+- ~~**`parse_inline_assignment` splits the first word on raw whitespace**~~
+  ✅ **FIXED 2026-08-25.** It read `FOO='a b' cmd` as `first_word = FOO='a`,
+  `command = b' cmd`, so the shell set `FOO` to the fragment `'a` and then ran
+  `b'` as a command — two wrong things, neither reported. It was equally broken
+  before the quoting fix (it read `FOO=a` and ran `b`); that fix changed the
+  wrong answer, not its wrongness.
+
+  The fix is the quote-aware scan the rest of the shell's parsers already use,
+  factored out as `first_unquoted_space`, sitting beside `unquoted_positions`
+  and `split_unquoted` and following the same convention (an unterminated quote
+  runs to the end of the string). Pinned by self-test rung 57.
+
+  **A bare quoted assignment went through the same door**, which is the part
+  that was easy to miss when this was written up: `ZZ='a b'` with no command
+  after it still contains a space, so the *inline* parser claimed it, set `ZZ`
+  to `'a`, and ran `b'`. `parse_bare_assignment` — which handles it correctly —
+  was never reached, because it is tried second. So the defect was not limited
+  to the construct it was found in; it swallowed the more common one too.
+
+  **Left alone deliberately:** the value still goes through `strip_quotes`
+  (outer pair only) rather than `remove_quotes` (all quoting), so
+  `A=x" "y cmd` keeps its interior quotes where bash would remove them. That is
+  a different, rarer defect in a different function, shared with
+  `parse_bare_assignment`, and it does not run the wrong command.
 - **`grep` with no arguments prints its usage and exits 0.** Its usage arm is a
   `console_println!` followed by a bare `return`, never reaching `set_exit(1)`.
   This is the same silent-success class as

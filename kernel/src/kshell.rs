@@ -1130,6 +1130,42 @@ fn unquoted_positions(s: &str, needle: u8) -> (Option<usize>, Option<usize>) {
     (first, last)
 }
 
+/// Byte offset of the first *unquoted* space or tab in `s`, or `None` if the
+/// whole string is a single word.
+///
+/// Same quoting convention as [`unquoted_positions`]: a `'` opens a region only
+/// another `'` closes, likewise `"`, and an unterminated quote runs to the end
+/// of the string — which is the whole shell's convention, not a choice made
+/// here, and is why this returns `None` rather than an error for `a='b c`.
+///
+/// This is "where does the first word end", which is not the same question as
+/// `str::find([' ', '\t'])`. The difference is load-bearing wherever the first
+/// word can carry a quoted value: see [`parse_inline_assignment`], where the
+/// raw search made `FOO='a b' cmd` run the command `b'`.
+fn first_unquoted_space(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while let Some(&b) = bytes.get(i) {
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if b == b'\'' || b == b'"' {
+                    quote = Some(b);
+                } else if b == b' ' || b == b'\t' {
+                    return Some(i);
+                }
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    None
+}
+
 /// Split `s` on *unquoted* occurrences of `sep`, keeping the pieces verbatim.
 ///
 /// Always returns at least one piece, so `parts.len() > 1` is the test for
@@ -6437,9 +6473,23 @@ struct InlineAssignment {
 /// - There's no `=` in the first word
 /// - The variable name is invalid
 /// - There's no command after the assignment (bare assignment)
+///
+/// **The first word ends at the first *unquoted* space**, which is the whole
+/// point of [`first_unquoted_space`]. A quoted value with a space in it is the
+/// ordinary reason to write this construct at all — `LANG='en US' cmd`,
+/// `MSG="a b" cmd` — and splitting on the raw space cut it in half: the first
+/// word became `MSG="a`, so the shell set `MSG` to the fragment `"a` and then
+/// ran, as a command, the remainder `b" cmd`. Two wrong things, neither
+/// reported: a variable holding a piece of its own value, and a command nobody
+/// asked for. The `b"` case usually surfaces as "unknown command", but only
+/// usually — the fragment is whatever the value happened to contain.
+///
+/// Chained assignments keep working because the recursion is unchanged:
+/// `A=1 B=2 cmd` parses `A=1` here and hands `B=2 cmd` back to
+/// [`execute_single`], which parses `B=2` the same way.
 fn parse_inline_assignment(line: &str) -> Option<InlineAssignment> {
-    // The first word (up to first whitespace) must contain `=`.
-    let first_space = line.find([' ', '\t'])?;
+    // The first word (up to the first *unquoted* whitespace) must contain `=`.
+    let first_space = first_unquoted_space(line)?;
     let first_word = line.get(..first_space)?;
     let rest = line.get(first_space.saturating_add(1)..)?.trim();
 
@@ -14566,6 +14616,66 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         let _ = crate::fs::Vfs::remove(a);
         let _ = crate::fs::Vfs::remove(b);
+    }
+
+    serial_println!(
+        "  kshell::self_test 57: an inline assignment's first word ends at an unquoted space"
+    );
+    {
+        // `VAR=value cmd` found the end of `VAR=value` with
+        // `line.find([' ', '\t'])`, which does not know about quotes. A quoted
+        // value containing a space -- the ordinary reason to write this
+        // construct -- was therefore cut in half: `ZZMSG="a b" printenv` set
+        // `ZZMSG` to the fragment `"a` and ran `b" printenv` as a command.
+        // Neither half was reported.
+        let out = capture_command("ZZMSG=\"a b\" printenv");
+        assert_output_contains(
+            "the quoted value reaches the command whole",
+            &out,
+            b"ZZMSG=a b\n",
+        );
+
+        // The other half of the same cut, and the one with teeth: what ran.
+        // Whole-output equality, because the failure mode is not "the wrong
+        // output is missing" but "some other command's output is present" --
+        // here the old build reached `b'` and printed an unknown-command
+        // message, which a `contains` on `zz_kept` would have caught but a
+        // `lacks` would not have described.
+        let out = capture_command("ZZMSG='a b' echo zz_kept");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_kept\n",
+            "and the command that runs is the one that was written"
+        );
+        assert_eq!(last_exit(), 0, "which succeeds, as it always did");
+
+        // Unchanged behaviour, pinned because the fix moves where the word
+        // ends and so could have moved what gets restored.
+        let out = capture_command("printenv");
+        assert_output_lacks("the binding does not outlive the command", &out, b"ZZMSG=");
+
+        // Chained assignments still recurse: `A=1 B=2 cmd` parses one here and
+        // hands the rest back to `execute_single`. The second value is quoted
+        // so the recursion is exercised on the case that was broken, not only
+        // on the case that always worked.
+        let out = capture_command("ZZ1=x ZZ2='y z' printenv");
+        assert_output_contains("the first assignment binds", &out, b"ZZ1=x\n");
+        assert_output_contains("and so does the second", &out, b"ZZ2=y z\n");
+
+        // A *bare* quoted assignment went through the same door, which is the
+        // part that is easy to miss: with no command after it, `ZZBARE='a b'`
+        // still had a space, so the inline parser claimed it, set `ZZBARE` to
+        // `'a`, and ran `b'`. It reaches `parse_bare_assignment` now because
+        // there is no unquoted space to find.
+        let _ = capture_command("ZZBARE='a b'");
+        let out = capture_command("echo $ZZBARE");
+        assert_eq!(
+            out.as_slice(),
+            b"a b\n",
+            "a bare quoted assignment keeps its whole value"
+        );
+
+        let _ = capture_command("unset ZZBARE");
     }
 
     serial_println!("  kshell::self_test PASSED");

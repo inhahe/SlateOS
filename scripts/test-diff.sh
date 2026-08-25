@@ -3,11 +3,11 @@
 #
 # ## Why this harness batches, when the other twenty-eight do not
 #
-# The established shape in this tree is one reference invocation per case:
-# `wsl -e env LC_ALL=C.UTF-8 <util> …`, compared against one native run. That
-# costs a WSL process launch per case — roughly a second and a half on this host
-# — which is affordable at `csplit`'s 76 cases and already unpleasant at
-# `split`'s 210.
+# It was written when the established shape in this tree was one reference
+# invocation per case — `wsl -e env LC_ALL=C.UTF-8 <util> …`, compared against
+# one native run — costing a WSL process launch per case, roughly a second and a
+# half on this host. That is affordable at `csplit`'s 86 cases and already
+# unpleasant at `split`'s 210.
 #
 # `test` needs many more cases than either. Its behaviour is not defined by a
 # list of options but by a *grammar*, and the grammar's rules interact: what
@@ -18,15 +18,17 @@
 #
 # So this one batches. Every case is a line in a file, arguments joined by
 # `\x1f` (ASCII Unit Separator); a small script reads them all and emits one
-# record per case, and it is run **once** on each side. 400 cases cost one WSL
-# launch rather than 400.
+# record per case, and it is run **once** on each side.
 #
-# This is only possible because `test` is the rare utility with no output to
-# compare: it writes nothing on success, and its entire product is an *exit
-# status* plus, on a malformed expression, one line of stderr. There is no file
-# to leave behind and no stdout to interleave, so batching cannot let one case
-# contaminate the next. A batched `split` harness would be wrong for exactly the
-# reason this one is right.
+# Since the move to `scripts/diff-wsl.sh` the harness is *already* inside WSL,
+# so the launch it was avoiding now costs a fork rather than a VM entry, and the
+# batching is an optimisation rather than a necessity. It is kept because it is
+# not *wrong*: `test` is the rare utility with no output to compare — it writes
+# nothing on success, and its entire product is an *exit status* plus, on a
+# malformed expression, one line of stderr. There is no file to leave behind and
+# no stdout to interleave, so batching cannot let one case contaminate the next.
+# A batched `split` harness would be wrong for exactly the reason this one is
+# right.
 #
 # ## Why the exit status is the whole point
 #
@@ -43,57 +45,50 @@
 # before this harness existed — see `known-issues.md`. Every case below
 # therefore compares the status exactly, never merely "did it succeed".
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `test` is MSYS2's, a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, and its diagnostics are worded differently. Same note as
-# `split-diff.sh`, `csplit-diff.sh`, `od-diff.sh` and `wc-diff.sh`; see
-# `known-issues.md` → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.
+# `scripts/diff-wsl.sh` gives the reasons. The one that bites here is the
+# reference: the host's `test` is MSYS2's, a Cygwin derivative linking
+# `msys-2.0.dll` rather than glibc, and its diagnostics are worded differently
+# (`known-issues.md` → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`).
+#
+# The second reason is specific to this utility and is worth naming: `test` is
+# almost entirely *about* the filesystem, and the two hosts do not agree about
+# what a file is. The probe this preamble replaces existed because WSL was
+# entered with the Windows cwd and might land somewhere else; the whole "not
+# covered" list at the foot of this file existed because a symlink or a fifo
+# made by MSYS is not the same object a WSL binary sees on DrvFs. With both
+# sides in one process tree on one Linux filesystem, neither problem exists —
+# `$DIFF_TMP` is a real `/tmp` directory, not a `/mnt/c` view of one.
 #
 # ## Why LC_ALL=C.UTF-8
 #
-# The diagnostics quote the offending argument back at the caller through gnulib's
-# `quote()`, which picks its quote marks from the locale. Since §351 ours
-# prints U+2018/U+2019 in every locale, and GNU prints those under a UTF-8
-# locale and ASCII under `C` — so `C.UTF-8` is the setting the two agree in.
-# This file ran under `C` for the mirror-image of that reason until B-Q2 was
-# answered; nothing else here reads the locale.
+# `diff-wsl.sh` fixes it there, for the whole family. The diagnostics quote the
+# offending argument back at the caller through gnulib's `quote()`, which picks
+# its quote marks from the locale. Since §351 ours prints U+2018/U+2019 in every
+# locale, and GNU prints those under a UTF-8 locale and ASCII under `C` — so
+# `C.UTF-8` is the setting the two agree in. This file ran under `C` for the
+# mirror-image of that reason until B-Q2 was answered; nothing else here reads
+# the locale.
 set -u
 
-# Our `test` is a native Windows binary, so MSYS would rewrite any argument that
-# looks like a path — and `/`, `-ef`'s operands and every `-f FILE` case do.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils test "${OURS:-}") || exit 1
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one name
+# `test` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+#
+# The reference is named explicitly because `command -v test` inside a shell
+# finds the *builtin*, which is a different implementation and deliberately not
+# what is compared. `/usr/bin/test` is the real binary.
+DIFF_PROG=test
+DIFF_REF='/usr/bin/test /bin/test'
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 US=$'\x1f'   # joins the arguments of one case
 RS=$'\x1e'   # ends one case's record in the results
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$PWD/$OURS" ;; esac
+work=$DIFF_TMP/work
+mkdir -p "$work"
 cd "$work" >/dev/null || exit 1
-
-# WSL is invoked with the Windows cwd, which for an MSYS temp directory lands on
-# the same bytes under `/mnt/c/...`. Verified rather than assumed: every
-# filesystem case below names its operand *relatively*, so a reference that
-# silently ran somewhere else would report every file as absent — which looks
-# like a divergence in the file tests rather than like a broken harness.
-: > .probe
-if wsl -e env LC_ALL=C.UTF-8 test -f .probe >/dev/null 2>&1; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "test-diff: glibc test not reachable in this directory; skipping"
-fi
-rm -f .probe
 
 # --- fixtures -----------------------------------------------------------------
 #
@@ -146,18 +141,23 @@ xfail() { local why=$1; shift; add "$why" "$@"; }
 # because it should never write any: the utility's whole contract is "say
 # nothing, mean it with the exit status", so a stray byte on stdout is itself
 # the bug. It is captured by redirecting to a file rather than by running the
-# case a second time — on MSYS a `$(…)` costs a fork plus a Windows process
-# creation, ~2s under load, so a second invocation per case would add ten
-# minutes to the sweep to learn something we expect to be empty every time.
+# case a second time, which would double the work to learn something we expect
+# to be empty every time.
 #
-# $PROG is what that side puts in front of its diagnostics, and is stripped
-# here so the comparison is of the *message*. GNU echoes argv[0] verbatim, so
-# naming the reference `/usr/bin/test` makes every single error case "differ"
-# from our bare `test:` — 37 false diffs on the first run of this harness, all
-# of them the prefix and none of them the message. Stripping is done by exact
-# match, not by a wildcard: an unprefixed diagnostic is wrapped in a marker so
-# that dropping the prefix entirely still shows up as a difference rather than
-# being normalised away.
+# The `test: ` prefix on a diagnostic is *compared*, not stripped. GNU echoes
+# argv[0] verbatim, so when this harness named its reference `/usr/bin/test`
+# every single error case "differed" from our bare `test:` — 37 false diffs on
+# its first run, all of them the prefix and none of them the message — and the
+# fix at the time was to strip a known prefix from each side. `diff-wsl.sh`
+# removes the need: both binaries are reached through a symlink named `test` in
+# a directory on `PATH`, so both are handed the bare word as argv[0] and both
+# print `test: `. That gets back the one thing the stripping cost, which is the
+# ability to catch a *wrong* prefix.
+#
+# `env` is what makes that work. A bare `test` inside this runner would be
+# bash's builtin, which is a different implementation and deliberately not what
+# is being compared; a plain path would put that path in argv[0] and bring the
+# prefix problem back. `env` searches `PATH` and passes the bare name along.
 runner_body='
 US=$(printf "\037"); RS=$(printf "\036")
 tmp=$(mktemp)
@@ -173,21 +173,19 @@ while IFS= read -r line; do
     rest=${rest#*"$US"}
     i=$((i+1))
   done
-  err=$("$BIN" "${argv[@]}" 2>&1 >"$tmp" </dev/null); rc=$?
+  err=$(env test "${argv[@]}" 2>&1 >"$tmp" </dev/null); rc=$?
   out=$(<"$tmp")
-  case $err in
-    "")           ;;
-    "$PROG: "*)   err=${err#"$PROG: "} ;;
-    *)            err="<unprefixed>$err" ;;
-  esac
   printf "%s%s%s%s%s%s" "$rc" "$US" "$err" "$US" "$out" "$RS"
 done
 '
 
+# `$1` is `ours` or `gnu`, `$2` the output file. That side's directory goes on
+# the *front* of `PATH` rather than replacing it: the runner needs `mktemp` and
+# `env` from the system, and a one-entry `PATH` — the idiom the single-case
+# harnesses in this family use — would starve it of both. Our `test` still wins
+# the lookup, because it is first.
 run_side() {
-  # $1 = path to the binary as that side sees it, $2 = the prefix it prints,
-  # $3 = output file
-  BIN=$1 PROG=$2 bash -c "$runner_body" < "$cases" > "$3" 2>/dev/null
+  PATH="$bindir/$1:$PATH" bash -c "$runner_body" < "$cases" > "$2" 2>/dev/null
 }
 
 # --- the cases ----------------------------------------------------------------
@@ -436,80 +434,71 @@ t --version x
 
 # --- run and compare ---------------------------------------------------------
 
-rc=0
-if [ "$HAVE_GNU" = yes ]; then
-  run_side "$OURS_ABS" test "$work/ours.out"
-  # The reference is named as WSL sees it. `test` is a real binary at
-  # /usr/bin/test there; bash's builtin would be a different implementation and
-  # is deliberately not what is compared. Its diagnostics are prefixed with
-  # that same path, which is what $PROG strips.
-  wsl -e env LC_ALL=C.UTF-8 BIN=/usr/bin/test PROG=/usr/bin/test \
-      bash -c "$runner_body" < "$cases" > "$work/gnu.out" 2>/dev/null
+run_side ours "$work/ours.out"
+run_side gnu  "$work/gnu.out"
 
-  # Flatten both RS-delimited result streams to one record per line, then join
-  # them with the labels and reasons so a single awk can walk all four.
-  #
-  # The obvious loop — `awk 'NR==n'` over the result file once per case — is
-  # what this replaces. It re-read both files for every case and forked three
-  # subshells per case; at 157 cases that was ~470 process creations, which on
-  # MSYS took thirteen minutes for work that is one linear pass. A harness slow
-  # enough to be run reluctantly is a harness that stops being run.
-  #
-  # Flattening is safe because a `test` record cannot contain a newline: the
-  # diagnostics are single-line and stdout is always empty. If that ever stops
-  # being true the field count goes wrong and the case reports as a difference,
-  # which is noisy but not silent.
-  for side in ours gnu; do
-    tr "$RS" '\n' < "$work/$side.out" | sed '$d' > "$work/$side.lines"
-  done
-  paste -d "$RS" "$labels" "$whys" "$work/ours.lines" "$work/gnu.lines" \
-    | awk -F"$RS" -v US="$US" -v verbose="${VERBOSE:-}" '
-      { label = $1; why = $2; o = $3; g = $4 }
-      o == g && why == "-" { pass++; if (verbose) printf "OK   %s\n", label; next }
-      o == g               { xpass++
-                             printf "XPASS %s  (expected to differ: %s)\n", label, why
-                             next }
-      why != "-"           { xfail++; if (verbose) printf "XFAIL %s  (%s)\n", label, why
-                             next }
-      {
-        fail++
-        gsub(US, "|", o); gsub(US, "|", g)
-        printf "DIFF %s\n  ours: %s\n  gnu : %s\n", label, o, g
-      }
-      END {
-        printf "\n%d passed, %d differed, %d differ on purpose", pass, fail, xfail
-        if (xpass) printf ", %d no longer differ (update the harness)", xpass
-        printf "\n"
-        exit (fail == 0 && xpass == 0) ? 0 : 1
-      }'
-  rc=$?
-else
-  printf '\n0 passed, 0 differed, 0 differ on purpose (no reference available)\n'
-fi
+# Flatten both RS-delimited result streams to one record per line, then join
+# them with the labels and reasons so a single awk can walk all four.
+#
+# The obvious loop — `awk 'NR==n'` over the result file once per case — is
+# what this replaces. It re-read both files for every case and forked three
+# subshells per case; at 157 cases that was ~470 process creations, which on
+# MSYS took thirteen minutes for work that is one linear pass. A harness slow
+# enough to be run reluctantly is a harness that stops being run.
+#
+# Flattening is safe because a `test` record cannot contain a newline: the
+# diagnostics are single-line and stdout is always empty. If that ever stops
+# being true the field count goes wrong and the case reports as a difference,
+# which is noisy but not silent.
+for side in ours gnu; do
+  tr "$RS" '\n' < "$work/$side.out" | sed '$d' > "$work/$side.lines"
+done
+paste -d "$RS" "$labels" "$whys" "$work/ours.lines" "$work/gnu.lines" \
+  | awk -F"$RS" -v US="$US" -v verbose="${VERBOSE:-}" '
+    { label = $1; why = $2; o = $3; g = $4 }
+    o == g && why == "-" { pass++; if (verbose) printf "OK   %s\n", label; next }
+    o == g               { xpass++
+                           printf "XPASS %s  (expected to differ: %s)\n", label, why
+                           next }
+    why != "-"           { xfail++; if (verbose) printf "XFAIL %s  (%s)\n", label, why
+                           next }
+    {
+      fail++
+      gsub(US, "|", o); gsub(US, "|", g)
+      printf "DIFF %s\n  ours: %s\n  gnu : %s\n", label, o, g
+    }
+    END {
+      printf "\n%d passed, %d differed, %d differ on purpose", pass, fail, xfail
+      if (xpass) printf ", %d no longer differ (update the harness)", xpass
+      printf "\n"
+      exit (fail == 0 && xpass == 0) ? 0 : 1
+    }'
+rc=$?
 
 # --- not covered, and why ------------------------------------------------------
 #
 # `-b -c -p -S` (block/character/fifo/socket) and `-g -u -k` (setgid/setuid/
-# sticky) have no representable fixture here: MSYS cannot create the file types,
-# and a WSL-created one under /mnt/c is not seen as such by a native Windows
-# binary. They appear above only in their *false* form, against a plain file,
-# which at least pins "does not crash, does not claim yes".
+# sticky) appear above only in their *false* form, against a plain file, which
+# pins "does not crash, does not claim yes" and nothing more. `-L -h -N -O -G`
+# are in the same position.
 #
-# `-L -h -N -O -G` are in the same position for the same reason: a symlink made
-# by MSYS and a symlink made by WSL are different objects on DrvFs, and owner
-# and mtime-vs-atime comparisons need semantics the host does not supply.
+# That used to be forced: MSYS could not create the file types, and one made in
+# WSL under /mnt/c was not seen as such by a native Windows binary, so a fixture
+# the two sides disagreed about would have tested the harness rather than
+# `test`. Since the move to `diff-wsl.sh` both sides read one real Linux
+# filesystem, so `mkfifo`, `ln -s`, `chmod u+s` and a dangling symlink are all
+# representable and all mean the same thing to both. The true-form cases are
+# therefore now *possible* and merely absent; adding them is worth a commit of
+# its own, since it is new coverage rather than the same coverage moved.
+# (`-O`/`-G` and `-N` still need care: the first two are true of everything this
+# harness creates, and the third needs an atime the mount option may not update.)
 #
 # `-t` is tested only for the answers that do not depend on the terminal: both
 # sides run with stdin, stdout and stderr redirected, so every `-t N` is false,
 # and what is being compared is the *argument handling*, not the tty detection.
 #
 # `[` — the same program under its other name, where the final `]` is mandatory
-# — cannot be exercised here: argv[0] is not settable from this side of the
-# harness. It is covered by unit tests in `test.rs` instead.
-#
-# The *program-name prefix* on diagnostics is normalised away rather than
-# compared, because GNU echoes argv[0] verbatim and this harness must name the
-# reference by an absolute path. What that costs is the ability to catch a
-# wrong prefix; `test.rs`'s unit tests pin the `[:` versus `test:` distinction
-# instead.
+# — is not exercised here. It is now reachable in principle (a second symlink in
+# each side's `PATH` directory would do it) but is currently covered by unit
+# tests in `test.rs` instead.
 exit "$rc"

@@ -35,11 +35,20 @@
 //! so it arrives as the physical `LeftBracket` with the character `ü`
 //! travelling beside it, rather than as nothing at all.
 //!
+//! ## What this module deliberately is not
+//!
+//! A pure function of one keystroke. Dead keys (`´` then `e` → `é`) need state
+//! carried between two key events, so they live next door in
+//! [`deadkey`](crate::deadkey) rather than here, and the split is the point:
+//! `key_for_layout` stays a lookup that can be tested one code at a time.
+//!
 //! ## What is still missing
 //!
-//! Dead keys (`´` then `e` → `é`) and compose sequences. Both need state
-//! carried between two key events, and this module is a pure function of one.
-//! See `known-issues.md` → `TD-ONLY-ONE-KEYBOARD-LAYOUT`, steps (3) and (4).
+//! Compose sequences (`Compose`, `o`, `c` → `©`), which are a *sequence* of
+//! arbitrary length rather than the one-character memory a dead key needs, and
+//! the numeric keypad, which cannot type digits until something tracks Num
+//! Lock. See `known-issues.md` →
+//! `TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK`.
 
 use guitk::event::{Key, Modifiers};
 use keylayout::{KeyDef, Layout, Level};

@@ -72,6 +72,11 @@ mod render;
 pub use render::{RenderBackend, RenderTarget};
 mod keymap;
 pub use keymap::{ModifierState, key_for_scancode};
+// The one piece of keyboard state that spans two events. `keymap` is a pure
+// function of a single keystroke, and a dead key is the case that cannot be:
+// `´` types nothing until the `e` after it arrives. Kept beside `keymap` and
+// not inside it so that the pure part stays pure.
+mod deadkey;
 // The front end that turns a byte stream from a client into compositor calls
 // and compositor events back into bytes. Everything above this line works in
 // terms of typed requests; `wire` is the only place that parses frames.
@@ -4462,6 +4467,12 @@ pub struct Compositor {
     /// (`design-decisions.md` §456): one answer for the whole system, so two
     /// applications cannot disagree about whether Ctrl was down.
     modifiers: ModifierState,
+    /// The dead-key accent waiting for the keystroke that completes it.
+    ///
+    /// Beside [`Self::modifiers`] and for the same reason: it is keyboard
+    /// state spanning two events, and one answer for the whole desktop is the
+    /// point. See the [`deadkey`] module docs for the rules.
+    dead_keys: deadkey::DeadKeys,
     /// Whether a full recomposite is needed (e.g., after display resize).
     full_recomposite: bool,
     /// Whether [`render_all_windows`](Self::render_all_windows) may skip the
@@ -4527,6 +4538,7 @@ impl Compositor {
             pending_notifications: VecDeque::new(),
             window_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
+            dead_keys: deadkey::DeadKeys::new(),
             full_recomposite: true,
             occlusion_cull: true,
             scanout: Scanout::Composited,
@@ -5602,6 +5614,11 @@ impl Compositor {
         if let Some(old_id) = old_focused
             && old_id != window_id
         {
+            // A dead-key accent belongs to the window it was armed in. Left
+            // pending across a focus change it would complete itself in the
+            // *next* window, putting a letter the user never typed into a
+            // document they had already left.
+            self.dead_keys.cancel();
             if let Some(win) = self.window_mut(old_id) {
                 win.focused = false;
                 win.dirty = true;
@@ -6383,6 +6400,32 @@ impl Compositor {
             // Alt+Q shortcut must keep working from either side.
             modifiers.alt = self.modifiers.left_alt();
         }
+        // The source's own character wins where it has one, and the dead-key
+        // machine is skipped with it: a source that hands over a finished
+        // character has already run whatever composition its own layout
+        // implies, and running ours on top would compose twice. Releases
+        // carry no text at all — a key going up inserts nothing, and a
+        // character there would have every text field type each letter twice.
+        //
+        // Everything else goes through `DeadKeys`, which is where a `String`
+        // rather than a `char` is finally earned: `´` then `x` types *two*
+        // characters (`design-decisions.md` §550), and until this call every
+        // keystroke could only ever produce one.
+        let text = match (character, pressed) {
+            (Some(from_source), true) => from_source.to_string(),
+            (None, true) => self.dead_keys.press(
+                self.layout,
+                scancode,
+                level,
+                laid_out,
+                // After the AltGr fold above, so a German user's AltGr+Q is
+                // text entry and not an Alt chord. Super is included because
+                // Super+E opens a file manager on every desktop there is; a
+                // pending accent must survive that too.
+                modifiers.ctrl || modifiers.alt || modifiers.super_key,
+            ),
+            (_, false) => String::new(),
+        };
         self.pending_notifications
             .push_back(EventNotification::KeyEvent {
                 window_id,
@@ -6390,16 +6433,7 @@ impl Compositor {
                 key,
                 pressed,
                 modifiers,
-                // The source's own character wins where it has one: the host
-                // backend gets it from the *host's* layout, which is the one
-                // the person at that keyboard is actually typing on, and
-                // second-guessing it with ours would mean a US developer
-                // testing a German build typed German. Releases carry none —
-                // a key going up inserts no text, and a character there would
-                // have every text field type each letter twice.
-                text: character
-                    .or(if pressed { laid_out } else { None })
-                    .map_or_else(String::new, |c| c.to_string()),
+                text,
             });
     }
 
@@ -6410,8 +6444,14 @@ impl Compositor {
     /// forever and every later keystroke arrives as a chord: the classic
     /// "stuck Ctrl" that makes a desktop look crashed when nothing has
     /// actually failed.
+    ///
+    /// A pending dead-key accent is discarded with them, and for the same
+    /// reason: the keyboard is gone, so the vowel that would have completed it
+    /// is never coming. Leaving it armed would attach an accent the user typed
+    /// in one session to the first letter they type in the next.
     pub const fn release_all_modifiers(&mut self) {
         self.modifiers.release_all();
+        self.dead_keys.cancel();
     }
 
     /// The modifier keys currently held.
@@ -8810,6 +8850,123 @@ mod tests {
         });
 
         assert_eq!(first_key(&mut comp).text, "s");
+    }
+
+    #[test]
+    fn a_dead_key_composes_with_the_next_letter_end_to_end() {
+        // The unit tests in `deadkey` prove the rules; this proves the wiring,
+        // which is the half that can be right in isolation and still never
+        // run. German `´` is the key right of `ß` (0x0D).
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0D,
+            character: None,
+        });
+        assert_eq!(
+            first_key(&mut comp).text,
+            "",
+            "a dead key types nothing on its own"
+        );
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x12, // E
+            character: None,
+        });
+        assert_eq!(first_key(&mut comp).text, "é");
+    }
+
+    #[test]
+    fn a_failed_composition_reaches_the_client_as_both_characters() {
+        // `design-decisions.md` §550, end to end. This is the case that made
+        // `KeyEvent::text` a `String`: one keystroke, two characters, and a
+        // field that dropped either of them would be eating input.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0D,
+            character: None,
+        });
+        let _ = first_key(&mut comp);
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x2D, // X — there is no "x with acute"
+            character: None,
+        });
+        assert_eq!(first_key(&mut comp).text, "´x");
+    }
+
+    #[test]
+    fn moving_focus_disarms_a_pending_dead_key() {
+        // An accent belongs to the window it was armed in. Carried across a
+        // focus change it would put a letter the user never typed into a
+        // document they had already left.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let first = comp.create_window("First".to_string(), 400, 300, 1);
+        let second = comp.create_window("Second".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+
+        comp.focus_window(first);
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0D,
+            character: None,
+        });
+        let _ = first_key(&mut comp);
+
+        comp.focus_window(second);
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x12, // E
+            character: None,
+        });
+        assert_eq!(
+            first_key(&mut comp).text,
+            "e",
+            "the accent followed focus into the next window"
+        );
+    }
+
+    #[test]
+    fn losing_the_keyboard_disarms_a_pending_dead_key() {
+        // A VT switch or a device unplug. The vowel that would have completed
+        // the accent is never coming; keeping it armed would attach it to the
+        // first letter typed after the session comes back.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("de-qwertz"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0D,
+            character: None,
+        });
+        let _ = first_key(&mut comp);
+
+        comp.release_all_modifiers();
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x12, // E
+            character: None,
+        });
+        assert_eq!(first_key(&mut comp).text, "e");
+    }
+
+    #[test]
+    fn a_us_layout_types_a_grave_accent_as_a_grave_accent() {
+        // The regression that would matter most: US QWERTY declares no dead
+        // keys, and every shell prompt, every Markdown code span and every
+        // `git log --format` string is a backtick. A machine that armed on the
+        // character rather than on the layout's declaration would break all of
+        // them.
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        comp.create_window("Focused".to_string(), 400, 300, 1);
+        comp.set_input_settings(settings_using("us-qwerty"));
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x29, // the key left of `1`
+            character: None,
+        });
+        assert_eq!(first_key(&mut comp).text, "`");
     }
 
     #[test]

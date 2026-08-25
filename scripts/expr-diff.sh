@@ -1,89 +1,142 @@
 #!/usr/bin/env bash
-# Differential test: our expr against the host's GNU expr.
+# Differential test: our expr against GNU expr, both run inside WSL.
 #
-# Each case is `run_case ARGS...`. Both exprs get identical argv — there is no
-# stdin to give them — and stdout and the exit status are compared byte for
-# byte. This is the check a unit test cannot make, because a unit test asserts
-# what we believe expr does rather than what expr does, and expr's corners are
-# where belief and reality part company: `expr '' '|' ''` prints `0`, not an
-# empty line, and `expr +0 '|' x` prints `+0` while `expr -0 '|' x` prints `x`.
+# expr has no stdin. Every case is argv and nothing else, which makes this the
+# simplest harness in the tree and also the one whose corners are least
+# guessable: `expr '' '|' ''` prints `0` rather than an empty line, `expr +0 '|'
+# x` prints `+0` while `expr -0 '|' x` prints `x`, and `expr abc : 'a**'` is
+# accepted by GNU and refused by us. A unit test asserts what we believe expr
+# does; this asserts what expr does.
 #
-# `xfail_case REASON ARGS...` is a case where we differ deliberately and the
-# reason is written down — see the head of `expr.rs` for the list. The script
-# fails if a plain case differs, and also if an xfail *stops* differing, because
-# that means the recorded reason no longer describes reality.
+# ## What changed when this moved onto diff-wsl.sh
 #
-# stderr only has to agree about *whether* there was a diagnostic. Matching
-# GNU's wording exactly would be fitting to glibc's regcomp, not to expr.
+# It used to run on Windows against MSYS2's expr, and had three defects that
+# each hid divergences rather than reporting them.
 #
-# GNU expr is run in a UTF-8 locale on purpose. `length`, `substr`, `index` and
-# the count `:` returns are character operations there and byte operations in
-# the C locale; this system is UTF-8 throughout, so the UTF-8 answers are the
-# ones we are claiming to match. Running the comparison in the C locale would
-# be comparing against an artifact of the development host's environment.
+# **The reference was not GNU's.** MSYS2 is a Cygwin derivative; its coreutils
+# are built against Cygwin's libc and its regex is not glibc's. A harness that
+# compares against it certifies wording no GNU/Linux system prints.
+#
+# **stdout was captured with `$(...)`,** which strips every trailing newline and
+# cannot hold a NUL. GNU expr terminates its one line of output with `\n`; a
+# build of ours that stopped doing so would have passed this harness silently.
+# stdout now goes to a file and is compared as a hex dump.
+#
+# **stderr was compared for presence only** — whether there was a diagnostic,
+# never what it said. That is the right rule for exactly two of expr's messages
+# and the wrong rule for all the rest, so the two rules are now separated; see
+# below. It was hiding a real divergence: GNU quotes the offending argument
+# with directional quotes (`syntax error: unexpected argument ‘2’`) in a UTF-8
+# locale and with `'...'` under `C`, and nothing here had ever looked.
+#
+# It also needed `MSYS2_ARG_CONV_EXCL='*'` so that MSYS would not rewrite the
+# pattern `.*/\(.*\)` into something with a drive letter in it. Inside WSL an
+# argument is a byte string and arrives as written, which is also what makes the
+# undecodable-byte cases at the end possible at all — they could not be written
+# before, because MSYS could not carry the byte.
+#
+# ## Two verdicts per case
+#
+# | helper | stderr compared as |
+# |---|---|
+# | `run_case ARGS...` | presence — was there a diagnostic at all |
+# | `msg_case ARGS...` | text — byte for byte |
+#
+# `msg_case` is the default for expr's own diagnostics, because they are plain
+# reports about the command line (`syntax error: unexpected argument ‘2’`,
+# `division by zero`, `non-integer argument`) and a script that greps expr's
+# stderr should not have to know which expr it got.
+#
+# `run_case` is for the two that come out of the regex engine — `Unmatched ( or
+# \(`, `Invalid content of \{\}` — which are glibc's `regcomp` strings rendered
+# by glibc's `regerror`. Matching those exactly would be fitting our engine to
+# glibc's internal error taxonomy rather than to expr, so we agree only about
+# *whether* the pattern was rejected.
+#
+# `xfail_case` / `xmsg_case` take a reason first, for a divergence we chose. The
+# script fails if a plain case differs, and also if an xfail stops differing,
+# because then the recorded reason no longer describes reality.
 set -u
 
-# Our expr is a native Windows binary, so MSYS would helpfully rewrite an
-# argument that looks like a path — turning the pattern `.*/\(.*\)` into
-# something with a drive letter in it.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils expr "${OURS:-}") || exit 1
-GNU=${GNU:-expr}
-export LC_ALL=${LC_ALL:-C.UTF-8}
+DIFF_PROG=expr
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
+# One entry on `PATH`, which is safe here in a way it would not be for awk or
+# sed: expr runs no subprocess, so there is nothing else for it to need to find.
+# The single entry is the guarantee that the `expr` being run is the symlink and
+# not whatever else is installed.
+run_side() {
+  local side=$1 out=$2 err=$3; shift 3
+  env PATH="$bindir/$side" expr "$@" >"$out" 2>"$err"
+}
+
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc
-  o_err=$(mktemp); g_err=$(mktemp)
-  o_out=$("$OURS" "$@" 2>"$o_err"); o_rc=$?
-  g_out=$("$GNU" "$@" 2>"$g_err"); g_rc=$?
+  local o_out g_out o_msg g_msg o_bin g_bin o_err g_err o_rc g_rc
+  o_err=$(mktemp); g_err=$(mktemp); o_bin=$(mktemp); g_bin=$(mktemp)
+  # stdout to a file rather than through a pipe into `od`: in `x=$(expr | od)`
+  # the recorded status is od's, and `PIPESTATUS` is set inside the command
+  # substitution's subshell where it cannot be read — so every failing case
+  # would compare od's success against od's success and pass.
+  run_side ours "$o_bin" "$o_err" "$@"; o_rc=$?
+  run_side gnu  "$g_bin" "$g_err" "$@"; g_rc=$?
+
+  # A hex dump, so that the trailing newline and any byte that is not valid
+  # UTF-8 are part of the comparison rather than lost on the way into a shell
+  # variable.
+  o_out=$(od -An -tx1 <"$o_bin"); g_out=$(od -An -tx1 <"$g_bin")
+  o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
 
   local o_loud=no g_loud=no
   [ -s "$o_err" ] && o_loud=yes
   [ -s "$g_err" ] && g_loud=yes
+  rm -f "$o_bin" "$g_bin" "$o_err" "$g_err"
 
-  if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_loud" = "$g_loud" ]; then
-    AGREED=yes
-  else
-    AGREED=no
-  fi
+  local same_out=no
+  [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && same_out=yes
+
+  AGREED=no; AGREED_MSG=no
+  [ "$same_out" = yes ] && [ "$o_loud" = "$g_loud" ] && AGREED=yes
+  [ "$same_out" = yes ] && [ "$o_msg" = "$g_msg" ] && AGREED_MSG=yes
+
   REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}' \
-    "$o_rc" "$(printf '%s' "$o_out" | tr '\n' '|')" "$(tr '\n' '|' <"$o_err")" \
-    "$g_rc" "$(printf '%s' "$g_out" | tr '\n' '|')" "$(tr '\n' '|' <"$g_err")")
-  rm -f "$o_err" "$g_err"
+    "$o_rc" "$(printf '%s' "$o_out" | tr -s ' \n' ' ')" "$(printf '%s' "$o_msg" | tr '\n' '|')" \
+    "$g_rc" "$(printf '%s' "$g_out" | tr -s ' \n' ' ')" "$(printf '%s' "$g_msg" | tr '\n' '|')")
 }
 
-run_case() {
-  compare "$@"
-  if [ "$AGREED" = yes ]; then
+report() {
+  local agreed=$1 label=$2
+  if [ "$agreed" = yes ]; then
     pass=$((pass+1))
-    [ -n "${VERBOSE:-}" ] && printf 'OK   expr %s\n' "$*"
+    [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$label"
   else
     fail=$((fail+1))
-    printf 'DIFF expr %s\n%s\n' "$*" "$REPORT"
+    printf 'DIFF %s\n%s\n' "$label" "$REPORT"
   fi
   return 0
 }
 
-xfail_case() {
-  local reason="$1"; shift
-  compare "$@"
-  if [ "$AGREED" = no ]; then
+report_x() {
+  local agreed=$1 reason=$2 label=$3
+  if [ "$agreed" = no ]; then
     xfail=$((xfail+1))
-    [ -n "${VERBOSE:-}" ] && printf 'XFAIL expr %s  (%s)\n' "$*" "$reason"
+    [ -n "${VERBOSE:-}" ] && printf 'XFAIL %s  (%s)\n' "$label" "$reason"
   else
     xpass=$((xpass+1))
-    printf 'XPASS expr %s\n  now agrees with GNU, so this reason is stale: %s\n' "$*" "$reason"
+    printf 'XPASS %s\n  now agrees with GNU, so this reason is stale: %s\n' "$label" "$reason"
   fi
   return 0
 }
+
+run_case()  { compare "$@"; report   "$AGREED"     "expr $*"; }
+msg_case()  { compare "$@"; report   "$AGREED_MSG" "expr $*"; }
+
+xfail_case() { local r="$1"; shift; compare "$@"; report_x "$AGREED"     "$r" "expr $*"; }
+xmsg_case()  { local r="$1"; shift; compare "$@"; report_x "$AGREED_MSG" "$r" "expr $*"; }
+
+printf 'expr-diff:\n  ours: %s\n  gnu:  %s\n\n' "$OURS" "$gnu_real"
 
 # --- arithmetic -------------------------------------------------------------
 run_case 2 + 3
@@ -114,14 +167,16 @@ run_case 123456789012345678901234567890 % 987654321
 run_case 2 '*' 170141183460469231731687303715884105728
 
 # --- arithmetic on things that are not numbers ------------------------------
-run_case foo + 1
-run_case '' + 1
-run_case ' 10 ' + 1
-run_case +1 + 1
-run_case 1 - -
-run_case 1 / 0
-run_case 5 % 0
-run_case 1.5 + 1
+# The wording is compared: `non-integer argument` is a plain report about the
+# command line, not a rendering of anything's internals.
+msg_case foo + 1
+msg_case '' + 1
+msg_case ' 10 ' + 1
+msg_case +1 + 1
+msg_case 1 - -
+msg_case 1 / 0
+msg_case 5 % 0
+msg_case 1.5 + 1
 
 # --- comparison -------------------------------------------------------------
 run_case 5 = 5
@@ -196,6 +251,14 @@ run_case v1.24.3 : 'v\([0-9]*\)'
 run_case v1.24.3 : 'v\([0-9]*\)\.\([0-9]*\)'
 run_case abc : '\(x\)*a'
 
+# Patterns the engine rejects. Presence only: the text is glibc's `regcomp`
+# error taxonomy rendered by `regerror`, and matching it would be fitting our
+# engine to glibc's internals rather than to expr.
+run_case abc : 'a\('
+run_case abc : 'a\{3,1\}'
+run_case abc : '[a-'
+run_case abc : 'a\{1'
+
 # --- match, substr, index, length -------------------------------------------
 run_case match abc a
 run_case match abc b
@@ -236,6 +299,9 @@ run_case 1 + + 2
 run_case + 1 + 2
 
 # --- text that is not ASCII -------------------------------------------------
+# Character operations under `C.UTF-8`, which is what this system is. Under `C`
+# they are byte operations, and a harness that ran there would be certifying an
+# artifact of the development host's environment rather than expr's behaviour.
 run_case length héllo
 run_case substr héllo 2 2
 run_case index héllo é
@@ -244,27 +310,93 @@ run_case héllo : '.é'
 run_case héllo : '\(.é\)'
 run_case héllo : '.*'
 
+# ...and text that is not text. A byte that is not valid UTF-8 is data: it has
+# to survive `substr` and be counted by `length` without being replaced by
+# U+FFFD, which is the silent corruption `from_utf8_lossy` performs and this
+# project forbids outright (CLAUDE.md's self-review item 7). Measured: GNU
+# counts the byte, matches it, and says nothing about it.
+#
+# These cases could not be written under the old harness at all — MSYS could not
+# carry the byte through argv.
+raw=$(printf 'a\xffb')
+run_case length "$raw"
+run_case index "$raw" b
+run_case substr "$raw" 2 1
+run_case "$raw" '|' x
+run_case "$raw" = "$raw"
+
+# The regex half is where GNU stops agreeing with itself, and the two cases
+# below are the demonstration. The three cases above establish that GNU calls
+# the undecodable byte a character: `length` says 3, `index ... b` says 3, and
+# `substr ... 2 1` hands the byte back. But its matcher cannot see past it —
+# `.*` matches only the leading `a`, and `a.b` does not match at all. A string
+# that is three characters long to `length` and one character long to `.*` is
+# not a model a script can be written against.
+#
+# Ours counts the byte in both halves (design-decisions.md §322). That is also
+# the only reading under which `expr "$path" : '.*/\(.*\)'` — one of the oldest
+# spellings of `basename` — keeps working on a path this filesystem allows,
+# which is every byte but `/` and NUL.
+xfail_case 'GNU: length calls the undecodable byte a character but the matcher stops at it; ours is bytes throughout (§322)' \
+  "$raw" : '.*'
+xfail_case 'GNU: `a.b` cannot match across an undecodable byte its own `length` counts; ours is bytes throughout (§322)' \
+  "$raw" : 'a.b'
+
 # --- syntax errors ----------------------------------------------------------
-run_case ''
-run_case 1 +
-run_case '(' 1
-run_case '(' 1 ']'
-run_case '(' 1 ')' ')'
-run_case 1 2
-run_case ')'
-run_case length
-run_case length ')'
-run_case substr abc 1
-run_case match abc
-run_case index abc
-run_case abc :
-run_case : abc
-run_case -
-run_case - 1
-run_case substr abc 1 1 extra
+# Text-compared. Every one of these names the offending argument back to the
+# user, which is the part a person reads and a script greps.
+msg_case ''
+msg_case 1 +
+msg_case '(' 1
+msg_case '(' 1 ']'
+msg_case '(' 1 ')' ')'
+msg_case 1 2
+msg_case ')'
+msg_case length
+msg_case length ')'
+msg_case substr abc 1
+msg_case match abc
+msg_case index abc
+msg_case abc :
+msg_case : abc
+msg_case -
+msg_case - 1
+msg_case substr abc 1 1 extra
 run_case '(' 42 ')'
 run_case hello
 run_case 42
+
+# --- the two option-shaped arguments ----------------------------------------
+# `--` ends the options, so `expr -- 1 + 2` is arithmetic and not an error.
+# `--help` and `--version` are recognised only in the first position; anywhere
+# else they are ordinary strings, which is why `expr abc --version` is a syntax
+# error about an unexpected argument rather than a version banner.
+run_case -- 1 + 2
+msg_case abc --version
+msg_case 1 + --help
+
+# `--help` is checked for shape rather than text. Its content is not GNU's to
+# dictate to us — GNU's ends in translation-project and info-page addresses
+# that would be a lie coming from this binary — but the three things that go
+# wrong with a `--help` are not about content at all, and all three are checked:
+# it must exit 0, it must write to *stdout* and not stderr, and it must say
+# something. A `--help` that exits 2, or that a pager cannot be piped, is the
+# bug this case exists to catch.
+help_shape() {
+  local out err rc
+  out=$(mktemp); err=$(mktemp)
+  run_side ours "$out" "$err" --help; rc=$?
+  if [ "$rc" -eq 0 ] && [ -s "$out" ] && [ ! -s "$err" ]; then
+    AGREED=yes
+  else
+    AGREED=no
+    REPORT=$(printf '  rc=%s  stdout=%s bytes  stderr=%s bytes' \
+      "$rc" "$(wc -c <"$out")" "$(wc -c <"$err")")
+  fi
+  rm -f "$out" "$err"
+  report "$AGREED" 'expr --help (exits 0, writes stdout, says nothing on stderr)'
+}
+help_shape
 
 # --- backreferences ---------------------------------------------------------
 run_case abc : '\(a\)\1'
@@ -273,9 +405,16 @@ run_case abcabcx : '\(abc\)\1'
 run_case aa : '\(a*\)\1'
 run_case a2 : '\(a\)\2'
 
-# --- where we differ on purpose ---------------------------------------------
-xfail_case 'a stacked quantifier is refused; GNU folds a** to a*' \
-  abc : 'a**'
+# --- two divergences that stopped being divergences --------------------------
+# Both were recorded as deliberate and both are now plain cases, caught as XPASS
+# the first time this harness ran against real GNU expr instead of MSYS2's.
+# Backreferences were the Pike VM's one real limitation and were implemented on
+# 2026-08-18 (known-issues.md); the stacked quantifier `a**` is now folded
+# exactly as GNU folds it. They are kept as cases precisely because they were
+# once wrong.
+run_case abc : 'a**'
+run_case aab : 'a**'
+run_case abcabcx : '\(abc\)\1'
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

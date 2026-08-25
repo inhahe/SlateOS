@@ -62,14 +62,30 @@
 //!
 //! | Case | Ours | GNU |
 //! |---|---|---|
-//! | a backreference in the pattern (`\(a\)\1`) | refused, exit 2 | matched |
-//! | a stacked quantifier (`a**`) | refused, exit 2 | matched, `*` folded |
+//! | `:` against a byte that is not valid UTF-8 | the byte is data; `.` matches it | the byte stops the match dead |
 //! | the text of a bad-pattern diagnostic | `ere`'s wording | `regcomp`'s wording |
 //!
-//! The first is the Pike VM's one real limitation — it is the same property
-//! that makes the engine immune to catastrophic backtracking — and refusing is
-//! better than the alternative, which is treating `\1` as a literal `1` and
-//! quietly answering the wrong question. See `known-issues.md`.
+//! The first is a place where **GNU disagrees with itself** and we do not.
+//! Measured on GNU expr 9.4 under `C.UTF-8`, with `$raw` holding the three
+//! bytes `a`, `0xff`, `b`: `expr length "$raw"` answers `3` and `expr index
+//! "$raw" b` answers `3`, so its string half calls the undecodable byte a
+//! character and counts it — but `expr "$raw" : '.*'` answers `1` and `expr
+//! "$raw" : 'a.b'` does not match at all, so its regex half cannot see past it.
+//! A string that is three characters long to `length` and one character long to
+//! `.*` is not a model anyone can write a script against. Ours counts the byte
+//! in both halves, which is `design-decisions.md` §322's byte-based model, and
+//! is the only reading under which `expr "$path" : '.*/\(.*\)'` still works on
+//! a path this filesystem allows — every byte but `/` and NUL.
+//!
+//! The second stays: `regcomp`'s messages are glibc's internal error taxonomy,
+//! and reproducing them would fit our engine to glibc rather than to expr.
+//!
+//! Two rows that used to be here are gone because they stopped being true.
+//! Backreferences (`\(a\)\1`) were the Pike VM's one real limitation and are
+//! now supported — see `known-issues.md`, fixed 2026-08-18 — and a stacked
+//! quantifier (`a**`) is now folded exactly as GNU folds it. Both were caught
+//! by `expr-diff.sh` reporting them as XPASS once it was measuring against real
+//! GNU expr rather than MSYS2's.
 
 use coreutils::diag;
 use coreutils::stdfd;
@@ -83,7 +99,68 @@ use ere::ch::{Ch, chars};
 /// An operand, an operator, and a result: all bytes.
 type Str = Vec<u8>;
 
+/// The one line printed beside a diagnostic, where a wall of text would bury
+/// the error that caused it.
 const USAGE: &str = "usage: expr EXPRESSION";
+
+/// What `--help` prints, which is a different job from [`USAGE`]: nobody types
+/// `--help` by accident, and expr's entire interface *is* its operator table —
+/// a program whose help says only `expr EXPRESSION` has told the reader
+/// nothing they did not already know. Shaped like `sed`'s, not copied from
+/// GNU's, whose text ends in translation-project and info-page addresses that
+/// are not ours to print.
+///
+/// The precedence order is the one thing here that cannot be guessed and is
+/// the usual reason a script gets a surprising answer, so it is the spine of
+/// the listing rather than a footnote.
+const HELP: &str = "\
+usage: expr EXPRESSION
+       expr --help | --version
+
+Evaluate EXPRESSION and print its value. Operators are grouped below from
+loosest-binding to tightest; each group binds tighter than the one above it,
+and every group associates to the left.
+
+  ARG1 | ARG2              ARG1 if it is neither null nor 0, otherwise ARG2
+  ARG1 & ARG2              ARG1 if neither argument is null or 0, otherwise 0
+
+  ARG1 < ARG2              less than
+  ARG1 <= ARG2             less than or equal
+  ARG1 = ARG2, ARG1 == ARG2    equal
+  ARG1 != ARG2             unequal
+  ARG1 >= ARG2             greater than or equal
+  ARG1 > ARG2              greater than
+
+  ARG1 + ARG2              sum
+  ARG1 - ARG2              difference
+
+  ARG1 * ARG2              product
+  ARG1 / ARG2              quotient, truncated toward zero
+  ARG1 % ARG2              remainder, with the sign of ARG1
+
+  STRING : REGEXP          match REGEXP, anchored at the start of STRING
+
+  match STRING REGEXP      the same as STRING : REGEXP
+  substr STRING POS LENGTH substring of STRING, POS counted from 1
+  index STRING CHARS       position in STRING of the first of any CHARS, or 0
+  length STRING            length of STRING in characters
+  + TOKEN                  TOKEN as a string, even if it is a keyword such as
+                           `match' or an operator such as `/'
+  ( EXPRESSION )           the value of EXPRESSION
+
+A comparison is arithmetic when both arguments are integers and lexicographic
+otherwise. A `:' or `match' with \\( \\) in the pattern yields the text the
+first group captured, or null when it did not match; without \\( \\) it yields
+the number of characters matched, or 0. Arithmetic is arbitrary-precision.
+
+Most of these operators mean something to the shell as well, so they have to be
+quoted: write `expr 3 '*' 4', not `expr 3 * 4'.
+
+Exit status:
+  0  EXPRESSION is neither null nor 0
+  1  EXPRESSION is null or 0
+  2  EXPRESSION is invalid, or an operand is wrong for its operator
+  3  a write failed";
 
 /// Why evaluation stopped. Every case exits 2 — GNU reserves 3 for an I/O
 /// failure, which is the only thing this program can fail at afterwards.
@@ -105,7 +182,7 @@ fn run_main() -> ExitCode {
     // two strings that happen to look like options, and answers 1.
     if let [only] = raw.as_slice() {
         if only.as_slice() == b"--help" {
-            println!("{USAGE}");
+            println!("{HELP}");
             return ExitCode::SUCCESS;
         }
         if only.as_slice() == b"--version" {

@@ -59,16 +59,24 @@
 use coreutils::diag;
 use coreutils::quote::{self, quotef_os};
 use coreutils::stdfd;
+use std::collections::VecDeque;
 use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 // Aliased: this file already has a `Syntax` — the `-G`/`-E`/`-F` selector —
 // and `ere::Syntax` is the dialect that selector maps *onto*.
 use ere::{MatchLimit, Regex, Syntax as EreSyntax, bre};
+
+// Before `main`, so that `stdfd::restore` still sees a caller's `grep … >&-` as
+// the closed descriptor it is rather than the `/dev/null` the Rust runtime
+// substitutes for it before `main` runs. Without it `grep a abc >&-` prints
+// nothing and exits 0, where GNU says `grep: write error: Bad file descriptor`
+// and exits 2.
+coreutils::guard_std_fds!();
 
 /// Which language the patterns are written in.
 #[derive(Clone, Copy, Default)]
@@ -86,6 +94,37 @@ enum Syntax {
     Fixed,
 }
 
+/// What is printed between two groups of output that are not adjacent in the
+/// file.
+///
+/// Three states rather than an `Option<Vec<u8>>` because *empty* and *absent*
+/// are different answers: `--group-separator=` prints a blank line, while
+/// `--no-group-separator` prints nothing at all. An `Option` would have to
+/// spell one of the two as `Some(b"")` and then remember which.
+#[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum GroupSep {
+    /// GNU's default, `--`.
+    #[default]
+    Dashes,
+    /// `--group-separator=SEP`.
+    Custom(Vec<u8>),
+    /// `--no-group-separator`.
+    Suppressed,
+}
+
+impl GroupSep {
+    /// The bytes written before the separator's newline, or `None` when no
+    /// separator line is written at all.
+    fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            Self::Dashes => Some(b"--"),
+            Self::Custom(s) => Some(s),
+            Self::Suppressed => None,
+        }
+    }
+}
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Options {
@@ -95,6 +134,14 @@ struct Options {
     count_only: bool,
     line_numbers: bool,
     recursive: bool,
+    /// `-R`: also follow a symbolic link found *during* the walk.
+    ///
+    /// `-r` and `-R` differ over exactly this. Both follow a link named on the
+    /// command line — `grep -r foo link-to-dir` descends it — and only `-R`
+    /// follows one it discovers. Ours followed them always until 2026-08-25,
+    /// which reported files GNU does not and, on a tree containing a link back
+    /// to one of its own ancestors, did not terminate.
+    deref_links: bool,
     quiet: bool,
     /// `-w`: the match must be bounded by non-word characters.
     word: bool,
@@ -117,6 +164,22 @@ struct Options {
     /// construction and `grep -rlZ … | xargs -0` is the only spelling that is
     /// not. The one byte a name cannot contain is the one that delimits it.
     null_name: bool,
+    /// `-A N`: lines of trailing context printed after each selected line.
+    ///
+    /// `Option`, not a plain `usize`, for two reasons that a zero cannot carry.
+    /// `-A 0` is not "no context": it still puts a `--` between groups that are
+    /// not adjacent, which plain `grep` never does. And an unset `-A` falls
+    /// back to `-C`'s value *after* parsing finishes, which is what makes
+    /// `-A 3 -C 1` and `-C 1 -A 3` the same command — under a plain `usize`
+    /// the later option would overwrite the earlier one and they would differ.
+    after_context: Option<usize>,
+    /// `-B N`: lines of leading context printed before each selected line.
+    before_context: Option<usize>,
+    /// `-C N`, `--context=N`, or the digit shorthand `-N`: the value that
+    /// `-A` and `-B` fall back to when they were not given one.
+    default_context: Option<usize>,
+    /// `--group-separator=SEP` / `--no-group-separator`.
+    group_sep: GroupSep,
     /// `-z`: the *input* is NUL-separated too, and so is the output.
     ///
     /// The other half of the same pipeline: `find -print0 | xargs -0 grep -z`
@@ -136,8 +199,46 @@ impl Options {
 
     /// What follows a file name that is being used as a prefix — `:` normally,
     /// NUL under `-Z`.
-    fn name_sep(&self) -> u8 {
-        if self.null_name { 0 } else { b':' }
+    ///
+    /// `field` is the byte that separates the *other* prefix fields, which is
+    /// `:` on a selected line and `-` on a context line. It is ignored under
+    /// `-Z`: a name is terminated by NUL there whatever kind of line follows
+    /// it, which is what keeps `grep -ZC1 … | xargs -0` parseable.
+    fn name_sep(&self, field: u8) -> u8 {
+        if self.null_name { 0 } else { field }
+    }
+
+    /// Lines of trailing context, with `-C`'s value standing in for an unset
+    /// `-A`.
+    fn out_after(&self) -> usize {
+        self.after_context.or(self.default_context).unwrap_or(0)
+    }
+
+    /// Lines of leading context, with `-C`'s value standing in for an unset
+    /// `-B`.
+    fn out_before(&self) -> usize {
+        self.before_context.or(self.default_context).unwrap_or(0)
+    }
+
+    /// Whether the caller asked for context *at all* — which is not the same
+    /// as asking for a non-zero amount of it.
+    ///
+    /// This is what gates the `--` between groups, and it is why `-A 0` and
+    /// plain `grep` differ: both print only the selected lines, but only the
+    /// first separates non-adjacent runs of them.
+    fn context_requested(&self) -> bool {
+        self.after_context.is_some()
+            || self.before_context.is_some()
+            || self.default_context.is_some()
+    }
+
+    /// Whether context is *printed* at all.
+    ///
+    /// `-c`, `-l`, `-L` and `-q` answer a question about the file rather than
+    /// about its lines, and GNU ignores `-A`/`-B`/`-C` outright under each of
+    /// them — including the group separator.
+    fn context_printed(&self) -> bool {
+        !self.count_only && !self.quiet && !self.files_with_matches && !self.files_without_match
     }
 }
 
@@ -190,7 +291,14 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
             continue;
         }
         if let Some(long) = arg.strip_prefix("--") {
-            parse_long(long, &mut opts, &mut patterns, &mut pattern_files)?;
+            parse_long(
+                long,
+                args,
+                &mut i,
+                &mut opts,
+                &mut patterns,
+                &mut pattern_files,
+            )?;
             continue;
         }
 
@@ -198,6 +306,23 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
         // option taking an argument can swallow what is left of it.
         let mut rest = arg.get(1..).unwrap_or("").chars();
         while let Some(c) = rest.next() {
+            // The digit shorthand: `-2` is `-C 2`, and the digits of `-12`
+            // accumulate into twelve rather than the last one winning. Handled
+            // before `take_arg` exists because it reads `rest` directly, and
+            // the two cannot borrow it at once. Only the *leading* run of
+            // digits belongs to the length — `-1n` is `-C 1 -n`, so the first
+            // non-digit is left in the cluster for the loop above.
+            if let Some(d) = c.to_digit(10) {
+                let mut v = usize::try_from(d).unwrap_or(usize::MAX);
+                while let Some(d) = rest.as_str().chars().next().and_then(|n| n.to_digit(10)) {
+                    rest.next();
+                    v = v
+                        .saturating_mul(10)
+                        .saturating_add(usize::try_from(d).unwrap_or(usize::MAX));
+                }
+                opts.default_context = Some(v);
+                continue;
+            }
             // The argument of an option that takes one: the remainder of this
             // cluster if there is any, otherwise the next argv entry.
             let mut take_arg = |what: char| -> Result<String, String> {
@@ -217,7 +342,11 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 'v' => opts.invert = true,
                 'c' => opts.count_only = true,
                 'n' => opts.line_numbers = true,
-                'r' | 'R' => opts.recursive = true,
+                'r' => opts.recursive = true,
+                'R' => {
+                    opts.recursive = true;
+                    opts.deref_links = true;
+                }
                 'w' => opts.word = true,
                 'x' => opts.whole_line = true,
                 'o' => opts.only_matching = true,
@@ -234,6 +363,9 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 // turn off. Refusing it would break callers that pass it
                 // defensively, and they are asking for what we already do.
                 'a' => {}
+                'A' => opts.after_context = Some(context_len(&take_arg('A')?)?),
+                'B' => opts.before_context = Some(context_len(&take_arg('B')?)?),
+                'C' => opts.default_context = Some(context_len(&take_arg('C')?)?),
                 'e' => patterns.push(take_arg('e')?.into_bytes()),
                 'f' => pattern_files.push(take_arg('f')?),
                 'm' => {
@@ -278,8 +410,18 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
 }
 
 /// One `--long-option`, with or without an `=value`.
+///
+/// `args` and `i` are threaded through because a long option's value may be the
+/// *next* argv entry rather than the text after an `=`: `grep --regexp foo`,
+/// `--max-count 1` and `--context 1` are all legal, and until 2026-08-25 every
+/// one of them was rejected as a missing argument. GNU's own long options work
+/// this way because `getopt_long` does, and a caller writing them out in full
+/// is exactly the caller least likely to guess that only the `=` form is
+/// accepted.
 fn parse_long(
     long: &str,
+    args: &[String],
+    i: &mut usize,
     opts: &mut Options,
     patterns: &mut Vec<Vec<u8>>,
     pattern_files: &mut Vec<String>,
@@ -288,11 +430,16 @@ fn parse_long(
         Some((n, v)) => (n, Some(v)),
         None => (long, None),
     };
-    // An option that needs a value and was not given one, reported by name
-    // rather than silently treated as absent.
-    let need = |v: Option<&str>| -> Result<String, String> {
-        v.map(str::to_string)
-            .ok_or_else(|| format!("option '--{name}' requires an argument"))
+    // The value: what followed the `=`, else the next argv entry. An option
+    // that needs one and has neither is reported by name rather than silently
+    // treated as absent.
+    let mut need = |v: Option<&str>| -> Result<String, String> {
+        if let Some(v) = v {
+            return Ok(v.to_string());
+        }
+        let next = args.get(*i).cloned();
+        *i = i.saturating_add(1);
+        next.ok_or_else(|| format!("option '--{name}' requires an argument"))
     };
     match name {
         "extended-regexp" => opts.syntax = Syntax::Extended,
@@ -302,7 +449,11 @@ fn parse_long(
         "invert-match" => opts.invert = true,
         "count" => opts.count_only = true,
         "line-number" => opts.line_numbers = true,
-        "recursive" | "dereference-recursive" => opts.recursive = true,
+        "recursive" => opts.recursive = true,
+        "dereference-recursive" => {
+            opts.recursive = true;
+            opts.deref_links = true;
+        }
         "word-regexp" => opts.word = true,
         "line-regexp" => opts.whole_line = true,
         "only-matching" => opts.only_matching = true,
@@ -314,6 +465,14 @@ fn parse_long(
         "no-messages" => opts.no_messages = true,
         "null" => opts.null_name = true,
         "null-data" => opts.null_data = true,
+        "after-context" => opts.after_context = Some(context_len(&need(value)?)?),
+        "before-context" => opts.before_context = Some(context_len(&need(value)?)?),
+        "context" => opts.default_context = Some(context_len(&need(value)?)?),
+        // `--group-separator=` with nothing after the `=` is a *blank line*
+        // between groups, not a request for no separator — which is why an
+        // empty value is stored rather than folded into `Suppressed`.
+        "group-separator" => opts.group_sep = GroupSep::Custom(need(value)?.into_bytes()),
+        "no-group-separator" => opts.group_sep = GroupSep::Suppressed,
         "text" | "binary-files" => {}
         "regexp" => patterns.push(need(value)?.into_bytes()),
         "file" => pattern_files.push(need(value)?),
@@ -327,6 +486,20 @@ fn parse_long(
         other => return Err(format!("unknown option: --{other}")),
     }
     Ok(())
+}
+
+/// The value of `-A`, `-B` or `-C`, or the diagnostic GNU gives for one that is
+/// not a count.
+///
+/// The wording is grep's own — `grep: x: invalid context length argument`, exit
+/// 2 — and not the family's `invalid number`, because a script that greps for
+/// the message is greping for that one. A negative value lands here too:
+/// `grep -A -1` takes `-1` as the argument (the option demands one) and then
+/// refuses it, rather than reading it as the digit shorthand.
+fn context_len(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|_| format!("{value}: invalid context length argument"))
 }
 
 /// The patterns held in the text of a `-f` file, or of a `-e` argument.
@@ -529,29 +702,58 @@ fn display_name(path: &str) -> &str {
     }
 }
 
+/// Whether every printed line is prefixed with the name of the file it came
+/// from.
+///
+/// `explicit` is `-H`/`-h`, which settle it outright. Otherwise the rule is not
+/// "more than one file was searched" but **"more than one file was *named*, or
+/// `-r` was pointed at a directory"** — which is a question about the operands,
+/// not about what they expand to. Measured, GNU grep 3.11:
+///
+/// | command | prefix? | why |
+/// |---|---|---|
+/// | `grep -r foo dir` where `dir` holds one file | yes | an operand was a directory |
+/// | `grep -r foo link-to-file` | no | one operand, and not a directory |
+/// | `grep foo a b` | yes | two operands |
+///
+/// Counting the expansion instead got the first row wrong. It is also the only
+/// formulation that can be answered *before* the walk begins, which the walk
+/// now requires: it streams, so by the time the size of the expansion is known,
+/// lines have already been printed with or without a prefix.
+fn wants_filename(explicit: Option<bool>, operands: usize, named_a_directory: bool) -> bool {
+    explicit.unwrap_or(operands > 1 || named_a_directory)
+}
+
 /// The prefix shown before a printed line: file name, line number, both or
 /// neither.
 ///
 /// Bytes rather than `String` because `-Z` puts a NUL after the name, and
 /// because the name itself is a path — which on this system may hold any byte
 /// but `/` and NUL. Only the *name's* separator changes under `-Z`; the one
-/// after a line number stays `:`, which is what GNU does and is what keeps
-/// `-nZ` output parseable at all.
+/// after a line number stays as `field`, which is what GNU does and is what
+/// keeps `-nZ` output parseable at all.
+///
+/// `field` is `:` for a selected line and `-` for a context line, and it
+/// punctuates *every* field rather than just the last: `grep -nHC1` writes
+/// `ctx:3:HIT` for the match and `ctx-2-2` for its neighbour. That is the only
+/// thing distinguishing the two kinds of line in the output, so a caller
+/// filtering `grep -C` output for real matches is reading this byte.
 fn line_prefix(
     filename: &str,
     line_idx_zero_based: usize,
     show_filename: bool,
     opts: &Options,
+    field: u8,
 ) -> Vec<u8> {
     let mut prefix = Vec::new();
     if show_filename {
         prefix.extend_from_slice(filename.as_bytes());
-        prefix.push(opts.name_sep());
+        prefix.push(opts.name_sep(field));
     }
     if opts.line_numbers {
         // Zero-based internally, one-based on the way out.
         prefix.extend_from_slice(line_idx_zero_based.saturating_add(1).to_string().as_bytes());
-        prefix.push(b':');
+        prefix.push(field);
     }
     prefix
 }
@@ -565,6 +767,7 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> ExitCode {
+    stdfd::restore();
     let args: Vec<String> = env::args().skip(1).collect();
     let parsed = match parse_args(&args) {
         Ok(p) => p,
@@ -599,81 +802,171 @@ fn run_main() -> ExitCode {
         }
     };
 
-    let mut files = parsed.files;
-    if parsed.opts.recursive {
-        let mut expanded: Vec<String> = Vec::new();
-        for f in &files {
-            let path = Path::new(f);
-            if path.is_dir() {
-                collect_files_recursive(path, &mut expanded);
-            } else {
-                expanded.push(f.clone());
-            }
+    let named_a_directory = parsed.opts.recursive
+        && parsed.files.iter().any(|f| {
+            // `is_dir` follows a symlink, matching what `Run::operand` does
+            // with the same operand a moment later.
+            Path::new(f).is_dir()
+        });
+    let show_filename = wants_filename(parsed.opts.filename, parsed.files.len(), named_a_directory);
+
+    let mut run = Run {
+        // `Stream`, not `io::stdout().lock()`, because the verdict on the
+        // output is part of the answer: `grep a file >&-` wrote into a buffer
+        // that was discarded by a final `let _ = out.flush()` and exited 0
+        // having printed nothing. `Stream` records the failure instead of
+        // returning it — so no write below can fail — and `close_stdout_with`
+        // reports it as `grep: write error: …` and exits 2, as GNU does.
+        out: stdfd::Stream::stdout(),
+        pats: &pats,
+        opts: &parsed.opts,
+        show_filename,
+        any_match: false,
+        had_error: false,
+        done: false,
+        printed_before: false,
+    };
+
+    for f in &parsed.files {
+        run.operand(f);
+        if run.done {
+            break;
         }
-        files = expanded;
     }
 
-    // More than one file to search means each line needs to say which file it
-    // came from — unless `-H`/`-h` settled the question.
-    let show_filename = parsed.opts.filename.unwrap_or(files.len() > 1);
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let mut any_match = false;
-    let mut had_error = false;
+    let earned = if run.any_match && parsed.opts.quiet {
+        // `-q` asks one question — "is there a match?" — and an error reading
+        // some *other* file does not unanswer it. POSIX says so outright
+        // ("exit with zero status if an input line is selected, even if an
+        // error was detected"), and it is measurable: `grep -q foo nonexistent
+        // words` prints the diagnostic and still exits 0, where the same
+        // command without `-q` exits 2.
+        ExitCode::SUCCESS
+    } else if run.had_error {
+        // Otherwise an error outranks both answers: a script that
+        // distinguishes 0 from 1 is asking about the content of files it
+        // believes were all read.
+        ExitCode::from(2)
+    } else if run.any_match {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    };
+    // grep's `exit_failure` is 2, not the family's 1.
+    stdfd::close_stdout_with("grep", run.out, earned, 2)
+}
 
-    for path in &files {
+/// Everything one run carries from file to file.
+///
+/// It is a struct rather than a handful of locals because the recursive walk
+/// has to **stream**: GNU searches each file at the moment it reaches it, so
+/// the walk and the searching are one traversal and not two phases. Collecting
+/// the tree into a `Vec` first — which is what this did until 2026-08-25 — got
+/// two observable things wrong:
+///
+/// * `grep -rq foo dir` stops at the first match and never looks at what comes
+///   after it, so it never emits the diagnostics those files would have
+///   produced. Measured: on a tree holding a symlink loop, `grep -Rq foo L`
+///   prints nothing, while `grep -Rq zzz L` prints the loop warning — the
+///   difference being only how far the walk got.
+/// * A diagnostic about one file belongs *between* the matches of its
+///   neighbours. Expanding first put every diagnostic before every match.
+struct Run<'a> {
+    out: stdfd::Stream,
+    pats: &'a [Pat],
+    opts: &'a Options,
+    show_filename: bool,
+    any_match: bool,
+    had_error: bool,
+    /// Set once `-q` has its answer. Every remaining file and directory is
+    /// then skipped — including the diagnostics they would have produced,
+    /// which is the point.
+    done: bool,
+    /// Whether any group of output has been printed yet, anywhere in the run.
+    ///
+    /// Crosses file boundaries because the `--` between context groups does:
+    /// `grep -A1 HIT a b` puts one between `a`'s last group and `b`'s first,
+    /// and only the very first group of the whole run goes without.
+    printed_before: bool,
+}
+
+impl Run<'_> {
+    /// Handle one command-line operand.
+    fn operand(&mut self, f: &str) {
+        // `is_dir`, which follows a symlink — deliberately, and unlike the
+        // walk. A link named on the command line is followed by `-r` as well
+        // as `-R`; it is only a link *discovered* by the walk that `-r` skips.
+        if self.opts.recursive && Path::new(f).is_dir() {
+            let mut ancestors: Vec<PathBuf> = Vec::new();
+            self.walk(Path::new(f), &mut ancestors);
+        } else {
+            self.search(f);
+        }
+    }
+
+    /// Search one named file — or standard input, spelled `-`.
+    fn search(&mut self, path: &str) {
         let reader: Box<dyn Read> = if path == "-" {
             Box::new(io::stdin())
         } else {
             if Path::new(path).is_dir() {
-                if !parsed.opts.recursive {
-                    if !parsed.opts.no_messages {
-                        diag!("grep: {}: Is a directory", quotef_os(path));
-                    }
-                    // Named but not searched, so the run's answer is about
-                    // less than it was asked about — status 2, as for a file
-                    // that could not be opened.
-                    had_error = true;
+                // Only reachable without `-r`; with it, `operand` walked the
+                // directory instead of arriving here.
+                if !self.opts.no_messages {
+                    diag!("grep: {}: Is a directory", quotef_os(path));
                 }
-                continue;
+                // Named but not searched, so the run's answer is about less
+                // than it was asked about — status 2, as for a file that could
+                // not be opened.
+                self.had_error = true;
+                return;
             }
             match File::open(path) {
                 Ok(f) => Box::new(f),
                 Err(e) => {
-                    if !parsed.opts.no_messages {
+                    if !self.opts.no_messages {
                         diag!("grep: {}: {}", quotef_os(path), strerror(&e));
                     }
                     // A file that could not be read is an error, not an absence
                     // of matches: exiting 1 would tell a script the file has
                     // been searched and found wanting.
-                    had_error = true;
-                    continue;
+                    self.had_error = true;
+                    return;
                 }
             }
         };
 
         let shown = display_name(path);
-        match search_stream(&mut out, reader, &pats, shown, show_filename, &parsed.opts) {
+        match search_stream(
+            &mut self.out,
+            reader,
+            self.pats,
+            shown,
+            self.show_filename,
+            self.opts,
+            &mut self.printed_before,
+        ) {
             Ok(matched) => {
                 if matched {
-                    any_match = true;
-                    if parsed.opts.quiet {
+                    self.any_match = true;
+                    if self.opts.quiet {
                         // `-q` is a question, and it has been answered.
-                        break;
+                        self.done = true;
+                        return;
                     }
                 }
                 // `-l` and `-L` name the file rather than the lines; which of
                 // the two asked decides which answer is worth naming.
-                let name_it = (parsed.opts.files_with_matches && matched)
-                    || (parsed.opts.files_without_match && !matched);
+                let name_it = (self.opts.files_with_matches && matched)
+                    || (self.opts.files_without_match && !matched);
                 if name_it {
                     // NUL after the name under `-Z`, newline otherwise — and
                     // *not* `-z`'s separator, which describes the input. This
                     // is the half of `-Z` that matters: `grep -rlZ | xargs -0`
                     // is the only listing of paths that survives a path
                     // containing a newline, which this system permits.
-                    let _ = out.write_all(shown.as_bytes());
-                    let _ = out.write_all(if parsed.opts.null_name {
+                    let _ = self.out.write_all(shown.as_bytes());
+                    let _ = self.out.write_all(if self.opts.null_name {
                         &b"\0"[..]
                     } else {
                         &b"\n"[..]
@@ -681,29 +974,195 @@ fn run_main() -> ExitCode {
                 }
             }
             Err(e) => {
-                if !parsed.opts.no_messages {
+                if !self.opts.no_messages {
                     diag!("grep: {}: {}", quotef_os(path), strerror(&e));
                 }
-                had_error = true;
+                self.had_error = true;
             }
         }
     }
 
-    let _ = out.flush();
-    // An error outranks both answers: a script that distinguishes 0 from 1 is
-    // asking about the content of files it believes were all read.
-    if had_error {
-        return ExitCode::from(2);
-    }
-    if !any_match {
-        return ExitCode::from(1);
+    /// Search a file the walk found, rather than one the command line named.
+    ///
+    /// `to_string_lossy` is a known defect and not a choice: every path in this
+    /// program is a `String`, so a path holding a byte that is not valid UTF-8
+    /// — which this system permits in a filename — is corrupted on the way in
+    /// and printed back wrong. It is one entry in the argv-UTF-8 backlog
+    /// (`known-issues.md`); fixing it means moving the whole program onto
+    /// `OsString`, which is a change to `search_stream`'s signature and to
+    /// every prefix it builds. Isolated into a named method so that the fix is
+    /// a change to one line, and so that the defect is not silently spelled
+    /// inline in the middle of the walk.
+    fn search_found(&mut self, path: &Path) {
+        let shown = path.to_string_lossy().into_owned();
+        self.search(&shown);
     }
 
-    ExitCode::SUCCESS
+    /// Walk one directory, searching what it holds, deepest-last and in sorted
+    /// order.
+    ///
+    /// # Which symlinks are followed
+    ///
+    /// A symlink met *during* the walk is skipped by `-r` and followed by `-R`
+    /// — that single difference is the whole of what separates the two flags.
+    /// A symlink *named on the command line* is followed by both, which is why
+    /// [`Run::operand`] asks `is_dir` (following) where this asks
+    /// `symlink_metadata` (not following).
+    ///
+    /// # The loop
+    ///
+    /// `-R` on a tree containing a link back to one of its own ancestors
+    /// describes an infinite tree. GNU prints
+    /// `grep: PATH: warning: recursive directory loop` and carries on.
+    /// Measured, and all three halves of that matter: the message is
+    /// suppressed by `-s`, it does **not** change the exit status (`grep -R zzz
+    /// loop-tree` exits 1, not 2), and it names the link rather than what the
+    /// link resolves to.
+    ///
+    /// # Ordering
+    ///
+    /// Sorted, where GNU emits readdir order. See `design-decisions.md` §380:
+    /// the order a directory hands back its entries is a property of the
+    /// filesystem, so GNU's output is not reproducible between two machines
+    /// holding the same files, whereas a sorted listing is stable and
+    /// diffable.
+    fn walk(&mut self, dir: &Path, ancestors: &mut Vec<PathBuf>) {
+        if self.done {
+            return;
+        }
+        if self.opts.deref_links {
+            // Identity by resolved path: two names for one directory are one
+            // directory, and it is the resolved form that says so. A failure
+            // to resolve is not fatal here — the `read_dir` below will report
+            // it properly — so the unresolvable path stands in for itself.
+            let real = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            if ancestors.contains(&real) {
+                if !self.opts.no_messages {
+                    diag!(
+                        "grep: {}: warning: recursive directory loop",
+                        quotef_os(dir)
+                    );
+                }
+                return;
+            }
+            ancestors.push(real);
+        }
+
+        self.walk_entries(dir, ancestors);
+
+        if self.opts.deref_links {
+            ancestors.pop();
+        }
+    }
+
+    /// The body of [`Run::walk`], split out so that the ancestor pushed by the
+    /// caller is popped on every path out of it.
+    fn walk_entries(&mut self, dir: &Path, ancestors: &mut Vec<PathBuf>) {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                if !self.opts.no_messages {
+                    diag!("grep: {}: {}", quotef_os(dir), strerror(&e));
+                }
+                self.had_error = true;
+                return;
+            }
+        };
+
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(e) => paths.push(e.path()),
+                Err(e) => {
+                    if !self.opts.no_messages {
+                        diag!("grep: {}: {}", quotef_os(dir), strerror(&e));
+                    }
+                    self.had_error = true;
+                }
+            }
+        }
+        paths.sort();
+
+        for path in paths {
+            if self.done {
+                return;
+            }
+            // `symlink_metadata`, not `metadata`: the question here is what the
+            // entry *is*, not what it points at.
+            let md = match fs::symlink_metadata(&path) {
+                Ok(md) => md,
+                Err(e) => {
+                    if !self.opts.no_messages {
+                        diag!("grep: {}: {}", quotef_os(&path), strerror(&e));
+                    }
+                    self.had_error = true;
+                    continue;
+                }
+            };
+
+            if md.file_type().is_symlink() {
+                if !self.opts.deref_links {
+                    // `-r` passes over it in silence — including a dangling
+                    // one, which it never asks about and so never reports.
+                    continue;
+                }
+                match fs::metadata(&path) {
+                    Ok(target) if target.is_dir() => self.walk(&path, ancestors),
+                    Ok(_) => self.search_found(&path),
+                    Err(e) => {
+                        if !self.opts.no_messages {
+                            diag!("grep: {}: {}", quotef_os(&path), strerror(&e));
+                        }
+                        self.had_error = true;
+                    }
+                }
+                continue;
+            }
+
+            if md.is_dir() {
+                self.walk(&path, ancestors);
+            } else {
+                self.search_found(&path);
+            }
+        }
+    }
+}
+
+/// Write one line of *context* — a line printed because it neighbours a
+/// selected line, not because it was selected itself.
+///
+/// Under `-o` this writes nothing at all, not even the prefix: `-o` prints the
+/// part of a line that matched, and a context line has no such part. GNU is the
+/// same, and the caller still counts the line as output, because the `--` that
+/// separates groups is placed by where the file has been *read up to*, not by
+/// how many bytes came out. That is what makes `grep -oC2 HIT ctx` print two
+/// bare `HIT`s with no separator between them while `grep -oA1 HIT ctx` puts
+/// one in: in the first the two groups' ranges touch, in the second they do
+/// not, and neither one printed anything for the lines in between.
+fn write_context_line(
+    out: &mut impl Write,
+    body: &[u8],
+    filename: &str,
+    line_idx: usize,
+    show_filename: bool,
+    opts: &Options,
+) -> io::Result<()> {
+    if opts.only_matching {
+        return Ok(());
+    }
+    out.write_all(&line_prefix(filename, line_idx, show_filename, opts, b'-'))?;
+    out.write_all(body)?;
+    out.write_all(&[opts.line_sep()])
 }
 
 /// Search one stream, printing what the options ask for. Returns whether any
 /// line was selected.
+///
+/// `printed_before` is the run's memory of whether *anything* has been printed
+/// yet, and it lives outside this function because the group separator does
+/// too: `grep -A1 HIT a b` puts a `--` between the last group of `a` and the
+/// first of `b`, so a file cannot decide on its own whether its opening group
+/// needs one. It never leads the very first group of the run.
 fn search_stream(
     out: &mut impl Write,
     reader: impl Read,
@@ -711,6 +1170,7 @@ fn search_stream(
     filename: &str,
     show_filename: bool,
     opts: &Options,
+    printed_before: &mut bool,
 ) -> io::Result<bool> {
     // `-m 0` is not "no limit", and it is not "stop after the first" either:
     // GNU prints nothing at all — not even the `-c` count line, which is the
@@ -727,9 +1187,31 @@ fn search_stream(
     // a pipe is also the difference between returning and waiting.
     let stop_at_first = opts.quiet || opts.files_with_matches || opts.files_without_match;
     let sep = opts.line_sep();
+    // `-c`/`-l`/`-L`/`-q` answer a question about the file, so GNU ignores
+    // `-A`/`-B`/`-C` under them entirely — the separator included.
+    let show_context = opts.context_printed();
+    let out_before = if show_context { opts.out_before() } else { 0 };
+    let out_after = if show_context { opts.out_after() } else { 0 };
+    let separate_groups = show_context && opts.context_requested();
+
     let mut match_count: usize = 0;
     let mut line_idx: usize = 0;
     let mut line: Vec<u8> = Vec::new();
+    // Lines held back as possible leading context: the last `out_before` lines
+    // that were neither selected nor already printed, oldest first.
+    let mut before: VecDeque<(usize, Vec<u8>)> = VecDeque::new();
+    // Trailing context still owed to the most recent selected line.
+    let mut pending_after: usize = 0;
+    // The one-based number of the last line this *file* has printed — or has
+    // decided to print nothing for, under `-o`. `None` until the file prints
+    // its first, which is also what makes a file's opening group take a
+    // separator: it is never adjacent to anything.
+    let mut last_out: Option<usize> = None;
+    // `-m` has been satisfied, but trailing context may still be owed. Lines
+    // read after this point are not tested against the pattern at all, so a
+    // line that *would* have matched prints as context — measured:
+    // `grep -n -m1 -A2 HIT` over three `HIT`s gives `1:HIT`, `2-HIT`, `3-HIT`.
+    let mut limit_reached = false;
 
     loop {
         line.clear();
@@ -741,6 +1223,23 @@ fn search_stream(
         // The separator is not part of the line, and a final line without one
         // is still a line.
         let body = line.strip_suffix(&[sep][..]).unwrap_or(&line);
+        let lineno = line_idx.saturating_add(1);
+
+        if limit_reached {
+            if pending_after == 0 {
+                break;
+            }
+            write_context_line(out, body, filename, line_idx, show_filename, opts)?;
+            last_out = Some(lineno);
+            pending_after = pending_after.saturating_sub(1);
+            if pending_after == 0 {
+                // Stopping here rather than on the next iteration keeps `-m`
+                // from swallowing one more line of a pipe than it printed.
+                break;
+            }
+            line_idx = lineno;
+            continue;
+        }
 
         if line_selected(body, pats, opts).map_err(limit_err)? {
             match_count = match_count.saturating_add(1);
@@ -748,7 +1247,38 @@ fn search_stream(
                 return Ok(true);
             }
             if !opts.count_only {
-                let prefix = line_prefix(filename, line_idx, show_filename, opts);
+                // Where this group of output begins: `out_before` lines back,
+                // but never behind what has already been printed. The clamp is
+                // what merges overlapping groups into one — and what decides
+                // the separator, since a group that starts exactly where the
+                // last one stopped is a continuation and takes none.
+                let floor = last_out.map_or(1, |l| l.saturating_add(1));
+                let start = lineno.saturating_sub(out_before).max(floor);
+                let adjacent = last_out.is_some_and(|l| start == l.saturating_add(1));
+                if separate_groups
+                    && *printed_before
+                    && !adjacent
+                    && let Some(s) = opts.group_sep.bytes()
+                {
+                    out.write_all(s)?;
+                    // A newline even under `-z`, where every *line* ends with
+                    // NUL. Measured; and it follows — the separator is not a
+                    // line of the file.
+                    out.write_all(b"\n")?;
+                }
+                for (n, text) in before.drain(..) {
+                    if n >= start {
+                        write_context_line(
+                            out,
+                            &text,
+                            filename,
+                            n.saturating_sub(1),
+                            show_filename,
+                            opts,
+                        )?;
+                    }
+                }
+                let prefix = line_prefix(filename, line_idx, show_filename, opts, b':');
                 if opts.only_matching {
                     // `-o` with `-v` prints nothing: the part of the line that
                     // did not match is the whole line, and GNU declines to call
@@ -775,18 +1305,33 @@ fn search_stream(
                     out.write_all(body)?;
                     out.write_all(&[sep])?;
                 }
+                last_out = Some(lineno);
+                *printed_before = true;
+                pending_after = out_after;
             }
             if opts.max_count.is_some_and(|m| match_count >= m) {
-                break;
+                if pending_after == 0 {
+                    break;
+                }
+                limit_reached = true;
+            }
+        } else if pending_after > 0 {
+            write_context_line(out, body, filename, line_idx, show_filename, opts)?;
+            last_out = Some(lineno);
+            pending_after = pending_after.saturating_sub(1);
+        } else if out_before > 0 {
+            before.push_back((lineno, body.to_vec()));
+            if before.len() > out_before {
+                before.pop_front();
             }
         }
-        line_idx = line_idx.saturating_add(1);
+        line_idx = lineno;
     }
 
     if opts.count_only {
         if show_filename {
             out.write_all(filename.as_bytes())?;
-            out.write_all(&[opts.name_sep()])?;
+            out.write_all(&[opts.name_sep(b':')])?;
         }
         out.write_all(match_count.to_string().as_bytes())?;
         // A newline, not `sep`: `-z` says what a *line of input* is, and a
@@ -797,28 +1342,6 @@ fn search_stream(
     }
 
     Ok(match_count > 0)
-}
-
-fn collect_files_recursive(dir: &Path, result: &mut Vec<String>) {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => {
-            diag!("grep: {}: {}", quotef_os(dir), strerror(&e));
-            return;
-        }
-    };
-
-    let mut paths: Vec<std::path::PathBuf> =
-        entries.filter_map(Result::ok).map(|e| e.path()).collect();
-    paths.sort();
-
-    for path in paths {
-        if path.is_dir() {
-            collect_files_recursive(&path, result);
-        } else {
-            result.push(path.to_string_lossy().into_owned());
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1008,6 +1531,148 @@ mod tests {
     #[test]
     fn parse_recursive_with_no_operand_walks_here() {
         assert_eq!(parse_args(&s(&["-r", "foo"])).unwrap().files, vec!["."]);
+    }
+
+    /// `-r` and `-R` are not synonyms, and the whole of the difference is one
+    /// flag: whether a symbolic link *found during the walk* is followed.
+    /// Treating them as synonyms made `-r` report files GNU does not, and made
+    /// it run forever on a tree containing a link back to one of its own
+    /// ancestors.
+    #[test]
+    fn parse_capital_r_is_the_dereferencing_one() {
+        let lower = parse_args(&s(&["-r", "foo"])).unwrap().opts;
+        assert!(lower.recursive);
+        assert!(!lower.deref_links);
+
+        let upper = parse_args(&s(&["-R", "foo"])).unwrap().opts;
+        assert!(upper.recursive);
+        assert!(upper.deref_links);
+
+        // The long spellings say the same thing at more length, and
+        // `--dereference-recursive` implies `--recursive` rather than needing
+        // it alongside.
+        let long = parse_args(&s(&["--recursive", "foo"])).unwrap().opts;
+        assert!(long.recursive);
+        assert!(!long.deref_links);
+
+        let long_deref = parse_args(&s(&["--dereference-recursive", "foo"]))
+            .unwrap()
+            .opts;
+        assert!(long_deref.recursive);
+        assert!(long_deref.deref_links);
+    }
+
+    #[test]
+    fn context_flags_keep_their_own_values_whatever_the_order() {
+        // The whole reason the three are `Option`s: `-A` and `-B` fall back to
+        // `-C` only where they were not given, and the fallback happens after
+        // parsing rather than during it. A plain `usize` would make these two
+        // commands differ, and GNU says they do not.
+        for argv in [
+            s(&["-A", "3", "-C", "1", "foo"]),
+            s(&["-C", "1", "-A", "3", "foo"]),
+        ] {
+            let o = parse_args(&argv).unwrap().opts;
+            assert_eq!(o.out_after(), 3);
+            assert_eq!(o.out_before(), 1);
+        }
+
+        // -C alone feeds both sides.
+        let c = parse_args(&s(&["-C", "2", "foo"])).unwrap().opts;
+        assert_eq!((c.out_before(), c.out_after()), (2, 2));
+
+        // …and -A alone leaves the other side at zero without claiming that
+        // no context was asked for.
+        let a = parse_args(&s(&["-A", "2", "foo"])).unwrap().opts;
+        assert_eq!((a.out_before(), a.out_after()), (0, 2));
+        assert!(a.context_requested());
+
+        // `-A 0` asks for context and gets none, which is not the same state
+        // as never having asked: only the first puts `--` between groups.
+        let zero = parse_args(&s(&["-A", "0", "foo"])).unwrap().opts;
+        assert!(zero.context_requested());
+        assert_eq!(zero.out_after(), 0);
+        assert!(!parse_args(&s(&["foo"])).unwrap().opts.context_requested());
+    }
+
+    #[test]
+    fn the_digit_shorthand_accumulates_and_stops_at_the_first_non_digit() {
+        let one = parse_args(&s(&["-1", "foo"])).unwrap().opts;
+        assert_eq!(one.default_context, Some(1));
+
+        // Twelve, not two: the digits of a cluster build one number.
+        let twelve = parse_args(&s(&["-12", "foo"])).unwrap().opts;
+        assert_eq!(twelve.default_context, Some(12));
+
+        // A non-digit ends the number and is read as its own option, in
+        // either order.
+        let with_n = parse_args(&s(&["-1n", "foo"])).unwrap().opts;
+        assert_eq!(with_n.default_context, Some(1));
+        assert!(with_n.line_numbers);
+
+        let after_n = parse_args(&s(&["-n1", "foo"])).unwrap().opts;
+        assert_eq!(after_n.default_context, Some(1));
+        assert!(after_n.line_numbers);
+    }
+
+    #[test]
+    fn a_context_length_that_is_not_a_count_is_grep_s_own_diagnostic() {
+        // Not the family's `invalid number`: a script matching on the message
+        // is matching on this one.
+        for argv in [
+            s(&["-A", "x", "foo"]),
+            s(&["-B", "x", "foo"]),
+            s(&["-C", "x", "foo"]),
+            s(&["--context=x", "foo"]),
+            // `-A -1` is not the digit shorthand — `-A` demands an argument,
+            // so `-1` is consumed as one and then refused.
+            s(&["-A", "-1", "foo"]),
+        ] {
+            let err = parse_args(&argv).unwrap_err();
+            assert!(err.ends_with(": invalid context length argument"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_long_option_takes_the_next_argv_entry_when_there_is_no_equals() {
+        // getopt_long accepts both spellings, so `--regexp foo` and
+        // `--regexp=foo` are one command written two ways. Taking only the
+        // `=` form rejected the other as a missing argument.
+        let spaced = parse_args(&s(&["--regexp", "foo", "words"])).unwrap();
+        let equals = parse_args(&s(&["--regexp=foo", "words"])).unwrap();
+        assert_eq!(spaced.patterns, equals.patterns);
+        assert_eq!(spaced.files, equals.files);
+
+        let ctx = parse_args(&s(&["--context", "1", "foo"])).unwrap().opts;
+        assert_eq!(ctx.default_context, Some(1));
+
+        // The value is consumed, so it is not left behind as an operand.
+        let mc = parse_args(&s(&["--max-count", "2", "foo", "words"])).unwrap();
+        assert_eq!(mc.opts.max_count, Some(2));
+        assert_eq!(mc.files, vec!["words"]);
+
+        let missing = parse_args(&s(&["--context"])).unwrap_err();
+        assert_eq!(missing, "option '--context' requires an argument");
+    }
+
+    #[test]
+    fn an_empty_group_separator_is_a_blank_line_and_not_an_absent_one() {
+        // The distinction an `Option<Vec<u8>>` could not carry.
+        let dflt = parse_args(&s(&["foo"])).unwrap().opts;
+        assert_eq!(dflt.group_sep.bytes(), Some(&b"--"[..]));
+
+        let empty = parse_args(&s(&["--group-separator=", "foo"])).unwrap().opts;
+        assert_eq!(empty.group_sep.bytes(), Some(&b""[..]));
+
+        let custom = parse_args(&s(&["--group-separator=XX", "foo"]))
+            .unwrap()
+            .opts;
+        assert_eq!(custom.group_sep.bytes(), Some(&b"XX"[..]));
+
+        let none = parse_args(&s(&["--no-group-separator", "foo"]))
+            .unwrap()
+            .opts;
+        assert_eq!(none.group_sep.bytes(), None);
     }
 
     // ---------------- patterns are patterns ----------------
@@ -1246,20 +1911,39 @@ mod tests {
         assert_eq!(display_name("a.txt"), "a.txt");
         // `grep -H pattern -` printing `-:line` reads as part of the line.
         assert_eq!(
-            line_prefix(display_name("-"), 0, true, &pfx_opts(false, false)),
+            line_prefix(display_name("-"), 0, true, &pfx_opts(false, false), b':'),
             b"(standard input):"
         );
     }
 
+    /// The prefix rule is about the operands, not the expansion: one directory
+    /// operand prefixes even when it holds a single file, and one symlink-to-a-
+    /// file operand does not prefix at all. Ours counted the expansion, so
+    /// `grep -r foo dir-with-one-file` printed a bare line where GNU prints
+    /// `dir/file:line`.
+    #[test]
+    fn a_directory_operand_earns_the_prefix_however_little_is_in_it() {
+        assert!(wants_filename(None, 1, true));
+        assert!(!wants_filename(None, 1, false));
+        assert!(wants_filename(None, 2, false));
+        assert!(!wants_filename(None, 0, false));
+        // -H and -h outrank the count either way.
+        assert!(wants_filename(Some(true), 1, false));
+        assert!(!wants_filename(Some(false), 9, true));
+    }
+
     #[test]
     fn prefix_none() {
-        assert_eq!(line_prefix("f", 0, false, &pfx_opts(false, false)), b"");
+        assert_eq!(
+            line_prefix("f", 0, false, &pfx_opts(false, false), b':'),
+            b""
+        );
     }
 
     #[test]
     fn prefix_filename_only() {
         assert_eq!(
-            line_prefix("a.txt", 0, true, &pfx_opts(false, false)),
+            line_prefix("a.txt", 0, true, &pfx_opts(false, false), b':'),
             b"a.txt:"
         );
     }
@@ -1267,11 +1951,11 @@ mod tests {
     #[test]
     fn prefix_line_number_only() {
         assert_eq!(
-            line_prefix("ignored", 0, false, &pfx_opts(true, false)),
+            line_prefix("ignored", 0, false, &pfx_opts(true, false), b':'),
             b"1:"
         );
         assert_eq!(
-            line_prefix("ignored", 41, false, &pfx_opts(true, false)),
+            line_prefix("ignored", 41, false, &pfx_opts(true, false), b':'),
             b"42:"
         );
     }
@@ -1279,7 +1963,7 @@ mod tests {
     #[test]
     fn prefix_filename_and_line_number() {
         assert_eq!(
-            line_prefix("a.txt", 9, true, &pfx_opts(true, false)),
+            line_prefix("a.txt", 9, true, &pfx_opts(true, false), b':'),
             b"a.txt:10:"
         );
     }
@@ -1290,11 +1974,11 @@ mod tests {
         // line number too would make `-nZ` output unparseable, and it is not
         // what GNU does.
         assert_eq!(
-            line_prefix("a.txt", 0, true, &pfx_opts(false, true)),
+            line_prefix("a.txt", 0, true, &pfx_opts(false, true), b':'),
             b"a.txt\0"
         );
         assert_eq!(
-            line_prefix("a.txt", 9, true, &pfx_opts(true, true)),
+            line_prefix("a.txt", 9, true, &pfx_opts(true, true), b':'),
             b"a.txt\x0010:"
         );
     }
@@ -1309,7 +1993,17 @@ mod tests {
         show_filename: bool,
     ) -> (Vec<u8>, bool) {
         let mut out: Vec<u8> = Vec::new();
-        let matched = search_stream(&mut out, input, pats, filename, show_filename, opts).unwrap();
+        let mut printed_before = false;
+        let matched = search_stream(
+            &mut out,
+            input,
+            pats,
+            filename,
+            show_filename,
+            opts,
+            &mut printed_before,
+        )
+        .unwrap();
         (out, matched)
     }
 
@@ -1330,6 +2024,213 @@ mod tests {
         let (out, matched) = run(b"foo\nbar\nfoobar\n", "foo", Options::default(), "f", false);
         assert!(matched);
         assert_eq!(out, "foo\nfoobar\n");
+    }
+
+    // ---------------- context ----------------
+    //
+    // `CTX` is the harness fixture: eight numbered lines with hits six apart,
+    // far enough that `-C 1` leaves a gap and `-C 3` closes it. Every
+    // expectation below was measured against GNU grep 3.11.
+
+    const CTX: &[u8] = b"1\n2\nHIT\n4\n5\n6\nHIT\n8\n";
+
+    fn ctx_opts(before: Option<usize>, after: Option<usize>, default: Option<usize>) -> Options {
+        Options {
+            before_context: before,
+            after_context: after,
+            default_context: default,
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn context_prints_the_neighbours_and_separates_groups_that_do_not_touch() {
+        let (out, _) = run(CTX, "HIT", ctx_opts(None, Some(1), None), "f", false);
+        assert_eq!(out, "HIT\n4\n--\nHIT\n8\n");
+
+        let (out, _) = run(CTX, "HIT", ctx_opts(Some(1), None, None), "f", false);
+        assert_eq!(out, "2\nHIT\n--\n6\nHIT\n");
+
+        let (out, _) = run(CTX, "HIT", ctx_opts(None, None, Some(1)), "f", false);
+        assert_eq!(out, "2\nHIT\n4\n--\n6\nHIT\n8\n");
+    }
+
+    #[test]
+    fn groups_that_meet_are_one_group_with_no_separator() {
+        // -C 3 reaches from line 3 back over 4-6 to line 7, so the two groups
+        // become one run of the whole file.
+        let (out, _) = run(CTX, "HIT", ctx_opts(None, None, Some(3)), "f", false);
+        assert_eq!(out, "1\n2\nHIT\n4\n5\n6\nHIT\n8\n");
+
+        // More context than there is file clamps at both ends rather than
+        // repeating lines or running off.
+        let (out, _) = run(CTX, "HIT", ctx_opts(Some(99), None, None), "f", false);
+        assert_eq!(out, "1\n2\nHIT\n4\n5\n6\nHIT\n");
+    }
+
+    #[test]
+    fn zero_context_still_separates_where_plain_grep_does_not() {
+        // The one observable difference between `-A 0` and no context at all,
+        // and the reason `context_requested` is not `out_after() > 0`.
+        let (out, _) = run(CTX, "HIT", ctx_opts(None, Some(0), None), "f", false);
+        assert_eq!(out, "HIT\n--\nHIT\n");
+
+        let (out, _) = run(CTX, "HIT", Options::default(), "f", false);
+        assert_eq!(out, "HIT\nHIT\n");
+    }
+
+    #[test]
+    fn a_context_line_is_punctuated_with_a_dash_where_a_match_uses_a_colon() {
+        // In *every* field, not just the last: this byte is the only thing
+        // telling a caller which lines of `grep -C` output actually matched.
+        let opts = Options {
+            line_numbers: true,
+            ..ctx_opts(None, None, Some(1))
+        };
+        let (out, _) = run(CTX, "HIT", opts, "f", true);
+        assert_eq!(out, "f-2-2\nf:3:HIT\nf-4-4\n--\nf-6-6\nf:7:HIT\nf-8-8\n");
+    }
+
+    #[test]
+    fn the_group_separator_can_be_changed_or_removed() {
+        let custom = Options {
+            group_sep: GroupSep::Custom(b"XX".to_vec()),
+            ..ctx_opts(None, None, Some(1))
+        };
+        let (out, _) = run(CTX, "HIT", custom, "f", false);
+        assert_eq!(out, "2\nHIT\n4\nXX\n6\nHIT\n8\n");
+
+        // An empty separator is a blank line — a different answer from none.
+        let empty = Options {
+            group_sep: GroupSep::Custom(Vec::new()),
+            ..ctx_opts(None, None, Some(1))
+        };
+        let (out, _) = run(CTX, "HIT", empty, "f", false);
+        assert_eq!(out, "2\nHIT\n4\n\n6\nHIT\n8\n");
+
+        let none = Options {
+            group_sep: GroupSep::Suppressed,
+            ..ctx_opts(None, None, Some(1))
+        };
+        let (out, _) = run(CTX, "HIT", none, "f", false);
+        assert_eq!(out, "2\nHIT\n4\n6\nHIT\n8\n");
+    }
+
+    #[test]
+    fn trailing_context_outlives_the_max_count_and_demotes_what_it_covers() {
+        // Measured: `grep -n -m1 -A2` over three consecutive hits prints the
+        // first as a match and the next two as *context*, because once `-m` is
+        // satisfied the remaining lines are never tested against the pattern.
+        let opts = Options {
+            line_numbers: true,
+            max_count: Some(1),
+            ..ctx_opts(None, Some(2), None)
+        };
+        let (out, _) = run(b"HIT\nHIT\nHIT\n", "HIT", opts, "f", false);
+        assert_eq!(out, "1:HIT\n2-HIT\n3-HIT\n");
+
+        // With the limit at two, the second one is still a match and only the
+        // third is demoted.
+        let opts = Options {
+            line_numbers: true,
+            max_count: Some(2),
+            ..ctx_opts(None, Some(2), None)
+        };
+        let (out, _) = run(b"HIT\nHIT\nHIT\n", "HIT", opts, "f", false);
+        assert_eq!(out, "1:HIT\n2:HIT\n3-HIT\n");
+
+        // Leading context owes nothing once the limit is reached, so `-B`
+        // stops dead where `-A` runs on.
+        let opts = Options {
+            line_numbers: true,
+            max_count: Some(1),
+            ..ctx_opts(Some(2), None, None)
+        };
+        let (out, _) = run(b"HIT\nHIT\nHIT\n", "HIT", opts, "f", false);
+        assert_eq!(out, "1:HIT\n");
+    }
+
+    #[test]
+    fn only_matching_prints_nothing_for_a_context_line_but_still_groups_by_it() {
+        // The subtle half of `-o`: the group separator is decided by how far
+        // the file has been read, not by how many bytes came out. `-A 1`
+        // leaves a gap between the two groups and gets a `--`; `-C 2` closes
+        // it and does not — even though both printed only the two `HIT`s.
+        let opts = Options {
+            only_matching: true,
+            ..ctx_opts(None, Some(1), None)
+        };
+        let (out, _) = run(CTX, "HIT", opts, "f", false);
+        assert_eq!(out, "HIT\n--\nHIT\n");
+
+        let opts = Options {
+            only_matching: true,
+            ..ctx_opts(None, None, Some(2))
+        };
+        let (out, _) = run(CTX, "HIT", opts, "f", false);
+        assert_eq!(out, "HIT\nHIT\n");
+    }
+
+    #[test]
+    fn context_is_ignored_by_the_options_that_answer_about_the_file() {
+        // `-c`, `-l`, `-L` and `-q` are questions about the file, and GNU
+        // drops `-A`/`-B`/`-C` under each — separator included.
+        let opts = Options {
+            count_only: true,
+            ..ctx_opts(None, None, Some(1))
+        };
+        let (out, _) = run(CTX, "HIT", opts, "f", false);
+        assert_eq!(out, "2\n");
+
+        let opts = Options {
+            quiet: true,
+            ..ctx_opts(None, None, Some(1))
+        };
+        let (out, matched) = run(CTX, "HIT", opts, "f", false);
+        assert!(matched);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn a_new_file_is_never_adjacent_to_the_one_before_it() {
+        // The reason `printed_before` outlives a single file. `top` matches on
+        // its first line, so its group cannot be preceded by anything within
+        // its own file — and GNU still puts a `--` in front of it, because the
+        // adjacency being tested is with the *previous file's* last line.
+        let opts = ctx_opts(None, Some(1), None);
+        let p = pats("HIT", &opts);
+        let mut out: Vec<u8> = Vec::new();
+        let mut printed_before = false;
+        for (name, body) in [("a", CTX), ("b", &b"HIT\n2\n3\n"[..])] {
+            search_stream(&mut out, body, &p, name, true, &opts, &mut printed_before).unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "a:HIT\na-4\n--\na:HIT\na-8\n--\nb:HIT\nb-2\n"
+        );
+
+        // …and a file that prints nothing contributes no separator of its own.
+        let mut out: Vec<u8> = Vec::new();
+        let mut printed_before = false;
+        for (name, body) in [("a", CTX), ("empty", &b""[..]), ("b", CTX)] {
+            search_stream(&mut out, body, &p, name, false, &opts, &mut printed_before).unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "HIT\n4\n--\nHIT\n8\n--\nHIT\n4\n--\nHIT\n8\n"
+        );
+    }
+
+    #[test]
+    fn inverted_context_is_context_around_the_lines_that_did_not_match() {
+        // Every line of the fixture: the six non-hits are selected, and the
+        // two hits are each a neighbour of one.
+        let opts = Options {
+            invert: true,
+            ..ctx_opts(None, None, Some(1))
+        };
+        let (out, _) = run(CTX, "HIT", opts, "f", false);
+        assert_eq!(out, "1\n2\nHIT\n4\n5\n6\nHIT\n8\n");
     }
 
     #[test]

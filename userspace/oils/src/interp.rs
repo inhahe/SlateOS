@@ -1174,16 +1174,21 @@ fn shell_script_indirection(path: &std::path::Path) -> Option<Interposed> {
     if head.starts_with(b"MZ") || head_is_binary(head) {
         return None;
     }
-    if head.starts_with(b"#!") {
+    // A line that *names* an interpreter is the OS's business wherever the OS
+    // reads one; only a host that would not read it needs the shell to stand in.
+    // A `#!` naming no interpreter is not that case: [`shebang`] returns `None`
+    // exactly where the kernel answers `ENOEXEC`, and `ENOEXEC` is a
+    // fall-through rather than a refusal — the same one a file with no line at
+    // all takes. So the parse has to be consulted *before* deferring to the OS,
+    // on every host. Returning `None` for any `#!` at all on unix left
+    // `#!\necho hi` unrunnable there while bash runs it (measured, bash 5.2.21).
+    if head.starts_with(b"#!")
+        && let Some((program, arg)) = shebang(head)
+    {
         if cfg!(unix) {
             return None;
         }
-        if let Some((program, arg)) = shebang(head) {
-            return Some(Interposed::Interpreter { program, arg });
-        }
-        // A `#!` naming no interpreter is `ENOEXEC` on a kernel that reads the
-        // line, which is the same fall-through as a file with no line at all:
-        // the text goes to the shell.
+        return Some(Interposed::Interpreter { program, arg });
     }
     own_binary().map(Interposed::Shell)
 }

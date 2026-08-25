@@ -10079,10 +10079,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // awk — a string literal and the comma splitter, both byte-indexed
         // over ASCII delimiters.
-        assert_eq!(awk_eval_expr("\"café\"", b"", &[], 1, 0), b"caf\xc3\xa9");
         assert_eq!(
-            awk_eval_expr("\"a\\tcafé\"", b"", &[], 1, 0),
-            b"a\tcaf\xc3\xa9"
+            awk_eval_expr("\"café\"", b"", &[], 1, 0).as_deref(),
+            Some(&b"caf\xc3\xa9"[..])
+        );
+        assert_eq!(
+            awk_eval_expr("\"a\\tcafé\"", b"", &[], 1, 0).as_deref(),
+            Some(&b"a\tcaf\xc3\xa9"[..])
         );
         assert_eq!(
             awk_split_print_args("\"café\",\"→\""),
@@ -12883,6 +12886,136 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = crate::fs::Vfs::remove(csv);
         let _ = crate::fs::Vfs::remove(csv2);
         let _ = crate::fs::Vfs::remove(f);
+    }
+
+    serial_println!("  kshell::self_test 42: awk refuses a program it cannot run whole");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+        let data: &[u8] = b"1 alpha\n7 beta\n";
+
+        // The four rows of `TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN`.
+        // Each of these used to exit 0 having quietly dropped the statement it
+        // could not run, so the output looked like a legitimate result.
+        for (program, fragment) in [
+            ("awk '{n = n + 1} END {print n}'", &b"n = n + 1"[..]),
+            ("awk '{if ($1 > 5) print}'", b"if ($1 > 5) print"),
+            ("awk '{printf \"%s\\n\", $1}'", b"printf"),
+            ("awk '{sub(/a/, \"b\"); print}'", b"sub(/a/, \"b\")"),
+        ] {
+            let out = piped(program, data);
+            assert_output_contains(
+                "an unrunnable statement is named, not skipped",
+                &out,
+                b"unsupported statement",
+            );
+            assert_output_contains("and the fragment is quoted back", &out, fragment);
+            assert_eq!(
+                last_exit(),
+                2,
+                "a program that cannot be run is fatal to the invocation, not per-operand"
+            );
+        }
+
+        // The refusal is whole-program: the `{print}` rule here is perfectly
+        // runnable, and is still not run. Running it would emit output that
+        // looks like a complete result.
+        let out = piped("awk '{n = 1} {print}'", data);
+        assert_output_contains(
+            "one bad rule refuses the program",
+            &out,
+            b"unsupported statement",
+        );
+        assert!(
+            !out.windows(5).any(|w| w == b"alpha"),
+            "and no record is printed by the rules that would have worked"
+        );
+        assert_eq!(last_exit(), 2, "still exit 2");
+
+        // The pattern half of the same fault: this used to fall through to a
+        // substring search for the seven characters `$1 > 5`, which matches no
+        // record, so the filter printed nothing and reported success.
+        let out = piped("awk '$1 > 5 {print}'", data);
+        assert_output_contains(
+            "an unevaluable pattern is named too",
+            &out,
+            b"unsupported pattern",
+        );
+        assert_output_contains("with its own text", &out, b"$1 > 5");
+        assert_eq!(last_exit(), 2, "exit 2");
+
+        // A bare word in `print` used to be echoed as literal text, so
+        // `print total` printed `total` where awk prints the (empty) variable.
+        let out = piped("awk '{print total}'", data);
+        assert_output_contains(
+            "a variable reference is refused, not echoed",
+            &out,
+            b"unsupported statement",
+        );
+        assert!(
+            !out.windows(6).any(|w| w == b"total\n"),
+            "and the source text is not printed as if it were data"
+        );
+
+        // What must keep working. `NF` now takes all six operators, not the
+        // three the duplicated copy had; `NF < 3` used to become a substring
+        // search for `NF < 3`.
+        let out = piped("awk 'NF < 3 {print $2}'", data);
+        assert_eq!(
+            out.as_slice(),
+            b"alpha\nbeta\n",
+            "NF takes the operators NR always had"
+        );
+        assert_eq!(last_exit(), 0, "and a runnable program is a success");
+
+        let out = piped("awk 'NR != 1 {print $2}'", data);
+        assert_eq!(out.as_slice(), b"beta\n", "NR != N still works");
+
+        // An integer literal is the one case the old bare-word fallback got
+        // right, and it is kept as an explicit arm.
+        let out = piped("awk 'NR == 1 {print 42, $2}'", data);
+        assert_eq!(out.as_slice(), b"42 alpha\n", "an integer literal prints");
+
+        // A decimal is *not* kept, because awk would print `5` for `5.0` via
+        // OFMT and echoing the text would print `5.0` -- the two readings
+        // differ, so the refusal applies. See design-decisions §294.
+        let out = piped("awk 'NR == 1 {print 5.0}'", data);
+        assert_output_contains(
+            "a decimal literal is refused rather than echoed",
+            &out,
+            b"unsupported statement",
+        );
+
+        // An out-of-range field is a *value* (the empty string), not an
+        // unrecognised expression: this must not be refused.
+        let out = piped("awk '{print $9}'", data);
+        assert_eq!(
+            out.as_slice(),
+            b"\n\n",
+            "a missing field is empty, and does not refuse the program"
+        );
+        assert_eq!(last_exit(), 0, "and is a success");
+
+        // The invariant that makes validating with a dummy record sound:
+        // whether a pattern or an expression can be evaluated is a function of
+        // the program text alone. Same fragments, two unlike records.
+        for pattern in ["", "/alpha/", "NR > 2", "NF == 2", "$1 > 5", "junk"] {
+            assert_eq!(
+                awk_pattern_eval(pattern, b"", 0, 0).is_some(),
+                awk_pattern_eval(pattern, b"7 beta", 9, 2).is_some(),
+                "pattern recognition must not depend on the record"
+            );
+        }
+        for expr in ["\"s\"", "NR", "NF", "$0", "$NF", "$9", "42", "5.0", "total"] {
+            assert_eq!(
+                awk_format_print(expr, b"", &[], 0, 0).is_some(),
+                awk_format_print(expr, b"7 beta", &[b"7", b"beta"], 9, 2).is_some(),
+                "expression recognition must not depend on the record"
+            );
+        }
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -122346,7 +122479,12 @@ fn awk_feed(data: &[u8], rules: &[AwkRule], fs: &AwkFs, nr: &mut usize) {
             if rule.is_begin || rule.is_end {
                 continue;
             }
-            if awk_pattern_matches(&rule.pattern, record, *nr, nf) {
+            // `unwrap_or(false)` is unreachable for a validated program:
+            // `awk_validate_program` has already refused every pattern this
+            // returns `None` for. A rule that somehow escaped it is skipped
+            // rather than substring-matched, which is the honest reading of
+            // "cannot evaluate".
+            if awk_pattern_eval(&rule.pattern, record, *nr, nf).unwrap_or(false) {
                 awk_exec_action(&rule.action, record, &fields, *nr, nf);
             }
         }
@@ -122377,6 +122515,17 @@ fn awk_run(spec: &AwkSpec, stdin: Option<&[u8]>) {
     };
 
     let rules = parse_awk_program(&spec.program);
+
+    // Before anything runs, and before any file is opened: a program with a
+    // statement or pattern this shell cannot execute is refused whole. Running
+    // the recognised parts would produce output that looks like a result — see
+    // design-decisions §294.
+    if let Err(e) = awk_validate_program(&rules) {
+        e.report();
+        set_exit(2);
+        return;
+    }
+
     let mut nr: usize = 0;
 
     for rule in &rules {
@@ -122446,6 +122595,9 @@ fn awk_usage(piped: bool) {
     shell_println!("  Fields: $0 (line), $1..$N, $NF (last)");
     shell_println!("  Vars:   NR (line#), NF (field count), FS (separator)");
     shell_println!("  Blocks: BEGIN {{ }} ... {{ }} ... END {{ }}");
+    shell_println!("  Stmts:  print, print <expr>[, <expr>...] -- and nothing else");
+    shell_println!("  Pttrns: empty, /text/, NR <op> N, NF <op> N (<op>: > >= < <= == !=)");
+    shell_println!("  A program outside that set is refused, not partly run (exit 2).");
     shell_println!("  `-` as an operand names the pipe.");
 }
 
@@ -122457,13 +122609,23 @@ fn awk_usage(piped: bool) {
 ///   - `{ print }`, `{ print $1, $3 }`
 ///   - `/pattern/ { action }` — see the caveat below
 ///   - `BEGIN { ... }` and `END { ... }` blocks
-///   - `NR` (record number), `NF` (field count)
+///   - `NR` (record number), `NF` (field count), compared against an integer
 ///   - Pipe input support; `-` as an operand names the pipe
+///
+/// **That list is exhaustive, and it is enforced.** `print` is the only
+/// statement; there are no variables, no assignment, no arithmetic, no `if`,
+/// no `printf`, and no functions. A program using any of them is refused
+/// before it runs — `awk: unsupported statement: '…'`, exit 2 — rather than
+/// having the unrecognised parts skipped, which is what it used to do while
+/// still reporting success. See design-decisions §294 for why refusal beats a
+/// partial implementation here, and `awk_validate_program` for the check.
 ///
 /// **`/pattern/` is a substring match, not a regular expression.** The kernel
 /// shell has no regex engine, so `/^err/` matches the literal `^err`. This is
 /// tracked as `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`
-/// and is blocked on the `ere` crate gaining a `no_std` build.
+/// and is blocked on the `ere` crate gaining a `no_std` build. It is the one
+/// wrong answer the refusal above deliberately leaves in place, because the fix
+/// is the engine, not a refusal.
 ///
 /// Examples:
 ///   awk '{ print $1 }' file.txt            First field of each line
@@ -122684,80 +122846,109 @@ fn awk_split_fields<'a>(record: &'a [u8], fs: &AwkFs) -> alloc::vec::Vec<&'a [u8
     }
 }
 
-/// Check if a pattern matches the current record.
+/// Evaluate `<var> <op> <integer>`, where the variable's value is already
+/// resolved, or `None` if `rest` is not a comparison this shell can evaluate.
+///
+/// One chain serves both `NR` and `NF`. There used to be two, and they had
+/// already drifted: the `NR` copy handled all six operators and the `NF` copy
+/// only `>=`, `>` and `==`, so `awk 'NF < 3'` fell out of the bottom of the
+/// matcher and became a substring search for the text `NF < 3`. That is the
+/// duplicated-loop failure recorded in
+/// `TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP`, in a second place.
+///
+/// The two-character operators are tested before the one-character ones, so
+/// `>=` is never read as `>` followed by a stray `=`.
+fn awk_compare(value: usize, rest: &str) -> Option<bool> {
+    let rest = rest.trim();
+    for op in [">=", "<=", "==", "!=", ">", "<"] {
+        let Some(n_str) = rest.strip_prefix(op) else {
+            continue;
+        };
+        let n = n_str.trim().parse::<usize>().ok()?;
+        return Some(match op {
+            ">=" => value >= n,
+            "<=" => value <= n,
+            "==" => value == n,
+            "!=" => value != n,
+            ">" => value > n,
+            _ => value < n,
+        });
+    }
+    None
+}
+
+/// Evaluate a pattern against the current record, or `None` if this shell
+/// cannot evaluate it at all.
+///
+/// The `None` arm is the point of the function. It used to be a fall-through
+/// to a substring search, so `awk '$1 > 5 { print }'` searched each record for
+/// the seven characters `$1 > 5`, found none, printed nothing, and exited 0 —
+/// a filter that silently matched nothing rather than saying it could not run.
+///
+/// **Invariant:** whether this returns `Some` depends on `pattern` alone; the
+/// record, `nr` and `nf` affect only the value inside. That is what lets
+/// [`awk_validate_program`] ask the question with a dummy record before any
+/// rule has run, and `kshell::self_test` rung 42 pins it by evaluating the same
+/// patterns against two unlike records and comparing only `is_some()`.
 ///
 /// The `/.../` arm is a **substring** match, not a regular expression; see
 /// `cmd_awk`'s doc comment and
 /// `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`.
-#[allow(clippy::arithmetic_side_effects)]
-fn awk_pattern_matches(pattern: &str, line: &[u8], nr: usize, nf: usize) -> bool {
+fn awk_pattern_eval(pattern: &str, line: &[u8], nr: usize, nf: usize) -> Option<bool> {
     if pattern.is_empty() {
-        return true; // No pattern — match all.
+        return Some(true); // No pattern — match all.
     }
 
     // /regex/ pattern — literal string match.
     if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() >= 2 {
-        let pat = &pattern[1..pattern.len() - 1];
-        return awk_bytes_contain(line, pat.as_bytes());
+        let pat = pattern
+            .get(1..pattern.len().saturating_sub(1))
+            .unwrap_or("");
+        return Some(awk_bytes_contain(line, pat.as_bytes()));
     }
 
-    // NR comparisons: NR > N, NR < N, NR == N, NR >= N, NR <= N, NR != N
-    if let Some(after_nr) = pattern.strip_prefix("NR") {
-        let rest = after_nr.trim();
-        if let Some(n_str) = rest.strip_prefix(">=") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr >= n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix("<=") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr <= n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix("!=") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr != n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix("==") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr == n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix('>') {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr > n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix('<') {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nr < n;
-            }
-        }
+    if let Some(rest) = pattern.strip_prefix("NR") {
+        return awk_compare(nr, rest);
+    }
+    if let Some(rest) = pattern.strip_prefix("NF") {
+        return awk_compare(nf, rest);
     }
 
-    // NF comparisons.
-    if let Some(after_nf) = pattern.strip_prefix("NF") {
-        let rest = after_nf.trim();
-        if let Some(n_str) = rest.strip_prefix(">=") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nf >= n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix('>') {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nf > n;
-            }
-        }
-        if let Some(n_str) = rest.strip_prefix("==") {
-            if let Ok(n) = n_str.trim().parse::<usize>() {
-                return nf == n;
-            }
-        }
-    }
+    None
+}
 
-    // Fallback: treat as a literal substring match.
-    awk_bytes_contain(line, pattern.as_bytes())
+/// The statements this shell's `awk` can run.
+///
+/// The enum exists so that [`awk_exec_action`] and [`awk_validate_program`]
+/// cannot disagree about what is supported: both go through
+/// [`awk_classify_stmt`], and adding a variant is the only way to widen the
+/// set. A separate `is_supported` predicate beside the executor's `match` arms
+/// would be a second copy of the same list, which is the shape that drifted in
+/// [`awk_compare`].
+enum AwkStmt<'a> {
+    /// `print` / `print $0` — the whole record, byte for byte.
+    PrintRecord,
+    /// `print <expr>[, <expr>…]` — the argument list, unparsed.
+    PrintExpr(&'a str),
+}
+
+/// Recognise one awk statement, or `None` if this shell cannot run it.
+///
+/// `None` is a refusal, not a no-op: [`awk_validate_program`] turns it into
+/// `awk: unsupported statement: '…'` and exit 2 before any rule runs. See
+/// design-decisions §294 for why the whole program is refused rather than the
+/// recognised parts being run.
+fn awk_classify_stmt(stmt: &str) -> Option<AwkStmt<'_>> {
+    if stmt == "print" || stmt == "print $0" {
+        return Some(AwkStmt::PrintRecord);
+    }
+    if let Some(expr) = stmt
+        .strip_prefix("print ")
+        .or_else(|| stmt.strip_prefix("print\t"))
+    {
+        return Some(AwkStmt::PrintExpr(expr.trim()));
+    }
+    None
 }
 
 /// Execute an awk action for a record.
@@ -122765,7 +122956,12 @@ fn awk_pattern_matches(pattern: &str, line: &[u8], nr: usize, nf: usize) -> bool
 /// Output goes through [`shell_write_bytes`] rather than `shell_println!`,
 /// because `$0` and the fields are now bytes: a record that is not valid UTF-8
 /// is printed as it was read instead of being replaced or dropped.
-#[allow(clippy::arithmetic_side_effects)]
+///
+/// Every statement here has already been accepted by [`awk_validate_program`],
+/// so the unrecognised arms are unreachable for any program that gets this far.
+/// They are still written as skips rather than panics: a panic in the kernel
+/// shell takes the kernel with it, and an escape from the validator should cost
+/// a missing line, not a halt.
 fn awk_exec_action(action: &str, line: &[u8], fields: &[&[u8]], nr: usize, nf: usize) {
     // Split action by `;` for multiple statements.
     for stmt in action.split(';') {
@@ -122774,24 +122970,90 @@ fn awk_exec_action(action: &str, line: &[u8], fields: &[&[u8]], nr: usize, nf: u
             continue;
         }
 
-        if stmt == "print" || stmt == "print $0" {
-            shell_write_bytes(line);
-            shell_write_bytes(b"\n");
-        } else if let Some(expr) = stmt
-            .strip_prefix("print ")
-            .or_else(|| stmt.strip_prefix("print\t"))
-        {
-            let output = awk_format_print(expr.trim(), line, fields, nr, nf);
-            shell_write_bytes(&output);
-            shell_write_bytes(b"\n");
-        } else {
-            // Unknown statement — ignore. Tracked as
-            // `TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN`.
+        match awk_classify_stmt(stmt) {
+            Some(AwkStmt::PrintRecord) => {
+                shell_write_bytes(line);
+                shell_write_bytes(b"\n");
+            }
+            Some(AwkStmt::PrintExpr(expr)) => {
+                if let Some(output) = awk_format_print(expr, line, fields, nr, nf) {
+                    shell_write_bytes(&output);
+                    shell_write_bytes(b"\n");
+                }
+            }
+            None => {}
         }
     }
 }
 
+/// Why a program cannot be run, carrying the fragment that caused it.
+enum AwkUnsupported {
+    Pattern(alloc::string::String),
+    Statement(alloc::string::String),
+}
+
+impl AwkUnsupported {
+    /// Report the refusal, naming the fragment so the user can see which part
+    /// of a multi-rule program is at fault.
+    fn report(&self) {
+        match self {
+            Self::Pattern(p) => shell_println!("awk: unsupported pattern: '{}'", p),
+            Self::Statement(s) => shell_println!("awk: unsupported statement: '{}'", s),
+        }
+    }
+}
+
+/// Check that every rule in a parsed program can actually be run.
+///
+/// This runs once, before any rule executes, so the verdict depends only on the
+/// program text — a program that would have been mis-run on some inputs is
+/// refused on all of them, including the inputs where the wrong answer would
+/// have looked right. See design-decisions §294.
+///
+/// Patterns are checked by evaluating them against a dummy empty record and
+/// asking only whether the answer exists. That is sound because of
+/// [`awk_pattern_eval`]'s documented invariant: whether it returns `Some`
+/// depends on the pattern alone. The same holds for [`awk_format_print`].
+fn awk_validate_program(rules: &[AwkRule]) -> Result<(), AwkUnsupported> {
+    for rule in rules {
+        // BEGIN and END carry no pattern of their own; `rule.pattern` is empty
+        // for both, and an empty pattern is always evaluable, so checking it
+        // unconditionally is correct as well as simpler.
+        if awk_pattern_eval(&rule.pattern, b"", 0, 0).is_none() {
+            return Err(AwkUnsupported::Pattern(alloc::string::String::from(
+                rule.pattern.as_str(),
+            )));
+        }
+        for stmt in rule.action.split(';') {
+            let stmt = stmt.trim();
+            if stmt.is_empty() {
+                continue;
+            }
+            match awk_classify_stmt(stmt) {
+                Some(AwkStmt::PrintRecord) => {}
+                Some(AwkStmt::PrintExpr(expr)) => {
+                    if awk_format_print(expr, b"", &[], 0, 0).is_none() {
+                        return Err(AwkUnsupported::Statement(alloc::string::String::from(stmt)));
+                    }
+                }
+                None => {
+                    return Err(AwkUnsupported::Statement(alloc::string::String::from(stmt)));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Evaluate a print expression, expanding $N, NR, NF, and string literals.
+///
+/// `None` if any argument is an expression this shell cannot evaluate. Like
+/// [`awk_pattern_eval`], whether the answer is `Some` depends on `expr` alone,
+/// which is what lets [`awk_validate_program`] ask with a dummy record.
+///
+/// The arguments are joined with a single space, which is `OFS`'s default and
+/// the only value this shell supports; assigning `OFS` is an unsupported
+/// statement, so it cannot be anything else.
 #[allow(clippy::arithmetic_side_effects)]
 fn awk_format_print(
     expr: &str,
@@ -122799,7 +123061,7 @@ fn awk_format_print(
     fields: &[&[u8]],
     nr: usize,
     nf: usize,
-) -> alloc::vec::Vec<u8> {
+) -> Option<alloc::vec::Vec<u8>> {
     let mut result: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let parts = awk_split_print_args(expr);
 
@@ -122807,10 +123069,10 @@ fn awk_format_print(
         if i > 0 {
             result.push(b' ');
         }
-        result.extend_from_slice(&awk_eval_expr(part.trim(), line, fields, nr, nf));
+        result.extend_from_slice(&awk_eval_expr(part.trim(), line, fields, nr, nf)?);
     }
 
-    result
+    Some(result)
 }
 
 /// Split print arguments by commas (respecting quotes).
@@ -122847,7 +123109,18 @@ fn awk_split_print_args(expr: &str) -> alloc::vec::Vec<alloc::string::String> {
     parts
 }
 
-/// Evaluate a single awk expression to bytes.
+/// Evaluate a single awk expression to bytes, or `None` if this shell cannot.
+///
+/// The `None` arm replaces a "bare word — treat as literal" fallback, under
+/// which `awk '{ print total }'` printed the five characters `total` where awk
+/// prints the value of the variable `total` (empty, since this shell has no
+/// variables). Both are wrong; one of them said so.
+///
+/// **Invariant:** whether this returns `Some` depends on `expr` alone. Every
+/// arm below is recognised by the expression's own text; the record, fields,
+/// `nr` and `nf` only supply the value. An out-of-range `$9` is `Some(empty)`,
+/// not `None`, because awk says a missing field is the empty string — that is a
+/// value, not an unrecognised expression.
 #[allow(clippy::arithmetic_side_effects)]
 fn awk_eval_expr(
     expr: &str,
@@ -122855,7 +123128,7 @@ fn awk_eval_expr(
     fields: &[&[u8]],
     nr: usize,
     nf: usize,
-) -> alloc::vec::Vec<u8> {
+) -> Option<alloc::vec::Vec<u8>> {
     let expr = expr.trim();
 
     // String literal: "..."
@@ -122892,39 +123165,62 @@ fn awk_eval_expr(
         // The literal came from the program, which is `&str`, so it is already
         // valid UTF-8; it is returned as bytes only because everything else
         // `print` concatenates is.
-        return result;
+        return Some(result);
     }
 
     // Built-in variables.
     if expr == "NR" {
-        return alloc::format!("{}", nr).into_bytes();
+        return Some(alloc::format!("{}", nr).into_bytes());
     }
     if expr == "NF" {
-        return alloc::format!("{}", nf).into_bytes();
+        return Some(alloc::format!("{}", nf).into_bytes());
     }
     if expr == "$0" {
-        return line.to_vec();
+        return Some(line.to_vec());
     }
     if expr == "$NF" {
-        return fields
-            .last()
-            .map_or_else(alloc::vec::Vec::new, |f| f.to_vec());
+        return Some(
+            fields
+                .last()
+                .map_or_else(alloc::vec::Vec::new, |f| f.to_vec()),
+        );
     }
 
     // Field reference: $N
     if let Some(field_num) = expr.strip_prefix('$') {
         if let Ok(n) = field_num.parse::<usize>() {
             if n == 0 {
-                return line.to_vec();
+                return Some(line.to_vec());
             }
-            return fields
-                .get(n.wrapping_sub(1))
-                .map_or_else(alloc::vec::Vec::new, |f| f.to_vec());
+            return Some(
+                fields
+                    .get(n.wrapping_sub(1))
+                    .map_or_else(alloc::vec::Vec::new, |f| f.to_vec()),
+            );
         }
     }
 
-    // Bare word — treat as literal.
-    expr.as_bytes().to_vec()
+    // An integer literal prints as its own digits. This is the one case where
+    // the old "bare word — treat as literal" fallback was right, and it is kept
+    // as an explicit arm for the reason §293 gives for a literal `-F`: the two
+    // readings provably coincide, so choosing one is a proof rather than a
+    // guess. A *decimal* literal is not here, because they do not coincide —
+    // awk formats `print 5.0` through `OFMT` (`%.6g`) and prints `5`, where
+    // echoing the text would print `5.0`.
+    if !expr.is_empty()
+        && expr
+            .strip_prefix('-')
+            .unwrap_or(expr)
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        && expr != "-"
+    {
+        return Some(expr.as_bytes().to_vec());
+    }
+
+    // Anything else — a variable, a function call, arithmetic — this shell
+    // cannot evaluate, and says so rather than echoing the source text.
+    None
 }
 
 /// `invariant` — check kernel invariants (system-wide consistency).

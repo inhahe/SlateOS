@@ -76499,7 +76499,42 @@ searching them.
 `ere` gaining a `no_std` build — and the statement executor still ignores
 anything it cannot run, below.
 
-#### TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN (lane A, 2026-08-25) — filed
+#### TD-A-AWK-IGNORES-EVERY-STATEMENT-IT-CANNOT-RUN (lane A, 2026-08-25) — ✅ FIXED
+
+**Fixed** by the parse-time refusal described under "What the fix looks like",
+plus the pattern half of the same fault, which this entry did not originally
+cover. `awk_validate_program` walks the parsed rules before any of them runs and
+refuses the whole program with `awk: unsupported statement: '…'` or
+`awk: unsupported pattern: '…'` and exit 2. Rationale and the decision not to
+implement the missing language instead: design-decisions §294. Pinned by
+`kshell::self_test` rung 42, which asserts all four rows of the table below plus
+the pattern case.
+
+Three things came with it:
+
+- **The pattern fallback is gone.** `awk_pattern_matches` used to end in
+  "treat as a literal substring match", so `awk '$1 > 5 { print }'` searched
+  each record for the seven characters `$1 > 5` and printed nothing. It is now
+  `awk_pattern_eval`, returning `Option<bool>`, and `None` is a refusal.
+- **`NF` gained the three comparison operators it was missing.** The `NR` and
+  `NF` chains were separate copies and had drifted — `NR` handled all six
+  operators, `NF` only `>=`, `>` and `==` — so `awk 'NF < 3'` fell out of the
+  bottom and became a substring search. One `awk_compare` now serves both. This
+  is `TD-A-SED-KEPT-TWO-COPIES-OF-ITS-TRANSFORM-LOOP` in a second place.
+- **A bare word in `print` is refused rather than echoed.** `print total`
+  printed the five characters `total`; awk prints the value of the variable
+  `total`, which here is empty. An *integer* literal is still supported, because
+  that is the one case where echoing the text and evaluating it provably agree
+  — a decimal is not, since awk formats `5.0` through `OFMT` and prints `5`.
+
+**Still not refused: `/pattern/`**, which remains a substring match. That is the
+separate `TD-A-THE-KERNEL-SHELLS-AWK-MATCHES-REGEXES-WITH-SUBSTRING-SEARCH`,
+blocked on the `ere` crate gaining a `no_std` build; refusing every `/…/` with
+a metacharacter is the documented fallback if that request is declined, and is
+not done pre-emptively because it would break working invocations while the
+request is open.
+
+The original entry follows.
 
 **In short:** the kernel shell's `awk` understands exactly one statement,
 `print`. Anything else — an assignment, an `if`, a function call — is skipped

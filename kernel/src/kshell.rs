@@ -12148,8 +12148,31 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         let out = piped("cut -q -d: -f1", data);
         assert_output_lacks("an unknown option is not a file name", &out, b"zz_a");
-        assert_output_contains("and is named", &out, b"unrecognized option");
+        assert_output_contains("and is named by its letter", &out, b"invalid option -- 'q'");
         assert_eq!(last_exit(), 1, "an unknown option is a usage error");
+
+        // Short options bundle, as getopt's do. This is not a nicety: `-sd:` is
+        // how the option is ordinarily written, and the old parser looked at
+        // byte 1 alone, so `-s` matched only when the word was exactly `-s` and
+        // every bundle fell through to the catch-all. `cut -sd: -f1` was
+        // refused outright -- a correct command line that did not run.
+        let out = piped("cut -sd: -f1", data);
+        assert_eq!(last_exit(), 0, "a bundled -s -d: is an ordinary invocation");
+        assert_output_contains("and -d: took the delimiter", &out, b"zz_a");
+
+        // A value ends the bundle and takes the rest of the word, so the `:`
+        // after `d` is the delimiter and not another flag. If it were read as a
+        // flag this would be `invalid option -- ':'`.
+        let out = piped("cut -d: -sf1", data);
+        assert_eq!(last_exit(), 0, "-sf1 is -s and -f1");
+        assert_output_contains("and the field came out", &out, b"zz_a");
+
+        // A bad letter inside a bundle is named on its own. `-s` is valid, so a
+        // message quoting `-sq` back would name a string that is half correct.
+        let out = piped("cut -sq -f1", data);
+        assert_output_contains("the bad letter is named", &out, b"invalid option -- 'q'");
+        assert_output_lacks("not the bundle it sat in", &out, b"-sq");
+        assert_eq!(last_exit(), 1, "and it is a usage error");
 
         let out = piped("cut -d: -f1 -c1", data);
         assert_output_lacks("the two list kinds cannot be combined", &out, b"zz_a");
@@ -108971,8 +108994,9 @@ enum CutParseError {
     NoList,
     /// A real `cut` option this one does not implement.
     Unsupported(String, &'static str),
-    /// Anything else beginning with `-`.
-    UnknownOption(String),
+    /// Anything else beginning with `-`, named by the letter rather than by the
+    /// word it was bundled in — see [`FoldParseError::InvalidOption`].
+    InvalidOption(char),
 }
 
 impl CutParseError {
@@ -109020,8 +109044,8 @@ impl CutParseError {
             Self::Unsupported(ref opt, hint) => {
                 shell_println!("cut: {} is not supported ({})", opt, hint);
             }
-            Self::UnknownOption(ref opt) => {
-                shell_println!("cut: unrecognized option '{}'", opt);
+            Self::InvalidOption(c) => {
+                shell_println!("cut: invalid option -- '{}'", c);
             }
         }
     }
@@ -109029,19 +109053,23 @@ impl CutParseError {
 
 /// Read the value of a short option that takes one: `-fVALUE` or `-f VALUE`.
 ///
-/// `i` is the index of the word *after* `word`, and is advanced when the
-/// detached form consumes it. A missing value is an error rather than a
-/// default, which is the whole point: the old parser consumed the word
+/// `rest` is what remains of the word *after* the flag letter, which is not
+/// necessarily at byte 2: in a bundle like `-sd:` the `-d` value is `:` at byte
+/// 3. Taking the remainder rather than the whole word is what lets this be
+/// called from inside the bundle loop.
+///
+/// `i` is the index of the word *after* the one being read, and is advanced
+/// when the detached form consumes it. A missing value is an error rather than
+/// a default, which is the whole point: the old parser consumed the word
 /// whether or not it could read it.
 fn cut_opt_value(
-    word: &str,
+    rest: &str,
     words: &[String],
     i: &mut usize,
     flag: char,
 ) -> Result<String, CutParseError> {
-    let attached = word.get(2..).unwrap_or("");
-    if !attached.is_empty() {
-        return Ok(String::from(attached));
+    if !rest.is_empty() {
+        return Ok(String::from(rest));
     }
     let next = words.get(*i).ok_or(CutParseError::MissingArg(flag))?;
     *i = i.saturating_add(1);
@@ -109115,49 +109143,63 @@ fn parse_cut_args(args: &str) -> Result<CutSpec, CutParseError> {
             continue;
         }
 
-        let flag = w.as_bytes().get(1).copied().unwrap_or(b'\0');
-        match flag {
-            b'd' => {
-                let v = cut_opt_value(w, &words, &mut i, 'd')?;
-                let mut cs = v.chars();
-                let (Some(c), None) = (cs.next(), cs.next()) else {
-                    return Err(CutParseError::MultiCharDelim(v));
-                };
-                delim = Some(c);
-            }
-            b'f' | b'c' => {
-                let this = if flag == b'f' {
-                    CutMode::Fields
-                } else {
-                    CutMode::Chars
-                };
-                if mode.is_some_and(|prev| prev != this) {
-                    return Err(CutParseError::BothLists);
+        let after = w.get(1..).unwrap_or("");
+        if after.starts_with('-') {
+            return Err(CutParseError::Unsupported(
+                String::from(w),
+                "long options are not implemented; use -c, -f, -d, -s",
+            ));
+        }
+
+        // Bundled short flags, left to right, as getopt reads them: `-sd:` is
+        // `-s -d:`. This used to look at byte 1 alone and treat the rest of the
+        // word as part of that one option, so every bundle that was not exactly
+        // `-s` fell to the catch-all and was refused -- `cut -sd: -f1` is an
+        // ordinary invocation and did not run. An option that takes a value
+        // consumes the rest of the word and ends the bundle, which is why `-d:`
+        // gives `:` and not a flag `:`.
+        let mut rest = after;
+        while let Some(flag) = rest.chars().next() {
+            rest = rest.get(flag.len_utf8()..).unwrap_or("");
+            match flag {
+                'd' => {
+                    let v = cut_opt_value(rest, &words, &mut i, 'd')?;
+                    rest = "";
+                    let mut cs = v.chars();
+                    let (Some(c), None) = (cs.next(), cs.next()) else {
+                        return Err(CutParseError::MultiCharDelim(v));
+                    };
+                    delim = Some(c);
                 }
-                mode = Some(this);
-                let spec = cut_opt_value(w, &words, &mut i, char::from(flag))?;
-                // Two lists of the *same* kind merge rather than conflict:
-                // because selected input is written in line order and exactly
-                // once, `-f1 -f3` and `-f1,3` name the same set, so merging is
-                // not a guess about which one was meant.
-                for item in spec.split(',') {
-                    ranges.push(parse_cut_item(item.trim(), char::from(flag))?);
+                'f' | 'c' => {
+                    let this = if flag == 'f' {
+                        CutMode::Fields
+                    } else {
+                        CutMode::Chars
+                    };
+                    if mode.is_some_and(|prev| prev != this) {
+                        return Err(CutParseError::BothLists);
+                    }
+                    mode = Some(this);
+                    let spec = cut_opt_value(rest, &words, &mut i, flag)?;
+                    rest = "";
+                    // Two lists of the *same* kind merge rather than conflict:
+                    // because selected input is written in line order and
+                    // exactly once, `-f1 -f3` and `-f1,3` name the same set, so
+                    // merging is not a guess about which one was meant.
+                    for item in spec.split(',') {
+                        ranges.push(parse_cut_item(item.trim(), flag)?);
+                    }
                 }
+                's' => only_delimited = true,
+                'b' => {
+                    return Err(CutParseError::Unsupported(
+                        alloc::format!("-{flag}"),
+                        "this cut counts characters; use -c",
+                    ));
+                }
+                _ => return Err(CutParseError::InvalidOption(flag)),
             }
-            b's' if w == "-s" => only_delimited = true,
-            b'b' => {
-                return Err(CutParseError::Unsupported(
-                    String::from(w),
-                    "this cut counts characters; use -c",
-                ));
-            }
-            b'-' => {
-                return Err(CutParseError::Unsupported(
-                    String::from(w),
-                    "long options are not implemented; use -c, -f, -d, -s",
-                ));
-            }
-            _ => return Err(CutParseError::UnknownOption(String::from(w))),
         }
     }
 

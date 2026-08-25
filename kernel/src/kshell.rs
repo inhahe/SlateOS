@@ -397,6 +397,25 @@ fn assert_output_lacks(what: &str, out: &[u8], forbidden: &[u8]) {
     panic!("`{}` output contained text it must not", what);
 }
 
+/// Build a `root/d1/d2/.../dN` path two levels deeper than [`WALK_DEPTH_CAP`],
+/// for the self-test rungs that prove a recursive walk stops at the cap.
+///
+/// Two past the cap rather than one, so the walk *hits* the limit instead of
+/// merely reaching it, and the rung cannot pass on an off-by-one.
+///
+/// This exists because the fixtures used to be literal paths — 18 components
+/// for `find`'s cap of 16, 34 for `ls`'s 32. A literal is a second, silent copy
+/// of the constant: raising the cap leaves the fixture shallower than the limit
+/// it is supposed to trip, and the rung then asserts nothing while still
+/// passing. Deriving it from the constant is what keeps the two from drifting.
+fn deep_fixture_path(root: &str) -> String {
+    let mut path = String::from(root);
+    for level in 1..=WALK_DEPTH_CAP.saturating_add(2) {
+        path.push_str(&alloc::format!("/d{}", level));
+    }
+    path
+}
+
 // ---------------------------------------------------------------------------
 // Working directory
 // ---------------------------------------------------------------------------
@@ -11102,11 +11121,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Vfs::mkdir_all(shallow)?;
         Vfs::write_file(Path::new("/tmp/kshell_find_shallow/needle.txt"), b"x")?;
 
-        // 18 levels: two past FIND_DEPTH_CAP, so the walk is certain to hit the
-        // cap rather than merely reach it.
-        Vfs::mkdir_all(Path::new(
-            "/tmp/kshell_find_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17/d18",
-        ))?;
+        // Two levels past [`WALK_DEPTH_CAP`], so the walk is certain to hit the
+        // cap rather than merely reach it. Built in a loop rather than spelled
+        // out: this was an 18-component literal chosen when the cap was 16, and
+        // a hand-written path silently stops testing anything the day the cap
+        // moves past it -- which it just did.
+        Vfs::mkdir_all(Path::new(&deep_fixture_path("/tmp/kshell_find_deep")))?;
 
         // 0: matched. The ordinary path, asserted so the rungs below cannot pass
         // by breaking the search itself.
@@ -11203,17 +11223,22 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         use crate::fs::vfs::Vfs;
 
-        // 34 levels: two past LS_DEPTH_CAP.
-        Vfs::mkdir_all(Path::new(
-            "/tmp/kshell_ls_deep/d1/d2/d3/d4/d5/d6/d7/d8/d9/d10/d11/d12/d13/d14/d15/d16/d17\
-             /d18/d19/d20/d21/d22/d23/d24/d25/d26/d27/d28/d29/d30/d31/d32/d33/d34",
-        ))?;
+        // Two levels past [`WALK_DEPTH_CAP`]; see `deep_fixture_path` for why
+        // this is no longer a literal.
+        Vfs::mkdir_all(Path::new(&deep_fixture_path("/tmp/kshell_ls_deep")))?;
 
         let out = capture_command("ls -R /tmp/kshell_ls_deep");
         assert_output_contains("the cap is named when it bites", &out, b"recursion limit");
         // The path is the point: without it the line is unattributable, which is
-        // what it was before.
-        assert_output_contains("ls names the subtree it stopped at", &out, b"/d33");
+        // what it was before. The walk refuses at the first level *past* the
+        // cap, and the root is depth 0, so that is `d{cap+1}` -- derived rather
+        // than written out, for the same reason the fixture is.
+        let stopped_at = alloc::format!("/d{}", WALK_DEPTH_CAP.saturating_add(1));
+        assert_output_contains(
+            "ls names the subtree it stopped at",
+            &out,
+            stopped_at.as_bytes(),
+        );
         assert_eq!(last_exit(), 1, "ls: a truncated listing is incomplete");
 
         // A listing that fits under the cap is untouched by any of this. Its own
@@ -12441,18 +12466,53 @@ fn cmd_ls(args: &str) {
     );
 }
 
-/// How deep `ls -R` will descend before giving up on a subtree.
+/// How deep any of the shell's recursive directory walks will descend before
+/// giving up on a subtree: `ls -R`, `find`, and `grep -r`.
 ///
-/// A stack-safety limit against infinite recursion — a symlink loop, most
-/// obviously. Named rather than inlined because the limit is now *reported*
-/// when it bites, and the diagnostic and the check must not be able to drift
-/// apart.
-const LS_DEPTH_CAP: u32 = 32;
+/// A stack-safety limit against unbounded recursion — a symlink loop, most
+/// obviously. Named rather than inlined because the limit is *reported* when it
+/// bites, and the diagnostic and the check must not be able to drift apart.
+///
+/// # Why one constant, and why this number
+///
+/// This was three constants (`LS_DEPTH_CAP` 32, `FIND_DEPTH_CAP` 16,
+/// `MAX_GREP_DEPTH` 16) whose stated justification was, verbatim, "the shell's
+/// task stack is 64 KiB (`TASK_STACK_SIZE`)". **The shell does not run on a task
+/// stack.** Both of its entry points — `kshell::self_test` and `kshell::run` —
+/// are reached from `kernel_main`, which runs on the dedicated 2 MiB
+/// `KERNEL_BOOT_STACK`, of which 1984 KiB is usable (the low 64 KiB is the
+/// canary redzone). Every one of the three numbers was picked against a stack
+/// the code never touches.
+///
+/// So the number is derived from the frames that actually exist. Measured with
+/// `llvm-objdump` on the debug build — the profile the boot test runs, and the
+/// expensive one, since debug frames here are ~6x release:
+///
+/// | walker                  | bytes/level (debug) | at cap 64 |
+/// |-------------------------|--------------------:|----------:|
+/// | `ls_list_dir`           |                3712 |    232 KiB |
+/// | `find_recurse_filtered` |                1232 |     77 KiB |
+/// | `grep_recursive`        |                 960 |     60 KiB |
+///
+/// The cap is sized for the worst walker, so 64 costs at most 232 KiB — 12% of
+/// the usable boot stack — leaving the rest for the non-recursive call chain
+/// beneath the innermost level (VFS, ext4), which is a constant, not multiplied
+/// by depth. Uniform rather than per-walker on purpose: "the shell descends at
+/// most 64 levels" is one fact to learn instead of three, and the worst case is
+/// the one that has to fit anyway.
+///
+/// 64 is far past any real tree (a kernel source tree is ~12 deep, a
+/// pathological `node_modules` ~40) while still being a hard stop for a symlink
+/// loop, which is unbounded and so is caught by any finite cap.
+///
+/// If a walker's frame grows, re-measure rather than guessing: the old numbers
+/// looked deliberate and were arithmetic against the wrong stack.
+const WALK_DEPTH_CAP: u32 = 64;
 
 /// Internal helper for ls: list one directory and optionally recurse.
 ///
 /// `depth` guards against infinite recursion (e.g., symlink loops); the bound is
-/// [`LS_DEPTH_CAP`].
+/// [`WALK_DEPTH_CAP`].
 ///
 /// Sets a failing status itself rather than leaving it to `cmd_ls`, which is
 /// what it already does for an unreadable directory below. The usual reason a
@@ -12471,7 +12531,7 @@ fn ls_list_dir(
     recursive: bool,
     depth: u32,
 ) {
-    if depth > LS_DEPTH_CAP {
+    if depth > WALK_DEPTH_CAP {
         // Named the path and set a status, neither of which it used to do. `ls`
         // has no equivalent of `find`'s user-supplied depth, so unlike there,
         // every hit on this limit is a refusal: the directories below it exist
@@ -12481,7 +12541,7 @@ fn ls_list_dir(
         shell_println!(
             "ls: {}: recursion limit ({}) reached, not listed",
             path.display(),
-            LS_DEPTH_CAP
+            WALK_DEPTH_CAP
         );
         set_exit(1);
         return;
@@ -13823,7 +13883,7 @@ fn du_recurse(path: &Path, depth: usize, max_depth: usize, summary_only: bool) -
 /// Exits **0** when the walk completed — *including* when it matched nothing,
 /// which is a complete answer and not an error — and **1** when it could not
 /// walk something: an unreadable directory, a subtree cut off by
-/// [`FIND_DEPTH_CAP`], or a usage error. Two values, not the three
+/// [`WALK_DEPTH_CAP`], or a usage error. Two values, not the three
 /// `grep`/`cmp`/`diff` use; see [`FindTally`] for why the third would be
 /// meaningless here.
 #[allow(clippy::arithmetic_side_effects)]
@@ -13901,20 +13961,20 @@ fn cmd_find(args: &str) {
     // A `-maxdepth` deeper than the cap cannot be honoured, and pretending
     // otherwise is the same silence in a different place: the old code let the
     // user's number straight through, so `-maxdepth 200` would have recursed 200
-    // levels into the shell's 64 KiB stack if a tree that deep existed. Clamp,
-    // and say so once here rather than once per subtree below.
+    // levels if a tree that deep existed. Clamp, and say so once here rather
+    // than once per subtree below.
     let (max_depth, depth_limit_is_builtin) = match user_max_depth {
-        Some(n) if n <= FIND_DEPTH_CAP => (n, false),
+        Some(n) if n <= WALK_DEPTH_CAP => (n, false),
         Some(n) => {
             shell_println!(
                 "find: -maxdepth {}: exceeds the built-in limit of {}, using {}",
                 n,
-                FIND_DEPTH_CAP,
-                FIND_DEPTH_CAP
+                WALK_DEPTH_CAP,
+                WALK_DEPTH_CAP
             );
-            (FIND_DEPTH_CAP, true)
+            (WALK_DEPTH_CAP, true)
         }
-        None => (FIND_DEPTH_CAP, true),
+        None => (WALK_DEPTH_CAP, true),
     };
 
     let filter = FindFilter {
@@ -13941,18 +14001,6 @@ fn cmd_find(args: &str) {
     }
 }
 
-/// How deep `find` will descend before giving up on a subtree.
-///
-/// This is a stack-safety limit, not a feature: `find_recurse_filtered` recurses
-/// once per directory level, and the shell's task stack is 64 KiB
-/// ([`crate::sched::task::TASK_STACK_SIZE`]). It is emphatically *not* the same
-/// thing as the user's `-maxdepth`, even though one field used to carry both --
-/// see [`FindFilter::depth_limit_is_builtin`].
-///
-/// Named rather than inlined because the limit is now *reported* when it bites,
-/// and the diagnostic and the check must not be able to drift apart.
-const FIND_DEPTH_CAP: u32 = 16;
-
 /// Parsed find predicates.
 struct FindFilter<'a> {
     name_pattern: Option<&'a str>,
@@ -13961,7 +14009,7 @@ struct FindFilter<'a> {
     size_filter: Option<(i64, char)>,
     empty_filter: bool,
     /// The depth actually enforced: the user's `-maxdepth` if they gave one and
-    /// it fits, otherwise [`FIND_DEPTH_CAP`].
+    /// it fits, otherwise [`WALK_DEPTH_CAP`].
     max_depth: u32,
     /// Whether `max_depth` is ours or theirs.
     ///
@@ -13993,7 +14041,7 @@ struct FindTally {
     /// Paths that satisfied every predicate.
     matches: u64,
     /// Directories the walk could not read, or subtrees it was cut off from by
-    /// [`FIND_DEPTH_CAP`]. Any of these means the search was incomplete, so the
+    /// [`WALK_DEPTH_CAP`]. Any of these means the search was incomplete, so the
     /// zero-match answer is not an answer.
     unreadable: usize,
 }
@@ -95178,7 +95226,7 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, tally: &mut FindT
             shell_println!(
                 "find: {}: recursion limit ({}) reached, not searched",
                 path.display(),
-                FIND_DEPTH_CAP
+                WALK_DEPTH_CAP
             );
             tally.unreadable = tally.unreadable.saturating_add(1);
         }
@@ -95516,12 +95564,6 @@ fn cmd_hexdump(args: &str) {
 // exists here, so it was silently documenting whatever item happened to follow
 // it, which after this change would have been the depth limit.
 
-/// How deep `grep -r` will descend before giving up on a subtree.
-///
-/// Named rather than inlined because the limit is now *reported* when it bites,
-/// and the diagnostic and the check must not be able to drift apart.
-const MAX_GREP_DEPTH: usize = 16;
-
 /// Grep flags parsed from command-line arguments.
 struct GrepFlags {
     case_insensitive: bool,
@@ -95829,7 +95871,8 @@ fn grep_file(
     }
 }
 
-/// Recursively search a directory for grep matches (depth limit 16).
+/// Recursively search a directory for grep matches, bounded by
+/// [`WALK_DEPTH_CAP`].
 ///
 /// Every way this can decline to search something now says so and records it in
 /// `tally`. It previously had three bare `return`s — an unstattable path, an
@@ -95842,7 +95885,7 @@ fn grep_recursive(
     flags: &GrepFlags,
     multi_file: bool,
     tally: &mut GrepTally,
-    depth: usize,
+    depth: u32,
 ) {
     // Two unrelated stopping conditions used to share one `if`. Only one of
     // them is a failure: reaching the match cap is the ordinary, already-
@@ -95851,11 +95894,11 @@ fn grep_recursive(
     if tally.matches >= flags.max_matches {
         return;
     }
-    if depth > MAX_GREP_DEPTH {
+    if depth > WALK_DEPTH_CAP {
         shell_println!(
             "grep: {}: recursion limit ({}) reached, not searched",
             path.display(),
-            MAX_GREP_DEPTH
+            WALK_DEPTH_CAP
         );
         tally.unreadable = tally.unreadable.saturating_add(1);
         return;

@@ -78449,3 +78449,95 @@ one that destroys data.
 `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`: `sed` is already on
 `command_parses_own_quotes`, so the *words* are right — what is missing is the
 grammar over them.
+
+---
+
+### Lesson 47: an app that keeps time but never receives the clock (lane C, 2026-08-25)
+
+**In short:** five lane-C programs measured time, and none of them was given
+any. A stopwatch that sat at 00:00.00, a metronome that never beat, a typing
+tutor whose every speed reading was zero, toasts that never left the screen,
+and a speed test that finished in a single frame. All five had a correct,
+well-tested function to advance the clock. Nothing in production ever called
+it. Every one of them still laid out, still repainted, still answered the
+keyboard — they just showed a plausible zero.
+
+A GUI program's clock arrives as one event:
+
+```rust
+Event::Tick { elapsed_ms }
+```
+
+`oswindow` computes `now - this window's previous tick` and sends that
+interval to the window. An app that ages anything has to route that event to
+whatever advances its state. If `handle_event` does not name `Event::Tick`,
+the event lands in the `_ => {}` arm and the state is frozen for the life of
+the process.
+
+**Why this is lesson 45 wearing a disguise the compiler cannot see through.**
+Lesson 45 is "a feature with no production caller is a feature that does not
+exist," and `dead_code` is the lint that finds it. `dead_code` cannot find
+this one, because the function *is* called — by the tests. And a test can
+always reach it, because a test passes the timestamp in by hand:
+
+```rust
+#[test]
+fn test_auto_dismiss_on_timeout() {
+    toasts.tick(3001);          // the daemon never does this
+    assert!(toasts[0].dismissing);
+}
+```
+
+That test passed for the entire time notifications were broken. It asserts
+something true about `tick`. It asserts nothing whatever about the program.
+
+**The rule that follows: test a wiring through the entry point, not the
+target.** Every fix here got a test that goes in through `handle_event` and
+was then *falsified* — delete the match arm, confirm that test and only that
+test fails, restore, re-run green. That is the only construction that can
+distinguish a wired app from an unwired one.
+
+**The five, and what each was actually showing the user.**
+
+| App | Symptom |
+|---|---|
+| `apps/stopwatch` | 00:00.00, running. The countdown never counted either. |
+| `apps/metronome` | No beat, and `T` (tap tempo) was an empty match arm whose comment read "in a real app this would use system time". |
+| `apps/typingtutor` | Every WPM figure and every duration read zero — on the live screen, on the results screen, and in the saved history. |
+| `gui/notifications` | Toasts never aged, so they never left the screen. |
+| `apps/speedtest` | Start ran latency, download and upload inside one call and returned `Complete`. The live graph arrived full; the phase strip's running-highlight and Escape's cancel were unreachable code. |
+
+Four of the five were found by hand in one afternoon. Four for four is not a
+coincidence — it is the default outcome of an event enum with a `_ =>` arm.
+
+**The gate: `scripts/check-tick-wiring.py`.** It reports a file when all three
+hold: it defines `fn handle_event`; it defines a function taking a named time
+parameter (`delta_ms`, `elapsed_ms`, `current_ms`, `delta_secs`, …); and it
+never mentions `Event::Tick` **in production code**. `--self-test` runs 13
+fixture cases; exit status is 1 on findings, so it can be run as a gate. It
+found `apps/speedtest`, which the hand search had missed.
+
+**Two things about the gate that are worth more than the gate.**
+
+- **The three conditions are tight on purpose.** Flagging every file with a
+  `_ms` constant would report dozens of non-problems, and a gate that cries
+  wolf is a gate that gets commented out. A `format_time(total_ms)` helper is
+  not asking to be driven; a parameter called `delta_ms` is.
+- **"In production code" is the whole difference between a gate and a
+  decoration, and the first draft did not have it.** Comments and
+  `#[cfg(test)]` items are blanked before the search, because every file this
+  check causes to be fixed acquires a comment explaining the fix and a test
+  constructing an `Event::Tick`. If either counted as evidence of wiring, the
+  file would be permanently exempt from the check that found it — delete the
+  arm again and the test written to catch exactly that would still hold the
+  file green. Caught by falsifying the first draft against the live tree:
+  removing `apps/stopwatch`'s arm produced no finding.
+
+That second point generalises past this check. **A static gate must be
+falsified against the tree it guards, not only against its own fixtures.** A
+fixture proves the gate can see; only a live falsification proves it is still
+looking at the thing you think it is. This is the same failure lane A logged
+in `A-GATES-SILENTLY-STOPPED-CHECKING` — four gates parsing a fraction of the
+tree and reporting "clean" — arrived at from the opposite direction: not a
+gate that stopped reading the files, but a gate that read them and was talked
+out of its finding by the evidence of its own success.

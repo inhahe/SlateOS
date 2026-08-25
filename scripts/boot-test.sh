@@ -2735,6 +2735,83 @@ if ! check_variant_lists; then
     exit 1
 fi
 
+# An app that keeps time but never receives the clock.
+#
+# A GUI app's clock is one event, `Event::Tick { elapsed_ms }`.  An app that
+# ages anything -- a stopwatch, a metronome, a toast that expires, a WPM figure
+# -- must route it to whatever advances that state.  If `handle_event` never
+# names the variant, the event lands in the `_ =>` arm and the state is frozen
+# for the life of the process, while the window still lays out, still repaints,
+# still answers the keyboard, and still shows a number.
+#
+# `dead_code` cannot see this, because the advancing function *is* called -- by
+# its own unit test, which passes the interval in by hand and passes.  Lane C
+# found five of these and all five had green tests over frozen code.
+#
+# The gate is a heuristic over Rust source and its fixture runs first, for the
+# usual reason: a gate that has stopped seeing reports zero findings in exactly
+# the way a clean tree does.
+#
+# Requested by lane C in requests/c-a-wire-the-tick-gate-into-boot-test.md.
+# Scope is lane C's own tree (gui, apps, net*, pkg), which is where the script
+# was falsified; unlike the variant-list gate, this one is not widened, because
+# `handle_event` and `Event::Tick` are matched by bare name and a same-named
+# `handle_event` over some other lane's own event enum would be a false finding
+# in a gate that refuses to build.  Widen it when something outside lane C
+# grows a guitk window, and falsify it there first.
+check_tick_wiring() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Tick wiring check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Not a formality.  The first version of this script accepted a file's own
+    # regression test as evidence of production wiring -- so every file it ever
+    # caused to be fixed would have gone permanently blind to it.  It now blanks
+    # comments and `#[cfg(test)]` items before searching, and the fixture pins
+    # that behaviour.
+    echo "=== Checking the tick wiring gate against its fixture ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-tick-wiring.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The tick wiring gate no longer agrees" >&2
+        echo "with its own fixture, so its verdict on the tree means nothing --" >&2
+        echo "a gate that has stopped seeing reports zero findings just like a" >&2
+        echo "clean tree does." >&2
+        return 1
+    fi
+
+    echo "=== Checking that apps which keep time receive the clock ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-tick-wiring.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each file above defines handle_event and a" >&2
+    echo "function that takes a time interval, but never matches Event::Tick." >&2
+    echo "Nothing in the running program advances that state: it is frozen for" >&2
+    echo "the life of the process and shows a plausible zero." >&2
+    echo "" >&2
+    echo "The fix is a match arm in handle_event:" >&2
+    echo "" >&2
+    echo "    Event::Tick { elapsed_ms } => { self.tick(*elapsed_ms); ... }" >&2
+    echo "" >&2
+    echo "Note elapsed_ms is an INTERVAL since this window's previous tick, not" >&2
+    echo "a timestamp -- see gui/window/src/lib.rs.  Then write the regression" >&2
+    echo "test through handle_event, never against the advancing function: a" >&2
+    echo "test that calls tick() directly cannot tell a wired app from an" >&2
+    echo "unwired one, which is how all five of these shipped green." >&2
+    return 1
+}
+
+if ! check_tick_wiring; then
+    exit 1
+fi
+
 # Keep `.unwrap()` / `.expect()` out of kernel production paths.
 #
 # The count reached zero on 2026-08-22 and the script that measured it was

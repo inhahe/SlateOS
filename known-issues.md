@@ -32744,6 +32744,79 @@ Settings was the application this entry singled out because it had something
 specific it could not call. That is closed. The entry stays open for the other
 136 unwired applications.
 
+**Update 2026-08-25 — the strap is written once, and the recipe below is the
+whole of what converting an app now costs.**
+
+Three applications had by then been wired — editor, Settings, and (as of this
+update) metronome — and each had its own hand-written `run`. That is the failure
+step (d) named at the top of this entry, arriving from the other direction: the
+loop was written once *for the tree* and then written again, per app, because
+nothing had extracted the parts that are identical in all of them. Three copies
+is where the divergence starts being cheap to fix; 136 is where it is not.
+
+`gui/window/src/app.rs` (`oswindow::app`) now holds it: an `App` trait
+(`title`, `initial_size`, `resizable`, `tick_interval`, `on_event`, `render`,
+the first three and the fourth defaulted), `open`, `drive`, `Args`, and
+`launch`/`launch_with`. Editor and metronome are on it; Settings is not yet.
+
+**The recipe.** For an ordinary single-window application:
+
+1. Add `oswindow = { path = "../../gui/window" }` to its `Cargo.toml`. An app
+   names `oswindow` and never `guiremote`, for the reason a Unix program does
+   not name the socket layer.
+2. Delete `#![allow(dead_code)]` if it has one. It is almost always there
+   because the app was never wired, and it is what hides the fact — see
+   `lesson 46`. Expect to delete genuinely dead code once the lint works again,
+   and expect some of it to be *test-only* dead code, which is lesson 45 exactly
+   and is invisible unless you compare `cargo build` against `cargo test`.
+3. `impl oswindow::app::App` for the app's state type.
+   - If it has an inherent `render`, **rename it** (`render_commands`,
+     `render_tree`). At equal arity an inherent method silently wins method
+     lookup over the trait's and every existing call keeps compiling while
+     testing the other function.
+   - **`tick_interval` is the one to get right.** Anything the app ages — a
+     beat, a blink, a countdown, a toast — needs it, and the default `None`
+     ships the feature frozen with its tests still passing (`lesson 47`).
+     Return `None` only when the app genuinely ages nothing, and gate it on
+     what is actually moving so an idle desktop can park.
+   - Do **not** answer `Redraw` to `Event::Resize`/`ScaleChanged`; `drive` takes
+     that decision for every app, because 137 apps each remembering to is 137
+     chances to forget.
+   - If the app's renderer reads its own stored window size, have `App::render`
+     reconcile it with the size it is *handed* — a compositor may grant a size
+     that was never requested, and the first frame is drawn before any event.
+4. `fn main() -> ExitCode` becomes one line, `app::launch("name", &mut state)`
+   — or, for an app with arguments of its own, `Args::from_env()` +
+   `launch_with(name, args.display.as_deref(), &mut state)`, because `launch`
+   rejects unexpected arguments with exit 2.
+5. Delete the app's own display parsing, dialer, diagnostic and window build.
+   All four are in `oswindow::app` and were identical in every copy.
+6. Run `python scripts/check-tick-wiring.py` and
+   `python scripts/scan-unwired.py`. The second reports reach per binary; a
+   conversion should raise it, and if it *falls*, suspect the scanner's
+   `ENTRY_POINTS` list before suspecting the app (that list has already lagged
+   the code once).
+
+**What the extraction cost, which is the argument for having done it before app
+four rather than after app forty.** `guiremote::client::Client` — step (d)'s
+original home for the loop — was retired in the same work. It had been
+superseded by `oswindow::EventLoop` within a week of being written and had sat
+since with **no production caller of its own**, which is this entry's own defect
+arriving inside its own cure. It also structurally could not tick: no wake-up
+list, so it parked in `Transport::wait` until the compositor spoke, and any app
+built on it would have reproduced lesson 47 through no fault of its own.
+
+Two live defects surfaced in the two conversions, both of them in `main` and
+both invisible until `main` had something in it worth testing: `apps/metronome`
+never advanced (its `Event::Tick` fell into a `_ => {}` arm), and
+`apps/editor` showed a stray blank tab beside every file named on its command
+line. That is the yield to expect per app, and it is the reason the conversions
+are worth doing individually rather than by a mechanical sweep.
+
+**Count: 135 to go.** Three applications open a window — editor, Settings,
+metronome — and Settings still has its own copy of the strap, so converting it
+onto `oswindow::app` is the next item under this entry rather than a fourth app.
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY

@@ -2259,6 +2259,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if condition.is_empty() {
                 shell_println!("Syntax error: {} requires a condition", first_word);
+                set_exit(1);
                 return true;
             }
 
@@ -2297,6 +2298,7 @@ fn handle_control_flow(line: &str) -> bool {
                         shell_println!(
                             "Syntax error: for ((...)) requires 3 semicolon-separated expressions"
                         );
+                        set_exit(1);
                         return true;
                     }
                     let init_expr = parts[0].trim();
@@ -2328,6 +2330,7 @@ fn handle_control_flow(line: &str) -> bool {
                     return true;
                 }
                 shell_println!("Syntax error: unterminated for ((...))");
+                set_exit(1);
                 return true;
             }
 
@@ -2342,6 +2345,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if variable.is_empty() {
                 shell_println!("Syntax error: for requires a variable name");
+                set_exit(1);
                 return true;
             }
 
@@ -2350,6 +2354,7 @@ fn handle_control_flow(line: &str) -> bool {
                 stripped.trim_start()
             } else {
                 shell_println!("Syntax error: for requires 'in' keyword");
+                set_exit(1);
                 return true;
             };
 
@@ -2363,6 +2368,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if words_raw.is_empty() {
                 shell_println!("Syntax error: for requires a word list after 'in'");
+                set_exit(1);
                 return true;
             }
 
@@ -2387,6 +2393,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if variable.is_empty() {
                 shell_println!("Syntax error: select requires a variable name");
+                set_exit(1);
                 return true;
             }
 
@@ -2394,6 +2401,7 @@ fn handle_control_flow(line: &str) -> bool {
                 stripped.trim_start()
             } else {
                 shell_println!("Syntax error: select requires 'in' keyword");
+                set_exit(1);
                 return true;
             };
 
@@ -2406,6 +2414,7 @@ fn handle_control_flow(line: &str) -> bool {
 
             if words_raw.is_empty() {
                 shell_println!("Syntax error: select requires a word list after 'in'");
+                set_exit(1);
                 return true;
             }
 
@@ -2425,6 +2434,7 @@ fn handle_control_flow(line: &str) -> bool {
         }
         "done" => {
             shell_println!("Syntax error: done without while/for/select");
+            set_exit(1);
             return true;
         }
         "case" => {
@@ -2441,11 +2451,13 @@ fn handle_control_flow(line: &str) -> bool {
                 ""
             } else {
                 shell_println!("Syntax error: case requires 'in' keyword");
+                set_exit(1);
                 return true;
             };
 
             if word_part.is_empty() {
                 shell_println!("Syntax error: case requires a word before 'in'");
+                set_exit(1);
                 return true;
             }
 
@@ -2461,6 +2473,7 @@ fn handle_control_flow(line: &str) -> bool {
         }
         "esac" => {
             shell_println!("Syntax error: esac without case");
+            set_exit(1);
             return true;
         }
         _ => {}
@@ -2488,6 +2501,7 @@ fn handle_control_flow(line: &str) -> bool {
             if condition.is_empty() {
                 shell_println!("Syntax error: if requires a condition");
                 CONTROL_STACK.lock().push(ControlState::ThenSkip);
+                set_exit(1);
                 return true;
             }
 
@@ -2519,6 +2533,7 @@ fn handle_control_flow(line: &str) -> bool {
             let mut stack = CONTROL_STACK.lock();
             if stack.is_empty() {
                 shell_println!("Syntax error: elif without if");
+                set_exit(1);
                 return true;
             }
 
@@ -2548,6 +2563,7 @@ fn handle_control_flow(line: &str) -> bool {
 
                     if condition.is_empty() {
                         shell_println!("Syntax error: elif requires a condition");
+                        set_exit(1);
                         return true;
                     }
 
@@ -2576,6 +2592,7 @@ fn handle_control_flow(line: &str) -> bool {
             let mut stack = CONTROL_STACK.lock();
             if stack.is_empty() {
                 shell_println!("Syntax error: else without if");
+                set_exit(1);
                 return true;
             }
 
@@ -2594,6 +2611,7 @@ fn handle_control_flow(line: &str) -> bool {
             let mut stack = CONTROL_STACK.lock();
             if stack.is_empty() {
                 shell_println!("Syntax error: fi without if");
+                set_exit(1);
             } else {
                 stack.pop();
             }
@@ -3249,6 +3267,9 @@ fn start_func_collection(name: &str, after_name: &str) -> bool {
             after_name
         );
     }
+    // Both branches above are errors and the two success paths returned
+    // earlier, so one insertion here covers them.
+    set_exit(1);
     true
 }
 
@@ -11269,8 +11290,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = crate::fs::vfs::Vfs::remove(Path::new("/tmp/kshell_sweep_selftest.gz"));
     }
 
-    // 30. `gzip` compresses and `gunzip` decompresses, whichever way the file
-    //     happens to look.
+    serial_println!("  kshell::self_test 30: gunzip decompresses, whichever way the file looks");
+    // `gzip` compresses and `gunzip` decompresses, whichever way the file
+    // happens to look.
     //
     // `gzip` and `gunzip` share one function, and until now they shared one
     // *dispatch arm* as well -- so the name the user typed was discarded before
@@ -11388,6 +11410,72 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         let _ = crate::fs::vfs::Vfs::remove(plain);
         let _ = crate::fs::vfs::Vfs::remove(archive);
+    }
+
+    serial_println!("  kshell::self_test 31: a line the shell could not parse is not a success");
+    // The last family of statusless failures: `handle_control_flow` returns
+    // `true` to mean "this was control flow, I consumed it", `execute` returns
+    // the moment it does, and nothing on that path ever set a status. So the 0
+    // that `dispatch` writes before every command was what survived, and
+    //
+    //     fi ; echo $?
+    //
+    // printed a syntax error and then `0`. Under `&&` that is worse than
+    // cosmetic: `for in ; do ... && rm -rf build` ran the `rm` off the back of
+    // a line the shell had just refused to parse.
+    //
+    // Flat 1, not bash's 2. Bash does reserve 2 for syntax errors, but as one
+    // row of a whole table -- 126 not-executable, 127 not-found, 128+N signals
+    // -- and taking a single row without the rest leaves a caller unable to
+    // tell which convention it is reading. `empty pipe operand` already used
+    // flat 1 and is the precedent the rest now match.
+    {
+        // One per shape, not one per site: the sites are near-identical and the
+        // interesting question is whether the *arm* returns without a status,
+        // which differs by how the arm ends rather than by which keyword it is.
+        for (cmd, needle) in [
+            // Ends in a plain `return true`.
+            ("done", &b"done without"[..]),
+            ("esac", &b"esac without"[..]),
+            ("else", &b"else without"[..]),
+            ("elif", &b"elif without"[..]),
+            // Ends by falling out of an `if` whose `else` does the real work --
+            // the one arm with no `return` at all, so the insertion had to go
+            // inside the branch rather than before a return.
+            ("fi", &b"fi without"[..]),
+            // Reached through a different route: the keyword parses but its
+            // operands do not.
+            ("while", &b"requires a condition"[..]),
+            ("for", &b"for requires a variable name"[..]),
+            // A different function entirely (`start_func_collection`), whose two
+            // error branches share one `true` -- so one insertion covers both,
+            // and this checks that the shared one is on the reachable path.
+            ("zzz_nosuch() oops", &b"in function definition"[..]),
+        ] {
+            let out = capture_command(cmd);
+            assert_output_contains("the shell says what it could not parse", &out, needle);
+            assert_eq!(last_exit(), 1, "an unparseable line is a failed command");
+        }
+
+        // `if` with no condition is held back from the loop above because it is
+        // the one site that mutates parser state before returning: it pushes
+        // `ControlState::ThenSkip` so the body it expects gets skipped. Left
+        // there, every later command in this self-test would be silently
+        // discarded by `control_should_execute` and every later rung would
+        // "pass" without running. So it is asserted on its own and closed
+        // immediately.
+        let out = capture_command("if");
+        assert_output_contains("if wants a condition", &out, b"if requires a condition");
+        assert_eq!(last_exit(), 1, "an unparseable `if` is a failed command");
+        let _ = capture_command("fi");
+
+        // And the shell is still usable afterwards -- the assertion that the
+        // cleanup above actually worked. Without it a corrupted control stack
+        // would leave this rung green and take the rest of the suite with it,
+        // silently, which is the exact failure the `if` case risks.
+        let out = capture_command("echo parser_ok");
+        assert_output_starts_with("a plain command still runs", &out, b"parser_ok");
+        assert_eq!(last_exit(), 0, "and still reports success");
     }
 
     serial_println!("  kshell::self_test PASSED");

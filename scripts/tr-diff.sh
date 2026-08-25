@@ -8,14 +8,20 @@
 # joined, whether squeezing crosses a read boundary, whether SET2 pads with its
 # last byte or stops, and whether a NUL survives the translation table.
 #
-# ## Why the reference is glibc, and only glibc
+# ## Why both sides run inside WSL
 #
-# The host's `tr` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll`
-# rather than glibc, whose `getopt` words every option diagnostic differently
-# (`unknown option -- x` against `invalid option -- 'x'`). A harness pointed at
-# it would certify sentences no GNU/Linux system prints. See `known-issues.md`
-# → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, and the identical
-# note at the top of `cut-diff.sh`, `head-diff.sh` and `wc-diff.sh`.
+# `scripts/diff-wsl.sh` gives the reasons. The reference has to be glibc's: the
+# host's `tr` is MSYS2's — a Cygwin derivative linking `msys-2.0.dll` rather
+# than glibc, whose `getopt` words every option diagnostic differently
+# (`unknown option -- x` against `invalid option -- 'x'`), so a harness pointed
+# at it would certify sentences no GNU/Linux system prints. See
+# `known-issues.md` → `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`.
+#
+# This file already reached past MSYS2 to `wsl -e env LC_ALL=C.UTF-8 tr`, at
+# the cost of a WSL process per case. The subject moves in with it now, which
+# costs this harness no case at all: `tr` takes no file operands, so it has no
+# argument whose *kind* the two platforms could disagree about, and the tally
+# is unchanged by the move.
 #
 # ## Why the locale barely matters here
 #
@@ -28,50 +34,38 @@
 # setting in which the reference would be wrong.
 set -u
 
-# Our tr is a native Windows binary, so MSYS would rewrite an argument that
-# looks like a path — and a `tr` SET is full of things that look like paths.
-export MSYS2_ARG_CONV_EXCL='*'
-
-# Built here, from the package named, rather than picked up out of `target/`.
-# A harness that only *runs* that path measures whatever was written there
-# last, which need not be current and need not even be this crate — see
-# `scripts/diff-subject.sh`.
-. "$(dirname "$0")/diff-subject.sh"
-OURS=$(subject_binary coreutils tr "${OURS:-}") || exit 1
-GNU=${GNU:-"wsl -e env LC_ALL=C.UTF-8 tr"}
-export LC_ALL=${LC_ALL:-C.UTF-8}
+# Into WSL, build ours for Linux, find glibc's, and put both behind the one
+# name `tr` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
+DIFF_PROG=tr
+# shellcheck source=diff-wsl.sh
+. "$(dirname "$0")/diff-wsl.sh"
 
 pass=0; fail=0; xfail=0; xpass=0
 
-fixtures=$(mktemp -d)
-trap 'rm -rf "$fixtures"' EXIT
+fixtures=$DIFF_TMP/fixtures
+mkdir -p "$fixtures"
 cd "$fixtures" >/dev/null || exit 1
-OURS_ABS=$OURS
-case $OURS in /*|[A-Za-z]:*) ;; *) OURS_ABS="$OLDPWD/$OURS" ;; esac
 
-# `tr` takes no file operands, so the cwd never matters to it — but the
-# reference still has to be *reachable*, and a `wsl` that is not installed
-# fails silently enough to look like agreement on every case at once.
-if [ "$(printf 'probe\n' | $GNU a-z A-Z 2>/dev/null)" = "PROBE" ]; then
-  HAVE_GNU=yes
-else
-  HAVE_GNU=no
-  echo "tr-diff: glibc tr not reachable (tried: $GNU); skipping"
-fi
+# One invocation of one side. `$1` is `ours` or `gnu`; each is reached through
+# a symlink named `tr` in a directory that is the whole of `PATH` for that one
+# invocation, so `argv[0]` is the bare word on both sides. This replaced a
+# reference held as a *string* and word-split at every call site, which is why
+# `compare` below has lost its second parameter.
+run_side() { local side=$1; shift; env PATH="$bindir/$side" tr "$@"; }
 
 compare() {
-  local o_out g_out o_err g_err o_rc g_rc stdin=$1 ref=$2; shift 2
+  local o_out g_out o_err g_err o_rc g_rc stdin=$1; shift
   o_err=$(mktemp); g_err=$(mktemp)
   # stdout through a file, not a pipe: in `x=$(tr | od)` the recorded status is
   # od's, and `PIPESTATUS` is set in the substitution's subshell where it
   # cannot be read. See the same note in cat-diff.sh.
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
   if [ "$stdin" = "-" ]; then
-    "$OURS_ABS" "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    $ref "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+    run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
+    run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   else
-    printf '%b' "$stdin" | "$OURS_ABS" "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$stdin" | $ref "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
+    printf '%b' "$stdin" | run_side ours "$@" >"$o_bin" 2>"$o_err"; o_rc=$?
+    printf '%b' "$stdin" | run_side gnu  "$@" >"$g_bin" 2>"$g_err"; g_rc=$?
   fi
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   rm -f "$o_bin" "$g_bin"
@@ -107,21 +101,19 @@ report() {
 
 # A case with input: the first argument is fed to `printf '%b'` and piped in.
 run_in() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local input="$1"; shift
-  compare "$input" "$GNU" "$@"
+  compare "$input" "$@"
   report "printf '$input' | tr $*"
 }
 
 # A case with no input, for the diagnostics — every one of them is decided
 # before a byte is read.
-run_case() { [ "$HAVE_GNU" = yes ] || return 0; compare - "$GNU" "$@"; report "tr $*"; }
+run_case() { compare - "$@"; report "tr $*"; }
 
 
 xfail_case() {
-  [ "$HAVE_GNU" = yes ] || return 0
   local reason="$1"; shift
-  compare - "$GNU" "$@"
+  compare - "$@"
   if [ "$AGREED" = no ]; then
     xfail=$((xfail+1))
     [ -n "${VERBOSE:-}" ] && printf 'XFAIL tr %s  (%s)\n' "$*" "$reason"
@@ -139,8 +131,8 @@ xfail_case() {
 selfsame() {
   local a="$1" b="$2" x y xr yr
   # shellcheck disable=SC2086  # both are single options by construction
-  x=$("$OURS_ABS" $a </dev/null 2>&1); xr=$?
-  y=$("$OURS_ABS" $b </dev/null 2>&1); yr=$?
+  x=$(env PATH="$bindir/ours" tr $a </dev/null 2>&1); xr=$?
+  y=$(env PATH="$bindir/ours" tr $b </dev/null 2>&1); yr=$?
   if [ "$x" = "$y" ] && [ "$xr" = "$yr" ]; then
     pass=$((pass+1))
     [ -n "${VERBOSE:-}" ] && printf 'OK   tr %s == tr %s\n' "$a" "$b"
@@ -381,12 +373,10 @@ run_in '\303\251x\n' 'a-z' 'A-Z'
 # --- a run long enough to cross a read boundary ------------------------------
 # Our filter reads in 64 KiB chunks and squeezes across the seam; GNU's buffer
 # is a different size, so agreement here is the whole point.
-if [ "$HAVE_GNU" = yes ]; then
-  long=$(printf 'a%.0s' $(seq 1 200000))
-  compare "$long" "$GNU" -s a; report "200k a's | tr -s a"
-  compare "$long" "$GNU" -d a; report "200k a's | tr -d a"
-  compare "$long" "$GNU" a b; report "200k a's | tr a b"
-fi
+long=$(printf 'a%.0s' $(seq 1 200000))
+compare "$long" -s a; report "200k a's | tr -s a"
+compare "$long" -d a; report "200k a's | tr -d a"
+compare "$long" a b; report "200k a's | tr a b"
 
 # --- operand-count diagnostics ------------------------------------------------
 run_case
@@ -590,10 +580,6 @@ selfsame --v --version
 selfsame --hel --help
 
 # --- summary ------------------------------------------------------------------
-if [ "$HAVE_GNU" != yes ]; then
-  echo "tr-diff: skipped (no glibc tr)"
-  exit 0
-fi
 printf '\n%d passed, %d differed' "$pass" "$fail"
 [ "$xfail" -gt 0 ] && printf ', %d differ on purpose' "$xfail"
 [ "$xpass" -gt 0 ] && printf ', %d XPASS' "$xpass"

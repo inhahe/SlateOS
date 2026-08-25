@@ -24,7 +24,12 @@
 //! | `-q` | print nothing; the exit status is the answer |
 //! | `-s` | do not report unreadable files |
 //! | `-m N` | stop after N selected lines per file; `-m 0` prints nothing |
-//! | `-r` | search directories recursively |
+//! | `-r` / `-R` | search directories recursively; `-R` follows symlinks it finds |
+//! | `-d A` | do `A` with a directory: `read`, `recurse` (which is `-r`) or `skip` |
+//! | `-D A` | do `A` with a device, socket or FIFO: `read` or `skip` |
+//! | `--include=G` / `--exclude=G` | search only / never the files whose name matches glob `G` |
+//! | `--exclude-from=F` | read `--exclude` globs from file `F`, one per line |
+//! | `--exclude-dir=G` | do not descend into a directory whose name matches `G` |
 //! | `-Z` | write a NUL after a file name instead of the `:` or newline |
 //! | `-z` | the input is NUL-separated too, and so is the output |
 //! | `-a` | accepted and ignored: this grep never suppresses binary output |
@@ -58,6 +63,9 @@
 
 use coreutils::diag;
 use coreutils::filekind;
+// Aliased for the same reason `ere::Syntax` is: `Flags` is far too plain a name
+// to stand unqualified next to grep's own option soup.
+use coreutils::fnmatch::{Flags as FnmatchFlags, fnmatch};
 use coreutils::quote::{self, quotef_os};
 use coreutils::stdfd;
 use std::collections::VecDeque;
@@ -286,6 +294,154 @@ impl Colors {
     }
 }
 
+/// `-d ACTION` / `--directories=ACTION`: what to do with a directory.
+///
+/// `-r` and `-R` are not a separate setting — they *are* `-d recurse`, which is
+/// why the last of `-r` and `-d skip` wins whichever order they are written in.
+/// Measured: `grep -r -d skip foo dir` skips, `grep -d skip -r foo dir`
+/// recurses, and `grep -r -d read foo dir` says `Is a directory`. Modelling
+/// recursion as its own `bool` — which this did until 2026-08-25 — cannot
+/// express that, because two independent flags have no order between them.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum Directories {
+    /// `read`, the default: try to read the directory, which fails with
+    /// `Is a directory` and status 2. `-s` silences the message; the status
+    /// stands, because the file was named and not searched.
+    #[default]
+    Read,
+    /// `recurse`: what `-r` and `-R` set.
+    Recurse,
+    /// `skip`: pass over it in silence, and **without** raising the status —
+    /// `grep -d skip foo dir` exits 1, not 2. Skipping is not an error.
+    Skip,
+}
+
+/// `-D ACTION` / `--devices=ACTION`: what to do with a character device, block
+/// device, socket or FIFO.
+///
+/// Three states rather than two, because the default is neither "read" nor
+/// "skip": it reads a device **named on the command line** and skips one the
+/// recursive walk **finds**. That asymmetry is what lets `grep -r pat /` finish
+/// on a system with FIFOs in it while `grep pat /dev/stdin` still works.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum Devices {
+    /// The default: read a device the command line names, skip one the walk
+    /// finds.
+    #[default]
+    CommandLine,
+    /// `read`: read them wherever they are found. `grep -D read -r pat .` over
+    /// a tree holding a FIFO with no writer blocks forever — GNU does too.
+    Read,
+    /// `skip`: never read one.
+    Skip,
+}
+
+/// One run of consecutive same-kind selector options.
+///
+/// `--include a --include b --exclude c` is two segments, not three patterns:
+/// a run of `--include`s coalesces into one, and so does a run of `--exclude`s
+/// (`--exclude-from` extends the current exclude run rather than starting a new
+/// one). A segment matches when *any* of its globs does.
+#[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Segment {
+    /// Whether matching this segment means *keep* (`--include`) or *drop*
+    /// (`--exclude`, `--exclude-from`, `--exclude-dir`).
+    include: bool,
+    globs: Vec<Vec<u8>>,
+}
+
+/// The `--include`/`--exclude` list for one kind of name — files, or
+/// directories — and the rule that turns it into a yes or a no.
+///
+/// # The rule
+///
+/// This is gnulib's `excluded_file_name`, and it is not the "last one wins" or
+/// "include beats exclude" that either reading of the manual suggests. Three
+/// steps, in order:
+///
+/// 1. Try the segments **newest first**. The first one that matches decides:
+///    an include segment means keep, an exclude segment means drop.
+/// 2. If none matches, look at the **oldest** segment. Drop iff it is an
+///    include — because a command that opens with `--include` is a whitelist,
+///    and a whitelist's default is to reject.
+/// 3. With no segments at all, keep.
+///
+/// Step 2 is the surprising one, and together with step 1 it makes swapping two
+/// options change far more than their order. Measured, GNU grep 3.11:
+///
+/// | command | `s1.txt` | `s2.log` | `s2.txt` |
+/// |---|---|---|---|
+/// | `--include='*.txt' --exclude='s1*'` | dropped — newest segment matches, and it excludes | dropped — nothing matches, and the oldest segment is an include | kept |
+/// | `--exclude='s1*' --include='*.txt'` | **kept** — newest segment matches, and it includes | kept — nothing matches, and the oldest segment is an exclude | kept |
+///
+/// So the second command searches *everything*, `s1.txt` included: written in
+/// that order the `--exclude` cannot reject anything the `--include` names, and
+/// cannot reject anything it does not name either.
+#[derive(Clone, Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Selectors {
+    segments: Vec<Segment>,
+}
+
+impl Selectors {
+    /// Add one glob, extending the newest segment when it is of the same kind.
+    fn push(&mut self, include: bool, glob: Vec<u8>) {
+        match self.segments.last_mut() {
+            Some(seg) if seg.include == include => seg.globs.push(glob),
+            _ => self.segments.push(Segment {
+                include,
+                globs: vec![glob],
+            }),
+        }
+    }
+
+    /// Whether `name` is *excluded* — the sense gnulib's function returns, and
+    /// the sense the callers want, since "no selectors at all" must answer
+    /// `false`.
+    fn excludes(&self, name: &[u8]) -> bool {
+        for seg in self.segments.iter().rev() {
+            if seg.globs.iter().any(|g| glob_matches(g, name)) {
+                return !seg.include;
+            }
+        }
+        // Nothing matched: the oldest segment sets the default.
+        self.segments.first().is_some_and(|seg| seg.include)
+    }
+}
+
+/// gnulib's `exclude_fnmatch` without `EXCLUDE_ANCHORED`: the glob is tried
+/// against the whole name, and then against each suffix of it that begins just
+/// after a `/`.
+///
+/// The suffix pass is why `grep --exclude='top.txt' foo ./top.txt` excludes the
+/// file even though the operand was written with a `./` on the front, and why
+/// `grep --exclude-dir='su*' -r foo ./sub` skips the directory. It is invisible
+/// for a name the walk found, because the walk matches base names, which hold
+/// no `/` — see [`Options::skipped_file`].
+///
+/// `Flags::NONE`, deliberately: grep passes no `FNM_PATHNAME`, so `*` crosses a
+/// `/`, and no `FNM_PERIOD`, so `--include='*'` matches a dotfile. `\` still
+/// escapes.
+fn glob_matches(glob: &[u8], name: &[u8]) -> bool {
+    if fnmatch(glob, name, FnmatchFlags::NONE) {
+        return true;
+    }
+    for (i, b) in name.iter().enumerate() {
+        // `p[1] != '/'` is gnulib's, and it is what stops `a//b` offering the
+        // suffix `/b` as well as `b`.
+        if *b == b'/' && name.get(i.saturating_add(1)) != Some(&b'/') {
+            let suffix = name.get(i.saturating_add(1)..).unwrap_or_default();
+            if fnmatch(glob, suffix, FnmatchFlags::NONE) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct Options {
@@ -294,7 +450,20 @@ struct Options {
     invert: bool,
     count_only: bool,
     line_numbers: bool,
-    recursive: bool,
+    /// `-d`/`--directories`, which `-r` and `-R` also write. See
+    /// [`Directories`] for why recursion is a *value of this* rather than a
+    /// flag beside it.
+    directories: Directories,
+    /// `-D`/`--devices`.
+    devices: Devices,
+    /// `--include`, `--exclude` and `--exclude-from`, in the order written.
+    /// Consulted for anything that is not a directory.
+    file_selectors: Selectors,
+    /// `--exclude-dir`, in the order written. Consulted for directories, and
+    /// only ever holding exclude segments — GNU has no `--include-dir`, so a
+    /// `--include` never reaches a directory and cannot filter the walk by the
+    /// names of the directories in it.
+    dir_selectors: Selectors,
     /// `-R`: also follow a symbolic link found *during* the walk.
     ///
     /// `-r` and `-R` differ over exactly this. Both follow a link named on the
@@ -380,6 +549,38 @@ struct Options {
 }
 
 impl Options {
+    /// Whether directories are walked — `-r`, `-R` or `-d recurse`.
+    fn recursive(&self) -> bool {
+        self.directories == Directories::Recurse
+    }
+
+    /// gnulib's `skip_devices`: whether a device found *here* is passed over.
+    ///
+    /// `command_line` distinguishes the two places a device can turn up,
+    /// because the default setting treats them differently — see [`Devices`].
+    fn skip_devices(&self, command_line: bool) -> bool {
+        self.devices == Devices::Skip || (self.devices == Devices::CommandLine && !command_line)
+    }
+
+    /// GNU's `skipped_file`: whether the selectors reject this name.
+    ///
+    /// Which list is asked depends on `is_dir` and on nothing else — so
+    /// `--exclude=sub` does not stop `grep -r pat sub`, and `--exclude-dir=sub`
+    /// does, even without `-r`.
+    ///
+    /// **`name` is not the path.** For an operand it is the operand exactly as
+    /// written, `./` and all; for an entry the walk found it is that entry's
+    /// **base name**, never the path the walk built up to reach it. That is
+    /// GNU's `ent->fts_name`, and it is why `--exclude='sub/s1'` excludes
+    /// nothing under `-r` while `--exclude='s1'` excludes it at every depth.
+    fn skipped_file(&self, name: &[u8], is_dir: bool) -> bool {
+        if is_dir {
+            self.dir_selectors.excludes(name)
+        } else {
+            self.file_selectors.excludes(name)
+        }
+    }
+
     /// The byte that ends a line of input and of output: `\n`, or NUL under
     /// `-z`.
     fn line_sep(&self) -> u8 {
@@ -468,6 +669,10 @@ struct GrepArgs {
     /// argument parsing stays a pure function of argv.
     pattern_files: Vec<String>,
     files: Vec<String>,
+    /// Whether the sole operand is a `.` this parser supplied rather than one
+    /// the caller wrote, in which case the walk's names print without their
+    /// leading `./`. GNU's `omit_dot_slash`.
+    omit_dot_slash: bool,
 }
 
 /// A compiled pattern.
@@ -559,9 +764,9 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 'v' => opts.invert = true,
                 'c' => opts.count_only = true,
                 'n' => opts.line_numbers = true,
-                'r' => opts.recursive = true,
+                'r' => opts.directories = Directories::Recurse,
                 'R' => {
-                    opts.recursive = true;
+                    opts.directories = Directories::Recurse;
                     opts.deref_links = true;
                 }
                 'w' => opts.word = true,
@@ -582,6 +787,8 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
                 // turn off. Refusing it would break callers that pass it
                 // defensively, and they are asking for what we already do.
                 'a' => {}
+                'd' => opts.directories = directories_arg(&take_arg('d')?)?,
+                'D' => opts.devices = devices_arg(&take_arg('D')?)?,
                 'A' => opts.after_context = Some(context_len(&take_arg('A')?)?),
                 'B' => opts.before_context = Some(context_len(&take_arg('B')?)?),
                 'C' => opts.default_context = Some(context_len(&take_arg('C')?)?),
@@ -610,14 +817,22 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
         patterns.push(files.remove(0).into_bytes());
     }
 
+    // Recursion with no operand walks the working directory, as GNU does;
+    // without it there is nothing to walk and the input is stdin.
+    //
+    // `omit_dot_slash` is the half of that nobody expects: the walk is rooted at
+    // `.`, but the names GNU prints have no `./` on them — `grep -rl foo` says
+    // `sub/s1` where `grep -rl foo .` says `./sub/s1`. It is GNU's
+    // `filename_prefix_len`, and it applies only when the `.` was *supplied* by
+    // this branch, never when the caller wrote it.
+    let mut omit_dot_slash = false;
     if files.is_empty() {
-        // Recursion with no operand walks the working directory, as GNU does;
-        // without it there is nothing to walk and the input is stdin.
-        files.push(if opts.recursive {
-            ".".to_string()
+        if opts.recursive() {
+            files.push(".".to_string());
+            omit_dot_slash = true;
         } else {
-            "-".to_string()
-        });
+            files.push("-".to_string());
+        }
     }
 
     Ok(GrepArgs {
@@ -625,6 +840,7 @@ fn parse_args(args: &[String]) -> Result<GrepArgs, String> {
         patterns,
         pattern_files,
         files,
+        omit_dot_slash,
     })
 }
 
@@ -668,10 +884,33 @@ fn parse_long(
         "invert-match" => opts.invert = true,
         "count" => opts.count_only = true,
         "line-number" => opts.line_numbers = true,
-        "recursive" => opts.recursive = true,
+        "recursive" => opts.directories = Directories::Recurse,
         "dereference-recursive" => {
-            opts.recursive = true;
+            opts.directories = Directories::Recurse;
             opts.deref_links = true;
+        }
+        "directories" => opts.directories = directories_arg(&need(value)?)?,
+        "devices" => opts.devices = devices_arg(&need(value)?)?,
+        "include" => opts.file_selectors.push(true, need(value)?.into_bytes()),
+        "exclude" => opts.file_selectors.push(false, need(value)?.into_bytes()),
+        // Trailing slashes are stripped from the *pattern*, so `--exclude-dir=
+        // sub/` and `--exclude-dir=sub` are the same request. GNU does it with
+        // `strip_trailing_slashes`, and without it the pattern could never
+        // match, because the names it is compared against never end in one.
+        "exclude-dir" => {
+            let mut pat = need(value)?.into_bytes();
+            while pat.len() > 1 && pat.last() == Some(&b'/') {
+                pat.pop();
+            }
+            opts.dir_selectors.push(false, pat);
+        }
+        "exclude-from" => {
+            let path = need(value)?;
+            let raw =
+                fs::read(&path).map_err(|e| format!("{}: {}", quotef_os(&path), strerror(&e)))?;
+            for pat in split_exclude_file(&raw) {
+                opts.file_selectors.push(false, pat);
+            }
         }
         "word-regexp" => opts.word = true,
         "line-regexp" => opts.whole_line = true,
@@ -710,6 +949,83 @@ fn parse_long(
         other => return Err(format!("unknown option: --{other}")),
     }
     Ok(())
+}
+
+/// The value of `-d` / `--directories`.
+///
+/// # Errors
+///
+/// GNU routes this through gnulib's `argmatch`, which prints **seven** lines —
+/// the rejected value, `Valid arguments are:` and the three of them, then
+/// `Usage: …` and `Try 'grep --help' …` — and exits **1**, not grep's usual 2.
+///
+/// The first five are reproduced here exactly, curly quotes included, because
+/// [`quote::quote`] is gnulib's `quote` and those lines say nothing about which
+/// options exist. The last two are not, and cannot be until this family has a
+/// `--help` at all: printing `Try 'grep --help' for more information.` when
+/// `--help` is an unknown option would be a diagnostic that lies. Nor is the
+/// status right, because every parse error in this program funnels through one
+/// `Err(String)` that exits 2. Both belong to
+/// `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`, which is the same
+/// defect `--zzz` and `-m x` have, and `scripts/grep-diff.sh` records this case
+/// as a gap against it rather than as a decision about `-d`.
+fn directories_arg(value: &str) -> Result<Directories, String> {
+    match value {
+        "read" => Ok(Directories::Read),
+        "recurse" => Ok(Directories::Recurse),
+        "skip" => Ok(Directories::Skip),
+        _ => Err(format!(
+            "invalid argument {} for {}\nValid arguments are:\n  - {}\n  - {}\n  - {}",
+            quote::quote(value.as_bytes()),
+            quote::quote(b"--directories"),
+            quote::quote(b"read"),
+            quote::quote(b"recurse"),
+            quote::quote(b"skip"),
+        )),
+    }
+}
+
+/// The value of `-D` / `--devices`.
+///
+/// # Errors
+///
+/// `grep: unknown devices method`, exit 2 — GNU's own wording and status, which
+/// this one can reproduce exactly because GNU checks `-D` by hand rather than
+/// through `argmatch`. The value is not named, which is GNU's choice and not an
+/// omission here.
+fn devices_arg(value: &str) -> Result<Devices, String> {
+    match value {
+        "read" => Ok(Devices::Read),
+        "skip" => Ok(Devices::Skip),
+        _ => Err("unknown devices method".to_string()),
+    }
+}
+
+/// The patterns held in a `--exclude-from` file.
+///
+/// gnulib's `add_exclude_fp`, which is *not* [`split_patterns`]: there is no
+/// comment syntax — a line beginning `#` is a glob that matches a name
+/// beginning `#` — and a blank line is an empty pattern, which matches nothing
+/// rather than everything. (An empty *`-f` pattern* matches every line; the
+/// two files look alike and mean opposite things.)
+///
+/// One pattern per newline, plus a final unterminated remainder if there is
+/// one, so an empty file contributes nothing at all — which matters, because a
+/// segment made of no patterns would still set the "oldest segment" default in
+/// [`Selectors::excludes`].
+fn split_exclude_file(raw: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for (i, b) in raw.iter().enumerate() {
+        if *b == b'\n' {
+            out.push(raw.get(start..i).unwrap_or_default().to_vec());
+            start = i.saturating_add(1);
+        }
+    }
+    if start < raw.len() {
+        out.push(raw.get(start..).unwrap_or_default().to_vec());
+    }
+    out
 }
 
 /// The value of `--color[=WHEN]`.
@@ -1201,7 +1517,7 @@ fn run_main() -> ExitCode {
         }
     };
 
-    let named_a_directory = parsed.opts.recursive
+    let named_a_directory = parsed.opts.recursive()
         && parsed.files.iter().any(|f| {
             // `is_dir` follows a symlink, matching what `Run::operand` does
             // with the same operand a moment later.
@@ -1220,6 +1536,7 @@ fn run_main() -> ExitCode {
         pats: &pats,
         opts: &parsed.opts,
         show_filename,
+        omit_dot_slash: parsed.omit_dot_slash,
         any_match: false,
         had_error: false,
         done: false,
@@ -1275,6 +1592,10 @@ struct Run<'a> {
     pats: &'a [Pat],
     opts: &'a Options,
     show_filename: bool,
+    /// Strip the `./` the walk builds onto every name, because the `.` it is
+    /// walking was supplied by [`parse_args`] rather than written by the
+    /// caller. See `GrepArgs::omit_dot_slash`.
+    omit_dot_slash: bool,
     any_match: bool,
     had_error: bool,
     /// Set once `-q` has its answer. Every remaining file and directory is
@@ -1291,16 +1612,80 @@ struct Run<'a> {
 
 impl Run<'_> {
     /// Handle one command-line operand.
+    ///
+    /// # Why this stats before it decides anything
+    ///
+    /// GNU's order is open, `fstat`, *then* choose — and the choices need the
+    /// mode, so there is no way to skip the stat. Doing it before the open
+    /// instead of after is the one deliberate difference, and it is what keeps
+    /// `grep -D skip pat fifo` from hanging: opening a FIFO that has no writer
+    /// blocks forever, so a `grep` that opened first would hang on exactly the
+    /// input it was told to skip. GNU avoids the same hang from the other side,
+    /// by adding `O_NONBLOCK` when devices are to be skipped.
+    ///
+    /// The order of the tests below is GNU's, and it is observable:
+    ///
+    /// * The stat comes **first**, so `grep --exclude='*' pat nosuch` still
+    ///   reports the missing file and exits 2. A name that does not exist is
+    ///   not excluded; it is an error.
+    /// * The selectors come **before** the directory handling, so
+    ///   `grep --exclude-dir=sub pat sub` is silent and exits 1 where plain
+    ///   `grep pat sub` says `Is a directory` and exits 2.
+    /// * `--exclude` and `--exclude-dir` are chosen between by what the operand
+    ///   *is*, so `grep --exclude=sub -r pat sub` searches `sub` after all.
     fn operand(&mut self, f: &str) {
-        // `is_dir`, which follows a symlink — deliberately, and unlike the
-        // walk. A link named on the command line is followed by `-r` as well
-        // as `-R`; it is only a link *discovered* by the walk that `-r` skips.
-        if self.opts.recursive && Path::new(f).is_dir() {
-            let mut ancestors: Vec<PathBuf> = Vec::new();
-            self.walk(Path::new(f), &mut ancestors);
-        } else {
+        // Standard input is exempt from every one of these: it is not a name,
+        // so no glob can select it, and GNU's tests are all guarded on the
+        // descriptor not being stdin. `grep --exclude='*' pat -` reads it.
+        if f == "-" {
             self.search(f);
+            return;
         }
+        // `metadata`, which follows a symlink — deliberately, and unlike the
+        // walk. A link named on the command line is followed by `-r` as well as
+        // `-R`; it is only a link *discovered* by the walk that `-r` skips.
+        let md = match fs::metadata(Path::new(f)) {
+            Ok(md) => md,
+            Err(e) => {
+                if !self.opts.no_messages {
+                    diag!("grep: {}: {}", quotef_os(f), strerror(&e));
+                }
+                self.had_error = true;
+                return;
+            }
+        };
+        let is_dir = md.is_dir();
+
+        if self.opts.skipped_file(f.as_bytes(), is_dir) {
+            return;
+        }
+
+        if is_dir {
+            match self.opts.directories {
+                Directories::Recurse => {
+                    let mut ancestors: Vec<PathBuf> = Vec::new();
+                    self.walk(Path::new(f), &mut ancestors);
+                }
+                // Silent, and *not* an error: `grep -d skip pat dir` exits 1.
+                Directories::Skip => {}
+                Directories::Read => {
+                    if !self.opts.no_messages {
+                        diag!("grep: {}: Is a directory", quotef_os(f));
+                    }
+                    // Named but not searched, so the run's answer is about less
+                    // than it was asked about — status 2, as for a file that
+                    // could not be opened. `-s` silences the message, not this.
+                    self.had_error = true;
+                }
+            }
+            return;
+        }
+
+        if self.opts.skip_devices(true) && filekind::is_device(&md) {
+            return;
+        }
+
+        self.search(f);
     }
 
     /// Search one named file — or standard input, spelled `-`.
@@ -1316,8 +1701,13 @@ impl Run<'_> {
             Box::new(io::stdin())
         } else {
             if Path::new(path).is_dir() {
-                // Only reachable without `-r`; with it, `operand` walked the
-                // directory instead of arriving here.
+                // A backstop, not the usual route: [`Run::operand`] settles
+                // every directory it is given, and the walk recurses rather
+                // than arriving here, so this is reached only when a name
+                // becomes a directory between the stat there and the open here.
+                // It stays because on a host where opening a directory fails
+                // outright — Windows, where the differential harness used to
+                // run — the `read` below would report the wrong errno.
                 if !self.opts.no_messages {
                     diag!("grep: {}: Is a directory", quotef_os(path));
                 }
@@ -1413,6 +1803,15 @@ impl Run<'_> {
     /// inline in the middle of the walk.
     fn search_found(&mut self, path: &Path) {
         let shown = path.to_string_lossy().into_owned();
+        // GNU's `filename_prefix_len`: the walk is rooted at a `.` this program
+        // supplied, and the names it prints carry no `./`. Applied here rather
+        // than at the root because it is a property of how the name is
+        // *displayed*, not of where the walk goes.
+        let shown = if self.omit_dot_slash {
+            shown.strip_prefix("./").unwrap_or(&shown).to_string()
+        } else {
+            shown
+        };
         self.search(&shown);
     }
 
@@ -1518,6 +1917,13 @@ impl Run<'_> {
                 }
             };
 
+            // The name the selectors are shown is the entry's **base name**,
+            // never the path the walk built to reach it — GNU matches
+            // `ent->fts_name`. So `--exclude='sub/s1'` excludes nothing under
+            // `-r`, and `--include='*/s1'` matches nothing at all, while
+            // `--exclude='s1'` excludes it at every depth.
+            let name = path.file_name().map(quote::os_bytes).unwrap_or_default();
+
             if md.file_type().is_symlink() {
                 if !self.opts.deref_links {
                     // `-r` passes over it in silence — including a dangling
@@ -1525,8 +1931,19 @@ impl Run<'_> {
                     continue;
                 }
                 match fs::metadata(&path) {
-                    Ok(target) if target.is_dir() => self.walk(&path, ancestors),
-                    Ok(_) => self.search_found(&path),
+                    Ok(target) => {
+                        // Asked of the *target*, because that is what `-R`'s
+                        // walk treats the entry as: a link to a directory is a
+                        // directory here, and so faces `--exclude-dir`.
+                        if self.opts.skipped_file(&name, target.is_dir()) {
+                            continue;
+                        }
+                        if target.is_dir() {
+                            self.walk(&path, ancestors);
+                        } else if !(self.opts.skip_devices(false) && filekind::is_device(&target)) {
+                            self.search_found(&path);
+                        }
+                    }
                     Err(e) => {
                         if !self.opts.no_messages {
                             diag!("grep: {}: {}", quotef_os(&path), strerror(&e));
@@ -1537,9 +1954,16 @@ impl Run<'_> {
                 continue;
             }
 
+            if self.opts.skipped_file(&name, md.is_dir()) {
+                continue;
+            }
+
             if md.is_dir() {
                 self.walk(&path, ancestors);
-            } else {
+            } else if !(self.opts.skip_devices(false) && filekind::is_device(&md)) {
+                // The default already skips a device the walk found, which is
+                // what stops `grep -r pat /` blocking on the first FIFO with no
+                // writer. Only `-D read` reads them here.
                 self.search_found(&path);
             }
         }
@@ -1927,7 +2351,7 @@ mod tests {
         assert!(a.opts.invert);
         assert!(a.opts.count_only);
         assert!(a.opts.line_numbers);
-        assert!(a.opts.recursive);
+        assert!(a.opts.recursive());
     }
 
     #[test]
@@ -2063,7 +2487,244 @@ mod tests {
 
     #[test]
     fn parse_recursive_with_no_operand_walks_here() {
-        assert_eq!(parse_args(&s(&["-r", "foo"])).unwrap().files, vec!["."]);
+        let a = parse_args(&s(&["-r", "foo"])).unwrap();
+        assert_eq!(a.files, vec!["."]);
+        // …and prints the names it finds *without* the `./` that walking a `.`
+        // would otherwise put on them, which a caller who wrote the `.` gets.
+        assert!(a.omit_dot_slash);
+        assert!(!parse_args(&s(&["-r", "foo", "."])).unwrap().omit_dot_slash);
+        // Not recursing means no walk to name anything, so the input is stdin
+        // and the question never arises.
+        let plain = parse_args(&s(&["foo"])).unwrap();
+        assert_eq!(plain.files, vec!["-"]);
+        assert!(!plain.omit_dot_slash);
+        // `-d recurse` reaches the same branch, because it is the same setting.
+        assert_eq!(
+            parse_args(&s(&["-d", "recurse", "foo"])).unwrap().files,
+            vec!["."]
+        );
+    }
+
+    /// `-r`, `-R` and `-d` all write one setting, so the **last** of them wins
+    /// whichever order they are written in. Two independent booleans could not
+    /// express this, and expressing it is the whole reason [`Directories`]
+    /// exists.
+    #[test]
+    fn recursion_and_d_are_one_setting_and_the_last_wins() {
+        let d = |a: &[&str]| parse_args(&s(a)).unwrap().opts.directories;
+        assert_eq!(d(&["foo"]), Directories::Read);
+        assert_eq!(d(&["-r", "foo"]), Directories::Recurse);
+        assert_eq!(d(&["-d", "skip", "foo"]), Directories::Skip);
+        assert_eq!(d(&["-r", "-d", "skip", "foo"]), Directories::Skip);
+        assert_eq!(d(&["-d", "skip", "-r", "foo"]), Directories::Recurse);
+        assert_eq!(d(&["-r", "-d", "read", "foo"]), Directories::Read);
+        // Bundled, split and long-with-`=` are the same option three ways.
+        assert_eq!(d(&["-dskip", "foo"]), Directories::Skip);
+        assert_eq!(d(&["--directories=skip", "foo"]), Directories::Skip);
+        assert_eq!(d(&["--directories", "skip", "foo"]), Directories::Skip);
+        // `-R` sets the same value *and* the dereference flag.
+        let upper = parse_args(&s(&["-R", "foo"])).unwrap().opts;
+        assert_eq!(upper.directories, Directories::Recurse);
+        assert!(upper.deref_links);
+        // …and `-d` does not clear it, because it is a different field. GNU is
+        // the same: `-R -d recurse` still follows links met during the walk.
+        let both = parse_args(&s(&["-R", "-d", "recurse", "foo"]))
+            .unwrap()
+            .opts;
+        assert!(both.deref_links);
+
+        assert!(parse_args(&s(&["-d", "bogus", "foo"])).is_err());
+        assert!(parse_args(&s(&["-d"])).is_err());
+    }
+
+    /// `-D`'s default is neither "read" nor "skip" but a third thing, and the
+    /// third thing is the one that keeps `grep -r` from blocking on a FIFO.
+    #[test]
+    fn devices_default_reads_named_ones_and_skips_found_ones() {
+        let dev = |a: &[&str]| parse_args(&s(a)).unwrap().opts;
+
+        let default = dev(&["foo"]);
+        assert_eq!(default.devices, Devices::CommandLine);
+        assert!(!default.skip_devices(true));
+        assert!(default.skip_devices(false));
+
+        let read = dev(&["-D", "read", "foo"]);
+        assert_eq!(read.devices, Devices::Read);
+        assert!(!read.skip_devices(true));
+        assert!(!read.skip_devices(false));
+
+        let skip = dev(&["--devices=skip", "foo"]);
+        assert_eq!(skip.devices, Devices::Skip);
+        assert!(skip.skip_devices(true));
+        assert!(skip.skip_devices(false));
+
+        // GNU checks `-D` by hand rather than through argmatch, so this is its
+        // exact wording — and it does not name the offending value.
+        assert_eq!(
+            parse_args(&s(&["-D", "bogus", "foo"])).unwrap_err(),
+            "unknown devices method"
+        );
+    }
+
+    /// The three steps of gnulib's `excluded_file_name`, each isolated.
+    #[test]
+    fn selector_segments_are_read_newest_first() {
+        let sel = |opts: &[&str]| {
+            let mut a: Vec<&str> = opts.to_vec();
+            a.push("foo");
+            parse_args(&s(&a)).unwrap().opts.file_selectors
+        };
+
+        // Nothing at all: everything is searched.
+        assert!(!sel(&[]).excludes(b"s1.txt"));
+
+        // One include is a whitelist — rule 1 keeps what it names, rule 2
+        // drops what it does not.
+        let inc = sel(&["--include=*.txt"]);
+        assert!(!inc.excludes(b"s1.txt"));
+        assert!(inc.excludes(b"s2.log"));
+
+        // One exclude is a blacklist, and its default is the opposite.
+        let exc = sel(&["--exclude=s1*"]);
+        assert!(exc.excludes(b"s1.txt"));
+        assert!(!exc.excludes(b"s2.log"));
+
+        // The pair, both ways round — the table in [`Selectors`]'s docs.
+        let ie = sel(&["--include=*.txt", "--exclude=s1*"]);
+        assert!(ie.excludes(b"s1.txt"));
+        assert!(ie.excludes(b"s2.log"));
+        assert!(!ie.excludes(b"s2.txt"));
+
+        let ei = sel(&["--exclude=s1*", "--include=*.txt"]);
+        assert!(!ei.excludes(b"s1.txt"));
+        assert!(!ei.excludes(b"s2.log"));
+        assert!(!ei.excludes(b"s2.txt"));
+
+        // Consecutive same-kind options coalesce, so `--include a --include b`
+        // is one segment matching either — not two segments where the newer
+        // shadows the older.
+        let two = sel(&["--include=*.txt", "--include=*.log"]);
+        assert!(!two.excludes(b"s1.txt"));
+        assert!(!two.excludes(b"s2.log"));
+        assert!(two.excludes(b"s3.bin"));
+
+        // …and a segment is only broken by a *change* of kind, which is what
+        // makes three options able to mean three different things.
+        let three = sel(&["--exclude=s1*", "--include=*.log", "--exclude=s2*"]);
+        assert!(three.excludes(b"s2.log")); // newest segment matches
+        assert!(!three.excludes(b"s3.log")); // the include matches
+        assert!(!three.excludes(b"s3.txt")); // nothing matches; oldest excludes
+
+        // An empty pattern matches nothing, so `--include=''` is a whitelist
+        // with nothing on it: everything is dropped.
+        assert!(sel(&["--include="]).excludes(b"s1.txt"));
+        assert!(!sel(&["--exclude="]).excludes(b"s1.txt"));
+    }
+
+    /// `--exclude` and `--exclude-dir` are separate lists chosen between by
+    /// what the name *is*, not two spellings of one list.
+    #[test]
+    fn directories_have_their_own_selector_list() {
+        let opts = parse_args(&s(&["--exclude=sub", "--exclude-dir=deep", "foo"]))
+            .unwrap()
+            .opts;
+        assert!(opts.skipped_file(b"sub", false));
+        assert!(!opts.skipped_file(b"sub", true));
+        assert!(opts.skipped_file(b"deep", true));
+        assert!(!opts.skipped_file(b"deep", false));
+
+        // A trailing slash on the *pattern* is stripped; without that it could
+        // never match, since no name it is compared against ends in one.
+        let slash = parse_args(&s(&["--exclude-dir=deep//", "foo"]))
+            .unwrap()
+            .opts;
+        assert!(slash.skipped_file(b"deep", true));
+    }
+
+    /// The suffix pass of gnulib's `exclude_fnmatch`, which is what lets a
+    /// pattern written without the `./` still match an operand written with it.
+    #[test]
+    fn a_glob_is_tried_against_every_suffix_after_a_slash() {
+        assert!(glob_matches(b"top.txt", b"./top.txt"));
+        assert!(glob_matches(b"./top.txt", b"./top.txt"));
+        assert!(glob_matches(b"deepfile", b"a/b/c/deepfile"));
+        assert!(glob_matches(b"c/deepfile", b"a/b/c/deepfile"));
+        assert!(glob_matches(b"su*", b"./sub"));
+        assert!(!glob_matches(b"b/deepfile", b"a/b/c/deepfile"));
+
+        // No `FNM_PATHNAME`, so `*` crosses a `/`; no `FNM_PERIOD`, so `*`
+        // matches a leading dot. Both are grep's choices, not fnmatch's
+        // defaults elsewhere in this family.
+        assert!(glob_matches(b"a*e", b"a/b/c/deepfile"));
+        assert!(glob_matches(b"*", b".dotfile"));
+        // `\` still escapes, and a bracket still negates.
+        assert!(glob_matches(b"t[!1].txt", b"t2.txt"));
+        assert!(!glob_matches(b"t[!1].txt", b"t1.txt"));
+        assert!(glob_matches(br"t\1.txt", b"t1.txt"));
+        // Case matters: grep passes no `FNM_CASEFOLD`, and `-i` does not reach
+        // here — it is about the pattern, not about file names.
+        assert!(!glob_matches(b"*.TXT", b"a.txt"));
+    }
+
+    /// A `--exclude-from` file is not a `-f` file: no comments, and a blank
+    /// line is an empty glob rather than a glob that matches everything.
+    #[test]
+    fn exclude_from_splits_at_newlines_and_has_no_comment_syntax() {
+        assert_eq!(split_exclude_file(b""), Vec::<Vec<u8>>::new());
+        assert_eq!(split_exclude_file(b"a\n"), vec![b"a".to_vec()]);
+        // A final line with no newline on it still counts.
+        assert_eq!(
+            split_exclude_file(b"a\nb"),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+        assert_eq!(
+            split_exclude_file(b"a\n\nb\n"),
+            vec![b"a".to_vec(), Vec::new(), b"b".to_vec()]
+        );
+        // `#` is a character a file name may begin with, so it is a glob.
+        assert_eq!(split_exclude_file(b"#a\n"), vec![b"#a".to_vec()]);
+    }
+
+    /// `--exclude-from` extends the current exclude run rather than starting a
+    /// segment of its own — which matters, because a segment boundary is what
+    /// the newest-first scan stops at.
+    #[test]
+    fn exclude_from_joins_the_neighbouring_exclude_segment() {
+        let dir = std::env::temp_dir().join(format!(
+            "slateos-grep-exfrom-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("list");
+        fs::write(&file, b"*.log\n").expect("write exclude list");
+        let name = file.to_string_lossy().into_owned();
+
+        let opts = parse_args(&s(&[
+            "--include=*.txt",
+            "--exclude=s1*",
+            &format!("--exclude-from={name}"),
+            "foo",
+        ]))
+        .unwrap()
+        .opts;
+        assert_eq!(opts.file_selectors.segments.len(), 2);
+        assert!(opts.file_selectors.excludes(b"a.log"));
+        assert!(opts.file_selectors.excludes(b"s1.txt"));
+        assert!(!opts.file_selectors.excludes(b"s2.txt"));
+
+        // A file that cannot be read is an error at parse time, worded as the
+        // ordinary "no such file" is.
+        let missing = dir.join("nope");
+        let err = parse_args(&s(&[
+            &format!("--exclude-from={}", missing.to_string_lossy()),
+            "foo",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("No such file"), "{err}");
+
+        let _ = fs::remove_file(&file);
+        let _ = fs::remove_dir(&dir);
     }
 
     /// `-r` and `-R` are not synonyms, and the whole of the difference is one
@@ -2074,24 +2735,24 @@ mod tests {
     #[test]
     fn parse_capital_r_is_the_dereferencing_one() {
         let lower = parse_args(&s(&["-r", "foo"])).unwrap().opts;
-        assert!(lower.recursive);
+        assert!(lower.recursive());
         assert!(!lower.deref_links);
 
         let upper = parse_args(&s(&["-R", "foo"])).unwrap().opts;
-        assert!(upper.recursive);
+        assert!(upper.recursive());
         assert!(upper.deref_links);
 
         // The long spellings say the same thing at more length, and
         // `--dereference-recursive` implies `--recursive` rather than needing
         // it alongside.
         let long = parse_args(&s(&["--recursive", "foo"])).unwrap().opts;
-        assert!(long.recursive);
+        assert!(long.recursive());
         assert!(!long.deref_links);
 
         let long_deref = parse_args(&s(&["--dereference-recursive", "foo"]))
             .unwrap()
             .opts;
-        assert!(long_deref.recursive);
+        assert!(long_deref.recursive());
         assert!(long_deref.deref_links);
     }
 

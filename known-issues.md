@@ -75746,23 +75746,22 @@ carry their own copy of the BEGIN/record/END driver, and
 `cmd_mapfile`/`cmd_mapfile_input` each carry their own copy of the `-t` flag
 scan. Both are the same accident waiting for its first divergence.
 
-## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **open** (the missing features; the defects below were fixed the same day)
+## TD-GREP-IS-MISSING-CONTEXT-COLOUR-BYTE-OFFSETS-AND-THE-FILE-SELECTORS (lane B, 2026-08-25) — **resolved 2026-08-25** (every feature the title names is built; what is left is diagnostic wording, tracked with the getopt debt)
 
-**In short:** our `grep` handles matching well and is missing a lot of the
-things people actually type at it. `-d` (what to do when an operand is a
-directory) and `--include`/`--exclude`/`--exclude-dir` (search only some of the
-files a recursive search would reach) are still missing. Typing either gets
-`grep: unknown option`, so a script that uses one fails outright rather than
-degrading. Four larger gaps were closed on 2026-08-25 and are recorded below:
-context selection (`grep -C 3 pattern file`, show three lines either side of
-each hit), `-b` (print each hit's byte offset), `-T` (line up the output in
-columns) and `--color` (paint the matched text, and the rest of the line, in
-terminal colours). Five further things were wrong rather than absent — the recursive walk
-followed symbolic links it should have skipped, an unreadable directory did not
-raise the exit status, a failed write to a closed output was thrown away, `-q`
-stopped too late, and a long option refused a value given as the next argument
-— and all five were fixed on 2026-08-25; they are kept below because the fix
-for each is what the harness now pins.
+**In short:** our `grep` handled matching well and was missing a lot of the
+things people actually type at it. All of it is now built. `-d` (what to do when
+an operand is a directory), `-D` (the same question for a device or a FIFO) and
+`--include`/`--exclude`/`--exclude-dir`/`--exclude-from` (search only some of the
+files a recursive search would reach) landed on 2026-08-25, joining context
+selection (`grep -C 3 pattern file`, show three lines either side of each hit),
+`-b` (print each hit's byte offset), `-T` (line up the output in columns) and
+`--color` (paint the matched text, and the rest of the line, in terminal
+colours) from earlier the same day. Five further things were wrong rather than
+absent — the recursive walk followed symbolic links it should have skipped, an
+unreadable directory did not raise the exit status, a failed write to a closed
+output was thrown away, `-q` stopped too late, and a long option refused a value
+given as the next argument — and all five were fixed on 2026-08-25; they are kept
+below because the fix for each is what the harness now pins.
 
 **How they were found.** All of it in one run, by `scripts/grep-diff.sh`'s
 first execution after it was moved onto `diff-wsl.sh` (2026-08-25). None of it
@@ -75773,18 +75772,11 @@ had introduced. Each item below is a live case in that harness carrying a `?`
 marker, which means the harness fails the moment the gap closes — deleting the
 marker is part of closing it, and nothing here can be fixed and forgotten.
 
-**Missing features**, in the order worth doing them:
-
-| | What it does | Harness cases |
-|---|---|---|
-| `--include=GLOB` `--exclude=GLOB` `--exclude-dir=GLOB` | filter what a recursive search descends into and reports | 3 |
-| `-d ACTION` | `read` (the default), `skip`, or `recurse` for a directory operand | 2 |
-
-The two file-selection groups are all that is left, and they should land
-together: `-d recurse` *is* `-r`, `-d skip` is the degenerate case of
-`--exclude`, and all four options want the same glob matcher and the same hook
-in the recursive walk. Building one of them and not the others would mean
-writing that hook twice.
+**Nothing is missing any more.** A table here used to list the two
+file-selection groups as the last gaps, with the note that they had to land
+together because `-d recurse` *is* `-r`, `-d skip` is the degenerate case of
+`--exclude`, and all of them want the same glob matcher and the same hook in the
+recursive walk. They did land together, and the write-up is below.
 
 **Defects — all fixed 2026-08-25**, and each now pinned by plain (unmarked)
 cases in `scripts/grep-diff.sh`, so a regression fails the harness:
@@ -75961,20 +75953,105 @@ point observable.
   is `IsTerminal` — and off in the harness, which is why the harness always says
   `always`.
 
-**Diagnostic wording** (four more `?` cases, lower value than the above):
-`grep` with no operands answers `grep: missing PATTERN` where GNU prints the
-usage summary; `--zzz` is `unknown option: --zzz` against GNU's `unrecognized
-option '--zzz'`; `-m x` names the offending value where GNU's does not; and a
-leading quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU
-also warns `grep: warning: * at start of expression` on stderr while still
-exiting 0. The first two belong with
-`TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE` rather than with grep.
+**`-d`, `-D` and the file selectors — implemented 2026-08-25.** The five `?`
+cases that pinned their absence are now 65 plain cases and one `?` (`-d bogus`,
+whose diagnostic is the getopt-shape debt rather than anything about `-d`). The
+model below was **measured** against GNU 3.11 — five throwaway probe scripts —
+and in one place the measurement flatly contradicted what reading gnulib from
+memory had concluded.
 
-**Severity.** Medium, and lower than it was: the four defects are gone, which
-removes the only hang and the only silently-wrong exit status. What is left
-produces no wrong answer to a query that works — the matching itself agrees
-with GNU across 370 cases — but a script that names a directory operand, or one
-that filters a recursive search, still fails outright rather than degrading.
+* **`-d` and `-r` are one setting, not three flags.** `-d recurse` *is* `-r`;
+  `-d read` is the default that says `Is a directory` and exits 2 (`-s` silences
+  the message, not the status); `-d skip` says nothing and exits 1, because
+  skipping is not an error. Being one setting, the last one written wins in both
+  directions — `-r -d skip` skips and `-d skip -r` recurses. `-R` differs from
+  `-r` only in *also* turning on symlink dereferencing, which a following `-d`
+  leaves behind when it takes the recursion away. Ours therefore stores a
+  `Directories` enum where it had a `recursive: bool`, with
+  `Options::recursive()` reading it.
+* **`-D` is tri-state, and that is what stops `grep -r pat /` hanging.** A device
+  *named on the command line* is read; a device the *walk finds* is skipped.
+  Neither is spelled by an argument, so the default is its own variant. Opening a
+  FIFO with no writer blocks forever, so the skip has to be decided from a `stat`
+  and never from an open — which is why the predicate is
+  `coreutils::filekind::is_device(&Metadata)` and not a question asked of an open
+  `File`. (GNU dodges the same hang from the other side, by adding `O_NONBLOCK`
+  when devices are to be skipped.) It is four `S_IS*` tests — char device, block
+  device, socket, FIFO — and no others: a directory is not a device, so `-D skip`
+  still descends into one.
+* **The combination rule is neither "includes win" nor "the last one wins".**
+  Consecutive options of the same kind coalesce into a segment; the segments are
+  scanned **newest first** and the first one holding a matching glob decides; a
+  name no segment matches is dropped only if the **oldest** segment is an
+  include. So the same two options in the other order are not the same command:
+
+  | command | `t1.txt` | `l1.log` |
+  |---|---|---|
+  | `--include='*.txt' --exclude='t1*'` | dropped | dropped |
+  | `--exclude='t1*' --include='*.txt'` | **kept** | **kept** |
+
+  Reversing them makes the exclude the *newer* segment, so `t1.txt` is reached by
+  the include first and kept; and it makes the include the *older* segment, so a
+  name neither matches — `l1.log` — is kept rather than dropped.
+* **Which list a glob joins is decided by the option, not by what it names.**
+  `--exclude` and `--exclude-from` ask about files only, `--exclude-dir` about
+  directories only, and there is no `--include-dir`. `--exclude=drop` therefore
+  does not stop the walk entering `drop/`, and `--exclude-dir=t1.txt` does not
+  stop `t1.txt` being searched. Trailing slashes are stripped from an
+  `--exclude-dir` pattern, because `--exclude-dir=drop/` is what tab completion
+  produces.
+* **A command-line operand is matched as written *and* at every suffix that
+  starts after a `/`.** Recalling gnulib said the opposite — that command-line
+  names are `EXCLUDE_ANCHORED` and so match whole or not at all — and the probe
+  disproved it: `--exclude=deepfile.txt` excludes `a/b/c/deepfile.txt` and
+  `--exclude=top.txt` excludes `./top.txt`. During the walk only the base name is
+  ever offered, so the suffix loop is unobservable there; it is written once and
+  used by both paths rather than special-cased.
+* The globs are `fnmatch` with **no** `FNM_PATHNAME` and **no** `FNM_PERIOD`: `*`
+  crosses a `/` and matches a leading dot, which is the opposite of what a shell
+  would do and the assumption a reader is most likely to bring. `\` still
+  escapes.
+* **Selection happens after the `stat`, not instead of it.** `grep --exclude='*'
+  foo abc /nonexistent` still reports the missing file and still exits 2. Stdin
+  is exempt from the whole mechanism, there being no name to match.
+* **`--exclude-from` has no comment syntax.** One glob per line, a final line
+  without a newline still counted, `#t1*` a glob and not a remark, and an empty
+  file excluding nothing — which is not the same as excluding everything. It is
+  read at parse time and its globs join the neighbouring `--exclude` segment, so
+  where it sits among the other options changes the answer.
+* **With no operand at all, `-r` walks `.` and prints the names without the `./`**
+  that naming `.` explicitly would have kept. That is a property of the
+  defaulting rather than of the walk, so it rides on its own flag set at the end
+  of `parse_args`.
+
+**One harness lesson, kept because it nearly cost the whole tranche.** The `-D`
+cases can hang rather than fail if the "skip a device found by the walk" rule is
+ever lost, so `scripts/grep-diff.sh` wraps each side in `timeout 20`. Written as
+`env PATH=$bindir/$side timeout 20 grep`, that resolves `timeout` through the
+PATH it has just set — a directory holding one symlink named `grep` — so
+`timeout` was not found, **both** sides exited 127, and all 435 cases agreed at
+once. A completely clean run is what a harness that cannot fail looks like from
+the outside. `timeout` now comes before `env`, and `DIFF_NEED` names both it and
+`sort` so a missing one skips the run instead of greening it.
+
+**Diagnostic wording** — five kinds, eight `?` cases, every one of lower value
+than the above: `grep` with no operands answers `grep: missing PATTERN` where GNU
+prints the usage summary; `--zzz` is `unknown option: --zzz` against GNU's
+`unrecognized option '--zzz'`; `-m x` names the offending value where GNU's does
+not; `-d bogus` prints gnulib's argmatch block but stops before the
+`Usage:`/`Try 'grep --help'` pair and exits 2 where GNU exits 1; and a leading
+quantifier under `-E` (`grep -E '*a'`) is accepted silently where GNU also warns
+`grep: warning: * at start of expression` on stderr while still exiting 0. All
+but the last belong with `TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE`
+rather than with grep. (`-D bogus` is *not* among them: GNU does not use argmatch
+for it, and we reproduce its one-liner and its status exactly.)
+
+**Severity.** Low, and only wording is left. Every feature this entry was opened
+for is implemented and pinned by plain cases in `scripts/grep-diff.sh`, which now
+runs **435 agreeing cases** against GNU 3.11 with five deliberate divergences and
+eight wording gaps. The deliberate five are the two choices recorded elsewhere:
+we never suppress binary output, and we list a directory sorted where GNU uses
+readdir order (design-decisions.md §380).
 
 #### TD-A-POISON-CHECK-READS-EVERY-BYTE-ONE-AT-A-TIME-WHILE-THE-FILL-USES-REP-STOSB (lane A, 2026-08-25) — **open**
 

@@ -96,6 +96,42 @@ pub fn is_regular(file: &File) -> bool {
     regular(file) == Some(true)
 }
 
+/// Whether `md` describes a **device** in the sense POSIX utilities mean when
+/// they offer to skip one: a character device, a block device, a socket or a
+/// FIFO.
+///
+/// Deliberately not "anything that is not a regular file". A directory is not a
+/// device — `grep -D skip` still descends into one, and still says `Is a
+/// directory` about one named on the command line — and a symlink is not one
+/// either. GNU grep spells the same predicate `is_device_mode`, and it is those
+/// four `S_IS*` tests and no others.
+///
+/// The question is asked of a [`std::fs::Metadata`] rather than of an open
+/// [`File`] because the whole point is to answer it **without opening**: `open`
+/// on a FIFO with no writer blocks forever, so a `grep -D skip` that opened
+/// first would hang on exactly the input it was told to skip. (GNU dodges the
+/// same hang from the other side, by adding `O_NONBLOCK` when devices are to be
+/// skipped; statting first is the equivalent that does not need the flag.)
+///
+/// On a host that is not Unix the answer is always `false`. Windows has no
+/// FIFOs or block devices in the filesystem namespace to stat, and the
+/// differential harnesses that would care run under WSL, where `cfg(unix)`
+/// holds.
+#[must_use]
+pub fn is_device(md: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let t = md.file_type();
+        t.is_char_device() || t.is_block_device() || t.is_socket() || t.is_fifo()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = md;
+        false
+    }
+}
+
 /// Whether `file` can be read out of order.
 ///
 /// This is [`is_regular`] plus the seek itself: a handle can be a regular file

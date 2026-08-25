@@ -71,6 +71,21 @@
 # deciding whether to open a bug: `!` is a decision, `?` is a debt. Counting
 # them together, as this harness did when every `!` was really a `?`, is how
 # six cases spent months labelled "deliberate" while describing a defect.
+#
+# ## Why cases may end in `| sort`
+#
+# We list a directory sorted; GNU lists it in readdir order (design-decisions.md
+# §380). That is a decision, not a defect, but it means any case whose output is
+# more than one line from one directory would fail for a reason that has nothing
+# to do with the flag under test. Sorting both sides removes the one difference
+# we already know about and leaves every other one visible — which is what makes
+# the file-selection options testable at all, since a selector's whole job is to
+# change *which* of several files come out.
+#
+# `pipefail` is what keeps that honest. Without it a pipeline reports `sort`'s
+# status, so a case where GNU exits 1 and we exit 0 would agree by construction;
+# with it the pipeline reports grep's own 0/1/2. The four pre-existing piped
+# cases are `cat w99 | grep …`, where `cat` cannot fail, so nothing else moves.
 set -u
 
 # grep reads these, and inheriting them from the operator's shell would change
@@ -78,8 +93,22 @@ set -u
 unset GREP_OPTIONS GREP_COLOR GREP_COLORS POSIXLY_CORRECT
 
 DIFF_PROG=grep
+# `sort` normalises the directory order the selector cases would otherwise
+# disagree about, and `timeout` is what stops a device case hanging the run.
+# Both are load-bearing enough that running without them would be worse than
+# not running: a missing one makes *both* sides fail identically, which reads as
+# a pass.
+DIFF_NEED='sort timeout'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
+
+# After the source, not before: `pipefail` is a bash option, and the shell that
+# reaches the top of this file is whatever the operator typed — `sh`, which on a
+# Debian WSL is dash and rejects it outright. Everything past `diff-wsl.sh` runs
+# in the bash it re-execs into, so this is the first line where the option
+# exists. (Sourcing is what makes that true: an `exec` inside the sourced file
+# replaces this process, so nothing above it survives to matter.)
+set -o pipefail
 
 pass=0; fail=0; xfail=0; xgap=0; xpass=0
 
@@ -183,6 +212,40 @@ ln -s .. loopdir/inner/up
 mkdir -p onefile
 printf 'foo\n' > onefile/only
 
+# The file-selection tree. Every file in it matches `foo`, so that what comes
+# out is decided by --include/--exclude/--exclude-dir alone and never by the
+# pattern. Two extensions with two files each give a glob something to select
+# *among*; two subdirectories give --exclude-dir the same; and the dotted pair
+# is there because these globs are plain `fnmatch` with no `FNM_PERIOD`, so `*`
+# matches a leading dot — which is the opposite of what a shell would do and the
+# thing a reader is most likely to assume wrongly.
+mkdir -p sel/keep sel/drop sel/.hid
+printf 'foo\n' > sel/t1.txt
+printf 'foo\n' > sel/t2.txt
+printf 'foo\n' > sel/l1.log
+printf 'foo\n' > sel/l2.log
+printf 'foo\n' > sel/.dot
+printf 'foo\n' > sel/keep/k.txt
+printf 'foo\n' > sel/drop/d.txt
+printf 'foo\n' > sel/.hid/h.txt
+
+# --exclude-from's whole content model: one glob per line, a final line with no
+# newline still counted, and *no* comment syntax — `#t1*` is a glob that matches
+# a file called `#t1…`, not a remark. An empty file excludes nothing, which is
+# not the same as excluding everything.
+printf 't1*\nl1*\n'   > selfrom
+printf '#t1*\nl1*'    > selhash
+: > selempty
+
+# A directory holding a device, for -D. The FIFO is the only fixture here that
+# can hang the harness: opening it blocks until someone writes, so the cases
+# below only ever ask grep to *skip* it or to walk past it — never `-D read`,
+# which would block GNU exactly as hard as it blocks us and prove nothing.
+# `mkfifo` is why this section could not exist on the Windows host.
+mkdir -p dev
+printf 'foo\n' > dev/plain
+mkfifo dev/fifo 2>/dev/null || printf 'note: mkfifo failed; the -D device cases will not mean much\n'
+
 # ------------------------------------------------------------------- cases ---
 #
 # One shell command line per case, `grep` standing for whichever grep is
@@ -200,7 +263,21 @@ printf 'foo\n' > onefile/only
 # directory holds one symlink and is the whole of `PATH` for that one process —
 # safe here because grep runs no subprocess, so there is nothing else it could
 # need to find.
-grep() { env PATH="$bindir/$CAP_SIDE" grep "$@"; }
+#
+# The `timeout` is insurance for the `-D` cases below. A FIFO with no writer
+# blocks in `open`, and the only thing standing between `grep -r` and a
+# permanent stall is the rule that a device *found by the walk* is skipped
+# without being opened. If we ever lose that rule the harness would hang rather
+# than fail, and a hang reports nothing; with the timeout the case fails loudly
+# with status 124 and names itself.
+#
+# `timeout` comes *before* `env`, not after. `env PATH=… timeout 20 grep` looks
+# equivalent and is not: `env` resolves its own command through the PATH it was
+# just handed, and that directory holds one symlink named `grep` and nothing
+# else — so `timeout` was not found, both sides exited 127, and all 435 cases
+# agreed at once. That is what a harness that cannot fail looks like from the
+# outside: a completely clean run.
+grep() { timeout 20 env PATH="$bindir/$CAP_SIDE" grep "$@"; }
 
 # Everything observable about one run, left in globals rather than printed,
 # because the stderr *text* and the mere fact of a diagnostic are two different
@@ -512,12 +589,135 @@ grep -r foo sub/deep
 grep foo sub
 grep -r foo sub/s1
 grep -r foo /nonexistent
-?-d is not implemented; GNU's `-d recurse` is -r and `-d skip` ignores directories silently|grep -d recurse foo sub
-?-d is not implemented; GNU's `-d recurse` is -r and `-d skip` ignores directories silently|grep -d skip foo sub
 grep -r foo sub empty
-?--include is not implemented|grep -r --include='s1' foo .
-?--exclude is not implemented|grep -r --exclude='s1' foo .
-?--exclude-dir is not implemented|grep -r --exclude-dir='deep' bar .
+
+# --- -d, which is where -r actually lives ---
+#
+# `-d recurse` *is* -r, `-d read` is the default that says `Is a directory`, and
+# `-d skip` says nothing and exits 1 — skipping is not an error. Because they
+# are one setting and not three flags, the last one written wins in both
+# directions, which is what the two -r/-d pairs below are for. -R writes the
+# same setting *and* turns on symlink dereferencing, so a following `-d` can
+# take the recursion away and leave the dereferencing behind.
+grep -d recurse foo sub
+grep -d skip foo sub
+grep -d read foo sub
+grep -sd read foo sub
+grep -d skip -r foo sub
+grep -r -d skip foo sub
+grep -d recurse -R foo symdir
+grep -R -d skip foo symdir
+grep -d skip foo sub abc
+grep -d read foo sub abc
+grep --directories=recurse foo sub
+grep --directories=skip foo sub
+# GNU rejects an unknown ACTION with gnulib's argmatch block: the invalid
+# argument, `Valid arguments are:`, the three of them, and then the usage
+# summary and `Try 'grep --help'` that every option error here ends with. We
+# print those first five lines and stop, and we exit 2 where GNU exits 1 —
+# which is not grep being inconsistent, it is `usage()` being reached by a path
+# that does not go through EXIT_TROUBLE. Both halves are the getopt-diagnostic
+# shape debt and neither is about -d.
+#
+# `-D bogus` is unmarked below because GNU does not use argmatch for it: it is
+# grep's own one-liner and exits 2, which we reproduce exactly.
+?our argmatch diagnostic stops before GNU's `Usage:`/`Try ...' pair, and exits 2 where GNU exits 1 (TD-COREUTILS-GETOPT-DIAGNOSTICS-USE-THE-WRONG-SHAPE)|grep -d bogus foo sub
+
+# --- -D, and why its default is not a plain boolean ---
+#
+# It is tri-state: a device *named on the command line* is read, a device the
+# walk *finds* is skipped. That asymmetry is the only thing keeping `grep -r pat
+# /` from blocking forever on the first FIFO it meets, so `grep -r foo dev`
+# below has to come back rather than hang. `-c ''` on /dev/null is how read and
+# skip are told apart at all: reading an empty device prints `0`, skipping it
+# prints nothing, and both exit 1.
+grep -c '' /dev/null
+grep -D read -c '' /dev/null
+grep -D skip -c '' /dev/null
+grep -D skip foo dev/fifo
+grep -D skip -c foo dev/fifo abc
+grep -r foo dev
+grep -rD skip foo dev
+grep -rc foo dev
+grep --devices=skip -c '' /dev/null
+grep -D bogus foo abc
+
+# --- --include / --exclude / --exclude-dir / --exclude-from ---
+#
+# Every file under `sel` matches `foo`, so these cases are about selection and
+# nothing else. They sort because a selector's job is to change which of several
+# files come out, and our directory order is not GNU's; see the header.
+#
+# The combination rule is not "includes win" or "the last one wins". Runs of the
+# same kind coalesce into segments, the newest matching segment decides, and a
+# name no segment matches is dropped only if the *oldest* segment is an include.
+# The two middle cases are the whole proof: the same two options in the other
+# order keep `t1.txt` instead of dropping it, because reversing them makes the
+# exclude the newer segment and the include the older one.
+grep -rl foo sel | sort
+grep -rl --include='*.txt' foo sel | sort
+grep -rl --exclude='*.txt' foo sel | sort
+grep -rl --include='*.txt' --exclude='t1*' foo sel | sort
+grep -rl --exclude='t1*' --include='*.txt' foo sel | sort
+grep -rl --include='t1*' --include='l1*' foo sel | sort
+grep -rl --exclude='t1*' --exclude='l1*' foo sel | sort
+grep -rl --include='*.txt' --exclude='*' --include='*.log' foo sel | sort
+grep -rl --exclude='*' foo sel
+grep -rl --include='zz' foo sel
+# No FNM_PERIOD: `*` matches a leading dot, and `.*` matches nothing else.
+grep -rl --include='*' foo sel | sort
+grep -rl --include='.*' foo sel | sort
+grep -rl --exclude='.*' foo sel | sort
+
+# --exclude-dir has its own list and only ever consults it about directories,
+# so an --exclude that names a directory does not stop the walk and an
+# --exclude-dir that names a file does not stop the file. The trailing slash is
+# stripped from the pattern, because `--exclude-dir=drop/` is what tab
+# completion produces.
+grep -rl --exclude-dir='drop' foo sel | sort
+grep -rl --exclude-dir='drop/' foo sel | sort
+grep -rl --exclude-dir='dr*' foo sel | sort
+grep -rl --exclude-dir='.*' foo sel | sort
+grep -rl --exclude='drop' foo sel | sort
+grep -rl --exclude-dir='t1.txt' foo sel | sort
+grep -rl --include='*.txt' --exclude-dir='keep' foo sel | sort
+grep -rl --exclude-dir='sel' foo sel
+grep -rl --exclude-dir='sel/' foo sel
+
+# On the command line the name is matched as written, and also at every suffix
+# that starts after a `/` — so `--exclude=s1` reaches `sub/s1`. During the walk
+# only the base name is ever offered, which is why the same glob behaves the
+# same either way here.
+grep -l --exclude='t1.txt' foo sel/t1.txt sel/l1.log
+grep -l --exclude='sel/t1.txt' foo sel/t1.txt
+grep -l --exclude='*/t1.txt' foo sel/t1.txt
+grep -l --include='*.log' foo sel/t1.txt sel/l1.log
+grep -r --exclude='s1' foo sub
+grep -r --exclude-dir='deep' bar sub
+grep -c --include='*.log' foo sel/t1.txt
+# Selection happens after the stat, not instead of it: a name that does not
+# exist is still reported and still raises the status, however thoroughly it
+# would have been excluded.
+grep --exclude='*' foo abc /nonexistent
+grep --exclude='*' foo abc
+# Stdin is exempt from all of it — there is no name to match.
+grep --exclude='*' foo < abc
+grep --include='zz' foo < abc
+
+grep -rl --exclude-from=selfrom foo sel | sort
+grep -rl --exclude-from=selhash foo sel | sort
+grep -rl --exclude-from=selempty foo sel | sort
+grep -rl --include='*.txt' --exclude-from=selfrom foo sel | sort
+grep -rl --exclude-from=selfrom --include='*.txt' foo sel | sort
+grep --exclude-from=/nonexistent foo abc
+grep --exclude-from=sel foo abc
+
+# With no operand at all, -r walks `.` — and prints the names *without* the
+# `./` that naming `.` explicitly would have kept. The pair below is the only
+# way to see that, since either one alone looks like an ordinary walk.
+grep -rl foo | sort
+grep -rl foo . | sort
+grep -l --directories=recurse foo | sort
 
 # -r and -R differ over exactly one thing: a symlink met during the walk. -r
 # skips it, -R follows it. A symlink named on the command line is followed by
@@ -581,7 +781,11 @@ grep -LZ z abc
 grep -HZ a abc
 grep -HZc a abc
 grep -nZ a abc abc
-!the Windows build joins recursive paths with `\`; the target build joins with `/`|grep -rlZ foo .
+# The last survivor of the six cases whose stated reason was "the Windows build
+# joins recursive paths with `\`". That reason died with the move into WSL; what
+# it actually differs over is the same directory ordering as the `-r foo .` case
+# above, and it cannot be sorted away because the names come out NUL-separated.
+!we list a directory sorted where GNU uses readdir order (design-decisions.md §380)|grep -rlZ foo .
 grep -z foo zsep
 grep -zc foo zsep
 grep -zn foo zsep

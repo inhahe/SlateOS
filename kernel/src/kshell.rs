@@ -11821,6 +11821,102 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "and succeed");
     }
 
+    serial_println!("  kshell::self_test 36: xargs reports the worst invocation, not the last");
+    // `xargs` runs a command many times and has one status to say how it went.
+    // It used to hand that status to whichever invocation happened to run last,
+    // so `printf 'bad\ngood\n' | xargs -n1 check && deploy` deployed on the
+    // strength of the final check while an earlier one had failed. A batch that
+    // reports only its last member's result is a batch whose failures are
+    // invisible in exactly the arrangement scripts are written in.
+    //
+    // The same read turned up `-n` swallowing an argument it could not parse:
+    // `xargs -n abc rm` consumed `abc`, left the batch size unset, and ran one
+    // invocation over every word -- the opposite of what was asked, reported as
+    // success. Same family as the `sed` flag in rung 35: a wrong answer, not a
+    // missing one.
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        let present = "/tmp/zz_xargs_present";
+        let missing = "/tmp/zz_xargs_missing";
+        crate::fs::Vfs::write_file(present, b"x\n")?;
+        // `test -e` is the probe because its status is its whole output, so
+        // nothing about these checks depends on what a command prints.
+        let _ = crate::fs::Vfs::remove(missing);
+
+        let both_ok = alloc::format!("{} {}\n", present, present);
+        let _ = piped("xargs -n1 test -e", both_ok.as_bytes());
+        assert_eq!(
+            last_exit(),
+            0,
+            "xargs -n1: every invocation succeeding is 0"
+        );
+
+        // The bug, in the arrangement that hid it: the *first* invocation
+        // fails and the last succeeds.
+        let bad_first = alloc::format!("{} {}\n", missing, present);
+        let _ = piped("xargs -n1 test -e", bad_first.as_bytes());
+        assert_eq!(
+            last_exit(),
+            1,
+            "xargs -n1: an earlier failure is not erased by a later success"
+        );
+
+        // The mirror image, which passed even before the fix. It is here so
+        // that "report the worst" cannot have been implemented as "report the
+        // first", which would satisfy the check above and break this one.
+        let bad_last = alloc::format!("{} {}\n", present, missing);
+        let _ = piped("xargs -n1 test -e", bad_last.as_bytes());
+        assert_eq!(last_exit(), 1, "xargs -n1: a later failure still counts");
+
+        // A single invocation propagates the child's own status verbatim, so
+        // `cmd | xargs foo` behaves as `foo args` does -- see the note on
+        // `cmd_xargs_input` for why this shell does not use GNU's 123.
+        let one = alloc::format!("{}\n", missing);
+        let _ = piped("xargs test -e", one.as_bytes());
+        assert_eq!(last_exit(), 1, "xargs: one failing invocation is a failure");
+
+        // `-n` must still batch, or every check above would be satisfied by an
+        // implementation that quietly stopped honouring it. The two words can
+        // only end up adjacent on one line if they went to one invocation, so
+        // the pair of checks below distinguishes the two readings without
+        // depending on how a line ends -- which the serial log is free to
+        // decide for itself.
+        let out = piped("xargs -n1 echo", b"zz_p zz_q\n");
+        assert_output_contains("xargs -n1 still runs the command", &out, b"zz_p");
+        assert_output_lacks(
+            "but one word per invocation, so never both together",
+            &out,
+            b"zz_p zz_q",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let out = piped("xargs echo", b"zz_p zz_q\n");
+        assert_output_contains(
+            "and without -n they share one invocation",
+            &out,
+            b"zz_p zz_q",
+        );
+
+        // A `-n` argument that is not a positive number is refused rather than
+        // swallowed. The command must not run at all: asserting only on the
+        // status would pass against a version that ran it and then failed.
+        let out = piped("xargs -n abc echo", b"zz_unrun\n");
+        assert_output_lacks("a bad -n does not run the command", &out, b"zz_unrun");
+        assert_output_contains("and says why", &out, b"invalid number");
+        assert_eq!(last_exit(), 1, "a bad -n is a usage error");
+
+        let out = piped("xargs -n 0 echo", b"zz_unrun\n");
+        assert_output_lacks("nor does -n 0", &out, b"zz_unrun");
+        assert_eq!(last_exit(), 1, "-n 0 is a usage error too");
+
+        let _ = crate::fs::Vfs::remove(present);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -106952,6 +107048,32 @@ fn cmd_xargs(_args: &str) {
     set_exit(1);
 }
 
+/// `xargs` pipe-input variant: the form that actually runs anything.
+///
+/// The status is the **worst** of the invocations, not the last one's. It used
+/// to be the last one's by omission — the loop called [`execute`] and never
+/// looked at what it left in the exit slot — so
+/// `printf 'bad\ngood\n' | xargs -n1 check && deploy` deployed on the strength
+/// of the final invocation while an earlier one had failed. That is exactly the
+/// "batch operations must track and report the worst error, not just the last
+/// one" rule in `CLAUDE.md`.
+///
+/// **Why `max` is the right operator and not merely a convenient one.** Under
+/// the convention `design-decisions.md` §275 established, a larger status is a
+/// worse one: 2 ("I could not check") outranks 1 ("the answer is no") in
+/// `grep`, `cmp` and `diff`. Taking the maximum therefore propagates a failure
+/// to look over a negative finding, which is the same precedence §275 argues
+/// for within a single command.
+///
+/// **Why not GNU's 123.** GNU `xargs` maps every child failure onto 123 so that
+/// it can reserve 124–127 for "child exited 255", "child killed by a signal",
+/// "command not executable" and "command not found". This shell has none of
+/// those rows — an unknown command is a flat 1 here — so adopting the one row
+/// would leave a caller unable to tell which convention it is reading, which is
+/// the same reason the `Syntax error: …` sites were left at 1 rather than
+/// borrowing bash's 2. Propagating the child's own status instead makes
+/// `cmd | xargs foo` behave exactly like `foo args` in the single-invocation
+/// case, which is what the rest of the shell already does.
 fn cmd_xargs_input(args: &str, input: &str) {
     let mut max_args: Option<usize> = None;
     let mut rest = args.trim();
@@ -106960,32 +107082,56 @@ fn cmd_xargs_input(args: &str, input: &str) {
     if rest.starts_with("-n") {
         rest = rest.get(2..).unwrap_or("").trim_start();
         let end = rest.find([' ', '\t']).unwrap_or(rest.len());
-        max_args = rest.get(..end).and_then(|s| s.parse::<usize>().ok());
+        let num = rest.get(..end).unwrap_or("");
+        // The word is consumed whether or not it parsed, so a `parse().ok()`
+        // that failed used to leave `max_args` at `None` *and* swallow the
+        // word: `xargs -n abc rm` ran **one** invocation over every input word
+        // — the opposite of what was asked — and reported success. `-n 0` did
+        // the same by way of the `Some(n) if n > 0` guard falling through.
+        // Refusing is the only reading that cannot be mistaken for obedience.
+        match num.parse::<usize>() {
+            Ok(n) if n > 0 => max_args = Some(n),
+            _ => {
+                shell_println!("xargs: invalid number '{}' for -n option", num);
+                set_exit(1);
+                return;
+            }
+        }
         rest = rest.get(end..).unwrap_or("").trim_start();
     }
 
     let command = if rest.is_empty() { "echo" } else { rest };
 
     // Collect input words.
+    //
+    // Empty input runs nothing. GNU runs the command once unless `-r` is
+    // given; BSD/macOS `xargs` does not run it. There is no single correct
+    // answer to match here, and this is one of the two real ones — see the
+    // note under `TD-A-XARGS-…` in `known-issues.md` so this is not "fixed"
+    // into GNU's shape by someone who does not know the two differ.
     let words: Vec<&str> = input.split_whitespace().collect();
     if words.is_empty() {
         return;
     }
 
+    let mut worst: u8 = 0;
     match max_args {
-        Some(n) if n > 0 => {
+        Some(n) => {
             // Execute in batches of N words.
             for chunk in words.chunks(n) {
                 let full_cmd = alloc::format!("{} {}", command, chunk.join(" "));
                 execute(&full_cmd);
+                worst = worst.max(last_exit());
             }
         }
-        _ => {
+        None => {
             // All words in one invocation.
             let full_cmd = alloc::format!("{} {}", command, words.join(" "));
             execute(&full_cmd);
+            worst = last_exit();
         }
     }
+    set_exit(worst);
 }
 
 /// Pause for N milliseconds (busy-wait using APIC tick counter).

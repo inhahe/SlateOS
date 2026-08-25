@@ -10,8 +10,14 @@ echo "=== an escaped keyword is an ordinary word"
 ( eval '\for x in a; do echo $x; done' ); echo "rc=$?"
 ( eval '\case x in x) echo m;; esac' ); echo "rc=$?"
 ( eval '\{ echo hi; }' ); echo "rc=$?"
-# … and so is a whole word made of escaped letters.
-\time true; echo "rc=$?"
+# … and so is a whole word made of escaped letters. `\time` reaches
+# /usr/bin/time, whose default report counts elapsed hundredths and minor page
+# faults — host weather, different on every run and between two runs of the
+# same shell. `$TIME` is GNU time's own format string, so setting it replaces
+# that report with a fixed line; and because the *keyword* is steered by
+# `$TIMEFORMAT` instead, the line appearing is itself the evidence that the
+# escaped word did not read as the keyword.
+TIME='[external time ran]' \time true; echo "rc=$?"
 \[[ a == a ]]; echo "rc=$?"
 \! true; echo "rc=$?"
 

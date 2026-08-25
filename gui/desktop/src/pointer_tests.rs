@@ -879,16 +879,40 @@ fn show_desktop_does_not_ask_an_already_minimized_window_to_minimize() {
     // asking would be a request the compositor must ignore and, worse, one the
     // user would have to undo twice to get back where they were. This is why
     // the fix is two accessors rather than one widened one.
+    //
+    // This test used to build `asked` by copying `run_desktop_action`'s filter
+    // into its own body and asserting against the copy. That proved the copy:
+    // widening the production predicate from `on_glass()` to `mapped` left it
+    // green, because the test was no longer reading the code it was named for.
+    // A test that re-derives the answer is worse than no test, because it looks
+    // like coverage. So it presses the chord and reads what the shell asked for.
     let mut shell = shell();
     let away = open(&mut shell, "Editor");
     let still_here = open(&mut shell, "Terminal");
     minimize(&mut shell, away);
 
-    let asked: Vec<WindowId> = shell
-        .windows
-        .values()
-        .filter(|w| w.on_glass() && w.desktop == shell.current_desktop)
-        .map(|w| w.id)
+    let super_d = KeyEvent {
+        key: Key::D,
+        pressed: true,
+        modifiers: Modifiers {
+            super_key: true,
+            ..Modifiers::default()
+        },
+        text: String::new(),
+    };
+    let outcome = shell.handle_hotkey(&super_d);
+    assert!(outcome.consumed);
+
+    let asked: Vec<WindowId> = outcome
+        .requests
+        .iter()
+        .map(|request| match request {
+            ShellRequest::Window(w) => {
+                assert_eq!(w.action, ShellControlAction::Minimize);
+                w.window
+            }
+            other => panic!("Super+D names windows and nothing else, got {other:?}"),
+        })
         .collect();
     assert_eq!(
         asked,

@@ -4235,6 +4235,120 @@ mod window_manager_tests {
         assert!(shell.alt_tab_index < shell.taskbar_windows().len());
     }
 
+    /// The same property, from the one starting index that actually exercises
+    /// the clamp.
+    ///
+    /// `stepping_backwards_survives_the_windows_closing_underneath_it` above
+    /// steps forward *twice* from a four-window switcher, which wraps the index
+    /// round to 0 — and 0 is in range for every list, so removing the clamp
+    /// leaves that test green. Stepping forward once leaves the index at 3, and
+    /// stepping back from 3 in a one-window list is the only arithmetic that
+    /// tells the two versions apart: clamped it is 0, unclamped it is 2, which
+    /// is another index past the end and so `finish_alt_tab` picks nothing at
+    /// all. The user sees Shift+Alt+Tab do nothing after a window closed under
+    /// the switcher.
+    #[test]
+    fn stepping_backwards_from_the_end_lands_in_the_list_not_past_it() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..4).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 3, "the last row, not a wrapped one");
+
+        for id in &ids[1..] {
+            close(&mut shell, *id);
+        }
+
+        shell.prev_alt_tab();
+        assert!(
+            shell.alt_tab_index < shell.taskbar_windows().len(),
+            "index {} is past the end of a {}-window list",
+            shell.alt_tab_index,
+            shell.taskbar_windows().len()
+        );
+        assert_eq!(
+            shell.finish_alt_tab(),
+            Some(ShellRequest::window(ids[0], ShellControlAction::Activate)),
+            "and the one window left is the one it lands on"
+        );
+    }
+
+    /// A switcher left on an index that no longer names a window still has to
+    /// close.
+    ///
+    /// `finish_alt_tab` answers two questions at once — "which window?" and "the
+    /// switcher is over now" — and only the first of them can fail. Answering
+    /// them in the wrong order lets the stale-index `?` return before the
+    /// switcher is marked closed, and then it is closed by nothing: the Alt
+    /// release that would have ended it has already been spent, so the overlay
+    /// stays on screen over every window for the rest of the session.
+    #[test]
+    fn a_switcher_whose_window_closed_under_it_still_closes() {
+        let mut shell = shell();
+        let ids: Vec<WindowId> = (0..3).map(|i| open(&mut shell, &format!("w{i}"))).collect();
+
+        shell.start_alt_tab();
+        shell.next_alt_tab();
+        assert_eq!(shell.alt_tab_index, 2, "the last row");
+
+        for id in &ids[1..] {
+            close(&mut shell, *id);
+        }
+
+        assert_eq!(
+            shell.finish_alt_tab(),
+            None,
+            "there is no window at that index any more, so it names none"
+        );
+        assert!(
+            !shell.alt_tab_active,
+            "but it is still over -- closing the switcher cannot depend on \
+             finding a window"
+        );
+    }
+
+    /// Letting go of a key that is not Alt does not end the switcher.
+    ///
+    /// Alt+Tab is held: Alt stays down while Tab is pressed and released, over
+    /// and over, and the switch is committed by the *Alt* release. A guard that
+    /// asked only whether the switcher was open would commit on the first Tab
+    /// release instead, so every use of Alt+Tab would land on the second window
+    /// and the user could never reach the third.
+    #[test]
+    fn releasing_tab_does_not_end_the_window_switcher() {
+        let mut shell = shell();
+        for i in 0..3 {
+            open(&mut shell, &format!("w{i}"));
+        }
+
+        shell.start_alt_tab();
+        let landed_on = shell.alt_tab_index;
+
+        let release_tab = KeyEvent {
+            key: Key::Tab,
+            pressed: false,
+            modifiers: Modifiers::alt(),
+            text: String::new(),
+        };
+        let outcome = shell.handle_hotkey(&release_tab);
+        assert!(!outcome.consumed, "a Tab release is not the shell's");
+        assert!(outcome.requests.is_empty(), "and asks for nothing");
+        assert!(shell.alt_tab_active, "the switcher is still up");
+        assert_eq!(shell.alt_tab_index, landed_on, "and has not moved");
+
+        // The release that *does* end it, so the test says what the rule is and
+        // not merely what it is not.
+        let release_alt = KeyEvent {
+            key: Key::LeftAlt,
+            pressed: false,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        };
+        assert!(shell.handle_hotkey(&release_alt).consumed);
+        assert!(!shell.alt_tab_active);
+    }
+
     #[test]
     fn super_d_minimizes_everything_on_the_current_desktop() {
         let mut shell = shell();

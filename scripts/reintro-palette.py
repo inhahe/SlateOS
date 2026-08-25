@@ -25024,6 +25024,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'stepping_backwards_from_the_end_lands_in_the_list_not_past_it',
+            'alt_tab_between_two_windows_swaps_them',
             # The documented historical bug, restored. `taskbar_windows` is
             # ordered bottom-to-top, so the window below the top one is the
             # second from the *end*, not index 1.
@@ -25039,6 +25041,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'a_switcher_whose_window_closed_under_it_still_closes',
+            'stepping_backwards_from_the_end_lands_in_the_list_not_past_it',
             # Not caught by `alt_tab_visits_every_window_and_comes_back_round`:
             # stepping the other way still visits all three windows and still
             # comes back round. Only the test that asserts the *direction*
@@ -25055,12 +25059,15 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape. `stepping_backwards_survives_the_windows_
-            # closing_underneath_it` steps forward twice from a 4-window start,
-            # which lands the index on 0 -- so by the time the windows close the
-            # index is already in range and the clamp has nothing to do. The
-            # clamp only acts on an index that is *past the end*, which that
-            # fixture never produces.
+            # Escaped, as predicted, and now closed. `stepping_backwards_
+            # survives_the_windows_closing_underneath_it` steps forward twice
+            # from a 4-window start, which lands the index on 0 -- so by the
+            # time the windows close the index is already in range and the clamp
+            # has nothing to do. The clamp only acts on an index *past the end*,
+            # which that fixture never produces. The closing test steps forward
+            # once instead, leaving the index at 3, which is the only arithmetic
+            # that tells clamped (0) from unclamped (2, still past the end).
+            'stepping_backwards_from_the_end_lands_in_the_list_not_past_it',
         ],
     ),
     (
@@ -25084,11 +25091,15 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape. The `?` only fires on a stale index, and every
-            # fixture reaches `finish_alt_tab` through `next_alt_tab`, which
-            # wraps and therefore always lands in range. Reaching it with a
-            # stale index needs a window to close between the last step and the
-            # release of Alt, which nothing sets up.
+            # Escaped, as predicted, and now closed. The `?` only fires on a
+            # stale index, and every fixture reached `finish_alt_tab` through
+            # `next_alt_tab`, which wraps and therefore always lands in range.
+            # Reaching it with a stale index needs a window to close between the
+            # last step and the release of Alt, which nothing set up. The
+            # closing test does exactly that, and asserts on `alt_tab_active`
+            # rather than on the returned window -- the return is `None` either
+            # way, so only the flag can see the ordering.
+            'a_switcher_whose_window_closed_under_it_still_closes',
         ],
     ),
     (
@@ -25100,10 +25111,11 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape. Only one test releases a key at all, and the key
-            # it releases is LeftAlt -- for which the guard and its removal agree.
-            # Releasing the Tab of an Alt+Tab is the ordinary case this breaks,
-            # and no fixture ever releases Tab.
+            # Escaped, as predicted, and now closed. Only one test released a key
+            # at all, and the key it released was LeftAlt -- for which the guard
+            # and its removal agree. Releasing the Tab of an Alt+Tab is the
+            # ordinary case this breaks, and no fixture ever released Tab.
+            'releasing_tab_does_not_end_the_window_switcher',
         ],
     ),
     (
@@ -25115,6 +25127,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'releasing_tab_does_not_end_the_window_switcher',
             'a_key_release_only_ends_the_window_switcher',
         ],
     ),
@@ -25139,6 +25152,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'alt_f4_asks_the_compositor_to_close_the_focused_window',
             'a_window_shortcut_with_nothing_focused_asks_for_nothing',
             'alt_f4_asks_the_compositor_and_changes_nothing_itself',
         ],
@@ -25152,6 +25166,9 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'show_desktop_does_not_ask_an_already_minimized_window_to_minimize',
+            'a_refused_shortcut_does_not_swallow_the_rest_of_the_batch',
+            'super_d_asks_for_every_window_to_be_minimised',
             'super_d_minimizes_everything_on_the_current_desktop',
         ],
     ),
@@ -25164,6 +25181,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'super_right_asks_for_a_tile_and_computes_no_geometry',
             'snapping_and_switching_desktops_are_different_shortcuts',
         ],
     ),
@@ -25188,6 +25206,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'desktop_navigation_stops_at_both_ends',
+            'switching_desktop_names_no_window',
             # The exact bug the whole match-the-full-chord table exists to
             # prevent, reintroduced on the right-hand side.
             'snapping_and_switching_desktops_are_different_shortcuts',
@@ -25202,6 +25222,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'switching_desktop_names_no_window',
             # Predicted escape, and the interesting one: the table's own
             # regression test presses Ctrl+Super+*Right* and never
             # Ctrl+Super+Left. `desktop_navigation_stops_at_both_ends` does press
@@ -25220,6 +25241,7 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'switching_desktop_names_no_window',
             'desktop_navigation_stops_at_both_ends',
         ],
     ),
@@ -25232,6 +25254,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'closing_the_last_menu_takes_the_surface_away_again',
+            'the_chooser_closes_the_ways_a_popup_closes',
             'escape_closes_a_popup_and_is_otherwise_left_alone',
         ],
     ),
@@ -25256,11 +25280,14 @@ DEFECTS = [
         ],
         ["desktop"],
         [
-            # Predicted escape. `show_desktop_does_not_ask_an_already_minimized_
-            # window_to_minimize` is named for exactly this and cannot catch it:
-            # it *copies* the filter expression into the test body and asserts
-            # against its own copy, rather than pressing Super+D and reading the
-            # requests. A copied predicate is proved by nothing.
+            # Escaped, as predicted, and now closed -- by rewriting the test
+            # rather than adding one. `show_desktop_does_not_ask_an_already_
+            # minimized_window_to_minimize` is named for exactly this and could
+            # not catch it: it *copied* the filter expression into the test body
+            # and asserted against its own copy, rather than pressing Super+D
+            # and reading the requests. A copied predicate is proved by nothing,
+            # and is worse than no test at all because it looks like coverage.
+            'show_desktop_does_not_ask_an_already_minimized_window_to_minimize',
         ],
     ),
     (
@@ -25308,6 +25335,8 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'a_window_list_is_what_says_which_desktop_a_window_is_on',
+            'switching_desktop_names_no_window',
             'a_window_is_only_visible_on_its_own_desktop',
         ],
     ),
@@ -25320,6 +25349,18 @@ DEFECTS = [
         ],
         ["desktop"],
         [
+            'a_double_click_is_the_same_event_to_this_shell_as_a_single_one',
+            'a_key_release_only_ends_the_window_switcher',
+            'a_minimized_window_keeps_its_button_and_an_unmapped_one_does_not',
+            'a_new_window_opens_above_the_existing_ones_and_takes_focus',
+            'a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised',
+            'a_taskbar_button_asks_the_compositor_rather_than_changing_anything',
+            'a_taskbar_button_asks_to_activate_an_unfocused_window_and_to_minimize_a_focused_one',
+            'a_taskbar_button_is_clickable_where_it_is_drawn',
+            'a_window_list_arriving_with_a_click_is_folded_in_after_it',
+            'alt_tab_between_two_windows_swaps_them',
+            'the_compositors_window_list_is_what_the_taskbar_is_drawn_from',
+            'the_window_list_replaces_what_the_shell_believed_rather_than_adding_to_it',
             'the_stacking_order_is_the_one_the_list_arrived_in',
         ],
     ),

@@ -79891,6 +79891,54 @@ not wrong; it just has no way to notice it is reading a file from an hour ago.
 
 ---
 
+### Lesson 50: an outer timeout equal to the inner one can never let the inner one fire (lane A, 2026-08-25)
+
+**In short:** the standing recipe for a boot test was
+
+```bash
+python scripts/run-timeout.py --poll 30 900 ./scripts/boot-test.sh
+```
+
+and `scripts/boot-test.sh` runs QEMU under **its own 900 s timeout**. The outer
+budget has to cover the pre-build gates and the kernel build as well, so it is
+strictly the smaller of the two windows — the outer kill always wins. On
+2026-08-25 the gates plus build took 530 s (a full clippy recompile, because
+several `git stash` comparisons had invalidated the cache), leaving 370 s for a
+boot that reaches `BOOT_OK` at 370–405 s. `run-timeout` killed the tree at 900 s
+while the guest was running post-self-test diagnostics, perfectly healthy.
+
+**Why this is worse than one wasted cycle.** The inner timeout is not a
+duplicate of the outer one — it is the *diagnostic* one. When `boot-test.sh`'s
+own QEMU timeout expires it reports `SYSTEM HANG`, dumps the guest state, and
+(since `49496d935` made the HMP monitor on by default) reads back the faulting
+RIP. `run-timeout`'s expiry produces exit 124 and a killed process tree: no RIP,
+no task table, no serial marker saying where it stopped. So an outer budget at
+or below the inner one silently converts every genuine boot hang — the
+`B-FORKEXEC-BOOT-HANG` class, which is intermittent and expensive to catch —
+from a diagnosed fault into an anonymous kill. The one run where the
+instrumentation matters most is the run where it is guaranteed not to speak.
+
+**The rule.** The outer budget must be **inner QEMU timeout + worst-case gates
+and build**, not the inner timeout itself. Gates plus a cold-cache build have
+been observed at 530 s here, so:
+
+```bash
+python scripts/run-timeout.py --poll 30 1500 ./scripts/boot-test.sh
+```
+
+1500 s = 900 s inner + 600 s headroom. This does not weaken the hang protection
+`run-timeout` exists to provide: `boot-test.sh` bounds the guest itself, and the
+outer wrapper's real job is the one only it can do — killing the *whole process
+tree*, grandchildren included, if the harness or QEMU orphans something. That
+job is unaffected by the budget being generous.
+
+**Generalisation.** Whenever two timeouts nest, the outer one must exceed the
+inner one by the cost of everything the outer covers and the inner does not. Two
+equal timeouts are not belt-and-braces; they are one timeout, and it is the one
+with the less useful failure message.
+
+---
+
 ### TOOL-DIFF-WSL-LIB-FRESHNESS-CHECK-IS-CURRENTLY-INERT. `diff_lib_artifacts` cannot tell "this package has no library" from "this package's library is gone", and today it answers the second with the first — 2026-08-25 — FIXED
 
 > **Correction, same day, before the fix landed.** This entry was filed with the

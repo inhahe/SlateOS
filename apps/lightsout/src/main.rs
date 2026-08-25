@@ -211,36 +211,31 @@ impl LightsOut {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. })
-                if *modifiers == Modifiers::NONE => {
-                    match key {
-                        Key::Up
-                            if self.cursor_row > 0 => {
-                                self.cursor_row -= 1;
-                            }
-                        Key::Down
-                            if self.cursor_row < self.size - 1 => {
-                                self.cursor_row += 1;
-                            }
-                        Key::Left
-                            if self.cursor_col > 0 => {
-                                self.cursor_col -= 1;
-                            }
-                        Key::Right
-                            if self.cursor_col < self.size - 1 => {
-                                self.cursor_col += 1;
-                            }
-                        Key::Enter | Key::Space => {
-                            self.toggle_cell(self.cursor_row, self.cursor_col);
-                        }
-                        Key::N => self.new_game(),
-                        Key::H => self.show_help = !self.show_help,
-                        Key::Num3 => self.set_size(3),
-                        Key::Num5 => self.set_size(5),
-                        Key::Num7 => self.set_size(7),
-                        _ => {}
+            Event::Key(KeyEvent { key, modifiers, .. }) if *modifiers == Modifiers::NONE => {
+                match key {
+                    Key::Up if self.cursor_row > 0 => {
+                        self.cursor_row -= 1;
                     }
+                    Key::Down if self.cursor_row < self.size - 1 => {
+                        self.cursor_row += 1;
+                    }
+                    Key::Left if self.cursor_col > 0 => {
+                        self.cursor_col -= 1;
+                    }
+                    Key::Right if self.cursor_col < self.size - 1 => {
+                        self.cursor_col += 1;
+                    }
+                    Key::Enter | Key::Space => {
+                        self.toggle_cell(self.cursor_row, self.cursor_col);
+                    }
+                    Key::N => self.new_game(),
+                    Key::H => self.show_help = !self.show_help,
+                    Key::Num3 => self.set_size(3),
+                    Key::Num5 => self.set_size(5),
+                    Key::Num7 => self.set_size(7),
+                    _ => {}
                 }
+            }
             Event::Mouse(MouseEvent { x, y, kind }) => {
                 if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
                     self.handle_mouse_click(*x, *y);
@@ -946,7 +941,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.cursor_row, 1);
@@ -960,7 +955,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.cursor_row, 0);
@@ -974,7 +969,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.cursor_row, 3);
@@ -988,7 +983,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.cursor_row, 4);
@@ -1002,7 +997,7 @@ mod tests {
             key: Key::Left,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.cursor_col, 1);
@@ -1016,7 +1011,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.cursor_col, 3);
@@ -1030,7 +1025,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         // Center should have toggled
@@ -1046,7 +1041,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.moves, 0);
@@ -1059,7 +1054,7 @@ mod tests {
             key: Key::Num3,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.size, 3);
@@ -1073,7 +1068,7 @@ mod tests {
             key: Key::H,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert!(app.show_help);

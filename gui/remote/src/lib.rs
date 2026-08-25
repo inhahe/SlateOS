@@ -164,7 +164,18 @@ pub const MAGIC: [u8; 4] = *b"ORDR";
 /// desynchronise for the rest of the frame — silently, since 0x00 and 0x01 are
 /// both plausible tags. That is exactly the failure a version number exists to
 /// turn into a clean [`DecodeError::UnsupportedVersion`].
-pub const PROTOCOL_VERSION: u8 = 2;
+///
+/// **3** — a key event's text became a length-prefixed string rather than a
+/// present-flag plus one codepoint, when `KeyEvent::text` widened from
+/// `Option<char>` to `String` so that a dead key could type nothing and a
+/// failed composition could type two characters (`design-decisions.md` §550).
+/// The same silent-desynchronisation argument as version 2 applies. A
+/// version-2 decoder meeting the commonest case of all — the empty text every
+/// key *release* carries, four zero bytes of length — reads the first as
+/// "no character present" and then takes the other three as the start of the
+/// next event. No error, every event after it shifted, and a decoder that
+/// happily reports keystrokes nobody made.
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// Frame header size (magic + version + flags + cmd-count).
 const HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -392,9 +403,6 @@ pub enum DecodeError {
     BadMouseButton(u8),
     /// A [`MouseEventKind`](guitk::event::MouseEventKind) tag byte was unknown.
     BadMouseKind(u8),
-    /// A character field held a value that is not a Unicode scalar — a
-    /// surrogate, or past `U+10FFFF`.
-    BadChar(u32),
     /// A control frame's message count exceeds [`control::MAX_MESSAGES_PER_FRAME`].
     TooManyMessages(u32),
     /// A [`CursorShape`](control::CursorShape) byte is not in this decoder's table.
@@ -452,7 +460,6 @@ impl core::fmt::Display for DecodeError {
             Self::BadKey(b) => write!(f, "unknown key code {b:#04x}"),
             Self::BadMouseButton(b) => write!(f, "unknown mouse button {b:#04x}"),
             Self::BadMouseKind(b) => write!(f, "unknown mouse event kind {b:#04x}"),
-            Self::BadChar(c) => write!(f, "codepoint {c:#x} is not a Unicode scalar value"),
             Self::TooManyMessages(n) => {
                 write!(
                     f,
@@ -1575,8 +1582,8 @@ mod tests {
     /// and a version bump is exactly the change that must never be accidental —
     /// every peer has to be updated in step with it.
     #[test]
-    fn protocol_version_is_two() {
-        assert_eq!(PROTOCOL_VERSION, 2);
+    fn protocol_version_is_three() {
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     #[test]

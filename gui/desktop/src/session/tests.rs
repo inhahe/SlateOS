@@ -65,7 +65,7 @@ fn key(k: Key) -> guitk::event::Event {
         key: k,
         pressed: true,
         modifiers: Modifiers::default(),
-        text: None,
+        text: String::new(),
     })
 }
 
@@ -75,7 +75,7 @@ fn chord(k: Key, modifiers: Modifiers) -> guitk::event::Event {
         key: k,
         pressed: true,
         modifiers,
-        text: None,
+        text: String::new(),
     })
 }
 

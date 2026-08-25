@@ -2283,9 +2283,12 @@ impl DesktopShell {
         if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {
             return None;
         }
-        key.text
-            .filter(|ch| !ch.is_control())
-            .map(overview::OverviewKey::Char)
+        // Controls are dropped character by character rather than rejecting the
+        // whole run: they arrive mixed in with real text only in the odd cases
+        // — a composition that failed on a control-producing key — and typing
+        // nothing at all there would lose the part the user meant.
+        let typed: String = key.typed().collect();
+        (!typed.is_empty()).then_some(overview::OverviewKey::Text(typed))
     }
 
     /// Carry out a shortcut that has already been recognised.
@@ -3669,7 +3672,7 @@ mod window_manager_tests {
             key,
             pressed: true,
             modifiers,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -4109,7 +4112,7 @@ mod window_manager_tests {
             key: Key::LeftAlt,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let idle = shell.handle_hotkey(&release);
         assert!(!idle.consumed, "nothing to finish yet");
@@ -4624,7 +4627,7 @@ mod overview_wiring_tests {
             key: k,
             pressed: true,
             modifiers,
-            text,
+            text: text.map_or_else(String::new, |c| c.to_string()),
         }
     }
 

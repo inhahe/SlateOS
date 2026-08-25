@@ -2872,7 +2872,16 @@ pub enum EventNotification {
         /// Modifiers held *at the moment this key changed state*, including
         /// this key itself if it is a modifier.
         modifiers: Modifiers,
-        character: Option<char>,
+        /// The text this keystroke produced — see [`ClientKeyEvent::text`],
+        /// whose shape this is and into which it is copied unchanged.
+        ///
+        /// A `String` rather than the [`CompositorInput::KeyDown`] side's
+        /// `Option<char>` because the two ends of this translation are not
+        /// symmetric: a keystroke *arrives* carrying at most one character —
+        /// that is all a scancode plus a level can name — but *leaves*
+        /// carrying however many the layout made of it, which is none for a
+        /// dead key and two when a composition fails.
+        text: String,
     },
     /// Mouse event for a window.
     MouseEvent {
@@ -2932,14 +2941,14 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
             key,
             pressed,
             modifiers,
-            character,
+            text,
         } => guiremote::InputEvent::key(
             window_id.0,
             ClientKeyEvent {
                 key,
                 pressed,
                 modifiers,
-                text: character,
+                text,
             },
             scancode,
         ),
@@ -6388,7 +6397,9 @@ impl Compositor {
                 // testing a German build typed German. Releases carry none —
                 // a key going up inserts no text, and a character there would
                 // have every text field type each letter twice.
-                character: character.or(if pressed { laid_out } else { None }),
+                text: character
+                    .or(if pressed { laid_out } else { None })
+                    .map_or_else(String::new, |c| c.to_string()),
             });
     }
 
@@ -8642,7 +8653,7 @@ mod tests {
         };
         assert_eq!(k.key, Key::A);
         assert!(k.pressed);
-        assert_eq!(k.text, Some('a'));
+        assert_eq!(k.text, "a");
         assert_eq!(k.modifiers, Modifiers::NONE);
     }
 
@@ -8780,7 +8791,7 @@ mod tests {
 
         let k = first_key(&mut comp);
         assert_eq!(k.key, Key::O, "Dvorak types `o` where the board says `S`");
-        assert_eq!(k.text, Some('o'), "and the text channel must agree");
+        assert_eq!(k.text, "o", "and the text channel must agree");
     }
 
     #[test]
@@ -8798,7 +8809,7 @@ mod tests {
             character: Some('s'),
         });
 
-        assert_eq!(first_key(&mut comp).text, Some('s'));
+        assert_eq!(first_key(&mut comp).text, "s");
     }
 
     #[test]
@@ -8827,11 +8838,7 @@ mod tests {
                 _ => None,
             })
             .expect("no Q key event");
-        assert_eq!(
-            k.text,
-            Some('@'),
-            "AltGr+Q is the only `@` on a German board"
-        );
+        assert_eq!(k.text, "@", "AltGr+Q is the only `@` on a German board");
         assert!(
             !k.modifiers.alt,
             "AltGr spent itself on the character and must not also read as Alt"
@@ -8884,7 +8891,7 @@ mod tests {
         });
 
         let k = first_key(&mut comp);
-        assert_eq!(k.text, Some('ü'));
+        assert_eq!(k.text, "ü");
         assert_eq!(
             k.key,
             keymap::key_for_scancode(0x1A),
@@ -8893,7 +8900,7 @@ mod tests {
     }
 
     #[test]
-    fn a_release_carries_no_character() {
+    fn a_release_carries_no_text() {
         // A client that inserted text on every key event would double every
         // letter if the release carried one too.
         let mut comp = Compositor::new(800, 600, 60).unwrap();
@@ -8906,14 +8913,14 @@ mod tests {
         });
         comp.handle_input(InputEvent::KeyUp { scancode: 0x1F });
 
-        let texts: Vec<Option<char>> = decode_drained(&mut comp)
+        let texts: Vec<String> = decode_drained(&mut comp)
             .into_iter()
             .filter_map(|e| match e.event {
                 ClientEvent::Key(k) if k.key == Key::O => Some(k.text),
                 _ => None,
             })
             .collect();
-        assert_eq!(texts, vec![Some('o'), None]);
+        assert_eq!(texts, vec!["o".to_string(), String::new()]);
     }
 
     #[test]
@@ -8936,7 +8943,7 @@ mod tests {
             scancode: 0x1F,
             character: None,
         });
-        assert_eq!(first_key(&mut comp).text, Some('o'));
+        assert_eq!(first_key(&mut comp).text, "o");
     }
 
     #[test]
@@ -8964,7 +8971,7 @@ mod tests {
                 _ => None,
             })
             .expect("no A key event");
-        assert_eq!(k.text, Some('A'));
+        assert_eq!(k.text, "A");
     }
 
     #[test]

@@ -1440,7 +1440,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 
@@ -1449,7 +1449,7 @@ mod tests {
             key,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 

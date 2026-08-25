@@ -1288,8 +1288,8 @@ impl FileDiffApp {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = key.text {
-                    self.search.query.push(ch);
+                if key.types_text() {
+                    self.search.query.extend(key.typed());
                     self.rerun_search();
                     EventResult::Consumed
                 } else {
@@ -3440,7 +3440,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = app.handle_event(&Event::Key(key));
         assert_eq!(result, EventResult::Consumed);
@@ -3455,12 +3455,21 @@ mod tests {
         let left: String = (0..400)
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join(
+                "
+",
+            );
         let mut right_lines: Vec<String> = (0..400).map(|i| format!("line{i}")).collect();
         right_lines[399] = "changed".to_string();
-        app.load_files("a", &left, "b", &right_lines.join("
-"));
+        app.load_files(
+            "a",
+            &left,
+            "b",
+            &right_lines.join(
+                "
+",
+            ),
+        );
         app
     }
 
@@ -3512,7 +3521,10 @@ mod tests {
         app.sync_scroll = false;
         wheel_at(&mut app, 10.0, -1.0);
         assert_eq!(app.scroll_left, 3.0);
-        assert_eq!(app.scroll_right, 0.0, "the right panel was not under the pointer");
+        assert_eq!(
+            app.scroll_right, 0.0,
+            "the right panel was not under the pointer"
+        );
         let right_x = app.width - 10.0;
         wheel_at(&mut app, right_x, -2.0);
         assert_eq!(app.scroll_left, 3.0);
@@ -3538,7 +3550,7 @@ mod tests {
             key: Key::Num2,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         let result = app.handle_event(&Event::Key(key));
         assert_eq!(result, EventResult::Consumed);
@@ -4212,7 +4224,7 @@ mod tests {
                 key: Key::A,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: Some(ch),
+                text: ch.to_string(),
             });
         }
         assert!(
@@ -4283,7 +4295,7 @@ mod tests {
             key: k,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 }

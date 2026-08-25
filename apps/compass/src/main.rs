@@ -414,15 +414,16 @@ impl CompassApp {
     /// Remove the selected waypoint.
     fn remove_selected_waypoint(&mut self) {
         if let Some(idx) = self.selected_waypoint
-            && idx < self.waypoints.len() {
-                self.waypoints.remove(idx);
-                if self.waypoints.is_empty() {
-                    self.selected_waypoint = None;
-                } else if idx >= self.waypoints.len() {
-                    self.selected_waypoint = Some(self.waypoints.len() - 1);
-                }
-                self.status = String::from("Waypoint removed");
+            && idx < self.waypoints.len()
+        {
+            self.waypoints.remove(idx);
+            if self.waypoints.is_empty() {
+                self.selected_waypoint = None;
+            } else if idx >= self.waypoints.len() {
+                self.selected_waypoint = Some(self.waypoints.len() - 1);
             }
+            self.status = String::from("Waypoint removed");
+        }
     }
 
     /// Bearing and distance from the current position to the selected waypoint.
@@ -509,8 +510,16 @@ impl CompassApp {
             Key::M => {
                 self.add_waypoint_at_current_position();
             }
-            Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 | Key::Num5 | Key::Num6 | Key::Num7
-            | Key::Num8 | Key::Num9 | Key::Num0 => {
+            Key::Num1
+            | Key::Num2
+            | Key::Num3
+            | Key::Num4
+            | Key::Num5
+            | Key::Num6
+            | Key::Num7
+            | Key::Num8
+            | Key::Num9
+            | Key::Num0 => {
                 let digit = match event.key {
                     Key::Num1 => 0,
                     Key::Num2 => 1,
@@ -1224,7 +1233,9 @@ impl CompassApp {
         cmds.push(RenderCommand::Text {
             x: 40.0,
             y: help_y,
-            text: String::from("Up/Down: select  |  Del: remove  |  C: add new  |  Enter/Esc: back"),
+            text: String::from(
+                "Up/Down: select  |  Del: remove  |  C: add new  |  Enter/Esc: back",
+            ),
             color: OVERLAY0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -1505,7 +1516,7 @@ mod tests {
                 alt: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -1519,7 +1530,7 @@ mod tests {
                 alt: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         }
     }
 

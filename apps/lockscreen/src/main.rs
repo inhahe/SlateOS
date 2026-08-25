@@ -1246,9 +1246,7 @@ impl LockScreen {
                     _ => {
                         self.enter_password_mode();
                         // If the key was a printable character, also type it.
-                        if let Some(ch) = key.text
-                            && !ch.is_control()
-                        {
+                        for ch in key.typed() {
                             self.type_char(ch);
                         }
                         EventResult::Consumed
@@ -1278,9 +1276,7 @@ impl LockScreen {
                     EventResult::Consumed
                 }
                 _ => {
-                    if let Some(ch) = key.text
-                        && !ch.is_control()
-                    {
+                    for ch in key.typed() {
                         self.type_char(ch);
                     }
                     EventResult::Consumed
@@ -2505,7 +2501,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         let result = ls.handle_event(&event);
         assert_eq!(result, EventResult::Consumed);
@@ -2529,7 +2525,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
 
         assert!(!ls.take_unlock_request());
@@ -2788,7 +2784,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         ls.handle_event(&event);
         assert_eq!(ls.state, LockScreenState::Clock);
@@ -2801,7 +2797,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('a'),
+            text: "a".to_string(),
         });
         ls.handle_event(&event);
         assert_eq!(ls.state, LockScreenState::PasswordEntry);
@@ -2815,7 +2811,7 @@ mod tests {
             key: Key::LeftShift,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         ls.handle_event(&event);
         assert_eq!(ls.state, LockScreenState::Clock);

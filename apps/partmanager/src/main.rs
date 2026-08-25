@@ -3876,10 +3876,12 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
                 return EventResult::Consumed;
             }
             _ => {
-                if let Some(ch) = key_ev.text
-                    && (ch.is_alphanumeric() || ch == ' ' || ch == '-' || ch == '_')
-                {
-                    dialog.label.push(ch);
+                let allowed: String = key_ev
+                    .typed()
+                    .filter(|ch| ch.is_alphanumeric() || *ch == ' ' || *ch == '-' || *ch == '_')
+                    .collect();
+                if !allowed.is_empty() {
+                    dialog.label.push_str(&allowed);
                     return EventResult::Consumed;
                 }
             }
@@ -6116,7 +6118,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         handle_event(&mut app, &ev);
         assert!(!app.dialog.is_open());
@@ -6134,7 +6136,7 @@ mod tests {
             key: Key::Z,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         });
         handle_event(&mut app, &ev);
         assert!(!app.has_pending_operations());
@@ -6148,7 +6150,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         handle_event(&mut app, &ev);
         assert_ne!(app.selected_item, SelectedItem::None);
@@ -6168,7 +6170,7 @@ mod tests {
             key: Key::A,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         let result = handle_event(&mut app, &ev);
         assert_eq!(result, EventResult::Ignored);
@@ -6182,7 +6184,7 @@ mod tests {
             key: Key::A,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('a'),
+            text: "a".to_string(),
         });
         handle_event(&mut app, &ev);
         if let ActiveDialog::CreatePartition(ref d) = app.dialog {
@@ -6202,7 +6204,7 @@ mod tests {
             key: Key::Backspace,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         handle_event(&mut app, &ev);
         if let ActiveDialog::CreatePartition(ref d) = app.dialog {
@@ -6219,7 +6221,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         handle_event(&mut app, &ev);
         if let ActiveDialog::CreatePartition(ref d) = app.dialog {
@@ -6235,7 +6237,7 @@ mod tests {
             key: Key::Tab,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         handle_event(&mut app, &ev);
         if let ActiveDialog::CreatePartition(ref d) = app.dialog {

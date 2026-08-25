@@ -2118,8 +2118,8 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
                 return true;
             }
             _ => {
-                if let Some(ch) = key_event.text {
-                    state.search_query.push(ch);
+                if key_event.types_text() {
+                    state.search_query.extend(key_event.typed());
                     return true;
                 }
             }
@@ -3034,7 +3034,7 @@ mod tests {
                     key: Key::A,
                     pressed: true,
                     modifiers: Modifiers::default(),
-                    text: Some(ch),
+                    text: ch.to_string(),
                 }),
             );
         }

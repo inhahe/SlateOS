@@ -1846,7 +1846,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_row, 4);
     }
@@ -1859,7 +1859,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_row, 6);
     }
@@ -1872,7 +1872,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_col, 4);
     }
@@ -1885,7 +1885,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_col, 6);
     }
@@ -1898,7 +1898,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_row, 0);
     }
@@ -1911,7 +1911,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_row, BOARD_SIZE as i32 - 1);
     }
@@ -1924,7 +1924,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_col, 0);
     }
@@ -1937,7 +1937,7 @@ mod tests {
             key: Key::Right,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.cursor_col, BOARD_SIZE as i32 - 1);
     }
@@ -1953,7 +1953,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(!app.board.is_empty(7, 7));
     }
@@ -1967,7 +1967,7 @@ mod tests {
             key: Key::Space,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(!app.board.is_empty(7, 7));
     }
@@ -1982,7 +1982,7 @@ mod tests {
             key: Key::N,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert_eq!(app.phase, GamePhase::Playing);
         assert_eq!(app.move_count, 0);
@@ -1999,7 +1999,7 @@ mod tests {
             key: Key::Z,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         assert!(app.move_count < count);
     }
@@ -2384,7 +2384,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.cursor_row, 4);
     }

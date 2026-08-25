@@ -290,7 +290,7 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
             encode_key(out, k.key);
             out.push(u8::from(k.pressed));
             out.push(encode_modifiers(k.modifiers));
-            encode_optional_char(out, k.text);
+            crate::write_string(out, &k.text);
             // Absent is legal here even though the compositor always supplies
             // one: a synthetic key event (a macro, a test, an accessibility
             // tool) has no physical key behind it and should not have to invent
@@ -419,16 +419,6 @@ const fn encode_modifiers(m: Modifiers) -> u8 {
     bits
 }
 
-fn encode_optional_char(out: &mut Vec<u8>, c: Option<char>) {
-    match c {
-        Some(ch) => {
-            out.push(1);
-            write_u32(out, ch as u32);
-        }
-        None => out.push(0),
-    }
-}
-
 // ============================================================================
 // Decoding
 // ============================================================================
@@ -492,7 +482,7 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
             let key = decode_key(r)?;
             let pressed = r.read_u8()? != 0;
             let modifiers = decode_modifiers(r.read_u8()?)?;
-            let text = decode_optional_char(r)?;
+            let text = r.read_string()?;
             let scancode = match r.read_u8()? {
                 0 => None,
                 1 => Some(r.read_u32()?),
@@ -585,22 +575,6 @@ const fn decode_modifiers(bits: u8) -> Result<Modifiers, DecodeError> {
     })
 }
 
-fn decode_optional_char(r: &mut Reader<'_>) -> Result<Option<char>, DecodeError> {
-    match r.read_u8()? {
-        0 => Ok(None),
-        1 => {
-            let raw = r.read_u32()?;
-            // Surrogates and out-of-range values are rejected rather than
-            // replaced: silently substituting U+FFFD would insert a character
-            // the user never typed into whatever document is focused.
-            char::from_u32(raw)
-                .map(Some)
-                .ok_or(DecodeError::BadChar(raw))
-        }
-        other => Err(DecodeError::BadTag(other)),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
@@ -623,7 +597,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -741,7 +715,7 @@ mod tests {
                     key: Key::K,
                     pressed: true,
                     modifiers,
-                    text: None,
+                    text: String::new(),
                 },
                 0,
             ));
@@ -758,7 +732,7 @@ mod tests {
                     key: Key::A,
                     pressed: true,
                     modifiers: Modifiers::shift(),
-                    text: Some(ch),
+                    text: ch.to_string(),
                 },
                 30,
             );
@@ -766,6 +740,51 @@ mod tests {
                 roundtrip(std::slice::from_ref(&ev)),
                 vec![ev],
                 "char {ch:?}"
+            );
+        }
+    }
+
+    /// The three lengths the field exists to distinguish, which the
+    /// `Option<char>` this replaced could express only two of.
+    #[test]
+    fn a_keystroke_survives_typing_none_one_or_several_characters() {
+        // Paired with their descriptions rather than commented, because a
+        // comment beside an array element is not attached to it: rustfmt is
+        // free to move it to the next line, and did, leaving every description
+        // one element out of step. A tuple cannot drift, and it also puts the
+        // description in the failure message, where it is the thing that says
+        // what broke.
+        for (text, what_it_is) in [
+            ("", "a dead key, or a key that types no text at all"),
+            ("a", "the ordinary case"),
+            (
+                "é",
+                "a composition that succeeded: one character, several bytes",
+            ),
+            // The case the old encoding could not carry at all, so the one
+            // worth pinning: if the wire ever silently drops the second
+            // character, the user's keystroke disappears between two machines
+            // with nothing to say so.
+            ("´x", "a composition that failed, typing both keys"),
+            (
+                "e\u{301}",
+                "a decomposed pair the compositor chose not to compose",
+            ),
+        ] {
+            let ev = InputEvent::key(
+                1,
+                KeyEvent {
+                    key: Key::A,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                    text: text.to_string(),
+                },
+                30,
+            );
+            assert_eq!(
+                roundtrip(std::slice::from_ref(&ev)),
+                vec![ev],
+                "{what_it_is}: {text:?}"
             );
         }
     }
@@ -778,7 +797,7 @@ mod tests {
             key: Key::Space,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         let decoded = roundtrip(&[press.clone(), release.clone()]);
         assert_eq!(decoded, vec![press, release]);
@@ -952,26 +971,26 @@ mod tests {
     }
 
     #[test]
-    fn a_non_character_codepoint_is_rejected_not_substituted() {
+    fn text_that_is_not_valid_utf8_is_rejected_not_substituted() {
         let mut bytes = encode_input_frame(&[InputEvent::key(
             1,
             KeyEvent {
                 key: Key::A,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: Some('a'),
+                text: "a".to_string(),
             },
             30,
         )]);
         // header, window (8), tag (1), key (1), pressed (1), mods (1),
-        // text-present (1), then the codepoint.
-        let ch_at = INPUT_HEADER_LEN + 8 + 1 + 1 + 1 + 1 + 1;
-        // A lone surrogate: valid UTF-16, never a Rust `char`.
-        bytes[ch_at..ch_at + 4].copy_from_slice(&0xD800u32.to_le_bytes());
-        assert_eq!(
-            decode_input_frame(&bytes),
-            Err(DecodeError::BadChar(0xD800))
-        );
+        // text length (4), then the text's bytes.
+        let text_at = INPUT_HEADER_LEN + 8 + 1 + 1 + 1 + 1 + 4;
+        // A lone continuation byte: never the start of a UTF-8 sequence. The
+        // point is that this is an *error*, not a U+FFFD — `from_utf8_lossy`
+        // would hand the widget a replacement character and no way to tell it
+        // from one the sender meant, which is corruption dressed as data.
+        bytes[text_at] = 0x80;
+        assert_eq!(decode_input_frame(&bytes), Err(DecodeError::BadUtf8));
     }
 
     #[test]

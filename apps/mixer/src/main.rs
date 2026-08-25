@@ -11,12 +11,14 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, FlexLayout, SizeConstraint};
 #[allow(unused_imports)]
 use guitk::render::RenderTree;
-use guitk::rng::{seeded_from_system, RandomSource, SeededRng};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 #[allow(unused_imports)]
@@ -343,7 +345,11 @@ impl MixerState {
 
     /// Get master effective volume.
     pub fn master_effective_volume(&self) -> f32 {
-        if self.master_muted { 0.0 } else { self.master_volume }
+        if self.master_muted {
+            0.0
+        } else {
+            self.master_volume
+        }
     }
 
     /// Set master volume, clamped to valid range.
@@ -366,7 +372,8 @@ impl MixerState {
         let mut sorted: Vec<&AudioStream> = self.streams.iter().collect();
         sorted.sort_by(|a, b| {
             // Playing streams come first.
-            b.playing.cmp(&a.playing)
+            b.playing
+                .cmp(&a.playing)
                 .then_with(|| a.app_name.cmp(&b.app_name))
         });
         sorted
@@ -392,10 +399,11 @@ impl MixerState {
             Selection::Stream(idx) => {
                 let sorted_ids: Vec<u32> = self.sorted_streams().iter().map(|s| s.id).collect();
                 if let Some(&stream_id) = sorted_ids.get(idx)
-                    && let Some(stream) = self.streams.iter_mut().find(|s| s.id == stream_id) {
-                        let new_vol = (stream.volume + delta).clamp(0.0, 1.0);
-                        stream.volume = new_vol;
-                    }
+                    && let Some(stream) = self.streams.iter_mut().find(|s| s.id == stream_id)
+                {
+                    let new_vol = (stream.volume + delta).clamp(0.0, 1.0);
+                    stream.volume = new_vol;
+                }
             }
         }
     }
@@ -409,9 +417,10 @@ impl MixerState {
             Selection::Stream(idx) => {
                 let sorted_ids: Vec<u32> = self.sorted_streams().iter().map(|s| s.id).collect();
                 if let Some(&stream_id) = sorted_ids.get(idx)
-                    && let Some(stream) = self.streams.iter_mut().find(|s| s.id == stream_id) {
-                        stream.muted = !stream.muted;
-                    }
+                    && let Some(stream) = self.streams.iter_mut().find(|s| s.id == stream_id)
+                {
+                    stream.muted = !stream.muted;
+                }
             }
         }
     }
@@ -431,7 +440,9 @@ impl MixerState {
         // The draw is lifted out of the loop body's borrow of `self.streams` by
         // taking all of them first; `self.rng` and `self.streams` are disjoint
         // fields but the closure form below would not convince the borrowck.
-        let draws: Vec<f32> = (0..self.streams.len()).map(|_| self.rng.unit_f32()).collect();
+        let draws: Vec<f32> = (0..self.streams.len())
+            .map(|_| self.rng.unit_f32())
+            .collect();
 
         for (stream, &draw) in self.streams.iter_mut().zip(draws.iter()) {
             if stream.playing && !stream.muted {
@@ -552,7 +563,9 @@ pub fn build_mixer_ui(state: &MixerState) -> Widget {
     let sorted = state.sorted_streams();
     for (idx, stream) in sorted.iter().enumerate() {
         let selected = state.selection == Selection::Stream(idx);
-        content_row.children.push(build_stream_column(stream, selected));
+        content_row
+            .children
+            .push(build_stream_column(stream, selected));
     }
 
     root.children.push(content_row);
@@ -571,7 +584,12 @@ fn build_device_bar(state: &MixerState) -> Widget {
             background: colors::MANTLE,
             padding: Edges::symmetric(8.0, 12.0),
             border_radius: CornerRadii::all(6.0),
-            margin: Edges { top: 0.0, right: 0.0, bottom: 8.0, left: 0.0 },
+            margin: Edges {
+                top: 0.0,
+                right: 0.0,
+                bottom: 8.0,
+                left: 0.0,
+            },
             ..Style::default()
         });
 
@@ -584,8 +602,7 @@ fn build_device_bar(state: &MixerState) -> Widget {
     });
 
     // Output device section.
-    let mut output_section = Widget::container()
-        .with_flex_direction(FlexDirection::Row);
+    let mut output_section = Widget::container().with_flex_direction(FlexDirection::Row);
     output_section.flex_layout = Some(FlexLayout {
         direction: FlexDirection::Row,
         gap: 8.0,
@@ -593,44 +610,44 @@ fn build_device_bar(state: &MixerState) -> Widget {
         ..FlexLayout::default()
     });
 
-    output_section.children.push(
-        Widget::label("Output:")
-            .with_style(Style {
-                foreground: colors::SUBTEXT0,
-                font_weight: FontWeight::Bold,
-                ..Style::default()
-            })
-    );
+    output_section
+        .children
+        .push(Widget::label("Output:").with_style(Style {
+            foreground: colors::SUBTEXT0,
+            font_weight: FontWeight::Bold,
+            ..Style::default()
+        }));
 
-    let output_name = state.current_output_device()
+    let output_name = state
+        .current_output_device()
         .map(|d| d.name.as_str())
         .unwrap_or("None");
-    output_section.children.push(
-        Widget::label(output_name)
-            .with_style(Style {
-                foreground: colors::BLUE,
-                ..Style::default()
-            })
-    );
+    output_section
+        .children
+        .push(Widget::label(output_name).with_style(Style {
+            foreground: colors::BLUE,
+            ..Style::default()
+        }));
 
     // Output device properties.
     if let Some(dev) = state.current_output_device() {
-        let props = format!("{}Hz / {}bit / {}ch", dev.sample_rate, dev.bit_depth, dev.channels);
-        output_section.children.push(
-            Widget::label(&props)
-                .with_style(Style {
-                    foreground: colors::OVERLAY1,
-                    font_size: 11.0,
-                    ..Style::default()
-                })
+        let props = format!(
+            "{}Hz / {}bit / {}ch",
+            dev.sample_rate, dev.bit_depth, dev.channels
         );
+        output_section
+            .children
+            .push(Widget::label(&props).with_style(Style {
+                foreground: colors::OVERLAY1,
+                font_size: 11.0,
+                ..Style::default()
+            }));
     }
 
     bar.children.push(output_section);
 
     // Input device section.
-    let mut input_section = Widget::container()
-        .with_flex_direction(FlexDirection::Row);
+    let mut input_section = Widget::container().with_flex_direction(FlexDirection::Row);
     input_section.flex_layout = Some(FlexLayout {
         direction: FlexDirection::Row,
         gap: 8.0,
@@ -638,36 +655,37 @@ fn build_device_bar(state: &MixerState) -> Widget {
         ..FlexLayout::default()
     });
 
-    input_section.children.push(
-        Widget::label("Input:")
-            .with_style(Style {
-                foreground: colors::SUBTEXT0,
-                font_weight: FontWeight::Bold,
-                ..Style::default()
-            })
-    );
+    input_section
+        .children
+        .push(Widget::label("Input:").with_style(Style {
+            foreground: colors::SUBTEXT0,
+            font_weight: FontWeight::Bold,
+            ..Style::default()
+        }));
 
-    let input_name = state.current_input_device()
+    let input_name = state
+        .current_input_device()
         .map(|d| d.name.as_str())
         .unwrap_or("None");
-    input_section.children.push(
-        Widget::label(input_name)
-            .with_style(Style {
-                foreground: colors::TEAL,
-                ..Style::default()
-            })
-    );
+    input_section
+        .children
+        .push(Widget::label(input_name).with_style(Style {
+            foreground: colors::TEAL,
+            ..Style::default()
+        }));
 
     if let Some(dev) = state.current_input_device() {
-        let props = format!("{}Hz / {}bit / {}ch", dev.sample_rate, dev.bit_depth, dev.channels);
-        input_section.children.push(
-            Widget::label(&props)
-                .with_style(Style {
-                    foreground: colors::OVERLAY1,
-                    font_size: 11.0,
-                    ..Style::default()
-                })
+        let props = format!(
+            "{}Hz / {}bit / {}ch",
+            dev.sample_rate, dev.bit_depth, dev.channels
         );
+        input_section
+            .children
+            .push(Widget::label(&props).with_style(Style {
+                foreground: colors::OVERLAY1,
+                font_size: 11.0,
+                ..Style::default()
+            }));
     }
 
     bar.children.push(input_section);
@@ -678,7 +696,11 @@ fn build_device_bar(state: &MixerState) -> Widget {
 /// Build the master volume column.
 fn build_master_column(state: &MixerState) -> Widget {
     let selected = state.selection == Selection::Master;
-    let border_color = if selected { colors::MAUVE } else { colors::SURFACE1 };
+    let border_color = if selected {
+        colors::MAUVE
+    } else {
+        colors::SURFACE1
+    };
 
     let mut col = Widget::container()
         .with_flex_direction(FlexDirection::Column)
@@ -699,64 +721,74 @@ fn build_master_column(state: &MixerState) -> Widget {
     });
 
     // Title.
-    col.children.push(
-        Widget::label("Master")
-            .with_style(Style {
-                foreground: colors::TEXT,
-                font_weight: FontWeight::Bold,
-                font_size: 13.0,
-                ..Style::default()
-            })
-    );
+    col.children.push(Widget::label("Master").with_style(Style {
+        foreground: colors::TEXT,
+        font_weight: FontWeight::Bold,
+        font_size: 13.0,
+        ..Style::default()
+    }));
 
     // Volume percentage display.
     let vol_text = format_volume_percent(state.master_volume);
-    col.children.push(
-        Widget::label(&vol_text)
-            .with_style(Style {
-                foreground: if state.master_muted { colors::RED } else { colors::GREEN },
-                font_weight: FontWeight::Bold,
-                font_size: 16.0,
-                ..Style::default()
-            })
-    );
+    col.children
+        .push(Widget::label(&vol_text).with_style(Style {
+            foreground: if state.master_muted {
+                colors::RED
+            } else {
+                colors::GREEN
+            },
+            font_weight: FontWeight::Bold,
+            font_size: 16.0,
+            ..Style::default()
+        }));
 
     // Volume slider (vertical representation via progress bar).
-    let slider_value = if state.master_muted { 0.0 } else { state.master_volume };
+    let slider_value = if state.master_muted {
+        0.0
+    } else {
+        state.master_volume
+    };
     col.children.push(build_volume_slider(slider_value, true));
 
     // Mute button.
     let mute_text = if state.master_muted { "MUTED" } else { "Mute" };
-    let mute_bg = if state.master_muted { colors::RED } else { colors::SURFACE1 };
-    col.children.push(
-        Widget::button(mute_text)
-            .with_style(Style {
-                background: mute_bg,
-                foreground: colors::TEXT,
-                padding: Edges::symmetric(4.0, 12.0),
-                border_radius: CornerRadii::all(4.0),
-                ..Style::default()
-            })
-    );
+    let mute_bg = if state.master_muted {
+        colors::RED
+    } else {
+        colors::SURFACE1
+    };
+    col.children
+        .push(Widget::button(mute_text).with_style(Style {
+            background: mute_bg,
+            foreground: colors::TEXT,
+            padding: Edges::symmetric(4.0, 12.0),
+            border_radius: CornerRadii::all(4.0),
+            ..Style::default()
+        }));
 
     // dB display.
     let db_text = format_volume_db(state.master_effective_volume());
-    col.children.push(
-        Widget::label(&db_text)
-            .with_style(Style {
-                foreground: colors::OVERLAY1,
-                font_size: 10.0,
-                ..Style::default()
-            })
-    );
+    col.children.push(Widget::label(&db_text).with_style(Style {
+        foreground: colors::OVERLAY1,
+        font_size: 10.0,
+        ..Style::default()
+    }));
 
     col
 }
 
 /// Build a per-app stream column.
 fn build_stream_column(stream: &AudioStream, selected: bool) -> Widget {
-    let border_color = if selected { colors::MAUVE } else { colors::SURFACE1 };
-    let bg = if stream.playing { colors::SURFACE0 } else { colors::MANTLE };
+    let border_color = if selected {
+        colors::MAUVE
+    } else {
+        colors::SURFACE1
+    };
+    let bg = if stream.playing {
+        colors::SURFACE0
+    } else {
+        colors::MANTLE
+    };
 
     let mut col = Widget::container()
         .with_flex_direction(FlexDirection::Column)
@@ -777,39 +809,45 @@ fn build_stream_column(stream: &AudioStream, selected: bool) -> Widget {
     });
 
     // App name.
-    let name_color = if stream.playing { colors::TEXT } else { colors::OVERLAY1 };
-    col.children.push(
-        Widget::label(&stream.app_name)
-            .with_style(Style {
-                foreground: name_color,
-                font_weight: FontWeight::Bold,
-                font_size: 11.0,
-                ..Style::default()
-            })
-    );
+    let name_color = if stream.playing {
+        colors::TEXT
+    } else {
+        colors::OVERLAY1
+    };
+    col.children
+        .push(Widget::label(&stream.app_name).with_style(Style {
+            foreground: name_color,
+            font_weight: FontWeight::Bold,
+            font_size: 11.0,
+            ..Style::default()
+        }));
 
     // Playing indicator.
     let status_text = if stream.playing { "Playing" } else { "Idle" };
-    let status_color = if stream.playing { colors::GREEN } else { colors::OVERLAY0 };
-    col.children.push(
-        Widget::label(status_text)
-            .with_style(Style {
-                foreground: status_color,
-                font_size: 9.0,
-                ..Style::default()
-            })
-    );
+    let status_color = if stream.playing {
+        colors::GREEN
+    } else {
+        colors::OVERLAY0
+    };
+    col.children
+        .push(Widget::label(status_text).with_style(Style {
+            foreground: status_color,
+            font_size: 9.0,
+            ..Style::default()
+        }));
 
     // Volume percentage.
     let vol_text = format_volume_percent(stream.volume);
-    col.children.push(
-        Widget::label(&vol_text)
-            .with_style(Style {
-                foreground: if stream.muted { colors::RED } else { colors::SUBTEXT1 },
-                font_size: 12.0,
-                ..Style::default()
-            })
-    );
+    col.children
+        .push(Widget::label(&vol_text).with_style(Style {
+            foreground: if stream.muted {
+                colors::RED
+            } else {
+                colors::SUBTEXT1
+            },
+            font_size: 12.0,
+            ..Style::default()
+        }));
 
     // Volume slider.
     let slider_value = if stream.muted { 0.0 } else { stream.volume };
@@ -820,17 +858,19 @@ fn build_stream_column(stream: &AudioStream, selected: bool) -> Widget {
 
     // Mute button.
     let mute_text = if stream.muted { "M" } else { "m" };
-    let mute_bg = if stream.muted { colors::RED } else { colors::SURFACE1 };
-    col.children.push(
-        Widget::button(mute_text)
-            .with_style(Style {
-                background: mute_bg,
-                foreground: colors::TEXT,
-                padding: Edges::symmetric(3.0, 8.0),
-                border_radius: CornerRadii::all(4.0),
-                ..Style::default()
-            })
-    );
+    let mute_bg = if stream.muted {
+        colors::RED
+    } else {
+        colors::SURFACE1
+    };
+    col.children
+        .push(Widget::button(mute_text).with_style(Style {
+            background: mute_bg,
+            foreground: colors::TEXT,
+            padding: Edges::symmetric(3.0, 8.0),
+            border_radius: CornerRadii::all(4.0),
+            ..Style::default()
+        }));
 
     col
 }
@@ -850,28 +890,29 @@ fn build_volume_slider(value: f32, is_master: bool) -> Widget {
         colors::OVERLAY0
     };
 
-    let mut slider = Widget::container()
-        .with_style(Style {
-            background: track_color,
-            border_radius: CornerRadii::all(4.0),
-            min_width: Some(width),
-            min_height: Some(height),
-            ..Style::default()
-        });
+    let mut slider = Widget::container().with_style(Style {
+        background: track_color,
+        border_radius: CornerRadii::all(4.0),
+        min_width: Some(width),
+        min_height: Some(height),
+        ..Style::default()
+    });
 
     // Fill portion.
     let fill_height = height * value;
-    slider.children.push(
-        Widget::container()
-            .with_style(Style {
-                background: fill_color,
-                border_radius: CornerRadii::all(3.0),
-                min_width: Some(width - 4.0),
-                min_height: Some(fill_height),
-                margin: Edges { top: height - fill_height, right: 2.0, bottom: 0.0, left: 2.0 },
-                ..Style::default()
-            })
-    );
+    slider.children.push(Widget::container().with_style(Style {
+        background: fill_color,
+        border_radius: CornerRadii::all(3.0),
+        min_width: Some(width - 4.0),
+        min_height: Some(fill_height),
+        margin: Edges {
+            top: height - fill_height,
+            right: 2.0,
+            bottom: 0.0,
+            left: 2.0,
+        },
+        ..Style::default()
+    }));
 
     slider
 }
@@ -892,28 +933,29 @@ fn build_peak_meter(level: f32) -> Widget {
         colors::SURFACE1
     };
 
-    let mut meter = Widget::container()
-        .with_style(Style {
-            background: colors::CRUST,
-            border_radius: CornerRadii::all(3.0),
-            border: Borders::all(1.0, colors::SURFACE1),
-            min_width: Some(meter_width),
-            min_height: Some(meter_height),
-            ..Style::default()
-        });
+    let mut meter = Widget::container().with_style(Style {
+        background: colors::CRUST,
+        border_radius: CornerRadii::all(3.0),
+        border: Borders::all(1.0, colors::SURFACE1),
+        min_width: Some(meter_width),
+        min_height: Some(meter_height),
+        ..Style::default()
+    });
 
     let fill_height = meter_height * level;
-    meter.children.push(
-        Widget::container()
-            .with_style(Style {
-                background: fill_color,
-                border_radius: CornerRadii::all(2.0),
-                min_width: Some(meter_width - 4.0),
-                min_height: Some(fill_height),
-                margin: Edges { top: meter_height - fill_height, right: 2.0, bottom: 0.0, left: 2.0 },
-                ..Style::default()
-            })
-    );
+    meter.children.push(Widget::container().with_style(Style {
+        background: fill_color,
+        border_radius: CornerRadii::all(2.0),
+        min_width: Some(meter_width - 4.0),
+        min_height: Some(fill_height),
+        margin: Edges {
+            top: meter_height - fill_height,
+            right: 2.0,
+            bottom: 0.0,
+            left: 2.0,
+        },
+        ..Style::default()
+    }));
 
     meter
 }
@@ -932,13 +974,12 @@ fn build_separator() -> Widget {
 
 /// Build a vertical separator.
 fn build_vertical_separator() -> Widget {
-    Widget::container()
-        .with_style(Style {
-            background: colors::SURFACE1,
-            min_width: Some(1.0),
-            margin: Edges::symmetric(0.0, 4.0),
-            ..Style::default()
-        })
+    Widget::container().with_style(Style {
+        background: colors::SURFACE1,
+        min_width: Some(1.0),
+        margin: Edges::symmetric(0.0, 4.0),
+        ..Style::default()
+    })
 }
 
 /// Build the keyboard shortcut hint bar at the bottom.
@@ -949,7 +990,12 @@ fn build_shortcut_bar() -> Widget {
             background: colors::MANTLE,
             padding: Edges::symmetric(6.0, 12.0),
             border_radius: CornerRadii::all(4.0),
-            margin: Edges { top: 8.0, right: 0.0, bottom: 0.0, left: 0.0 },
+            margin: Edges {
+                top: 8.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+            },
             ..Style::default()
         });
 
@@ -969,8 +1015,7 @@ fn build_shortcut_bar() -> Widget {
     ];
 
     for (key, action) in &shortcuts {
-        let mut item = Widget::container()
-            .with_flex_direction(FlexDirection::Row);
+        let mut item = Widget::container().with_flex_direction(FlexDirection::Row);
         item.flex_layout = Some(FlexLayout {
             direction: FlexDirection::Row,
             gap: 4.0,
@@ -978,23 +1023,17 @@ fn build_shortcut_bar() -> Widget {
             ..FlexLayout::default()
         });
 
-        item.children.push(
-            Widget::label(key)
-                .with_style(Style {
-                    foreground: colors::LAVENDER,
-                    font_weight: FontWeight::Bold,
-                    font_size: 10.0,
-                    ..Style::default()
-                })
-        );
-        item.children.push(
-            Widget::label(action)
-                .with_style(Style {
-                    foreground: colors::OVERLAY1,
-                    font_size: 10.0,
-                    ..Style::default()
-                })
-        );
+        item.children.push(Widget::label(key).with_style(Style {
+            foreground: colors::LAVENDER,
+            font_weight: FontWeight::Bold,
+            font_size: 10.0,
+            ..Style::default()
+        }));
+        item.children.push(Widget::label(action).with_style(Style {
+            foreground: colors::OVERLAY1,
+            font_size: 10.0,
+            ..Style::default()
+        }));
 
         bar.children.push(item);
     }
@@ -1067,9 +1106,10 @@ pub fn handle_slider_click(state: &mut MixerState, column_index: Option<usize>, 
         Some(idx) => {
             let sorted_ids: Vec<u32> = state.sorted_streams().iter().map(|s| s.id).collect();
             if let Some(&stream_id) = sorted_ids.get(idx)
-                && let Some(stream) = state.streams.iter_mut().find(|s| s.id == stream_id) {
-                    stream.volume = volume;
-                }
+                && let Some(stream) = state.streams.iter_mut().find(|s| s.id == stream_id)
+            {
+                stream.volume = volume;
+            }
             state.selection = Selection::Stream(idx);
         }
     }
@@ -1235,7 +1275,12 @@ mod tests {
         for &v in &values {
             let db = linear_to_db(v);
             let back = db_to_linear(db);
-            assert!((back - v).abs() < 0.001, "roundtrip failed for {}: got {}", v, back);
+            assert!(
+                (back - v).abs() < 0.001,
+                "roundtrip failed for {}: got {}",
+                v,
+                back
+            );
         }
     }
 
@@ -1473,11 +1518,21 @@ mod tests {
         state.selection = Selection::Stream(0);
         let sorted_ids: Vec<u32> = state.sorted_streams().iter().map(|s| s.id).collect();
         let first_id = sorted_ids[0];
-        let initial_vol = state.streams.iter().find(|s| s.id == first_id).unwrap().volume;
+        let initial_vol = state
+            .streams
+            .iter()
+            .find(|s| s.id == first_id)
+            .unwrap()
+            .volume;
 
         state.adjust_selected_volume(0.05);
 
-        let new_vol = state.streams.iter().find(|s| s.id == first_id).unwrap().volume;
+        let new_vol = state
+            .streams
+            .iter()
+            .find(|s| s.id == first_id)
+            .unwrap()
+            .volume;
         assert!((new_vol - (initial_vol + 0.05)).abs() < 0.001);
     }
 
@@ -1566,7 +1621,7 @@ mod tests {
             key: Key::Left,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = handle_key_event(&mut state, &event);
         assert_eq!(result, EventResult::Consumed);
@@ -1582,7 +1637,7 @@ mod tests {
             key: Key::M,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = handle_key_event(&mut state, &event);
         assert_eq!(result, EventResult::Consumed);
@@ -1598,7 +1653,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = handle_key_event(&mut state, &event);
         assert_eq!(result, EventResult::Consumed);
@@ -1612,7 +1667,7 @@ mod tests {
             key: Key::M,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = handle_key_event(&mut state, &event);
         assert_eq!(result, EventResult::Ignored);
@@ -1625,7 +1680,7 @@ mod tests {
             key: Key::F12,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = handle_key_event(&mut state, &event);
         assert_eq!(result, EventResult::Ignored);

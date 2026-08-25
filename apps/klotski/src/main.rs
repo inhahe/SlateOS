@@ -193,16 +193,16 @@ const PUZZLES: &[PuzzleDef] = &[
     PuzzleDef {
         name: "Heng Dao Li Ma",
         blocks: &[
-            (BlockKind::Big, 0, 1),        // Cao Cao at top center
-            (BlockKind::TallRect, 0, 0),   // Guard left
-            (BlockKind::TallRect, 0, 3),   // Guard right
-            (BlockKind::TallRect, 2, 0),   // Soldier left
-            (BlockKind::TallRect, 2, 3),   // Soldier right
-            (BlockKind::WideRect, 2, 1),   // Horizontal bar middle
-            (BlockKind::Small, 3, 1),      // Small block
-            (BlockKind::Small, 3, 2),      // Small block
-            (BlockKind::Small, 4, 0),      // Small block
-            (BlockKind::Small, 4, 3),      // Small block
+            (BlockKind::Big, 0, 1),      // Cao Cao at top center
+            (BlockKind::TallRect, 0, 0), // Guard left
+            (BlockKind::TallRect, 0, 3), // Guard right
+            (BlockKind::TallRect, 2, 0), // Soldier left
+            (BlockKind::TallRect, 2, 3), // Soldier right
+            (BlockKind::WideRect, 2, 1), // Horizontal bar middle
+            (BlockKind::Small, 3, 1),    // Small block
+            (BlockKind::Small, 3, 2),    // Small block
+            (BlockKind::Small, 4, 0),    // Small block
+            (BlockKind::Small, 4, 3),    // Small block
         ],
     },
     // Puzzle 1: "Zhi Tui Heng Shan" — near-optimal path
@@ -420,9 +420,10 @@ impl Klotski {
                 let new_r = (block.row as i32 + dr + dr_off as i32) as usize;
                 let new_c = (block.col as i32 + dc + dc_off as i32) as usize;
                 if let Some(occupant) = occupancy[new_r][new_c]
-                    && occupant != block.id {
-                        return false;
-                    }
+                    && occupant != block.id
+                {
+                    return false;
+                }
             }
         }
         true
@@ -501,9 +502,7 @@ impl Klotski {
 
     /// Find the index of the Big block.
     fn big_block_index(&self) -> Option<usize> {
-        self.blocks
-            .iter()
-            .position(|b| b.kind == BlockKind::Big)
+        self.blocks.iter().position(|b| b.kind == BlockKind::Big)
     }
 
     // ── Pixel geometry ─────────────────────────────────────────────
@@ -525,7 +524,11 @@ impl Klotski {
 
     /// Total app height.
     fn total_height() -> f32 {
-        HEADER_HEIGHT + Self::grid_pixel_height() + EXIT_INDICATOR_HEIGHT + FOOTER_HEIGHT + PADDING * 2.0
+        HEADER_HEIGHT
+            + Self::grid_pixel_height()
+            + EXIT_INDICATOR_HEIGHT
+            + FOOTER_HEIGHT
+            + PADDING * 2.0
     }
 
     /// Origin X of the grid.
@@ -864,10 +867,10 @@ impl Klotski {
             let is_selected = self.selected == Some(idx);
             let (px, py) = Self::cell_to_pixel(block.row, block.col);
 
-            let block_w = block.kind.cols() as f32 * CELL_SIZE
-                + (block.kind.cols() as f32 - 1.0) * CELL_GAP;
-            let block_h = block.kind.rows() as f32 * CELL_SIZE
-                + (block.kind.rows() as f32 - 1.0) * CELL_GAP;
+            let block_w =
+                block.kind.cols() as f32 * CELL_SIZE + (block.kind.cols() as f32 - 1.0) * CELL_GAP;
+            let block_h =
+                block.kind.rows() as f32 * CELL_SIZE + (block.kind.rows() as f32 - 1.0) * CELL_GAP;
 
             let base_color = block.kind.color();
 
@@ -896,8 +899,12 @@ impl Klotski {
             // Label for the big block
             let label = block.kind.label();
             if !label.is_empty() {
-                let text_x =
-                    text::center_x(label, px + block_w / 2.0, BLOCK_FONT_SIZE, FontWeightHint::Bold);
+                let text_x = text::center_x(
+                    label,
+                    px + block_w / 2.0,
+                    BLOCK_FONT_SIZE,
+                    FontWeightHint::Bold,
+                );
                 let text_y = py + block_h / 2.0 - BLOCK_FONT_SIZE / 2.0;
                 cmds.push(RenderCommand::Text {
                     x: text_x,
@@ -950,7 +957,12 @@ impl Klotski {
         });
     }
 
-    fn render_win_overlay(&self, cmds: &mut Vec<RenderCommand>, total_width: f32, total_height: f32) {
+    fn render_win_overlay(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        total_width: f32,
+        total_height: f32,
+    ) {
         // Semi-transparent overlay (approximated with a dark fill)
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -1032,7 +1044,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         })
     }
 
@@ -1267,8 +1279,16 @@ mod tests {
         for i in 0..PUZZLES.len() {
             let mut app = Klotski::new();
             app.load_puzzle(i);
-            let big_count = app.blocks.iter().filter(|b| b.kind == BlockKind::Big).count();
-            assert_eq!(big_count, 1, "Puzzle {} should have exactly one Big block", i);
+            let big_count = app
+                .blocks
+                .iter()
+                .filter(|b| b.kind == BlockKind::Big)
+                .count();
+            assert_eq!(
+                big_count, 1,
+                "Puzzle {} should have exactly one Big block",
+                i
+            );
         }
     }
 
@@ -1308,12 +1328,12 @@ mod tests {
                     }
                 }
             }
-            let expected: usize = app.blocks.iter().map(|b| b.kind.rows() * b.kind.cols()).sum();
-            assert_eq!(
-                cell_count, expected,
-                "Puzzle {} has overlapping blocks",
-                i
-            );
+            let expected: usize = app
+                .blocks
+                .iter()
+                .map(|b| b.kind.rows() * b.kind.cols())
+                .sum();
+            assert_eq!(cell_count, expected, "Puzzle {} has overlapping blocks", i);
         }
     }
 
@@ -1323,7 +1343,11 @@ mod tests {
         for i in 0..PUZZLES.len() {
             let mut app = Klotski::new();
             app.load_puzzle(i);
-            let occupied: usize = app.blocks.iter().map(|b| b.kind.rows() * b.kind.cols()).sum();
+            let occupied: usize = app
+                .blocks
+                .iter()
+                .map(|b| b.kind.rows() * b.kind.cols())
+                .sum();
             let total = GRID_ROWS * GRID_COLS;
             let empty = total - occupied;
             assert!(
@@ -1459,7 +1483,10 @@ mod tests {
             let old_row = app.blocks[idx].row;
             let old_col = app.blocks[idx].col;
             app.move_block(idx, dir);
-            assert_ne!((app.blocks[idx].row, app.blocks[idx].col), (old_row, old_col));
+            assert_ne!(
+                (app.blocks[idx].row, app.blocks[idx].col),
+                (old_row, old_col)
+            );
             app.undo();
             assert_eq!(app.blocks[idx].row, old_row);
             assert_eq!(app.blocks[idx].col, old_col);
@@ -1945,9 +1972,9 @@ mod tests {
     fn test_render_has_title_text() {
         let app = Klotski::new();
         let cmds = app.render();
-        let has_title = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "Klotski")
-        });
+        let has_title = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Klotski"));
         assert!(has_title, "Render should include title text");
     }
 
@@ -1955,9 +1982,9 @@ mod tests {
     fn test_render_has_exit_text() {
         let app = Klotski::new();
         let cmds = app.render();
-        let has_exit = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "EXIT")
-        });
+        let has_exit = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "EXIT"));
         assert!(has_exit);
     }
 
@@ -1975,9 +2002,9 @@ mod tests {
     fn test_render_has_moves_text() {
         let app = Klotski::new();
         let cmds = app.render();
-        let has_moves = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Moves:"))
-        });
+        let has_moves = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Moves:")));
         assert!(has_moves);
     }
 
@@ -1986,7 +2013,10 @@ mod tests {
         let app = Klotski::new();
         let cmds = app.render();
         // Should have at least 10 block fill rects (one per block) plus grid cells
-        let fill_count = cmds.iter().filter(|cmd| matches!(cmd, RenderCommand::FillRect { .. })).count();
+        let fill_count = cmds
+            .iter()
+            .filter(|cmd| matches!(cmd, RenderCommand::FillRect { .. }))
+            .count();
         assert!(fill_count >= 10);
     }
 
@@ -1996,9 +2026,9 @@ mod tests {
         app.selected = Some(0);
         let cmds = app.render();
         // Should have a yellow highlight rect
-        let has_highlight = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::FillRect { color, .. } if *color == YELLOW)
-        });
+        let has_highlight = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::FillRect { color, .. } if *color == YELLOW));
         assert!(has_highlight);
     }
 
@@ -2006,9 +2036,9 @@ mod tests {
     fn test_render_without_selection_no_highlight() {
         let app = Klotski::new();
         let cmds = app.render();
-        let has_highlight = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::FillRect { color, .. } if *color == YELLOW)
-        });
+        let has_highlight = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::FillRect { color, .. } if *color == YELLOW));
         assert!(!has_highlight);
     }
 
@@ -2017,9 +2047,9 @@ mod tests {
         let mut app = Klotski::new();
         app.status = GameStatus::Won;
         let cmds = app.render();
-        let has_win = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Solved"))
-        });
+        let has_win = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Solved")));
         assert!(has_win);
     }
 
@@ -2029,9 +2059,9 @@ mod tests {
         app.moves = 42;
         app.status = GameStatus::Won;
         let cmds = app.render();
-        let has_42 = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("42"))
-        });
+        let has_42 = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("42")));
         assert!(has_42);
     }
 
@@ -2039,9 +2069,9 @@ mod tests {
     fn test_render_big_block_label() {
         let app = Klotski::new();
         let cmds = app.render();
-        let has_cao = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "CAO")
-        });
+        let has_cao = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "CAO"));
         assert!(has_cao);
     }
 
@@ -2049,9 +2079,9 @@ mod tests {
     fn test_render_footer_help() {
         let app = Klotski::new();
         let cmds = app.render();
-        let has_help = cmds.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Undo"))
-        });
+        let has_help = cmds
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Undo")));
         assert!(has_help);
     }
 
@@ -2092,9 +2122,7 @@ mod tests {
                 Direction::Right => Key::Right,
             };
             app.handle_event(&make_key_event(key));
-            assert!(
-                app.blocks[idx].row != old_row || app.blocks[idx].col != old_col,
-            );
+            assert!(app.blocks[idx].row != old_row || app.blocks[idx].col != old_col,);
         }
     }
 
@@ -2167,7 +2195,11 @@ mod tests {
         for i in 0..MAX_UNDO + 10 {
             app.undo_stack.push(UndoEntry {
                 block_id: 0,
-                direction: if i % 2 == 0 { Direction::Down } else { Direction::Up },
+                direction: if i % 2 == 0 {
+                    Direction::Down
+                } else {
+                    Direction::Up
+                },
             });
         }
         // The stack should still be bounded after actual moves
@@ -2230,7 +2262,12 @@ mod tests {
 
     /// Finds a block and direction that can move in the current state.
     fn find_movable_block(app: &Klotski) -> Option<(usize, Direction)> {
-        let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+        let dirs = [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ];
         for idx in 0..app.blocks.len() {
             for &dir in &dirs {
                 if app.can_move(idx, dir) {

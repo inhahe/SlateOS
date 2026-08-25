@@ -578,11 +578,18 @@ impl ColorPicker {
                     self.sync_hex_from_hsv();
                 }
                 _ => {
-                    if let Some(ch) = event.text
-                        && ch.is_ascii_hexdigit()
-                        && self.hex_input.len() < 8
-                    {
+                    // Every hex digit the keystroke typed, not only the first:
+                    // one keystroke can produce more than one character, and
+                    // taking one would drop the rest silently.
+                    let mut took_any = false;
+                    for ch in event.typed().filter(char::is_ascii_hexdigit) {
+                        if self.hex_input.len() >= 8 {
+                            break;
+                        }
                         self.hex_input.push(ch.to_ascii_uppercase());
+                        took_any = true;
+                    }
+                    if took_any {
                         self.try_apply_hex();
                         return Some(ColorPickerEvent::Changed(self.current_color()));
                     }
@@ -2420,7 +2427,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: crate::event::Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = dialog.handle_key(&event);
         assert_eq!(result, Some(ColorPickerEvent::Cancelled));
@@ -2434,7 +2441,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: crate::event::Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let result = dialog.handle_key(&event);
         assert!(matches!(result, Some(ColorPickerEvent::Confirmed(_))));

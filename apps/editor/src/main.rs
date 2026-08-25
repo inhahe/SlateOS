@@ -3077,7 +3077,7 @@ mod loop_tests {
             key: Key::Unknown(0),
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some(ch),
+            text: ch.to_string(),
         })
     }
 

@@ -1880,7 +1880,7 @@ mod tests {
                     key: Key::Q,
                     pressed: true,
                     modifiers: Modifiers::NONE,
-                    text: None,
+                    text: String::new(),
                 }),
             ),
             InputEvent::new(id, Event::FocusOut),

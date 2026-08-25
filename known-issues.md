@@ -32763,6 +32763,36 @@ is a real difference from how those keyboards behave. That is the shape of the
 remaining debt: not a missing feature so much as three layouts that type a
 standalone accent where a real one would compose.
 
+**Update 2026-08-24, later — (3) is under way: the event can now describe a
+dead key, though nothing produces one yet.** This is step 1 of four, and it is
+deliberately only the shape:
+
+- `guitk::event::KeyEvent::text` is a `String` rather than an `Option<char>`.
+  That is what makes the two cases dead keys need *expressible*: a keystroke
+  that types **nothing yet** (distinct from `None`, which already meant "this
+  key produces no text at all" — F5, an arrow) and one that types **two
+  characters**, which is what a failed composition must emit. See
+  `design-decisions.md` §550, which also records the failed-composition policy:
+  `´` then `x` types `´x`, following Windows and macOS rather than X11, because
+  silently discarding a keystroke is the one failure a text field must not have.
+- `guiremote::PROTOCOL_VERSION` is 3. The old encoding (a present-flag plus one
+  codepoint) could not carry either case, and a version-2 decoder reading a
+  version-3 stream desynchronises *silently* rather than erroring.
+- Forty-odd call sites were converted. Reading the field raw is now wrong almost
+  everywhere: `KeyEvent::typed()` yields the characters minus control
+  characters, and `KeyEvent::types_text()` answers "did this keystroke belong to
+  the text field at all?". Seven sites had been missing the control filter and
+  would put `\x1b` in a search box when the user pressed Escape; those are fixed
+  as a side effect of the rule now having one home.
+
+**Still to do for (3):** layouts must be able to declare a key's face *dead*
+(step 2, in `gui/keylayout`, composing through the exact NFC tables already in
+`gui/font/src/norm.rs` rather than a second hand-written accent table), and the
+compositor must hold the pending accent between two key events (step 3, which is
+the part that turns `Layout::character` from a pure function into a machine with
+a memory). **(4) compose sequences remain untouched** and are the same shape of
+problem over longer sequences.
+
 ## A-JOB-CONTROL-SELF-STOP-LOST-A-RACING-SIGCONT (lane A, 2026-08-17) - **fixed**
 
 **In short:** when a program stopped itself for job control (what a shell does

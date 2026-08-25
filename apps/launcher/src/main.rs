@@ -478,11 +478,11 @@ impl LauncherState {
         }
 
         // Text input: if the event carries a printable character, insert it
-        if let Some(ch) = event.text
-            && !ch.is_control()
-        {
-            self.query.insert(self.cursor, ch);
-            self.cursor += ch.len_utf8();
+        if event.types_text() {
+            for ch in event.typed() {
+                self.query.insert(self.cursor, ch);
+                self.cursor += ch.len_utf8();
+            }
             self.selected_index = 0;
             self.update_results();
         }
@@ -1338,7 +1338,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let action = launcher.handle_key(&event);
         assert_eq!(action, LauncherAction::Dismiss);
@@ -1356,7 +1356,7 @@ mod tests {
                 key: Key::A, // key code doesn't matter for text input
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: Some(ch),
+                text: ch.to_string(),
             };
             launcher.handle_key(&event);
         }
@@ -1382,7 +1382,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         launcher.handle_key(&down);
         assert_eq!(launcher.selected_index, 1);
@@ -1391,7 +1391,7 @@ mod tests {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         launcher.handle_key(&up);
         assert_eq!(launcher.selected_index, 0);
@@ -1411,7 +1411,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let action = launcher.handle_key(&enter);
         match action {
@@ -1434,7 +1434,7 @@ mod tests {
                 key: Key::A,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: Some(ch),
+                text: ch.to_string(),
             };
             launcher.handle_key(&event);
         }
@@ -1445,7 +1445,7 @@ mod tests {
             key: Key::Backspace,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         launcher.handle_key(&bs);
         assert_eq!(launcher.query, "a");
@@ -1461,7 +1461,7 @@ mod tests {
             key: Key::Num1,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         let action = launcher.handle_key(&event);
         assert!(
@@ -1481,7 +1481,7 @@ mod tests {
                 key: Key::A,
                 pressed: true,
                 modifiers: Modifiers::NONE,
-                text: Some(ch),
+                text: ch.to_string(),
             };
             launcher.handle_key(&event);
         }
@@ -1491,7 +1491,7 @@ mod tests {
             key: Key::Tab,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         launcher.handle_key(&tab);
 
@@ -1530,7 +1530,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         launcher.handle_key(&enter);
 
@@ -1556,7 +1556,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         launcher.handle_key(&enter);
         // After launch, the vec has 106 entries then gets trimmed to keep <=100+1
@@ -1589,7 +1589,7 @@ mod tests {
             key: Key::Escape,
             pressed: false, // released, not pressed
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         let action = launcher.handle_key(&event);
         assert_eq!(action, LauncherAction::None);

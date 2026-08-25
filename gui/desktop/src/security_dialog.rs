@@ -1794,7 +1794,7 @@ mod tests {
                 shift: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         };
         assert!(dialog.handle_key_event(&event));
         let events = dialog.drain_events();
@@ -1815,7 +1815,7 @@ mod tests {
                 shift: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         };
         assert!(dialog.handle_key_event(&event));
         let events = dialog.drain_events();
@@ -1837,7 +1837,7 @@ mod tests {
                 shift: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         };
         assert!(dialog.handle_key_event(&event));
         let events = dialog.drain_events();
@@ -1859,7 +1859,7 @@ mod tests {
                 shift: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         };
         dialog.handle_key_event(&event);
         assert!(dialog.details_expanded);
@@ -1883,7 +1883,7 @@ mod tests {
                 shift: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         };
         dialog.handle_key_event(&event);
         assert!(dialog.remember);
@@ -1901,7 +1901,7 @@ mod tests {
                 shift: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         };
         // Can't call on immutable ref; need mutable
         let mut dialog = dialog;
@@ -1922,7 +1922,7 @@ mod tests {
                 shift: false,
                 super_key: false,
             },
-            text: None,
+            text: String::new(),
         };
 
         assert_eq!(dialog.hovered_button, None);

@@ -267,47 +267,44 @@ impl Nim {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. })
-                if *modifiers == Modifiers::NONE => {
-                    match key {
-                        Key::Left
-                            if self.selected_heap > 0 => {
-                                self.selected_heap -= 1;
-                                self.take_count = 1;
-                            }
-                        Key::Right
-                            if self.selected_heap + 1 < self.heaps.len() => {
-                                self.selected_heap += 1;
-                                self.take_count = 1;
-                            }
-                        Key::Up => {
-                            let max = self.heaps.get(self.selected_heap).copied().unwrap_or(0);
-                            if self.take_count < max {
-                                self.take_count += 1;
-                            }
-                        }
-                        Key::Down
-                            if self.take_count > 1 => {
-                                self.take_count -= 1;
-                            }
-                        Key::Enter | Key::Space
-                            if self.current_player == Player::Human
-                                && self.state == GameState::Playing
-                                && self.take(self.selected_heap, self.take_count) => {
-                                    self.take_count = 1;
-                                    self.computer_move();
-                                }
-                        Key::N => self.new_game(),
-                        Key::H => self.show_help = !self.show_help,
-                        Key::V => self.toggle_variant(),
-                        Key::Num1 => self.set_preset(0),
-                        Key::Num2 => self.set_preset(1),
-                        Key::Num3 => self.set_preset(2),
-                        Key::Num4 => self.set_preset(3),
-                        Key::Num5 => self.set_preset(4),
-                        _ => {}
+            Event::Key(KeyEvent { key, modifiers, .. }) if *modifiers == Modifiers::NONE => {
+                match key {
+                    Key::Left if self.selected_heap > 0 => {
+                        self.selected_heap -= 1;
+                        self.take_count = 1;
                     }
+                    Key::Right if self.selected_heap + 1 < self.heaps.len() => {
+                        self.selected_heap += 1;
+                        self.take_count = 1;
+                    }
+                    Key::Up => {
+                        let max = self.heaps.get(self.selected_heap).copied().unwrap_or(0);
+                        if self.take_count < max {
+                            self.take_count += 1;
+                        }
+                    }
+                    Key::Down if self.take_count > 1 => {
+                        self.take_count -= 1;
+                    }
+                    Key::Enter | Key::Space
+                        if self.current_player == Player::Human
+                            && self.state == GameState::Playing
+                            && self.take(self.selected_heap, self.take_count) =>
+                    {
+                        self.take_count = 1;
+                        self.computer_move();
+                    }
+                    Key::N => self.new_game(),
+                    Key::H => self.show_help = !self.show_help,
+                    Key::V => self.toggle_variant(),
+                    Key::Num1 => self.set_preset(0),
+                    Key::Num2 => self.set_preset(1),
+                    Key::Num3 => self.set_preset(2),
+                    Key::Num4 => self.set_preset(3),
+                    Key::Num5 => self.set_preset(4),
+                    _ => {}
                 }
+            }
             _ => {}
         }
     }
@@ -702,7 +699,7 @@ mod tests {
             key: Key::Left,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.selected_heap, 1);
@@ -716,7 +713,7 @@ mod tests {
             key: Key::Right,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.selected_heap, 1);
@@ -730,7 +727,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&up);
         assert_eq!(app.take_count, 2);
@@ -738,7 +735,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&down);
         assert_eq!(app.take_count, 1);
@@ -753,7 +750,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         // Human took, then computer moved
@@ -768,7 +765,7 @@ mod tests {
             key: Key::N,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.total_remaining(), 16);
@@ -781,7 +778,7 @@ mod tests {
             key: Key::V,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&evt);
         assert_eq!(app.variant, NimVariant::Normal);
@@ -855,7 +852,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&up);
         assert_eq!(app.take_count, 1); // can't go above 1
@@ -869,7 +866,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::NONE,
             pressed: true,
-            text: None,
+            text: String::new(),
         });
         app.event(&down);
         assert_eq!(app.take_count, 1); // can't go below 1

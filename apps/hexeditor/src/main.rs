@@ -144,8 +144,7 @@ const MAX_UNDO_DEPTH: usize = 10_000;
 // ============================================================================
 
 /// Number of bytes displayed per line in the hex dump.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BytesPerLine {
     Eight = 8,
     #[default]
@@ -160,16 +159,13 @@ impl BytesPerLine {
     }
 }
 
-
 /// How to display the offset column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum OffsetDisplay {
     #[default]
     Hex,
     Decimal,
 }
-
 
 /// Hex view configuration.
 ///
@@ -213,15 +209,13 @@ impl Default for HexView {
 // ============================================================================
 
 /// Editing mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum EditMode {
     ReadOnly,
     Insert,
     #[default]
     Overwrite,
 }
-
 
 // ============================================================================
 // Data model — Data types for inspector
@@ -386,14 +380,12 @@ impl Selection {
 // ============================================================================
 
 /// Direction for search operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SearchDirection {
     #[default]
     Forward,
     Backward,
 }
-
 
 /// What kind of pattern to search for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -427,8 +419,7 @@ impl Default for SearchQuery {
 }
 
 /// State of an active search / replace dialog.
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct SearchState {
     pub query: SearchQuery,
     pub replace_pattern: Option<Vec<u8>>,
@@ -440,7 +431,6 @@ pub struct SearchState {
     /// Text in the replace input field.
     pub replace_text: String,
 }
-
 
 // ============================================================================
 // Data model — Bookmarks
@@ -631,10 +621,7 @@ impl HexDocument {
     pub fn display_name(&self) -> String {
         if let Some(ref path) = self.file_path {
             // Extract filename from path.
-            path.rsplit('/')
-                .next()
-                .unwrap_or(path.as_str())
-                .to_string()
+            path.rsplit('/').next().unwrap_or(path.as_str()).to_string()
         } else {
             String::from("Untitled")
         }
@@ -697,11 +684,10 @@ impl HexDocument {
         let cursor_line = self.line_for_offset(self.cursor);
         if cursor_line < self.view.scroll_offset {
             self.view.scroll_offset = cursor_line;
-        } else if visible_lines > 0 && cursor_line >= self.view.scroll_offset.saturating_add(visible_lines)
+        } else if visible_lines > 0
+            && cursor_line >= self.view.scroll_offset.saturating_add(visible_lines)
         {
-            self.view.scroll_offset = cursor_line
-                .saturating_sub(visible_lines)
-                .saturating_add(1);
+            self.view.scroll_offset = cursor_line.saturating_sub(visible_lines).saturating_add(1);
         }
     }
 
@@ -772,11 +758,7 @@ impl HexDocument {
             return;
         }
         let actual_end = end.min(self.data.len().saturating_sub(1));
-        let old_bytes: Vec<u8> = self
-            .data
-            .get(start..=actual_end)
-            .unwrap_or(&[])
-            .to_vec();
+        let old_bytes: Vec<u8> = self.data.get(start..=actual_end).unwrap_or(&[]).to_vec();
         if old_bytes.is_empty() {
             return;
         }
@@ -799,18 +781,13 @@ impl HexDocument {
         if start > end {
             return;
         }
-        let actual_end = end.min(
-            if self.data.is_empty() {
-                0
-            } else {
-                self.data.len().saturating_sub(1)
-            },
-        );
+        let actual_end = end.min(if self.data.is_empty() {
+            0
+        } else {
+            self.data.len().saturating_sub(1)
+        });
         let old_bytes: Vec<u8> = if start < self.data.len() {
-            self.data
-                .get(start..=actual_end)
-                .unwrap_or(&[])
-                .to_vec()
+            self.data.get(start..=actual_end).unwrap_or(&[]).to_vec()
         } else {
             Vec::new()
         };
@@ -931,12 +908,18 @@ impl HexDocument {
         }
 
         match query.direction {
-            SearchDirection::Forward => {
-                self.find_forward(&bytes_to_find, from_offset, query.case_sensitive, query.wrap_around)
-            }
-            SearchDirection::Backward => {
-                self.find_backward(&bytes_to_find, from_offset, query.case_sensitive, query.wrap_around)
-            }
+            SearchDirection::Forward => self.find_forward(
+                &bytes_to_find,
+                from_offset,
+                query.case_sensitive,
+                query.wrap_around,
+            ),
+            SearchDirection::Backward => self.find_backward(
+                &bytes_to_find,
+                from_offset,
+                query.case_sensitive,
+                query.wrap_around,
+            ),
         }
     }
 
@@ -1011,7 +994,11 @@ impl HexDocument {
             return false;
         }
         for (i, &p) in pattern.iter().enumerate() {
-            let d = self.data.get(offset.saturating_add(i)).copied().unwrap_or(0);
+            let d = self
+                .data
+                .get(offset.saturating_add(i))
+                .copied()
+                .unwrap_or(0);
             if case_sensitive {
                 if d != p {
                     return false;
@@ -1045,7 +1032,11 @@ impl HexDocument {
         }
 
         let mut count = 0usize;
-        let search_len = self.data.len().saturating_sub(bytes_to_find.len()).saturating_add(1);
+        let search_len = self
+            .data
+            .len()
+            .saturating_sub(bytes_to_find.len())
+            .saturating_add(1);
         for i in 0..search_len {
             if self.match_at(i, &bytes_to_find, query.case_sensitive) {
                 count = count.saturating_add(1);
@@ -1424,10 +1415,9 @@ impl HexDocument {
                 }
                 let matches = self
                     .data
-                    .get(check_start..check_start.saturating_add(pat_len)) == Some(hl.pattern.as_slice());
-                if matches
-                    && offset >= check_start
-                    && offset < check_start.saturating_add(pat_len)
+                    .get(check_start..check_start.saturating_add(pat_len))
+                    == Some(hl.pattern.as_slice());
+                if matches && offset >= check_start && offset < check_start.saturating_add(pat_len)
                 {
                     return Some(hl.color);
                 }
@@ -1916,8 +1906,8 @@ impl HexEditor {
 
         // Text input for search/goto dialogs.
         if self.focused_panel == FocusedPanel::SearchBar {
-            if let Some(ch) = key.text {
-                self.search.input_text.push(ch);
+            if key.types_text() {
+                self.search.input_text.extend(key.typed());
                 return EventResult::Consumed;
             }
             if key.key == Key::Backspace && !self.search.input_text.is_empty() {
@@ -1926,8 +1916,8 @@ impl HexEditor {
             }
         }
         if self.focused_panel == FocusedPanel::GoToDialog {
-            if let Some(ch) = key.text {
-                self.goto_text.push(ch);
+            if key.types_text() {
+                self.goto_text.extend(key.typed());
                 return EventResult::Consumed;
             }
             if key.key == Key::Backspace && !self.goto_text.is_empty() {
@@ -2015,10 +2005,15 @@ impl HexEditor {
                 let doc = self.active_doc_mut();
                 let old_cursor = doc.cursor;
                 let line_start = doc.line_for_offset(doc.cursor).saturating_mul(bpl);
-                let line_end = line_start
-                    .saturating_add(bpl)
-                    .saturating_sub(1)
-                    .min(if doc.data.is_empty() { 0 } else { doc.data.len().saturating_sub(1) });
+                let line_end =
+                    line_start
+                        .saturating_add(bpl)
+                        .saturating_sub(1)
+                        .min(if doc.data.is_empty() {
+                            0
+                        } else {
+                            doc.data.len().saturating_sub(1)
+                        });
                 doc.cursor = line_end;
                 doc.hex_nibble = 0;
                 Self::update_selection(doc, old_cursor, extending);
@@ -2150,23 +2145,35 @@ impl HexEditor {
             }
         } else {
             // ASCII editing: accept printable characters.
-            if let Some(ch) = key.text
-                && ch.is_ascii() && !ch.is_ascii_control() {
-                    let cur = doc.cursor;
-                    let byte = ch as u8;
-                    if doc.edit_mode == EditMode::Overwrite && cur < doc.data.len() {
-                        doc.overwrite_byte(cur, byte);
-                        if cur.saturating_add(1) < doc.data.len() {
-                            doc.cursor = cur.saturating_add(1);
-                        }
-                    } else if doc.edit_mode == EditMode::Insert {
-                        doc.insert_byte(cur, byte);
+            //
+            // Every character the keystroke typed, not its first: a dead key
+            // whose composition failed types two, and writing one byte of a
+            // two-character keystroke into a file is a corruption the user
+            // cannot see — the pane shows the byte they meant to type and says
+            // nothing about the one that went missing.
+            //
+            // Non-ASCII is dropped per character rather than rejecting the run,
+            // because the pane edits *bytes*: `é` names no single one, and
+            // there is no honest byte to write for it.
+            let mut wrote_any = false;
+            for byte in key.typed().filter(char::is_ascii).map(|ch| ch as u8) {
+                let cur = doc.cursor;
+                if doc.edit_mode == EditMode::Overwrite && cur < doc.data.len() {
+                    doc.overwrite_byte(cur, byte);
+                    if cur.saturating_add(1) < doc.data.len() {
                         doc.cursor = cur.saturating_add(1);
                     }
-                    let vis = self.visible_lines();
-                    self.active_doc_mut().ensure_cursor_visible(vis);
-                    return true;
+                } else if doc.edit_mode == EditMode::Insert {
+                    doc.insert_byte(cur, byte);
+                    doc.cursor = cur.saturating_add(1);
                 }
+                wrote_any = true;
+            }
+            if wrote_any {
+                let vis = self.visible_lines();
+                self.active_doc_mut().ensure_cursor_visible(vis);
+                return true;
+            }
         }
 
         false
@@ -2234,14 +2241,14 @@ impl HexEditor {
             return;
         }
 
-        let offset = if let Some(stripped) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
-        {
-            usize::from_str_radix(stripped, 16).ok()
-        } else if text.starts_with('$') {
-            usize::from_str_radix(text.get(1..).unwrap_or(""), 16).ok()
-        } else {
-            text.parse::<usize>().ok()
-        };
+        let offset =
+            if let Some(stripped) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                usize::from_str_radix(stripped, 16).ok()
+            } else if text.starts_with('$') {
+                usize::from_str_radix(text.get(1..).unwrap_or(""), 16).ok()
+            } else {
+                text.parse::<usize>().ok()
+            };
 
         if let Some(off) = offset {
             let vis = self.visible_lines();
@@ -2573,7 +2580,10 @@ impl HexEditor {
                     Some(colors::SURFACE0)
                 } else if doc.bookmarks.iter().any(|b| b.offset == offset) {
                     Some(Color::rgba(250, 179, 135, 60))
-                } else { doc.highlight_color_at(offset).map(|hl| Color::rgba(hl.r, hl.g, hl.b, 40)) };
+                } else {
+                    doc.highlight_color_at(offset)
+                        .map(|hl| Color::rgba(hl.r, hl.g, hl.b, 40))
+                };
 
                 if let Some(bg) = bg_color {
                     tree.push(RenderCommand::FillRect {
@@ -3188,9 +3198,7 @@ pub fn format_hex_line(data: &[u8], offset: usize, bytes_per_line: usize) -> Str
         }
 
         // Extra space every 8 bytes.
-        if (i.saturating_add(1)) % 8 == 0
-            && i.saturating_add(1) < bytes_per_line
-            && i < data.len()
+        if (i.saturating_add(1)) % 8 == 0 && i.saturating_add(1) < bytes_per_line && i < data.len()
         {
             hex_part.push(' ');
         }
@@ -3285,10 +3293,7 @@ mod tests {
 
     #[test]
     fn test_parse_hex_string_spaced() {
-        assert_eq!(
-            parse_hex_string("FF 00 AB"),
-            Some(vec![0xFF, 0x00, 0xAB])
-        );
+        assert_eq!(parse_hex_string("FF 00 AB"), Some(vec![0xFF, 0x00, 0xAB]));
     }
 
     #[test]
@@ -3900,8 +3905,9 @@ mod tests {
         // remainders, so a flick that switched tabs would move the wrong file.
         let mut app = HexEditor::new(1200.0, 800.0);
         long_doc(&mut app);
-        app.documents
-            .push(HexDocument::from_data((0..4096u32).map(|b| b as u8).collect()));
+        app.documents.push(HexDocument::from_data(
+            (0..4096u32).map(|b| b as u8).collect(),
+        ));
 
         app.active_tab = 0;
         for _ in 0..4 {
@@ -4589,7 +4595,7 @@ mod tests {
                 ctrl: true,
                 ..Modifiers::default()
             },
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -4906,7 +4912,7 @@ mod tests {
             key,
             pressed: true,
             modifiers,
-            text: None,
+            text: String::new(),
         }
     }
 

@@ -10,7 +10,9 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexWrap, Size};
 #[allow(unused_imports)]
@@ -284,7 +286,11 @@ impl FontCollection {
         let family = Self::family_from_path(path);
 
         // Check for duplicate installation.
-        if self.fonts.iter().any(|f| f.family == family && f.style == FontStyle::Regular) {
+        if self
+            .fonts
+            .iter()
+            .any(|f| f.family == family && f.style == FontStyle::Regular)
+        {
             return Err(FontError::AlreadyInstalled);
         }
 
@@ -309,7 +315,10 @@ impl FontCollection {
 
     /// Uninstall a font by ID. System fonts cannot be uninstalled.
     pub fn uninstall(&mut self, id: u64) -> Result<(), FontError> {
-        let idx = self.fonts.iter().position(|f| f.id == id)
+        let idx = self
+            .fonts
+            .iter()
+            .position(|f| f.id == id)
             .ok_or(FontError::NotFound)?;
         if self.fonts[idx].system {
             return Err(FontError::SystemFont);
@@ -327,9 +336,7 @@ impl FontCollection {
 
     /// Return a sorted list of unique family names.
     pub fn families(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.fonts.iter()
-            .map(|f| f.family.clone())
-            .collect();
+        let mut names: Vec<String> = self.fonts.iter().map(|f| f.family.clone()).collect();
         names.sort();
         names.dedup();
         names
@@ -337,22 +344,19 @@ impl FontCollection {
 
     /// Return all fonts belonging to a given family.
     pub fn by_family(&self, family: &str) -> Vec<&FontInfo> {
-        self.fonts.iter()
-            .filter(|f| f.family == family)
-            .collect()
+        self.fonts.iter().filter(|f| f.family == family).collect()
     }
 
     /// Return all fonts in a given category.
     pub fn by_category(&self, cat: FontCategory) -> Vec<&FontInfo> {
-        self.fonts.iter()
-            .filter(|f| f.category == cat)
-            .collect()
+        self.fonts.iter().filter(|f| f.category == cat).collect()
     }
 
     /// Search fonts by family name (case-insensitive substring match).
     pub fn search(&self, query: &str) -> Vec<&FontInfo> {
         let query_lower = query.to_lowercase();
-        self.fonts.iter()
+        self.fonts
+            .iter()
             .filter(|f| f.family.to_lowercase().contains(&query_lower))
             .collect()
     }
@@ -380,10 +384,13 @@ impl FontCollection {
     /// Extract a plausible family name from a file path.
     fn family_from_path(path: &str) -> String {
         // Take the filename stem, strip extension, replace hyphens/underscores with spaces.
-        let filename = path.rsplit('/').next()
+        let filename = path
+            .rsplit('/')
+            .next()
             .or_else(|| path.rsplit('\\').next())
             .unwrap_or(path);
-        let stem = filename.rsplit_once('.')
+        let stem = filename
+            .rsplit_once('.')
             .map(|(s, _)| s)
             .unwrap_or(filename);
         stem.replace(['-', '_'], " ")
@@ -392,25 +399,139 @@ impl FontCollection {
     /// Populate with default system fonts covering all categories.
     fn add_default_fonts(&mut self) {
         let defaults: &[(&str, FontStyle, FontFormat, FontCategory, u32)] = &[
-            ("Inter", FontStyle::Regular, FontFormat::OpenType, FontCategory::SansSerif, 2548),
-            ("Inter", FontStyle::Bold, FontFormat::OpenType, FontCategory::SansSerif, 2548),
-            ("Inter", FontStyle::Italic, FontFormat::OpenType, FontCategory::SansSerif, 2548),
-            ("Roboto", FontStyle::Regular, FontFormat::TrueType, FontCategory::SansSerif, 1294),
-            ("Roboto", FontStyle::Light, FontFormat::TrueType, FontCategory::SansSerif, 1294),
-            ("Noto Sans", FontStyle::Regular, FontFormat::TrueType, FontCategory::SansSerif, 3440),
-            ("Noto Sans", FontStyle::Bold, FontFormat::TrueType, FontCategory::SansSerif, 3440),
-            ("Noto Serif", FontStyle::Regular, FontFormat::TrueType, FontCategory::Serif, 3200),
-            ("Noto Serif", FontStyle::Italic, FontFormat::TrueType, FontCategory::Serif, 3200),
-            ("Libre Baskerville", FontStyle::Regular, FontFormat::OpenType, FontCategory::Serif, 820),
-            ("JetBrains Mono", FontStyle::Regular, FontFormat::TrueType, FontCategory::Monospace, 1036),
-            ("JetBrains Mono", FontStyle::Bold, FontFormat::TrueType, FontCategory::Monospace, 1036),
-            ("Fira Code", FontStyle::Regular, FontFormat::TrueType, FontCategory::Monospace, 1588),
-            ("Source Code Pro", FontStyle::Regular, FontFormat::OpenType, FontCategory::Monospace, 974),
-            ("Source Code Pro", FontStyle::Medium, FontFormat::OpenType, FontCategory::Monospace, 974),
-            ("Lobster", FontStyle::Regular, FontFormat::TrueType, FontCategory::Display, 490),
-            ("Pacifico", FontStyle::Regular, FontFormat::TrueType, FontCategory::Handwriting, 370),
-            ("Dancing Script", FontStyle::Regular, FontFormat::TrueType, FontCategory::Handwriting, 534),
-            ("Noto Emoji", FontStyle::Regular, FontFormat::TrueType, FontCategory::Symbol, 3610),
+            (
+                "Inter",
+                FontStyle::Regular,
+                FontFormat::OpenType,
+                FontCategory::SansSerif,
+                2548,
+            ),
+            (
+                "Inter",
+                FontStyle::Bold,
+                FontFormat::OpenType,
+                FontCategory::SansSerif,
+                2548,
+            ),
+            (
+                "Inter",
+                FontStyle::Italic,
+                FontFormat::OpenType,
+                FontCategory::SansSerif,
+                2548,
+            ),
+            (
+                "Roboto",
+                FontStyle::Regular,
+                FontFormat::TrueType,
+                FontCategory::SansSerif,
+                1294,
+            ),
+            (
+                "Roboto",
+                FontStyle::Light,
+                FontFormat::TrueType,
+                FontCategory::SansSerif,
+                1294,
+            ),
+            (
+                "Noto Sans",
+                FontStyle::Regular,
+                FontFormat::TrueType,
+                FontCategory::SansSerif,
+                3440,
+            ),
+            (
+                "Noto Sans",
+                FontStyle::Bold,
+                FontFormat::TrueType,
+                FontCategory::SansSerif,
+                3440,
+            ),
+            (
+                "Noto Serif",
+                FontStyle::Regular,
+                FontFormat::TrueType,
+                FontCategory::Serif,
+                3200,
+            ),
+            (
+                "Noto Serif",
+                FontStyle::Italic,
+                FontFormat::TrueType,
+                FontCategory::Serif,
+                3200,
+            ),
+            (
+                "Libre Baskerville",
+                FontStyle::Regular,
+                FontFormat::OpenType,
+                FontCategory::Serif,
+                820,
+            ),
+            (
+                "JetBrains Mono",
+                FontStyle::Regular,
+                FontFormat::TrueType,
+                FontCategory::Monospace,
+                1036,
+            ),
+            (
+                "JetBrains Mono",
+                FontStyle::Bold,
+                FontFormat::TrueType,
+                FontCategory::Monospace,
+                1036,
+            ),
+            (
+                "Fira Code",
+                FontStyle::Regular,
+                FontFormat::TrueType,
+                FontCategory::Monospace,
+                1588,
+            ),
+            (
+                "Source Code Pro",
+                FontStyle::Regular,
+                FontFormat::OpenType,
+                FontCategory::Monospace,
+                974,
+            ),
+            (
+                "Source Code Pro",
+                FontStyle::Medium,
+                FontFormat::OpenType,
+                FontCategory::Monospace,
+                974,
+            ),
+            (
+                "Lobster",
+                FontStyle::Regular,
+                FontFormat::TrueType,
+                FontCategory::Display,
+                490,
+            ),
+            (
+                "Pacifico",
+                FontStyle::Regular,
+                FontFormat::TrueType,
+                FontCategory::Handwriting,
+                370,
+            ),
+            (
+                "Dancing Script",
+                FontStyle::Regular,
+                FontFormat::TrueType,
+                FontCategory::Handwriting,
+                534,
+            ),
+            (
+                "Noto Emoji",
+                FontStyle::Regular,
+                FontFormat::TrueType,
+                FontCategory::Symbol,
+                3610,
+            ),
         ];
 
         for (family, style, format, category, glyph_count) in defaults {
@@ -674,7 +795,9 @@ impl FontManagerState {
 
     /// Return unique family names from the currently visible fonts.
     pub fn visible_families(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.visible_fonts().iter()
+        let mut names: Vec<String> = self
+            .visible_fonts()
+            .iter()
             .map(|f| f.family.clone())
             .collect();
         names.sort();
@@ -840,11 +963,31 @@ impl FontManagerState {
         let search_w = 250.0;
         let search_y = 10.0;
         let search_h = 28.0;
-        fill_rounded(tree, search_x, search_y, search_w, search_h, COL_SURFACE0, 6.0);
+        fill_rounded(
+            tree,
+            search_x,
+            search_y,
+            search_w,
+            search_h,
+            COL_SURFACE0,
+            6.0,
+        );
         if self.search_query.is_empty() {
-            tree.text(search_x + 10.0, search_y + 7.0, "Search fonts...", COL_SUBTEXT0, 13.0);
+            tree.text(
+                search_x + 10.0,
+                search_y + 7.0,
+                "Search fonts...",
+                COL_SUBTEXT0,
+                13.0,
+            );
         } else {
-            tree.text(search_x + 10.0, search_y + 7.0, &self.search_query, COL_TEXT, 13.0);
+            tree.text(
+                search_x + 10.0,
+                search_y + 7.0,
+                &self.search_query,
+                COL_TEXT,
+                13.0,
+            );
         }
     }
 
@@ -869,7 +1012,14 @@ impl FontManagerState {
         let mut y = sidebar_y + SIDEBAR_PADDING;
 
         // Section: Filter
-        text_bold(tree, SIDEBAR_PADDING + 4.0, y + 4.0, "FILTER", COL_SUBTEXT0, 10.0);
+        text_bold(
+            tree,
+            SIDEBAR_PADDING + 4.0,
+            y + 4.0,
+            "FILTER",
+            COL_SUBTEXT0,
+            10.0,
+        );
         y += 24.0;
 
         // All Fonts
@@ -900,12 +1050,19 @@ impl FontManagerState {
         y += 12.0;
 
         // Section: Categories
-        text_bold(tree, SIDEBAR_PADDING + 4.0, y + 4.0, "CATEGORIES", COL_SUBTEXT0, 10.0);
+        text_bold(
+            tree,
+            SIDEBAR_PADDING + 4.0,
+            y + 4.0,
+            "CATEGORIES",
+            COL_SUBTEXT0,
+            10.0,
+        );
         y += 24.0;
 
         for cat in FontCategory::ALL {
-            let is_selected = self.filter_mode == FilterMode::Category
-                && self.selected_category == Some(*cat);
+            let is_selected =
+                self.filter_mode == FilterMode::Category && self.selected_category == Some(*cat);
             let label = cat.label();
             let icon = cat.icon();
             let display = format!("{icon}  {label}");
@@ -934,10 +1091,13 @@ impl FontManagerState {
 
         for family in &families {
             // Background highlight for selected
-            let variants = self.visible_fonts().into_iter()
+            let variants = self
+                .visible_fonts()
+                .into_iter()
                 .filter(|f| &f.family == family)
                 .collect::<Vec<_>>();
-            let is_selected = self.selected_font
+            let is_selected = self
+                .selected_font
                 .and_then(|id| self.collection.get(id))
                 .map(|f| &f.family == family)
                 .unwrap_or(false);
@@ -956,13 +1116,23 @@ impl FontManagerState {
 
             // Family name
             let name_color = if is_selected { COL_ACCENT } else { COL_TEXT };
-            text_bold(tree, list_x + CONTENT_PADDING, y + 8.0, family, name_color, 15.0);
+            text_bold(
+                tree,
+                list_x + CONTENT_PADDING,
+                y + 8.0,
+                family,
+                name_color,
+                15.0,
+            );
 
             // Style variants and metadata
             let styles: Vec<&str> = variants.iter().map(|v| v.style.label()).collect();
             let styles_str = styles.join(", ");
             let enabled_count = variants.iter().filter(|v| v.enabled).count();
-            let meta = format!("{styles_str}  |  {enabled_count}/{} enabled", variants.len());
+            let meta = format!(
+                "{styles_str}  |  {enabled_count}/{} enabled",
+                variants.len()
+            );
             tree.text(
                 list_x + CONTENT_PADDING,
                 y + 28.0,
@@ -974,7 +1144,13 @@ impl FontManagerState {
             // Disabled indicator
             if variants.iter().any(|v| !v.enabled) {
                 let disabled_x = list_x + list_w - 80.0;
-                tree.text(disabled_x, y + 16.0, "partially disabled", COL_SUBTEXT0, 10.0);
+                tree.text(
+                    disabled_x,
+                    y + 16.0,
+                    "partially disabled",
+                    COL_SUBTEXT0,
+                    10.0,
+                );
             }
 
             y += FONT_LIST_ITEM_HEIGHT + 4.0;
@@ -1010,7 +1186,14 @@ impl FontManagerState {
 
         if let Some(font) = self.selected_font.and_then(|id| self.collection.get(id)) {
             // Font family name
-            text_bold(tree, panel_x + CONTENT_PADDING, y, &font.family, COL_TEXT, 18.0);
+            text_bold(
+                tree,
+                panel_x + CONTENT_PADDING,
+                y,
+                &font.family,
+                COL_TEXT,
+                18.0,
+            );
             y += 28.0;
 
             // Style and format
@@ -1020,15 +1203,39 @@ impl FontManagerState {
 
             // Version and glyph count
             let detail_str = format!("v{}  |  {} glyphs", font.version, font.glyph_count);
-            tree.text(panel_x + CONTENT_PADDING, y, &detail_str, COL_SUBTEXT0, 11.0);
+            tree.text(
+                panel_x + CONTENT_PADDING,
+                y,
+                &detail_str,
+                COL_SUBTEXT0,
+                11.0,
+            );
             y += 20.0;
 
             // System/User badge
-            let badge = if font.system { "System Font" } else { "User Font" };
+            let badge = if font.system {
+                "System Font"
+            } else {
+                "User Font"
+            };
             let badge_color = if font.system { COL_ACCENT } else { COL_TEAL };
             let badge_w = text::padded_width(badge, 8.0, 11.0, FontWeightHint::Regular);
-            fill_rounded(tree, panel_x + CONTENT_PADDING, y, badge_w, 22.0, badge_color, 4.0);
-            tree.text(panel_x + CONTENT_PADDING + 8.0, y + 4.0, badge, COL_CRUST, 11.0);
+            fill_rounded(
+                tree,
+                panel_x + CONTENT_PADDING,
+                y,
+                badge_w,
+                22.0,
+                badge_color,
+                4.0,
+            );
+            tree.text(
+                panel_x + CONTENT_PADDING + 8.0,
+                y + 4.0,
+                badge,
+                COL_CRUST,
+                11.0,
+            );
             y += 36.0;
 
             // Separator
@@ -1043,13 +1250,26 @@ impl FontManagerState {
             y += 16.0;
 
             // Preview heading
-            text_bold(tree, panel_x + CONTENT_PADDING, y, "Preview", COL_TEXT, 14.0);
+            text_bold(
+                tree,
+                panel_x + CONTENT_PADDING,
+                y,
+                "Preview",
+                COL_TEXT,
+                14.0,
+            );
             y += 24.0;
 
             // Render preview at multiple sizes
             for size in PREVIEW_SIZE_LABELS {
                 let size_label = format!("{size}pt");
-                tree.text(panel_x + CONTENT_PADDING, y, &size_label, COL_SUBTEXT0, 10.0);
+                tree.text(
+                    panel_x + CONTENT_PADDING,
+                    y,
+                    &size_label,
+                    COL_SUBTEXT0,
+                    10.0,
+                );
                 y += 14.0;
 
                 // Sample text at this size (clamped to panel width)
@@ -1094,8 +1314,13 @@ impl FontManagerState {
         let panel_y = (self.window_height - panel_h) / 2.0;
 
         // Dim overlay behind the panel
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height,
-            Color::rgba(0, 0, 0, 160));
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            Color::rgba(0, 0, 0, 160),
+        );
 
         // Panel shadow
         tree.push(RenderCommand::BoxShadow {
@@ -1131,7 +1356,9 @@ impl FontManagerState {
         // Hinting
         tree.text(label_x, y, "Hinting", COL_TEXT, 13.0);
         render_setting_options(
-            tree, value_x, y,
+            tree,
+            value_x,
+            y,
             HintMode::ALL,
             self.render_settings.hinting,
             |m| m.label(),
@@ -1141,7 +1368,9 @@ impl FontManagerState {
         // Antialiasing
         tree.text(label_x, y, "Antialiasing", COL_TEXT, 13.0);
         render_setting_options(
-            tree, value_x, y,
+            tree,
+            value_x,
+            y,
             AntialiasingMode::ALL,
             self.render_settings.antialiasing,
             |m| m.label(),
@@ -1151,7 +1380,9 @@ impl FontManagerState {
         // Subpixel order
         tree.text(label_x, y, "Subpixel Order", COL_TEXT, 13.0);
         render_setting_options(
-            tree, value_x, y,
+            tree,
+            value_x,
+            y,
             SubpixelOrder::ALL,
             self.render_settings.subpixel_order,
             |m| m.label(),
@@ -1204,9 +1435,23 @@ fn render_sidebar_item(tree: &mut RenderTree, y: f32, label: &str, selected: boo
     let item_w = SIDEBAR_WIDTH - SIDEBAR_PADDING * 2.0;
 
     if selected {
-        fill_rounded(tree, item_x, y, item_w, CATEGORY_ITEM_HEIGHT, COL_SURFACE1, 6.0);
+        fill_rounded(
+            tree,
+            item_x,
+            y,
+            item_w,
+            CATEGORY_ITEM_HEIGHT,
+            COL_SURFACE1,
+            6.0,
+        );
         // Left accent bar
-        tree.fill_rect(item_x, y + 6.0, 3.0, CATEGORY_ITEM_HEIGHT - 12.0, COL_ACCENT);
+        tree.fill_rect(
+            item_x,
+            y + 6.0,
+            3.0,
+            CATEGORY_ITEM_HEIGHT - 12.0,
+            COL_ACCENT,
+        );
     }
 
     let text_color = if selected { COL_ACCENT } else { COL_TEXT };
@@ -1244,7 +1489,10 @@ fn main() {
     let tree = state.render();
 
     // The render tree would be submitted to the compositor.
-    assert!(!tree.is_empty(), "Font Manager UI must produce render commands");
+    assert!(
+        !tree.is_empty(),
+        "Font Manager UI must produce render commands"
+    );
 }
 
 // ============================================================================
@@ -1317,7 +1565,10 @@ mod tests {
     #[test]
     fn test_default_collection_is_populated() {
         let coll = FontCollection::new_with_defaults();
-        assert!(coll.fonts.len() >= 15, "Should have at least 15 default fonts");
+        assert!(
+            coll.fonts.len() >= 15,
+            "Should have at least 15 default fonts"
+        );
     }
 
     #[test]
@@ -1517,7 +1768,10 @@ mod tests {
         let coll = FontCollection::new_with_defaults();
         let families = coll.families();
         // We have multiple styles per family; families() deduplicates.
-        assert!(families.len() < coll.fonts.len(), "families() should deduplicate");
+        assert!(
+            families.len() < coll.fonts.len(),
+            "families() should deduplicate"
+        );
     }
 
     // ====================================================================
@@ -1693,13 +1947,19 @@ mod tests {
         assert!(!tree.is_empty());
         // Settings panel adds many more commands.
         let base_tree = FontManagerState::new().render();
-        assert!(tree.len() > base_tree.len(), "Settings overlay adds commands");
+        assert!(
+            tree.len() > base_tree.len(),
+            "Settings overlay adds commands"
+        );
     }
 
     #[test]
     fn test_render_after_resize() {
         let mut state = FontManagerState::new();
-        let ev = Event::Resize { width: 1400, height: 900 };
+        let ev = Event::Resize {
+            width: 1400,
+            height: 900,
+        };
         let result = state.handle_event(&ev);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(state.window_width, 1400.0);
@@ -1728,7 +1988,7 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         state.handle_event(&ev);
         assert_ne!(state.selected_font.unwrap(), first_id);
@@ -1743,14 +2003,14 @@ mod tests {
             key: Key::Down,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         state.handle_event(&down);
         let up = Event::Key(KeyEvent {
             key: Key::Up,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         state.handle_event(&up);
         assert_eq!(state.selected_font.unwrap(), first_id);
@@ -1764,7 +2024,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         state.handle_event(&ev);
         assert!(!state.show_settings);
@@ -1778,7 +2038,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         state.handle_event(&ev);
         assert!(state.search_query.is_empty());
@@ -1791,8 +2051,13 @@ mod tests {
         let ev = Event::Key(KeyEvent {
             key: Key::S,
             pressed: true,
-            modifiers: Modifiers { shift: false, ctrl: true, alt: false, super_key: false },
-            text: None,
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: true,
+                alt: false,
+                super_key: false,
+            },
+            text: String::new(),
         });
         state.handle_event(&ev);
         assert!(state.show_settings);
@@ -1807,8 +2072,14 @@ mod tests {
     #[test]
     fn test_font_error_display() {
         assert_eq!(FontError::NotFound.to_string(), "Font not found");
-        assert_eq!(FontError::SystemFont.to_string(), "Cannot modify system font");
-        assert_eq!(FontError::AlreadyInstalled.to_string(), "Font already installed");
+        assert_eq!(
+            FontError::SystemFont.to_string(),
+            "Cannot modify system font"
+        );
+        assert_eq!(
+            FontError::AlreadyInstalled.to_string(),
+            "Font already installed"
+        );
         assert_eq!(FontError::InvalidFormat.to_string(), "Invalid font format");
         assert_eq!(
             FontError::IoError(String::from("disk full")).to_string(),

@@ -1562,7 +1562,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -2012,7 +2012,7 @@ mod tests {
             key: Key::Up,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         });
         app.handle_event(&event);
         assert_eq!(app.queued_dir, None);

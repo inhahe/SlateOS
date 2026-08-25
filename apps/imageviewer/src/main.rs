@@ -2177,7 +2177,7 @@ mod tests {
             key: Key::Equals,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         assert!(state.handle_key_event(&event));
         assert!(state.transform.zoom > initial_zoom);
@@ -2191,7 +2191,7 @@ mod tests {
             key: Key::Minus,
             pressed: true,
             modifiers: Modifiers::ctrl(),
-            text: None,
+            text: String::new(),
         };
         assert!(state.handle_key_event(&event));
         assert!(state.transform.zoom < 2.0);
@@ -2204,7 +2204,7 @@ mod tests {
             key: Key::Left,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         assert!(!state.handle_key_event(&event));
     }
@@ -2241,7 +2241,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         // First escape should stop slideshow
         state.handle_key_event(&event);

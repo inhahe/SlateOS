@@ -495,8 +495,7 @@ impl PtyMaster {
                 if inner.pending_to_slave.is_empty() {
                     return inner.master_to_slave.write(data);
                 }
-                let room =
-                    DEFAULT_CHANNEL_CAPACITY.saturating_sub(inner.pending_to_slave.len());
+                let room = DEFAULT_CHANNEL_CAPACITY.saturating_sub(inner.pending_to_slave.len());
                 if room == 0 {
                     return Err(PtyError::BufferFull);
                 }
@@ -880,11 +879,7 @@ impl PtyManager {
     }
 
     /// Allocate a new PTY pair with the given initial window size.
-    pub fn allocate_with_size(
-        &self,
-        cols: u16,
-        rows: u16,
-    ) -> PtyResult<(PtyId, PtyPair)> {
+    pub fn allocate_with_size(&self, cols: u16, rows: u16) -> PtyResult<(PtyId, PtyPair)> {
         let mut ptys = self.ptys.lock().map_err(|_| PtyError::LockPoisoned)?;
 
         // Count active entries to enforce the limit.
@@ -1065,11 +1060,7 @@ impl ChildProcess {
     /// 4. Execute the program.
     ///
     /// For now, we create a simulated process handle.
-    pub fn spawn(
-        program: &str,
-        _args: &[&str],
-        _pty: &PtySlave,
-    ) -> PtyResult<Self> {
+    pub fn spawn(program: &str, _args: &[&str], _pty: &PtySlave) -> PtyResult<Self> {
         if program.is_empty() {
             return Err(PtyError::SpawnFailed("empty program name".into()));
         }
@@ -1161,9 +1152,10 @@ impl ChildProcess {
     /// Internal: mark the process as exited with the given status.
     fn mark_exited(&self, status: ExitStatus) {
         if let Ok(mut guard) = self.exit_status.lock()
-            && guard.is_none() {
-                *guard = Some(status);
-            }
+            && guard.is_none()
+        {
+            *guard = Some(status);
+        }
         self.exited.store(true, Ordering::Release);
     }
 
@@ -1194,8 +1186,7 @@ mod tests {
 
     #[test]
     fn test_pty_pair_open_with_size() {
-        let pair =
-            PtyPair::open_with_size(120, 40).expect("should create PTY pair");
+        let pair = PtyPair::open_with_size(120, 40).expect("should create PTY pair");
         let (cols, rows) = pair.slave.get_size();
         assert_eq!(cols, 120);
         assert_eq!(rows, 40);
@@ -1650,8 +1641,7 @@ mod tests {
     #[test]
     fn test_child_spawn() {
         let pair = PtyPair::open().unwrap();
-        let child =
-            ChildProcess::spawn("/bin/sh", &["-l"], &pair.slave).unwrap();
+        let child = ChildProcess::spawn("/bin/sh", &["-l"], &pair.slave).unwrap();
         assert!(child.pid() >= 1000);
         assert_eq!(child.program(), "/bin/sh");
         assert!(!child.has_exited());
@@ -1667,8 +1657,7 @@ mod tests {
     #[test]
     fn test_child_wait() {
         let pair = PtyPair::open().unwrap();
-        let child =
-            ChildProcess::spawn("/bin/echo", &["hello"], &pair.slave).unwrap();
+        let child = ChildProcess::spawn("/bin/echo", &["hello"], &pair.slave).unwrap();
 
         let status = child.wait().unwrap();
         assert!(status.success());
@@ -1679,8 +1668,7 @@ mod tests {
     #[test]
     fn test_child_try_wait_not_exited() {
         let pair = PtyPair::open().unwrap();
-        let child =
-            ChildProcess::spawn("/bin/sleep", &["10"], &pair.slave).unwrap();
+        let child = ChildProcess::spawn("/bin/sleep", &["10"], &pair.slave).unwrap();
 
         let result = child.try_wait().unwrap();
         assert!(result.is_none());
@@ -1689,8 +1677,7 @@ mod tests {
     #[test]
     fn test_child_kill() {
         let pair = PtyPair::open().unwrap();
-        let child =
-            ChildProcess::spawn("/bin/sleep", &["10"], &pair.slave).unwrap();
+        let child = ChildProcess::spawn("/bin/sleep", &["10"], &pair.slave).unwrap();
 
         child.kill().unwrap();
         assert!(child.has_exited());
@@ -1703,8 +1690,7 @@ mod tests {
     #[test]
     fn test_child_kill_idempotent() {
         let pair = PtyPair::open().unwrap();
-        let child =
-            ChildProcess::spawn("/bin/test", &[], &pair.slave).unwrap();
+        let child = ChildProcess::spawn("/bin/test", &[], &pair.slave).unwrap();
 
         child.kill().unwrap();
         child.kill().unwrap(); // should not panic or error
@@ -1714,8 +1700,7 @@ mod tests {
     #[test]
     fn test_child_simulate_exit() {
         let pair = PtyPair::open().unwrap();
-        let child =
-            ChildProcess::spawn("/bin/app", &[], &pair.slave).unwrap();
+        let child = ChildProcess::spawn("/bin/app", &[], &pair.slave).unwrap();
 
         child.simulate_exit(ExitStatus::Code(42));
         assert!(child.has_exited());
@@ -1899,7 +1884,10 @@ mod tests {
     fn test_pty_error_display() {
         assert_eq!(PtyError::Closed.to_string(), "PTY channel closed");
         assert_eq!(PtyError::WouldBlock.to_string(), "operation would block");
-        assert_eq!(PtyError::TooManyPtys.to_string(), "maximum number of PTYs reached");
+        assert_eq!(
+            PtyError::TooManyPtys.to_string(),
+            "maximum number of PTYs reached"
+        );
     }
 
     // -- PtyId display --
@@ -2085,9 +2073,7 @@ mod tests {
         out.extend_from_slice(&drain_master(&pair.master));
 
         let z = out.iter().position(|&b| b == b'Z');
-        let reply = out
-            .windows(5)
-            .position(|w| w == b"REPLY");
+        let reply = out.windows(5).position(|w| w == b"REPLY");
         let z = z.expect("the echoed keystroke was dropped");
         let reply = reply.expect("the child's output was dropped");
         assert!(
@@ -2163,7 +2149,10 @@ mod tests {
         );
 
         // The user can still get out of the state.
-        assert_eq!(cooked_process(0x08, &mut line_buf), CookedAction::Echo(0x08));
+        assert_eq!(
+            cooked_process(0x08, &mut line_buf),
+            CookedAction::Echo(0x08)
+        );
         assert_eq!(line_buf.len(), MAX_CANON - 1);
         assert!(matches!(
             cooked_process(b'\n', &mut line_buf),

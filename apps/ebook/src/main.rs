@@ -1585,10 +1585,8 @@ impl EbookApp {
             }
             _ => {
                 // If the key produces a character, add it to the query.
-                if let Some(ch) = event.text
-                    && !ch.is_control()
-                {
-                    self.search_query.push(ch);
+                if event.types_text() {
+                    self.search_query.extend(event.typed());
                     return true;
                 }
                 false
@@ -2379,7 +2377,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::default(),
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -2388,7 +2386,7 @@ mod tests {
             key,
             pressed: true,
             modifiers,
-            text: None,
+            text: String::new(),
         }
     }
 
@@ -2397,7 +2395,7 @@ mod tests {
             key,
             pressed: true,
             modifiers: Modifiers::default(),
-            text: Some(ch),
+            text: ch.to_string(),
         }
     }
 
@@ -3663,7 +3661,7 @@ mod tests {
             key: Key::Right,
             pressed: false, // key released, not pressed
             modifiers: Modifiers::default(),
-            text: None,
+            text: String::new(),
         };
         let consumed = app.handle_key_event(&event);
         assert!(!consumed);

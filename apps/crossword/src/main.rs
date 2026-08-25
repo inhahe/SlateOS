@@ -1677,7 +1677,7 @@ mod tests {
             key: Key::Space,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.direction, Direction::Down);
     }
@@ -1893,14 +1893,14 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.selected_puzzle, 1);
         app.handle_event_select(&Event::Key(KeyEvent {
             key: Key::Up,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.selected_puzzle, 0);
     }
@@ -1912,7 +1912,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.view, View::Playing);
     }
@@ -1924,7 +1924,7 @@ mod tests {
             key: Key::Escape,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.view, View::PuzzleSelect);
     }
@@ -1937,7 +1937,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.view, View::PuzzleSelect);
     }
@@ -1955,7 +1955,7 @@ mod tests {
                 ..Modifiers::default()
             },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.check_mode);
     }
@@ -1972,7 +1972,7 @@ mod tests {
                 ..Modifiers::default()
             },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.cell_at(0, 0).unwrap().revealed);
     }
@@ -1990,7 +1990,7 @@ mod tests {
                 ..Modifiers::default()
             },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         for col in 0..4 {
             assert!(app.cell_at(0, col).unwrap().revealed);
@@ -2005,14 +2005,14 @@ mod tests {
             key: Key::F1,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(app.show_help);
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::F1,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(!app.show_help);
     }
@@ -2029,7 +2029,7 @@ mod tests {
             key: Key::Tab,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         // Should have moved to a different position
         assert!(app.cursor_row != start_row || app.cursor_col != start_col);
@@ -2143,7 +2143,7 @@ mod tests {
             key: Key::Up,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.selected_puzzle, 0);
     }
@@ -2156,7 +2156,7 @@ mod tests {
             key: Key::Down,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.selected_puzzle, PUZZLES.len() - 1);
     }
@@ -2292,7 +2292,7 @@ mod tests {
                 ..Modifiers::default()
             },
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert!(!app.check_mode);
     }
@@ -2305,7 +2305,7 @@ mod tests {
             key: Key::Enter,
             modifiers: Modifiers::default(),
             pressed: true,
-            text: None,
+            text: String::new(),
         }));
         assert_eq!(app.view, View::Playing);
     }

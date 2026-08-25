@@ -14,7 +14,9 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
 #[allow(unused_imports)]
@@ -130,14 +132,38 @@ fn tokenize(input: &str) -> Option<Vec<Token>> {
 
         // Operators and parentheses.
         match ch {
-            '+' => { tokens.push(Token::Plus); i += 1; }
-            '-' => { tokens.push(Token::Minus); i += 1; }
-            '*' => { tokens.push(Token::Multiply); i += 1; }
-            '/' => { tokens.push(Token::Divide); i += 1; }
-            '%' => { tokens.push(Token::Modulo); i += 1; }
-            '^' => { tokens.push(Token::Power); i += 1; }
-            '(' => { tokens.push(Token::LeftParen); i += 1; }
-            ')' => { tokens.push(Token::RightParen); i += 1; }
+            '+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
+            '-' => {
+                tokens.push(Token::Minus);
+                i += 1;
+            }
+            '*' => {
+                tokens.push(Token::Multiply);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(Token::Divide);
+                i += 1;
+            }
+            '%' => {
+                tokens.push(Token::Modulo);
+                i += 1;
+            }
+            '^' => {
+                tokens.push(Token::Power);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LeftParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RightParen);
+                i += 1;
+            }
             _ if ch.is_ascii_alphabetic() => {
                 // Parse identifiers (function names, constants).
                 let start = i;
@@ -584,11 +610,13 @@ impl Calculator {
         // Replace trailing operator if the user changes their mind.
         let trimmed = self.expression.trim_end();
         if let Some(last) = trimmed.chars().last()
-            && "+-*/%".contains(last) && op != '-' {
-                // Replace the last operator (but allow unary minus after another op).
-                let end = trimmed.len() - last.len_utf8();
-                self.expression.truncate(end);
-            }
+            && "+-*/%".contains(last)
+            && op != '-'
+        {
+            // Replace the last operator (but allow unary minus after another op).
+            let end = trimmed.len() - last.len_utf8();
+            self.expression.truncate(end);
+        }
         self.expression.push(' ');
         self.expression.push(op);
         self.expression.push(' ');
@@ -934,41 +962,38 @@ fn calc_button(label: &str, bg: Color) -> Widget {
 
 /// Create a small-label button (for scientific mode functions).
 fn func_button(label: &str) -> Widget {
-    calc_button(label, Colors::BTN_FUNC_BG)
-        .with_style(Style {
-            background: Colors::BTN_FUNC_BG,
-            foreground: Color::BLACK,
-            padding: Edges::symmetric(6.0, 2.0),
-            border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
-            border_radius: CornerRadii::all(4.0),
-            font_size: 11.0,
-            font_weight: FontWeight::Regular,
-            min_width: Some(42.0),
-            min_height: Some(32.0),
-            ..Style::default()
-        })
+    calc_button(label, Colors::BTN_FUNC_BG).with_style(Style {
+        background: Colors::BTN_FUNC_BG,
+        foreground: Color::BLACK,
+        padding: Edges::symmetric(6.0, 2.0),
+        border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
+        border_radius: CornerRadii::all(4.0),
+        font_size: 11.0,
+        font_weight: FontWeight::Regular,
+        min_width: Some(42.0),
+        min_height: Some(32.0),
+        ..Style::default()
+    })
 }
 
 /// Build the display area showing the expression and current result.
 fn build_display(calc: &Calculator) -> Widget {
-    let expr_label = Widget::label(&calc.expression)
-        .with_style(Style {
-            foreground: Colors::EXPR_TEXT,
-            font_size: 12.0,
-            padding: Edges::symmetric(2.0, 8.0),
-            text_align: TextAlign::Right,
-            ..Style::default()
-        });
+    let expr_label = Widget::label(&calc.expression).with_style(Style {
+        foreground: Colors::EXPR_TEXT,
+        font_size: 12.0,
+        padding: Edges::symmetric(2.0, 8.0),
+        text_align: TextAlign::Right,
+        ..Style::default()
+    });
 
-    let result_label = Widget::label(&calc.display)
-        .with_style(Style {
-            foreground: Colors::DISPLAY_TEXT,
-            font_size: 24.0,
-            font_weight: FontWeight::Bold,
-            padding: Edges::symmetric(4.0, 8.0),
-            text_align: TextAlign::Right,
-            ..Style::default()
-        });
+    let result_label = Widget::label(&calc.display).with_style(Style {
+        foreground: Colors::DISPLAY_TEXT,
+        font_size: 24.0,
+        font_weight: FontWeight::Bold,
+        padding: Edges::symmetric(4.0, 8.0),
+        text_align: TextAlign::Right,
+        ..Style::default()
+    });
 
     Widget::container()
         .with_flex_direction(FlexDirection::Column)
@@ -996,29 +1021,27 @@ fn build_status_bar(calc: &Calculator) -> Widget {
         AngleUnit::Radians => "RAD",
     };
 
-    let mode_btn = calc_button(mode_text, Colors::BTN_MODE_BG)
-        .with_style(Style {
-            background: Colors::BTN_MODE_BG,
-            font_size: 11.0,
-            padding: Edges::symmetric(4.0, 8.0),
-            border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
-            border_radius: CornerRadii::all(4.0),
-            min_width: Some(72.0),
-            min_height: Some(24.0),
-            ..Style::default()
-        });
+    let mode_btn = calc_button(mode_text, Colors::BTN_MODE_BG).with_style(Style {
+        background: Colors::BTN_MODE_BG,
+        font_size: 11.0,
+        padding: Edges::symmetric(4.0, 8.0),
+        border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
+        border_radius: CornerRadii::all(4.0),
+        min_width: Some(72.0),
+        min_height: Some(24.0),
+        ..Style::default()
+    });
 
-    let angle_btn = calc_button(angle_text, Colors::BTN_MODE_BG)
-        .with_style(Style {
-            background: Colors::BTN_MODE_BG,
-            font_size: 11.0,
-            padding: Edges::symmetric(4.0, 8.0),
-            border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
-            border_radius: CornerRadii::all(4.0),
-            min_width: Some(42.0),
-            min_height: Some(24.0),
-            ..Style::default()
-        });
+    let angle_btn = calc_button(angle_text, Colors::BTN_MODE_BG).with_style(Style {
+        background: Colors::BTN_MODE_BG,
+        font_size: 11.0,
+        padding: Edges::symmetric(4.0, 8.0),
+        border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
+        border_radius: CornerRadii::all(4.0),
+        min_width: Some(42.0),
+        min_height: Some(24.0),
+        ..Style::default()
+    });
 
     let mut status = Widget::container()
         .with_flex_direction(FlexDirection::Row)
@@ -1031,28 +1054,26 @@ fn build_status_bar(calc: &Calculator) -> Widget {
         .with_child(angle_btn);
 
     if calc.memory_set {
-        let mem_label = Widget::label("M")
-            .with_style(Style {
-                foreground: Colors::MEMORY_INDICATOR,
-                font_size: 11.0,
-                font_weight: FontWeight::Bold,
-                padding: Edges::symmetric(4.0, 6.0),
-                ..Style::default()
-            });
+        let mem_label = Widget::label("M").with_style(Style {
+            foreground: Colors::MEMORY_INDICATOR,
+            font_size: 11.0,
+            font_weight: FontWeight::Bold,
+            padding: Edges::symmetric(4.0, 6.0),
+            ..Style::default()
+        });
         status = status.with_child(mem_label);
     }
 
-    let history_btn = calc_button("Hist", Colors::BTN_MODE_BG)
-        .with_style(Style {
-            background: Colors::BTN_MODE_BG,
-            font_size: 11.0,
-            padding: Edges::symmetric(4.0, 8.0),
-            border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
-            border_radius: CornerRadii::all(4.0),
-            min_width: Some(42.0),
-            min_height: Some(24.0),
-            ..Style::default()
-        });
+    let history_btn = calc_button("Hist", Colors::BTN_MODE_BG).with_style(Style {
+        background: Colors::BTN_MODE_BG,
+        font_size: 11.0,
+        padding: Edges::symmetric(4.0, 8.0),
+        border: Borders::all(1.0, Color::from_hex(0xBBBBBB)),
+        border_radius: CornerRadii::all(4.0),
+        min_width: Some(42.0),
+        min_height: Some(24.0),
+        ..Style::default()
+    });
 
     status.with_child(history_btn)
 }
@@ -1187,7 +1208,7 @@ fn build_standard_keypad() -> Vec<Widget> {
             padding: Edges::symmetric(1.0, 4.0),
             ..Style::default()
         })
-        .with_child(calc_button("\u{00B1}", Colors::BTN_OP_BG))  // Plus-minus sign
+        .with_child(calc_button("\u{00B1}", Colors::BTN_OP_BG)) // Plus-minus sign
         .with_child(calc_button("0", Colors::BTN_NUM_BG))
         .with_child(calc_button(".", Colors::BTN_NUM_BG))
         .with_child(calc_button("=", Colors::BTN_EQUALS_BG));
@@ -1197,14 +1218,13 @@ fn build_standard_keypad() -> Vec<Widget> {
 
 /// Build the history panel showing recent calculations.
 fn build_history_panel(calc: &Calculator) -> Widget {
-    let title = Widget::label("History")
-        .with_style(Style {
-            font_size: 13.0,
-            font_weight: FontWeight::Bold,
-            foreground: Color::from_hex(0x333333),
-            padding: Edges::symmetric(4.0, 8.0),
-            ..Style::default()
-        });
+    let title = Widget::label("History").with_style(Style {
+        font_size: 13.0,
+        font_weight: FontWeight::Bold,
+        foreground: Color::from_hex(0x333333),
+        padding: Edges::symmetric(4.0, 8.0),
+        ..Style::default()
+    });
 
     let mut panel = Widget::container()
         .with_flex_direction(FlexDirection::Column)
@@ -1222,31 +1242,28 @@ fn build_history_panel(calc: &Calculator) -> Widget {
         .with_child(title);
 
     if calc.history.is_empty() {
-        let empty_msg = Widget::label("No history yet")
-            .with_style(Style {
-                foreground: Color::GRAY,
-                font_size: 11.0,
-                padding: Edges::symmetric(4.0, 8.0),
-                ..Style::default()
-            });
+        let empty_msg = Widget::label("No history yet").with_style(Style {
+            foreground: Color::GRAY,
+            font_size: 11.0,
+            padding: Edges::symmetric(4.0, 8.0),
+            ..Style::default()
+        });
         panel = panel.with_child(empty_msg);
     } else {
         for entry in calc.history.iter().take(10) {
-            let expr_label = Widget::label(&entry.expression)
-                .with_style(Style {
-                    foreground: Colors::HISTORY_EXPR,
-                    font_size: 10.0,
-                    padding: Edges::symmetric(1.0, 8.0),
-                    ..Style::default()
-                });
-            let result_label = Widget::label(&format!("= {}", entry.result))
-                .with_style(Style {
-                    foreground: Colors::HISTORY_RESULT,
-                    font_size: 12.0,
-                    font_weight: FontWeight::SemiBold,
-                    padding: Edges::symmetric(1.0, 8.0),
-                    ..Style::default()
-                });
+            let expr_label = Widget::label(&entry.expression).with_style(Style {
+                foreground: Colors::HISTORY_EXPR,
+                font_size: 10.0,
+                padding: Edges::symmetric(1.0, 8.0),
+                ..Style::default()
+            });
+            let result_label = Widget::label(&format!("= {}", entry.result)).with_style(Style {
+                foreground: Colors::HISTORY_RESULT,
+                font_size: 12.0,
+                font_weight: FontWeight::SemiBold,
+                padding: Edges::symmetric(1.0, 8.0),
+                ..Style::default()
+            });
             let row = Widget::container()
                 .with_flex_direction(FlexDirection::Column)
                 .with_style(Style {
@@ -1367,27 +1384,72 @@ pub fn handle_key(calc: &mut Calculator, key: &KeyEvent) -> bool {
     }
 
     // Digit keys (both main keyboard and numpad produce text events).
-    if let Some(ch) = key.text {
+    // `single_char`, not every character typed: each arm below is a *command*
+    // -- press this button -- and a keystroke that produced two characters
+    // named no single button.
+    if let Some(ch) = key.single_char() {
         match ch {
-            '0'..='9' => { calc.input_digit(ch); return true; }
-            '.' => { calc.input_decimal(); return true; }
-            '+' => { calc.input_operator('+'); return true; }
-            '-' => { calc.input_operator('-'); return true; }
-            '*' => { calc.input_operator('*'); return true; }
-            '/' => { calc.input_operator('/'); return true; }
-            '%' => { calc.input_percent(); return true; }
-            '^' => { calc.input_operator('^'); return true; }
-            '(' => { calc.input_open_paren(); return true; }
-            ')' => { calc.input_close_paren(); return true; }
+            '0'..='9' => {
+                calc.input_digit(ch);
+                return true;
+            }
+            '.' => {
+                calc.input_decimal();
+                return true;
+            }
+            '+' => {
+                calc.input_operator('+');
+                return true;
+            }
+            '-' => {
+                calc.input_operator('-');
+                return true;
+            }
+            '*' => {
+                calc.input_operator('*');
+                return true;
+            }
+            '/' => {
+                calc.input_operator('/');
+                return true;
+            }
+            '%' => {
+                calc.input_percent();
+                return true;
+            }
+            '^' => {
+                calc.input_operator('^');
+                return true;
+            }
+            '(' => {
+                calc.input_open_paren();
+                return true;
+            }
+            ')' => {
+                calc.input_close_paren();
+                return true;
+            }
             _ => {}
         }
     }
 
     match key.key {
-        Key::Enter => { calc.calculate(); true }
-        Key::Escape => { calc.clear_all(); true }
-        Key::Backspace => { calc.input_backspace(); true }
-        Key::Delete => { calc.clear_entry(); true }
+        Key::Enter => {
+            calc.calculate();
+            true
+        }
+        Key::Escape => {
+            calc.clear_all();
+            true
+        }
+        Key::Backspace => {
+            calc.input_backspace();
+            true
+        }
+        Key::Delete => {
+            calc.clear_entry();
+            true
+        }
         _ => false,
     }
 }
@@ -1916,7 +1978,7 @@ mod tests {
             key: Key::Num5,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: Some('5'),
+            text: "5".to_string(),
         };
         assert!(handle_key(&mut calc, &key));
         assert_eq!(calc.expression, "5");
@@ -1930,7 +1992,7 @@ mod tests {
             key: Key::Enter,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         assert!(handle_key(&mut calc, &key));
         assert!(calc.showing_result);
@@ -1944,7 +2006,7 @@ mod tests {
             key: Key::Escape,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         assert!(handle_key(&mut calc, &key));
         assert_eq!(calc.display, "0");
@@ -1959,7 +2021,7 @@ mod tests {
             key: Key::Backspace,
             pressed: true,
             modifiers: Modifiers::NONE,
-            text: None,
+            text: String::new(),
         };
         assert!(handle_key(&mut calc, &key));
         assert_eq!(calc.expression, "4");
@@ -1972,7 +2034,7 @@ mod tests {
             key: Key::Num5,
             pressed: false,
             modifiers: Modifiers::NONE,
-            text: Some('5'),
+            text: "5".to_string(),
         };
         assert!(!handle_key(&mut calc, &key));
         assert_eq!(calc.expression, ""); // Not modified.

@@ -1,9 +1,17 @@
 # B → A — `kernel/src/ada.rs` generates six warnings when the workspace is checked on the host target
 
-**Filed:** 2026-08-25 by Lane B. **Status:** open. **Action needed:** six
-one-line warnings in `kernel/src/ada.rs`, all of them
+**Filed:** 2026-08-25 by Lane B. **Status:** ✅ **LANDED 2026-08-25** by lane A.
+**Action needed:** six one-line warnings in `kernel/src/ada.rs`, all of them
 `#[cfg(target_os = "none")]` fallout, so that
 `cargo check --workspace --target x86_64-pc-windows-gnu` is clean.
+
+> **Resolved.** The whole workspace host check is now zero warnings and zero
+> errors. The import took your `cfg` rather than an `allow` (it has exactly one
+> user, and that user is already `cfg`'d); the five `mut`s took your option (2)
+> per-function, but with `expect` rather than `allow` so a *pointless* one
+> cannot survive a later restructure in silence. Full reply, including why
+> option (1) was rejected:
+> `requests/a-b-ada-rs-is-clean-on-the-host-target-and-so-is-the-whole-workspace.md`.
 
 ## In short
 

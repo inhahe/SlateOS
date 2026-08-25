@@ -1,6 +1,6 @@
 //! Mouse and keyboard settings panel: the rendering, not the model.
 //!
-//! The types this panel edits — [`MouseConfig`], [`KeyboardRepeatConfig`] and
+//! The types this panel edits — [`MouseConfig`], [`KeyboardConfig`] and
 //! the enums around them — live in the `inputsettings` crate and are
 //! re-exported here, because the compositor and the Settings application need
 //! exactly the same values and none of the three can depend on the other two.
@@ -58,8 +58,7 @@ use guitk::style::CornerRadii;
 // `desktop::mouse_settings::MouseConfig` keeps working, and so that the panel
 // and the model still read as one thing from the outside.
 pub use inputsettings::{
-    AccelProfile, ButtonMapping, InputFile, InputSettings, KeyboardRepeatConfig, MouseConfig,
-    ScrollMode,
+    AccelProfile, ButtonMapping, InputFile, InputSettings, KeyboardConfig, MouseConfig, ScrollMode,
 };
 
 // ============================================================================

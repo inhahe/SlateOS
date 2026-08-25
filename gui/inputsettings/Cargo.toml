@@ -16,6 +16,14 @@ yamldoc = { path = "../../yamldoc" }
 # widget toolkit into a crate the compositor reads on every reload.
 settingsfile = { path = "../settingsfile" }
 
+# For the name of the default keyboard layout, and for nothing else. The
+# catalogue of layouts lives in one crate (see gui/keylayout/src/lib.rs); the
+# id of the one a fresh install uses is part of that catalogue, and spelling it
+# a second time here is how the two would come to disagree on the day the
+# default changes. `keylayout` has no dependencies of its own, so this edge
+# costs nothing to the compositor and the Settings app that read this crate.
+keylayout = { path = "../keylayout" }
+
 # `settingsfile::testing` -- reached here as `config::testing` -- for the tests that
 # run against a scratch configuration directory instead of the developer's
 # own. Cargo unifies this with the ordinary dependency when building tests,

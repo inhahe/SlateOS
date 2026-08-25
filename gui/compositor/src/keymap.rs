@@ -20,16 +20,29 @@
 //! must stay distinguishable, because they are different keys with the same low
 //! byte, and the arrows are precisely the keys a text editor cares about most.
 //!
-//! ## What this is not
+//! ## The physical table and the layout
 //!
-//! This is a US-QWERTY table, and it is the *only* table. That is a known
-//! limitation rather than a design position: the structure — one central map
-//! consulted per key event — is what a real layout system needs, but selecting
-//! between layouts, and the dead-key and compose sequences a non-English layout
-//! requires, are not built. See `known-issues.md` →
-//! `TD-ONLY-ONE-KEYBOARD-LAYOUT`.
+//! [`key_for_scancode`] is the *physical* table: it answers with what is
+//! printed on a US board, and it is the whole answer for every key that no
+//! layout moves — Enter, F5, the arrows, the keypad. The alphanumeric block
+//! *is* movable, and what each of its keys produces is a property of the
+//! user's chosen layout, which lives in the [`keylayout`] crate and is named
+//! in `input.yaml`.
+//!
+//! [`key_for_layout`] puts the two together: it asks the layout first and
+//! falls back to the physical table. The fallback is what makes a partial
+//! answer safe — a German board's `ü` key has no [`Key`] variant to name it,
+//! so it arrives as the physical `LeftBracket` with the character `ü`
+//! travelling beside it, rather than as nothing at all.
+//!
+//! ## What is still missing
+//!
+//! Dead keys (`´` then `e` → `é`) and compose sequences. Both need state
+//! carried between two key events, and this module is a pure function of one.
+//! See `known-issues.md` → `TD-ONLY-ONE-KEYBOARD-LAYOUT`, steps (3) and (4).
 
 use guitk::event::{Key, Modifiers};
+use keylayout::{KeyDef, Layout, Level};
 
 /// Translate a scan-code-set-1 code to a key name.
 ///
@@ -159,6 +172,120 @@ pub const fn key_for_scancode(scancode: u32) -> Key {
     }
 }
 
+/// The [`Key`] a character names, for the characters `Key` can name.
+///
+/// The bridge between [`keylayout`], which speaks in characters because that
+/// is what a layout is, and [`Key`], which is what clients match on. Only the
+/// ASCII repertoire `Key` actually has variants for: `ü`, `é` and `§` answer
+/// `None`, which is not a gap to be filled by inventing variants — a `Key` per
+/// character in every European layout would be a keysym table, and the
+/// character itself already travels beside the key in
+/// [`EventNotification::KeyEvent`](crate::EventNotification::KeyEvent).
+///
+/// Case is folded: a layout's *plain* face is the one that names the key, and
+/// asking for `'A'` and `'a'` to name different keys would make Shift change
+/// which key was pressed.
+#[must_use]
+pub const fn key_for_char(character: char) -> Option<Key> {
+    Some(match character.to_ascii_lowercase() {
+        'a' => Key::A,
+        'b' => Key::B,
+        'c' => Key::C,
+        'd' => Key::D,
+        'e' => Key::E,
+        'f' => Key::F,
+        'g' => Key::G,
+        'h' => Key::H,
+        'i' => Key::I,
+        'j' => Key::J,
+        'k' => Key::K,
+        'l' => Key::L,
+        'm' => Key::M,
+        'n' => Key::N,
+        'o' => Key::O,
+        'p' => Key::P,
+        'q' => Key::Q,
+        'r' => Key::R,
+        's' => Key::S,
+        't' => Key::T,
+        'u' => Key::U,
+        'v' => Key::V,
+        'w' => Key::W,
+        'x' => Key::X,
+        'y' => Key::Y,
+        'z' => Key::Z,
+        '0' => Key::Num0,
+        '1' => Key::Num1,
+        '2' => Key::Num2,
+        '3' => Key::Num3,
+        '4' => Key::Num4,
+        '5' => Key::Num5,
+        '6' => Key::Num6,
+        '7' => Key::Num7,
+        '8' => Key::Num8,
+        '9' => Key::Num9,
+        ',' => Key::Comma,
+        '.' => Key::Period,
+        ';' => Key::Semicolon,
+        ':' => Key::Colon,
+        '/' => Key::Slash,
+        '\\' => Key::Backslash,
+        '[' => Key::LeftBracket,
+        ']' => Key::RightBracket,
+        '-' => Key::Minus,
+        '=' => Key::Equals,
+        '\'' => Key::Apostrophe,
+        '`' => Key::Grave,
+        ' ' => Key::Space,
+        _ => return None,
+    })
+}
+
+/// Translate a scancode through the user's layout, falling back to the
+/// physical table.
+///
+/// Two answers, because a keystroke means two things and clients need both:
+///
+/// * the [`Key`], which is what a shortcut matches on — `Ctrl+S` must be the
+///   key that types `s`, wherever the layout put it;
+/// * the character to insert, which is what a text field appends, and which
+///   depends on Shift, Caps Lock and AltGr.
+///
+/// The character is `None` for a key that produces no text (Enter, F5) and for
+/// a level the layout leaves empty (AltGr on a US board).
+///
+/// The `Key` falls back to [`key_for_scancode`] when the layout's character
+/// has no [`Key`] to name it. That is the German `ü` case, and the fallback is
+/// deliberate: a key that arrived as nothing would be a key the user cannot
+/// bind, cannot see in a shortcut editor, and cannot use to close a dialog.
+/// The physical identity is the only meaning left once the character has no
+/// name, and it is a true one — that switch really is where `[` is on a US
+/// board.
+#[must_use]
+pub fn key_for_layout(layout: &Layout, scancode: u32, level: Level) -> (Key, Option<char>) {
+    let Some(def) = layout.key(scancode) else {
+        return (key_for_scancode(scancode), None);
+    };
+    let key = key_for_char(def.plain).unwrap_or_else(|| key_for_scancode(scancode));
+    (key, def.character(level))
+}
+
+/// Whether this keystroke resolved through the layout's AltGr level.
+///
+/// Distinct from "AltGr was held": on a US layout AltGr is held and nothing
+/// comes of it, and the keystroke is an ordinary Alt chord that a menu should
+/// still see. It is only when the layout actually *puts a character there*
+/// that the right-hand Alt key stops being a modifier and becomes a level
+/// shift — which is the difference between a German user typing `@` and a
+/// German user opening the File menu every time they write an email address.
+#[must_use]
+pub fn resolves_through_alt_gr(layout: &Layout, scancode: u32, level: Level) -> bool {
+    level.alt_gr
+        && layout
+            .key(scancode)
+            .is_some_and(|def: &KeyDef| def.altgr.is_some())
+}
+
 /// Whether a scancode names a key whose *state* is a modifier.
 ///
 /// Used to keep [`ModifierState`] in step; kept next to the table it reads so
@@ -262,6 +389,40 @@ impl ModifierState {
     #[must_use]
     pub const fn caps_lock(self) -> bool {
         self.caps_lock
+    }
+
+    /// Whether the right-hand Alt key — AltGr on a European board — is held.
+    ///
+    /// Reported separately from [`Self::modifiers`], which collapses the two
+    /// sides, because this is the one place where the sides do not mean the
+    /// same thing: on a layout that uses it, AltGr selects a third character
+    /// on the key rather than modifying a command.
+    #[must_use]
+    pub const fn alt_gr(self) -> bool {
+        self.right_alt
+    }
+
+    /// Whether the left-hand Alt key is held.
+    ///
+    /// The modifier that stays a modifier on every layout. Used to answer
+    /// "was this an Alt chord?" for a keystroke that resolved through AltGr,
+    /// where the right-hand side has already been spent as a level shift.
+    #[must_use]
+    pub const fn left_alt(self) -> bool {
+        self.left_alt
+    }
+
+    /// Which level of the key the current modifiers select.
+    ///
+    /// The bridge to [`keylayout`]: it holds the table, this holds the state,
+    /// and neither should have to know the other's shape.
+    #[must_use]
+    pub const fn level(self) -> Level {
+        Level {
+            shift: self.left_shift || self.right_shift,
+            caps: self.caps_lock,
+            alt_gr: self.right_alt,
+        }
     }
 
     /// Whether letters should currently come out capitalised.

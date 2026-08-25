@@ -1,0 +1,25 @@
+[package]
+name = "keylayout"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS keyboard layouts — the one table saying what each physical key produces"
+
+# No dependencies, deliberately.
+#
+# This crate exists because the layout tables had grown two homes — a US-only
+# scancode table in `gui/compositor/src/keymap.rs` and a second, richer set of
+# row strings in `gui/desktop/src/input_method.rs` that nothing consulted. The
+# whole point of the third home is that it is the *only* one, so both of those
+# consumers have to be able to depend on it, and they have very little in
+# common: the compositor is a display server that must not pull in a widget
+# toolkit to answer "what letter is this key", and the desktop shell is a
+# toolkit client that must not link a display server to draw a preview of the
+# keyboard. Anything this crate depended on would become a dependency of both.
+#
+# In particular it does *not* depend on `guitk` for `Key`. It speaks in
+# scancodes and characters, which is what a layout is; turning a character into
+# a `guitk::event::Key` is the compositor's job and lives there.
+[dependencies]
+
+[lints]
+workspace = true

@@ -2135,6 +2135,7 @@ dependencies = [
  "guiremote",
  "guitk",
  "inputsettings",
+ "keylayout",
  "osfont",
  "settingsfile",
 ]
@@ -2792,6 +2793,7 @@ dependencies = [
  "guiremote",
  "guitk",
  "inputsettings",
+ "keylayout",
  "oswindow",
  "tzrules",
  "yamldoc",
@@ -5555,6 +5557,7 @@ version = "0.1.0"
 name = "inputsettings"
 version = "0.1.0"
 dependencies = [
+ "keylayout",
  "settingsfile",
  "yamldoc",
 ]
@@ -6108,6 +6111,10 @@ version = "0.1.0"
 
 [[package]]
 name = "keydb-cli"
+version = "0.1.0"
+
+[[package]]
+name = "keylayout"
 version = "0.1.0"
 
 [[package]]

@@ -42,7 +42,7 @@
 //!    returns `ENOSYS` and autorepeat (`EV_KEY` value 2) is never generated.
 //!    Repeat is synthesised from key-down/up timing, which is what a Wayland
 //!    compositor does anyway, and takes its delay and interval from the user's
-//!    own `input.yaml` ([`inputsettings::KeyboardRepeatConfig`]) — settings that
+//!    own `input.yaml` ([`inputsettings::KeyboardConfig`]) — settings that
 //!    the Settings panel has been writing and nothing has been reading.
 //! 2. **Absolute pointer position.** A mouse reports *deltas*; a compositor
 //!    needs a point. [`Pointer`] integrates them, applies the user's pointer
@@ -395,11 +395,7 @@ impl Keys {
     }
 
     /// Emit whatever repeats have come due, and schedule the next.
-    fn tick(
-        &mut self,
-        now: Instant,
-        config: &inputsettings::KeyboardRepeatConfig,
-    ) -> Vec<InputEvent> {
+    fn tick(&mut self, now: Instant, config: &inputsettings::KeyboardConfig) -> Vec<InputEvent> {
         let mut out = Vec::new();
         if !config.enabled {
             return out;

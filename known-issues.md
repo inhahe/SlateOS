@@ -33283,6 +33283,36 @@ Two caveats for the compositor half:
 Details and the reasoning: `design-decisions.md` §270. Reply request filed as
 `requests/a-c-drm-setcrtc-has-landed-and-page-flip-is-now-strict.md`.
 
+**Update 2026-08-25 — the compositor now issues the mode-set, and had to.**
+Lane A's second caveat above understated the urgency: with `page_flip` strict,
+*not* mode-setting is no longer a limitation, it is a black screen on the ATI
+backend — that backend's CRTCs enumerate with `active: false, mode: None`, and a
+first flip onto a CRTC with no mode is `EINVAL`. `gui/compositor/src/present/drm.rs`
+now issues `DRM_IOCTL_MODE_SETCRTC` once per head in `make_head`, after both
+dumb buffers are registered and before the head's first flip, naming the
+connector, the head's back buffer, and the mode `best_mode` picked from the
+connector's advertised list. `uapi.rs` gained `SETCRTC` (`0xC068_64A2`) and
+`ModeCrtc` (104 bytes), pinned by the same offset and `_IOC`-size tests as every
+other struct there.
+
+The mode-set's error is deliberately discarded — the flip that follows is a
+strictly stronger check of the same property, and treating it as fatal would
+decline the connector on any kernel with no `SETCRTC` at all. Reasoning, and
+the diagnosis cost it accepts: `design-decisions.md` §552.
+
+The test double was made strict in the same change, which is the part that
+makes the tests mean anything: `FakeCard` now tracks the mode programmed on
+each CRTC, refuses a flip on a CRTC that has none or whose mode is not the
+framebuffer's size, and refuses a mode-set naming a mode the connector never
+advertised or a connector its encoders cannot route. Six new tests, including
+one that asserts the fake's own strictness so that a future permissive fake
+fails loudly rather than silently making `set_mode` deletable.
+
+**Still open:** changing to a mode other than the display's native one. Nothing
+above this module can ask for one, and two of the three backends refuse it
+anyway. This entry stays open at the same low severity, now for a smaller
+reason than when it was filed.
+
 ## BUG-DRM-PAGE-FLIP-ACCEPTS-A-MISMATCHED-FB (found by lane C 2026-08-21; lives in lane A's tree)
 
 **In short:** the kernel lets a program hand the graphics card a picture that is

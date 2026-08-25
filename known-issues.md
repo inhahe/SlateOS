@@ -78353,3 +78353,28 @@ tests those and not new scripts.
 reorder case is run against a real file in `/tmp` and the file's bytes are
 compared afterwards, because "refused" and "rewrote it anyway" are
 indistinguishable from the diagnostic alone.
+
+---
+
+## `A-KSHELL-CUT-AND-FOLD-HAVE-NO-END-OF-OPTIONS-MARKER` (lane A, 2026-08-25) — **open**
+
+**Where.** `kernel/src/kshell.rs` — `parse_cut_args`, `parse_fold_args`.
+
+**What.** Neither treats `--` as the end of the options, so a file whose name
+begins with `-` cannot be named at all. `cut -f1 -- -weird.txt` refuses the
+`--`, and without the `--` the name is parsed as options.
+
+**Why it is small but not nothing.** It is a refusal, not a wrong answer: the
+command fails loudly and nothing is misread as data. That is what keeps it out
+of the silent-guess class and off the front of the queue. But `-` is a legal
+leading character for a filename here (our paths allow every byte except `/`
+and NUL), so this is a reachable file that two commands cannot open, and the
+usual workaround — `./-weird.txt` — depends on the caller knowing to write it.
+
+**What the proper fix looks like.** The same three lines `tr` and `sed` already
+have: a `flags_done` flag set by a bare `--`, tested at the top of the word
+loop before the `starts_with('-')` test. Both parsers already have the loop
+shape for it; `cut`'s gained the bundling structure in `a24d8f5fa`.
+
+**Not a regression.** True since both commands were written. Deliberately left
+out of `a24d8f5fa` so that bundling and end-of-options stayed separate changes.

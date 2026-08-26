@@ -688,6 +688,15 @@ impl<T: Transport> ShellSession<T> {
                 // showing. Drawn earlier it would be the thing dimmed, by its
                 // own scrim, under a switcher it is supposed to be in front of.
                 self.shell.render_notifications(),
+                // Last of all. The Run box is the shell's only modal dialog:
+                // while it is up it owns the keyboard
+                // (`DesktopShell::handle_hotkey`) and every press
+                // (`handle_mouse`), and a surface that owns the input has to be
+                // the surface on top or the user is typing into something they
+                // cannot see. Nothing else is open underneath it in practice —
+                // opening it dismisses the popups — so this states the invariant
+                // rather than resolving a case that arises.
+                self.shell.render_run_dialog(),
             ]
             .into_iter()
             .flatten()
@@ -729,6 +738,7 @@ impl<T: Transport> ShellSession<T> {
             || self.shell.alt_tab_active
             || self.shell.snap.is_overlay_visible()
             || self.shell.overview.visible
+            || self.shell.run_dialog.is_visible()
     }
 
     /// Handle everything waiting, without blocking. Reports whether anything
@@ -931,6 +941,15 @@ impl<T: Transport> ShellSession<T> {
                 for request in outcome.requests {
                     self.request(request)?;
                 }
+                // The keyboard's half of `ShellAction::Launch`, and it lands in
+                // the same queue that the pointer's half does — a command typed
+                // into the Run box and a start-menu entry clicked are the same
+                // ask, and whoever drains `take_launches` should not be able to
+                // tell which one it was. `extend`, not a loop, because unlike
+                // `request` there is nothing here that can fail: the session
+                // does not start the program either, it only records that one
+                // was asked for.
+                self.launches.extend(outcome.launches);
             }
             // The background surface is screen-sized by construction, so the
             // compositor resizing it *is* the display changing size. Everything

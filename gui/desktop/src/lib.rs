@@ -177,7 +177,9 @@ pub use guiremote::control::{Layer, ShellControlAction};
 // made virtual desktops a taskbar filter.
 pub use guiremote::window_list::{WindowInfo, WindowList};
 use guitk::color::Color;
-use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use guitk::render::RenderTree;
 use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
@@ -714,6 +716,20 @@ pub struct HotkeyOutcome {
     pub consumed: bool,
     /// What to ask the compositor for, in the order the shortcut named it.
     pub requests: Vec<ShellRequest>,
+    /// Programs to start, by path, in the order the keystroke named them.
+    ///
+    /// The keyboard counterpart of [`ShellAction::Launch`], and it exists for
+    /// the same reason that variant does: the shell has no connection to the
+    /// process server and reports the intent instead of acting on it. Until the
+    /// Run box was wired up there was no keystroke that could start a program —
+    /// every shortcut in the table acts on a window that already exists — so
+    /// this half of the parallel was simply missing, and Enter in the command
+    /// box had nowhere to go.
+    ///
+    /// A `Vec` rather than an `Option` to match `requests` above: both are
+    /// unordered, independent asks, and a caller that can already loop over one
+    /// should not need a second shape for the other.
+    pub launches: Vec<String>,
 }
 
 impl HotkeyOutcome {
@@ -726,7 +742,7 @@ impl HotkeyOutcome {
     fn consumed() -> Self {
         Self {
             consumed: true,
-            requests: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -735,6 +751,7 @@ impl HotkeyOutcome {
         Self {
             consumed: true,
             requests: request.into_iter().collect(),
+            ..Self::default()
         }
     }
 
@@ -743,6 +760,16 @@ impl HotkeyOutcome {
         Self {
             consumed: true,
             requests,
+            ..Self::default()
+        }
+    }
+
+    /// The shell claimed the key and wants these programs started.
+    fn start(launches: Vec<String>) -> Self {
+        Self {
+            consumed: true,
+            launches,
+            ..Self::default()
         }
     }
 }
@@ -962,6 +989,24 @@ pub struct DesktopShell {
     /// frame after a park reports the length of *that frame*, not the length of
     /// the pause, and the pause never lands on an overlay's deadline at all.
     osd_clock_ms: u64,
+    /// The Run box: type a command, press Enter, the program starts.
+    ///
+    /// The only shell surface with a text field that is *also* a dialog — the
+    /// overview and the start menu have search boxes, but neither has an OK
+    /// button or an error line. Two consequences follow, and both are why it
+    /// could not simply be added to the popup list and left there:
+    ///
+    /// It is modal about keys, because every printable key belongs to it while
+    /// it is up. `handle_hotkey_inner` gives it every press before the binding
+    /// table sees one, exactly as it does for the overview: without that, typing
+    /// `d` into the command box would show the desktop out from under the box
+    /// being typed into.
+    ///
+    /// And Enter is a *launch*, which is the one thing the shell cannot do
+    /// itself (see [`ShellAction::Launch`]). The keyboard path had no way to
+    /// report one until this surface existed, which is what
+    /// [`HotkeyOutcome::launches`] is for.
+    pub run_dialog: run_dialog::RunDialog,
 }
 
 /// Desktop visual theme — every colour the shell paints with.
@@ -1179,6 +1224,11 @@ impl DesktopShell {
             // it is a heads-up overlay and may sit over the taskbar.
             osd: osd::OsdManager::new(screen_width as f32, screen_height as f32),
             osd_clock_ms: 0,
+            // Not positioned here. `set_position` needs a screen size, and this
+            // one would go stale the moment the display changed; the dialog is
+            // centred on the screen it is opened on instead, in
+            // `toggle_run_dialog`.
+            run_dialog: run_dialog::RunDialog::new(),
         };
         shell.sync_snap_area();
         shell
@@ -1715,6 +1765,33 @@ impl DesktopShell {
     }
 
     fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
+        // The Run box first, ahead of even the pane's scrim: it is painted over
+        // everything, so a press anywhere landed on it or on the space around
+        // it, and the dialog answers both — inside, a button; outside, dismiss.
+        // Either way the press is consumed, which is what "modal" means and is
+        // the behaviour `RunDialog::handle_mouse_event` already implements.
+        //
+        // Motion is the one exception, and it is the dialog that makes it: a
+        // move outside the box returns `Ignored` rather than dismissing, because
+        // only a press dismisses. Consuming it anyway would freeze every hover
+        // highlight on the desktop while the box is up; passing it on lets the
+        // taskbar keep lighting under the cursor, which is what a user moving
+        // the mouse *towards* the box sees.
+        if self.run_dialog.is_visible() {
+            let handled = self.run_dialog.handle_mouse_event(event);
+            // `next()` rather than a loop, and nothing is thrown away by it: one
+            // press reaches at most one button, and only the OK button executes,
+            // so the drained list holds at most one path. The keyboard path
+            // returns the whole `Vec` because `HotkeyOutcome` can carry one;
+            // `ShellAction::Launch` names a single program and cannot.
+            if let Some(path) = self.drain_run_dialog().into_iter().next() {
+                return ShellAction::Launch(path);
+            }
+            if handled == EventResult::Consumed {
+                return ShellAction::Consumed;
+            }
+        }
+
         // Before the match, and before `handle_press`'s own overview check: the
         // notification pane draws a scrim across everything above the taskbar,
         // so while it is up an event there landed on it whatever is underneath.
@@ -2461,6 +2538,17 @@ impl DesktopShell {
         // desktop out from under the overlay the user is typing into, and "e"
         // would open a file manager behind it. A modal surface with a text field
         // has to be modal about keys as well as clicks.
+        // The Run box first, because it is drawn last: `paint_chrome` puts it
+        // over every other popup, and the surface on top is the one that owns
+        // the keyboard. In practice nothing else is open underneath it —
+        // `toggle_run_dialog` dismisses the popups on the way in and a click
+        // outside the box closes the box — but the ordering here has to agree
+        // with the paint order regardless of whether the case arises, or the
+        // day it does arise is the day keys go to a window the user cannot see.
+        if self.run_dialog.is_visible() {
+            return self.key_on_run_dialog(key);
+        }
+
         if self.overview.visible {
             return self.key_on_overview(key);
         }
@@ -2694,7 +2782,97 @@ impl DesktopShell {
                 });
                 HotkeyOutcome::consumed()
             }
+            // Consumed unconditionally, like the three toggles above. Super+R is
+            // the shell's chord in either direction, and a second press that
+            // reached the focused window would type an `r` into the program the
+            // *first* press was used to start.
+            DesktopAction::ToggleRunDialog => {
+                self.toggle_run_dialog();
+                HotkeyOutcome::consumed()
+            }
         }
+    }
+
+    /// Open the Run box, or close it if it is already open.
+    ///
+    /// Centred on each opening rather than once at construction: the display can
+    /// change size under a shell that is already running
+    /// ([`ShellSession::resize_display`](session::ShellSession)), and a position
+    /// computed at startup would put the box off the edge of the new screen. The
+    /// same pull-on-use reasoning as [`sync_osd_screen`](Self::sync_osd_screen),
+    /// for the same reason: `screen_width` and `screen_height` are public fields
+    /// that anything may assign.
+    pub fn toggle_run_dialog(&mut self) {
+        if self.run_dialog.is_visible() {
+            self.run_dialog.hide();
+            return;
+        }
+        // The other popups close, because the Run box is modal about keys: with
+        // the start menu still open behind it, the menu would be showing a
+        // search field that can no longer be typed into.
+        self.dismiss_popups();
+        self.run_dialog.show();
+        self.centre_run_dialog();
+    }
+
+    /// Put the Run box in the middle of the display.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "screen dimensions are far inside f32's exact-integer range"
+    )]
+    fn centre_run_dialog(&mut self) {
+        self.run_dialog
+            .centre_on(self.screen_width as f32, self.screen_height as f32);
+    }
+
+    /// One press while the Run box is up.
+    ///
+    /// Modal on the same terms as [`key_on_overview`](Self::key_on_overview),
+    /// and for the same reason — the box has a text field, so a press that
+    /// reached the binding table would run a shortcut instead of typing a
+    /// character. The chord that opened it still reaches the table, so that
+    /// Super+R closes what Super+R opened.
+    fn key_on_run_dialog(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        if DesktopAction::for_chord(key.modifiers, key.key) == Some(DesktopAction::ToggleRunDialog)
+        {
+            return self.run_desktop_action(DesktopAction::ToggleRunDialog);
+        }
+        // Result deliberately discarded, exactly as the notification pane's is:
+        // a press the dialog had no meaning for is still not the desktop's while
+        // the dialog is up.
+        let _ = self.run_dialog.handle_key_event(key);
+        HotkeyOutcome::start(self.drain_run_dialog())
+    }
+
+    /// Answer whatever the Run box has asked for since it was last emptied, and
+    /// report the programs it wants started.
+    ///
+    /// `Cancel` and `Closed` need no answer — the dialog has already hidden
+    /// itself by the time it reports them — but they must still be drained, or
+    /// the buffer grows by one on every dismissal. That is the whole reason this
+    /// is called on *every* press rather than only on the ones that could have
+    /// executed something.
+    ///
+    /// [`Browse`](run_dialog::RunDialogEvent::Browse) is dropped, deliberately
+    /// and visibly. It asks for a file *picker* — a chooser whose answer goes
+    /// back into the command box — not for a file manager to be started, and the
+    /// shell cannot yet put one up: `guitk::dialog::FileDialog` exists and would
+    /// serve, but it has to be fed directory entries, and this crate performs no
+    /// filesystem reads at all. Starting the file explorer instead would be the
+    /// tempting substitute and is the wrong one: the user would get a window
+    /// they did not ask for and an empty command box. See `known-issues.md`
+    /// `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
+    fn drain_run_dialog(&mut self) -> Vec<String> {
+        self.run_dialog
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                run_dialog::RunDialogEvent::Execute(command) => Some(command),
+                run_dialog::RunDialogEvent::Browse
+                | run_dialog::RunDialogEvent::Cancel
+                | run_dialog::RunDialogEvent::Closed => None,
+            })
+            .collect()
     }
 
     /// `action` aimed at whatever is focused, or `None` if nothing is.
@@ -2771,6 +2949,14 @@ enum DesktopAction {
     Volume(VolumeStep),
     /// Silence output, or let it back.
     ToggleMute,
+    /// Open (or close) the Run box.
+    ///
+    /// Distinct from [`ToggleStartMenu`](Self::ToggleStartMenu), which also has
+    /// a search field: the start menu searches a list of *installed* programs
+    /// and can only offer what is in it. The Run box takes a path and arguments,
+    /// which is what you reach for when the thing you want to start is not on
+    /// any menu.
+    ToggleRunDialog,
 }
 
 /// Which way a volume key moves the level.
@@ -2837,6 +3023,12 @@ impl DesktopAction {
             // Super+N, as in "notifications" — the chord Windows uses for the
             // same panel, and free here: none of the bindings above claim `N`.
             (false, false, false, true, Key::N) => Some(Self::ToggleNotifications),
+            // Super+R, as in "run" — the chord Windows uses for the same box,
+            // and free here. The module's own doc comment offers "Ctrl+R or
+            // Super+R"; Ctrl+R is not taken by the desktop but *is* taken by
+            // roughly every application that has a reload command, and a global
+            // grab on it would break all of them.
+            (false, false, false, true, Key::R) => Some(Self::ToggleRunDialog),
             (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),
             (false, true, false, true, Key::Right) => Some(Self::NextDesktop),
             // Bare Escape. The shell had no binding for it at all, so the only
@@ -2915,6 +3107,7 @@ const GLOBAL_CHORDS: &[(Key, Modifiers)] = &[
     (Key::Z, Modifiers::super_key()),
     (Key::Tab, Modifiers::super_key()),
     (Key::N, Modifiers::super_key()),
+    (Key::R, Modifiers::super_key()),
     (
         Key::Left,
         Modifiers {
@@ -3874,6 +4067,7 @@ impl DesktopShell {
             || self.notifications.pane_state().is_visible()
             || self.snap.is_overlay_visible()
             || self.overview.visible
+            || self.run_dialog.is_visible()
     }
 
     /// Close whatever popup is open. Returns whether anything was.
@@ -3898,6 +4092,19 @@ impl DesktopShell {
         // opened it, and a user who does not remember what that was is left
         // looking at a screen they cannot dismiss.
         self.overview.hide();
+        // Guarded, unlike every other line here. `RunDialog::hide` posts a
+        // `Closed` event unconditionally, and this function is called on every
+        // Escape and on every opening of the box itself — so an unguarded call
+        // would push one event per dismissal into a queue that, with the box
+        // shut, nothing drains.
+        if self.run_dialog.is_visible() {
+            self.run_dialog.hide();
+            // Emptied straight away for the same reason. Nothing here can have
+            // produced an `Execute`: the box was closed without being asked to
+            // run anything, so the drained list is discarded rather than
+            // returned, and this function keeps its `bool`.
+            drop(self.drain_run_dialog());
+        }
         any
     }
 
@@ -3992,6 +4199,25 @@ impl DesktopShell {
         let mut tree = RenderTree::new();
         tree.commands
             .extend(self.osd.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
+    }
+
+    /// Render the Run box, if it is open.
+    ///
+    /// On the popup surface rather than the overlay one, unlike
+    /// [`render_osd`](Self::render_osd): the box exists to be typed into and
+    /// clicked on, and the overlay surface is the one that declines the mouse
+    /// (`design-decisions.md` 566).
+    #[must_use]
+    pub fn render_run_dialog(&self) -> Option<RenderTree> {
+        if !self.run_dialog.is_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(
+            self.run_dialog
+                .render(&Palette::from_settings(&self.appearance)),
+        );
         Some(tree)
     }
 
@@ -6664,5 +6890,522 @@ mod overview_wiring_tests {
         s.toggle_notifications();
         let (x, y) = pane_label_at(&s, "Three new messages");
         assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+    }
+}
+
+/// The Run box, wired to the shell.
+///
+/// `run_dialog.rs` was 2,000 lines with its own text field, its own history and
+/// its own autocomplete, and nothing anywhere constructed a `RunDialog`: the
+/// shell had no chord that opened it, no surface that drew it, and no way at
+/// all to hear that a command had been confirmed. These are the tests that
+/// would have failed while the two were strangers.
+///
+/// The box's *own* behaviour — editing, history, resolution, the autocomplete
+/// list — is tested in `run_dialog.rs` beside the code that implements it. What
+/// is tested here is only the seam: that a chord opens it, that while it is up
+/// it owns the keyboard, that a confirmed command comes back out as a launch,
+/// and that dismissing it leaves nothing behind.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp
+)]
+mod run_box_wiring_tests {
+    use super::{
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        ShellAction, notif_pane,
+    };
+    use guitk::render::RenderCommand;
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    fn chord(k: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// Super+R — the chord that opens and closes the Run box.
+    fn super_r() -> KeyEvent {
+        chord(
+            Key::R,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    const LETTERS: [Key; 26] = [
+        Key::A,
+        Key::B,
+        Key::C,
+        Key::D,
+        Key::E,
+        Key::F,
+        Key::G,
+        Key::H,
+        Key::I,
+        Key::J,
+        Key::K,
+        Key::L,
+        Key::M,
+        Key::N,
+        Key::O,
+        Key::P,
+        Key::Q,
+        Key::R,
+        Key::S,
+        Key::T,
+        Key::U,
+        Key::V,
+        Key::W,
+        Key::X,
+        Key::Y,
+        Key::Z,
+    ];
+
+    /// The keystroke a real keyboard sends for a lower-case character.
+    ///
+    /// The identity is carried as well as the text, rather than typing
+    /// everything through `Key::Unknown`: the dialog's key handler dispatches on
+    /// `event.key` for eight of its arms, and a test that never sent a real
+    /// letter could not tell a shell that had accidentally bound one from a
+    /// shell that had not.
+    fn typed(ch: char) -> KeyEvent {
+        let index = (ch as u32).wrapping_sub('a' as u32) as usize;
+        let key = match ch {
+            '/' => Key::Slash,
+            _ => *LETTERS
+                .get(index)
+                .unwrap_or_else(|| panic!("no key for {ch:?}; the helper only knows a-z and /")),
+        };
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: ch.to_string(),
+        }
+    }
+
+    /// Type a command into the open box, one keystroke at a time.
+    ///
+    /// Through `handle_hotkey`, never through `run_dialog.handle_key_event`
+    /// directly: the claim under test is that the shell *routes* a printable
+    /// key to the box, and a test that reached past the shell would still pass
+    /// on a shell that routed it to the binding table instead.
+    fn type_command(s: &mut DesktopShell, command: &str) -> Vec<String> {
+        let mut launches = Vec::new();
+        for ch in command.chars() {
+            launches.extend(s.handle_hotkey(&typed(ch)).launches);
+        }
+        launches
+    }
+
+    fn press(s: &mut DesktopShell, x: f32, y: f32) -> ShellAction {
+        s.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// The middle of the box's own background rectangle, in screen coordinates.
+    ///
+    /// Read out of the render rather than computed from the layout constants,
+    /// which are private to `run_dialog` and should stay that way: a test that
+    /// knew the box was 450×180 would be a test that agreed with a stale copy
+    /// of the number rather than with the box that was drawn.
+    fn box_rect(s: &DesktopShell) -> (f32, f32, f32, f32) {
+        let tree = s.render_run_dialog().expect("the box is not open");
+        tree.commands
+            .iter()
+            .find_map(|cmd| match *cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some((x, y, width, height)),
+                _ => None,
+            })
+            .expect("the open box drew no background")
+    }
+
+    /// The middle of the button carrying `label`.
+    ///
+    /// A button is a `FillRect` followed by the `Text` that names it, so the
+    /// label is what identifies the rectangle: the geometry is
+    /// `render_button`'s business, and this finds whichever rectangle it in
+    /// fact drew.
+    fn button_centre(s: &DesktopShell, label: &str) -> (f32, f32) {
+        let tree = s.render_run_dialog().expect("the box is not open");
+        let mut last_rect = None;
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => last_rect = Some((*x, *y, *width, *height)),
+                RenderCommand::Text { text, .. } if text == label => {
+                    let (x, y, w, h) = last_rect.expect("a label with no button under it");
+                    return (x + w / 2.0, y + h / 2.0);
+                }
+                _ => {}
+            }
+        }
+        panic!("the box drew no {label:?} button");
+    }
+
+    // ---- opening and closing ----
+
+    #[test]
+    fn super_r_opens_the_box_and_a_second_press_closes_it() {
+        let mut s = shell();
+        assert!(!s.run_dialog.is_visible(), "the box starts out of the way");
+
+        let outcome = s.handle_hotkey(&super_r());
+        assert!(
+            outcome.consumed,
+            "the chord was passed to the focused window"
+        );
+        assert!(s.run_dialog.is_visible(), "Super+R did not open the box");
+
+        // The second press has to reach the binding table rather than the box,
+        // which is the one-way-toggle exception the overview and the pane also
+        // carry — otherwise the chord that opens it cannot close it.
+        let outcome = s.handle_hotkey(&super_r());
+        assert!(outcome.consumed);
+        assert!(
+            !s.run_dialog.is_visible(),
+            "Super+R would not close the box"
+        );
+        assert!(
+            outcome.launches.is_empty(),
+            "closing the box started a program"
+        );
+    }
+
+    #[test]
+    fn an_open_box_is_drawn_and_a_closed_one_is_not() {
+        let mut s = shell();
+        assert!(s.render_run_dialog().is_none());
+        s.toggle_run_dialog();
+        let tree = s.render_run_dialog().expect("an open box draws");
+        assert!(!tree.commands.is_empty(), "an open box drew no commands");
+    }
+
+    #[test]
+    fn the_box_is_centred_on_the_screen_it_opens_on() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let (x, y, w, h) = box_rect(&s);
+        assert_eq!(
+            (x + w / 2.0, y + h / 2.0),
+            (960.0, 540.0),
+            "the box opened off-centre"
+        );
+    }
+
+    /// A box positioned once at construction would be centred on the display the
+    /// session started with and nowhere near the middle of the one the user is
+    /// looking at after a mode change.
+    #[test]
+    fn the_box_follows_a_display_that_changed_size() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        s.toggle_run_dialog();
+
+        s.screen_width = 1280;
+        s.screen_height = 720;
+        s.toggle_run_dialog();
+        let (x, y, w, h) = box_rect(&s);
+        assert_eq!(
+            (x + w / 2.0, y + h / 2.0),
+            (640.0, 360.0),
+            "the box was centred on the display the shell booted with"
+        );
+    }
+
+    /// A screen smaller than the box is not a real display, but it is a
+    /// plausible transient during a mode change, and the box's *left* edge is
+    /// the half that carries the title — so it must not be the half pushed off.
+    #[test]
+    fn a_screen_narrower_than_the_box_still_shows_its_top_left() {
+        let mut s = shell();
+        s.screen_width = 100;
+        s.screen_height = 40;
+        s.toggle_run_dialog();
+        let (x, y, _, _) = box_rect(&s);
+        assert_eq!((x, y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn opening_the_box_puts_the_other_popups_away() {
+        // Modal about keys, so anything else with a text field in it is a
+        // surface the user can see and cannot type into.
+        let mut s = shell();
+        s.start_menu_open = true;
+        s.toggle_notifications();
+        s.toggle_run_dialog();
+        assert!(
+            !s.start_menu_open,
+            "the start menu stayed open under the box"
+        );
+        assert_eq!(
+            s.notifications.pane_state(),
+            notif_pane::PaneState::Hidden,
+            "the notification pane stayed open under the box"
+        );
+    }
+
+    // ---- modal about keys ----
+
+    #[test]
+    fn a_shortcut_pressed_into_the_box_does_not_act_on_the_desktop() {
+        // Super+D shows the desktop. Pressed into the box it must do nothing at
+        // all: minimising every window to type a command is not what the user
+        // asked for, and the box would be left floating over a bare desktop.
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let outcome = s.handle_hotkey(&chord(
+            Key::D,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert!(outcome.consumed);
+        assert!(
+            outcome.requests.is_empty(),
+            "a shortcut fired through the open box"
+        );
+        assert!(s.run_dialog.is_visible(), "a stray chord closed the box");
+    }
+
+    /// The media keys are bound modifier-agnostically — a key with one meaning
+    /// and no other job is not a chord — which makes them the binding most
+    /// likely to fire through a modal surface.
+    #[test]
+    fn a_media_key_pressed_into_the_box_does_not_move_the_volume() {
+        let mut s = shell();
+        let level = s.notifications.volume();
+        s.toggle_run_dialog();
+        let outcome = s.handle_hotkey(&chord(Key::VolumeUp, Modifiers::NONE));
+        assert!(outcome.consumed);
+        assert_eq!(
+            s.notifications.volume(),
+            level,
+            "the volume moved while the user was typing a command"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_box_and_starts_nothing() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        let outcome = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
+        assert!(outcome.consumed);
+        assert!(!s.run_dialog.is_visible(), "Escape left the box up");
+        assert!(
+            outcome.launches.is_empty(),
+            "cancelling started the command anyway"
+        );
+    }
+
+    /// The box empties itself on every opening, so a command abandoned with
+    /// Escape must not be sitting in the field the next time it is opened —
+    /// where the next Enter would start it.
+    #[test]
+    fn an_abandoned_command_is_not_still_there_next_time() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        let _ = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
+
+        s.toggle_run_dialog();
+        let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert!(
+            outcome.launches.is_empty(),
+            "Enter on an empty box started the command typed before it"
+        );
+        assert!(
+            s.run_dialog.is_visible(),
+            "Enter on an empty box closed it, so there is no way to type"
+        );
+    }
+
+    // ---- a confirmed command is a launch ----
+
+    #[test]
+    fn a_command_typed_and_confirmed_comes_back_out_as_a_launch() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        assert!(
+            type_command(&mut s, "terminal").is_empty(),
+            "a keystroke that only typed a letter started a program"
+        );
+
+        let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert_eq!(outcome.launches, ["terminal"]);
+        assert!(
+            !s.run_dialog.is_visible(),
+            "the box stayed up after starting the command"
+        );
+    }
+
+    /// The launch channel carries what the box *resolved*, not whatever was in
+    /// the field: a shell that forwarded the raw text would ask the process
+    /// server to start things that do not exist, and the user would get no
+    /// error at all — the box would simply close.
+    #[test]
+    fn a_command_the_box_cannot_resolve_is_not_a_launch() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "no/such");
+        let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert!(
+            outcome.launches.is_empty(),
+            "an unresolvable name was started"
+        );
+        assert!(
+            s.run_dialog.is_visible(),
+            "the box closed on a name it had rejected, so its error is unreadable"
+        );
+    }
+
+    #[test]
+    fn the_ok_button_starts_the_command_the_way_enter_does() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        let (x, y) = button_centre(&s, "OK");
+        assert_eq!(
+            press(&mut s, x, y),
+            ShellAction::Launch("terminal".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_cancel_button_closes_the_box_without_starting_anything() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        let (x, y) = button_centre(&s, "Cancel");
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert!(!s.run_dialog.is_visible());
+    }
+
+    /// Browse asks for a file *picker*, and the shell has none — it does no
+    /// filesystem reads at all. What it must not do is answer with something
+    /// else: starting a file manager would give the user a window they did not
+    /// ask for and a command box still empty. See known-issues.md →
+    /// `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
+    #[test]
+    fn the_browse_button_starts_nothing_and_leaves_the_box_up() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let (x, y) = button_centre(&s, "Browse...");
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert!(
+            s.run_dialog.is_visible(),
+            "a button that does nothing yet also threw the typed command away"
+        );
+    }
+
+    // ---- the mouse ----
+
+    #[test]
+    fn a_press_outside_the_box_closes_it() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        assert_eq!(press(&mut s, 4.0, 4.0), ShellAction::Consumed);
+        assert!(!s.run_dialog.is_visible(), "a click on the desktop missed");
+    }
+
+    /// The one event the box does not claim. Consuming motion as well would
+    /// freeze every hover highlight on the desktop for as long as the box is
+    /// up — including the taskbar's, which is nowhere near it.
+    #[test]
+    fn motion_outside_the_box_is_passed_on() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let action = s.handle_mouse(&MouseEvent {
+            x: 4.0,
+            y: 4.0,
+            kind: MouseEventKind::Move,
+        });
+        assert_ne!(
+            action,
+            ShellAction::Consumed,
+            "the box swallowed a move it was nowhere near"
+        );
+        assert!(s.run_dialog.is_visible(), "a hover dismissed the box");
+    }
+
+    // ---- nothing is left behind ----
+
+    #[test]
+    fn the_boxs_event_buffer_does_not_grow() {
+        // It is an unbounded `Vec` that only `drain_events` empties, and
+        // `hide()` posts a `Closed` into it unconditionally — so every one of
+        // the four ways the box can be dismissed has to be drained, not just
+        // the one that produces an `Execute`.
+        let mut s = shell();
+        for _ in 0..5 {
+            let _ = s.handle_hotkey(&super_r());
+            let _ = s.handle_hotkey(&super_r());
+
+            let _ = s.handle_hotkey(&super_r());
+            let _ = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
+
+            let _ = s.handle_hotkey(&super_r());
+            let _ = press(&mut s, 4.0, 4.0);
+
+            let _ = s.handle_hotkey(&super_r());
+            s.dismiss_popups();
+        }
+        assert!(
+            s.run_dialog.drain_events().is_empty(),
+            "the shell left events in the box"
+        );
+    }
+
+    /// `dismiss_popups` runs on the way *into* the box as well as on Escape, so
+    /// an unguarded `hide()` there would post a `Closed` for a box that was
+    /// never open — one per opening, for the life of the session.
+    #[test]
+    fn dismissing_popups_that_are_not_open_reports_nothing() {
+        let mut s = shell();
+        for _ in 0..5 {
+            s.dismiss_popups();
+        }
+        assert!(s.run_dialog.drain_events().is_empty());
+    }
+
+    #[test]
+    fn an_open_box_counts_as_a_popup() {
+        // `any_popup_open` is what decides whether Escape is worth grabbing
+        // from every other window on the desktop. A box missing from it is a
+        // box that cannot be cancelled from the keyboard in a live session.
+        let mut s = shell();
+        assert!(!s.any_popup_open());
+        s.toggle_run_dialog();
+        assert!(s.any_popup_open(), "the open box is not a popup");
     }
 }

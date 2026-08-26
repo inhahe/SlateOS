@@ -460,6 +460,35 @@ impl RunDialog {
         self.dialog_y = y;
     }
 
+    /// Put the dialog in the middle of a screen of this size.
+    ///
+    /// Here rather than at the caller so that `DIALOG_WIDTH` and
+    /// `DIALOG_HEIGHT` can stay private: a caller that had to be told the box's
+    /// size in order to centre it would be a caller that could be told a stale
+    /// one, and the layout constants are this module's business.
+    ///
+    /// Clamped at zero on both axes. A screen narrower than the box is not a
+    /// real display, but it is a plausible *test* and a plausible transient
+    /// during a mode change, and the arithmetic would otherwise place the box's
+    /// left edge off-screen — where the title bar cannot be reached and the
+    /// buttons are the half that gets cut.
+    pub fn centre_on(&mut self, screen_width: f32, screen_height: f32) {
+        self.dialog_x = ((screen_width - DIALOG_WIDTH) / 2.0).max(0.0);
+        self.dialog_y = ((screen_height - DIALOG_HEIGHT) / 2.0).max(0.0);
+    }
+
+    /// Where the dialog's top-left corner currently is.
+    ///
+    /// The read half of [`set_position`](Self::set_position). Exists because
+    /// [`centre_on`](Self::centre_on) is a *calculation* the caller does not do
+    /// and therefore cannot check: without this, the only way to tell a centred
+    /// box from one left at the constructor's placeholder is to render both and
+    /// compare pictures.
+    #[must_use]
+    pub fn position(&self) -> (f32, f32) {
+        (self.dialog_x, self.dialog_y)
+    }
+
     /// Whether the dialog is currently visible.
     pub fn is_visible(&self) -> bool {
         self.visible

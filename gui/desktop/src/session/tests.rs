@@ -2046,3 +2046,138 @@ fn the_overlay_surface_follows_the_display() {
         "the display shrank and the overlay surface stayed at the old size"
     );
 }
+
+// ---- the Run box ----
+
+/// Super+R — the chord that opens and closes the Run box.
+fn super_r() -> guitk::event::Event {
+    chord(
+        Key::R,
+        Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        },
+    )
+}
+
+/// One printable keystroke, carried the way a real keyboard sends it.
+fn typed(k: Key, ch: char) -> guitk::event::Event {
+    guitk::event::Event::Key(KeyEvent {
+        key: k,
+        pressed: true,
+        modifiers: Modifiers::NONE,
+        text: ch.to_string(),
+    })
+}
+
+/// The Run box is drawn on the popup surface, not the overlay one, and the
+/// popup surface is unmapped whenever nothing is on it: a box that did not
+/// count as "something on it" would be a box the compositor was never asked to
+/// show, so Super+R would appear to do nothing at all.
+#[test]
+fn opening_the_run_box_maps_the_surface_it_is_drawn_on() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let popups = session.popups().window();
+    let before = desktop.borrow().seen.len();
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_r())]);
+    session.pump().expect("pump");
+    assert!(session.shell().run_dialog.is_visible());
+
+    assert!(
+        desktop.borrow().seen[before..].iter().any(|r| r.body
+            == RequestBody::SetVisible {
+                window: popups,
+                visible: true
+            }),
+        "the box was opened and had nothing to be drawn on"
+    );
+    let drawn = desktop
+        .borrow_mut()
+        .drawn()
+        .into_iter()
+        .rfind(|(w, _)| *w == popups)
+        .expect("the popup surface was mapped and never painted");
+    assert!(
+        drawn.1 > 2,
+        "the popup surface got only its translation wrapper — a mapped, blank \
+         sheet where the box should be"
+    );
+}
+
+/// The keyboard's half of `ShellAction::Launch`. Everything up to the last step
+/// worked without this: the box opened, took the text, resolved it and reported
+/// an `Execute` — which the shell then had no channel to hand back, so the
+/// command was resolved and dropped.
+#[test]
+fn a_command_confirmed_with_enter_reaches_the_launcher() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_r())]);
+    session.pump().expect("pump");
+
+    for (k, ch) in [
+        (Key::T, 't'),
+        (Key::E, 'e'),
+        (Key::R, 'r'),
+        (Key::M, 'm'),
+        (Key::I, 'i'),
+        (Key::N, 'n'),
+        (Key::A, 'a'),
+        (Key::L, 'l'),
+    ] {
+        desktop
+            .borrow_mut()
+            .send_input(&[InputEvent::new(panel, typed(k, ch))]);
+    }
+    session.pump().expect("pump");
+    assert!(
+        session.take_launches().is_empty(),
+        "typing a command started something before it was confirmed"
+    );
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, key(Key::Enter))]);
+    session.pump().expect("pump");
+
+    assert_eq!(session.take_launches(), ["terminal"]);
+    assert!(
+        !session.shell().run_dialog.is_visible(),
+        "the box stayed up after starting the command"
+    );
+    assert!(
+        session.take_launches().is_empty(),
+        "taking the launches twice handed out the same command twice"
+    );
+}
+
+/// A press outside the box is the ordinary way to give up on it, and it arrives
+/// on the popup surface — the same surface the box itself is on — so the
+/// session has to translate it and hand it to the shell before anything else
+/// gets a look at it.
+#[test]
+fn a_press_beside_the_box_closes_it_without_starting_anything() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_r())]);
+    session.pump().expect("pump");
+
+    press_at(&desktop, session.popups(), 8.0, 8.0);
+    session.pump().expect("pump");
+
+    assert!(
+        !session.shell().run_dialog.is_visible(),
+        "a click on the desktop left the box up"
+    );
+    assert!(session.take_launches().is_empty());
+}

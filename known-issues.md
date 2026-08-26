@@ -84205,3 +84205,60 @@ unguarded, and a correctly-typed `groupmgr delete 0` still destroys `root`. See
 `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
 
 **Not a regression.** True since `delete_group` was written.
+
+---
+
+### TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO — 2026-08-26 — OPEN
+
+**In short:** The Run box (Super+R — type a program's name, press Enter, it
+starts) has three buttons: OK, Cancel and **Browse...**. Browse is supposed to
+open a file chooser so you can *point* at the program instead of typing its
+name, and put the path you picked into the box. Pressing it currently does
+nothing at all. The box stays open with whatever you had typed still in it, and
+no chooser appears.
+
+**Where:** `gui/desktop/src/run_dialog.rs` posts `RunDialogEvent::Browse` when
+the button is pressed; `gui/desktop/src/lib.rs` `DesktopShell::drain_run_dialog`
+drops it on the floor. The dropping is deliberate and is commented as such at
+the match arm, and `run_box_wiring_tests::the_browse_button_starts_nothing_and_
+leaves_the_box_up` pins the current behaviour so it cannot change by accident.
+
+**Why it is dropped rather than answered.** The obvious answer is wrong. There
+is a file manager in the tree (`/usr/bin/explorer`), and starting it is one
+line — but Browse does not ask for a file manager. It asks for a *file picker*:
+a modal chooser whose answer comes **back into the command box**. Starting the
+file manager would give the user a window they did not ask for, in front of the
+Run box, and leave the command box exactly as empty as before. That is worse
+than the button doing nothing, because it looks like it worked.
+
+**What is actually missing.** `guitk::dialog::FileDialog` exists, is tested, and
+would serve — but it does not read the filesystem itself. It has to be *fed* a
+`Vec<DirEntry>` by whoever embeds it, and `gui/desktop` performs no filesystem
+reads anywhere: the shell reads its own YAML config through `appearance` and
+nothing else. So wiring Browse means giving the desktop shell a directory-listing
+path it does not currently have, which is a larger change than the button.
+
+**The proper fix.**
+
+1. Give the shell a directory read — one function returning
+   `Vec<guitk::dialog::DirEntry>` for a path, propagating the I/O error rather
+   than swallowing it, with paths handled as bytes (see
+   `TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`,
+   which this would be the second caller to hit).
+2. Host a `FileDialog` on the popup surface, above the Run box, the way the Run
+   box is itself hosted above the other popups (`paint_chrome`'s parts array).
+   It is modal about keys for the same reason and by the same mechanism.
+3. On `DialogAction::Selected`, put the chosen path into the Run box's text
+   field — which needs a `set_text`/`replace_text` on `RunDialog`; today the
+   field can only be written by keystroke.
+4. On cancel, return to the Run box with its text untouched. The text surviving
+   the round trip is the whole point: a Browse that cleared the box would be a
+   Browse nobody uses twice.
+
+**Severity while open:** low, and visible rather than silent. The button is one
+of three ways to do a thing the other two do; a user who presses it sees nothing
+happen and types the path instead. Nothing is lost or corrupted.
+
+**Not a regression.** `run_dialog.rs` had no caller of any kind until 2026-08-26
+— the button has never worked, because until this commit the box had no way to
+be opened.

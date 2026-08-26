@@ -1630,7 +1630,7 @@ Gated for programs by `power.reload` (§1.5), which is deliberately not implied 
 #### Other Desktop Features
 - [ ] Notification pane (per-app disable option)
 - [ ] Widget support
-- [ ] Ctrl+R run dialog (completion dropdown, recent commands)
+- [x] Ctrl+R run dialog (completion dropdown, recent commands) — bound to **Super+R**, not Ctrl+R: a desktop shortcut is a global grab and Ctrl+R is taken by every application with a reload command (design-decisions.md §568). Wired to the shell 2026-08-26. Browse button still inert — `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
 - [ ] Context menu extension API:
   - [ ] Programs must request capability to add items
   - [ ] Items load lazily (don't load program just to show menu)

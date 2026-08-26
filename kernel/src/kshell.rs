@@ -18670,6 +18670,116 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("diskquota remove zzrung89 user");
     }
 
+    serial_println!(
+        "  kshell::self_test 90: in an id space of security principals the guessed zero was the \
+         superuser"
+    );
+    // Every previous batch could describe the guess as "the wrong object" and
+    // leave it there, because the id spaces were CPUs, regions, quota names —
+    // spaces where `0` is an arbitrary member. `groupmgr`'s ids are *principals*,
+    // and `0` is `root` on the group axis and `root` on the user axis both. So
+    // the guess did not select an arbitrary wrong object; it selected the most
+    // privileged one available, and `delete_group` has no guard.
+    {
+        // `list` runs `init_defaults`, which is idempotent.
+        let _ = capture_command("groupmgr list");
+
+        let out = capture_command("groupmgr delete 1O");
+        assert_output_contains(
+            "an unreadable group id is named rather than read as GID 0",
+            &out,
+            b"`1O' is not a group id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable group id errors");
+
+        // The assertion that pins the severity rather than merely the wording:
+        // the root group is still here. Before the fix this command destroyed
+        // it and reported success.
+        let out = capture_command("groupmgr get 0");
+        assert_output_contains(
+            "and the root group still exists afterwards",
+            &out,
+            b"Group: root",
+        );
+        assert_eq!(last_exit(), 0, "`groupmgr get 0' succeeds");
+
+        // `adduser` and `rmuser` guessed `0` on *both* axes, so one typo asked
+        // to add root to a group, or someone to the root group, and two typos
+        // asked for both at once.
+        let out = capture_command("groupmgr adduser 1O 500");
+        assert_output_contains(
+            "an unreadable group id in `adduser' is named as a group id",
+            &out,
+            b"`1O' is not a group id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable group id in `adduser' errors");
+
+        let out = capture_command("groupmgr adduser 100 5O0");
+        assert_output_contains(
+            "and an unreadable user id beside it is named as a user id, not conflated with it",
+            &out,
+            b"`5O0' is not a user id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable user id errors");
+
+        let out = capture_command("groupmgr rmuser 1O 500");
+        assert_output_contains(
+            "the removing counterpart refuses on the same terms",
+            &out,
+            b"`1O' is not a group id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable group id in `rmuser' errors");
+
+        let out = capture_command("groupmgr user 5O0");
+        assert_output_contains(
+            "and a query is refused rather than answered about root",
+            &out,
+            b"`5O0' is not a user id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable user id in `user' errors");
+
+        // `create` guessed all three of its operands: a GID, a name, and a type.
+        let out = capture_command("groupmgr create 1O00 devs");
+        assert_output_contains(
+            "an unreadable gid is refused rather than silently becoming 2000",
+            &out,
+            b"`1O00' is not a group id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable gid in `create' errors");
+
+        let out = capture_command("groupmgr create 4242");
+        assert_output_contains(
+            "an omitted name is reported, not invented as `newgroup'",
+            &out,
+            b"groupmgr: create: missing group name",
+        );
+        assert_eq!(last_exit(), 1, "a missing group name errors");
+
+        // The guess that pointed the wrong way: `_ => GroupType::User` answered
+        // a request for a *system* group with the least privileged of the three.
+        let out = capture_command("groupmgr create 4242 zzrung90 sistem");
+        assert_output_contains(
+            "and a mistyped type is refused rather than downgraded to `user'",
+            &out,
+            b"`sistem' is not a group type",
+        );
+        assert_eq!(last_exit(), 1, "an unrecognised group type errors");
+
+        // The control: the same line without the typo creates the group, and an
+        // omitted `[type]` still keeps its documented default (§607) — so the
+        // refusal above cannot be passing by having broken the optional operand.
+        let out = capture_command("groupmgr create 4242 zzrung90");
+        assert_output_contains(
+            "while an omitted type keeps its documented default and the group is created",
+            &out,
+            b"Created group 'zzrung90'",
+        );
+        assert_eq!(last_exit(), 0, "`groupmgr create' succeeds");
+
+        // Leave the table as this rung found it, so rung order cannot matter.
+        let _ = capture_command("groupmgr delete 4242");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -41194,7 +41304,7 @@ fn cmd_useracct(args: &str) {
                 // complains about `abc' rather than about a toggle that is
                 // perfectly fine -- a diagnostic naming the wrong operand sends
                 // the reader to the wrong end of their command line.
-                let Some(uid) = required_num::<u64>(parts, 1, "useracct", "autologin", "uid")
+                let Some(uid) = required_num::<u64>(parts, 1, "useracct", "autologin", "a UID")
                 else {
                     return;
                 };
@@ -92195,12 +92305,42 @@ fn cmd_groupmgr(args: &str) {
         }
         "create" => {
             groupmgr::init_defaults();
-            let gid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(2000);
-            let name = parts.get(2).copied().unwrap_or("newgroup");
-            let gtype = parse_groupmgr_type(parts.get(3).copied().unwrap_or("user"));
+            let Some(gid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "group id") else {
+                return;
+            };
+            // The name was guessed too, and a guessed *name* is not a lesser
+            // version of a guessed number: `groupmgr create 1000` produced a
+            // real group called `newgroup`, which is indistinguishable from one
+            // somebody meant to call that. The numeric sites are what the ledger
+            // counts, but leaving this one would be patching around the same
+            // defect in the same arm.
+            let Some(name) = parts.get(2).copied() else {
+                shell_println!("groupmgr: create: missing group name");
+                set_exit(1);
+                return;
+            };
+            // `[type]` is genuinely optional and `user` is its documented
+            // default (§607), so an absent word still means `User`. A word that
+            // is *present* and unrecognised no longer does: the old
+            // `_ => GroupType::User` fallback meant `groupmgr create 1000 devs
+            // sistem` created a plain user group while the operator believed
+            // they had asked for a system one. That silent downgrade is the
+            // enum form of the same guess, and it points the wrong way — a
+            // request for more privilege quietly answered with less.
+            let gtype = match parts.get(3) {
+                None => groupmgr::GroupType::User,
+                Some(word) => {
+                    let Some(t) = parse_groupmgr_type(word) else {
+                        shell_println!(
+                            "groupmgr: create: `{}' is not a group type (system, user, service)",
+                            word
+                        );
+                        set_exit(1);
+                        return;
+                    };
+                    t
+                }
+            };
             match groupmgr::create_group(gid, name, gtype, "User-created group") {
                 Ok(()) => shell_println!("Created group '{}' (GID {})", name, gid),
                 Err(e) => {
@@ -92210,10 +92350,24 @@ fn cmd_groupmgr(args: &str) {
             }
         }
         "delete" | "rm" => {
-            let gid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // The sharpest guess in the whole burn-down. GID 0 is `root`
+            // (`groupmgr::init_defaults`), and `delete_group` is a bare
+            // `retain` with no guard on `GroupType::System` — so `groupmgr
+            // delete 1O` destroyed the root group and printed `Deleted group
+            // 0.` as a success.
+            //
+            // In an id space of *security principals*, `0` is not a neutral
+            // wrong answer the way "the 0th CPU" or "region 0" is. It is the
+            // superuser. Every unwrap_or(0) in this function names root or the
+            // root group, on whichever axis it sits.
+            //
+            // Refusing the word does not make the operation safe: a correctly
+            // typed `groupmgr delete 0` still destroys `root`. That is a
+            // separate defect, filed as
+            // `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING`.
+            let Some(gid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "group id") else {
+                return;
+            };
             match groupmgr::delete_group(gid) {
                 Ok(()) => shell_println!("Deleted group {}.", gid),
                 Err(e) => {
@@ -92223,14 +92377,17 @@ fn cmd_groupmgr(args: &str) {
             }
         }
         "adduser" => {
-            let gid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let uid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Both axes guessed `0`, so a single mistyped character asked to add
+            // *root* to a group, or to add someone to the *root group*, and a
+            // mistype in both asked for both at once. The success line then
+            // reported the guess as though it were the request: `Added UID 0 to
+            // GID 0.`
+            let Some(gid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "group id") else {
+                return;
+            };
+            let Some(uid) = required_num::<u32>(&parts, 2, "groupmgr", sub, "a user id") else {
+                return;
+            };
             match groupmgr::add_member(gid, uid) {
                 Ok(()) => shell_println!("Added UID {} to GID {}.", uid, gid),
                 Err(e) => {
@@ -92240,14 +92397,17 @@ fn cmd_groupmgr(args: &str) {
             }
         }
         "rmuser" => {
-            let gid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let uid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // The removing counterpart, and the one that loses privilege rather
+            // than granting it: `groupmgr rmuser 1O 500` asked to remove UID 0
+            // from the root group. Both directions are reachable from one typo,
+            // which is the point — the guess does not err toward safety in
+            // either arm, because it was never reasoning about safety.
+            let Some(gid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "group id") else {
+                return;
+            };
+            let Some(uid) = required_num::<u32>(&parts, 2, "groupmgr", sub, "a user id") else {
+                return;
+            };
             match groupmgr::remove_member(gid, uid) {
                 Ok(()) => shell_println!("Removed UID {} from GID {}.", uid, gid),
                 Err(e) => {
@@ -92258,10 +92418,14 @@ fn cmd_groupmgr(args: &str) {
         }
         "user" => {
             groupmgr::init_defaults();
-            let uid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // A query rather than a mutation, so nothing is destroyed — but the
+            // answer is still about the wrong person, and about root
+            // specifically. `groupmgr user 5O0` printed root's group list under
+            // a heading naming UID 0, which reads as a correct answer to a
+            // question nobody asked.
+            let Some(uid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "a user id") else {
+                return;
+            };
             let groups = groupmgr::groups_for_user(uid);
             shell_println!("UID {} belongs to {} group(s):", uid, groups.len());
             for g in &groups {
@@ -92291,13 +92455,22 @@ fn cmd_groupmgr(args: &str) {
     }
 }
 
-fn parse_groupmgr_type(s: &str) -> crate::fs::groupmgr::GroupType {
+/// Parse a group type, or `None` if the word names no type.
+///
+/// Returns `Option` rather than falling back to [`GroupType::User`]. The
+/// fallback made every unrecognised word mean "user", which is not a neutral
+/// reading: `system` and `service` are the two that carry meaning, so a typo in
+/// either was silently answered with the least of the three. The caller decides
+/// what an *absent* word means — for `groupmgr create` that is `User`, which is
+/// the documented default — and that is a different question from what an
+/// unreadable one means.
+fn parse_groupmgr_type(s: &str) -> Option<crate::fs::groupmgr::GroupType> {
     use crate::fs::groupmgr::GroupType;
     match s {
-        "system" | "sys" => GroupType::System,
-        "user" => GroupType::User,
-        "service" | "svc" => GroupType::Service,
-        _ => GroupType::User,
+        "system" | "sys" => Some(GroupType::System),
+        "user" => Some(GroupType::User),
+        "service" | "svc" => Some(GroupType::Service),
+        _ => None,
     }
 }
 

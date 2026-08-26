@@ -322,6 +322,20 @@ impl<T> Frame<T> {
         self.hits.push((target, visible));
     }
 
+    /// Forget every target recorded so far, keeping the drawing.
+    ///
+    /// This is what makes a modal dialog modal. A modal draws a scrim over the
+    /// whole window and its controls on top; the window behind is still
+    /// *painted*, so its commands must stay, but none of it can still be
+    /// clicked. Without this the toolbar behind the dialog keeps working — the
+    /// dialog only looks in front.
+    ///
+    /// Call it immediately before drawing the modal, so the modal's own targets
+    /// are recorded after it and survive.
+    pub fn discard_hits(&mut self) {
+        self.hits.clear();
+    }
+
     /// The topmost target at `(x, y)` in window coordinates, or `None` for
     /// bare background.
     ///
@@ -395,6 +409,23 @@ impl<T> Frame<T> {
             self.translations.len()
         );
         self.tree
+    }
+}
+
+/// Lets a frame stand in for a `RenderTree` wherever a drawing helper takes
+/// `&mut impl Extend<RenderCommand>` — [`crate::text::Paragraph::draw`] is the
+/// one that forced this.
+///
+/// It routes each command through [`Frame::push`] rather than extending the
+/// inner tree directly, because a helper that emits a `PushClip` must still
+/// move the frame's clip stack. Extending the tree behind the frame's back
+/// would leave the two disagreeing about what is clipped, which is exactly the
+/// class of bug this type exists to prevent.
+impl<T> Extend<RenderCommand> for Frame<T> {
+    fn extend<I: IntoIterator<Item = RenderCommand>>(&mut self, iter: I) {
+        for command in iter {
+            self.push(command);
+        }
     }
 }
 
@@ -637,6 +668,55 @@ mod tests {
         assert!(frame.is_balanced());
         let tree = frame.into_tree();
         assert_eq!(tree.commands.len(), 4);
+    }
+
+    #[test]
+    fn discarding_hits_keeps_the_drawing_and_drops_the_clicks() {
+        let mut frame: Frame<T> = Frame::new(100.0, 100.0);
+        frame.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            color: crate::Color::WHITE,
+            corner_radii: crate::style::CornerRadii::ZERO,
+        });
+        frame.hit(T::A, Rect::new(0.0, 0.0, 50.0, 50.0));
+        // A modal goes up: the window behind is still painted, none of it is
+        // still clickable.
+        frame.discard_hits();
+        frame.hit(T::B, Rect::new(20.0, 20.0, 20.0, 20.0));
+
+        assert_eq!(frame.commands().len(), 1, "the drawing must survive");
+        assert_eq!(frame.hit_test(5.0, 5.0), None, "covered by the modal");
+        assert_eq!(frame.hit_test(25.0, 25.0), Some(T::B));
+    }
+
+    #[test]
+    fn extending_a_frame_moves_its_stacks_like_pushing_would() {
+        // A drawing helper handed `&mut frame` emits its commands through
+        // `Extend`. If that bypassed `push`, a helper that clipped would leave
+        // the frame's stack untouched and every later `hit` would be recorded
+        // unclipped — the netmanager bug, reintroduced through a side door.
+        let mut frame: Frame<T> = Frame::new(200.0, 200.0);
+        frame.extend([
+            RenderCommand::PushTranslate { dx: 0.0, dy: 100.0 },
+            RenderCommand::PushClip {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 20.0,
+            },
+        ]);
+        frame.hit(T::A, Rect::new(0.0, 0.0, 200.0, 50.0));
+        frame.extend([RenderCommand::PopClip, RenderCommand::PopTranslate]);
+
+        assert!(frame.is_balanced());
+        assert_eq!(
+            frame.hits()[0].1,
+            Rect::new(0.0, 100.0, 200.0, 20.0),
+            "the clip and the translation both came in through `extend`"
+        );
     }
 
     #[test]

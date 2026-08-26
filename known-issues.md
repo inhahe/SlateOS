@@ -78121,9 +78121,9 @@ leak (2 cases); the Cygwin-isms osh had transcribed — `pwd -W`, `shopt igncr`,
 the `paste-from-clipboard` bind name — plus the two `help test` paragraphs bash
 5.2 has and osh did not; `compgen` ordering; the POSIX `time` path; child CPU
 accounting on unix (`TD-OILS10`); and `-O`/`-G`, which asked an invented root
-identity and therefore answered *backwards* on every file (commit `60a63c49f`).
-Remaining groups: job-death announcements osh makes and bash does not
-(`job-death-notice`, `jobs-listing`, `kill-dispositions`); shebang handling
+identity and therefore answered *backwards* on every file (commit `60a63c49f`);
+and the job-death group described just below (3 cases, commit `eb23cc57e`).
+Remaining groups: shebang handling
 (`shebang-interpreter-line`, `exec-shebangless-script`,
 `a-command-path-that-will-not-run…`); and ten one-off defects (`enable -f`, an
 arithmetic subscript expanded in place, a debug trap's `PIPESTATUS`, `nounset`
@@ -78137,6 +78137,78 @@ a copy, a symlink or an explicit `--bash` cannot fool it the way a path
 heuristic would — and prints a warning above the first case when the answer is
 not a Linux triple. A wrong reference announces itself as a green run, so it now
 gets announced somewhere the reader will still be paying attention.
+
+### The job-death group: one wrong belief, three cases, and a doc comment that stated the inverse — 2026-08-25 — **FIXED** (`eb23cc57e`)
+
+**In short:** when a background job is killed by a signal, osh kept the job in
+the table so a later `jobs` could report `Terminated`. bash does not: it drops
+the job the moment it hears of the death, whether or not it prints anything
+about it, so a script's `jobs` listing can never name a signal at all. Three
+corpus cases had been written around osh's version and certified green against
+MSYS bash.
+
+**The belief, quoted from the code it was written into:**
+
+> Those three, and only those, are the signal names a `jobs` listing can ever
+> show.
+
+— `signal_announced_when_reaped`'s doc comment, of `INT`, `TERM` and `PIPE`.
+This is the exact inverse of what bash does. Those three are the signals bash
+prints *no message* for (`DONT_REPORT_SIGTERM`, `DONT_REPORT_SIGPIPE`, and an
+interrupt being the user's own doing), and the exemption is from the **message
+and nothing else**. The shell still notices the death, and noticing is what
+takes the row.
+
+**Measured, bash 5.2.21, non-interactive:**
+
+| line | result |
+|---|---|
+| `sleep 5 & kill -TERM %1; sleep 0.02; jobs` | prints **nothing**, 8 runs out of 8 |
+| `sleep 5 & kill -TERM %1; jobs` | prints `Running`, 8 runs out of 8 |
+| `… ; wait %1` after the first | `no such job`; `%1` is free for the next job |
+
+So there is no listing that words the death: the sweep either has not happened
+yet (`Running`) or has (the row is gone). A non-interactive listing has exactly
+two states, `Done` and `Exit N`. `Interrupt` is doubly impossible — an
+asynchronous job is handed `SIGINT` already ignored.
+
+**Interactive bash is a different shell here** and *does* print `[1]+
+Terminated sleep 5`. That is presumably where the belief came from, since it is
+what one sees by hand at a prompt. The corpus runs non-interactively, so the
+non-interactive answer is the one osh owes.
+
+**The fix** splits the two questions that had been one.
+`announce_signalled_job` → `notice_signalled_job`: it prints only when bash
+prints, and returns `true` either way, so the caller drops the row
+unconditionally. `signal_announced_when_reaped` keeps its body and loses its
+claim about listings. What genuinely *does* suppress the notice is unrelated and
+unchanged: a command substitution, whose announcement would land on a stderr
+that has nothing to do with the value being collected, so bash holds the death
+for the substitution's own `jobs`.
+
+**Three unit tests changed with it**, and one of them is worth recording
+because it nearly produced a second wrong fix.
+`jobs_marks_the_current_and_previous_job` used `kill %1` to make a finished job
+to hang the `-` marker on; with the fix there is no row left to mark, so it now
+gates on a file instead:
+
+```sh
+until [ -e gate ]; do sleep 0.01; done & sleep 30 &
+: > gate
+```
+
+The listing then read `until [ -e gate ]; do` / `    sleep 0.01;` / `done` —
+which looked like a second osh defect, since the source text is one line. It is
+not: **both shells re-print a compound command in the `jobs` command column from
+the parse tree**, four-space indented and broken over lines. Verified against
+bash 5.2.21 for `until`, `for`, `while` and `if`. The expectation was wrong and
+osh was right; the note is in the test.
+
+**The general lesson, which is the same one the migration keeps teaching.** A
+differential harness with a wrong reference does not fail — it agrees. This
+belief was not parked in a waiver or flagged in `todo.txt`; it was implemented,
+documented in prose, asserted by three unit tests and three corpus cases, and
+green throughout. The only thing that found it was changing the reference.
 
 ---
 

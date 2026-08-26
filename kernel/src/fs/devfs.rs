@@ -1208,11 +1208,20 @@ pub fn self_test() -> KernelResult<()> {
         // A device may not shadow a fixed node.  Registering one called `null`
         // is the worst case available: `/dev/null` silently becoming a disk
         // means every program that discards output starts overwriting sectors.
+        //
+        // Asserted as "the disk did not win" rather than as a specific type,
+        // because the fixed node's own type belongs to DEV_NODES and not to
+        // this test.  The first version demanded `CharDevice` and failed on a
+        // correct tree: `null` is declared with `DevNode::file`, so it stats as
+        // `File`.  Pinning the neighbouring value would have made this rung
+        // fail again the day `null` is retyped -- which it arguably should be,
+        // see A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES.
         crate::blkdev::register("null", Box::new(crate::blkdev::RamBlockDevice::new(8)));
         let shadowed = fs.stat(Path::new("/null")).map(|m| m.entry_type);
         let nul_len = fs.read_file(Path::new("/null")).map(|v| v.len());
         crate::blkdev::unregister("null");
-        if shadowed != Ok(EntryType::CharDevice) || nul_len != Ok(0) {
+        let fixed_won = matches!(shadowed, Ok(t) if t != EntryType::BlockDevice);
+        if !fixed_won || nul_len != Ok(0) {
             serial_println!(
                 "[devfs]   FAIL: a block device named `null` shadowed /dev/null \
                  (type={shadowed:?}, read={nul_len:?})"

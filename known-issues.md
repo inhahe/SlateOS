@@ -87920,3 +87920,76 @@ files (the same search that produced the `netdev` and `irqstat` entries above);
 
 **Not a regression.** True since the module was written — it has never had a
 registrant.
+
+---
+
+## `A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES` (lane A, 2026-08-26)
+
+**In short:** `stat("/dev/null")` reports `S_IFREG` — a regular file — instead
+of `S_IFCHR`, a character device. Eleven of the twelve nodes at the devfs root
+are declared with `DevNode::file`, so `ls -l /dev/null` shows `-rw-rw-rw-`
+rather than `crw-rw-rw-`, and the standard shell test `[ -c /dev/null ]` is
+false. The devices *work* — reads and writes do the right thing — so nothing
+fails loudly; only the type is wrong.
+
+**The affected nodes**, all in `DEV_NODES` at `kernel/src/fs/devfs.rs:215`:
+
+| node | declared | should be |
+|---|---|---|
+| `null`, `zero`, `full`, `random`, `urandom` | `file` | `chr` |
+| `console`, `tty` | `file` | `chr` |
+| `stdin`, `stdout`, `stderr` | `file` | `chr` (Linux makes these symlinks to `/proc/self/fd/N`; `chr` is the closer of the two available answers) |
+| `kmsg` | `file` | `chr` |
+| `uptime` | `file` | **stays `file`** — it is a text file, and the only one here that genuinely is one |
+
+The nested nodes are already correct: `input/event0`, `input/event1`,
+`dri/card0`, `dri/renderD128` and the three `snd/*` are `DevNode::chr`.
+
+**The tree already knows why this matters** — it just never applied the
+reasoning at the root. `syscall/linux.rs:19852`, on the `CharDevice` arm of
+`meta_mode_bits`:
+
+```
+// The point of the variant: libinput refuses a node that is not
+// S_ISCHR, and libdrm and ALSA make the same check.
+```
+
+That is exactly the argument for `null` and `tty` as well; the variant was
+added for the device *directories* and the root nodes were left as they were.
+
+**Why it is worth fixing rather than shrugging at.** `[ -c /dev/null ]` and
+`[ -c /dev/tty ]` are ordinary idioms in configure scripts and shell libraries,
+and a program that special-cases a character device to avoid seeking, buffering
+or truncating will take the regular-file path on all eleven. The failure is
+quiet in the same way the others in this file are: the node behaves correctly
+when used, so only code that *asks what it is* gets a wrong answer, and that
+code usually responds by silently choosing a different strategy rather than by
+erroring.
+
+**Care needed — this is not a one-word change.** `EntryType` is load-bearing in
+routing, not only in `stat`:
+
+1. `Vfs::read_at_routed` page-caches only `EntryType::File` with a stable
+   inode. Retyping these to `CharDevice` removes them from the page cache —
+   which is *correct* (a device must not be cached; that is the property that
+   makes block nodes safe for verify-after-write) but it is a behaviour change
+   on the read path and needs checking, not assuming.
+2. `container.rs` merges `CharDevice | BlockDevice` into an arm that refuses
+   `read_file`, so an archive walk does not descend into a device. `/dev/null`
+   moving into that arm changes what a recursive walk does with it.
+3. `kshell`'s `ls -F`, `file`, and long-listing arms all switch on the type, as
+   does `d_type` in `getdents64`.
+4. `devfs`'s own self-tests assert entry types in several places.
+
+**The proper fix:** change the eleven declarations, leave `uptime` alone, then
+walk each of the four sites above and confirm the new routing is the intended
+one — in particular re-run the devfs and container self-tests, which is where a
+wrong answer will show up first.
+
+**How it was found.** A block-device self-test asserted that registering a disk
+named `null` could not shadow `/dev/null`, and expected the survivor to stat as
+`CharDevice`. It stats as `File`. The anti-shadowing property held; the
+expectation was wrong, and it was wrong because the node is mistyped. That rung
+now asserts "the disk did not win" instead of pinning the neighbouring value.
+
+**Not a regression.** True since devfs was written.

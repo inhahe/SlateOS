@@ -237,6 +237,32 @@ pub fn set_schedule_times(
     })
 }
 
+/// Interpolate `elapsed`/`total` of the way from `from` Kelvin to `to` Kelvin.
+///
+/// Exists because the previous inline arithmetic was `day_k - ((day_k -
+/// night_k) * elapsed / total)`, which assumes the day temperature is the
+/// warmer number. Nothing enforces that: [`set_day_night`] clamps both values
+/// into 1000..=10000 independently and never compares them, so `colortemp
+/// daynight 1 3000 6500` is accepted. On the next `update_for_time` that landed
+/// in a transition window, `day_k - night_k` underflowed — and because the
+/// kernel builds with `overflow-checks` on, that was not a wrong colour but a
+/// **kernel panic reachable from the shell**.
+///
+/// Subtracting only ever in the direction the values actually run removes the
+/// assumption instead of documenting it. `elapsed` is clamped to `total` so a
+/// caller cannot extrapolate past `to`, and `total` is floored at 1 so a zero
+/// transition window divides safely (`set_schedule_times` clamps
+/// `transition_min` to at least 1, but this function does not depend on that).
+fn lerp_kelvin(from: u32, to: u32, elapsed: u32, total: u32) -> u32 {
+    let total = total.max(1);
+    let elapsed = elapsed.min(total);
+    if to >= from {
+        from + (to - from) * elapsed / total
+    } else {
+        from - (from - to) * elapsed / total
+    }
+}
+
 /// Update color temperature based on current time (minutes from midnight).
 pub fn update_for_time(profile_id: u32, current_min: u16) -> KernelResult<u32> {
     with_state(|state| {
@@ -268,14 +294,24 @@ pub fn update_for_time(profile_id: u32, current_min: u16) -> KernelResult<u32> {
                 night_k
             } else if current >= sunset && current < sunset + trans {
                 // Evening transition: day → night.
-                let elapsed = (current - sunset) as u32;
-                let total = trans as u32;
-                day_k - ((day_k - night_k) * elapsed / total.max(1))
+                lerp_kelvin(
+                    day_k,
+                    night_k,
+                    u32::from(current - sunset),
+                    u32::from(trans),
+                )
             } else {
                 // Morning transition: night → day.
-                let elapsed = (current - sunrise) as u32;
-                let total = trans as u32;
-                night_k + ((day_k - night_k) * elapsed / total.max(1))
+                //
+                // `current >= sunrise` holds here: reaching this arm requires
+                // `!(current >= sunset + trans || current < sunrise)`, whose
+                // second half gives it directly.
+                lerp_kelvin(
+                    night_k,
+                    day_k,
+                    u32::from(current - sunrise),
+                    u32::from(trans),
+                )
             }
         } else {
             // Wrapped: sunset before midnight, sunrise after.
@@ -396,14 +432,14 @@ fn self_test_inner() {
     assert_eq!(profiles.len(), 1);
     assert_eq!(profiles[0].mode, TempMode::Off);
     assert_eq!(profiles[0].current_kelvin, 6500);
-    crate::serial_println!("  [1/8] default profile: OK");
+    crate::serial_println!("  [1/9] default profile: OK");
 
     // 2: Set manual temperature.
     set_temperature(1, 4000).expect("temp");
     let p = get_profile(1).expect("get");
     assert_eq!(p.current_kelvin, 4000);
     assert_eq!(p.mode, TempMode::Manual);
-    crate::serial_println!("  [2/8] manual temp: OK");
+    crate::serial_println!("  [2/9] manual temp: OK");
 
     // 3: Set scheduled mode.
     set_mode(1, TempMode::Scheduled).expect("mode");
@@ -411,18 +447,18 @@ fn self_test_inner() {
     let p = get_profile(1).expect("get2");
     assert_eq!(p.day_kelvin, 6500);
     assert_eq!(p.night_kelvin, 3400);
-    crate::serial_println!("  [3/8] scheduled mode: OK");
+    crate::serial_println!("  [3/9] scheduled mode: OK");
 
     // 4: Update for daytime → day temperature.
     set_schedule_times(1, 1200, 420, 30).expect("times");
     let k = update_for_time(1, 720).expect("update_day"); // noon
     assert_eq!(k, 6500);
-    crate::serial_println!("  [4/8] daytime update: OK");
+    crate::serial_println!("  [4/9] daytime update: OK");
 
     // 5: Update for nighttime → night temperature.
     let k = update_for_time(1, 100).expect("update_night"); // 1:40 AM
     assert_eq!(k, 3400);
-    crate::serial_println!("  [5/8] nighttime update: OK");
+    crate::serial_println!("  [5/9] nighttime update: OK");
 
     // 6: Clamp out-of-range temperature.
     set_temperature(1, 500).expect("low");
@@ -431,13 +467,13 @@ fn self_test_inner() {
     set_temperature(1, 20000).expect("high");
     let p = get_profile(1).expect("get4");
     assert_eq!(p.current_kelvin, 10000);
-    crate::serial_println!("  [6/8] clamp kelvin: OK");
+    crate::serial_println!("  [6/9] clamp kelvin: OK");
 
     // 7: Create and set active.
     let id2 = create_profile("Night Owl").expect("create");
     set_active(id2).expect("active");
     assert_eq!(active_profile_id(), id2);
-    crate::serial_println!("  [7/8] create/active: OK");
+    crate::serial_println!("  [7/9] create/active: OK");
 
     // 8: Stats.
     let (count, active, adj, ops) = stats();
@@ -445,7 +481,30 @@ fn self_test_inner() {
     assert_eq!(active, id2);
     assert!(adj >= 4);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/9] stats: OK");
 
-    crate::serial_println!("colortemp::self_test() — all 8 tests passed");
+    // 9: An inverted day/night pair must interpolate, not underflow.
+    //
+    // Nothing requires the day temperature to be the warmer number:
+    // `set_day_night` clamps its two arguments independently into
+    // 1000..=10000 and never compares them, so `colortemp daynight 1 3000
+    // 6500` is a configuration a user can reach. The transition arms used to
+    // compute `day_k - night_k` directly, so the next `update_for_time` that
+    // landed in a transition window did not return a wrong colour — it
+    // underflowed, and with `overflow-checks` on that is a kernel panic
+    // reachable from the shell. Regression test for the `lerp_kelvin` rewrite.
+    set_mode(1, TempMode::Scheduled).expect("mode9");
+    set_day_night(1, 3000, 6500).expect("daynight9");
+    set_schedule_times(1, 1200, 420, 30).expect("times9");
+    // 15 minutes into a 30-minute evening transition: exactly halfway from
+    // 3000K to 6500K. This is the call that used to panic.
+    let k = update_for_time(1, 1215).expect("update9_evening");
+    assert_eq!(k, 4750, "evening transition, halfway from 3000K to 6500K");
+    // The morning transition runs the same pair the other way, and so takes
+    // the other branch of `lerp_kelvin`.
+    let k = update_for_time(1, 435).expect("update9_morning");
+    assert_eq!(k, 4750, "morning transition, halfway from 6500K to 3000K");
+    crate::serial_println!("  [9/9] inverted day/night interpolates: OK");
+
+    crate::serial_println!("colortemp::self_test() — all 9 tests passed");
 }

@@ -81109,7 +81109,101 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **487 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **481 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-fifth batch): `cmd_cgmem` (6, plus
+> three uncounted) cleared — 487 → 481 across 218 → 217 functions. Pinned by
+> `kshell::self_test` rung 93.
+>
+> **In short:** `cgmem` tracks how much memory each cgroup (a named group of
+> processes with a memory ceiling) is using. Bare `cgmem create` invented a
+> cgroup called `cg0` with a ceiling nobody chose; a mistyped page count was
+> read as 1; a mistyped `rss`/`cache` was read as `rss`; and a mistyped cgroup
+> id was answered "no such cgroup".
+>
+> **Three shapes in one command, each a refinement of an earlier row rather
+> than a repeat of it.**
+>
+> **1. The ids are the familiar misdiagnosis.** `init_defaults` sets `next_id:
+> 1` and seeds no cgroups, and `create` only ever hands out `next_id`, so
+> cgroup 0 is unreachable. The guessed `0` was therefore *safe* — it removed
+> nothing, charged nothing — and dishonest in the same breath: `cgmem remove
+> 1O` answered `remove error: NotFound`, which says the cgroup does not exist.
+> It does. The word naming it could not be read, and the reader is sent to
+> check `list` instead of at what they typed.
+>
+> **2. The `create` limit is a *policy ceiling*, and this is the new row.**
+> Every earlier guessed number was a selector, a measurement, an address, or a
+> quantity. This one is the *threshold everything else is compared against*:
+> `record_charge` tests `usage_pages > limit_pages` on every call. `cgmem
+> create web 5OOOO` built a cgroup limited to 100000 pages — double the
+> intended 50000 — and echoed it back as though chosen.
+>
+> What makes it worth its own row is *why it does not currently hurt*. The
+> comparison's only output is `high_events`, which no command prints and no
+> accessor exposes (`A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`).
+> So today a guessed ceiling has no observable consequence at all — it is not
+> merely undetected but **unfalsifiable**, masked by a second defect. And
+> fixing that second defect, which is the right thing to do, is precisely what
+> would make this guess bite. That is a trap worth naming: *a burn-down that
+> looks harmless because something else is broken is not harmless, it is
+> queued.*
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **policy ceiling masked by a second defect** (`cmd_cgmem create`) | nothing, until the thing that reads the ceiling is fixed | you don't — and fixing an unrelated bug is what makes it start |
+>
+> **3. The page counts refine the `ipcns` accumulator row to *partially*
+> reversible.** The previous batch established that a guess `+=`'d into a total
+> with no inverse is uncorrectable in place. `cgmem` has an inverse —
+> `record_uncharge` puts `usage_pages` back — so at first glance it is the mild
+> version. It is not. `c.charges` and `state.total_charges` are `+= 1` with
+> nothing that ever decrements them, so **the correction is itself recorded**.
+> Un-charging a guessed 1 leaves `charges=1 uncharges=1` where the truth was
+> `charges=1 uncharges=0`. The quantity can be repaired; the record of what
+> happened to it cannot. That is arguably worse than `ipcns`, where at least
+> the wrongness stays in one number instead of being laundered into a
+> plausible-looking history.
+>
+> **The uncounted third operand is the one that hides best.** `[rss|cache]` was
+> read as `parts.get(3).copied().unwrap_or("rss") == "cache"` — `toggle_word`'s
+> `matches!` defect in a two-word alphabet. The expression has no way to say "I
+> did not understand you", so every spelling that was not exactly `cache`
+> evaluated to `rss`, and `cgmem charge 1 500 cach` charged 500 pages to the
+> wrong bucket and reported success. Two things make that worse than a mis-set
+> flag:
+>
+> * **It is invisible in the aggregate.** `record_charge` adds the pages to
+>   `usage_pages` either way, so `cgmem list`'s headline number is correct and
+>   only the breakdown beside it is wrong — and the breakdown is exactly what
+>   distinguishes memory that can be reclaimed under pressure (`cache`) from
+>   memory that cannot (`rss`). Nothing in the output looks off.
+> * **On the un-charge side it breaks an invariant.** `record_uncharge` floors
+>   the aggregate and the bucket with two independent `saturating_sub` calls,
+>   so un-charging `cache` from a cgroup holding none deflates `usage_pages`
+>   and nothing else. See
+>   `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` —
+>   an independent defect, reachable by typing `cache` correctly, and not
+>   cleared by fixing the parse.
+>
+> The refusal lives in a new `memory_kind_arg` helper next to `cmd_cgmem`
+> rather than in the generic operand family, because it is specific to this
+> command's alphabet and grouping it with `toggle_arg`/`required_num` would
+> imply otherwise.
+>
+> **Rung 93 also pins the other half of §607.** The kind is bracketed
+> `[rss|cache]` in the usage line, so an *absent* word keeps its documented
+> default: `cgmem charge 1 7` still charges rss, and the rung asserts it lands
+> in `rss=7 cache=0`. Only an unreadable word is refused. Two uncounted guesses
+> in one command that differ in exactly this way — `create`'s `<name>` is
+> refused when absent, `charge`'s `[rss|cache]` is not — is the clearest
+> illustration so far of why §607 keys on the brackets rather than on whether a
+> default exists in the code.
+>
+> **Found while reading for evidence:** two independent `cgmem` defects, both
+> logged separately and both still open —
+> `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` and
+> `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`.
 
 > **Burn-down log.** 2026-08-26 (twenty-fourth batch): `cmd_colortemp` (7,
 > plus two uncounted) cleared — 494 → 487 across 219 → 218 functions. Pinned
@@ -84629,7 +84723,7 @@ values are all in range; it is the *stored* pair that has to be inverted.
 
 ---
 
-## `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` (lane A, 2026-08-26) — **open**
+## `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` (lane A, 2026-08-26) — **fixed** the same day
 
 **In short:** `cgmem` tracks a cgroup's memory as one total (`usage`) plus a
 breakdown of that same memory into two buckets (`rss` for a program's own
@@ -84683,8 +84777,8 @@ was read with `unwrap_or("rss") == "cache"` and so turned any misspelling into
 `rss`. But the sequence above types `cache` correctly; the defect is in the
 subsystem, not in the parse, and clearing the parse does not clear it.
 
-**Proper fix.** Un-charge no more from the aggregate than actually left the
-bucket, so the two can never diverge:
+**Fixed.** Un-charge no more from the aggregate than actually left the bucket,
+so the two can never diverge:
 
 ```rust
 let actual = if is_cache {
@@ -84699,20 +84793,32 @@ let actual = if is_cache {
 c.usage_pages -= actual;   // == rss + cache still holds
 ```
 
-An alternative — refusing an un-charge larger than the bucket with
-`KernelError::InvalidArgument` — is worth considering *instead*, since silently
-un-charging less than asked is itself a kind of guess. The reason to prefer the
-clamp is that `record_uncharge` has exactly one honest job, keeping the two
-views of the same memory consistent, and a caller who over-un-charges has
-already lost track; refusing leaves the caller's own accounting wrong with no
-way to resynchronise. That is a genuine trade-off and is recorded here rather
-than decided in passing.
+`actual <= the bucket <= usage_pages` by the invariant, so the aggregate cannot
+underflow and the invariant holds afterwards.
+
+**The alternative that was rejected**, and it is a real trade-off rather than
+an obvious call: refuse an un-charge larger than the bucket with
+`KernelError::InvalidArgument`. That has a genuine argument behind it —
+silently un-charging less than asked is itself a quiet substitution of a number
+the caller did not supply, which is the very shape §600 exists to stamp out.
+The clamp wins because `record_uncharge` has exactly one honest job, keeping
+the two views of the same memory consistent, and a caller who over-un-charges
+has *already* lost track of what it charged; refusing leaves that caller's
+accounting wrong with no way to resynchronise, whereas clamping repairs the
+invariant on the spot. The §600 objection does not really apply either: the
+substituted number is not a guess about what the user meant, it is the
+arithmetic truth about how many pages were actually there.
+
+**Regression test.** `cgmem::self_test` test 9 covers both halves — un-charging
+a bucket that is empty (which used to deflate the aggregate and nothing else)
+and un-charging more than the right bucket holds — and asserts `usage_pages ==
+rss_pages + cache_pages` directly.
 
 **Not a regression.** True since `record_uncharge` was written.
 
 ---
 
-## `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN` (lane A, 2026-08-26) — **open**
+## `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN` (lane A, 2026-08-26) — **fixed 2026-08-26**
 
 **In short:** `cgmem create` takes a memory ceiling, and every charge checks
 whether the cgroup has gone over it. The result of that check is written to a
@@ -84763,6 +84869,43 @@ since a column that is always zero misinforms. Do not leave it printed and
 unwritten.
 
 **Not a regression.** True since the module was written.
+
+**Fixed.** Both ends, in one change.
+
+*The reported-and-not-measured end.* `record_swap(cg_id, pages, swap_in)` now
+exists: `swap_in` false adds to `swap_pages` (pages left memory for swap),
+`swap_in` true subtracts, saturating at zero so a swap-in larger than the
+recorded swap-out clamps rather than wrapping to `u64::MAX`. It is reachable
+from the shell as `cgmem swap <cg_id> <pages> [out|in]`, with `out` as the
+bracketed default — that being the only direction that can be first, since pages
+cannot come back in before they went out. It deliberately does *not* move the
+pages out of `rss_pages`/`cache_pages`, because only the caller knows which
+bucket they came from and inferring one would be §600's guessed-value shape; the
+caller pairs it with `record_uncharge`.
+
+*The measured-and-not-reported end.* `high_events` is now printed by
+`cgmem list` as `high={}` between `swap=` and `oom=`, and a new
+`total_high_events` aggregate is carried in `State`, bumped alongside the
+per-cgroup counter in `record_charge`, and returned by `stats()` — which widened
+from a 5-tuple to `(cgroups, charges, uncharges, ooms, high, ops)`. Both
+`cmd_cgmem stats` and `/proc/cgmem` print it as `High events:`.
+
+*Why this ordering matters beyond tidiness.* Surfacing `high_events` is what
+makes the twenty-fifth burn-down batch's `cmd_cgmem create` limit-guess
+falsifiable. Before this change a guessed policy ceiling had no observable
+consequence anywhere in the system, so the burn-down entry looked harmless — it
+was not harmless, it was *queued*, waiting for this fix to arm it. Both were
+therefore done together.
+
+*Tests.* `cgmem::self_test` grew from 9 to 10 tests. Test 1 now destructures the
+6-tuple and asserts `high == 0` at init; test 8 asserts `high == 1` after test
+6's deliberate over-limit charge; new test 10 (`swap_cg`) asserts `swap_pages ==
+25` after out-40/in-15, asserts the clamp to 0 after an over-large swap-in, and
+asserts `record_swap` on a nonexistent cgroup is an `Err`. Shell rung 93 asserts
+the `high=0` column is present in `cgmem list` output.
+
+*Design decision.* The delete-the-field alternative and why completing it won
+are recorded as `design-decisions.md` §608.
 
 ---
 

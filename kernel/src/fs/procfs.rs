@@ -13426,11 +13426,16 @@ fn gen_budstat() -> Vec<u8> {
 fn gen_cgmem() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
-    let (cgroups, charges, uncharges, ooms, ops) = super::cgmem::stats();
+    let (cgroups, charges, uncharges, ooms, high, ops) = super::cgmem::stats();
     out.push_str("=== Cgroup Memory Stats ===\n");
+    // `High events` is the count of charges that left a cgroup above the
+    // ceiling given to `cgmem create`. It is reported because nothing else
+    // reveals that ceiling's effect: no charge is ever rejected for exceeding
+    // it, so without this line a cgroup could sit permanently over its limit
+    // with no reader able to say so.
     out.push_str(&format!(
-        "Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  Ops: {}\n\n",
-        cgroups, charges, uncharges, ooms, ops
+        "Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  High events: {}  Ops: {}\n\n",
+        cgroups, charges, uncharges, ooms, high, ops
     ));
     for c in super::cgmem::per_cgroup() {
         let pct = if c.limit_pages < u64::MAX && c.limit_pages > 0 {
@@ -13444,7 +13449,7 @@ fn gen_cgmem() -> Vec<u8> {
             format!("{}", c.limit_pages)
         };
         out.push_str(&format!(
-            "  [{}] {:<10} usage={}/{}({}%)  rss={}  cache={}  swap={}  charges={}  oom={}\n",
+            "  [{}] {:<10} usage={}/{}({}%)  rss={}  cache={}  swap={}  charges={}  high={}  oom={}\n",
             c.cg_id,
             c.name,
             c.usage_pages,
@@ -13454,6 +13459,7 @@ fn gen_cgmem() -> Vec<u8> {
             c.cache_pages,
             c.swap_pages,
             c.charges,
+            c.high_events,
             c.oom_kills
         ));
     }

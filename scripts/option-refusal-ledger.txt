@@ -47,7 +47,6 @@ cmd_bootcfg 1
 cmd_bpfstat 4
 cmd_buddyinfo 3
 cmd_cal 2
-cmd_cgmem 6
 cmd_cgroup 2
 cmd_cgroupfs 3
 cmd_cliphistory 1

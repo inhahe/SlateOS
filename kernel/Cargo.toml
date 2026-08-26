@@ -40,6 +40,13 @@ sha2 = { path = "../sha2" }
 # -- so the next callers outside it started copies five and six. no_std with no
 # `alloc`: the state is one u32 and the table is a `const`.
 crc32 = { path = "../crc32" }
+# The shared DEFLATE/gzip/zlib codec. `kernel/src/fs/compress.rs` used to be
+# the implementation and is now a shim over this crate; the move happened
+# because `gui/imagecodec` could not depend on a module of a binary crate and
+# so grew a second, independent inflater for PNG decoding
+# (requests/c-a-two-inflates.md). no_std + alloc: a decompressor cannot be
+# allocation-free, since the output length is not declared in the format.
+deflate = { path = "../deflate" }
 # The shared POSIX regular-expression engine, used by userspace's grep, sed,
 # awk and expr. The kernel shell carries its own awk and sed, and they were
 # matching `/regex/` with `str::contains` -- so `awk '/^err/'` matched lines

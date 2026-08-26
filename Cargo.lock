@@ -2741,6 +2741,13 @@ name = "deepin-screenshot-cli"
 version = "0.1.0"
 
 [[package]]
+name = "deflate"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+]
+
+[[package]]
 name = "defold-cli"
 version = "0.1.0"
 
@@ -6082,6 +6089,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "crc32",
+ "deflate",
  "ere",
  "log",
  "netipc",

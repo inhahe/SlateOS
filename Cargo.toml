@@ -105,6 +105,15 @@ members = [
     # the gzip trailer and `gui/imagecodec` needs it for PNG chunk CRCs, and
     # neither can name `crate::crypto`.
     "crc32",
+    # DEFLATE (RFC 1951) with its gzip (RFC 1952) and zlib (RFC 1950)
+    # wrappers, promoted out of `kernel/src/fs/compress.rs` for the same
+    # reason and at lane C's request (`requests/c-a-two-inflates.md`): a PNG
+    # cannot be decoded without an inflater, so lane C had written a second
+    # one rather than reach into the kernel. Two implementations of a
+    # decompressor is not two of an ordinary function -- it is two parsers of
+    # untrusted input, each its own attack surface, and a bug fixed in one is
+    # not fixed in the other.
+    "deflate",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

@@ -80661,8 +80661,57 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **632 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **621 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (seventh batch): `cmd_wintiling` (11) cleared —
+> 632 → 621 across 236 → 235 functions. Pinned by `kshell::self_test` rung 74.
+>
+> This batch names the fourth and last failure mode in the family, and it is
+> the worst of them: **saying nothing at all.** Three arms — `rmws`, `rm` and
+> `float` — were spelled
+>
+> ```rust
+> if let Some(w) = parts.get(1) {
+>     if let Ok(id) = w.parse::<u32>() { … }   // no `else`
+> } else { <synopsis>; set_exit(1); }
+> ```
+>
+> The *outer* `if let` had an `else`, so an omitted operand was reported. The
+> *inner* one did not, so `tile rmws abc` produced no output whatsoever and
+> exited 0. Set against the other three modes the ledger has turned up —
+> guess a value, answer a query, report a clamp — silence is the hardest to
+> notice, because there is no sentence to disbelieve. A user who typed
+> `tile rm 1O` (letter O) and saw nothing would reasonably conclude the window
+> was gone.
+>
+> Three more sites the ledger cannot count, all of a different shape again:
+>
+> * **A guessed enum, from two copies of one parser that had drifted.** The
+>   layout `match` existed twice — in `create` and in `layout`. `layout`
+>   refused an unknown word; `create` fell through `_ => MasterStack` and
+>   reported the workspace as created, so `tile create work grd` silently
+>   built the wrong layout. Fixed by moving the parser onto the enum as
+>   `TilingLayout::from_str`, which makes the divergence impossible to
+>   reintroduce rather than merely fixing this instance of it.
+> * **Two errors discarded with `.ok()`** (`gap`, `ratio`), against the
+>   explicit rule in `CLAUDE.md` §9. `tile gap 999 5` for a workspace that
+>   does not exist printed `Gap → 5px` and exited 0 — a setting reported as
+>   applied to nothing.
+> * **A clamp the caller could not see.** `set_master_ratio` stores
+>   `ratio.clamp(10, 90)`, but the shell echoed the number it was *given*, so
+>   `tile ratio 1 200` printed `Master ratio → 200%` while the workspace held
+>   90. This is worth separating from the guessed-value family because the
+>   value is not guessed — it is *known* and then misreported. The fix refuses
+>   out-of-range rather than echoing the clamp: a clamp the caller cannot see
+>   is a guess by another name, and one the ledger's regex will never find.
+>
+> Of the eleven counted sites, the interesting ones are `add`'s destination
+> workspace (no guard at all, so a typo put the window on workspace 1 and said
+> so) and `retile`/`windows`, where the default — workspace 1, and the "all
+> workspaces" sentinel 0 — is documented and correct for an *absent* operand
+> and had simply been extended to an unreadable one. Those two took
+> `optional_num`; the rest took `required_num`.
+>
 > **Burn-down log.** 2026-08-26 (sixth batch): `cmd_winsnap` (12) cleared —
 > 644 → 632 across 237 → 236 functions. Pinned by `kshell::self_test` rung 73.
 >

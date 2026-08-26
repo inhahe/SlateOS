@@ -16117,7 +16117,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // so meant both "absent" and "unreadable" -- the two now have
             // separate wordings, and this is the "absent" one.
             ("vd remove", "vd remove 999999", b"missing desktop id"),
-            ("tile add", "tile add 999999", b"Usage:"),
+            ("tile add", "tile add 999999", b"missing window id"),
             // The `} else if` form: the branch the gate mis-read is followed
             // by a chain rather than a plain `else`.
             (
@@ -17004,6 +17004,130 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"Screen: 800x600",
         );
         assert_eq!(last_exit(), 0, "wsnap screen: a readable size succeeds");
+    }
+
+    serial_println!(
+        "  kshell::self_test 74: a tiler that says nothing at all is the worst refusal of the \
+         four shapes"
+    );
+    // `cmd_wintiling` (11 ledger sites, plus six the ledger cannot count).
+    // The shape that makes this batch worth its own rung is the *silent*
+    // refusal: three arms spelled `if let Some(w) = get(1) { if let Ok(id) =
+    // w.parse() { … } }` with no `else` on the inner arm, so a typo produced
+    // no output whatsoever and exit 0. Of the four failure modes this ledger
+    // has turned up -- guess a value, answer a query, report a clamp, say
+    // nothing -- saying nothing is the hardest to notice, because there is no
+    // sentence to disbelieve.
+    {
+        // Workspace 1 has to exist for the `ratio` control below to succeed.
+        let _ = capture_command("tile init");
+
+        // The three silent arms.
+        let out = capture_command("tile rmws abc");
+        assert_output_contains(
+            "tile rmws names the workspace id it cannot read",
+            &out,
+            b"`abc' is not a workspace id",
+        );
+        assert_eq!(last_exit(), 1, "tile rmws: an unreadable id errors");
+
+        let out = capture_command("tile rm abc");
+        assert_output_contains(
+            "tile rm names the window id it cannot read",
+            &out,
+            b"`abc' is not a window id",
+        );
+        assert_eq!(last_exit(), 1, "tile rm: an unreadable id errors");
+
+        let out = capture_command("tile float abc");
+        assert_output_contains(
+            "tile float names the window id it cannot read",
+            &out,
+            b"`abc' is not a window id",
+        );
+        assert_eq!(last_exit(), 1, "tile float: an unreadable id errors");
+
+        // The two copies of the layout `match` had drifted: `layout` refused
+        // an unknown word while `create` fell through to master-stack and
+        // reported the workspace as created.
+        let out = capture_command("tile create selftestws grd");
+        assert_output_contains(
+            "tile create names the layout it does not know",
+            &out,
+            b"`grd' is not a layout",
+        );
+        assert_eq!(last_exit(), 1, "tile create: an unknown layout errors");
+        assert_output_lacks("and creates nothing", &out, b"Created workspace");
+
+        // The control: an absent layout still means master-stack.
+        let out = capture_command("tile create selftestws");
+        assert_output_contains(
+            "bare `tile create` still defaults the layout",
+            &out,
+            b"Created workspace",
+        );
+        assert_eq!(last_exit(), 0, "tile create: an absent layout succeeds");
+
+        // A guessed *destination*: `add`'s workspace had no guard at all, so
+        // the window landed on workspace 1 and the shell said so.
+        let out = capture_command("tile add 4242 Term abc");
+        assert_output_contains(
+            "tile add names the destination workspace it cannot read",
+            &out,
+            b"`abc' is not a workspace id",
+        );
+        assert_eq!(last_exit(), 1, "tile add: an unreadable workspace errors");
+        assert_output_lacks("and adds nothing", &out, b"Added window");
+
+        // A setting reported as applied to a workspace that does not exist:
+        // the error was thrown away with `.ok()`.
+        let out = capture_command("tile gap 60000 5");
+        assert_output_lacks(
+            "tile gap does not report a gap it could not set",
+            &out,
+            b"Gap \xe2\x86\x92",
+        );
+        assert_eq!(last_exit(), 1, "tile gap: a missing workspace errors");
+
+        // A clamp the caller could not see: the module stores 10..=90 but the
+        // shell echoed the number it was given.
+        let out = capture_command("tile ratio 1 200");
+        assert_output_contains(
+            "tile ratio refuses a percentage it would have to clamp",
+            &out,
+            b"is out of range",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "tile ratio: an out-of-range percentage errors"
+        );
+        assert_output_lacks("and reports no ratio", &out, b"Master ratio");
+
+        let out = capture_command("tile ratio 1 60");
+        assert_output_contains("an in-range ratio is applied", &out, b"Master ratio");
+        assert_eq!(
+            last_exit(),
+            0,
+            "tile ratio: an in-range percentage succeeds"
+        );
+
+        // `windows` keeps 0 = every workspace for an *absent* operand.
+        let out = capture_command("tile windows abc");
+        assert_output_contains(
+            "tile windows names the workspace id it cannot read",
+            &out,
+            b"`abc' is not a workspace id",
+        );
+        assert_eq!(last_exit(), 1, "tile windows: an unreadable id errors");
+
+        let out = capture_command("tile windows");
+        assert_output_lacks(
+            "bare `tile windows` still lists every workspace",
+            &out,
+            b"is not a workspace id",
+        );
+        assert_eq!(last_exit(), 0, "bare `tile windows` succeeds");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -71764,10 +71888,14 @@ fn cmd_wintiling(args: &str) {
             }
         }
         "windows" | "wins" => {
-            let ws_id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Workspace 0 is the module's documented "all workspaces"
+            // sentinel, so an *absent* operand legitimately means all -- but
+            // an unreadable one meant all too, and `tile windows abc` listed
+            // every window in the system under a heading that says nothing
+            // about which workspace they came from.
+            let Some(ws_id) = optional_num::<u32>(&parts, 1, "tile", sub, "workspace id", 0) else {
+                return;
+            };
             let wins = wintiling::list_windows(ws_id);
             if wins.is_empty() {
                 shell_println!("No windows.");
@@ -71798,16 +71926,26 @@ fn cmd_wintiling(args: &str) {
         }
         "create" | "addws" => {
             let name = parts.get(1).copied().unwrap_or("New");
-            let layout_str = parts.get(2).copied().unwrap_or("master");
-            let layout = match layout_str {
-                "float" | "floating" => wintiling::TilingLayout::Floating,
-                "hsplit" | "horizontal" => wintiling::TilingLayout::HorizontalSplit,
-                "vsplit" | "vertical" => wintiling::TilingLayout::VerticalSplit,
-                "master" | "ms" => wintiling::TilingLayout::MasterStack,
-                "grid" => wintiling::TilingLayout::Grid,
-                "monocle" | "max" => wintiling::TilingLayout::Monocle,
-                "3col" | "three" => wintiling::TilingLayout::ThreeColumn,
-                _ => wintiling::TilingLayout::MasterStack,
+            // `master` is the documented default for an absent layout. The
+            // old `_ => MasterStack` catch-all applied it to an unreadable one
+            // as well, so `tile create work grd` built a master-stack
+            // workspace and reported "Created workspace 3 'work'." -- the
+            // same sentence a correct run prints. The sibling `tile layout`
+            // arm refused the same typo; the two copies of this `match` had
+            // drifted, which is why the parser now lives on the enum.
+            let layout = match parts.get(2) {
+                None => wintiling::TilingLayout::MasterStack,
+                Some(word) => {
+                    let Some(l) = wintiling::TilingLayout::from_str(word) else {
+                        shell_println!("tile: {}: `{}' is not a layout", sub, word);
+                        shell_println!(
+                            "Layouts: float, hsplit, vsplit, master, grid, monocle, 3col"
+                        );
+                        set_exit(1);
+                        return;
+                    };
+                    l
+                }
             };
             match wintiling::create_workspace(name, layout) {
                 Ok(id) => shell_println!("Created workspace {} '{}'.", id, name),
@@ -71818,80 +71956,77 @@ fn cmd_wintiling(args: &str) {
             }
         }
         "rmws" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match wintiling::remove_workspace(id) {
-                        Ok(()) => shell_println!("Removed workspace {}.", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
+            // The old shape was `if let Some(w) = get(1) { if let Ok(id) =
+            // w.parse() { … } }` with no `else` on the *inner* arm, so
+            // `tile rmws abc` printed nothing whatsoever and exited 0. A
+            // command that removes something and then says nothing is read as
+            // "removed, quietly". This is a site the guessed-value ledger
+            // cannot count -- there is no `unwrap_or` in it to match.
+            let Some(id) = required_num::<u32>(&parts, 1, "tile", "rmws", "workspace id") else {
+                return;
+            };
+            match wintiling::remove_workspace(id) {
+                Ok(()) => shell_println!("Removed workspace {}.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: tile rmws <workspace_id>");
-                set_exit(1);
             }
         }
         "addwin" | "add" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let title = parts.get(2).copied().unwrap_or("Window");
-            let ws = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            // The `wid == 0` guard gave the right status but could not name
+            // the word, so a typo and an omission printed one synopsis. The
+            // destination workspace had no guard at all: `tile add 5 Term abc`
+            // put the window on workspace 1 and said "Added window 5 to
+            // workspace 1." -- true, and about the wrong workspace.
+            let Some(wid) = required_num::<u32>(&parts, 1, "tile", sub, "window id") else {
+                return;
+            };
             if wid == 0 {
-                shell_println!("Usage: tile add <window_id> [title] [workspace]");
+                shell_println!("tile: {}: window ids start at 1", sub);
                 set_exit(1);
-            } else {
-                match wintiling::add_window(wid, title, ws) {
-                    Ok(()) => shell_println!("Added window {} to workspace {}.", wid, ws),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            }
+            let title = parts.get(2).copied().unwrap_or("Window");
+            let Some(ws) = optional_num::<u32>(&parts, 3, "tile", sub, "workspace id", 1) else {
+                return;
+            };
+            match wintiling::add_window(wid, title, ws) {
+                Ok(()) => shell_println!("Added window {} to workspace {}.", wid, ws),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "rmwin" | "rm" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match wintiling::remove_window(id) {
-                        Ok(()) => shell_println!("Removed window {}.", id),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
+            // Same silent `if let Ok(…)` with no `else` as `rmws`.
+            let Some(id) = required_num::<u32>(&parts, 1, "tile", sub, "window id") else {
+                return;
+            };
+            match wintiling::remove_window(id) {
+                Ok(()) => shell_println!("Removed window {}.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: tile rm <window_id>");
-                set_exit(1);
             }
         }
         "layout" => {
-            let ws = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let layout_str = parts.get(2).copied().unwrap_or("");
-            let layout = match layout_str {
-                "float" | "floating" => wintiling::TilingLayout::Floating,
-                "hsplit" | "horizontal" => wintiling::TilingLayout::HorizontalSplit,
-                "vsplit" | "vertical" => wintiling::TilingLayout::VerticalSplit,
-                "master" | "ms" => wintiling::TilingLayout::MasterStack,
-                "grid" => wintiling::TilingLayout::Grid,
-                "monocle" | "max" => wintiling::TilingLayout::Monocle,
-                "3col" | "three" => wintiling::TilingLayout::ThreeColumn,
-                _ => {
-                    shell_println!("tile: layout: `{}' is not a layout", layout_str);
-                    shell_println!("Layouts: float, hsplit, vsplit, master, grid, monocle, 3col");
-                    set_exit(1);
-                    return;
-                }
+            let Some(ws) = required_num::<u32>(&parts, 1, "tile", "layout", "workspace id") else {
+                return;
+            };
+            let Some(word) = parts.get(2) else {
+                shell_println!("tile: layout: missing layout");
+                shell_println!("Layouts: float, hsplit, vsplit, master, grid, monocle, 3col");
+                set_exit(1);
+                return;
+            };
+            let Some(layout) = wintiling::TilingLayout::from_str(word) else {
+                shell_println!("tile: layout: `{}' is not a layout", word);
+                shell_println!("Layouts: float, hsplit, vsplit, master, grid, monocle, 3col");
+                set_exit(1);
+                return;
             };
             match wintiling::set_layout(ws, layout) {
                 Ok(()) => shell_println!("Workspace {} → {}", ws, layout.label()),
@@ -71902,10 +72037,13 @@ fn cmd_wintiling(args: &str) {
             }
         }
         "retile" => {
-            let ws = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            // Workspace 1 is the documented default when no workspace is
+            // named; it was also what a typo produced, so `tile retile 3x`
+            // retiled workspace 1 and reported it.
+            let Some(ws) = optional_num::<u32>(&parts, 1, "tile", "retile", "workspace id", 1)
+            else {
+                return;
+            };
             match wintiling::retile(ws) {
                 Ok(()) => shell_println!("Retiled workspace {}.", ws),
                 Err(e) => {
@@ -71915,74 +72053,82 @@ fn cmd_wintiling(args: &str) {
             }
         }
         "gap" => {
-            let ws = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let gap = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            if ws == 0 {
-                shell_println!("Usage: tile gap <workspace> <pixels>");
-                set_exit(1);
-            } else {
-                wintiling::set_gap(ws, gap).ok();
-                shell_println!("Gap → {}px", gap);
+            let Some(ws) = required_num::<u32>(&parts, 1, "tile", "gap", "workspace id") else {
+                return;
+            };
+            // A mistyped gap became 0 -- windows flush against each other --
+            // and the shell reported "Gap → 0px", which is what asking for a
+            // zero gap also prints.
+            let Some(gap) = required_num::<u32>(&parts, 2, "tile", "gap", "gap in pixels") else {
+                return;
+            };
+            // The error was discarded with `.ok()`, so `tile gap 999 5` for a
+            // workspace that does not exist announced "Gap → 5px" and exited
+            // 0 -- a setting reported as applied to nothing.
+            match wintiling::set_gap(ws, gap) {
+                Ok(()) => shell_println!("Gap → {}px", gap),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "ratio" => {
-            let ws = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ratio = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(55);
-            if ws == 0 {
-                shell_println!("Usage: tile ratio <workspace> <percent>");
+            let Some(ws) = required_num::<u32>(&parts, 1, "tile", "ratio", "workspace id") else {
+                return;
+            };
+            let Some(ratio) = required_num::<u32>(&parts, 2, "tile", "ratio", "percentage") else {
+                return;
+            };
+            // `set_master_ratio` clamps to 10..=90, but the shell echoed the
+            // *requested* number, so `tile ratio 1 200` printed "Master ratio
+            // → 200%" while the workspace was set to 90. Refusing out of range
+            // is better than silently reporting a value that was not stored:
+            // a clamp the caller cannot see is a guess by another name.
+            if !(10..=90).contains(&ratio) {
+                shell_println!("tile: ratio: `{}' is out of range", ratio);
+                shell_println!("The master ratio is a percentage from 10 to 90");
                 set_exit(1);
-            } else {
-                wintiling::set_master_ratio(ws, ratio).ok();
-                shell_println!("Master ratio → {}%", ratio);
+                return;
+            }
+            match wintiling::set_master_ratio(ws, ratio) {
+                Ok(()) => shell_println!("Master ratio → {}%", ratio),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "float" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match wintiling::toggle_floating(id) {
-                        Ok(f) => shell_println!("Window {} floating: {}", id, f),
-                        Err(e) => {
-                            shell_println!("Error: {:?}", e);
-                            set_exit(1);
-                        }
-                    }
+            // The third silent `if let Ok(…)` with no `else`: `tile float abc`
+            // printed nothing and exited 0, so a typo looked like a window
+            // that had simply not changed state.
+            let Some(id) = required_num::<u32>(&parts, 1, "tile", "float", "window id") else {
+                return;
+            };
+            match wintiling::toggle_floating(id) {
+                Ok(f) => shell_println!("Window {} floating: {}", id, f),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
-            } else {
-                shell_println!("Usage: tile float <window_id>");
-                set_exit(1);
             }
         }
         "move" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ws = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            if wid == 0 || ws == 0 {
-                shell_println!("Usage: tile move <window_id> <workspace>");
-                set_exit(1);
-            } else {
-                match wintiling::move_to_workspace(wid, ws) {
-                    Ok(()) => shell_println!("Moved window {} to workspace {}.", wid, ws),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            // Both operands guessed 0 and were caught by a combined `wid == 0
+            // || ws == 0` guard, so one synopsis covered four different
+            // mistakes and named none of them.
+            let Some(wid) = required_num::<u32>(&parts, 1, "tile", "move", "window id") else {
+                return;
+            };
+            let Some(ws) = required_num::<u32>(&parts, 2, "tile", "move", "workspace id") else {
+                return;
+            };
+            match wintiling::move_to_workspace(wid, ws) {
+                Ok(()) => shell_println!("Moved window {} to workspace {}.", wid, ws),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }

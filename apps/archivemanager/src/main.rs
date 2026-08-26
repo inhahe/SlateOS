@@ -19,6 +19,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::probe::Probe;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -3094,6 +3095,27 @@ impl App for AppState {
     }
 }
 
+/// Lets the tests drive this window by naming its controls rather than
+/// measuring them. Three lines of forwarding; the helpers are in
+/// [`guitk::probe`].
+impl Probe for AppState {
+    type Target = Target;
+    type Outcome = Action;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        build_frame(self, size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
+        self.handle_click(x, y, button, size)
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Action {
+        self.handle_key(key, size)
+    }
+}
+
 fn main() -> ExitCode {
     let mut state = AppState {
         archive: Some(create_sample_archive()),
@@ -4462,19 +4484,20 @@ mod tests {
     // to catch.
     // ------------------------------------------------------------------
 
-    const SIZE: (f32, f32) = (900.0, 600.0);
+    const SIZE: (f32, f32) = <AppState as Probe>::SIZE;
 
     /// The centre of the first recorded box for `pred`, or a panic naming what
     /// was missing — a test that silently skipped a control it could not find
     /// would report success for a program with no such control.
+    /// Where the renderer drew the topmost control satisfying `pred`.
+    ///
+    /// A thin wrapper over [`guitk::probe::rect_matching`] kept because the
+    /// tests below click through `click(state, at)` with an explicit point,
+    /// and a couple of them want the point without the click.
     fn centre_of(state: &AppState, pred: impl Fn(&Target) -> bool, what: &str) -> (f32, f32) {
-        let frame = build_frame(state, SIZE.0, SIZE.1);
-        let (_, rect) = frame
-            .hits()
-            .iter()
-            .find(|(t, _)| pred(t))
-            .unwrap_or_else(|| panic!("no {what} was drawn"));
-        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+        guitk::probe::rect_matching(state, pred)
+            .unwrap_or_else(|| panic!("no {what} was drawn"))
+            .centre()
     }
 
     fn loaded() -> AppState {
@@ -4488,26 +4511,11 @@ mod tests {
         state.handle_click(at.0, at.1, MouseButton::Left, SIZE)
     }
 
-    fn key(k: Key) -> KeyEvent {
-        KeyEvent {
-            key: k,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }
-    }
-
-    fn ctrl(k: Key) -> KeyEvent {
-        KeyEvent {
-            key: k,
-            pressed: true,
-            modifiers: Modifiers {
-                ctrl: true,
-                ..Modifiers::NONE
-            },
-            text: String::new(),
-        }
-    }
+    /// Building a keystroke is the same in every program, so it lives in the
+    /// toolkit — see [`guitk::probe`]. `key` is this program's name for
+    /// `press`, kept because the tests below already say it.
+    use guitk::probe::ctrl;
+    use guitk::probe::press as key;
 
     #[test]
     fn a_click_on_empty_background_does_nothing() {

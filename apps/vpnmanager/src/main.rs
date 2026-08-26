@@ -20,6 +20,7 @@
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::frame::Rect;
+use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -4382,6 +4383,27 @@ impl App for VpnManager {
     }
 }
 
+/// Lets the tests drive this window by naming its controls rather than
+/// measuring them. Three lines of forwarding; the helpers are in
+/// [`guitk::probe`].
+impl Probe for VpnManager {
+    type Target = Target;
+    type Outcome = Action;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        render_frame(self, size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
+        self.handle_click(x, y, button, size)
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> Action {
+        self.handle_key(key)
+    }
+}
+
 fn main() -> ExitCode {
     let mut app = VpnManager::new();
     app::launch("vpnmanager", &mut app)
@@ -4404,7 +4426,7 @@ mod tests {
     )]
 
     use super::*;
-    use guitk::event::{Modifiers, MouseEvent};
+    use guitk::event::MouseEvent;
 
     // --- VpnProtocol tests ---
 
@@ -5939,60 +5961,13 @@ mod tests {
 
     /// The size the tests click at. The app remembers the size it last drew
     /// at, so the tests and the window take the same path.
-    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+    const SIZE: (f32, f32) = <VpnManager as Probe>::SIZE;
 
-    /// The rect the renderer recorded for `target`, or `None` if nothing was
-    /// drawn for it in this state.
-    ///
-    /// Topmost first: a few targets are drawn twice — Connect is in the
-    /// toolbar *and* on the Connection tab — and the one painted last is the
-    /// one a click would find.
-    fn rect_of(app: &VpnManager, target: Target) -> Option<Rect> {
-        render_frame(app, SIZE.0, SIZE.1)
-            .hits()
-            .iter()
-            .rev()
-            .find(|(t, _)| *t == target)
-            .map(|(_, rect)| *rect)
-    }
-
-    /// Click the middle of whatever the renderer drew for `target`.
-    ///
-    /// Panics if nothing was drawn for it, which is the point: a control that
-    /// is not on screen cannot be clicked, and a test that silently skipped
-    /// the click would pass while the button was missing.
-    fn click(app: &mut VpnManager, target: Target) -> Action {
-        let rect =
-            rect_of(app, target).unwrap_or_else(|| panic!("nothing on screen for {target:?}"));
-        let (cx, cy) = rect.centre();
-        app.handle_click(cx, cy, MouseButton::Left, SIZE)
-    }
-
-    /// A keystroke that types `text`.
-    fn typing(text: &str) -> KeyEvent {
-        KeyEvent {
-            key: Key::A,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: text.to_string(),
-        }
-    }
-
-    /// A keystroke that types nothing.
-    fn press(key: Key) -> KeyEvent {
-        KeyEvent {
-            key,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }
-    }
-
-    fn type_str(app: &mut VpnManager, text: &str) {
-        for ch in text.chars() {
-            app.handle_key(&typing(&ch.to_string()));
-        }
-    }
+    /// Finding a control by name, clicking it, and typing at it are the same
+    /// four lines in every program, so they live in the toolkit — see
+    /// [`guitk::probe`] for what each one guarantees. Imported under their
+    /// bare names because that is what ninety tests below already say.
+    use guitk::probe::{click, control_names, press, rect_of, type_str};
 
     /// A control and the profile field it is supposed to flip, so the
     /// toggle tests can be written once and run per row.
@@ -6017,18 +5992,6 @@ mod tests {
             app.add_profile(profile).expect("a valid extra profile");
         }
         app
-    }
-
-    /// Every control drawn in this state, by variant name.
-    fn control_names(app: &VpnManager) -> Vec<String> {
-        render_frame(app, SIZE.0, SIZE.1)
-            .hits()
-            .iter()
-            .map(|(target, _)| {
-                let full = format!("{target:?}");
-                full.split('(').next().unwrap_or(&full).to_string()
-            })
-            .collect()
     }
 
     // --- Sidebar ---

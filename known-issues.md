@@ -84188,7 +84188,7 @@ unbound.
 
 | File | What is there |
 |---|---|
-| `gui/desktop/src/hotkeys.rs` | `HotkeyAction::BrightnessUp` / `BrightnessDown` exist and are parseable from a config file, but `register_defaults` gives them no binding, and `parse_key_name` *rejects* `"brightnessup"` / `"brightnessdown"` |
+| `gui/desktop/src/hotkeys.rs` | `HotkeyAction::BrightnessUp` / `BrightnessDown` exist and are parseable from a config file, but `install_defaults` gives them no binding, and `parse_key_name` *rejects* `"brightnessup"` / `"brightnessdown"` |
 | `gui/toolkit/src/event.rs` | deliberately has no `Key::BrightnessUp` / `Key::BrightnessDown` variant |
 | `gui/compositor/src/keymap.rs` | `key_for_scancode` has arms for the seven media keys and deliberately none for brightness |
 
@@ -84838,3 +84838,44 @@ ignored is worse than a control that says it is not available yet.
 **Not a regression.** Until 2026-08-26 the rules engine had no caller at all, so
 *seventeen* of seventeen did nothing. This is the state after wiring five of
 them up.
+
+## `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` (lane C, 2026-08-26)
+
+**In short:** the desktop can draw a "Keyboard Shortcuts" card — a list of every
+chord and what it does, styled, scrollable-height, with the selected row
+highlighted — and there is no way for a user to make it appear. Nothing on the
+desktop opens it: not a chord, not a start-menu entry, not a right-click. So a
+user who wants to know what Super+Z does has to read the source.
+
+This got sharper, not softer, when the two shortcut tables were merged (see
+`design-decisions.md` §571): the shortcuts are now *editable*, and a user who
+can change a binding has a much stronger claim on being able to see what the
+bindings are.
+
+**Where it lives.** `gui/desktop/src/hotkeys.rs` —
+`render_settings_panel(registry, palette, x, y, selected_index)` returns a
+self-contained `Vec<RenderCommand>` and is called from nothing outside its own
+tests. It is fully exercised by them (colour roles in both themes, badge
+geometry, empty and default registries), so this is a wiring gap, not an
+unfinished renderer.
+
+**What the proper fix is.** Two pieces, and the first is the whole of the
+minimum:
+
+1. **Something that opens it.** The natural home is the shell's own popup
+   surface, alongside the start menu and the notification pane — it is the same
+   kind of thing: a sheet the shell draws over the desktop and dismisses with
+   Escape. That means a `HotkeyAction::ToggleShortcutCard`, a default chord, and
+   a branch in `DesktopShell::run_desktop_action` that flips a `bool` the way
+   `ToggleNotifications` does. The chord wants to be one the card itself would
+   list; Super+/ (i.e. Super+Slash) is what macOS and most editors use for
+   "show me the shortcuts" and is unclaimed here.
+2. **Rebinding from the card.** `selected_index` and the registry's conflict
+   detection are already there, which is most of what an editor needs; what is
+   missing is a "press the new chord now" capture mode and a call to
+   `HotkeyConfig::from_registry(...).save()` to persist it. This is the larger
+   half and is not required for the card to be worth opening — a read-only
+   reference card is already the thing users ask for.
+
+Until then the renderer is dead code that passes its tests, which is the state
+this project has repeatedly found to be worse than absent code: it looks done.

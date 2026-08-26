@@ -186,6 +186,7 @@ use guitk::style::{Border, CornerRadii, Shadow};
 use guitk::text;
 use guitk::theme::with_alpha;
 use guitk::wheel;
+use hotkeys::HotkeyAction;
 use launcher::{AppEntry, Category};
 // The same zone engine the libc's `localtime`, osh's `printf '%(…)T'`, the
 // calendar panel and the Date & Time settings page render through, so the
@@ -1053,6 +1054,20 @@ pub struct DesktopShell {
     /// process name and a window class, neither of which existed anywhere in
     /// this system. See `design-decisions.md` §569.
     pub rules: window_rules::WindowRulesManager,
+
+    /// Which chord does what.
+    ///
+    /// The desktop's whole binding table, and the only one: the shortcuts used
+    /// to live in a private `DesktopAction::for_chord` match hardcoded a few
+    /// hundred lines below, while [`hotkeys`] sat beside it with a registry, a
+    /// config file and 2,400 lines and was reachable from nothing. Two tables
+    /// meant two answers to "what does Super+E do", and the *live* one was the
+    /// one a user could not change. See `design-decisions.md` §571.
+    ///
+    /// Public so a settings panel can rebind without going through the shell,
+    /// on the same terms as [`rules`](Self::rules) above. Anything that changes
+    /// it has to re-grab: see [`global_chords`](Self::global_chords).
+    pub hotkeys: hotkeys::HotkeyRegistry,
 }
 
 /// Desktop visual theme — every colour the shell paints with.
@@ -1276,6 +1291,7 @@ impl DesktopShell {
             // `toggle_run_dialog`.
             run_dialog: run_dialog::RunDialog::new(),
             rules: window_rules::WindowRulesManager::new(),
+            hotkeys: hotkeys::HotkeyRegistry::defaults(),
         };
         shell.sync_snap_area();
         shell
@@ -2752,10 +2768,8 @@ impl DesktopShell {
         // on the same terms — with the same one-way-toggle exception, so that
         // the chord that opened it closes it again.
         if self.notifications.pane_state().is_visible() {
-            if DesktopAction::for_chord(key.modifiers, key.key)
-                == Some(DesktopAction::ToggleNotifications)
-            {
-                return self.run_desktop_action(DesktopAction::ToggleNotifications);
+            if self.bound_action(key) == Some(HotkeyAction::ToggleNotifications) {
+                return self.run_desktop_action(&HotkeyAction::ToggleNotifications);
             }
             // Result deliberately discarded: consumed even when the pane had no
             // meaning for the key, because a press the overlay did not use is
@@ -2764,10 +2778,19 @@ impl DesktopShell {
             return HotkeyOutcome::consumed();
         }
 
-        match DesktopAction::for_chord(key.modifiers, key.key) {
-            Some(action) => self.run_desktop_action(action),
+        match self.bound_action(key) {
+            Some(action) => self.run_desktop_action(&action),
             None => HotkeyOutcome::ignored(),
         }
+    }
+
+    /// What the user has bound this press to, if anything.
+    ///
+    /// Cloned out of the registry rather than borrowed, because carrying the
+    /// action out takes `&mut self` and two of them own a `String`. One clone
+    /// per *recognised* shortcut is not on any path that runs per frame.
+    fn bound_action(&self, key: &KeyEvent) -> Option<HotkeyAction> {
+        self.hotkeys.lookup(key.key, &key.modifiers).cloned()
     }
 
     /// One press while the overview is up.
@@ -2776,8 +2799,8 @@ impl DesktopShell {
         // the overview closes it. Without this the binding would be one-way —
         // Super+Tab would open the overlay and then, arriving as a bare Tab,
         // cycle its mode — and a toggle you cannot press twice is a trap.
-        if DesktopAction::for_chord(key.modifiers, key.key) == Some(DesktopAction::ToggleOverview) {
-            return self.run_desktop_action(DesktopAction::ToggleOverview);
+        if self.bound_action(key) == Some(HotkeyAction::ToggleOverview) {
+            return self.run_desktop_action(&HotkeyAction::ToggleOverview);
         }
         let Some(ok) = Self::overview_key(key) else {
             // Not a key the overview has a meaning for — a bare modifier, a
@@ -2838,12 +2861,12 @@ impl DesktopShell {
 
     /// Carry out a shortcut that has already been recognised.
     ///
-    /// Every binding but [`DismissPopup`](DesktopAction::DismissPopup) consumes
+    /// Every binding but [`DismissPopup`](HotkeyAction::DismissPopup) consumes
     /// the press; that one is bare Escape, and a key the shell claims
     /// unconditionally is a key no window can ever see. Closing a dialog is what
     /// Escape does far more often than closing the start menu.
     ///
-    /// The arms divide into two kinds, and the division is the whole point of
+    /// The arms divide into three kinds, and the division is the whole point of
     /// the return type. The start menu, the Alt-Tab switcher's *stepping*, and
     /// popup dismissal are the shell's own surfaces and are done here. Anything
     /// naming a window — close, minimise, maximise, tile, raise — is a
@@ -2851,10 +2874,13 @@ impl DesktopShell {
     /// do the second kind itself, against the shell's private copy of the window
     /// list, which on a live session the next
     /// [`apply_window_list`](DesktopShell::apply_window_list) discards: Alt+F4
-    /// removed a taskbar button and left the window open.
-    fn run_desktop_action(&mut self, action: DesktopAction) -> HotkeyOutcome {
+    /// removed a taskbar button and left the window open. The third kind starts
+    /// a program, and is handed back for the same reason in
+    /// [`launches`](HotkeyOutcome::launches): the shell has no connection to the
+    /// process server either.
+    fn run_desktop_action(&mut self, action: &HotkeyAction) -> HotkeyOutcome {
         match action {
-            DesktopAction::CycleWindows => {
+            HotkeyAction::CycleWindows => {
                 if self.alt_tab_active {
                     self.next_alt_tab();
                 } else {
@@ -2862,7 +2888,7 @@ impl DesktopShell {
                 }
                 HotkeyOutcome::consumed()
             }
-            DesktopAction::CycleWindowsBackwards => {
+            HotkeyAction::CycleWindowsBackwards => {
                 if !self.alt_tab_active {
                     self.start_alt_tab();
                 }
@@ -2871,16 +2897,19 @@ impl DesktopShell {
                 }
                 HotkeyOutcome::consumed()
             }
-            DesktopAction::CloseFocused => {
+            HotkeyAction::CloseWindow => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Close))
             }
-            DesktopAction::ToggleStartMenu => {
+            HotkeyAction::MinimizeWindow => {
+                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Minimize))
+            }
+            HotkeyAction::ToggleStartMenu => {
                 self.toggle_start_menu();
                 HotkeyOutcome::consumed()
             }
             // The one shortcut that names more than one window, and the reason
             // `handle_hotkey` cannot return a single request.
-            DesktopAction::ShowDesktop => HotkeyOutcome::ask_all(
+            HotkeyAction::ShowDesktop => HotkeyOutcome::ask_all(
                 self.windows
                     .values()
                     // `on_glass`, not `mapped`: this is the one caller that
@@ -2892,28 +2921,28 @@ impl DesktopShell {
                     .map(|w| ShellRequest::window(w.id, ShellControlAction::Minimize))
                     .collect(),
             ),
-            DesktopAction::SnapLeft => {
+            HotkeyAction::SnapLeft => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapLeft))
             }
-            DesktopAction::SnapRight => {
+            HotkeyAction::SnapRight => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapRight))
             }
-            DesktopAction::Maximize => {
+            HotkeyAction::MaximizeWindow => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Maximize))
             }
-            // Consumed whether or not the overlay opened. Super+Z is the
-            // shell's key in either case, and letting it through to the focused
-            // window on an empty desktop would make a shortcut that sometimes
-            // types a `z`.
-            // Consumed unconditionally, for the same reason as the zone
-            // overlay: Super+Tab is the shell's chord whether or not there is
-            // anything to show, and a shortcut that sometimes reaches the
-            // focused window is a shortcut that sometimes types a Tab into it.
-            DesktopAction::ToggleOverview => {
+            // Consumed unconditionally: Super+Tab is the shell's chord whether
+            // or not there is anything to show, and a shortcut that sometimes
+            // reaches the focused window is a shortcut that sometimes types a
+            // Tab into it.
+            HotkeyAction::ToggleOverview => {
                 self.overview.toggle(overview::OverviewMode::AllDesktops);
                 HotkeyOutcome::consumed()
             }
-            DesktopAction::ToggleZoneOverlay => {
+            // Consumed whether or not the overlay opened, for the same reason.
+            // Super+Z is the shell's key in either case, and letting it through
+            // to the focused window on an empty desktop would make a shortcut
+            // that sometimes types a `z`.
+            HotkeyAction::ToggleZoneOverlay => {
                 self.toggle_zone_overlay();
                 HotkeyOutcome::consumed()
             }
@@ -2921,11 +2950,11 @@ impl DesktopShell {
             // shell's chord whether or not there is anything in the pane, and a
             // shortcut that sometimes types an `n` into the focused window is
             // worse than one that sometimes opens an empty panel.
-            DesktopAction::ToggleNotifications => {
+            HotkeyAction::ToggleNotifications => {
                 self.toggle_notifications();
                 HotkeyOutcome::consumed()
             }
-            DesktopAction::RestoreOrMinimize => {
+            HotkeyAction::RestoreOrMinimize => {
                 // Which of the two it is depends on the state the *compositor*
                 // last reported, not on anything the shell decided: Super+Down
                 // un-maximizes a maximized window and minimizes an ordinary one,
@@ -2941,13 +2970,21 @@ impl DesktopShell {
                 };
                 HotkeyOutcome::ask(self.request_on_focused(want))
             }
-            DesktopAction::PreviousDesktop => {
+            HotkeyAction::PreviousDesktop => {
                 HotkeyOutcome::ask(self.previous_desktop().and_then(|d| self.switch_desktop(d)))
             }
-            DesktopAction::NextDesktop => {
+            HotkeyAction::NextDesktop => {
                 HotkeyOutcome::ask(self.next_desktop().and_then(|d| self.switch_desktop(d)))
             }
-            DesktopAction::DismissPopup => {
+            // A number the user wrote in a config file, so it can name a desktop
+            // that does not exist. `switch_desktop` answers `None` for one that
+            // is already showing or out of range, and the press is consumed
+            // either way: the chord is the shell's whether or not the desktop is
+            // there, and letting it through would type into the focused window.
+            HotkeyAction::SwitchDesktop(index) => {
+                HotkeyOutcome::ask(self.switch_desktop(u32::from(*index)))
+            }
+            HotkeyAction::DismissPopup => {
                 if self.dismiss_popups() {
                     HotkeyOutcome::consumed()
                 } else {
@@ -2958,7 +2995,12 @@ impl DesktopShell {
             // from the level this arm asked for: `adjust_volume` clamps, so at
             // either end of the range the two differ, and an indicator that
             // read 105% would be reporting a keystroke rather than a volume.
-            DesktopAction::Volume(step) => {
+            HotkeyAction::VolumeUp | HotkeyAction::VolumeDown => {
+                let step = if matches!(action, HotkeyAction::VolumeUp) {
+                    VolumeStep::Up
+                } else {
+                    VolumeStep::Down
+                };
                 let level = self.notifications.adjust_volume(step.delta());
                 self.show_osd(osd::OsdKind::Volume {
                     level,
@@ -2966,7 +3008,7 @@ impl DesktopShell {
                 });
                 HotkeyOutcome::consumed()
             }
-            DesktopAction::ToggleMute => {
+            HotkeyAction::VolumeMute => {
                 let muted = self.notifications.toggle_mute();
                 // The level as well as the flag, because muting does not change
                 // the level and the overlay is what tells you what unmuting
@@ -2981,10 +3023,29 @@ impl DesktopShell {
             // the shell's chord in either direction, and a second press that
             // reached the focused window would type an `r` into the program the
             // *first* press was used to start.
-            DesktopAction::ToggleRunDialog => {
+            HotkeyAction::ToggleRunDialog => {
                 self.toggle_run_dialog();
                 HotkeyOutcome::consumed()
             }
+            // The six that start a program instead of touching a window. The
+            // command is the action's own — see [`HotkeyAction::command`] — and
+            // it is reported rather than run, because the shell has no
+            // connection to the process server.
+            HotkeyAction::LaunchApp(_)
+            | HotkeyAction::ShowTaskManager
+            | HotkeyAction::SystemSettings
+            | HotkeyAction::ScreenLock
+            | HotkeyAction::Screenshot
+            | HotkeyAction::ScreenshotRegion => {
+                HotkeyOutcome::start(action.command().map(str::to_owned).into_iter().collect())
+            }
+            // Nothing can carry these out: there is no backlight channel out of
+            // the shell, and inventing one would mean a request the compositor
+            // has no verb for. Consumed regardless — the user bound the chord,
+            // so passing it to the focused window would be worse than doing
+            // nothing visibly. See `known-issues.md` →
+            // `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+            HotkeyAction::BrightnessUp | HotkeyAction::BrightnessDown => HotkeyOutcome::consumed(),
         }
     }
 
@@ -3028,9 +3089,8 @@ impl DesktopShell {
     /// character. The chord that opened it still reaches the table, so that
     /// Super+R closes what Super+R opened.
     fn key_on_run_dialog(&mut self, key: &KeyEvent) -> HotkeyOutcome {
-        if DesktopAction::for_chord(key.modifiers, key.key) == Some(DesktopAction::ToggleRunDialog)
-        {
-            return self.run_desktop_action(DesktopAction::ToggleRunDialog);
+        if self.bound_action(key) == Some(HotkeyAction::ToggleRunDialog) {
+            return self.run_desktop_action(&HotkeyAction::ToggleRunDialog);
         }
         // Result deliberately discarded, exactly as the notification pane's is:
         // a press the dialog had no meaning for is still not the desktop's while
@@ -3081,79 +3141,6 @@ impl DesktopShell {
     }
 }
 
-/// A desktop-level keyboard shortcut, named separately from the chord that
-/// invokes it and from the code that carries it out.
-///
-/// The bindings used to be a chain of `if`s, each testing only the modifiers it
-/// happened to care about, so a loose chord earlier in the chain swallowed a
-/// tighter one later on: `Super+Left`/`Super+Right` (snap the focused window)
-/// were tested before `Ctrl+Super+Left`/`Ctrl+Super+Right` (switch virtual
-/// desktop), and matched with Ctrl held as well — so the virtual-desktop
-/// shortcuts were unreachable and had never once fired. Pressing them snapped
-/// a window instead.
-///
-/// Matching the whole modifier set at once makes that class of bug impossible:
-/// every binding states its full chord, a modifier the chord does not list is a
-/// modifier the binding does *not* fire with, and two arms claiming the same
-/// chord are an unreachable-pattern warning rather than a silently dead
-/// shortcut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DesktopAction {
-    CycleWindows,
-    CycleWindowsBackwards,
-    CloseFocused,
-    ToggleStartMenu,
-    ShowDesktop,
-    SnapLeft,
-    SnapRight,
-    Maximize,
-    /// Open (or close) the multi-zone tiling chooser for the focused window.
-    ///
-    /// Distinct from [`SnapLeft`](Self::SnapLeft) and its neighbours, which are
-    /// one keystroke each and place the window immediately. This one opens a
-    /// chooser, because there are twenty-two zones across the six layouts and
-    /// no plausible set of chords for them.
-    ToggleZoneOverlay,
-    /// Open (or close) the Exposé overlay — every window on every desktop.
-    ///
-    /// Distinct from [`CycleWindows`](Self::CycleWindows), which is the same
-    /// job for the common case: Alt-Tab is fast and blind, showing a strip of
-    /// titles you step through without looking. This shows all of them at once,
-    /// to scale, and is what you reach for when you do not remember how many
-    /// presses away the window is — or which desktop it is on, which Alt-Tab
-    /// cannot answer at all.
-    ToggleOverview,
-    /// Open (or close) the notification pane.
-    ///
-    /// The pane is the only surface that holds a message the user did not ask
-    /// for, so it needs a way in that does not depend on having noticed a tray
-    /// icon change — a notification posted while the user was away is one they
-    /// will never see a transient hint for.
-    ToggleNotifications,
-    RestoreOrMinimize,
-    PreviousDesktop,
-    NextDesktop,
-    /// Close whatever popup is open. Unlike every other action here, this one
-    /// can decline: see [`DesktopShell::run_desktop_action`].
-    DismissPopup,
-    /// Turn the volume up or down by one step.
-    ///
-    /// One variant with a sign rather than two, because the two differ in
-    /// nothing but that sign and a `VolumeUp`/`VolumeDown` pair would be two
-    /// arms doing one job.
-    Volume(VolumeStep),
-    /// Silence output, or let it back.
-    ToggleMute,
-    /// Open (or close) the Run box.
-    ///
-    /// Distinct from [`ToggleStartMenu`](Self::ToggleStartMenu), which also has
-    /// a search field: the start menu searches a list of *installed* programs
-    /// and can only offer what is in it. The Run box takes a path and arguments,
-    /// which is what you reach for when the thing you want to start is not on
-    /// any menu.
-    ToggleRunDialog,
-}
-
 /// Which way a volume key moves the level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VolumeStep {
@@ -3179,228 +3166,34 @@ impl VolumeStep {
     }
 }
 
-impl DesktopAction {
-    /// The action a chord invokes, if it invokes one.
-    ///
-    /// This match is the whole binding table — there is no desktop shortcut
-    /// recognised anywhere else.
-    fn for_chord(modifiers: Modifiers, key: Key) -> Option<Self> {
-        let Modifiers {
-            shift,
-            ctrl,
-            alt,
-            super_key,
-        } = modifiers;
-        match (shift, ctrl, alt, super_key, key) {
-            (false, false, true, false, Key::Tab) => Some(Self::CycleWindows),
-            (true, false, true, false, Key::Tab) => Some(Self::CycleWindowsBackwards),
-            (false, false, true, false, Key::F4) => Some(Self::CloseFocused),
-            // The Super key on its own. It is itself a modifier, so whether the
-            // modifier bit is already set when it is the key being pressed is
-            // the keyboard driver's business, and neither answer should change
-            // what the key does.
-            (false, false, false, _, Key::LeftSuper | Key::RightSuper) => {
-                Some(Self::ToggleStartMenu)
-            }
-            (false, false, false, true, Key::D) => Some(Self::ShowDesktop),
-            (false, false, false, true, Key::Left) => Some(Self::SnapLeft),
-            (false, false, false, true, Key::Right) => Some(Self::SnapRight),
-            (false, false, false, true, Key::Up) => Some(Self::Maximize),
-            (false, false, false, true, Key::Down) => Some(Self::RestoreOrMinimize),
-            // Super+Z, as in "zones". Super plus an arrow is already taken by
-            // the four one-press placements above, and the chooser needs a key
-            // that is not one of them.
-            (false, false, false, true, Key::Z) => Some(Self::ToggleZoneOverlay),
-            // Super+Tab, which is the chord every other desktop uses for this
-            // and is not one of the four above. Alt+Tab is deliberately left
-            // alone: the two are complements, not alternatives.
-            (false, false, false, true, Key::Tab) => Some(Self::ToggleOverview),
-            // Super+N, as in "notifications" — the chord Windows uses for the
-            // same panel, and free here: none of the bindings above claim `N`.
-            (false, false, false, true, Key::N) => Some(Self::ToggleNotifications),
-            // Super+R, as in "run" — the chord Windows uses for the same box,
-            // and free here. The module's own doc comment offers "Ctrl+R or
-            // Super+R"; Ctrl+R is not taken by the desktop but *is* taken by
-            // roughly every application that has a reload command, and a global
-            // grab on it would break all of them.
-            (false, false, false, true, Key::R) => Some(Self::ToggleRunDialog),
-            (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),
-            (false, true, false, true, Key::Right) => Some(Self::NextDesktop),
-            // Bare Escape. The shell had no binding for it at all, so the only
-            // way to close the start menu or the calendar was to click
-            // somewhere else — and a popup that a click opened but Escape
-            // cannot close is the one every other desktop has taught the user
-            // to expect. It is claimed *conditionally*: with nothing open the
-            // press is not consumed and reaches the focused window, whose own
-            // dialog may be what the user meant to dismiss.
-            (false, false, false, false, Key::Escape) => Some(Self::DismissPopup),
-            // The volume keys, bare. Unlike every chord above they carry no
-            // modifier, because they are not chords: a dedicated key means one
-            // thing wherever it is pressed, and requiring a modifier on one
-            // would be requiring a modifier on a key that has no other job.
-            //
-            // They are matched with the modifier fields *ignored* rather than
-            // required to be clear. A keyboard whose volume key sits behind an
-            // Fn layer can report it with whatever the layer left set, and a
-            // volume key that stopped working because Shift was down would be
-            // a bug nobody could describe.
-            (_, _, _, _, Key::VolumeUp) => Some(Self::Volume(VolumeStep::Up)),
-            (_, _, _, _, Key::VolumeDown) => Some(Self::Volume(VolumeStep::Down)),
-            (_, _, _, _, Key::VolumeMute) => Some(Self::ToggleMute),
-            _ => None,
-        }
-    }
-}
-
-/// Every chord [`DesktopAction::for_chord`] answers, except Escape.
-///
-/// The table above says what a chord *means*; this says which chords the shell
-/// must be able to hear at all. They are different questions, because the
-/// compositor delivers a keystroke to whatever holds the keyboard, and that is
-/// almost never the shell: `handle_hotkey` is only ever reached for a key that
-/// landed on one of the shell's own three surfaces. Every shortcut here was
-/// therefore dead the moment the user clicked into an application, Alt+Tab —
-/// whose entire purpose is to be pressed from inside another window — most of
-/// all. [`ShellSession`](session::ShellSession) grabs this list at startup.
-///
-/// Kept as a list rather than derived from the match, which cannot be
-/// enumerated, and pinned by `every_grabbed_chord_is_a_chord_the_shell_acts_on`
-/// and its converse below: a binding added to one and not the other is either a
-/// chord nobody can press or a key taken from every application for nothing.
-///
-/// **Escape is deliberately absent.** It is claimed *conditionally* — with no
-/// popup open the press belongs to the focused window's own dialog — and a grab
-/// is not conditional. Holding it permanently would break Escape everywhere on
-/// the desktop, so the session grabs and releases it as menus open and close,
-/// from [`DesktopShell::any_popup_open`].
-///
-/// **The bare Super key appears twice**, once with the Super modifier set and
-/// once without. Whether the modifier bit is already on for the key that *is*
-/// the modifier is the keyboard driver's business, the binding table declines
-/// to care (`super_key: _`), and a grab table keyed by the exact chord has to
-/// name both or the start menu opens on only one kind of driver.
-const GLOBAL_CHORDS: &[(Key, Modifiers)] = &[
-    (Key::Tab, Modifiers::alt()),
-    (
-        Key::Tab,
-        Modifiers {
-            shift: true,
-            alt: true,
-            ..Modifiers::NONE
-        },
-    ),
-    (Key::F4, Modifiers::alt()),
-    (Key::LeftSuper, Modifiers::NONE),
-    (Key::LeftSuper, Modifiers::super_key()),
-    (Key::RightSuper, Modifiers::NONE),
-    (Key::RightSuper, Modifiers::super_key()),
-    (Key::D, Modifiers::super_key()),
-    (Key::Left, Modifiers::super_key()),
-    (Key::Right, Modifiers::super_key()),
-    (Key::Up, Modifiers::super_key()),
-    (Key::Down, Modifiers::super_key()),
-    (Key::Z, Modifiers::super_key()),
-    (Key::Tab, Modifiers::super_key()),
-    (Key::N, Modifiers::super_key()),
-    (Key::R, Modifiers::super_key()),
-    (
-        Key::Left,
-        Modifiers {
-            ctrl: true,
-            super_key: true,
-            ..Modifiers::NONE
-        },
-    ),
-    (
-        Key::Right,
-        Modifiers {
-            ctrl: true,
-            super_key: true,
-            ..Modifiers::NONE
-        },
-    ),
-];
-
-/// Keys the shell claims *whatever modifiers are held*.
-///
-/// A dedicated key is not a chord. `VolumeUp` has one meaning and no other job,
-/// so requiring a bare press would mean a volume key that stopped working
-/// because Shift happened to be down — a bug the user could feel but never
-/// describe. Keyboards that put these behind an Fn layer are free to report
-/// whatever the layer left set, and several do.
-///
-/// Expanded over [`ALL_MODIFIER_SETS`] by
-/// [`global_chords`](DesktopShell::global_chords), because a grab names an
-/// exact chord: there is no "any modifier" spelling in the protocol, and
-/// inventing one for three keys would put a special case in the compositor's
-/// keystroke path to save forty-eight entries in a hash map.
-const MODIFIER_AGNOSTIC_KEYS: &[Key] = &[Key::VolumeUp, Key::VolumeDown, Key::VolumeMute];
-
-/// Every distinct [`Modifiers`] value there is.
-///
-/// Sixteen, because there are four flags. Written out rather than counted up in
-/// a loop so that this is a list a reader can check against `Modifiers` by eye,
-/// and so a fifth flag added to that struct leaves this obviously — rather than
-/// silently — short.
-const ALL_MODIFIER_SETS: [Modifiers; 16] = {
-    const fn m(shift: bool, ctrl: bool, alt: bool, super_key: bool) -> Modifiers {
-        Modifiers {
-            shift,
-            ctrl,
-            alt,
-            super_key,
-        }
-    }
-    [
-        m(false, false, false, false),
-        m(true, false, false, false),
-        m(false, true, false, false),
-        m(true, true, false, false),
-        m(false, false, true, false),
-        m(true, false, true, false),
-        m(false, true, true, false),
-        m(true, true, true, false),
-        m(false, false, false, true),
-        m(true, false, false, true),
-        m(false, true, false, true),
-        m(true, true, false, true),
-        m(false, false, true, true),
-        m(true, false, true, true),
-        m(false, true, true, true),
-        m(true, true, true, true),
-    ]
-};
-
-/// The chord the shell holds only while one of its own surfaces is open.
-///
-/// See [`GLOBAL_CHORDS`] for why it is not in that list.
-const CONDITIONAL_CHORD: (Key, Modifiers) = (Key::Escape, Modifiers::NONE);
-
 impl DesktopShell {
     /// The chords the shell needs delivered wherever the keyboard is.
     ///
-    /// See [`GLOBAL_CHORDS`], plus [`MODIFIER_AGNOSTIC_KEYS`] expanded over
-    /// every [`ALL_MODIFIER_SETS`] entry. Exposed as a function rather than the
-    /// constants so that the list stays the shell's own business — a caller's
-    /// job is to grab what it is given, not to reason about which shortcut is
-    /// which, still less about why one of them appears sixteen times.
+    /// Derived from [`hotkeys`](Self::hotkeys) — every binding in the registry
+    /// except the [conditional](hotkeys::HotkeyAction::is_conditional) ones,
+    /// expanded to the exact chords a grab can name. This used to be a `const`
+    /// list written out beside the binding table and kept in step with it by two
+    /// tests, which is an arrangement that only works while the table is fixed at
+    /// compile time; the moment a user can rebind a shortcut, the grab set has
+    /// to be computed from what they bound.
     ///
     /// Built rather than returned by reference because of that expansion. It is
-    /// read once, at startup, so the allocation is not on any path that runs
-    /// twice.
+    /// read at startup and again whenever the bindings change, neither of which
+    /// is a path that runs per frame.
     #[must_use]
-    pub fn global_chords() -> Vec<(Key, Modifiers)> {
-        let mut chords = GLOBAL_CHORDS.to_vec();
-        for &key in MODIFIER_AGNOSTIC_KEYS {
-            chords.extend(ALL_MODIFIER_SETS.map(|modifiers| (key, modifiers)));
-        }
-        chords
+    pub fn global_chords(&self) -> Vec<(Key, Modifiers)> {
+        self.hotkeys.global_chords()
     }
 
-    /// The chord to hold only while [`any_popup_open`](Self::any_popup_open).
+    /// The chords to hold only while [`any_popup_open`](Self::any_popup_open).
+    ///
+    /// Bare Escape, out of the box. A grab is not conditional, so this set is
+    /// grabbed and released as the shell's surfaces open and close instead of
+    /// being held for the session — holding Escape permanently would break it in
+    /// every dialog on the desktop.
     #[must_use]
-    pub const fn conditional_chord() -> (Key, Modifiers) {
-        CONDITIONAL_CHORD
+    pub fn conditional_chords(&self) -> Vec<(Key, Modifiers)> {
+        self.hotkeys.conditional_chords()
     }
 }
 
@@ -4869,7 +4662,7 @@ mod window_manager_tests {
 
     use super::{
         DesktopShell, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers, ShellControlAction,
-        ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState, snap, text,
+        ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState, hotkeys, snap, text,
         window_rules,
     };
 
@@ -5020,10 +4813,16 @@ mod window_manager_tests {
     /// notice — a grab is a grab — so it has to be noticed here.
     #[test]
     fn every_grabbed_chord_is_a_chord_the_shell_acts_on() {
-        for (key, modifiers) in DesktopShell::global_chords() {
+        let shell = shell();
+        for (key, modifiers) in shell.global_chords() {
+            let action = shell.hotkeys.lookup(key, &modifiers).unwrap_or_else(|| {
+                panic!("{key:?} with {modifiers:?} is claimed from the compositor and then dropped")
+            });
             assert!(
-                super::DesktopAction::for_chord(modifiers, key).is_some(),
-                "{key:?} with {modifiers:?} is claimed from the compositor and then dropped"
+                !action.is_conditional(),
+                "{key:?} with {modifiers:?} is held permanently but only means \
+                 something some of the time, so it is taken from every window for \
+                 nothing the rest of the time"
             );
         }
     }
@@ -5037,13 +4836,15 @@ mod window_manager_tests {
     /// narrower sweep would miss.
     #[test]
     fn every_chord_the_shell_acts_on_is_a_chord_it_can_hear() {
-        let claimed: std::collections::HashSet<_> = DesktopShell::global_chords()
+        let shell = shell();
+        let claimed: std::collections::HashSet<_> = shell
+            .global_chords()
             .into_iter()
-            .chain(std::iter::once(DesktopShell::conditional_chord()))
+            .chain(shell.conditional_chords())
             .collect();
         for &key in guiremote::input::ALL_KEYS {
-            for modifiers in super::ALL_MODIFIER_SETS {
-                if super::DesktopAction::for_chord(modifiers, key).is_some() {
+            for modifiers in hotkeys::ALL_MODIFIER_SETS {
+                if shell.hotkeys.lookup(key, &modifiers).is_some() {
                     assert!(
                         claimed.contains(&(key, modifiers)),
                         "{key:?} with {modifiers:?} is bound but never grabbed, \
@@ -5060,13 +4861,19 @@ mod window_manager_tests {
     /// test here, and break the Escape key on the entire desktop.
     #[test]
     fn escape_is_not_held_permanently() {
+        let shell = shell();
         assert!(
-            !DesktopShell::global_chords().contains(&(Key::Escape, Modifiers::NONE)),
+            !shell
+                .global_chords()
+                .contains(&(Key::Escape, Modifiers::NONE)),
             "a permanent Escape grab takes the key from every dialog on the desktop"
         );
-        assert_eq!(
-            DesktopShell::conditional_chord(),
-            (Key::Escape, Modifiers::NONE)
+        assert!(
+            shell
+                .conditional_chords()
+                .contains(&(Key::Escape, Modifiers::NONE)),
+            "no grab at all means a menu opened with the mouse cannot be closed \
+             with the keyboard"
         );
     }
 

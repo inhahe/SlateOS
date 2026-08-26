@@ -331,7 +331,11 @@ impl<T: Transport> ShellSession<T> {
         // desktop. The one refusal that is *not* a bug — another shell already
         // holds the chord — is a refusal to run two shells at once, which is
         // correct.
-        for (key, modifiers) in DesktopShell::global_chords() {
+        // Asked of the shell rather than of a constant: the set is derived from
+        // whatever is in the shell's hotkey registry, so a rebound shortcut is
+        // grabbed under its new chord without anyone having to remember to edit
+        // a second list.
+        for (key, modifiers) in shell.global_chords() {
             events.grab_key(panel.window, key, modifiers)?;
         }
 
@@ -1031,11 +1035,15 @@ impl<T: Transport> ShellSession<T> {
         if wanted == self.escape_held {
             return Ok(());
         }
-        let (key, modifiers) = DesktopShell::conditional_chord();
-        if wanted {
-            self.events.grab_key(self.panel.window, key, modifiers)?;
-        } else {
-            self.events.ungrab_key(self.panel.window, key, modifiers)?;
+        // Asked of the shell rather than of a constant, because the chords the
+        // user has put on conditional actions are the user's business: a
+        // rebound "dismiss" is still grabbed and released with the popups.
+        for (key, modifiers) in self.shell.conditional_chords() {
+            if wanted {
+                self.events.grab_key(self.panel.window, key, modifiers)?;
+            } else {
+                self.events.ungrab_key(self.panel.window, key, modifiers)?;
+            }
         }
         self.escape_held = wanted;
         Ok(())

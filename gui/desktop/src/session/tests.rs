@@ -213,7 +213,7 @@ fn the_shell_claims_its_shortcuts_before_it_starts_listening() {
     let (session, desktop) = session();
     let panel = session.panel().window();
     let seen = &desktop.borrow().seen;
-    for (key, modifiers) in DesktopShell::global_chords() {
+    for (key, modifiers) in session.shell().global_chords() {
         assert!(
             seen.iter().any(|r| r.body
                 == RequestBody::GrabKey {
@@ -234,37 +234,54 @@ fn the_shell_claims_its_shortcuts_before_it_starts_listening() {
 fn escape_is_claimed_while_a_menu_is_open_and_given_back_after() {
     let (mut session, desktop) = session();
     let panel = session.panel().window();
-    let (key, modifiers) = DesktopShell::conditional_chord();
-    let grab = RequestBody::GrabKey {
-        window: panel,
-        key,
-        modifiers,
-    };
-    let ungrab = RequestBody::UngrabKey {
-        window: panel,
-        key,
-        modifiers,
-    };
+    let chords = session.shell().conditional_chords();
     assert!(
-        !desktop.borrow().seen.iter().any(|r| r.body == grab),
-        "Escape was taken from the whole desktop before anything was open"
+        !chords.is_empty(),
+        "no chord dismisses a popup, so a menu opened with the mouse cannot be \
+         closed with the keyboard at all"
     );
+    let grabs: Vec<_> = chords
+        .iter()
+        .map(|&(key, modifiers)| RequestBody::GrabKey {
+            window: panel,
+            key,
+            modifiers,
+        })
+        .collect();
+    let ungrabs: Vec<_> = chords
+        .iter()
+        .map(|&(key, modifiers)| RequestBody::UngrabKey {
+            window: panel,
+            key,
+            modifiers,
+        })
+        .collect();
+    for grab in &grabs {
+        assert!(
+            !desktop.borrow().seen.iter().any(|r| &r.body == grab),
+            "Escape was taken from the whole desktop before anything was open"
+        );
+    }
 
     let start = centre(session.shell().start_button_rect());
     press_at(&desktop, session.panel(), start.0, start.1);
     session.pump().expect("pump");
     assert!(session.shell().start_menu_open);
-    assert!(
-        desktop.borrow().seen.iter().any(|r| r.body == grab),
-        "the start menu is open and Escape still goes to whoever has the keyboard"
-    );
+    for grab in &grabs {
+        assert!(
+            desktop.borrow().seen.iter().any(|r| &r.body == grab),
+            "the start menu is open and Escape still goes to whoever has the keyboard"
+        );
+    }
 
     session.shell_mut().dismiss_popups();
     session.pump().expect("pump");
-    assert!(
-        desktop.borrow().seen.iter().any(|r| r.body == ungrab),
-        "the menu closed and the shell kept Escape"
-    );
+    for ungrab in &ungrabs {
+        assert!(
+            desktop.borrow().seen.iter().any(|r| &r.body == ungrab),
+            "the menu closed and the shell kept Escape"
+        );
+    }
 }
 
 #[test]

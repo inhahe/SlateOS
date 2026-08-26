@@ -218,7 +218,6 @@ cmd_sysresource 4
 cmd_systemimage 1
 cmd_tail_input 1
 cmd_taskbar 3
-cmd_taskio 8
 cmd_taskmon 1
 cmd_tasksched 1
 cmd_taskstats 2

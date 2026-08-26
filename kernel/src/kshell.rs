@@ -17908,6 +17908,96 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 82: a guessed number that is filed as a measurement becomes evidence, \
+         so `taskio' refuses the count it cannot read"
+    );
+    // §607 drew the line between a guess that misleads and a guess that
+    // destroys. `taskio` is a third kind, and arguably the worst-behaved of the
+    // three: the guessed number is written into a *statistic*, and statistics
+    // are read later, by someone who was not there when the command was typed
+    // and has nothing but the number to go on.
+    //
+    // `taskio read 5 8l92` (letter L) recorded **4096 bytes** of reads against
+    // pid 5 and printed `taskio: read 4096 bytes for pid 5`. Nothing was
+    // damaged and nothing acted wrongly — a counter simply acquired a value
+    // that no measurement produced, and from that moment it is indistinguishable
+    // from one that did. A missing statistic announces itself; a fabricated one
+    // does not.
+    //
+    // `taskio register 1O` was worse still, because there was no sentinel guard
+    // at all: it registered **pid 0** and reported `registered pid 0`, so a typo
+    // created a task record for a process that does not exist, which then
+    // collected every subsequent mistyped measurement.
+    //
+    // Unlike `splice` (§607) none of these defaults were documented — the
+    // synopsis has always said `read <pid> <bytes>`, both required — so here the
+    // right helper is `required_num` and removing the default breaks no
+    // documented form.
+    {
+        let _ = capture_command("taskio init");
+
+        let out = capture_command("taskio register 4242");
+        assert_output_contains("a task can be registered", &out, b"registered pid 4242");
+        assert_eq!(last_exit(), 0, "`taskio register 4242` succeeds");
+
+        let out = capture_command("taskio read 4242 8192");
+        assert_output_contains(
+            "and a real measurement is recorded",
+            &out,
+            b"read 8192 bytes for pid 4242",
+        );
+        assert_eq!(last_exit(), 0, "`taskio read 4242 8192` succeeds");
+
+        let out = capture_command("taskio list");
+        assert_output_contains(
+            "and shows up in the per-task table",
+            &out,
+            b"read=8192(1 calls)",
+        );
+
+        // The assertion this rung exists for: the refusal must leave the
+        // statistic exactly as it was, not merely avoid printing a wrong line.
+        let out = capture_command("taskio read 4242 8l92");
+        assert_output_contains(
+            "a byte count that cannot be read is named",
+            &out,
+            b"`8l92' is not a byte count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable byte count errors");
+        assert_output_lacks("and no transfer is reported", &out, b"bytes for pid");
+
+        let out = capture_command("taskio list");
+        assert_output_contains(
+            "and the counter has not moved behind the refusal",
+            &out,
+            b"read=8192(1 calls)",
+        );
+
+        // No sentinel stood between a mistyped pid and the task table, so this
+        // used to create a record for a process that does not exist.
+        let out = capture_command("taskio register 1O");
+        assert_output_contains(
+            "a process id that cannot be read is named",
+            &out,
+            b"`1O' is not a process id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable process id errors");
+        assert_output_lacks("and no phantom task is registered", &out, b"registered pid");
+
+        // Absence and unreadability are different events, and `taskio` could
+        // report neither: both used to become 0.
+        let out = capture_command("taskio unregister");
+        assert_output_contains(
+            "an omitted process id is reported as missing",
+            &out,
+            b"missing process id",
+        );
+        assert_eq!(last_exit(), 1, "a bare `taskio unregister` errors");
+
+        let _ = capture_command("taskio unregister 4242");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -100006,10 +100096,9 @@ fn cmd_taskio(args: &str) {
             shell_println!("taskio: initialized");
         }
         "register" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
             match taskio::register(pid) {
                 Ok(()) => shell_println!("taskio: registered pid {}", pid),
                 Err(e) => {
@@ -100019,10 +100108,9 @@ fn cmd_taskio(args: &str) {
             }
         }
         "unregister" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
             match taskio::unregister(pid) {
                 Ok(()) => shell_println!("taskio: unregistered pid {}", pid),
                 Err(e) => {
@@ -100032,14 +100120,17 @@ fn cmd_taskio(args: &str) {
             }
         }
         "read" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            // The byte count is what this command exists to record, and the
+            // synopsis has always written it `<bytes>`. The 4096 was never a
+            // documented default -- it was a number invented on the spot and
+            // then filed as a measurement, which is the one kind of wrong
+            // answer that later looks like evidence.
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
+            let Some(bytes) = required_num::<u64>(&parts, 2, "taskio", sub, "byte count") else {
+                return;
+            };
             match taskio::record_read(pid, bytes) {
                 Ok(()) => shell_println!("taskio: read {} bytes for pid {}", bytes, pid),
                 Err(e) => {
@@ -100049,14 +100140,12 @@ fn cmd_taskio(args: &str) {
             }
         }
         "write" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
+            let Some(bytes) = required_num::<u64>(&parts, 2, "taskio", sub, "byte count") else {
+                return;
+            };
             match taskio::record_write(pid, bytes) {
                 Ok(()) => shell_println!("taskio: write {} bytes for pid {}", bytes, pid),
                 Err(e) => {
@@ -100066,14 +100155,15 @@ fn cmd_taskio(args: &str) {
             }
         }
         "cancel" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // `unwrap_or(0)` here recorded a cancellation of nothing and called
+            // it a success, so an unreadable count produced a line in the log
+            // saying the command had run and a counter that had not moved.
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
+            let Some(bytes) = required_num::<u64>(&parts, 2, "taskio", sub, "byte count") else {
+                return;
+            };
             match taskio::record_cancelled(pid, bytes) {
                 Ok(()) => shell_println!("taskio: cancelled {} bytes for pid {}", bytes, pid),
                 Err(e) => {

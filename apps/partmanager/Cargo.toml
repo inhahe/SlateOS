@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window and the event loop. The app names `oswindow`, never `guiremote` --
+# an application should no more name the display protocol than a Unix program
+# names the socket layer.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

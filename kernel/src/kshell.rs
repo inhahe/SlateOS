@@ -96294,6 +96294,44 @@ fn cmd_kconsole(args: &str) {
     }
 }
 
+/// Map a signal number as typed at the shell onto a [`signalq::Signal`].
+///
+/// This exists because `send` and `block` each did the mapping themselves and
+/// **did it differently**, which made `signalq block` silently not block. `send`
+/// translated the CPU-exception numbers (`13` → `SegmentFault`) and fell through
+/// to `UserDefined(n)`; `block` skipped the translation entirely and always
+/// built `UserDefined(n)`. Those are not two spellings of one signal:
+/// `Signal::number()` returns `13` for `SegmentFault` but `32 + n` for
+/// `UserDefined(n)`, and the blocked-signal mask is indexed by `number()`. So
+/// `signalq block 1 13` set bit 45 while `signalq send 1 13` tested bit 13 —
+/// the block was recorded against a signal that cannot be sent, the send was
+/// never blocked, and the shell printed `Signal 13 blocked for pid 1` either
+/// way. Every number `send` treats as an exception (0, 3, 4, 6, 13, 14) was
+/// wrong in `block` for the same reason.
+///
+/// One mapping, three callers, so the two cannot drift apart again.
+fn signal_from_number(n: u32) -> crate::fs::signalq::Signal {
+    use crate::fs::signalq::Signal;
+    match n {
+        0 => Signal::DivideError,
+        3 => Signal::Breakpoint,
+        4 => Signal::Overflow,
+        5 => Signal::BoundRange,
+        6 => Signal::InvalidOpcode,
+        7 => Signal::DeviceNotAvail,
+        8 => Signal::DoubleFault,
+        13 => Signal::SegmentFault,
+        14 => Signal::PageFault,
+        16 => Signal::FloatingPoint,
+        17 => Signal::AlignmentCheck,
+        18 => Signal::MachineCheck,
+        // Not an architectural vector, so it is a user-defined signal. The
+        // module numbers those from 32 up, which is why they cannot simply
+        // share the integer with the exception vectors.
+        other => Signal::UserDefined(other),
+    }
+}
+
 /// `signalq` / `sigq` — signal/exception queue.
 fn cmd_signalq(args: &str) {
     use crate::fs::signalq;
@@ -96315,12 +96353,14 @@ fn cmd_signalq(args: &str) {
         }
         "pending" => {
             signalq::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // A guessed pid is quieter here than anywhere else in this command:
+            // `pending` on a process that does not exist returns an empty list,
+            // and the arm below prints "No pending signals for pid 0." That is
+            // a *reassuring* answer to a question that was never asked -- the
+            // one shape of wrong output an operator has no reason to doubt.
+            let Some(pid) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
+            };
             let signals = signalq::pending(pid);
             if signals.is_empty() {
                 shell_println!("No pending signals for pid {}.", pid);
@@ -96338,27 +96378,30 @@ fn cmd_signalq(args: &str) {
         }
         "send" => {
             signalq::init_defaults();
-            let target = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let sig_num = parts
-                .get(2)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let signal = match sig_num {
-                0 => signalq::Signal::DivideError,
-                3 => signalq::Signal::Breakpoint,
-                4 => signalq::Signal::Overflow,
-                6 => signalq::Signal::InvalidOpcode,
-                13 => signalq::Signal::SegmentFault,
-                14 => signalq::Signal::PageFault,
-                _ => signalq::Signal::UserDefined(sig_num),
+            // `send` is the only write in this module that *creates* the record
+            // it writes to -- `deliver`, `block` and `unblock` all return
+            // NotFound for a pid they cannot find, while `send` pushes a new
+            // process entry. That is batch 29's forged receipt with the forging
+            // and the checking one function apart in the same module, and it is
+            // why `signalq send` with no arguments manufactured **pid 0** and
+            // queued it a DivideError -- after which `deliver 0`, which had no
+            // process to find a moment earlier, succeeded.
+            //
+            // The auto-create itself stays: with the seeded table gone there is
+            // no `register` arm and no other way for a process to enter this
+            // accounting, so creating on first signal is the intended entry
+            // point. The guessed key was doing all the damage on its own.
+            let Some(target) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
             };
+            // The guessed 0 did not mean "unspecified": it mapped to
+            // DivideError, a real and alarming fault. A mistyped signal number
+            // filed a divide-by-zero against a process.
+            let Some(sig_num) = required_num::<u32>(&parts, 2, "signalq", sub, "signal number")
+            else {
+                return;
+            };
+            let signal = signal_from_number(sig_num);
             match signalq::send(0, target, signal, 0) {
                 Ok(()) => shell_println!("Signal {} sent to pid {}.", signal.label(), target),
                 Err(e) => {
@@ -96369,12 +96412,13 @@ fn cmd_signalq(args: &str) {
         }
         "deliver" => {
             signalq::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // `deliver` is destructive and unrepeatable: it clears the whole
+            // pending queue and folds the count into `total_delivered`. A
+            // guessed pid did not report the wrong process's backlog, it
+            // *discarded* it, and nothing retracts a delivery.
+            let Some(pid) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
+            };
             match signalq::deliver(pid) {
                 Ok(n) => shell_println!("Delivered {} signals to pid {}.", n, pid),
                 Err(e) => {
@@ -96385,21 +96429,59 @@ fn cmd_signalq(args: &str) {
         }
         "block" => {
             signalq::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let sig_num = parts
-                .get(2)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let signal = signalq::Signal::UserDefined(sig_num);
+            let Some(pid) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
+            };
+            let Some(sig_num) = required_num::<u32>(&parts, 2, "signalq", sub, "signal number")
+            else {
+                return;
+            };
+            // Was `Signal::UserDefined(sig_num)` unconditionally, which is the
+            // bug `signal_from_number` exists to close: it masked bit 32+n while
+            // `send` tested bit n, so blocking a signal by the number you send
+            // it with did not block it. See the helper's doc comment.
+            let signal = signal_from_number(sig_num);
             match signalq::block(pid, signal) {
-                Ok(()) => shell_println!("Signal {} blocked for pid {}.", sig_num, pid),
+                // Report the signal the module actually masked, not the integer
+                // that was typed -- the old wording was `Signal {sig_num}
+                // blocked`, which is what made the mismatch invisible.
+                Ok(()) => shell_println!(
+                    "Signal {} (#{}) blocked for pid {}.",
+                    signal.label(),
+                    signal.number(),
+                    pid
+                ),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        // `signalq` had no `unblock` arm, so `signalq::unblock` was reachable
+        // only from the module's own self-test and `blocked_mask` was
+        // **monotonic from the shell**: a signal could be blocked and never
+        // unblocked. That is the fourth batch running in which the subcommand
+        // that was missing is the one that *undoes* -- rqstat's creation
+        // (batch 30), zramstat's discard (batch 31), and now this. The pattern
+        // is not coincidence: these arms were written to demonstrate a feature,
+        // and demonstrating means showing a counter go up.
+        "unblock" => {
+            signalq::init_defaults();
+            let Some(pid) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
+            };
+            let Some(sig_num) = required_num::<u32>(&parts, 2, "signalq", sub, "signal number")
+            else {
+                return;
+            };
+            let signal = signal_from_number(sig_num);
+            match signalq::unblock(pid, signal) {
+                Ok(()) => shell_println!(
+                    "Signal {} (#{}) unblocked for pid {}.",
+                    signal.label(),
+                    signal.number(),
+                    pid
+                ),
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -96421,8 +96503,12 @@ fn cmd_signalq(args: &str) {
         }
         _ => {
             shell_println!(
-                "Usage: signalq [list|pending <pid>|send <pid> <sig>|deliver <pid>|block <pid> <sig>|stats|test]"
+                "Usage: signalq [list|pending <pid>|send <pid> <sig>|deliver <pid>|block <pid> <sig>|unblock <pid> <sig>|stats|test]"
             );
+            shell_println!(
+                "  <sig> is a vector number: 0 DIV, 3 BP, 4 OF, 5 BR, 6 UD, 7 NM, 8 DF,"
+            );
+            shell_println!("  13 GP, 14 PF, 16 MF, 17 AC, 18 MC; anything else is a user signal.");
             end_help_arm("signalq", sub);
         }
     }
@@ -99080,11 +99166,20 @@ fn cmd_mmapstat(args: &str) {
             shell_println!("mmapstat: initialized");
         }
         "register" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let name = parts.get(2).copied().unwrap_or("unnamed");
+            // The name was already documented as required (`register <pid>
+            // <name>`) and defaulted anyway. It is a guessed *word* rather than
+            // a guessed number, so the ledger never counted it, but it is the
+            // same defect: `mmapstat register 7` created pid 7 called
+            // "unnamed", and the `procs` table then has a process whose name is
+            // the one thing that would have identified it.
+            let Some(pid) = required_num::<u32>(&parts, 1, "mmapstat", sub, "pid") else {
+                return;
+            };
+            let Some(name) = parts.get(2).copied() else {
+                shell_println!("mmapstat: {}: missing process name", sub);
+                set_exit(1);
+                return;
+            };
             match mmapstat::register_process(pid, name) {
                 Ok(()) => shell_println!("mmapstat: registered pid {} '{}'", pid, name),
                 Err(e) => {
@@ -99094,22 +99189,41 @@ fn cmd_mmapstat(args: &str) {
             }
         }
         "map" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
-            let mt = match parts.get(3).copied().unwrap_or("anon") {
-                "anon" => mmapstat::MapType::Anonymous,
-                "file" => mmapstat::MapType::File,
-                "shared_anon" => mmapstat::MapType::SharedAnon,
-                "shared_file" => mmapstat::MapType::SharedFile,
-                "stack" => mmapstat::MapType::Stack,
-                "vdso" => mmapstat::MapType::Vdso,
-                _ => mmapstat::MapType::Anonymous,
+            let Some(pid) = required_num::<u32>(&parts, 1, "mmapstat", sub, "pid") else {
+                return;
+            };
+            // 4096 was the worst guess available: this OS's page is 16 KiB
+            // (mm/mod.rs — every frame is four contiguous 4 KiB hardware
+            // pages), so the old default was the canonical page size of a
+            // *different* system. That is what made it invisible — it reads as
+            // correct to anyone who has ever called mmap, and is wrong here by
+            // a factor of four. It also feeds `total_bytes`, so the error does
+            // not stay in one cell.
+            let Some(size) = required_num::<u64>(&parts, 2, "mmapstat", sub, "size in bytes")
+            else {
+                return;
+            };
+            // Absent means anonymous, which is a documented default; present
+            // but unreadable is a refusal. The old `_ =>` arm could not tell
+            // those apart, so `mmapstat map 7 16384 fille` recorded an
+            // *anonymous* mapping and printed `type=anon` — a report that is
+            // wrong about the one field the operand existed to set.
+            let mt = match parts.get(3).copied() {
+                None | Some("anon") => mmapstat::MapType::Anonymous,
+                Some("file") => mmapstat::MapType::File,
+                Some("shared_anon") => mmapstat::MapType::SharedAnon,
+                Some("shared_file") => mmapstat::MapType::SharedFile,
+                Some("stack") => mmapstat::MapType::Stack,
+                Some("vdso") => mmapstat::MapType::Vdso,
+                Some(other) => {
+                    shell_println!(
+                        "mmapstat: {}: `{}' is not a map type (anon|file|shared_anon|shared_file|stack|vdso)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match mmapstat::record_map(pid, size, mt) {
                 Ok(()) => shell_println!(
@@ -99125,14 +99239,20 @@ fn cmd_mmapstat(args: &str) {
             }
         }
         "unmap" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            // The sharpest of the six. `record_unmap` does
+            // `total_bytes = total_bytes.saturating_sub(size)`, so a guessed
+            // size corrupts the accumulator in the *destructive* direction —
+            // and the saturation can clamp it to zero, which destroys the
+            // evidence that anything was mis-subtracted. With the old 4096 on
+            // a 16 KiB-page system, unmapping one page left 12288 bytes
+            // credited against the process for the rest of the boot.
+            let Some(pid) = required_num::<u32>(&parts, 1, "mmapstat", sub, "pid") else {
+                return;
+            };
+            let Some(size) = required_num::<u64>(&parts, 2, "mmapstat", sub, "size in bytes")
+            else {
+                return;
+            };
             match mmapstat::record_unmap(pid, size) {
                 Ok(()) => shell_println!("mmapstat: unmap pid={} size={}", pid, size),
                 Err(e) => {
@@ -99142,10 +99262,9 @@ fn cmd_mmapstat(args: &str) {
             }
         }
         "protect" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "mmapstat", sub, "pid") else {
+                return;
+            };
             match mmapstat::record_protect(pid) {
                 Ok(()) => shell_println!("mmapstat: protect pid={}", pid),
                 Err(e) => {
@@ -99191,13 +99310,13 @@ fn cmd_mmapstat(args: &str) {
             shell_println!(
                 "Usage: mmapstat <init|register|map|unmap|protect|types|procs|stats|test>"
             );
-            shell_println!("  register <pid> <name>         — register process");
+            shell_println!("  register <pid> <name>          — register process");
             shell_println!(
-                "  map <pid> [size] [type]        — record mmap (type: anon|file|shared_anon|shared_file|stack|vdso)"
+                "  map <pid> <size> [type]        — record mmap (type: anon|file|shared_anon|shared_file|stack|vdso; default anon)"
             );
-            shell_println!("  unmap <pid> [size]             — record munmap");
+            shell_println!("  unmap <pid> <size>             — record munmap");
             shell_println!("  protect <pid>                  — record mprotect");
-            set_exit(1);
+            end_help_arm("mmapstat", sub);
         }
     }
 }
@@ -99212,11 +99331,30 @@ fn cmd_rqstat(args: &str) {
             rqstat::init_defaults();
             shell_println!("rqstat: initialized");
         }
+        // `rqstat` had no way to register a CPU, so every other subcommand
+        // returned NotFound for the whole life of the shell: `init` seeds an
+        // empty table and `register_cpu` existed in the module with nothing
+        // calling it. The batch-26/27 generalisation again — a module whose
+        // only caller is an interactive command is missing exactly the
+        // operation no test needed, and here the missing one was *creation*,
+        // which is why the guessed `unwrap_or(0)` below never had a CPU to
+        // hit and the damage stayed latent.
+        "register" => {
+            let Some(cpu) = required_num::<u32>(&parts, 1, "rqstat", sub, "CPU number") else {
+                return;
+            };
+            match rqstat::register_cpu(cpu) {
+                Ok(()) => shell_println!("rqstat: registered cpu {}", cpu),
+                Err(e) => {
+                    shell_println!("rqstat: error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
         "enqueue" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(cpu) = required_num::<u32>(&parts, 1, "rqstat", sub, "CPU number") else {
+                return;
+            };
             match rqstat::enqueue(cpu) {
                 Ok(()) => shell_println!("rqstat: enqueued on cpu {}", cpu),
                 Err(e) => {
@@ -99226,10 +99364,9 @@ fn cmd_rqstat(args: &str) {
             }
         }
         "dequeue" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(cpu) = required_num::<u32>(&parts, 1, "rqstat", sub, "CPU number") else {
+                return;
+            };
             match rqstat::dequeue(cpu) {
                 Ok(()) => shell_println!("rqstat: dequeued from cpu {}", cpu),
                 Err(e) => {
@@ -99239,14 +99376,19 @@ fn cmd_rqstat(args: &str) {
             }
         }
         "balance" => {
-            let from = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let to = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            // The only arm in the batch whose guess invented a *relationship*
+            // rather than a value: `0` and `1` are two different defaults, so a
+            // mistyped pair fabricated a migration between two specific CPUs
+            // that never exchanged a task — and it fabricated the same edge
+            // every time, which is what would make it look like a pattern.
+            let Some(from) = required_num::<u32>(&parts, 1, "rqstat", sub, "source CPU number")
+            else {
+                return;
+            };
+            let Some(to) = required_num::<u32>(&parts, 2, "rqstat", sub, "destination CPU number")
+            else {
+                return;
+            };
             match rqstat::record_balance(from, to) {
                 Ok(()) => shell_println!("rqstat: balance {} → {}", from, to),
                 Err(e) => {
@@ -99256,14 +99398,14 @@ fn cmd_rqstat(args: &str) {
             }
         }
         "wait" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ns = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1000);
+            // `ns` feeds `avg_wait = total_wait_ns / dequeues`, so the old 1000
+            // did not produce a wrong row — it moved a column that is a mean.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "rqstat", sub, "CPU number") else {
+                return;
+            };
+            let Some(ns) = required_num::<u64>(&parts, 2, "rqstat", sub, "wait time in ns") else {
+                return;
+            };
             match rqstat::record_wait(cpu, ns) {
                 Ok(()) => shell_println!("rqstat: recorded {}ns wait on cpu {}", ns, cpu),
                 Err(e) => {
@@ -99305,12 +99447,15 @@ fn cmd_rqstat(args: &str) {
         }
         "test" => rqstat::self_test(),
         _ => {
-            shell_println!("Usage: rqstat <init|enqueue|dequeue|balance|wait|cpus|stats|test>");
+            shell_println!(
+                "Usage: rqstat <init|register|enqueue|dequeue|balance|wait|cpus|stats|test>"
+            );
+            shell_println!("  register <cpu>                 — start tracking a CPU");
             shell_println!("  enqueue <cpu>                  — add task to runqueue");
             shell_println!("  dequeue <cpu>                  — remove task from runqueue");
             shell_println!("  balance <from_cpu> <to_cpu>    — load balance event");
-            shell_println!("  wait <cpu> [ns]                — record wait time");
-            set_exit(1);
+            shell_println!("  wait <cpu> <ns>                — record wait time");
+            end_help_arm("rqstat", sub);
         }
     }
 }
@@ -99840,11 +99985,31 @@ fn cmd_zramstat(args: &str) {
             shell_println!("zramstat: initialized");
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("zram1");
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(2_000_000_000);
+            // Both operands define the device being created, so both are
+            // required — the §607 read-the-brackets rule is overridden here for
+            // the same reason batch 28 overrode it for `kstack register`, and
+            // the two cases generalise: *an operand that says what a created
+            // object IS has no defensible default, because the default would be
+            // asserting a fact about a device nobody described.* `disk_size` is
+            // printed in the `devices` table as `disk=`, which an operator reads
+            // as configuration, not as a shell's opinion.
+            //
+            // The name guess was worse than merely invented: it was internally
+            // inconsistent with the record it created. Ids come from `next_id`,
+            // which starts at 0, so the very first `zramstat create` produced
+            // *device 0 named "zram1"* — and the module's own self-test names
+            // its fixture `zram0`, so the shell disagreed with the module about
+            // the same device's name. A wrong name is not a wrong cell here:
+            // the name is what distinguishes one zram device from another.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("zramstat: {}: missing device name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(size) = required_num::<u64>(&parts, 2, "zramstat", sub, "disk size in bytes")
+            else {
+                return;
+            };
             match zramstat::create_device(name, size) {
                 Ok(id) => shell_println!("zramstat: created {} ({}B) → id {}", name, size, id),
                 Err(e) => {
@@ -99854,10 +100019,16 @@ fn cmd_zramstat(args: &str) {
             }
         }
         "remove" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // The guessed 0 was reliably a *hit*, not a miss. `create_device`
+            // hands out ids from `next_id`, counting up from 0, so device 0 is
+            // whichever device was made first — it exists whenever anything
+            // exists. `NotFound`, the safety net every other guessed id in this
+            // burn-down eventually trips, could not fire here. And `remove` is
+            // destructive: it drops the device and every counter it accumulated,
+            // then prints `removed 0` as success.
+            let Some(id) = required_num::<u32>(&parts, 1, "zramstat", sub, "device id") else {
+                return;
+            };
             match zramstat::remove_device(id) {
                 Ok(()) => shell_println!("zramstat: removed {}", id),
                 Err(e) => {
@@ -99867,18 +100038,37 @@ fn cmd_zramstat(args: &str) {
             }
         }
         "write" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let orig = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
-            let compr = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(2048);
+            // `compr` is a denominator: both `devices` and
+            // `compression_ratio_x100` compute `orig * 100 / compr`, so a guess
+            // does not produce a wrong row, it rescales the ratio column an
+            // operator reads as a measurement. That is batch 28's override
+            // exactly, so `[compr]` became `<compr>`.
+            //
+            // The pair of defaults was the sharpest part. 4096/2048 is exactly
+            // 2.00x — the number a healthy zram is supposed to show — so a
+            // mistyped write did not look anomalous, it looked like evidence
+            // the compressor was working. That is the `cputhr` row again: *the
+            // guessed default is always the reassuring value.* 4096 is also the
+            // wrong page size for this OS, which uses 16 KiB pages, so the
+            // "obviously right" figure was right about a different machine.
+            //
+            // `orig` additionally drives a *classification*, not just a
+            // magnitude: `record_write` counts the write as a zero page when
+            // `orig_bytes == 0`, so an unreadable size could file a write under
+            // the wrong kind as well as the wrong amount.
+            let Some(id) = required_num::<u32>(&parts, 1, "zramstat", sub, "device id") else {
+                return;
+            };
+            let Some(orig) =
+                required_num::<u64>(&parts, 2, "zramstat", sub, "uncompressed size in bytes")
+            else {
+                return;
+            };
+            let Some(compr) =
+                required_num::<u64>(&parts, 3, "zramstat", sub, "compressed size in bytes")
+            else {
+                return;
+            };
             match zramstat::record_write(id, orig, compr) {
                 Ok(()) => {
                     shell_println!("zramstat: write dev={} orig={} compr={}", id, orig, compr)
@@ -99890,12 +100080,41 @@ fn cmd_zramstat(args: &str) {
             }
         }
         "read" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "zramstat", sub, "device id") else {
+                return;
+            };
             match zramstat::record_read(id) {
                 Ok(()) => shell_println!("zramstat: read dev={}", id),
+                Err(e) => {
+                    shell_println!("zramstat: error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        // `zramstat` had no `discard` subcommand, so `mem_used` could only ever
+        // grow from the shell: `record_discard` is the one operation that
+        // returns memory to the pool, it is fully exercised by the module's own
+        // self-test, and nothing outside that test called it. The batch-26/27
+        // generalisation once more — a module whose only caller is an
+        // interactive command is missing exactly the operation no test needed —
+        // and as in batch 30 the missing one is structural rather than
+        // cosmetic. Here it is the *destructive* half of the accounting, whose
+        // absence made the `mem=` column monotonic by construction.
+        "discard" => {
+            // `bytes` is subtracted: `mem_used = mem_used.saturating_sub(bytes)`.
+            // A guess would corrupt the accumulator in the destructive
+            // direction, and the saturation can clamp it to zero, which destroys
+            // the evidence that anything was mis-subtracted — mmapstat's
+            // `unmap` row (batch 29), reached here before a default was ever
+            // written rather than after.
+            let Some(id) = required_num::<u32>(&parts, 1, "zramstat", sub, "device id") else {
+                return;
+            };
+            let Some(bytes) = required_num::<u64>(&parts, 2, "zramstat", sub, "byte count") else {
+                return;
+            };
+            match zramstat::record_discard(id, bytes) {
+                Ok(()) => shell_println!("zramstat: discard dev={} bytes={}", id, bytes),
                 Err(e) => {
                     shell_println!("zramstat: error: {:?}", e);
                     set_exit(1);
@@ -99942,10 +100161,15 @@ fn cmd_zramstat(args: &str) {
         }
         "test" => zramstat::self_test(),
         _ => {
-            shell_println!("Usage: zramstat <init|create|remove|write|read|devices|stats|test>");
-            shell_println!("  create <name> [size]           — create ZRAM device");
-            shell_println!("  write <dev_id> [orig] [compr]  — record compressed write");
-            set_exit(1);
+            shell_println!(
+                "Usage: zramstat <init|create|remove|write|read|discard|devices|stats|test>"
+            );
+            shell_println!("  create <name> <size>           — create ZRAM device, size in bytes");
+            shell_println!("  remove <dev_id>                — delete a device and its counters");
+            shell_println!("  write <dev_id> <orig> <compr>  — record compressed write");
+            shell_println!("  read <dev_id>                  — record a read");
+            shell_println!("  discard <dev_id> <bytes>       — record a discard (frees mem)");
+            end_help_arm("zramstat", sub);
         }
     }
 }
@@ -101711,14 +101935,24 @@ fn cmd_kstack(args: &str) {
             shell_println!("kstack: initialized");
         }
         "register" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(16384);
+            // `size` is required, and the usage line was corrected to say so.
+            // It is the one place §607's read-the-brackets rule is overridden:
+            // the old `[size]` promised a default, but `list` divides by it —
+            // the `(N%)` column is
+            // `high_water * 100 / stack_size`. A guessed denominator does not
+            // produce a wrong *cell*, it rescales a column the operator reads
+            // as a measurement — and 16384 was the worst possible guess for
+            // it, being both this OS's page size and the textbook kernel stack
+            // size, so the rescaled figure looks exactly as authoritative as a
+            // real one. There is no stack size a CPU can be assumed to have;
+            // the operand states a fact about the machine.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "kstack", sub, "CPU number") else {
+                return;
+            };
+            let Some(size) = required_num::<u32>(&parts, 2, "kstack", sub, "stack size in bytes")
+            else {
+                return;
+            };
             match kstack::register_cpu(cpu, size) {
                 Ok(()) => shell_println!("kstack: registered cpu {} size={}", cpu, size),
                 Err(e) => {
@@ -101728,14 +101962,18 @@ fn cmd_kstack(args: &str) {
             }
         }
         "usage" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let used = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // A guessed `used` is not a recoverable mistake: `record_usage`
+            // increments `samples` and adds to `total_used_samples`, and the
+            // `avg` column is the quotient. Recording a phantom zero-byte
+            // sample therefore drags the mean down permanently — there is no
+            // operation that retracts a sample, so the only repair is to
+            // discard the whole table.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "kstack", sub, "CPU number") else {
+                return;
+            };
+            let Some(used) = required_num::<u32>(&parts, 2, "kstack", sub, "byte count") else {
+                return;
+            };
             match kstack::record_usage(cpu, used) {
                 Ok(()) => shell_println!("kstack: cpu {} usage={}", cpu, used),
                 Err(e) => {
@@ -101745,10 +101983,9 @@ fn cmd_kstack(args: &str) {
             }
         }
         "overflow" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(cpu) = required_num::<u32>(&parts, 1, "kstack", sub, "CPU number") else {
+                return;
+            };
             match kstack::record_overflow(cpu) {
                 Ok(()) => shell_println!("kstack: overflow on cpu {}", cpu),
                 Err(e) => {
@@ -101758,10 +101995,9 @@ fn cmd_kstack(args: &str) {
             }
         }
         "guard" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(cpu) = required_num::<u32>(&parts, 1, "kstack", sub, "CPU number") else {
+                return;
+            };
             match kstack::record_guard_hit(cpu) {
                 Ok(()) => shell_println!("kstack: guard hit on cpu {}", cpu),
                 Err(e) => {
@@ -101809,9 +102045,11 @@ fn cmd_kstack(args: &str) {
         "test" => kstack::self_test(),
         _ => {
             shell_println!("Usage: kstack <init|register|usage|overflow|guard|list|stats|test>");
-            shell_println!("  register <cpu> [size]   — register CPU stack");
-            shell_println!("  usage <cpu> <bytes>     — record stack usage");
-            set_exit(1);
+            shell_println!("  register <cpu> <size>   — register a CPU stack, size in bytes");
+            shell_println!("  usage <cpu> <bytes>     — record a stack-usage sample");
+            shell_println!("  overflow <cpu>          — record a stack overflow");
+            shell_println!("  guard <cpu>             — record a guard-page hit");
+            end_help_arm("kstack", sub);
         }
     }
 }

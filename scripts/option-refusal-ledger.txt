@@ -120,7 +120,6 @@ cmd_kernlog 1
 cmd_kmod 1
 cmd_kprobes 3
 cmd_ksmstat 2
-cmd_kstack 6
 cmd_kstat 1
 cmd_kthread 4
 cmd_lavg 2
@@ -132,7 +131,6 @@ cmd_memcg 3
 cmd_memdiag 1
 cmd_memtest 1
 cmd_migstat 1
-cmd_mmapstat 6
 cmd_mobilelink 2
 cmd_msivec 3
 cmd_multiclip 1
@@ -180,7 +178,6 @@ cmd_rcustat 3
 cmd_reclaim 2
 cmd_recoverypart 1
 cmd_remotedesktop 1
-cmd_rqstat 6
 cmd_rundialog 1
 cmd_schedclass 1
 cmd_schedwait 1
@@ -191,7 +188,6 @@ cmd_secureerase 1
 cmd_seq 2
 cmd_service_limits 4
 cmd_sharesheet 1
-cmd_signalq 6
 cmd_slabstat 1
 cmd_snaplayout 1
 cmd_sshd 1
@@ -236,7 +232,6 @@ cmd_widgets 6
 cmd_wifiscan 2
 cmd_windowrules 2
 cmd_writeback 2
-cmd_zramstat 6
 dispatch 1
 eval_test 2
 expand_braces_token 1

@@ -81306,8 +81306,407 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **469 of 800 remain**
+## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 520 of 1940
 
+**In short:** the kernel has ~430 small modules that each keep a table of numbers
+and print it — how much swap is compressed, which signals a process has blocked,
+how much memory a control group is using. **520 of the functions that change
+those numbers cannot be called by anything**, because the only code that
+mentions them is the module they live in. The visible effect is not a missing
+feature. It is that a column which should be able to go *down* can only ever go
+*up*, and a counter that cannot fall does not look like a gap — it looks like
+data.
+
+Measured by `scripts/find-unreachable-mutators.py` (reporting tool, always exits
+0): **520 mutators with no caller outside their own module, across 222 modules,
+out of 1940 mutators in 428 files** — about 27%. A function called only by its
+own `self_test` counts as unreachable, and that is the important case: the test
+proves the code works, which is exactly why the gap survives review.
+
+**How it was found.** Not by looking for it. Four consecutive batches of the
+`kshell` guessed-value burn-down each surfaced the same extra defect on the way
+past:
+
+| batch | module | unreachable operation | what that made monotonic |
+|---|---|---|---|
+| 30 | `rqstat` | `register_cpu` | every other subcommand returned `NotFound`, always |
+| 31 | `zramstat` | `record_discard` | `mem_used` could only rise |
+| 32 | `signalq` | `unblock` | `blocked_mask` could only gain bits |
+
+Three in a row is what prompted measuring the population, and the measurement
+says it is systemic rather than a property of those three.
+
+**The cause is consistent, and it explains the shape of the gap.** These
+modules' shell arms were written to *demonstrate* a feature, and demonstrating
+means showing a counter go up. The operation that brings it back down — the
+discard, the unblock, the release, the `remove_*` — has no demonstration value,
+so it was never wired to anything. That is why the unreachable set is so heavily
+weighted toward `set_*` and the un-doing verbs rather than being a random 27%.
+
+**Why it matters more than "dead code".** Three separate consequences, in
+increasing order of harm:
+
+1. The operation is untested against a real caller. The self-test exercises it
+   in isolation with fixtures it built itself.
+2. The number the module reports is *wrong in a specific direction* — always
+   the accumulating one — and nothing in the output says a whole class of
+   transition is missing.
+3. Where the module is meant to be fed by a real subsystem (`netdev::record_rx`,
+   `numastat::record_local_alloc`, `pagecache::record_hit`), an unreachable
+   recorder means the table is not merely incomplete but **empty of the thing it
+   exists to count**, while still printing totals of zero as though zero were
+   measured.
+
+**The proper fix is per-module and is a burn-down, not a patch.** For each
+module, decide which of the two it is: an accounting table a *subsystem* should
+be feeding — in which case wire the call site in the subsystem, which is the
+real fix and the valuable one — or a table only the shell drives, in which case
+add the missing subcommand as batches 30–32 did. Do not "fix" it by deleting the
+function: the function is usually right and the caller is what is missing, and
+deleting it would remove the evidence that a number is unfed.
+
+**Do not confuse this with the guessed-value ledger**
+(`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-…`). That one is about commands that
+invent an operand they could not read; this one is about operations no command
+offers at all. They keep appearing together because both come from the same
+habit — writing the arm that shows the feature working — but they are counted
+separately and cleared separately.
+
+**Not a regression.** True of each module since it was written.
+
+---
+
+## `A-SIGNALQ-BLOCK-MASKS-A-DIFFERENT-SIGNAL-THAN-SEND-SENDS` (lane A, 2026-08-26) — **fixed 2026-08-26**
+
+**In short:** the kernel shell's `signalq` command can send a signal to a
+process and can block one. Blocking signal 13 did not block signal 13. The
+command said it had, the next `send 1 13` went through anyway, and nothing in
+either message hinted that the two commands disagreed about which signal was
+meant.
+
+`cmd_signalq`'s `send` arm translated the CPU exception vectors by hand — `13`
+→ `SegmentFault`, `14` → `PageFault`, and so on — and fell through to
+`Signal::UserDefined(n)` for anything else. Its `block` arm did no translation
+at all and always built `Signal::UserDefined(sig_num)`. Those are different
+signals, not two spellings of one, because `Signal::number()` returns the
+vector for a named exception but `32 + n` for `UserDefined(n)`, and the
+blocked-signal mask is indexed by `number()`:
+
+| you type | `send` masks/tests | `block` sets |
+|---|---|---|
+| `13` | bit 13 (`SegmentFault`) | bit 45 (`UserDefined(13)`) |
+| `0`  | bit 0 (`DivideError`)   | bit 32 (`UserDefined(0)`) |
+
+So every number `send` recognises as an exception — 0, 3, 4, 6, 13, 14 — was
+blocked at the wrong bit, and the block was recorded against a signal that
+`send` has no way to produce. Both halves fail silently: the block does
+nothing, and the mask accumulates bits for signals nobody can send.
+
+**What made it invisible** was the confirmation message. `block` printed
+`Signal {sig_num} blocked for pid {pid}` using the integer that was *typed*
+rather than the signal that was *masked*, so the output agreed with the
+operator's intent no matter what the module did.
+
+**Fixed** by factoring the mapping into a single `signal_from_number` used by
+`send`, `block` and the new `unblock` arm, so the two cannot drift again, and
+by printing the signal's own label and number in the confirmation instead of
+the raw operand. The mapping was also completed while it was being moved — the
+`send` arm had omitted vectors 5, 7, 8, 16, 17 and 18, which it silently
+turned into user signals.
+
+**Not a regression.** True since `cmd_signalq` was written.
+
+---
+
+## `A-SIGNALQ-INIT-DEFAULTS-SEEDS-SEVEN-DELIVERIES-THAT-NEVER-HAPPENED` (lane A, 2026-08-26) — **open**
+
+**In short:** `signalq` reports how many signals each process has been sent and
+delivered. Before anything runs, it already claims seven deliveries. They are
+made up — written into the table at startup so the command would have something
+to print.
+
+`kernel/src/fs/signalq.rs`, `init_defaults()`: the state is seeded with two
+`ProcessSignalState` entries, pid 1 with `total_delivered: 5` and pid 100 with
+`total_delivered: 2`, plus a global `total_delivered: 7`. Nothing sent those
+signals. `signalq stats` and `signalq list` present them in the same columns,
+and the same formatting, as figures that were actually measured.
+
+**This is a defect the tree has already named and fixed once, elsewhere.**
+`kernel/src/fs/zramstat.rs` carries a doc comment recording that its own seeded
+fixtures were "displayed as if they were real measured compressed-swap usage.
+That demo data was removed; the self-test now builds its own fixtures explicitly
+via the real API." `signalq` is the same module shape with the same seed still
+in place — so the precedent for the fix, and the wording for it, already exist.
+
+**The proper fix** is zramstat's: seed `processes: Vec::new()` with all totals
+at zero, and rebuild the self-test's fixtures through the real API. That is not
+a mechanical edit, which is why it is filed rather than done in the same commit
+as the burn-down batch: `self_test` currently depends on the seed, e.g.
+`unblock(1, Signal::Breakpoint)` at `signalq.rs:359` assumes pid 1 already
+exists. The test must create its own process first — `send` auto-creates its
+target, so a single `send` before the block/unblock steps is enough — and the
+`[1/8]` step should then assert the table is empty after init, the way
+zramstat's does.
+
+**Why it is worth doing rather than tolerating:** every other counter in this
+module is now trustworthy after batch 32, so the seeded seven are the only
+fabricated numbers left in `signalq`'s output — and they sit in `total_delivered`,
+the one column an operator would use to decide whether signal delivery is
+working at all.
+
+---
+
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **439 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (thirty-second batch): `cmd_signalq` (6)
+> cleared — 445 → 439 across 211 → 210 functions. Not pinned by a rung.
+>
+> **In short:** `signalq` tracks signals queued to processes. Where it could not
+> read a number it used **pid 0** and **signal 0**. Two of its six guesses were
+> unlike anything earlier in this burn-down, and fixing the arms surfaced two
+> defects that are not guesses at all (filed separately, above).
+>
+> * **The purest instance of batch 29's rule yet.** `send` is the only write in
+>   this module that *creates* the record it writes to; `deliver`, `block` and
+>   `unblock` all return `NotFound` for a pid they cannot find. The forging and
+>   the checking are one function apart in the same file. `signalq send` with no
+>   arguments manufactured **pid 0** and queued it a `DivideError` — after which
+>   `deliver 0`, which had nothing to find a moment earlier, succeeded.
+>
+>   **The auto-create is not the bug here, and was deliberately left.** Once the
+>   fabricated seed goes (see the entry above) there is no `register` arm and no
+>   other way for a process to enter this accounting, so creating on first
+>   signal is the intended entry point. The guessed key was doing all the damage
+>   by itself — which is a useful sharpening of the rule: *what makes a
+>   create-on-write path dangerous is not that it creates, but that it can be
+>   reached with a key nobody supplied.*
+> * **A guessed default that is not "unspecified" but a specific alarming
+>   fault.** `send`'s `sig_num` fell back to `0`, and `0` maps to `DivideError`.
+>   A mistyped signal number therefore filed a divide-by-zero against a process
+>   rather than recording something obviously blank.
+> * **`pending`'s guess produced a reassuring answer to a question nobody
+>   asked.** `pending` on a nonexistent process returns an empty list, so the
+>   arm printed `No pending signals for pid 0.` — well-formed, calm, and about
+>   the wrong process. `deliver`'s is the opposite and the worst of the six: it
+>   is destructive and unrepeatable, clearing the entire pending queue and
+>   folding the count into `total_delivered`, so a guessed pid did not misreport
+>   a backlog, it *discarded* one.
+>
+> **The missing subcommand was the undo, for the fourth batch running.**
+> `signalq::unblock` was reachable only from the module's own self-test, so
+> `blocked_mask` was monotonic from the shell — a signal could be blocked and
+> never unblocked. With rqstat's creation (batch 30) and zramstat's discard
+> (batch 31), that is three consecutive batches plus this one, which is enough
+> to stop calling it a coincidence:
+>
+> > **The subcommand that is missing is the one that undoes.** These arms were
+> > written to demonstrate a feature, and demonstrating means showing a counter
+> > go up. The operation that brings it back down has no demo value, so it was
+> > never wired — and the column it governs is monotonic by construction, which
+> > looks like data rather than like a gap.
+>
+> This is now a *screen* in its own right, and a cheaper one than batch 29's:
+> for each remaining module, list its `pub fn`s and check every mutator has a
+> shell arm. An unreachable `pub fn` in one of these accounting modules is the
+> signature.
+>
+> **Burn-down log.** 2026-08-26 (thirty-first batch): `cmd_zramstat` (6, plus
+> one uncounted) cleared — 451 → 445 across 212 → 211 functions. Not pinned by
+> a rung; nothing asserts on `zramstat` shell output. Predicted by the batch-29
+> screen, like batch 30.
+>
+> **In short:** `zramstat` tracks compressed swap — RAM used as a swap device,
+> with the pages squeezed on the way in. Where it could not read a number it
+> used **device 0**, a **2 GB** disk size, and for a write, **4096 bytes in,
+> 2048 out**. Three things here were not in earlier batches.
+>
+> * **The guessed id was a hit, not a miss.** Every previous batch's guessed id
+>   was eventually caught by `NotFound` — the wrong key usually names nothing.
+>   Not here: `create_device` hands out ids from `next_id`, counting up from 0,
+>   so **device 0 is whichever device was created first**, and it exists
+>   whenever anything exists. This is the complement of batch 29's rule rather
+>   than an instance of it:
+>
+>   > **Where ids are assigned sequentially from zero, a guessed id needs no
+>   > forged receipt — it lands on the oldest real record.** The safety net is
+>   > not weakened, as in batch 29; it is simply never reached.
+>
+>   That matters most for `remove`, which is destructive: a mistyped id deleted
+>   the first device and every counter it had accumulated, and printed
+>   `removed 0` as success.
+> * **The guessed pair was the reassuring answer.** 4096/2048 is exactly
+>   **2.00x**, which is what a healthy zram is supposed to show. A mistyped
+>   write therefore did not read as anomalous — it read as evidence the
+>   compressor was working. That is the `cputhr` row (*the guessed default is
+>   always the reassuring value*) landing on a ratio rather than a rate. And
+>   4096 is the wrong page size for this OS, which uses 16 KiB pages, so it was
+>   also batch 29's borrowed-from-Linux mistake a second time. `compr` is the
+>   denominator of that ratio in both `devices` and `compression_ratio_x100`,
+>   so `[compr]` became `<compr>` under batch 28's §607 override. `orig`
+>   additionally selects a *classification* — `record_write` files the write as
+>   a zero page when `orig_bytes == 0` — so an unreadable size could put a
+>   write in the wrong category as well as at the wrong magnitude.
+> * **The uncounted name guess contradicted the record it created.** `create`
+>   fell back to the name `"zram1"` while the id counter starts at 0, so the
+>   first `zramstat create` produced **device 0 named "zram1"** — and the
+>   module's own self-test names its fixture `zram0`, so the shell and the
+>   module disagreed about what to call the same device. A wrong name is not a
+>   wrong cell in a device table; the name is the thing that distinguishes one
+>   device from another.
+>
+> **The §607 override now has a rule instead of two precedents.** Batch 28
+> promoted `[size]` to `<size>` because it was a denominator; this batch also
+> promoted `create`'s `[size]`, which is *not* one. What both actually share:
+>
+> > **An operand that says what a created object IS has no defensible default**,
+> > because the default asserts a fact about a device nobody described. Ratios
+> > and capacities are read as configuration, not as the shell's opinion.
+>
+> So `create`/`register` subcommands take required operands regardless of
+> brackets, and the mechanical read-the-brackets rule continues to govern
+> everything else.
+>
+> **A missing subcommand again, and again a structural one.** `zramstat` had no
+> `discard` arm, so `record_discard` — the only operation that returns memory
+> to the pool — was reachable only from the module's own self-test, and the
+> shell's `mem=` column was **monotonic by construction**. Batch 26/27's
+> generalisation for the third batch running; as in batch 30 the missing
+> operation was not cosmetic. Added, with its `bytes` operand required, since
+> `mem_used.saturating_sub(bytes)` corrupts in the destructive direction and
+> the saturation can clamp to zero — mmapstat's `unmap` row, reached here
+> before a default was ever written rather than after.
+>
+> **Burn-down log.** 2026-08-26 (thirtieth batch): `cmd_rqstat` (6) cleared —
+> 457 → 451 across 213 → 212 functions. Not pinned by a rung; nothing asserts
+> on `rqstat` shell output. Batch 29's rule was used as a *screen* rather than
+> a description: grepping the remaining modules for a register-like function
+> beside an `init_defaults` that seeds an empty `Vec` predicted `rqstat` before
+> any of its shell code was read, and the prediction held.
+>
+> **In short:** `rqstat` tracks each CPU's run-queue — how many tasks are
+> queued, how long they wait, how often the scheduler moves one CPU's work to
+> another. Where it could not read a number it used **cpu 0**, a **1000 ns**
+> wait, and for a migration, the pair **cpu 0 → cpu 1**. Three separate things
+> turned out to be wrong here, and only the first is the ledger's.
+>
+> * **The command had no `register` subcommand at all.** `rqstat init` seeds an
+>   empty table and `rqstat::register_cpu` existed in the module with nothing
+>   calling it, so `enqueue`, `dequeue`, `balance` and `wait` returned
+>   `NotFound` for the entire life of the shell. That is batch 26/27's
+>   generalisation again — *a module whose only caller is an interactive
+>   command is missing exactly the operation no test needed* — except that this
+>   time the missing operation was **creation**. It is also why the guessed
+>   `unwrap_or(0)` had never yet done damage: there was no cpu 0 for it to hit.
+>   The defect was latent, not absent, and adding the `register` arm is what
+>   would have armed it. Fixed together, in that order, deliberately.
+> * **`balance` guessed a *relationship*, not a value.** Its two operands had
+>   two *different* defaults — `from` fell back to 0 and `to` to 1 — so a
+>   mistyped pair did not record a vague or zeroed event, it fabricated a
+>   migration between two specific CPUs that never exchanged a task. And it
+>   fabricated the **same edge every time**, which is the part that matters:
+>   repeated identical errors read as a pattern, and a load-balancer report
+>   whose whole purpose is to show which CPUs feed which would show a hot 0→1
+>   edge that is an artifact of typing.
+> * **`rqstat::record_balance` was a write that could not fail** — a module
+>   bug, outside the ledger's scope, found while fixing the shell arm above it.
+>   It looked up each CPU with an independent `if let Some(…)` and then returned
+>   `Ok(())` unconditionally, so a balance naming a CPU that does not exist was
+>   *reported as success* and still advanced `total_balances`. The module's own
+>   self-test asserts `enqueue(0).is_err()` before registration, on the stated
+>   grounds that "no phantom CPU is created" — `record_balance` was the one
+>   operation that broke its own module's contract. It also made the `pushes`
+>   and `pulls` columns disagree by construction: a half-applied balance
+>   increments one side and not the other, and nothing in the output says so.
+>   Now both ids are resolved before either is written, and the self-test
+>   checks refusal from **both** directions with no partial effect — one-sided,
+>   because an implementation that resolved only the first id would still pass
+>   a one-directional test.
+>
+> **Burn-down log.** 2026-08-26 (twenty-ninth batch): `cmd_mmapstat` (6, plus
+> two uncounted) cleared — 463 → 457 across 214 → 213 functions. Not pinned by
+> a rung; nothing asserts on `mmapstat` output.
+>
+> **In short:** `mmapstat` records how much memory each process has mapped.
+> Where it could not read a number it used **pid 0** and a **4096-byte** size.
+> 4096 is the page size of Linux on x86 — it is *not* this OS's, which uses
+> 16 KiB pages. So the default was the right answer to the same question asked
+> about a different computer, which is exactly why nobody would look twice at
+> it.
+>
+> **This confirms batch 28's row rather than adding one.** `mmapstat`'s
+> `init_defaults` also seeds an **empty** table, so `register`'s guessed pid 0
+> manufactures the process that `map`, `unmap` and `protect`'s guessed pid 0s
+> then find. Two independent modules, same structure — mutually-corroborating
+> guesses are a property of the *shape* (an empty registry plus a
+> register-then-record command set), not a coincidence in `kstack`. That makes
+> it worth stating as a rule:
+>
+> > **Where a command can both create a record and write to one, a guessed
+> > key is worse than a guessed value, because the create path forges the
+> > receipt the write path checks.** The usual safety net — "a bad id gets
+> > `NotFound`" — is exactly what stops working.
+>
+> Two things `kstack` did not have:
+>
+> * **`record_unmap` subtracts.** It does
+>   `total_bytes = total_bytes.saturating_sub(size)`, so the guess corrupts an
+>   accumulator in the *destructive* direction, and the saturation can clamp it
+>   to zero — destroying the evidence that anything was mis-subtracted. On a
+>   16 KiB-page system, unmapping "one page" guessed as 4096 stranded 12288
+>   bytes against the process for the rest of the boot.
+> * **Two uncounted non-numeric guesses**, the same "plus one uncounted"
+>   pattern batch 27 set precedent for. `register`'s name fell back to
+>   `"unnamed"` despite the usage line already calling it required — so the
+>   `procs` table could hold a process whose name is the one field that would
+>   have identified it. And `map`'s type had a `_ =>` arm collapsing onto
+>   `Anonymous`, so `mmapstat map 7 16384 fille` recorded an anonymous mapping
+>   and printed `type=anon`: a report that is wrong about the single field the
+>   operand exists to set. The type operand keeps its documented default when
+>   *absent* and is refused when present-and-unreadable — `optional_num`'s
+>   distinction, in enum clothing.
+>
+> **Burn-down log.** 2026-08-26 (twenty-eighth batch): `cmd_kstack` (6) cleared
+> — 469 → 463 across 215 → 214 functions. Not pinned by a rung: no self-test
+> asserts on `kstack` output, which is itself the reason the guesses survived
+> this long.
+>
+> **In short:** `kstack` records how much of each CPU's kernel stack is in use.
+> Four of its subcommands took a CPU number, and when they could not read the
+> word you typed they used **cpu 0**. `register` did the same and also invented
+> a **16384-byte** stack. So `kstack register l 8192` — a lowercase L for a 1 —
+> registered cpu 0 with a 16 KiB stack and said so; the later `kstack usage l
+> 900` then found that cpu and recorded against it.
+>
+> **The new row is about guesses that corroborate each other.** Every previous
+> row assumed the guessed value lands in a table that already exists, so the
+> wrong row is at least a row someone put there. Here `init_defaults` seeds an
+> **empty** CPU list, so `register`'s guessed cpu 0 *manufactures the very CPU*
+> that the next three guesses then resolve against successfully. Nothing ever
+> returns `NotFound`; there is no dangling reference to trip over. The table is
+> not inconsistent — it is **self-consistently wrong**, which removes the last
+> witness a reader had.
+>
+> Two aggravations worth recording, both of which recur elsewhere:
+>
+> * **16384 is `kconsole`'s `80x25` again** (batch 27's provenance row): it is
+>   simultaneously this OS's page size and the textbook kernel stack size, so it
+>   reads as documentation rather than as a guess. Worse than `80x25`, though,
+>   because `list` *divides* by it — `pct = high_water * 100 / stack_size` — so
+>   the guess silently rescales a **derived** column the operator reads as a
+>   measurement.
+> * **`record_usage(cpu, 0)` is an uncorrectable accumulator** (the `ipcns`
+>   thesis applied to a mean): it increments `samples` and adds 0 to
+>   `total_used_samples`, so a phantom sample drags the `avg` column down
+>   permanently. There is no operation that retracts a sample; the only repair
+>   is to discard the whole table.
+>
+> `overflow` and `guard` had **no usage line at all**, so their operand was
+> undocumented as well as guessed — the batch-26/27 generalisation holding
+> again, that a module whose only caller is an interactive shell command is
+> missing precisely what no test ever needed. Both now have one, and the arm
+> uses `end_help_arm` so an explicit `kstack help` exits 0 while an unknown
+> subcommand still exits 1.
+>
 > **Burn-down log.** 2026-08-26 (twenty-seventh batch): `cmd_kconsole` (6, plus
 > one uncounted) cleared — 475 → 469 across 216 → 215 functions. Pinned by
 > `kshell::self_test` rung 95.
@@ -84056,9 +84455,9 @@ it does.
 
 | | |
 |---|---|
-| Crate | `gui/imagecodec` — `no_std` + `alloc`, zero dependencies |
+| Crate | `gui/imagecodec` — `no_std` + `alloc`, and nothing from the GUI |
 | Coverage | PNG (RFC 2083) in full: all five colour types, bit depths 1/2/4/8/16, `PLTE`, `tRNS`, all five scanline filters, Adam7 interlacing |
-| Also written | `imagecodec::inflate` — DEFLATE (RFC 1951) and zlib (RFC 1950) from scratch, because PNG pixel data is a zlib stream. See `requests/c-a-two-inflates.md` for why this is a *second* copy and what it would take to have one |
+| Decompression | `deflate` — the tree's one DEFLATE (RFC 1951) / zlib (RFC 1950) implementation, since PNG pixel data is a zlib stream. **Corrected 2026-08-26:** this row used to read "*Also written:* `imagecodec::inflate` … from scratch", and the crate row used to say "zero dependencies". Both were true and both were the problem — that decoder was the *second* copy in the tree (`requests/c-a-two-inflates.md`). Lane A promoted the kernel's to a root-level crate, and lane C deleted its own: 872 lines and 18 tests gone, the whole PNG suite passing on lane A's decoder unchanged, real-file conformance included. `deflate` is `no_std` + `alloc` and depends only on `crc32`, so the property this crate actually needs — that nothing forces a widget-library dependency on a thumbnail engine — is untouched. Zero dependencies was never the goal; zero *GUI* dependencies was |
 | Not covered | JPEG (the next thing this crate should grow); colour management (`gAMA`/`cHRM`/`iCCP`/`sRGB` are parsed past, not applied); APNG animation (decodes to the first frame, as the APNG spec requires of a decoder that does not animate) |
 | Output contract | densely packed `0xAARRGGBB`, **straight** alpha — matching `BufferFormat::Argb8888` and the compositor's `blend_pixel`, so no conversion pass stands between a file and a screen |
 | Safety | nothing panics for any input; nothing is allocated on the strength of a header field — `Limits` is checked against the header *before* the pixel buffer exists, and the decompressor is given the exact output size the header implies |
@@ -85584,6 +85983,757 @@ rebound shortcut works until the session restarts.
 practice. Nothing breaks; the card is still worth having as a reference. This is
 a feature gap, not a bug.
 
+
+---
+
+## BUG-C-PARTMANAGER-DECIDES-WHAT-YOU-CONFIRMED-BY-READING-THE-TITLE — fixed in `e8e46e7c3`
+
+**In short:** The partition manager asks "are you sure?" before it deletes a
+partition, wipes a partition table, or writes queued changes to disk. When you
+click the confirm button, it works out *which* of those three you just agreed to
+by searching the dialog's **title text** for the words `Partition Table`,
+`Delete`, or `Apply`. So the program's behaviour depends on the exact English
+wording shown on screen. Reword a title, translate the app, or add a fourth
+confirmation whose title happens to contain the word "Delete", and the wrong
+thing happens — or, more likely, nothing happens at all, silently, with the
+dialog closing as though it had worked.
+
+**Where it lives:** `apps/partmanager/src/main.rs` — `handle_confirm_accepted`,
+around line 3769:
+
+```rust
+let title = match &app.dialog { ActiveDialog::Confirm(d) => d.title.clone(), _ => String::new() };
+if title.contains("Partition Table") { … }
+else if title.contains("Delete") { … }
+else if title.contains("Apply") { app.apply_operations(); }
+```
+
+**How to reproduce:** change the delete confirmation's title from
+`"Delete Partition"` to `"Remove Partition"` — a change that looks purely
+cosmetic and that no test would flag — and the confirm button becomes a no-op.
+The dialog closes, the partition stays, and nothing is reported.
+
+**Why it is not caught:** the three titles are constructed a few hundred lines
+away from where they are matched, so nothing local ties the two together. There
+is no compile-time relationship between the string written and the string
+searched for; the `else if` chain simply falls off the end when none matches.
+
+**What the proper fix looks like.** Carry the intent as data rather than as
+display text. A `ConfirmIntent` enum (`CreatePartitionTable`, `DeletePartition`,
+`ApplyOperations`) stored alongside the dialog — `ActiveDialog::Confirm { dialog,
+intent }` — and a `match intent` in place of the string chain. Then the title is
+free to say anything, a fourth confirmation must name its own intent to compile,
+and a `match` with no wildcard arm makes the missing case a build error rather
+than a silent no-op. This is planned as part of migrating the app off its
+hand-rolled dialog onto `guitk::modal::AlertDialog`, which is where the intent
+value has to live anyway once the app stops owning the dialog struct.
+
+**Why it was worth fixing before it fired:** it worked, because the three
+titles happened to contain the three words. It was a trap for the next edit,
+not a live failure — but the failure mode when it sprang is the worst kind: a
+destructive action's confirmation appearing to succeed while doing nothing.
+
+**The fix**, landed with the migration onto `guitk::modal::AlertDialog`: the
+`ConfirmIntent` enum described above, stored as `ActiveDialog::Confirm {
+dialog, intent }`, and a wildcard-free `match intent` in
+`handle_confirm_accepted`. A regression test —
+`a_reworded_title_does_not_change_what_the_confirmation_does` — opens a delete
+confirmation titled `"Remove Volume"`, which contains none of the three magic
+words, and asserts the delete is still queued.
+
+---
+
+## BUG-C-A-DIALOG-BUTTON-WAS-DRAWN-ONE-WIDTH-AND-CLICKED-AT-ANOTHER — fixed in `a07710749`
+
+**In short:** In the toolkit's dialog box, the rectangle a button was *painted*
+into and the rectangle a click was *tested against* were computed in two
+different places from the same constant. They agreed only for as long as every
+button in the system was exactly the same width. They were about to stop
+agreeing, because buttons were being given their own labels — and once a `Cancel`
+sits next to a `Delete Partition`, a click aimed at one of them lands on the
+other.
+
+**Where it lived:** `gui/toolkit/src/modal.rs` — `AlertDialog::compute_layout`
+stored hit rectangles using `BUTTON_MIN_WIDTH`, and `AlertDialog::render_buttons`
+independently re-derived the drawn rectangle from the same constant instead of
+reading the stored one.
+
+**Why it was latent rather than live:** with a closed four-variant
+`DialogButton` enum, every button really was `BUTTON_MIN_WIDTH` wide, so the two
+copies could not disagree. The bug was created by the constant being copied, and
+would have been *revealed* by the very next feature. `BUTTON_PADDING_H` had been
+sitting unused in the file the whole time — a constant that existed for exactly
+the width computation nobody had written.
+
+**The fix:** one function, two consumers. `DialogButton::width()` measures the
+label and floors it at `BUTTON_MIN_WIDTH`; `compute_layout` walks the buttons
+accumulating x-positions and stores the resulting rectangles; `render_buttons`
+reads those stored rectangles rather than re-deriving anything. The regression
+test — `the_button_a_click_lands_on_is_the_button_that_was_drawn` — renders a
+dialog whose buttons have deliberately different label lengths, pulls each
+button's `FillRect` out of the render tree, clicks its centre, and asserts the
+result matches that button. It tests the drawn geometry, not the stored
+geometry, which is the only version of the test that could have caught the
+original.
+
+**Related:** the same change made a too-wide button row widen the dialog rather
+than overflow it. Buttons are right-aligned inside the box, so the overflow ran
+off the **left** edge — the near side, where it reads as an intentional inset
+rather than as a mistake.
+
+---
+
+## BUG-C-THE-WRITE-BUTTON-WAS-NOT-A-BUTTON — fixed in `c9c7902bd`
+
+**In short:** The disk imager's whole purpose is to write an image to a USB
+drive. The "Write Image" button that starts that had been on screen since the
+tab was written, and clicking it did nothing at all — no handler anywhere
+listened for it. The program could read images, inspect them, hash them and
+verify them, but it could not do the thing it is named after.
+
+**Where it lived:** `apps/diskimager/src/main.rs` — `render_write_tab` drew the
+button; `handle_mouse` had branches for the tab bar, the drive list and the ISO
+browser, and none for the Write tab.
+
+**What it took down with it.** The button was the only way in, so everything
+behind it was unreachable too: `ConfirmDialog` and its `show_write_confirm`, the
+140-line `render_confirm_dialog`, and the Enter/Escape handling in
+`handle_key`. Roughly 200 lines of tested-looking, never-run code — two unit
+tests exercised `ConfirmDialog` as a struct, which is why "it has tests" did not
+mean "it works."
+
+**Why nothing caught it.** `dead_code` is the lint that catches a feature with
+no way in, and it could not fire: the dialog was reachable *from the tests*, and
+the tests are compiled into the same crate. A crate-wide `#![allow(dead_code)]`
+had also been present until 2026-08-25. Nothing else in the toolkit can notice —
+a `FillRect` is a `FillRect` whether or not anyone will ever click it.
+
+**The fix:** a `WriteTabLayout` computed once, drawn from by `render_write_tab`
+and hit-tested by `handle_mouse`; the rows below the image and drive cards move
+with the selection, so the button's position is not a constant a hit test could
+have restated. `confirm_write()` puts the dialog up, guarded by the same
+`can_write()` that decides whether the button is drawn enabled — one test, so
+the button's look and its effect cannot disagree.
+
+**The lesson worth keeping:** a widget that is drawn but not wired is invisible
+to every automatic check there is. The test that catches it is the one that
+clicks where the pixels are — `the_write_button_opens_the_confirmation` —
+paired with one asserting the drawn rectangle is the hit-tested rectangle. Both
+now exist; either alone would pass while the feature stayed broken.
+
+---
+
+## BUG-C-A-DIALOG-DREW-ITSELF-ONE-HEIGHT-AND-WAS-CLICKED-AT-ANOTHER — fixed in `c9c7902bd`
+
+**In short:** The disk imager's confirmation box grew or shrank to fit its text,
+but the code that decided which button a click had hit always assumed the box
+was 200 pixels tall. Whenever the text made the box a different size — which was
+most of the time — the Cancel and Write buttons were clickable at a place on
+screen where nothing was drawn, and unclickable where they actually appeared.
+
+**Where it lived:** `apps/diskimager/src/main.rs` — `handle_dialog_click` opened
+with `let dialog_h = 200.0_f32;` and derived the button row from it, while
+`render_confirm_dialog` measured its own wrapped message and warning and used
+whatever height that came to.
+
+**Why it never fired in practice:** the button was inert (the entry above), so
+the dialog never opened outside a unit test, and the unit tests called
+`ConfirmDialog` methods directly rather than clicking anything. Two latent bugs
+covering for each other: the reachability bug meant the geometry bug had no way
+to be observed, and the geometry bug meant fixing the reachability bug alone
+would have shipped a dialog whose buttons miss.
+
+**The fix:** the whole hand-rolled dialog is gone, replaced by
+`guitk::modal::AlertDialog`, which stores the rectangles it drew and hit-tests
+against those. `clicking_the_verb_starts_the_write` renders the dialog, asks it
+where the button that means `Ok` landed, clicks the centre of that rectangle and
+asserts the write started — a test that only passes if the drawn geometry and
+the hit geometry are the same object.
+
+**The general shape, seen three times now** (here, in the toolkit's button
+widths, and in the Write button above): a rectangle computed twice agrees only
+until one copy is edited, and nothing warns you when they part. The fix is
+always the same — compute once, read twice — and the test is always the same
+too: recover the rectangle from the render tree, not from the code that was
+supposed to have drawn it.
+
+---
+
+## BUG-C-A-FULL-DIALOG-DROPPED-THE-WARNING-AND-KEPT-THE-QUESTION — fixed in `c9c7902bd`
+
+**In short:** The toolkit's alert box refuses to grow past 500 pixels tall, and
+when its text did not fit it stopped drawing lines at the bottom. The warning
+line sits *below* the message, so the bottom is where the warning is: a long
+drive name would push "This action cannot be undone" off the box and the user
+would be asked to confirm an irreversible write with the word "irreversible"
+missing. The name that causes it comes from the device, not from us, so its
+length was never ours to bound.
+
+**Where it lived:** `gui/toolkit/src/modal.rs` — `AlertDialog::render` drew the
+message and the detail in two hand-rolled loops, each with a `break` when the
+next line would cross the button row.
+
+**How to see it:** an `AlertDialog::destructive` whose message is a drive name
+repeated enough times to wrap past ~7 lines at the dialog's width. The yellow
+detail text is simply absent from the render tree — no ellipsis, no indication
+that anything was cut.
+
+**The fix:** `line_budget` decides both allowances up front, before either is
+drawn. The detail is served first, capped at half the column so it cannot crowd
+out the question; the message gets the rest, with a floor of one line, because a
+confirmation showing only its consequence with the question missing is not a
+question. Whichever is cut is elided with `…` by `text::Paragraph`, which
+already knew how — the old loops were a second, worse copy of wrapping logic
+that existed. Three tests: that an overlong message does not take the warning
+with it, that a cut is marked, and that no text reaches the button row.
+
+**The principle:** when a box is too small, cutting at the bottom cuts whatever
+happens to be last, which is a layout accident rather than a decision about what
+matters least. Decide what to keep before you decide where to stop.
+
+---
+
+## C-THE-DISK-IMAGER-WAS-A-MOCK-WITH-A-REAL-HASHER-BOLTED-ON (lane C, 2026-08-26)
+
+**In short.** `apps/diskimager` — the "write this .iso to that USB stick"
+program — reported success for every one of its four operations without ever
+touching a byte. It listed three drives that do not exist, filled a progress bar
+for a write that had opened no file, printed "Write complete", and published the
+checksum of the *empty input* for every image alike. The hasher underneath was
+genuine and had known-answer tests against the published FIPS and RFC vectors;
+it was still wrong end to end, because nothing ever fed it.
+
+**Where.** `apps/diskimager/src/main.rs`.
+
+### The four defects
+
+**1. The hash was of nothing.** `start_hash` built a `HashState`; the tick
+advanced a byte counter *beside* it; `complete_operation` finalised an untouched
+hasher. Every image of every size, under every algorithm, produced the digest of
+zero bytes — `d41d8cd98f00b204e9800998ecf8427e` for MD5, and so on. So the
+headline use of a disk imager, pasting in the checksum from the download page,
+always said "mismatch".
+
+This is the direct sequel to `C-THE-DISK-IMAGER-VERIFIES-NOTHING-AND-SAYS-SHA-256`
+above, and it is worth reading the two together. That entry's lesson was *"a
+known-answer vector is the only test that can distinguish a hash from a
+plausible-looking function"*, and the fix added exactly those vectors. They pass.
+They passed the whole time this bug existed. **A hasher with no reader is a hash
+of nothing, and no test of the hasher can see it** — the gap is between the
+hasher and the file. Only a test that hashes a known file *through the
+application* closes it. The generalisation: fixing a component does not fix the
+feature, and the test that proves the component right is not the test that proves
+the feature works.
+
+**2. Three invented drives.** `detect_drives` returned a hardcoded System NVMe,
+USB Flash Drive and SD Card Reader — with model strings, serial numbers,
+capacities and partition tables — that existed nowhere but inside that function,
+on a machine that exposes no block devices at all. The user could select one and
+click Write.
+
+**3. Fabricated progress.** The tick advanced `bytes_done` by `bytes_total / 100`
+under a comment reading `// Simulate progress if operation is active`. The
+comment is honest and the behaviour is not: a bar that fills at a rate derived
+from the total rather than from the transfer is a progress bar for a transfer
+that is not happening.
+
+The root cause was structural rather than local. `operation` (what the status bar
+says) and the open files (what the tick should do) were separate, and only the
+first existed — so an `operation` could be set with nothing open, which is a
+status bar describing work that nothing is doing. Setting them independently
+means they can disagree, and they did.
+
+**4. Speed and ETA were wrong by two orders of magnitude.** `OperationProgress::advance`
+*assigned* the tick's `elapsed_ms` rather than accumulating it. `gui/window/src/app.rs`
+is explicit that `Event::Tick { elapsed_ms }` carries the interval that
+**actually** elapsed and that an application must advance by it — so total
+elapsed time was being replaced, every frame, by the length of one frame. Speed
+(`bytes_done / elapsed_ms`) and the ETA derived from it were therefore inflated
+by roughly the ratio of the whole transfer's duration to a single frame's. This
+one would have survived the other three fixes intact: it is arithmetic in a
+helper that has its own tests, none of which called `advance` twice.
+
+**Severity.** High, and of a kind worth naming separately from ordinary
+wrongness: the program was *confidently* wrong. Each operation ended with a
+success message. A user with a real block device would have had every reason to
+believe an .iso had been written.
+
+### FIXED, 2026-08-26 (`82fc01942`)
+
+All four, plus a fifth found on the way.
+
+**The I/O is real.** A `Job` enum — `Hash`, `Copy`, `Compare` — holds the open
+files and steps one 1 MiB chunk per tick, returning `Moved(n)`, `Done`, or
+`Differs(offset)`. All four operations go through it. Three details that are not
+incidental:
+
+- **`operation` and `job` are set together**, by a single `begin(operation, job,
+  bytes_total)`, and the pump is driven by `self.job` rather than by
+  `self.operation`. There is now no way to have one without the other.
+- **A write flushes and `sync_all`s before it reports completion.** A "Write
+  complete" printed before the sync is a promise the program has not kept, and
+  for a program whose output is a bootable USB stick that promise is the entire
+  product.
+- **Short reads are looped, not trusted.** `Read::read` may return fewer bytes
+  than asked without meaning EOF; a comparison that took each side's return
+  length at face value would report a mismatch whenever the two sides happened
+  to hand back different amounts. `fill()` loops (and retries `Interrupted`).
+
+**Verification reports where.** `Differs(offset)` surfaces as "drive differs
+from image at byte N", and a device shorter than the image fails at the offset
+where it ran out rather than passing on its prefix.
+
+**Drives come from `/sys/hardware/block`** — the same node `apps/sysinfo` reads,
+same key=value-records-separated-by-blank-lines format. Reusing that convention
+rather than inventing a second way to ask "what disks exist" is deliberate: two
+programs that each invent their own end up disagreeing, and the disagreement
+surfaces to the user as a drive one of them offers to erase and the other has
+never heard of. The parser takes the file's **text**, not its path, so the format
+is testable on a host that has no such file — a parser reachable only through the
+filesystem is a parser nothing exercises, which is how the hand-rolled checksum
+stayed wrong for weeks in the first place.
+
+Nothing publishes that file yet (`kernel/src/blkdev.rs` and `kernel/src/nvme.rs`
+exist, but `devfs` exposes only character devices). Filed as
+`requests/c-a-expose-block-devices-to-userspace.md`. Until it lands the sidebar
+says "No drives detected. This system exposes no block devices to userspace
+yet." and a write fails with `Cannot open /dev/... for writing: <error>` — which
+is the honest answer, and the app becomes fully functional the moment the node
+appears with no further change in `apps/`.
+
+One distinction preserved on purpose: **`PartitionTable::None` does not fold into
+`Unknown`.** "The kernel read the disk and found no table" and "nobody looked"
+are not the same disk to offer to erase unasked.
+
+**The fifth defect, found while fixing the fourth: the Refresh Drives button was
+dead.** Drawn every frame in `render_toolbar`, hit-tested by nothing — the exact
+twin of the Write button fixed the previous day, and now the *only* way to pick
+up a drive plugged in after launch. This is the second instance of a failure mode
+that deserves its own name: **a dead button is a dead feature, and `dead_code`
+cannot see it.** The drawing code is live and there is no handler for the lint to
+find missing, so nothing in the toolchain will ever report it. The only defences
+are structural — derive the rectangle once (`ToolbarLayout`, read by both the
+renderer and the click handler) and pin the agreement with a test that the button
+is drawn where the click is tested.
+
+Refreshing also had a trap worth stating: the selection is an *index* into
+`drives`, and this program's next click erases the selected disk. Reassigning the
+list would silently re-point that index at whatever drive landed in the slot,
+which is the worst available way to be wrong here. The drive is re-found by `id`
+and the selection dropped outright if it is gone — and a refresh is refused while
+an operation holds a device open, because `locked_drive_id` names the drive being
+written and re-indexing under it would leave the status bar describing one drive
+while the bytes went to another.
+
+175 tests pass in `diskimager`; clippy clean. The new ones that would have caught
+the original four: `the_hash_is_of_the_file_and_not_of_nothing` (MD5/SHA-1/SHA-256
+of `"abc"` against RFC 1321 A.5 and FIPS 180-4, driven **through the app**),
+`hash_progress_counts_bytes_that_were_actually_read`,
+`a_write_puts_the_image_bytes_on_the_device`, `verify_after_write_reads_the_device_back`,
+`verification_reports_where_the_device_differs`, `a_truncated_device_fails_verification`,
+`creating_an_image_copies_the_device_into_a_file`,
+`no_block_node_means_no_drives_rather_than_invented_ones`, and
+`the_refresh_button_is_drawn_where_the_click_is_tested`.
+
+**A note on testing an app that has no hardware.** Every one of those transfer
+tests runs against ordinary files in a scratch directory, and that is not a
+compromise. `CopyJob` and `CompareJob` open by path and stream; a scratch file
+exercises every line the real device will. **An ordinary file is not a stand-in
+for a device — on this path it is the same code.** It is also the only way to
+test the transfer at all while `devfs` exposes no block devices, which means the
+alternative to testing against files was not testing.
+
+---
+
+## C-A-HUNDRED-AND-THIRTY-TWO-APPS-NEVER-OPEN-A-WINDOW (lane C, 2026-08-26)
+
+**In short:** SlateOS has about 140 desktop programs. Six of them can actually
+appear on screen. The other 132 are complete applications — layout, drawing,
+keyboard handling, tests, the lot — whose `main` function never asks the
+compositor for a window, so running one does nothing visible and it exits
+immediately. Nothing in the build reports this, because from the compiler's
+point of view every one of those programs is a valid program that ran and
+finished. The fix is per-app and mechanical; the thing that needed fixing
+*once* was the absence of anything that would ever notice.
+
+### What "wired" means
+
+A SlateOS application becomes a window in exactly one place:
+
+```rust
+oswindow::app::launch("name", &mut app)
+```
+
+`launch` connects to the compositor, creates the surface, and runs the event
+loop until the window closes. Reaching it is the entire difference between a
+program the user can use and a program that exits before they see it. There is
+no partial credit and no second door.
+
+### The count, as measured on 2026-08-26
+
+| | count | what its `main` does |
+|---|---|---|
+| **wired** | 6 | reaches `app::launch` |
+| **empty `main`** | 20 | nothing at all — `fn main() {}` |
+| **simulation `main`** | 112 | constructs the app, renders one throwaway frame, prints a line, exits |
+
+The six that work: `diskimager`, `imageviewer`, `metronome`, `settings`,
+`editor`, `explorer`. Every one of the six was wired on 2026-08-25 or -26
+(`git log -S"app::launch"` gives the dates); before that, **no application in
+the tree could open a window at all.**
+
+The twenty with an empty `main`: `alarmclock`, `archivemanager`, `benchmark`,
+`clipmanager`, `colorpicker`, `credmanager`, `defrag`, `devicemanager`,
+`diskanalyzer`, `diskcleanup`, `fileassoc`, `lockscreen`, `netmanager`,
+`partmanager`, `pdfviewer`, `speedtest`, `startupmanager`, `stickynotes`,
+`taskscheduler`, `vpnmanager`.
+
+The other 112 range from a comment that admits it —
+
+```rust
+// In a real Slate OS environment this would enter the compositor event loop
+```
+> — `apps/calculator/src/main.rs`
+
+— to `apps/snake/src/main.rs`, whose `main` is one line in its entirety:
+
+```rust
+fn main() { let _app = SnakeApp::new(); }
+```
+
+### Why nothing caught it
+
+This is lesson 45 — *a feature with no production caller is a feature that does
+not exist* — at whole-program scale, and it is the same shape as the dead Write
+button and the dead Refresh button in `apps/diskimager`, both recorded above.
+`dead_code` cannot see any of the three. Every type is constructed and every
+method is called: by `main`, or by the tests, or by both. The lint's question is
+"is this reachable?", and the answer is yes. The question nobody was asking is
+"is this reachable *from a window*?"
+
+Two further reasons it stayed invisible for so long:
+
+* **The tests pass.** Each app's `handle_event` and `render` have real coverage,
+  driven directly by the test module. Coverage of a function that production
+  never calls is coverage of a program that does not run.
+* **The comment reads like a plan, not a defect.** "In a real Slate OS
+  environment this would…" is written in the voice of a deliberate deferral. It
+  is a hundred and twelve deliberate deferrals, none of which was tracked.
+
+### Two generations of drawing, and why the second half is harder
+
+The 132 split by what they build:
+
+* 39 assemble a `RenderTree` — the type `oswindow::app::App::render` returns.
+  Wiring one is an `impl App` block and a new `main`; `apps/diskimager` is the
+  worked example.
+* 93 return a flat `Vec<RenderCommand>`, the older shape, written before the
+  tree existed. These need the conversion *as well as* the launch.
+
+That split is why the gate below matches both names. A check that knew only
+`RenderTree` would report 39 and stay silent about the harder ninety-three.
+
+### The gate: `scripts/check-window-wiring.py`
+
+Written the same day, modelled on `scripts/check-tick-wiring.py`. It reports
+every file that draws, defines a `main`, and never names `app::launch` — and it
+searches **production code only**: comments and `#[cfg(test)]` items are blanked
+first, so neither the promise of an event loop nor a test that calls `render` by
+hand can vouch for wiring that is not there. That is not a hypothetical
+precaution; the promise-of-an-event-loop comment is present in most of the 112,
+and without the blanking the gate would be blind to the exact population it
+exists to find.
+
+It **ratchets rather than failing outright**: `BASELINE = 132` is the count as
+found, the check fails if the number goes up, and the constant is meant to be
+edited downwards as apps are wired. Failing on all 132 today would mean a gate
+that is red from the minute it is written, and a gate that is always red is a
+gate that gets commented out.
+
+The shared scanning machinery — comment/literal blanking, `#[cfg(test)]`
+stripping, brace matching — moved into `scripts/rustscan.py` in the same change,
+because two copies of a 300-line scanner are two copies that drift, and the one
+that drifts is always the one nobody is currently editing.
+
+### Status
+
+**Open, and expected to stay open for a while.** 132 apps is 132 separate
+pieces of work, each small. Nothing is blocked on anyone else: the toolkit, the
+window crate and the compositor are all in place, and `apps/diskimager` is a
+complete worked example of both halves (an `impl App` with a `tick_interval`
+that only asks for a clock while something is moving, and a `main` that returns
+`launch`'s `ExitCode`).
+
+Order of attack, highest value first: the shell surfaces users cannot avoid
+(`launcher`, `systray`, `lockscreen`, `gui/notifications`), then the ones whose
+absence makes another feature untestable (`partmanager`, `devicemanager`,
+`netmanager`), then the rest.
+
+### The lesson, stated so it generalises
+
+**A program that never reaches its event loop is a program that does not exist,
+and no lint in any language can tell you so.** The compiler's reachability
+question stops at `main`. Whether `main` reaches the *outside world* — a window,
+a socket, a device — is a question only a project-specific check can ask, and it
+has to ask it of production text, because the codebase will otherwise answer
+with its own comments and its own tests.
+
+---
+
+## TD-C-DISKCLEANUP-DELETES-NOTHING — ✅ **FIXED** 2026-08-26
+
+> **Resolved the same day it was written.** Both halves are real: the scanner
+> walks the filesystem and measures what it finds, and "Clean" unlinks it. The
+> resolution — including the near-miss that shaped the design, which is the
+> part worth reading — is the entry
+> `C-DISKCLEANUP-A-REAL-DELETER-NEEDS-A-CONFINEMENT-INVARIANT-NOT-A-CONVENTION`
+> at the end of this file. The description below is kept as written, because it
+> is the accurate record of what the program was.
+
+**In short:** `apps/diskcleanup` is a disk cleaner that never cleans anything.
+Pressing "Clean" walks the list of files it plans to remove, counts them, and
+returns — it does not call the filesystem at all. Worse, the *scanner* never
+asks how big any of those files are, so every category reports "0 B" and the
+whole size-driven half of the window is dead: no "View" link ever appears, and
+the "Clean" button can never light up. As of 2026-08-26 the program at least
+says so out loud — the results screen is titled "Cleanup Preview" and carries a
+banner reading "Preview only — no files were deleted" — but the two stubs
+underneath it are still stubs.
+
+**Where:** `apps/diskcleanup/src/main.rs`.
+
+### The two halves
+
+**(a) `CleanupExecutor::execute` is byte-identical to `CleanupExecutor::dry_run`.**
+Both iterate `plan.items`, `saturating_add` a count and a byte total, and
+return. Neither names `std::fs`, the VFS, or any syscall. There is a comment at
+the exact line where the deletion belongs:
+
+```rust
+// A real implementation would call `std::fs::remove_file` or the
+// VFS equivalent here, and push a `(path, message)` onto `errors`
+// when it refused.
+```
+
+`CleanupResult` already carries an `errors: Vec<(String, String)>` field for
+per-file refusals, and it is always empty for the same reason.
+
+**(b) `CleanupScanner`'s per-category methods record directories, not files, and
+never measure them.** `scan_temp_files`, `scan_logs`, `scan_package_cache`,
+`scan_thumbnails`, `scan_crash_dumps` and the rest each push
+`CleanupItem::new(path, category)` — and not one of them chains `.with_size()`.
+`CleanupItem::estimated_size_bytes` therefore stays at its `0` default, so
+`run_scan`'s per-category totals are all zero, so:
+
+- every row reads `0 B`;
+- `can_clean()` is false whatever the user ticks, so "Clean" stays greyed;
+- the per-row "View" link, which only appears for a category with bytes in it,
+  is unreachable in the shipped program.
+
+This is why the event-wiring tests build their state through a `scanned()`
+helper that injects a size rather than going through `run_scan`: a test that
+used the real scanner could never reach the size-gated half of the UI, which is
+most of it.
+
+### How the program handles it today
+
+Not by a comment. `CleanupExecutor::deletes_for_real()` is a `const fn`
+returning `false`, and `CleanupResult` carries a `simulated: bool` set from it.
+Every piece of user-facing wording reads that bit:
+
+| `deletes_for_real()` | Results title | Banner | Row labels |
+|---|---|---|---|
+| `false` (today) | "Cleanup Preview" | yellow, bold, *above* the numbers | "Files that **would be** deleted" |
+| `true` (later) | "Cleanup Complete" | none | "Files deleted" |
+
+The banner sits above the totals rather than below them because a disclaimer
+under a bold green "Space freed: 1.4 GiB" is a disclaimer nobody reads. The bit
+is stored on the `CleanupResult` rather than consulted by the renderer, so the
+history log records it too: a row written today cannot later be mistaken for a
+real cleanup once the deleter lands.
+
+When the deleter is real, `deletes_for_real()` becomes `true` in one place and
+all of the wording follows. That is the whole point of it being a function.
+
+### Why the deleter was not written in the same commit
+
+`DEFAULT_SCAN_ROOTS` is `["/"]` — `CleanupScanner::scan` treats each base as a
+*prefix*, joining `"tmp"`, `"var/log"` and the rest onto it, so a base of `"/"`
+yields exactly `/tmp` and `/var/log`. The unit tests run on the **development
+host**, not under SlateOS. A real recursive deleter driven by the existing test
+suite would therefore delete files on the operator's `C:`/`D:`.
+
+So the sequencing was deliberate: wire the window and make the UI honest first
+(one commit, no filesystem writes anywhere in it), and make the back end real in
+a follow-up whose tests point **only** at a temporary directory they created
+themselves.
+
+### The proper fix
+
+1. **Measure during the scan.** Each `scan_*` method stats the files it finds
+   and chains `.with_size(bytes)`. For a directory that means summing its
+   entries, which also means the scan must be bounded — a cleaner that hangs on
+   a pathological tree is worse than one that reports zero.
+2. **Delete for real**, one file at a time, pushing `(path, message)` onto
+   `result.errors` for every refusal rather than aborting the run. A cleanup
+   that stops at the first permission error leaves the disk in a state the user
+   cannot reason about.
+3. **Flip `deletes_for_real()` to `true`** in the same commit as (2), never
+   before it. The wording follows automatically.
+4. **Test against a temp directory only.** The deletion tests must construct
+   their own tree, pass its root as the scan base, and assert both that the
+   files are gone and that a file outside the base survived. No test may ever
+   pass `"/"` to a code path that can delete.
+5. Keep the `simulated` field afterwards. It stops being always-`true`, not
+   meaningless: a future "preview" button would set it, and the history log
+   needs to distinguish the two kinds of row forever.
+
+### The lesson
+
+**A stub that reports success in the same words as the real thing is not an
+unfinished feature, it is a lie with a schedule.** The program told the user
+"Space freed: 1.4 GiB" while touching nothing; the user finds out when the disk
+is still full, which is the worst possible moment and the hardest possible thing
+to attribute. The fix that costs almost nothing is to make the *wording* a
+function of the *behaviour* — one boolean, read by every string — so that the
+day the behaviour changes, no one has to remember to change the words.
+
+---
+
+## `C-DISKCLEANUP-A-REAL-DELETER-NEEDS-A-CONFINEMENT-INVARIANT-NOT-A-CONVENTION` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26
+
+**In short:** `apps/diskcleanup` was made real — it now measures what it finds
+and actually erases it — and doing that surfaced a near-miss worth recording.
+The tests for the old, harmless stub scanned `"/"`, because scanning `"/"` was
+harmless when nothing was ever deleted. On the Windows machine these tests run
+on, `"/"` is `C:\` and `"/tmp"` is `C:\tmp`, a directory holding about 4.5 GB of
+the operator's files. Turning on the deleter without changing those tests would
+have pointed a working `remove_dir_all` at them. Nothing was lost — the paths
+the old tests injected did not happen to exist — but "did not happen to exist"
+is not a safety property. The fix is not "be careful in tests": it is that the
+program now physically cannot delete outside the directories it was asked to
+scan, plus a gate that fails the build if a test asks it to scan a real root.
+
+### What changed
+
+Four things, and the order matters — each one is a precondition for trusting
+the next.
+
+**1. Paths became `PathBuf` end-to-end.** `CleanupItem::path` was a `String`.
+For any filename the filesystem allows but Unicode cannot express, a round trip
+through UTF-8 comes back either unopenable or — far worse — naming a *different*
+file, and the operation waiting at the other end is `remove_dir_all`. This had
+to land before the deleter did, not after. `display()` is now called in exactly
+two places, both of them the moment text is handed to the renderer, and nothing
+reads the result back.
+
+**2. The scan became real, and bounded.** `enumerate_entries` lists what is
+*inside* a directory and `measure_recursive` walks each entry for its size.
+Three properties are load-bearing:
+
+* **`symlink_metadata`, never `metadata`, in both the measuring and the
+  deleting path.** A symlink in `/tmp` pointing at `$HOME` reports itself as a
+  directory to `metadata`. That single call is the difference between a disk
+  cleaner and a program that erases someone's documents — and, short of that,
+  between measuring a temp directory and walking the whole disk.
+* **Bounded walks** (`MAX_MEASURE_DEPTH`, `MAX_MEASURE_ENTRIES`). `/tmp` is
+  world-writable by definition, so its shape is not ours to assume. Hitting a
+  bound returns a *short* answer, which is the safe direction to be wrong in:
+  under-promise the space freed, then free at least that much.
+* **Age floors fail closed.** `age_in_days` returns `0` — "modified just now" —
+  when the clock cannot answer, so an unknown age *fails* an age filter rather
+  than passing it. A log still being written is not a log to delete.
+
+**3. The confinement list.** This is the actual fix. `CleanupScanner` records
+every directory it enumerated in `roots`; `CleanupPlan` carries that list; and
+`CleanupExecutor::execute` refuses any item that is not inside one of them —
+*before* any syscall, not as a check inside the deleter. So:
+
+```rust
+fn permits(&self, path: &Path) -> bool {
+    self.roots.iter().any(|root| path != root && path.starts_with(root))
+}
+```
+
+The set of things this program may delete is exactly the set of directories it
+was asked to look at. That holds no matter what a caller injects into the item
+list, no matter what a filename contains, and no matter how the UI is
+refactored later. Two details are deliberate:
+
+* `path != root` — cleaning `/tmp` must leave `/tmp` standing. (The scanner
+  also never lists the root itself; two independent guards, because this one is
+  cheap and the failure is not.)
+* `Path::starts_with` compares **whole components**, so `/tmp` does not contain
+  `/tmpfoo`. That is the bug every string-prefix version of a containment check
+  has, and `test_executor_confinement_compares_whole_path_components` pins it.
+
+`set_items` deliberately does *not* grant permission. "Here is a list of files"
+and "you may erase these" are different statements, and the second one should
+have to be made out loud — which is `allow_root`, and which is what makes every
+injected-item test inert by default.
+
+**4. Errors accumulate; they do not abort.** A permission denial in `/tmp` is
+the *expected* case on a busy machine. A cleanup that stopped at the first one
+would clean almost nothing while appearing to have tried. Only successful
+removals are counted, so every byte of "space freed" is backed by an actual
+unlink — which is the same principle as the entry above, one commit later.
+
+### The gate
+
+`scripts/check-diskcleanup-test-roots.py` fails if `#[cfg(test)]` code under
+`apps/diskcleanup` names `DEFAULT_SCAN_ROOTS` (which *is* `["/"]`) or passes a
+root-anchored literal — `"/"`, `"/tmp/…"`, `"C:\…"`, a UNC path — to anything
+that walks or unlinks. Tests build a `ScratchDir` under `std::env::temp_dir()`
+and scan that.
+
+It exists because the code fix alone leaves a *convention*, and a convention is
+a comment with better posture. `cargo test` on a green tree that has just
+emptied `C:\tmp` exits 0; nothing in the toolchain would ever have mentioned it.
+Run against the file one commit before the rewrite the gate names **eight**
+sites and against the file after it, none — so it is measured to catch the
+exact thing that happened, which is the only evidence that a gate is a gate.
+
+Note what it does *not* flag: a root-anchored literal on its own.
+`CleanupItem::new("/tmp/foo", …)` is inert under the confinement rule, and a
+gate that argues with provably harmless code teaches its readers to route
+around it.
+
+There is no `BASELINE` ratchet, unlike `check-window-wiring.py`. That idiom is
+for a pre-existing population too large to fix in one commit, where a gate red
+on day one is commented out by day two. Here the tests were rewritten first, so
+the count is already zero — and what it protects is not tech debt, it is the
+operator's files. Zero is the only defensible ceiling.
+
+### Collateral
+
+`rustscan.strip_comments` grew a `keep_literals` flag. Every existing caller
+matches braces and must keep the default, where a `"{"` inside a string is the
+trap the blanking exists to close. This gate is the first whose *subject* is a
+literal, so the default would have blanked away the only evidence there is. The
+new gate reads structure from the fully-blanked text and findings from the
+literal-preserving one, at identical offsets, because both passes replace
+characters in place and keep every newline.
+
+### Cost
+
+Test suite 72 → 84 passing; runtime **152 s → 2.66 s**, because 152 s was the
+time it took to measure the operator's `C:\tmp`. The slow test was not slow. It
+was pointed at the wrong disk, and saying so out loud is the reason it was
+noticed.
+
+### The lesson
+
+**When a program gains the power to destroy something, "the tests are careful"
+stops being an acceptable safety argument.** The old tests were not wrong when
+they were written — scanning `"/"` against a stub that deleted nothing was
+genuinely harmless. What changed underneath them was the *consequence* of a
+call they were already making, and nothing about them looked different
+afterwards. So the fix has to be structural: an invariant the executor enforces
+on every path before any syscall, and a gate that fails the build rather than a
+comment that asks nicely. A rule no machine checks is a rule that holds until
+the first person who has not read it.
+
+---
 
 ## `TD-B-OSH-DECIDED-A-COMMAND-WORD-BY-THE-ERRNO-RATHER-THAN-BY-THE-FILE` (lane B, 2026-08-26) — ✅ **FIXED** 2026-08-26 (`d31a8743b`, `d00f55270`, `b7d18d969`, `3d6bcce68`, `71932f742`)
 

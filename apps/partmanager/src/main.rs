@@ -21,12 +21,16 @@ use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::modal::{AlertDialog, DialogResult};
 #[allow(unused_imports)]
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
-use guitk::text;
 use guitk::wheel;
+use oswindow::app::Response;
+
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -128,19 +132,13 @@ const DIALOG_WIDTH: f32 = 420.0;
 const DIALOG_HEIGHT: f32 = 260.0;
 const DIALOG_BTN_WIDTH: f32 = 90.0;
 const DIALOG_BTN_HEIGHT: f32 = 30.0;
-/// Top of a confirmation dialog's message, from the top of the dialog.
-const DIALOG_MESSAGE_TOP: f32 = 50.0;
-/// Point size of a confirmation dialog's message.
-const DIALOG_MESSAGE_FONT_SIZE: f32 = 12.0;
-/// Line spacing of a confirmation dialog's message.
-const DIALOG_MESSAGE_LINE_HEIGHT: f32 = 17.0;
-/// Space left under the message before whatever the dialog draws next.
-const DIALOG_MESSAGE_GAP: f32 = 8.0;
-/// Top of the destructive-operation warning banner, from the top of the
-/// dialog. Also the floor the message must stay above on such a dialog.
-const DIALOG_WARNING_TOP: f32 = 120.0;
 /// Top of the button row, from the top of the dialog. The floor the message
-/// must stay above when there is no warning banner between them.
+/// must stay above when there is nothing between them.
+///
+/// The confirmation dialog no longer uses this, or any of the message-layout
+/// constants that used to sit beside it: it is a `guitk::modal::AlertDialog`
+/// now, which measures its own text and sizes its own box. What is left here
+/// is what the create-partition and format dialogs still lay out by hand.
 const DIALOG_BTN_TOP: f32 = DIALOG_HEIGHT - 50.0;
 const SIDEBAR_DISK_ROW_HEIGHT: f32 = 48.0;
 const MIN_PARTITION_BAR_WIDTH: f32 = 4.0;
@@ -725,31 +723,24 @@ impl PendingOperation {
 // Dialog types
 // ============================================================================
 
-/// Confirmation dialog state.
-#[derive(Clone, Debug)]
-pub struct ConfirmDialog {
-    /// Title text.
-    pub title: String,
-    /// Body message.
-    pub message: String,
-    /// Text on the confirm button.
-    pub confirm_text: String,
-    /// Whether this is a destructive action (styles the button red).
-    pub destructive: bool,
-    /// Which button is hovered (0=confirm, 1=cancel).
-    pub hovered_button: Option<u32>,
-}
-
-impl ConfirmDialog {
-    pub fn new(title: &str, message: &str, confirm_text: &str, destructive: bool) -> Self {
-        Self {
-            title: title.to_string(),
-            message: message.to_string(),
-            confirm_text: confirm_text.to_string(),
-            destructive,
-            hovered_button: None,
-        }
-    }
+/// What a confirmation, once accepted, will do.
+///
+/// The dialog used to be identified by searching its own *title text* for
+/// `"Partition Table"`, `"Delete"` or `"Apply"`, which made the program's
+/// behaviour depend on its English wording: rewording a title — a change that
+/// looks purely cosmetic — turned the confirm button into a silent no-op, the
+/// dialog closing as though it had worked. The intent travels with the dialog
+/// as data instead, and the `match` in [`handle_confirm_accepted`] has no
+/// wildcard arm, so a fourth confirmation is a build error until it says what
+/// it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmIntent {
+    /// Wipe the disk and lay down a fresh partition table.
+    CreatePartitionTable,
+    /// Remove the selected partition.
+    DeletePartition,
+    /// Write every queued operation to disk.
+    ApplyOperations,
 }
 
 /// Create-partition dialog state.
@@ -844,7 +835,12 @@ impl FormatDialog {
 /// Active dialog.
 #[derive(Clone, Debug)]
 pub enum ActiveDialog {
-    Confirm(ConfirmDialog),
+    /// A yes-or-no question, drawn and driven by the toolkit. The intent is
+    /// what the answer means; see [`ConfirmIntent`].
+    Confirm {
+        dialog: AlertDialog,
+        intent: ConfirmIntent,
+    },
     CreatePartition(CreatePartitionDialog),
     Format(FormatDialog),
     None,
@@ -853,6 +849,22 @@ pub enum ActiveDialog {
 impl ActiveDialog {
     pub fn is_open(&self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// A confirmation for something that destroys data: the verb on a red
+    /// button, focus parked on `Cancel`, and the standard cannot-be-undone
+    /// line under the question.
+    ///
+    /// `AlertDialog` is built to be constructed once and shown repeatedly, so
+    /// it starts hidden and ignores every event until `show()`. This app makes
+    /// a fresh one per prompt, so showing it here is what stops a dialog that
+    /// is on screen from being deaf to clicks.
+    fn destructive(intent: ConfirmIntent, title: &str, message: &str, confirm_label: &str) -> Self {
+        let mut dialog = AlertDialog::destructive(title, message, confirm_label)
+            .with_detail("This action cannot be undone.")
+            .with_width(DIALOG_WIDTH);
+        dialog.show();
+        Self::Confirm { dialog, intent }
     }
 }
 
@@ -2549,183 +2561,22 @@ fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
 // Rendering -- confirmation dialog
 // ============================================================================
 
-fn render_confirm_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
-    let dialog = match &app.dialog {
-        ActiveDialog::Confirm(d) => d,
-        _ => return,
-    };
-
-    // Dim overlay
-    tree.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: 0.0,
-        width: app.width,
-        height: app.height,
-        color: Color::rgba(0, 0, 0, 160),
-        corner_radii: CornerRadii::ZERO,
-    });
-
-    let dx = (app.width - DIALOG_WIDTH) / 2.0;
-    let dy = (app.height - DIALOG_HEIGHT) / 2.0;
-
-    // Shadow
-    tree.push(RenderCommand::BoxShadow {
-        x: dx,
-        y: dy,
-        width: DIALOG_WIDTH,
-        height: DIALOG_HEIGHT,
-        offset_x: 0.0,
-        offset_y: 4.0,
-        blur: 20.0,
-        spread: 2.0,
-        color: Color::rgba(0, 0, 0, 100),
-        corner_radii: CornerRadii::all(8.0),
-    });
-
-    // Dialog background
-    tree.push(RenderCommand::FillRect {
-        x: dx,
-        y: dy,
-        width: DIALOG_WIDTH,
-        height: DIALOG_HEIGHT,
-        color: COLOR_SURFACE0,
-        corner_radii: CornerRadii::all(8.0),
-    });
-
-    // Border
-    tree.push(RenderCommand::StrokeRect {
-        x: dx,
-        y: dy,
-        width: DIALOG_WIDTH,
-        height: DIALOG_HEIGHT,
-        color: COLOR_SURFACE2,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(8.0),
-    });
-
-    // Title
-    tree.push(RenderCommand::Text {
-        x: dx + 20.0,
-        y: dy + 20.0,
-        text: dialog.title.clone(),
-        color: if dialog.destructive {
-            COLOR_RED
-        } else {
-            COLOR_TEXT
-        },
-        font_size: 14.0,
-        font_weight: FontWeightHint::Bold,
-        max_width: Some(DIALOG_WIDTH - 40.0),
-        overflow: TextOverflow::Ellipsis,
-    });
-
-    // Message. `RenderCommand::Text` clips at `max_width` rather than
-    // wrapping, so this used to show its first line and no more — and the
-    // messages here are whole sentences about destroying a disk, which is the
-    // worst possible place to lose the second half of a warning. The dialog is
-    // a fixed size and everything under the message sits at a fixed offset in
-    // it, so the message gets the room down to whatever comes next and is
-    // marked with an ellipsis if it wants more.
-    let message_floor = if dialog.destructive {
-        DIALOG_WARNING_TOP
-    } else {
-        DIALOG_BTN_TOP
-    };
-    let message_lines = ((message_floor - DIALOG_MESSAGE_TOP - DIALOG_MESSAGE_GAP)
-        / DIALOG_MESSAGE_LINE_HEIGHT) as usize;
-    text::Paragraph::new(&dialog.message, COLOR_SUBTEXT1)
-        .at(dx + 20.0, dy + DIALOG_MESSAGE_TOP, DIALOG_WIDTH - 40.0)
-        .font(DIALOG_MESSAGE_FONT_SIZE, FontWeightHint::Regular)
-        .line_height(DIALOG_MESSAGE_LINE_HEIGHT)
-        .max_lines(message_lines.max(1))
-        .draw(tree);
-
-    // Warning icon area for destructive operations
-    if dialog.destructive {
-        tree.push(RenderCommand::FillRect {
-            x: dx + 20.0,
-            y: dy + DIALOG_WARNING_TOP,
-            width: DIALOG_WIDTH - 40.0,
-            height: 36.0,
-            color: Color::rgba(COLOR_RED.r, COLOR_RED.g, COLOR_RED.b, 30),
-            corner_radii: CornerRadii::all(4.0),
-        });
-        tree.push(RenderCommand::Text {
-            x: dx + 32.0,
-            y: dy + DIALOG_WARNING_TOP + 10.0,
-            text: String::from("WARNING: This action cannot be undone!"),
-            color: COLOR_RED,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(DIALOG_WIDTH - 64.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+/// Draw the confirmation dialog, if one is open.
+///
+/// This used to be 180 lines of scrim, shadow, box, border, title, wrapped
+/// message, warning banner and two hand-positioned buttons — a fourth copy of
+/// a dialog the toolkit already had, and the copy was not the same: it drew
+/// its buttons from one arithmetic and hit-tested them from another. All of it
+/// is `guitk::modal::AlertDialog` now.
+///
+/// Takes `&mut` because the toolkit dialog records where it landed as a side
+/// effect of drawing, which is what makes "you can only click what was drawn"
+/// true by construction rather than by two pieces of arithmetic agreeing.
+fn render_confirm_dialog(tree: &mut RenderTree, app: &mut PartitionManagerApp) {
+    let (width, height) = (app.width, app.height);
+    if let ActiveDialog::Confirm { dialog, .. } = &mut app.dialog {
+        dialog.render(width, height, tree);
     }
-
-    // Buttons
-    let btn_y = dy + DIALOG_BTN_TOP;
-    let confirm_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH * 2.0 - 30.0;
-    let cancel_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH - 20.0;
-
-    // Confirm button
-    let confirm_hovered = dialog.hovered_button == Some(0);
-    let confirm_bg = if dialog.destructive {
-        if confirm_hovered {
-            COLOR_RED
-        } else {
-            Color::rgba(COLOR_RED.r, COLOR_RED.g, COLOR_RED.b, 180)
-        }
-    } else if confirm_hovered {
-        COLOR_BLUE
-    } else {
-        Color::rgba(COLOR_BLUE.r, COLOR_BLUE.g, COLOR_BLUE.b, 180)
-    };
-
-    tree.push(RenderCommand::FillRect {
-        x: confirm_x,
-        y: btn_y,
-        width: DIALOG_BTN_WIDTH,
-        height: DIALOG_BTN_HEIGHT,
-        color: confirm_bg,
-        corner_radii: CornerRadii::all(4.0),
-    });
-    tree.push(RenderCommand::Text {
-        x: confirm_x + 10.0,
-        y: btn_y + 8.0,
-        text: dialog.confirm_text.clone(),
-        color: COLOR_BASE,
-        font_size: 12.0,
-        font_weight: FontWeightHint::Bold,
-        max_width: Some(DIALOG_BTN_WIDTH - 20.0),
-        overflow: TextOverflow::Ellipsis,
-    });
-
-    // Cancel button
-    let cancel_hovered = dialog.hovered_button == Some(1);
-    let cancel_bg = if cancel_hovered {
-        COLOR_SURFACE2
-    } else {
-        COLOR_SURFACE1
-    };
-
-    tree.push(RenderCommand::FillRect {
-        x: cancel_x,
-        y: btn_y,
-        width: DIALOG_BTN_WIDTH,
-        height: DIALOG_BTN_HEIGHT,
-        color: cancel_bg,
-        corner_radii: CornerRadii::all(4.0),
-    });
-    tree.push(RenderCommand::Text {
-        x: cancel_x + 20.0,
-        y: btn_y + 8.0,
-        text: String::from("Cancel"),
-        color: COLOR_TEXT,
-        font_size: 12.0,
-        font_weight: FontWeightHint::Regular,
-        max_width: Some(DIALOG_BTN_WIDTH - 20.0),
-        overflow: TextOverflow::Ellipsis,
-    });
 }
 
 // ============================================================================
@@ -3207,7 +3058,15 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
 // ============================================================================
 
 /// Render the entire application into a `RenderTree`.
-pub fn render(app: &PartitionManagerApp) -> RenderTree {
+///
+/// Takes `&mut` because the confirmation dialog is a
+/// `guitk::modal::AlertDialog`, which learns where it is by being drawn: the
+/// box it lands in depends on the window size, which only this function knows.
+/// Storing that as a side effect of rendering is what guarantees a click is
+/// tested against the rectangle the user was actually looking at — the three
+/// separate copies of that arithmetic this app used to carry are exactly the
+/// failure the guarantee exists to prevent.
+pub fn render(app: &mut PartitionManagerApp) -> RenderTree {
     let mut tree = RenderTree::new();
 
     // Window background
@@ -3229,9 +3088,11 @@ pub fn render(app: &PartitionManagerApp) -> RenderTree {
     render_queue_panel(&mut tree, app);
     render_status_bar(&mut tree, app);
 
-    // Dialogs (overlay)
-    match &app.dialog {
-        ActiveDialog::Confirm(_) => render_confirm_dialog(&mut tree, app),
+    // Dialogs (overlay). Dispatched with `matches!` rather than by matching on
+    // a borrow of `app.dialog`, because the confirmation arm needs `app`
+    // mutably and a live borrow of one of its fields would forbid that.
+    match app.dialog {
+        ActiveDialog::Confirm { .. } => render_confirm_dialog(&mut tree, app),
         ActiveDialog::CreatePartition(_) => render_create_partition_dialog(&mut tree, app),
         ActiveDialog::Format(_) => render_format_dialog(&mut tree, app),
         ActiveDialog::None => {}
@@ -3246,6 +3107,21 @@ pub fn render(app: &PartitionManagerApp) -> RenderTree {
 
 /// Handle an input event and return whether it was consumed.
 pub fn handle_event(app: &mut PartitionManagerApp, event: &Event) -> EventResult {
+    // An open confirmation takes the whole event — mouse and keyboard alike —
+    // because a toolkit dialog does its own hit-testing and its own focus
+    // handling, and splitting the two apart here is what left the old
+    // hand-rolled dialog with a mouse but no keyboard.
+    //
+    // Resize is the exception, and has to stay one: the dialog centres itself
+    // in a window whose size it is handed at render time, so the app must go
+    // on learning what that size is even while a dialog is up. A dialog told a
+    // stale size draws itself off-centre and is then clicked at the wrong
+    // place.
+    if matches!(app.dialog, ActiveDialog::Confirm { .. }) && !matches!(event, Event::Resize { .. })
+    {
+        return handle_confirm_event(app, event);
+    }
+
     match event {
         Event::Resize { width, height } => {
             app.width = *width as f32;
@@ -3338,12 +3214,12 @@ fn execute_toolbar_action(app: &mut PartitionManagerApp, action: usize) -> Event
     match action {
         0 => {
             // New Table
-            app.dialog = ActiveDialog::Confirm(ConfirmDialog::new(
+            app.dialog = ActiveDialog::destructive(
+                ConfirmIntent::CreatePartitionTable,
                 "Create New Partition Table",
                 "This will destroy ALL data on the disk. Choose GPT (default) or MBR.",
                 "Create GPT",
-                true,
-            ));
+            );
         }
         1 => {
             // Create partition (in unallocated space)
@@ -3378,12 +3254,12 @@ fn execute_toolbar_action(app: &mut PartitionManagerApp, action: usize) -> Event
                 } else {
                     format!("Delete partition {} (\"{}\")?", idx, label)
                 };
-                app.dialog = ActiveDialog::Confirm(ConfirmDialog::new(
+                app.dialog = ActiveDialog::destructive(
+                    ConfirmIntent::DeletePartition,
                     "Delete Partition",
                     &msg,
                     "Delete",
-                    true,
-                ));
+                );
             }
         }
         3 => {
@@ -3441,15 +3317,15 @@ fn execute_toolbar_action(app: &mut PartitionManagerApp, action: usize) -> Event
             // Apply
             if app.has_destructive_operations() {
                 let count = app.pending_count();
-                app.dialog = ActiveDialog::Confirm(ConfirmDialog::new(
+                app.dialog = ActiveDialog::destructive(
+                    ConfirmIntent::ApplyOperations,
                     "Apply Operations",
                     &format!(
                         "Apply {} pending operation(s)? Some are destructive.",
                         count
                     ),
                     "Apply All",
-                    true,
-                ));
+                );
             } else {
                 app.apply_operations();
             }
@@ -3632,39 +3508,12 @@ fn handle_dialog_mouse(
     let y = mouse.y;
 
     match &mut app.dialog {
-        ActiveDialog::Confirm(dialog) => {
-            let dx = (app.width - DIALOG_WIDTH) / 2.0;
-            let dy_base = (app.height - DIALOG_HEIGHT) / 2.0;
-            let btn_y = dy_base + DIALOG_BTN_TOP;
-            let confirm_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH * 2.0 - 30.0;
-            let cancel_x = dx + DIALOG_WIDTH - DIALOG_BTN_WIDTH - 20.0;
-
-            match &mouse.kind {
-                MouseEventKind::Move => {
-                    dialog.hovered_button = None;
-                    if y >= btn_y && y < btn_y + DIALOG_BTN_HEIGHT {
-                        if x >= confirm_x && x < confirm_x + DIALOG_BTN_WIDTH {
-                            dialog.hovered_button = Some(0);
-                        } else if x >= cancel_x && x < cancel_x + DIALOG_BTN_WIDTH {
-                            dialog.hovered_button = Some(1);
-                        }
-                    }
-                }
-                MouseEventKind::Press(MouseButton::Left)
-                    if y >= btn_y && y < btn_y + DIALOG_BTN_HEIGHT =>
-                {
-                    if x >= confirm_x && x < confirm_x + DIALOG_BTN_WIDTH {
-                        // Confirmed -- perform the action
-                        handle_confirm_accepted(app);
-                        return EventResult::Consumed;
-                    } else if x >= cancel_x && x < cancel_x + DIALOG_BTN_WIDTH {
-                        app.dialog = ActiveDialog::None;
-                        return EventResult::Consumed;
-                    }
-                }
-                _ => {}
-            }
-        }
+        // Never reached: `handle_event` routes the whole event to the
+        // confirmation dialog before the mouse/key split, because a toolkit
+        // dialog does its own hit-testing and its own focus handling and wants
+        // both kinds. The arm exists so that adding a variant here is a
+        // compile error rather than a silently dead dialog.
+        ActiveDialog::Confirm { .. } => {}
         ActiveDialog::CreatePartition(dialog) => {
             let dw = DIALOG_WIDTH + 40.0;
             let dh = DIALOG_HEIGHT + 40.0;
@@ -3766,37 +3615,71 @@ fn handle_dialog_mouse(
     EventResult::Consumed
 }
 
-fn handle_confirm_accepted(app: &mut PartitionManagerApp) {
-    let disk_id = app.current_disk().map(|d| d.id).unwrap_or(0);
-
-    // Determine what was being confirmed based on dialog title
-    let title = match &app.dialog {
-        ActiveDialog::Confirm(d) => d.title.clone(),
-        _ => String::new(),
+/// Feed an event to the open confirmation dialog and act on what it decided.
+///
+/// The dialog is dropped before the action runs, in both directions, so an
+/// operation that wants to open a dialog of its own is not fighting the one
+/// that authorised it.
+fn handle_confirm_event(app: &mut PartitionManagerApp, event: &Event) -> EventResult {
+    let ActiveDialog::Confirm { dialog, intent } = &mut app.dialog else {
+        return EventResult::Ignored;
     };
 
-    if title.contains("Partition Table") {
-        app.enqueue_operation(PendingOperation::CreatePartitionTable {
-            disk_id,
-            table_type: PartitionTableType::Gpt,
-        });
-    } else if title.contains("Delete") {
-        if let SelectedItem::Partition(idx) = &app.selected_item {
-            let label = app
-                .selected_partition()
-                .map(|p| p.label.clone())
-                .unwrap_or_default();
-            app.enqueue_operation(PendingOperation::DeletePartition {
+    let consumed = dialog.handle_event(event);
+    let Some(result) = dialog.result() else {
+        return consumed;
+    };
+
+    // `Cancel` is the button and `Dismissed` is Escape or a click on the
+    // scrim; both mean no. Only `Ok` — which is what the destructive button
+    // reports, whatever verb it is wearing — means yes.
+    let accepted = *result == DialogResult::Ok;
+    let intent = *intent;
+    app.dialog = ActiveDialog::None;
+
+    if accepted {
+        handle_confirm_accepted(app, intent);
+    }
+    EventResult::Consumed
+}
+
+/// Carry out whatever the user just confirmed.
+///
+/// The `match` deliberately has no wildcard arm: a new [`ConfirmIntent`] must
+/// be given an action here before the app will build. What this replaced was
+/// an `if title.contains("Delete")` chain that fell off the end in silence
+/// when no branch matched — so rewording a dialog title, which nothing in the
+/// type system connected to this function, turned the confirm button into a
+/// no-op that still closed the dialog.
+fn handle_confirm_accepted(app: &mut PartitionManagerApp, intent: ConfirmIntent) {
+    let disk_id = app.current_disk().map(|d| d.id).unwrap_or(0);
+
+    match intent {
+        ConfirmIntent::CreatePartitionTable => {
+            app.enqueue_operation(PendingOperation::CreatePartitionTable {
                 disk_id,
-                partition_index: *idx,
-                partition_label: label,
+                table_type: PartitionTableType::Gpt,
             });
         }
-    } else if title.contains("Apply") {
-        app.apply_operations();
+        ConfirmIntent::DeletePartition => {
+            if let SelectedItem::Partition(idx) = &app.selected_item {
+                let label = app
+                    .selected_partition()
+                    .map(|p| p.label.clone())
+                    .unwrap_or_default();
+                app.enqueue_operation(PendingOperation::DeletePartition {
+                    disk_id,
+                    partition_index: *idx,
+                    partition_label: label,
+                });
+            }
+        }
+        ConfirmIntent::ApplyOperations => {
+            // Returns how many operations ran; the count is already reported
+            // through `app.status_message`, which is where the user reads it.
+            let _applied = app.apply_operations();
+        }
     }
-
-    app.dialog = ActiveDialog::None;
 }
 
 fn handle_create_partition_accepted(app: &mut PartitionManagerApp) {
@@ -3978,7 +3861,63 @@ fn select_adjacent_region(app: &mut PartitionManagerApp, up: bool) {
 // Entry point
 // ============================================================================
 
-fn main() {}
+impl oswindow::app::App for PartitionManagerApp {
+    fn title(&self) -> String {
+        String::from("Partition Manager")
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn initial_size(&self) -> (u32, u32) {
+        // The same numbers the layout constants are written against, so the
+        // first frame is drawn at the geometry every hard-coded offset in this
+        // file assumes.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// A clock only while the confirmation is fading.
+    ///
+    /// Nothing else in this app moves on its own: the disk map, the queue and
+    /// the panels all change only in response to a click or a key. The one
+    /// exception is `guitk::modal`'s scrim, which fades in and out over a few
+    /// frames, and a fade with no clock is a dialog that appears and vanishes
+    /// instantly.
+    ///
+    /// `is_animating` and not `is_open`: a confirmation is a question, and a
+    /// question waits for a human. Ticking for as long as one is on screen
+    /// would hold the compositor awake — and with it every other window's
+    /// frame budget — for as long as the user takes to read it, which is the
+    /// longest any state in this program lasts.
+    fn tick_interval(&self) -> Option<Duration> {
+        match &self.dialog {
+            ActiveDialog::Confirm { dialog, .. } if dialog.is_animating() => {
+                Some(Duration::from_millis(16))
+            }
+            _ => None,
+        }
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match crate::handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the compositor last reported, not the one that was asked
+        // for. `handle_event` also records it from `Event::Resize`, but the
+        // very first frame arrives before any resize does, so without this the
+        // opening window would be laid out against the requested size rather
+        // than the granted one.
+        self.width = width;
+        self.height = height;
+        crate::render(self)
+    }
+}
+
+fn main() -> ExitCode {
+    oswindow::app::launch("partmanager", &mut PartitionManagerApp::new())
+}
 
 // ============================================================================
 // Tests
@@ -4004,6 +3943,7 @@ mod tests {
     )]
 
     use super::*;
+    use guitk::text;
 
     // -- Wheel scrolling --
 
@@ -5513,19 +5453,148 @@ mod tests {
 
     // -- Dialog tests --
 
-    #[test]
-    fn test_confirm_dialog_new() {
-        let d = ConfirmDialog::new("Title", "Message", "OK", false);
-        assert_eq!(d.title, "Title");
-        assert_eq!(d.message, "Message");
-        assert!(!d.destructive);
-        assert!(d.hovered_button.is_none());
+    /// An app with one destructive confirmation open, already rendered once
+    /// so the dialog knows where its buttons are.
+    ///
+    /// Rendering is not scene-setting here — it is the step that makes clicks
+    /// meaningful. A toolkit dialog hit-tests against the rectangles it last
+    /// drew, and before its first frame it has none, so a test that clicks
+    /// without rendering is clicking at a dialog that is not on screen.
+    fn app_with_confirm(intent: ConfirmIntent, verb: &str) -> PartitionManagerApp {
+        let mut app = PartitionManagerApp::new();
+        app.dialog = ActiveDialog::destructive(intent, "Delete Partition", "Sure?", verb);
+        let _ = render(&mut app);
+        app
+    }
+
+    /// Where the given text was drawn, if it was — searching from the back.
+    ///
+    /// From the back because the dialog is drawn last, over everything else,
+    /// and the app underneath has a toolbar button that also says `Delete`.
+    /// Searching forwards finds that one, which sits at y=49 with a live
+    /// dialog over it: a test that clicked there would be clicking the scrim,
+    /// not the button, and would pass or fail for reasons unrelated to what it
+    /// is asking about.
+    fn text_at(tree: &RenderTree, needle: &str) -> Option<(f32, f32)> {
+        tree.commands.iter().rev().find_map(|c| match c {
+            RenderCommand::Text { x, y, text, .. } if text == needle => Some((*x, *y)),
+            _ => None,
+        })
     }
 
     #[test]
-    fn test_confirm_dialog_destructive() {
-        let d = ConfirmDialog::new("Delete", "Sure?", "Delete", true);
-        assert!(d.destructive);
+    fn a_confirmation_is_shown_the_moment_it_is_constructed() {
+        // `AlertDialog` starts hidden and ignores every event until `show()`.
+        // A prompt built but not shown is a dialog painted on screen that
+        // cannot be clicked, which is worse than no dialog at all.
+        let app = app_with_confirm(ConfirmIntent::DeletePartition, "Delete");
+        match &app.dialog {
+            ActiveDialog::Confirm { dialog, intent } => {
+                assert!(dialog.is_active(), "the dialog was built but never shown");
+                assert_eq!(*intent, ConfirmIntent::DeletePartition);
+            }
+            _ => panic!("no confirmation was opened"),
+        }
+    }
+
+    #[test]
+    fn the_confirm_button_carries_the_verb_rather_than_reading_ok() {
+        let mut app = app_with_confirm(ConfirmIntent::DeletePartition, "Delete");
+        let tree = render(&mut app);
+        assert!(
+            text_at(&tree, "Delete").is_some(),
+            "the destructive button did not name what it does"
+        );
+        assert!(
+            text_at(&tree, "Cancel").is_some(),
+            "there was no way to say no"
+        );
+    }
+
+    #[test]
+    fn a_destructive_confirmation_says_it_cannot_be_undone() {
+        let mut app = app_with_confirm(ConfirmIntent::CreatePartitionTable, "Create GPT");
+        let tree = render(&mut app);
+        assert!(
+            text_at(&tree, "This action cannot be undone.").is_some(),
+            "the consequence line was not drawn"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_destructive_confirmation_cancels_rather_than_destroying() {
+        // Enter is what gets hit reflexively when a dialog appears
+        // unexpectedly. It must not thereby queue a partition delete.
+        let mut app = app_with_confirm(ConfirmIntent::DeletePartition, "Delete");
+        app.selected_item = SelectedItem::Partition(1);
+        let before = app.pending_count();
+        handle_event(
+            &mut app,
+            &Event::Key(KeyEvent {
+                key: Key::Enter,
+                pressed: true,
+                modifiers: Modifiers::NONE,
+                text: String::new(),
+            }),
+        );
+        assert!(!app.dialog.is_open(), "the dialog stayed up");
+        assert_eq!(
+            app.pending_count(),
+            before,
+            "Enter queued a destructive operation"
+        );
+    }
+
+    #[test]
+    fn clicking_the_verb_queues_the_operation_the_intent_names() {
+        let mut app = app_with_confirm(ConfirmIntent::DeletePartition, "Delete");
+        app.selected_item = SelectedItem::Partition(1);
+        // Render again after moving the selection, so the placement is fresh.
+        let tree = render(&mut app);
+        let (bx, by) = text_at(&tree, "Delete").expect("no destructive button was drawn");
+        let before = app.pending_count();
+        handle_event(
+            &mut app,
+            &Event::Mouse(guitk::event::MouseEvent {
+                // The label is drawn inside the button, so a point a hair down
+                // and right of its origin is inside the button too.
+                x: bx + 2.0,
+                y: by + 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        assert!(!app.dialog.is_open());
+        assert_eq!(
+            app.pending_count(),
+            before + 1,
+            "clicking the button the user was looking at did nothing"
+        );
+        assert!(matches!(
+            app.operation_queue.last(),
+            Some(PendingOperation::DeletePartition { .. })
+        ));
+    }
+
+    #[test]
+    fn a_reworded_title_does_not_change_what_the_confirmation_does() {
+        // The regression this replaces: the action used to be chosen by
+        // searching the title for "Delete"/"Apply"/"Partition Table", so a
+        // title that said something else silently did nothing at all.
+        let mut app = PartitionManagerApp::new();
+        app.selected_item = SelectedItem::Partition(1);
+        app.dialog = ActiveDialog::destructive(
+            ConfirmIntent::DeletePartition,
+            "Remove Volume",
+            "Sure?",
+            "Remove",
+        );
+        let before = app.pending_count();
+        handle_confirm_accepted(&mut app, ConfirmIntent::DeletePartition);
+        assert_eq!(
+            app.pending_count(),
+            before + 1,
+            "a title without the word 'Delete' in it stopped the delete happening"
+        );
     }
 
     #[test]
@@ -5576,7 +5645,9 @@ mod tests {
     #[test]
     fn test_active_dialog_is_open() {
         assert!(!ActiveDialog::None.is_open());
-        assert!(ActiveDialog::Confirm(ConfirmDialog::new("", "", "", false)).is_open());
+        assert!(
+            ActiveDialog::destructive(ConfirmIntent::DeletePartition, "", "", "Delete").is_open()
+        );
         assert!(ActiveDialog::CreatePartition(CreatePartitionDialog::new(0, 0, 512)).is_open());
         assert!(ActiveDialog::Format(FormatDialog::new(1, "")).is_open());
     }
@@ -5775,8 +5846,8 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
-        let app = PartitionManagerApp::new();
-        let tree = render(&app);
+        let mut app = PartitionManagerApp::new();
+        let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
@@ -5784,15 +5855,16 @@ mod tests {
     fn test_render_with_selected_partition() {
         let mut app = PartitionManagerApp::new();
         app.selected_item = SelectedItem::Partition(1);
-        let tree = render(&app);
+        let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
     #[test]
     fn test_render_with_dialog() {
         let mut app = PartitionManagerApp::new();
-        app.dialog = ActiveDialog::Confirm(ConfirmDialog::new("Test", "Body", "OK", false));
-        let tree = render(&app);
+        app.dialog =
+            ActiveDialog::destructive(ConfirmIntent::ApplyOperations, "Test", "Body", "Apply All");
+        let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
@@ -5800,7 +5872,7 @@ mod tests {
     fn test_render_with_create_dialog() {
         let mut app = PartitionManagerApp::new();
         app.dialog = ActiveDialog::CreatePartition(CreatePartitionDialog::new(0, 1000, 512));
-        let tree = render(&app);
+        let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
@@ -5808,7 +5880,7 @@ mod tests {
     fn test_render_with_format_dialog() {
         let mut app = PartitionManagerApp::new();
         app.dialog = ActiveDialog::Format(FormatDialog::new(1, "Test"));
-        let tree = render(&app);
+        let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
@@ -5821,7 +5893,7 @@ mod tests {
             partition_index: 1,
             new_label: String::from("X"),
         });
-        let tree = render(&app);
+        let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
@@ -5829,7 +5901,7 @@ mod tests {
     fn test_render_queue_collapsed() {
         let mut app = PartitionManagerApp::new();
         app.queue_expanded = false;
-        let tree = render(&app);
+        let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
@@ -5837,34 +5909,37 @@ mod tests {
     fn test_render_second_disk() {
         let mut app = PartitionManagerApp::new();
         app.select_disk(1);
-        let tree = render(&app);
+        let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
     #[test]
     fn test_render_destructive_confirm() {
         let mut app = PartitionManagerApp::new();
-        app.dialog = ActiveDialog::Confirm(ConfirmDialog::new("Del", "Sure?", "Delete", true));
-        let tree = render(&app);
+        app.dialog =
+            ActiveDialog::destructive(ConfirmIntent::DeletePartition, "Del", "Sure?", "Delete");
+        let tree = render(&mut app);
         assert!(!tree.is_empty());
     }
 
-    /// The lines of a confirmation dialog's message: every text drawn in the
-    /// message's colour and size, top to bottom.
-    fn confirm_message_lines(app: &PartitionManagerApp) -> Vec<(f32, String)> {
+    /// The wrapped lines of `message` as the open dialog drew them, top to
+    /// bottom.
+    ///
+    /// Matched by content rather than by colour and point size: the dialog is
+    /// drawn on top of the whole application, which has plenty of body text of
+    /// its own, and a filter keyed on styling would quietly start collecting
+    /// rows from the partition list the day one of them shares a colour. Every
+    /// wrapped line is a run of the original by construction, so "is a
+    /// substring of the message" is exact; the length floor keeps a short word
+    /// that also appears on a button out.
+    fn confirm_message_lines(app: &mut PartitionManagerApp, message: &str) -> Vec<(f32, String)> {
         let tree = render(app);
         let mut lines: Vec<(f32, String)> = tree
             .commands
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text {
-                    y,
-                    text,
-                    color,
-                    font_size,
-                    ..
-                } if *color == COLOR_SUBTEXT1
-                    && (*font_size - DIALOG_MESSAGE_FONT_SIZE).abs() < 0.01 =>
+                RenderCommand::Text { y, text, .. }
+                    if text.len() >= 8 && message.contains(text.trim_end_matches('…')) =>
                 {
                     Some((*y, text.clone()))
                 }
@@ -5877,14 +5952,16 @@ mod tests {
 
     #[test]
     fn a_long_confirmation_message_is_wrapped_not_truncated() {
+        const MESSAGE: &str =
+            "This will destroy ALL data on the disk. Choose GPT (default) or MBR.";
         let mut app = PartitionManagerApp::new();
-        app.dialog = ActiveDialog::Confirm(ConfirmDialog::new(
+        app.dialog = ActiveDialog::destructive(
+            ConfirmIntent::CreatePartitionTable,
             "Create New Partition Table",
-            "This will destroy ALL data on the disk. Choose GPT (default) or MBR.",
+            MESSAGE,
             "Create GPT",
-            true,
-        ));
-        let lines = confirm_message_lines(&app);
+        );
+        let lines = confirm_message_lines(&mut app, MESSAGE);
         assert!(
             lines.len() > 1,
             "a sentence too long for the dialog was drawn as {} line(s)",
@@ -5902,25 +5979,23 @@ mod tests {
     }
 
     #[test]
-    fn a_confirmation_message_stays_above_the_warning_banner() {
+    fn a_message_too_long_for_the_box_does_not_take_the_buttons_with_it() {
+        // The dialog this replaced was a fixed 260 px tall with its buttons at
+        // a fixed offset, so a message that outgrew its allowance was drawn
+        // over them. The toolkit grows the box to the text and stops drawing
+        // lines that would reach the button row; either way, the thing that
+        // must survive is the user's ability to answer.
         let mut app = PartitionManagerApp::new();
-        // Far more than the dialog can hold, so the cap is what stops it.
         let long = "Deleting this partition removes every file on it. ".repeat(8);
-        app.dialog = ActiveDialog::Confirm(ConfirmDialog::new("Delete", &long, "Delete", true));
-        let lines = confirm_message_lines(&app);
-        let bottom = lines
-            .last()
-            .map_or(0.0, |(y, _)| *y + DIALOG_MESSAGE_LINE_HEIGHT);
-        let dy = (app.height - DIALOG_HEIGHT) / 2.0;
+        app.dialog =
+            ActiveDialog::destructive(ConfirmIntent::DeletePartition, "Delete", &long, "Delete");
+        let tree = render(&mut app);
+        let (_, verb_y) = text_at(&tree, "Delete").expect("the confirm button was drawn over");
+        let lines = confirm_message_lines(&mut app, &long);
+        let bottom = lines.last().map_or(0.0, |(y, _)| *y);
         assert!(
-            bottom <= dy + DIALOG_WARNING_TOP,
-            "the message runs to {bottom}, past the warning banner at {}",
-            dy + DIALOG_WARNING_TOP
-        );
-        let last = lines.last().map_or(String::new(), |(_, t)| t.clone());
-        assert!(
-            last.ends_with('…'),
-            "a message cut short was not marked as cut: {last}"
+            bottom < verb_y,
+            "the message runs to {bottom}, at or past the button row at {verb_y}"
         );
     }
 
@@ -6113,7 +6188,8 @@ mod tests {
     #[test]
     fn test_handle_key_escape_closes_dialog() {
         let mut app = PartitionManagerApp::new();
-        app.dialog = ActiveDialog::Confirm(ConfirmDialog::new("T", "M", "OK", false));
+        app.dialog =
+            ActiveDialog::destructive(ConfirmIntent::ApplyOperations, "T", "M", "Apply All");
         let ev = Event::Key(KeyEvent {
             key: Key::Escape,
             pressed: true,
@@ -6319,5 +6395,108 @@ mod tests {
         // Up should stay at 0
         select_adjacent_region(&mut app, true);
         assert_ne!(app.selected_item, SelectedItem::None);
+    }
+
+    // ------------------------------------------------------------------
+    // The window
+    // ------------------------------------------------------------------
+    //
+    // Until 2026-08-26 this program's entry point was `fn main() {}`. Every
+    // test below this line passed then, against an application that could not
+    // be run: nothing in the toolchain reports a `main` that never reaches
+    // `oswindow::app::launch`, because from the compiler's side it is a
+    // perfectly good program that ran and returned. See `known-issues.md` →
+    // C-A-HUNDRED-AND-THIRTY-TWO-APPS-NEVER-OPEN-A-WINDOW, and
+    // `scripts/check-window-wiring.py`, which now names the rest of them.
+
+    #[test]
+    fn the_clock_runs_only_while_the_confirmation_fades() {
+        use oswindow::app::App as _;
+
+        // Nothing in this app moves on its own, so an idle window must not
+        // hold a timer: a tick that changes nothing is a frame the compositor
+        // spends on nothing, multiplied by every window that does the same.
+        let mut app = PartitionManagerApp::new();
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "an idle partition manager asked for a clock"
+        );
+
+        app.dialog = ActiveDialog::destructive(
+            ConfirmIntent::DeletePartition,
+            "Delete Partition",
+            "Sure?",
+            "Delete",
+        );
+        assert!(
+            app.tick_interval().is_some(),
+            "the scrim was fading in with no clock to move it"
+        );
+
+        // Let the fade finish. The dialog is still open and still waiting for
+        // an answer -- and a question waits for a human, which is the longest
+        // any state here lasts. Holding the clock through that would keep the
+        // whole desktop awake for the length of a read.
+        for _ in 0..64 {
+            let _ = handle_event(&mut app, &Event::Tick { elapsed_ms: 16 });
+        }
+        assert!(
+            matches!(app.dialog, ActiveDialog::Confirm { .. }),
+            "the confirmation closed itself"
+        );
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a settled confirmation went on asking for frames"
+        );
+    }
+
+    #[test]
+    fn the_window_is_drawn_at_the_size_the_compositor_reported() {
+        use oswindow::app::App;
+
+        // The first frame arrives before any `Event::Resize` does, so a render
+        // that trusted `WINDOW_WIDTH` would lay the opening window out against
+        // the size that was *asked for* rather than the one that was granted --
+        // visible as a stretched or clipped frame for one refresh, and as
+        // clicks landing off-target until the first resize.
+        let mut app = PartitionManagerApp::new();
+        let tree = App::render(&mut app, 1440.0, 900.0);
+        assert_eq!(app.width, 1440.0);
+        assert_eq!(app.height, 900.0);
+
+        // Drawn at that size, not merely recorded at it: the background fill
+        // is the first command and spans the window.
+        match tree.commands.first() {
+            Some(RenderCommand::FillRect { width, height, .. }) => {
+                assert_eq!(*width, 1440.0);
+                assert_eq!(*height, 900.0);
+            }
+            other => panic!("expected a full-window background fill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unconsumed_event_does_not_cost_a_frame() {
+        use oswindow::app::{App as _, Response};
+
+        // `Response::Idle` is what lets the compositor skip a repaint. An app
+        // that answered `Redraw` to everything would repaint on every mouse
+        // move over dead space.
+        let mut app = PartitionManagerApp::new();
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Idle,
+            "a tick with nothing to animate asked for a repaint"
+        );
+        assert_eq!(
+            app.on_event(&Event::Resize {
+                width: 1200,
+                height: 800
+            }),
+            Response::Redraw,
+            "a resize did not ask for a repaint"
+        );
     }
 }

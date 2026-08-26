@@ -18,6 +18,14 @@
 //! be found by a user, and neither test suite can see it because each is tested
 //! only against itself.
 //!
+//! That rule applies to this crate as much as to its callers, and until
+//! 2026-08-26 it was being broken here. PNG pixel data is a zlib stream, so this
+//! crate carried its own DEFLATE decoder — the *second* one in the tree, beside
+//! the kernel's. Both were tested only against themselves, which is precisely
+//! the arrangement the paragraph above says cannot detect a disagreement. The
+//! shared one is now the `deflate` crate (`no_std` + `alloc`, depending only on
+//! `crc32`), 872 lines here were deleted, and the two are one.
+//!
 //! # The output is what the compositor stores
 //!
 //! [`Image::pixels`] is densely packed `0xAARRGGBB` — the same layout
@@ -76,7 +84,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::fmt;
 
-pub mod inflate;
 pub mod png;
 pub mod testing;
 
@@ -189,7 +196,7 @@ pub enum ImageError {
     /// A checksum in the file does not match the bytes it covers.
     Corrupt(&'static str),
     /// The compressed pixel data could not be read.
-    Compressed(inflate::InflateError),
+    Compressed(deflate::Error),
 }
 
 impl fmt::Display for ImageError {
@@ -206,13 +213,48 @@ impl fmt::Display for ImageError {
                 )
             }
             Self::Corrupt(what) => write!(f, "corrupt {what}"),
-            Self::Compressed(e) => write!(f, "compressed data: {e}"),
+            Self::Compressed(e) => write!(f, "compressed data: {}", compression_failure(*e)),
         }
     }
 }
 
-impl From<inflate::InflateError> for ImageError {
-    fn from(e: inflate::InflateError) -> Self {
+/// One line of prose for a [`deflate::Error`], because that type has no
+/// `Display` of its own.
+///
+/// This wording used to live on `imagecodec`'s own `InflateError`. It is kept
+/// here rather than dropped in favour of `{e:?}` because this string reaches a
+/// person: it is what the desktop shows when a wallpaper will not open, and
+/// `DistanceTooFar` is an identifier, not an explanation.
+///
+/// The catch-all is not optional — `deflate::Error` is `#[non_exhaustive]`, so
+/// a `match` on it from outside that crate must have one. Its cost is that the
+/// compiler cannot tell us when lane A adds a variant, so a new one degrades
+/// quietly to its `Debug` form rather than failing the build. That is the right
+/// way round for a *message*, but it does mean this table can go stale silently.
+///
+/// The proper fix is a `Display` impl on `deflate::Error` itself, so that every
+/// caller is not left inventing its own wording and disagreeing — the same
+/// two-copies-drift argument that got this crate's decoder deleted in the first
+/// place. Filed as `requests/c-a-deflate-error-has-no-display.md`; when it
+/// lands, delete this function and write `{e}`.
+fn compression_failure(e: deflate::Error) -> &'static str {
+    match e {
+        deflate::Error::UnexpectedEnd => "compressed stream ended mid-symbol",
+        deflate::Error::ReservedBlockType => "reserved DEFLATE block type 3",
+        deflate::Error::StoredLengthMismatch => "stored block length does not match its complement",
+        deflate::Error::InvalidHuffmanTable => "invalid Huffman code lengths",
+        deflate::Error::InvalidSymbol => "undecodable Huffman symbol",
+        deflate::Error::DistanceTooFar => "back-reference points before the start of the output",
+        deflate::Error::OutputTooLarge => "decompressed size exceeds the caller's limit",
+        deflate::Error::BadWrapperHeader => "not a zlib stream this decoder supports",
+        deflate::Error::PresetDictionary => "zlib preset dictionary, which is not supported",
+        deflate::Error::ChecksumMismatch { .. } => "zlib Adler-32 checksum mismatch",
+        _ => "unreadable compressed stream",
+    }
+}
+
+impl From<deflate::Error> for ImageError {
+    fn from(e: deflate::Error) -> Self {
         Self::Compressed(e)
     }
 }

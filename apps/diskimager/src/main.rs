@@ -41,6 +41,7 @@ use guitk::event::{
 };
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
+use guitk::modal::{AlertDialog, DialogResult};
 #[allow(unused_imports)]
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -51,10 +52,14 @@ use guitk::text;
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 use guitk::{scroll_window, wheel};
 
-use std::collections::VecDeque;
+use oswindow::app::Response;
+
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
-use std::time::UNIX_EPOCH;
+use std::io::{self, Read, Write};
+use std::process::ExitCode;
+use std::time::{Duration, UNIX_EPOCH};
 
 // ============================================================================
 // Catppuccin Mocha color palette
@@ -129,27 +134,150 @@ const ISO_DATETIME_LEN: usize = 17;
 /// bytes are centiseconds and a timezone offset, which this view does not show.
 const ISO_DATETIME_DIGITS: usize = 14;
 
-// Destructive-confirmation dialog. Its two prose fields wrap, so the dialog
-// grows to hold them; these bound and floor that growth.
-/// Room between the dialog's title baseline and its message.
-const CONFIRM_TITLE_BLOCK: f32 = 28.0;
-/// Vertical room the message keeps even when it is one short line, so a
-/// typical confirmation looks exactly as it did before the fields wrapped.
-const CONFIRM_MESSAGE_MIN_HEIGHT: f32 = 24.0;
-/// Room below the warning for the Cancel/Write row and the padding under it.
-const CONFIRM_BUTTON_BLOCK: f32 = 62.0;
-/// The dialog never shrinks below the size it had when both fields were
-/// clipped to one line.
-const CONFIRM_MIN_HEIGHT: f32 = 200.0;
-/// A drive name is attacker-shaped input in the sense that matters here -- it
-/// comes from the device, not from us -- so neither field may grow the dialog
-/// without bound.
-const CONFIRM_MESSAGE_MAX_LINES: usize = 4;
-/// The warning is a fixed two-sentence form; four lines is generous for it at
-/// this width, and the cap keeps a pathological drive name from pushing the
-/// buttons off screen.
-const CONFIRM_DETAIL_MAX_LINES: usize = 4;
+// The destructive-confirmation dialog used to be sized here, by six constants
+// giving its title, message, warning and button row their shares of a box this
+// file drew itself. `guitk::modal::AlertDialog` owns all of that now --
+// including the rule those constants existed for: a drive name comes from the
+// device rather than from us, so the prose has to be bounded, and the bound
+// has to cut the *name* rather than the warning underneath it.
 const DEFAULT_BLOCK_SIZE: u64 = 4096;
+
+// ============================================================================
+// Write tab layout
+// ============================================================================
+
+/// Where the rows of the Write tab land.
+///
+/// The rows below the image and drive cards move depending on whether an image
+/// is loaded and whether a drive is selected, so the Write button's position
+/// is not a constant that a hit test could restate — and until this existed,
+/// no hit test tried: the button was drawn and nothing anywhere listened for a
+/// click on it, which left the program's one destructive action unreachable
+/// and its confirmation dialog dead code.
+///
+/// Computed once and read by both the renderer and the click handler, on the
+/// same principle as the toolkit dialog's `DialogLayout`: two copies of a
+/// layout agree only until one of them is edited.
+#[derive(Clone, Copy, Debug)]
+struct WriteTabLayout {
+    /// Left edge of every row.
+    px: f32,
+    image_label_y: f32,
+    image_body_y: f32,
+    drive_label_y: f32,
+    drive_body_y: f32,
+    options_label_y: f32,
+    verify_row_y: f32,
+    block_size_y: f32,
+    button_x: f32,
+    button_y: f32,
+    button_w: f32,
+    recent_y: f32,
+}
+
+impl WriteTabLayout {
+    /// Height of the image card, and of the placeholder that stands in for it.
+    const IMAGE_CARD_BLOCK: f32 = 100.0;
+    const IMAGE_EMPTY_BLOCK: f32 = 72.0;
+    /// Same, for the target-drive card.
+    const DRIVE_CARD_BLOCK: f32 = 72.0;
+    const DRIVE_EMPTY_BLOCK: f32 = 52.0;
+    /// A section heading and the gap under it.
+    const HEADING_BLOCK: f32 = 24.0;
+    /// The "Verify after write" checkbox row.
+    const VERIFY_ROW_BLOCK: f32 = 30.0;
+    /// The "Block size: N bytes" line.
+    const BLOCK_SIZE_BLOCK: f32 = 28.0;
+    /// Extra air above the Options heading.
+    const OPTIONS_GAP: f32 = 8.0;
+    /// Width of the Write button. Wide enough for its label at any weight.
+    const BUTTON_WIDTH: f32 = 160.0;
+
+    /// Lay the tab out in the panel at (`x`, `y`), for the given content.
+    fn new(x: f32, y: f32, image_loaded: bool, drive_selected: bool) -> Self {
+        let px = x + PANEL_PADDING;
+        let image_label_y = y + PANEL_PADDING;
+        let image_body_y = image_label_y + Self::HEADING_BLOCK;
+        let drive_label_y = image_body_y
+            + if image_loaded {
+                Self::IMAGE_CARD_BLOCK
+            } else {
+                Self::IMAGE_EMPTY_BLOCK
+            };
+        let drive_body_y = drive_label_y + Self::HEADING_BLOCK;
+        let options_label_y = drive_body_y
+            + if drive_selected {
+                Self::DRIVE_CARD_BLOCK
+            } else {
+                Self::DRIVE_EMPTY_BLOCK
+            }
+            + Self::OPTIONS_GAP;
+        let verify_row_y = options_label_y + Self::HEADING_BLOCK;
+        let block_size_y = verify_row_y + Self::VERIFY_ROW_BLOCK;
+        let button_y = block_size_y + Self::BLOCK_SIZE_BLOCK;
+        Self {
+            px,
+            image_label_y,
+            image_body_y,
+            drive_label_y,
+            drive_body_y,
+            options_label_y,
+            verify_row_y,
+            block_size_y,
+            button_x: px,
+            button_y,
+            button_w: Self::BUTTON_WIDTH,
+            recent_y: button_y + BUTTON_HEIGHT + 16.0,
+        }
+    }
+
+    /// Whether (`mx`, `my`) is on the Write button.
+    fn button_hit(&self, mx: f32, my: f32) -> bool {
+        mx >= self.button_x
+            && mx < self.button_x + self.button_w
+            && my >= self.button_y
+            && my < self.button_y + BUTTON_HEIGHT
+    }
+}
+
+/// Where the toolbar's one button is, for the renderer and the click handler.
+///
+/// The Refresh Drives button was the Write button's twin: drawn every frame,
+/// hit-tested by nothing, so the only way to notice a drive that appeared after
+/// launch was to restart the program. `dead_code` cannot see a button like that
+/// — the drawing code is live, and there is no handler for the lint to find
+/// missing — so the only defence is to derive the rectangle once here and have
+/// both sides read it, and to pin the agreement with a test.
+#[derive(Clone, Copy, Debug)]
+struct ToolbarLayout {
+    refresh_x: f32,
+    refresh_y: f32,
+    refresh_w: f32,
+}
+
+impl ToolbarLayout {
+    /// Width of the Refresh Drives button, sized to its label.
+    const REFRESH_WIDTH: f32 = 128.0;
+    /// Gap between the button's right edge and the window's.
+    const REFRESH_MARGIN: f32 = 12.0;
+
+    /// Lay out the toolbar of a window `window_width` pixels wide.
+    fn new(window_width: f32) -> Self {
+        Self {
+            refresh_x: window_width - Self::REFRESH_WIDTH - Self::REFRESH_MARGIN,
+            refresh_y: (TOOLBAR_HEIGHT - BUTTON_HEIGHT) / 2.0,
+            refresh_w: Self::REFRESH_WIDTH,
+        }
+    }
+
+    /// Whether (`mx`, `my`) is on the Refresh Drives button.
+    fn refresh_hit(&self, mx: f32, my: f32) -> bool {
+        mx >= self.refresh_x
+            && mx < self.refresh_x + self.refresh_w
+            && my >= self.refresh_y
+            && my < self.refresh_y + BUTTON_HEIGHT
+    }
+}
 
 // ============================================================================
 // Image format types
@@ -349,6 +477,203 @@ impl HashState {
     }
 }
 
+// ============================================================================
+// Streaming jobs — the I/O behind an operation
+// ============================================================================
+
+/// How many bytes one tick's worth of work moves.
+///
+/// A ceiling on how long the window can stop answering the mouse, because all
+/// of this runs on the event loop: a chunk is one `read` plus one `write`
+/// between two ticks. 1 MiB is large enough that a 4 GiB image is four
+/// thousand ticks rather than four million, and small enough that a slow USB
+/// stick cannot stall a frame for long.
+const IO_CHUNK: usize = 1 << 20;
+
+/// Read into `buf` until it is full or the source is exhausted.
+///
+/// `Read::read` is permitted to return fewer bytes than asked for without
+/// meaning end-of-file, and a comparison that treated a short read as one
+/// would report a mismatch between two identical files whenever the two sides
+/// happened to hand back different amounts.
+fn fill(reader: &mut fs::File, buf: &mut [u8]) -> io::Result<usize> {
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        let Some(rest) = buf.get_mut(filled..) else {
+            break;
+        };
+        match reader.read(rest) {
+            Ok(0) => break,
+            Ok(n) => filled = filled.saturating_add(n),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
+/// What one tick of a job accomplished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Step {
+    /// This many bytes were moved or checked, and there is more to do.
+    Moved(u64),
+    /// The source ran out: the operation is finished.
+    Done,
+    /// The two sides differ, first at this byte offset.
+    Differs(u64),
+}
+
+/// A hash computation streaming over a real file.
+///
+/// The hasher and the reader feeding it are one object because they are one
+/// invariant. When they were apart — a `HashState` held by the app and no
+/// reader anywhere — nothing connected the byte counter the progress bar drew
+/// to any byte that had been read, and `finalize()` returned the digest of the
+/// empty input.
+struct HashJob {
+    file: fs::File,
+    state: HashState,
+    buf: Vec<u8>,
+}
+
+impl HashJob {
+    fn open(path: &str, algorithm: HashAlgorithm) -> io::Result<Self> {
+        Ok(Self {
+            file: fs::File::open(path)?,
+            state: HashState::new(algorithm),
+            buf: vec![0; IO_CHUNK],
+        })
+    }
+
+    fn step(&mut self) -> io::Result<Step> {
+        let n = fill(&mut self.file, &mut self.buf)?;
+        if n == 0 {
+            return Ok(Step::Done);
+        }
+        let chunk = self
+            .buf
+            .get(..n)
+            .ok_or_else(|| io::Error::other("read reported more bytes than the buffer holds"))?;
+        self.state.update(chunk);
+        Ok(Step::Moved(n as u64))
+    }
+}
+
+/// A byte-for-byte copy streaming from one file to another.
+///
+/// Used for both directions the app offers — an image onto a device, and a
+/// device into an image — because they are the same operation with the two
+/// paths swapped, and writing them twice is writing two places for the
+/// short-write bug to live.
+struct CopyJob {
+    src: fs::File,
+    dst: fs::File,
+    buf: Vec<u8>,
+}
+
+impl CopyJob {
+    fn open(src_path: &str, dst_path: &str) -> io::Result<Self> {
+        let src = fs::File::open(src_path)?;
+        // `create` rather than `create_new`: writing an image to a device means
+        // opening a node that already exists, and creating an image means
+        // replacing a file the user named in a save dialog. Neither wants the
+        // "already exists" refusal, and the dialog is where an overwrite is
+        // confirmed.
+        let dst = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dst_path)?;
+        Ok(Self {
+            src,
+            dst,
+            buf: vec![0; IO_CHUNK],
+        })
+    }
+
+    fn step(&mut self) -> io::Result<Step> {
+        let n = fill(&mut self.src, &mut self.buf)?;
+        if n == 0 {
+            // Everything written so far is still only in the page cache until
+            // this returns. A "Write complete" printed before the sync is a
+            // promise the program has not kept, and pulling the stick out on
+            // the strength of it is how an image half-lands.
+            self.dst.flush()?;
+            self.dst.sync_all()?;
+            return Ok(Step::Done);
+        }
+        let chunk = self
+            .buf
+            .get(..n)
+            .ok_or_else(|| io::Error::other("read reported more bytes than the buffer holds"))?;
+        self.dst.write_all(chunk)?;
+        Ok(Step::Moved(n as u64))
+    }
+}
+
+/// A byte-for-byte comparison streaming over two files.
+struct CompareJob {
+    a: fs::File,
+    b: fs::File,
+    buf_a: Vec<u8>,
+    buf_b: Vec<u8>,
+    offset: u64,
+}
+
+impl CompareJob {
+    fn open(a_path: &str, b_path: &str) -> io::Result<Self> {
+        Ok(Self {
+            a: fs::File::open(a_path)?,
+            b: fs::File::open(b_path)?,
+            buf_a: vec![0; IO_CHUNK],
+            buf_b: vec![0; IO_CHUNK],
+            offset: 0,
+        })
+    }
+
+    fn step(&mut self) -> io::Result<Step> {
+        let na = fill(&mut self.a, &mut self.buf_a)?;
+        let nb = fill(&mut self.b, &mut self.buf_b)?;
+        let common = na.min(nb);
+        let (Some(sa), Some(sb)) = (self.buf_a.get(..common), self.buf_b.get(..common)) else {
+            return Err(io::Error::other(
+                "read reported more bytes than the buffer holds",
+            ));
+        };
+        if let Some(i) = sa.iter().zip(sb).position(|(x, y)| x != y) {
+            return Ok(Step::Differs(self.offset.saturating_add(i as u64)));
+        }
+        if na != nb {
+            // One side ran out first. That is a difference at the point where
+            // the shorter one stopped -- a device that is a prefix of the image
+            // is not a device the image was written to.
+            return Ok(Step::Differs(self.offset.saturating_add(common as u64)));
+        }
+        if common == 0 {
+            return Ok(Step::Done);
+        }
+        self.offset = self.offset.saturating_add(common as u64);
+        Ok(Step::Moved(common as u64))
+    }
+}
+
+/// The I/O behind whichever operation is running.
+enum Job {
+    Hash(HashJob),
+    Copy(CopyJob),
+    Compare(CompareJob),
+}
+
+impl Job {
+    fn step(&mut self) -> io::Result<Step> {
+        match self {
+            Self::Hash(j) => j.step(),
+            Self::Copy(j) => j.step(),
+            Self::Compare(j) => j.step(),
+        }
+    }
+}
+
 /// Verification result comparing computed hash to expected.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VerificationResult {
@@ -375,6 +700,25 @@ pub enum DriveType {
 }
 
 impl DriveType {
+    /// Read the `type=` field of a kernel block-device record.
+    ///
+    /// An unrecognised value becomes [`Unknown`](Self::Unknown) rather than a
+    /// parse failure: the kernel may learn a bus this app has not heard of,
+    /// and a drive shown with a vague type is far better than a drive dropped
+    /// from the list for having one.
+    #[must_use]
+    pub fn from_kernel_name(name: &str) -> Self {
+        match name {
+            "hdd" => Self::Hdd,
+            "ssd" | "nvme" => Self::Ssd,
+            "usb" => Self::Usb,
+            "sd" | "sdcard" => Self::SdCard,
+            "optical" | "cdrom" => Self::Optical,
+            "virtual" | "loop" => Self::Virtual,
+            _ => Self::Unknown,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Hdd => "HDD",
@@ -410,6 +754,23 @@ pub enum PartitionTable {
 }
 
 impl PartitionTable {
+    /// Read the `partition_table=` field of a kernel block-device record.
+    ///
+    /// Note the two distinct absences this preserves: `none` is "the kernel
+    /// looked and there is no table", while anything unrecognised — including
+    /// a missing field — is [`Unknown`](Self::Unknown), "nobody has said". A
+    /// blank disk and an unread disk look the same to a reader that folds
+    /// them together, and only one of the two is safe to overwrite unasked.
+    #[must_use]
+    pub fn from_kernel_name(name: &str) -> Self {
+        match name {
+            "mbr" | "dos" => Self::Mbr,
+            "gpt" => Self::Gpt,
+            "none" => Self::None,
+            _ => Self::Unknown,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Mbr => "MBR",
@@ -435,6 +796,13 @@ pub struct Partition {
 #[derive(Clone, Debug)]
 pub struct DriveInfo {
     pub id: String,
+    /// The device node to open in order to read or write this drive's bytes.
+    ///
+    /// Kept apart from `id` because the two answer different questions: `id`
+    /// names the drive across a refresh and is what `locked_drive_id`
+    /// compares, while this is a path the filesystem will accept. They happen
+    /// to coincide on Linux; nothing here requires that they do.
+    pub node: String,
     pub name: String,
     pub model: String,
     pub serial: String,
@@ -469,6 +837,144 @@ impl DriveInfo {
         }
         parts.join(" | ")
     }
+}
+
+// ============================================================================
+// Drive enumeration
+// ============================================================================
+
+/// Where the kernel publishes the block devices it has found.
+///
+/// The same node `apps/sysinfo` reads for its Storage page, deliberately. Two
+/// programs that each invent their own way of asking what disks exist end up
+/// disagreeing about what disks exist, and the disagreement surfaces as a
+/// drive that one of them offers to erase and the other has never heard of.
+///
+/// Nothing publishes this file yet: `kernel/src/blkdev.rs` and
+/// `kernel/src/nvme.rs` exist, but `devfs` exposes only character devices, so
+/// no block device reaches userspace at all. See
+/// `requests/c-a-expose-block-devices-to-userspace.md`.
+const SYSFS_BLOCK: &str = "/sys/hardware/block";
+
+/// The most partitions read from one drive's record.
+///
+/// A bound rather than "until the keys run out" because the keys are
+/// `part0_`…`part{n}_` and a producer that emitted a gap would otherwise
+/// truncate the list at the gap without saying so. GPT's own minimum
+/// guaranteed table is 128 entries, and 128 rows is already past what the
+/// panel can show.
+const MAX_PARTITIONS: u32 = 128;
+
+/// Split a key=value record file into records at blank lines.
+///
+/// `#` comments and blank-run collapsing are handled here so that both this
+/// and `apps/sysinfo` read the format the same way.
+fn parse_kv_records(content: &str) -> Vec<HashMap<String, String>> {
+    let mut records = Vec::new();
+    let mut current: HashMap<String, String> = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            if !current.is_empty() {
+                records.push(core::mem::take(&mut current));
+            }
+            continue;
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            current.insert(key.trim().to_string(), value.trim().to_string());
+        }
+    }
+    if !current.is_empty() {
+        records.push(current);
+    }
+    records
+}
+
+/// Read a `key=value` field as a boolean, defaulting to `false`.
+///
+/// Absent means false rather than "unknown": every flag this reads
+/// (`removable`, `readonly`, `system`) is one whose false value is the safe
+/// assumption for *describing* a drive, and none of them is load-bearing for
+/// refusing a write on its own.
+fn record_flag(record: &HashMap<String, String>, key: &str) -> bool {
+    matches!(
+        record.get(key).map(String::as_str),
+        Some("1" | "true" | "yes")
+    )
+}
+
+/// Turn the kernel's block-device records into drives the UI can show.
+///
+/// Takes the file's text rather than its path so that the format has tests: no
+/// machine this runs on has a `/sys/hardware/block`, so a parser reachable only
+/// through the filesystem would be a parser nothing ever exercises — which is
+/// exactly how the hand-written checksum in this app stayed wrong for weeks.
+fn parse_block_records(content: &str) -> Vec<DriveInfo> {
+    parse_kv_records(content)
+        .into_iter()
+        .filter_map(|record| {
+            // A record with no node is dropped rather than shown with an
+            // empty path. A drive that cannot be opened is not a drive the
+            // user can do anything with, and listing it only invites a click
+            // that fails for a reason the row does not explain.
+            let node = record.get("node")?.clone();
+            let id = record
+                .get("id")
+                .cloned()
+                .unwrap_or_else(|| node.rsplit('/').next().unwrap_or(&node).to_string());
+            let mut partitions = Vec::new();
+            for i in 0..MAX_PARTITIONS {
+                let prefix = format!("part{i}_");
+                let Some(label) = record.get(&format!("{prefix}label")) else {
+                    continue;
+                };
+                partitions.push(Partition {
+                    index: i,
+                    label: label.clone(),
+                    filesystem: record
+                        .get(&format!("{prefix}fs"))
+                        .cloned()
+                        .unwrap_or_default(),
+                    offset_bytes: record
+                        .get(&format!("{prefix}offset_bytes"))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0),
+                    size_bytes: record
+                        .get(&format!("{prefix}capacity_bytes"))
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0),
+                    is_boot: record_flag(&record, &format!("{prefix}boot")),
+                });
+            }
+            Some(DriveInfo {
+                name: record.get("name").cloned().unwrap_or_else(|| id.clone()),
+                id,
+                node,
+                model: record.get("model").cloned().unwrap_or_default(),
+                serial: record.get("serial").cloned().unwrap_or_default(),
+                size_bytes: record
+                    .get("capacity_bytes")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                drive_type: DriveType::from_kernel_name(
+                    record.get("type").map(String::as_str).unwrap_or_default(),
+                ),
+                partition_table: PartitionTable::from_kernel_name(
+                    record
+                        .get("partition_table")
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                ),
+                partitions,
+                is_system_drive: record_flag(&record, "system"),
+                is_removable: record_flag(&record, "removable"),
+                is_readonly: record_flag(&record, "readonly"),
+            })
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -894,10 +1400,17 @@ impl OperationProgress {
         self.fraction() * 100.0
     }
 
-    /// Update progress after transferring more bytes.
-    pub fn advance(&mut self, bytes: u64, elapsed_ms: u64) {
+    /// Update progress after transferring more bytes over `since_last_ms`.
+    ///
+    /// The time argument is a *delta*, because that is what `Event::Tick`
+    /// carries — "the interval that actually elapsed", per `oswindow::app`.
+    /// This used to assign it (`self.elapsed_ms = elapsed_ms`), which made the
+    /// running total one frame long however long the transfer had been going,
+    /// so the speed read as one chunk per frame — tens of times the real rate —
+    /// and the ETA derived from it was wrong by the same factor.
+    pub fn advance(&mut self, bytes: u64, since_last_ms: u64) {
         self.bytes_done = self.bytes_done.saturating_add(bytes);
-        self.elapsed_ms = elapsed_ms;
+        self.elapsed_ms = self.elapsed_ms.saturating_add(since_last_ms);
         if self.elapsed_ms > 0 {
             self.speed_bytes_per_sec = (self.bytes_done as f64) / (self.elapsed_ms as f64 / 1000.0);
         }
@@ -958,59 +1471,41 @@ impl OperationProgress {
 // Write confirmation dialog
 // ============================================================================
 
-/// Safety confirmation dialog state.
-#[derive(Clone, Debug)]
-pub struct ConfirmDialog {
-    pub visible: bool,
-    pub title: String,
-    pub message: String,
-    pub detail: String,
-    pub confirmed: bool,
-    pub cancelled: bool,
-    pub hover_confirm: bool,
-    pub hover_cancel: bool,
+/// The confirmation shown before a write, ready to be `show()`n.
+///
+/// This used to be a hand-rolled `ConfirmDialog` — a visible flag, two prose
+/// fields, two hover flags and two booleans for the answer — drawn by 140
+/// lines beside it and hit-tested by 30 more that restated the button geometry
+/// from different numbers than the drawing used. It is the toolkit's
+/// [`AlertDialog`] now, which is the same dialog the partition manager shows,
+/// so the two agree about what a destructive confirmation looks like and about
+/// which button Enter presses.
+///
+/// The dialog is returned rather than stored: `AlertDialog` starts hidden and
+/// ignores every event until `show()`, and building it at the point of use
+/// keeps the "make it, show it, act on its answer" sequence in one place.
+fn write_confirmation(image_name: &str, drive_name: &str, drive_size: u64) -> AlertDialog {
+    let mut dialog = AlertDialog::destructive(
+        "Confirm Write",
+        &format!("Write '{image_name}' to '{drive_name}'?"),
+        "Write",
+    )
+    .with_detail(&format!(
+        "All data on {} ({}) will be permanently destroyed. \
+         This action cannot be undone.",
+        drive_name,
+        format_bytes(drive_size)
+    ));
+    dialog.show();
+    dialog
 }
 
-impl Default for ConfirmDialog {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ConfirmDialog {
-    pub fn new() -> Self {
-        Self {
-            visible: false,
-            title: String::new(),
-            message: String::new(),
-            detail: String::new(),
-            confirmed: false,
-            cancelled: false,
-            hover_confirm: false,
-            hover_cancel: false,
-        }
-    }
-
-    /// Show a write-confirmation dialog for a destructive operation.
-    pub fn show_write_confirm(&mut self, image_name: &str, drive_name: &str, drive_size: u64) {
-        self.visible = true;
-        self.confirmed = false;
-        self.cancelled = false;
-        self.title = "Confirm Write".to_string();
-        self.message = format!("Write '{}' to '{}'?", image_name, drive_name);
-        self.detail = format!(
-            "WARNING: All data on {} ({}) will be permanently destroyed. \
-             This operation cannot be undone.",
-            drive_name,
-            format_bytes(drive_size)
-        );
-    }
-
-    pub fn dismiss(&mut self) {
-        self.visible = false;
-        self.confirmed = false;
-        self.cancelled = false;
-    }
+/// The name to show for an image file: its last path component.
+///
+/// Shared with the image card on the Write tab so the confirmation names the
+/// file the same way the card the user just read did.
+fn image_display_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 // ============================================================================
@@ -1150,9 +1645,20 @@ pub struct DiskImagerApp {
     pub operation: Operation,
     pub progress: OperationProgress,
 
+    /// The open files the running operation is streaming through, if any.
+    ///
+    /// `operation` says what the status bar should read; this says what the
+    /// next tick should actually *do*, and there is no way to have one without
+    /// the other. Before it existed, `operation` was set on its own and the
+    /// tick advanced a byte counter by `bytes_total / 100` under a comment
+    /// reading "Simulate progress if operation is active" — so a write that had
+    /// opened nothing filled a progress bar and finished with "Write complete",
+    /// and a hash that had read nothing finalised an untouched hasher and
+    /// published the digest of the empty input for every image alike.
+    job: Option<Job>,
+
     // Checksum / verification
     pub hash_algorithm: HashAlgorithm,
-    pub hash_state: Option<HashState>,
     pub computed_hash: Option<String>,
     pub expected_hash: String,
     pub verification_result: VerificationResult,
@@ -1162,7 +1668,12 @@ pub struct DiskImagerApp {
     pub create_options: CreateOptions,
 
     // Dialogs
-    pub confirm_dialog: ConfirmDialog,
+    /// The write confirmation, present only while it is on screen.
+    ///
+    /// `Option` rather than a `visible` flag: the old flag left the dialog's
+    /// stale title, message and answer sitting in the struct after it closed,
+    /// which is state that only ever exists to be read by mistake.
+    pub confirm_dialog: Option<AlertDialog>,
 
     /// The file-open dialog, present only while it is on screen.
     ///
@@ -1196,7 +1707,14 @@ impl Default for DiskImagerApp {
 
 impl DiskImagerApp {
     pub fn new() -> Self {
-        let drives = Self::detect_drives();
+        // An enumeration that fails is reported, not swallowed. The list being
+        // empty because the kernel has no block devices and the list being
+        // empty because reading them was refused look identical on screen, and
+        // only one of the two is worth the user's attention.
+        let (drives, status_message, status_is_error) = match Self::detect_drives() {
+            Ok(drives) => (drives, "Ready".to_string(), false),
+            Err(e) => (Vec::new(), e, true),
+        };
         Self {
             active_tab: MainTab::Write,
             window_width: 960.0,
@@ -1214,18 +1732,18 @@ impl DiskImagerApp {
             operation: Operation::Idle,
             progress: OperationProgress::new(0),
             hash_algorithm: HashAlgorithm::Sha256,
-            hash_state: None,
+            job: None,
             computed_hash: None,
             expected_hash: String::new(),
             verification_result: VerificationResult::Pending,
             write_options: WriteOptions::default(),
             create_options: CreateOptions::default(),
-            confirm_dialog: ConfirmDialog::new(),
+            confirm_dialog: None,
             open_dialog: None,
             recent_images: VecDeque::new(),
             locked_drive_id: None,
-            status_message: "Ready".to_string(),
-            status_is_error: false,
+            status_message,
+            status_is_error,
             tick_count: 0,
         }
     }
@@ -1350,76 +1868,28 @@ impl DiskImagerApp {
         .start
     }
 
-    /// Detect available drives on the system.
-    fn detect_drives() -> Vec<DriveInfo> {
-        // In production, this would enumerate actual block devices via
-        // the OS block device enumeration API. Here we provide sample
-        // drives for demonstration.
-        vec![
-            DriveInfo {
-                id: "disk0".to_string(),
-                name: "System NVMe".to_string(),
-                model: "Samsung 980 PRO 1TB".to_string(),
-                serial: "S5GXNG0N123456".to_string(),
-                size_bytes: 1_000_204_886_016,
-                drive_type: DriveType::Ssd,
-                partition_table: PartitionTable::Gpt,
-                partitions: vec![
-                    Partition {
-                        index: 1,
-                        label: "EFI System".to_string(),
-                        filesystem: "FAT32".to_string(),
-                        offset_bytes: 1_048_576,
-                        size_bytes: 268_435_456,
-                        is_boot: true,
-                    },
-                    Partition {
-                        index: 2,
-                        label: "Slate OS".to_string(),
-                        filesystem: "ext4".to_string(),
-                        offset_bytes: 269_484_032,
-                        size_bytes: 999_935_401_984,
-                        is_boot: false,
-                    },
-                ],
-                is_system_drive: true,
-                is_removable: false,
-                is_readonly: false,
-            },
-            DriveInfo {
-                id: "disk1".to_string(),
-                name: "USB Flash Drive".to_string(),
-                model: "SanDisk Ultra 32GB".to_string(),
-                serial: "4C530001234567".to_string(),
-                size_bytes: 31_457_280_000,
-                drive_type: DriveType::Usb,
-                partition_table: PartitionTable::Mbr,
-                partitions: vec![Partition {
-                    index: 1,
-                    label: "USBDRIVE".to_string(),
-                    filesystem: "FAT32".to_string(),
-                    offset_bytes: 1_048_576,
-                    size_bytes: 31_456_231_424,
-                    is_boot: false,
-                }],
-                is_system_drive: false,
-                is_removable: true,
-                is_readonly: false,
-            },
-            DriveInfo {
-                id: "disk2".to_string(),
-                name: "SD Card Reader".to_string(),
-                model: "Generic SD Card 16GB".to_string(),
-                serial: "0000000000000".to_string(),
-                size_bytes: 15_931_539_456,
-                drive_type: DriveType::SdCard,
-                partition_table: PartitionTable::Mbr,
-                partitions: vec![],
-                is_system_drive: false,
-                is_removable: true,
-                is_readonly: false,
-            },
-        ]
+    /// Ask the kernel which block devices exist.
+    ///
+    /// This used to answer with three drives that do not exist — a 1 TB
+    /// "System NVMe", a 32 GB "USB Flash Drive" and an SD card reader, complete
+    /// with serial numbers — under a comment saying that "in production, this
+    /// would enumerate actual block devices". Nothing downstream knew they were
+    /// invented, so the program offered to write a disk image to a piece of
+    /// hardware that was never there, and every test that clicked through the
+    /// Write tab passed against it. An empty list is not a worse answer than a
+    /// fictional one; it is the only true one this kernel can give today.
+    fn detect_drives() -> Result<Vec<DriveInfo>, String> {
+        match fs::read_to_string(SYSFS_BLOCK) {
+            Ok(content) => Ok(parse_block_records(&content)),
+            // A missing node means this kernel publishes no block devices —
+            // a fact about the machine, not a failure of this run, and not
+            // something to colour the status bar red over. Any *other* error
+            // (a permission denial, an I/O fault) is a failure, and the user
+            // needs to be told which, because the two call for opposite
+            // responses.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(format!("Cannot read {SYSFS_BLOCK}: {e}")),
+        }
     }
 
     // ========================================================================
@@ -1594,13 +2064,27 @@ impl DiskImagerApp {
             ));
         }
 
-        self.write_options.image_path = image.path.clone();
-        self.write_options.target_drive_id = drive.id.clone();
-        self.operation = Operation::WritingImage;
-        self.progress = OperationProgress::new(image.file_size);
-        self.locked_drive_id = Some(drive.id.clone());
-        self.status_message = format!("Writing to {}...", drive.name);
-        self.status_is_error = false;
+        // Everything above is a refusal we can make without touching the
+        // hardware; opening the node is the first thing that can fail for a
+        // reason outside this program, so it goes last. Today it is also the
+        // thing that fails: `devfs` publishes no block devices, so this
+        // returns "No such file or directory" for the node of a drive that
+        // was never enumerated in the first place.
+        let (image_path, drive_id, drive_name, node, total) = (
+            image.path.clone(),
+            drive.id.clone(),
+            drive.name.clone(),
+            drive.node.clone(),
+            image.file_size,
+        );
+        let job = CopyJob::open(&image_path, &node)
+            .map_err(|e| format!("Cannot open {node} for writing: {e}"))?;
+
+        self.write_options.image_path = image_path;
+        self.write_options.target_drive_id = drive_id.clone();
+        self.begin(Operation::WritingImage, Job::Copy(job), total);
+        self.locked_drive_id = Some(drive_id);
+        self.status_message = format!("Writing to {drive_name}...");
         Ok(())
     }
 
@@ -1615,61 +2099,154 @@ impl DiskImagerApp {
             .get(drive_idx)
             .ok_or_else(|| "Invalid drive index".to_string())?;
 
-        self.create_options.source_drive_id = drive.id.clone();
+        let (drive_id, drive_name, node, total) = (
+            drive.id.clone(),
+            drive.name.clone(),
+            drive.node.clone(),
+            drive.size_bytes,
+        );
+        let job = CopyJob::open(&node, output_path)
+            .map_err(|e| format!("Cannot copy {node} to {output_path}: {e}"))?;
+
+        self.create_options.source_drive_id = drive_id.clone();
         self.create_options.output_path = output_path.to_string();
-        self.operation = Operation::CreatingImage;
-        self.progress = OperationProgress::new(drive.size_bytes);
-        self.locked_drive_id = Some(drive.id.clone());
-        self.status_message = format!("Creating image from {}...", drive.name);
-        self.status_is_error = false;
+        self.begin(Operation::CreatingImage, Job::Copy(job), total);
+        self.locked_drive_id = Some(drive_id);
+        self.status_message = format!("Creating image from {drive_name}...");
         Ok(())
     }
 
-    /// Start byte-by-byte verification after write.
+    /// Start byte-by-byte verification of what was just written.
     pub fn start_verify_write(&mut self) -> Result<(), String> {
         let image = self
             .loaded_image
             .as_ref()
             .ok_or_else(|| "No image loaded".to_string())?;
-        self.operation = Operation::VerifyingWrite;
-        self.progress = OperationProgress::new(image.file_size);
+        let drive_idx = self
+            .selected_drive_index
+            .ok_or_else(|| "No drive selected".to_string())?;
+        let drive = self
+            .drives
+            .get(drive_idx)
+            .ok_or_else(|| "Invalid drive index".to_string())?;
+
+        let (image_path, node, total) = (image.path.clone(), drive.node.clone(), image.file_size);
+        let job = CompareJob::open(&image_path, &node)
+            .map_err(|e| format!("Cannot read back {node}: {e}"))?;
+
+        self.begin(Operation::VerifyingWrite, Job::Compare(job), total);
         self.status_message = "Verifying write...".to_string();
-        self.status_is_error = false;
         Ok(())
     }
 
     /// Start computing a hash of the loaded image.
+    ///
+    /// Opening the file is part of *starting*, not of the first tick: a hash
+    /// that cannot be read has failed before it began, and saying so now — with
+    /// the operating system's own reason attached — beats a progress bar that
+    /// appears and then reports an error a frame later.
     pub fn start_hash(&mut self) -> Result<(), String> {
         let image = self
             .loaded_image
             .as_ref()
             .ok_or_else(|| "No image loaded".to_string())?;
-        self.hash_state = Some(HashState::new(self.hash_algorithm));
+        let path = image.path.clone();
+        let job = HashJob::open(&path, self.hash_algorithm)
+            .map_err(|e| format!("Cannot read {path}: {e}"))?;
+
+        // The length the file has *now*, not the length it had when it was
+        // loaded: the bar is drawn against how far the read has got, and a
+        // total taken from a stale `ImageInfo` is a bar that stops at 90% or
+        // reaches 100% with more still to read.
+        let total = job
+            .file
+            .metadata()
+            .map(|m| m.len())
+            .unwrap_or(image.file_size);
+
         self.computed_hash = None;
         self.verification_result = VerificationResult::Pending;
-        self.operation = Operation::ComputingHash;
-        self.progress = OperationProgress::new(image.file_size);
+        self.begin(Operation::ComputingHash, Job::Hash(job), total);
         self.status_message = format!("Computing {} hash...", self.hash_algorithm.name());
-        self.status_is_error = false;
         Ok(())
+    }
+
+    /// Put an operation and its I/O in flight together.
+    ///
+    /// One function because the two must never be set apart: an `operation`
+    /// without a `job` is a status bar that describes work nothing is doing.
+    fn begin(&mut self, operation: Operation, job: Job, bytes_total: u64) {
+        self.operation = operation;
+        self.job = Some(job);
+        self.progress = OperationProgress::new(bytes_total);
+        self.status_is_error = false;
     }
 
     /// Cancel the current operation.
     pub fn cancel_operation(&mut self) {
         self.operation = Operation::Idle;
+        self.job = None;
         self.locked_drive_id = None;
         self.status_message = "Operation cancelled".to_string();
         self.status_is_error = false;
     }
 
+    /// Stop the current operation and say why it could not continue.
+    fn fail_operation(&mut self, why: String) {
+        if self.operation == Operation::ComputingHash {
+            self.verification_result = VerificationResult::Error(why.clone());
+        }
+        self.operation = Operation::Idle;
+        self.job = None;
+        self.locked_drive_id = None;
+        self.status_message = why;
+        self.status_is_error = true;
+    }
+
+    /// Move the running operation forward by one tick's worth of I/O.
+    ///
+    /// Driven by [`Job`] rather than by [`Operation`], because the job is what
+    /// can actually do something: an operation whose files were never opened
+    /// has nothing to advance, and the previous version of this — which
+    /// advanced a counter by `bytes_total / 100` whenever `operation` was not
+    /// `Idle` — is precisely how a write with no device and a hash with no
+    /// reader both ran to a successful-looking 100%.
+    fn pump_operation(&mut self, elapsed_ms: u64) {
+        let Some(job) = self.job.as_mut() else {
+            return;
+        };
+        match job.step() {
+            Ok(Step::Moved(n)) => self.progress.advance(n, elapsed_ms),
+            Ok(Step::Done) => self.complete_operation(),
+            Ok(Step::Differs(offset)) => {
+                self.progress
+                    .errors
+                    .push(format!("Mismatch at byte {offset}"));
+                self.fail_operation(format!(
+                    "Verification failed: drive differs from image at byte {offset}"
+                ));
+            }
+            Err(e) => self.fail_operation(format!("{}: {e}", self.operation.label())),
+        }
+    }
+
     /// Complete the current operation.
     pub fn complete_operation(&mut self) {
-        let msg = match &self.operation {
+        let finished = self.job.take();
+        let msg = match self.operation {
             Operation::WritingImage => {
                 if self.write_options.verify_after_write {
-                    // Transition to verification
-                    let _ = self.start_verify_write();
-                    return;
+                    // Transition to verification. A failure to open the device
+                    // for read-back is reported rather than dropped: "Write
+                    // complete" after a verification that never ran is the one
+                    // outcome the option exists to prevent.
+                    match self.start_verify_write() {
+                        Ok(()) => return,
+                        Err(e) => {
+                            self.fail_operation(format!("Written, but cannot verify: {e}"));
+                            return;
+                        }
+                    }
                 }
                 "Write complete".to_string()
             }
@@ -1678,11 +2255,11 @@ impl DiskImagerApp {
                 format!("Image created: {}", self.create_options.output_path)
             }
             Operation::ComputingHash => {
-                if let Some(state) = self.hash_state.as_mut() {
-                    let hash = state.finalize();
+                if let Some(Job::Hash(mut job)) = finished {
+                    let hash = job.state.finalize();
                     self.computed_hash = Some(hash.clone());
                     if !self.expected_hash.is_empty() {
-                        if self.expected_hash.to_lowercase() == hash.to_lowercase() {
+                        if self.expected_hash.trim().eq_ignore_ascii_case(&hash) {
                             self.verification_result = VerificationResult::Match;
                         } else {
                             self.verification_result = VerificationResult::Mismatch {
@@ -1700,6 +2277,48 @@ impl DiskImagerApp {
         self.locked_drive_id = None;
         self.status_message = msg;
         self.status_is_error = false;
+    }
+
+    /// Re-read the block-device list, keeping the selection on the same drive.
+    ///
+    /// The selection is an index into `drives`, so a plain reassignment would
+    /// silently re-point it at whatever drive happened to land in that slot —
+    /// which, for a program whose next click erases the selected disk, is the
+    /// worst possible way to be wrong. The drive is therefore re-found by `id`,
+    /// and the selection is dropped outright if it is gone.
+    ///
+    /// Refusing while an operation is running is not caution for its own sake:
+    /// `locked_drive_id` names the drive being written, and the streaming job
+    /// already holds the file open. Re-indexing under it would leave the status
+    /// bar describing one drive while the bytes went to another.
+    pub fn refresh_drives(&mut self) {
+        if self.operation.is_active() {
+            self.status_message = "Cannot refresh while an operation is running".to_string();
+            self.status_is_error = true;
+            return;
+        }
+        let previous = self.selected_drive().map(|d| d.id.clone());
+        match Self::detect_drives() {
+            Ok(drives) => {
+                self.drives = drives;
+                self.selected_drive_index =
+                    previous.and_then(|id| self.drives.iter().position(|d| d.id == id));
+                self.sidebar_scroll = self.sidebar_scroll.min(self.max_sidebar_scroll());
+                self.status_message = match self.drives.len() {
+                    0 => "No drives detected".to_string(),
+                    1 => "1 drive detected".to_string(),
+                    n => format!("{n} drives detected"),
+                };
+                self.status_is_error = false;
+            }
+            Err(e) => {
+                self.drives.clear();
+                self.selected_drive_index = None;
+                self.sidebar_scroll = 0;
+                self.status_message = e;
+                self.status_is_error = true;
+            }
+        }
     }
 
     /// Select a drive by index with validation.
@@ -1725,6 +2344,26 @@ impl DiskImagerApp {
     // ========================================================================
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // A tick drives the confirmation's fade as well as the write's
+        // progress, and the dialog has to keep animating while it is up.
+        if let (Event::Tick { elapsed_ms }, Some(dialog)) = (event, self.confirm_dialog.as_mut()) {
+            dialog.tick(*elapsed_ms);
+        }
+
+        // An open confirmation takes every key and every click, because a
+        // toolkit dialog does its own hit-testing and its own focus handling
+        // and the two cannot be split apart here. Splitting them is what let
+        // the hand-rolled dialog this replaced test its buttons against a
+        // height of 200 px that the renderer, which sized the box from its own
+        // wrapped text, had generally not used.
+        //
+        // The file-open dialog is drawn over the confirmation, but the two are
+        // never up together: the confirmation swallows the Ctrl+O that opens
+        // the one, and `confirm_write` refuses while the other is up.
+        if self.confirm_dialog.is_some() && matches!(event, Event::Key(_) | Event::Mouse(_)) {
+            return self.handle_confirm_event(event);
+        }
+
         match event {
             Event::Resize { width, height } => {
                 self.window_width = *width as f32;
@@ -1733,15 +2372,7 @@ impl DiskImagerApp {
             }
             Event::Tick { elapsed_ms } => {
                 self.tick_count = self.tick_count.wrapping_add(1);
-                // Simulate progress if operation is active
-                if self.operation.is_active() {
-                    let step = self.progress.bytes_total / 100;
-                    let step = if step == 0 { 1024 } else { step };
-                    self.progress.advance(step, *elapsed_ms);
-                    if self.progress.is_complete() {
-                        self.complete_operation();
-                    }
-                }
+                self.pump_operation(*elapsed_ms);
                 EventResult::Consumed
             }
             Event::Key(key_ev) if key_ev.pressed => self.handle_key(key_ev),
@@ -1755,27 +2386,6 @@ impl DiskImagerApp {
         // key before anything else can claim it.
         if let Some(result) = self.dispatch_to_open_dialog(key) {
             return result;
-        }
-
-        // Handle confirm dialog first
-        if self.confirm_dialog.visible {
-            match key.key {
-                Key::Enter => {
-                    self.confirm_dialog.confirmed = true;
-                    self.confirm_dialog.visible = false;
-                    // Execute the write
-                    if let Err(e) = self.start_write() {
-                        self.status_message = e;
-                        self.status_is_error = true;
-                    }
-                    return EventResult::Consumed;
-                }
-                Key::Escape => {
-                    self.confirm_dialog.dismiss();
-                    return EventResult::Consumed;
-                }
-                _ => return EventResult::Consumed,
-            }
         }
 
         // Tab switching
@@ -1852,9 +2462,12 @@ impl DiskImagerApp {
 
         match &mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => {
-                // Confirm dialog buttons
-                if self.confirm_dialog.visible {
-                    return self.handle_dialog_click(mx, my);
+                // The toolbar's one control.
+                if my < TOOLBAR_HEIGHT {
+                    if self.toolbar_layout().refresh_hit(mx, my) {
+                        self.refresh_drives();
+                    }
+                    return EventResult::Consumed;
                 }
 
                 // Tab bar clicks
@@ -1870,6 +2483,12 @@ impl DiskImagerApp {
                 // File tree clicks (browse panel)
                 if self.active_tab == MainTab::Browse {
                     return self.handle_iso_click(mx, my);
+                }
+
+                // The Write tab's one control.
+                if self.active_tab == MainTab::Write && self.write_tab_layout().button_hit(mx, my) {
+                    self.confirm_write();
+                    return EventResult::Consumed;
                 }
 
                 EventResult::Consumed
@@ -1990,34 +2609,57 @@ impl DiskImagerApp {
         EventResult::Consumed
     }
 
-    fn handle_dialog_click(&mut self, mx: f32, my: f32) -> EventResult {
-        let dialog_w = 420.0_f32;
-        let dialog_h = 200.0_f32;
-        let dialog_x = (self.window_width - dialog_w) / 2.0;
-        let dialog_y = (self.window_height - dialog_h) / 2.0;
-
-        let btn_y = dialog_y + dialog_h - 50.0;
-        let btn_h = 32.0_f32;
-
-        // Cancel button
-        let cancel_x = dialog_x + dialog_w - 200.0;
-        if mx >= cancel_x && mx < cancel_x + 90.0 && my >= btn_y && my < btn_y + btn_h {
-            self.confirm_dialog.dismiss();
-            return EventResult::Consumed;
+    /// Ask before writing.
+    ///
+    /// Returns whether a confirmation went up. It does not when there is
+    /// nothing to write, which is the same condition that draws the Write
+    /// button disabled -- one test, so the button's look and its effect cannot
+    /// disagree -- and not while the file-open dialog is up, which is drawn
+    /// over the confirmation and would leave it visible but unreachable.
+    pub fn confirm_write(&mut self) -> bool {
+        if !self.can_write() || self.open_dialog.is_some() {
+            return false;
         }
+        let Some(image) = self.loaded_image.as_ref() else {
+            return false;
+        };
+        let Some(drive) = self.selected_drive() else {
+            return false;
+        };
+        self.confirm_dialog = Some(write_confirmation(
+            image_display_name(&image.path),
+            &drive.name,
+            drive.size_bytes,
+        ));
+        true
+    }
 
-        // Confirm button
-        let confirm_x = dialog_x + dialog_w - 100.0;
-        if mx >= confirm_x && mx < confirm_x + 90.0 && my >= btn_y && my < btn_y + btn_h {
-            self.confirm_dialog.confirmed = true;
-            self.confirm_dialog.visible = false;
-            if let Err(e) = self.start_write() {
-                self.status_message = e;
-                self.status_is_error = true;
-            }
-            return EventResult::Consumed;
+    /// Whether a write could start right now. Read by both the Write button's
+    /// colour and [`confirm_write`](Self::confirm_write).
+    pub fn can_write(&self) -> bool {
+        self.loaded_image.is_some()
+            && self.selected_drive_index.is_some()
+            && !self.operation.is_active()
+    }
+
+    /// Give an event to the open confirmation and act on its answer.
+    fn handle_confirm_event(&mut self, event: &Event) -> EventResult {
+        let Some(dialog) = self.confirm_dialog.as_mut() else {
+            return EventResult::Ignored;
+        };
+        let consumed = dialog.handle_event(event);
+        let Some(result) = dialog.result() else {
+            return consumed;
+        };
+        // `Cancel` is the button and `Dismissed` is Escape or a click on the
+        // scrim; both mean no. Only `Ok` -- which is what the destructive
+        // button reports, whatever verb it is wearing -- means yes.
+        let accepted = *result == DialogResult::Ok;
+        self.confirm_dialog = None;
+        if accepted && let Err(e) = self.start_write() {
+            self.status_message = e;
+            self.status_is_error = true;
         }
-
         EventResult::Consumed
     }
 
@@ -2025,7 +2667,13 @@ impl DiskImagerApp {
     // Rendering
     // ========================================================================
 
-    pub fn render(&self, rt: &mut RenderTree) {
+    /// Draw the whole window.
+    ///
+    /// Takes `&mut` because the toolkit's confirmation records where it landed
+    /// as a side effect of drawing, which is what makes "you can only click
+    /// what was drawn" true by construction rather than by two pieces of
+    /// arithmetic agreeing.
+    pub fn render(&mut self, rt: &mut RenderTree) {
         // Background
         rt.fill_rect(
             0.0,
@@ -2062,9 +2710,14 @@ impl DiskImagerApp {
             self.render_progress_overlay(rt);
         }
 
-        // Overlay: confirm dialog
-        if self.confirm_dialog.visible {
-            self.render_confirm_dialog(rt);
+        // Overlay: confirm dialog. This used to be 140 lines of scrim, shadow,
+        // box, border, title, wrapped message, wrapped warning and two
+        // hand-positioned buttons -- a copy of a dialog the toolkit already
+        // had, and a copy that hit-tested its buttons at a height the drawing
+        // did not use. All of it is `guitk::modal::AlertDialog` now.
+        let (w, h) = (self.window_width, self.window_height);
+        if let Some(dialog) = self.confirm_dialog.as_mut() {
+            dialog.render(w, h, rt);
         }
 
         // Overlay: file-open dialog, last so it is over the confirm dialog
@@ -2102,19 +2755,18 @@ impl DiskImagerApp {
         });
 
         // Refresh drives button
-        let refresh_x = self.window_width - 140.0;
-        let btn_y = (TOOLBAR_HEIGHT - BUTTON_HEIGHT) / 2.0;
+        let lay = self.toolbar_layout();
         rt.fill_rounded_rect(
-            refresh_x,
-            btn_y,
-            128.0,
+            lay.refresh_x,
+            lay.refresh_y,
+            lay.refresh_w,
             BUTTON_HEIGHT,
             colors::SURFACE0,
             CornerRadii::all(4.0),
         );
         rt.push(RenderCommand::Text {
-            x: refresh_x + 12.0,
-            y: btn_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
+            x: lay.refresh_x + 12.0,
+            y: lay.refresh_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: "Refresh Drives".to_string(),
             color: colors::TEXT,
             font_size: UI_FONT_SIZE,
@@ -2222,6 +2874,32 @@ impl DiskImagerApp {
             width,
             height: self.drive_list_height(),
         });
+
+        // An empty list needs a reason beside it. The list is empty on every
+        // machine today -- `devfs` publishes no block devices -- and a blank
+        // column under the word "Drives" reads as "still looking", which is
+        // the one thing it does not mean.
+        if self.drives.is_empty() {
+            for (i, line) in [
+                "No drives detected.",
+                "This system exposes no block",
+                "devices to userspace yet.",
+            ]
+            .iter()
+            .enumerate()
+            {
+                rt.push(RenderCommand::Text {
+                    x: x + PANEL_PADDING,
+                    y: entry_y_start + 8.0 + (i as f32) * (SMALL_FONT_SIZE + 4.0),
+                    text: (*line).to_string(),
+                    color: colors::SUBTEXT0,
+                    font_size: SMALL_FONT_SIZE,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(width - PANEL_PADDING * 2.0),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
+        }
 
         // Draw only the window of rows the offset selects, at slot positions
         // counted from the top of that window. The old form walked all drives
@@ -2353,14 +3031,37 @@ impl DiskImagerApp {
         }
     }
 
+    /// The Write tab's layout for the current window and selection — the same
+    /// arrangement [`render_write_tab`](Self::render_write_tab) will draw,
+    /// because it is the one it draws from.
+    fn write_tab_layout(&self) -> WriteTabLayout {
+        WriteTabLayout::new(
+            SIDEBAR_WIDTH,
+            self.content_top(),
+            self.loaded_image.is_some(),
+            self.selected_drive().is_some(),
+        )
+    }
+
+    /// The toolbar's layout for the current window width — the same one
+    /// [`render_toolbar`](Self::render_toolbar) draws from.
+    fn toolbar_layout(&self) -> ToolbarLayout {
+        ToolbarLayout::new(self.window_width)
+    }
+
     fn render_write_tab(&self, rt: &mut RenderTree, x: f32, y: f32, width: f32, height: f32) {
-        let px = x + PANEL_PADDING;
-        let mut cy = y + PANEL_PADDING;
+        let lay = WriteTabLayout::new(
+            x,
+            y,
+            self.loaded_image.is_some(),
+            self.selected_drive().is_some(),
+        );
+        let px = lay.px;
 
         // Section: Image Selection
         rt.push(RenderCommand::Text {
             x: px,
-            y: cy,
+            y: lay.image_label_y,
             text: "Image File".to_string(),
             color: colors::TEXT,
             font_size: 14.0,
@@ -2368,16 +3069,14 @@ impl DiskImagerApp {
             max_width: Some(width - PANEL_PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cy += 24.0;
 
         if let Some(ref img) = self.loaded_image {
             // Image info card
-            self.render_image_card(rt, px, cy, width - PANEL_PADDING * 2.0, img);
-            cy += 100.0;
+            self.render_image_card(rt, px, lay.image_body_y, width - PANEL_PADDING * 2.0, img);
         } else {
             rt.fill_rounded_rect(
                 px,
-                cy,
+                lay.image_body_y,
                 width - PANEL_PADDING * 2.0,
                 60.0,
                 colors::SURFACE0,
@@ -2385,7 +3084,7 @@ impl DiskImagerApp {
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
-                y: cy + 20.0,
+                y: lay.image_body_y + 20.0,
                 // Names the key. The previous wording -- "Open an .iso, .img,
                 // or .bin file." -- was an instruction for an action the
                 // program did not offer.
@@ -2397,13 +3096,12 @@ impl DiskImagerApp {
                 max_width: Some(width - PANEL_PADDING * 4.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cy += 72.0;
         }
 
         // Section: Target Drive
         rt.push(RenderCommand::Text {
             x: px,
-            y: cy,
+            y: lay.drive_label_y,
             text: "Target Drive".to_string(),
             color: colors::TEXT,
             font_size: 14.0,
@@ -2411,15 +3109,13 @@ impl DiskImagerApp {
             max_width: Some(width - PANEL_PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cy += 24.0;
 
         if let Some(drive) = self.selected_drive() {
-            self.render_drive_card(rt, px, cy, width - PANEL_PADDING * 2.0, drive);
-            cy += 72.0;
+            self.render_drive_card(rt, px, lay.drive_body_y, width - PANEL_PADDING * 2.0, drive);
         } else {
             rt.fill_rounded_rect(
                 px,
-                cy,
+                lay.drive_body_y,
                 width - PANEL_PADDING * 2.0,
                 40.0,
                 colors::SURFACE0,
@@ -2427,7 +3123,7 @@ impl DiskImagerApp {
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
-                y: cy + 12.0,
+                y: lay.drive_body_y + 12.0,
                 text: "Select a target drive from the left panel".to_string(),
                 color: colors::SUBTEXT0,
                 font_size: UI_FONT_SIZE,
@@ -2435,14 +3131,12 @@ impl DiskImagerApp {
                 max_width: Some(width - PANEL_PADDING * 4.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cy += 52.0;
         }
 
         // Write options
-        cy += 8.0;
         rt.push(RenderCommand::Text {
             x: px,
-            y: cy,
+            y: lay.options_label_y,
             text: "Options".to_string(),
             color: colors::TEXT,
             font_size: 14.0,
@@ -2450,7 +3144,6 @@ impl DiskImagerApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cy += 24.0;
 
         // Verify after write checkbox
         let check_color = if self.write_options.verify_after_write {
@@ -2458,11 +3151,18 @@ impl DiskImagerApp {
         } else {
             colors::SURFACE1
         };
-        rt.fill_rounded_rect(px, cy, 18.0, 18.0, check_color, CornerRadii::all(3.0));
+        rt.fill_rounded_rect(
+            px,
+            lay.verify_row_y,
+            18.0,
+            18.0,
+            check_color,
+            CornerRadii::all(3.0),
+        );
         if self.write_options.verify_after_write {
             rt.push(RenderCommand::Text {
                 x: px + 3.0,
-                y: cy + 1.0,
+                y: lay.verify_row_y + 1.0,
                 text: "v".to_string(),
                 color: colors::CRUST,
                 font_size: 13.0,
@@ -2473,7 +3173,7 @@ impl DiskImagerApp {
         }
         rt.push(RenderCommand::Text {
             x: px + 26.0,
-            y: cy + 2.0,
+            y: lay.verify_row_y + 2.0,
             text: "Verify after write (byte-by-byte comparison)".to_string(),
             color: colors::TEXT,
             font_size: UI_FONT_SIZE,
@@ -2481,12 +3181,11 @@ impl DiskImagerApp {
             max_width: Some(width - PANEL_PADDING * 2.0 - 30.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cy += 30.0;
 
         // Block size
         rt.push(RenderCommand::Text {
             x: px,
-            y: cy,
+            y: lay.block_size_y,
             text: format!("Block size: {} bytes", self.write_options.block_size),
             color: colors::SUBTEXT0,
             font_size: SMALL_FONT_SIZE,
@@ -2494,30 +3193,26 @@ impl DiskImagerApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cy += 28.0;
 
-        // Write button
-        let can_write = self.loaded_image.is_some()
-            && self.selected_drive_index.is_some()
-            && !self.operation.is_active();
-
+        // Write button -- drawn at the rectangle `handle_mouse` tests against,
+        // because both read it from `lay`.
+        let can_write = self.can_write();
         let btn_color = if can_write {
             colors::BLUE
         } else {
             colors::SURFACE1
         };
-        let btn_w = 160.0_f32;
         rt.fill_rounded_rect(
-            px,
-            cy,
-            btn_w,
+            lay.button_x,
+            lay.button_y,
+            lay.button_w,
             BUTTON_HEIGHT,
             btn_color,
             CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::Text {
-            x: px + (btn_w - 80.0) / 2.0,
-            y: cy + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
+            x: lay.button_x + (lay.button_w - 80.0) / 2.0,
+            y: lay.button_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: "Write Image".to_string(),
             color: if can_write {
                 colors::CRUST
@@ -2532,7 +3227,7 @@ impl DiskImagerApp {
 
         // Recent images section
         let _ = height; // use height to avoid warning
-        cy += BUTTON_HEIGHT + 16.0;
+        let mut cy = lay.recent_y;
         if !self.recent_images.is_empty() {
             rt.push(RenderCommand::Text {
                 x: px,
@@ -3263,7 +3958,7 @@ impl DiskImagerApp {
         let mut ty = y + 8.0;
 
         // File name
-        let filename = img.path.rsplit(['/', '\\']).next().unwrap_or(&img.path);
+        let filename = image_display_name(&img.path);
         rt.push(RenderCommand::Text {
             x: tx,
             y: ty,
@@ -3664,146 +4359,6 @@ impl DiskImagerApp {
             overflow: TextOverflow::Clip,
         });
     }
-
-    fn render_confirm_dialog(&self, rt: &mut RenderTree) {
-        // Dim overlay
-        rt.fill_rect(
-            0.0,
-            0.0,
-            self.window_width,
-            self.window_height,
-            Color::rgba(0, 0, 0, 150),
-        );
-
-        let dialog_w = 420.0_f32;
-
-        // The message and the warning are prose, and `max_width` on a Text
-        // command clips to one line rather than wrapping -- so the detail
-        // ("... will be permanently destroyed. This operation cannot be
-        // undone.") was being cut mid-sentence, dropping the half that says
-        // the action is irreversible. Both wrap now, and the dialog is sized
-        // from the lines they actually produce. The dialog is centred, so its
-        // height has to be known before anything can be positioned.
-        let text_w = dialog_w - PANEL_PADDING * 2.0;
-        let message = |x: f32, y: f32| {
-            text::Paragraph::new(&self.confirm_dialog.message, colors::TEXT)
-                .at(x, y, text_w)
-                .font(UI_FONT_SIZE, FontWeightHint::Regular)
-                .max_lines(CONFIRM_MESSAGE_MAX_LINES)
-        };
-        let detail = |x: f32, y: f32| {
-            text::Paragraph::new(&self.confirm_dialog.detail, colors::YELLOW)
-                .at(x, y, text_w)
-                .font(SMALL_FONT_SIZE, FontWeightHint::Regular)
-                .max_lines(CONFIRM_DETAIL_MAX_LINES)
-        };
-        // Keep the original single-line allowance as a floor so a short
-        // message leaves the dialog looking exactly as it did.
-        let message_block = message(0.0, 0.0).height().max(CONFIRM_MESSAGE_MIN_HEIGHT);
-        let detail_h = detail(0.0, 0.0).height();
-        let dialog_h =
-            (PANEL_PADDING + CONFIRM_TITLE_BLOCK + message_block + detail_h + CONFIRM_BUTTON_BLOCK)
-                .max(CONFIRM_MIN_HEIGHT);
-        let dialog_x = (self.window_width - dialog_w) / 2.0;
-        let dialog_y = (self.window_height - dialog_h) / 2.0;
-
-        // Shadow
-        rt.push(RenderCommand::BoxShadow {
-            x: dialog_x,
-            y: dialog_y,
-            width: dialog_w,
-            height: dialog_h,
-            offset_x: 0.0,
-            offset_y: 4.0,
-            blur: 20.0,
-            spread: 0.0,
-            color: Color::rgba(0, 0, 0, 100),
-            corner_radii: CornerRadii::all(CORNER_RADIUS * 2.0),
-        });
-
-        // Dialog background
-        rt.fill_rounded_rect(
-            dialog_x,
-            dialog_y,
-            dialog_w,
-            dialog_h,
-            colors::MANTLE,
-            CornerRadii::all(CORNER_RADIUS * 2.0),
-        );
-        rt.push(RenderCommand::StrokeRect {
-            x: dialog_x,
-            y: dialog_y,
-            width: dialog_w,
-            height: dialog_h,
-            color: colors::RED,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS * 2.0),
-        });
-
-        // Title
-        rt.push(RenderCommand::Text {
-            x: dialog_x + PANEL_PADDING,
-            y: dialog_y + PANEL_PADDING,
-            text: self.confirm_dialog.title.clone(),
-            color: colors::RED,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(dialog_w - PANEL_PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Message, then the warning beneath whatever the message actually
-        // occupied -- not beneath a fixed one-line allowance for it.
-        let message_y = dialog_y + PANEL_PADDING + CONFIRM_TITLE_BLOCK;
-        message(dialog_x + PANEL_PADDING, message_y).draw(rt);
-        detail(dialog_x + PANEL_PADDING, message_y + message_block).draw(rt);
-
-        // Buttons
-        let btn_y = dialog_y + dialog_h - 50.0;
-        let btn_w = 90.0_f32;
-
-        // Cancel button
-        let cancel_x = dialog_x + dialog_w - 200.0;
-        rt.fill_rounded_rect(
-            cancel_x,
-            btn_y,
-            btn_w,
-            BUTTON_HEIGHT,
-            colors::SURFACE0,
-            CornerRadii::all(4.0),
-        );
-        rt.push(RenderCommand::Text {
-            x: cancel_x + (btn_w - 42.0) / 2.0,
-            y: btn_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
-            text: "Cancel".to_string(),
-            color: colors::TEXT,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Confirm (destructive) button
-        let confirm_x = dialog_x + dialog_w - 100.0;
-        rt.fill_rounded_rect(
-            confirm_x,
-            btn_y,
-            btn_w,
-            BUTTON_HEIGHT,
-            colors::RED,
-            CornerRadii::all(4.0),
-        );
-        rt.push(RenderCommand::Text {
-            x: confirm_x + (btn_w - 36.0) / 2.0,
-            y: btn_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
-            text: "Write".to_string(),
-            color: colors::CRUST,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
 }
 
 // ============================================================================
@@ -3972,23 +4527,98 @@ fn read_le_u16(data: &[u8], offset: usize) -> u16 {
 // Main entry point
 // ============================================================================
 
-fn main() {
-    let mut app = DiskImagerApp::new();
-    let mut rt = RenderTree::new();
+impl oswindow::app::App for DiskImagerApp {
+    fn title(&self) -> String {
+        String::from("Disk Imager")
+    }
 
-    // Initial render
-    app.render(&mut rt);
+    fn initial_size(&self) -> (u32, u32) {
+        (960, 680)
+    }
 
-    // Event loop (simplified — in production this is driven by the
-    // compositor's event dispatch).
-    let resize_event = Event::Resize {
-        width: 960,
-        height: 680,
-    };
-    app.handle_event(&resize_event);
+    /// The clock runs only while something is actually moving.
+    ///
+    /// Two things need it, and each stops needing it on its own:
+    ///
+    /// * `job` — the streaming transfer. This is the one that matters: the pump
+    ///   moves one chunk per tick, so an app that asked for no clock would open
+    ///   both files, report the operation as running, and never move a byte.
+    ///   That is a failure this program has already had in another form (see
+    ///   `known-issues.md`, the entry on its mock layer), and it is why the
+    ///   condition is `self.job` rather than `self.operation`: `operation` is
+    ///   what the status bar says, and a status bar is not a reason to hold a
+    ///   clock.
+    /// * the confirmation's fade, which must keep animating to finish appearing
+    ///   and — more importantly — to finish *disappearing*, since the overlay
+    ///   clears itself inside its own tick.
+    ///
+    /// `is_animating` rather than `is_active` on purpose. A confirmation sitting
+    /// fully faded in, waiting for a human to click Write, is exactly the state
+    /// that waits longest, and asking for 60 ticks a second through it would
+    /// hold the whole desktop awake for as long as the user hesitated.
+    ///
+    /// 16 ms is a floor, not a promise: the harness may deliver late, which is
+    /// why `advance` accumulates the `elapsed_ms` it is handed instead of
+    /// assuming this value. It used to assume it, and reported a transfer speed
+    /// inflated by the ratio of the whole copy's duration to one frame's.
+    fn tick_interval(&self) -> Option<Duration> {
+        let fading = self
+            .confirm_dialog
+            .as_ref()
+            .is_some_and(AlertDialog::is_animating);
+        if self.job.is_some() || fading {
+            Some(Duration::from_millis(16))
+        } else {
+            None
+        }
+    }
 
-    rt.clear();
-    app.render(&mut rt);
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            // A tick is 60 a second, so this arm does the work to answer
+            // honestly: a chunk that moved changed the progress bar, and a
+            // fading overlay changed the scrim, but a tick that did neither
+            // must not cost a frame.
+            Event::Tick { .. } => {
+                let before = self.progress.bytes_done;
+                let was_running = self.job.is_some();
+                let fading = self
+                    .confirm_dialog
+                    .as_ref()
+                    .is_some_and(AlertDialog::is_animating);
+                self.handle_event(event);
+                if fading || self.progress.bytes_done != before || was_running != self.job.is_some()
+                {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            // Everything else arrives at human speed -- a key, a click, a wheel
+            // notch -- so an occasional wasted frame costs nothing, and working
+            // out whether this particular one changed anything would cost more
+            // than the frame does.
+            _ => match self.handle_event(event) {
+                EventResult::Consumed => Response::Redraw,
+                EventResult::Ignored => Response::Idle,
+            },
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the compositor last reported, not the one that was asked
+        // for: a frame drawn at the old geometry is a visibly stretched or
+        // clipped window for one refresh.
+        self.window_width = width;
+        self.window_height = height;
+        let mut rt = RenderTree::new();
+        DiskImagerApp::render(self, &mut rt);
+        rt
+    }
+}
+
+fn main() -> ExitCode {
+    oswindow::app::launch("diskimager", &mut DiskImagerApp::new())
 }
 
 // ============================================================================
@@ -4009,6 +4639,51 @@ mod tests {
     )]
 
     use super::*;
+
+    // ----------------------------------------------------------------
+    // Fixtures
+    // ----------------------------------------------------------------
+
+    /// A drive for a test to work with.
+    ///
+    /// Tests build their own drives now, because the application does not: it
+    /// used to ship three invented ones — a 1 TB NVMe, a 32 GB stick, an SD
+    /// reader — that every test then leaned on, so a suite that appeared to
+    /// exercise drive selection, write blocking, sidebar scrolling and the
+    /// write confirmation was in fact exercising all of it against hardware
+    /// that did not exist. Moving the fixtures here is what lets the app tell
+    /// the truth about an empty list while the tests still have something to
+    /// click on.
+    ///
+    /// One builder rather than a struct literal per test: a literal repeated
+    /// at eight call sites is eight places to edit when `DriveInfo` grows a
+    /// field, and the compiler only makes you notice once you have already
+    /// decided what the field means.
+    fn test_drive(id: &str) -> DriveInfo {
+        DriveInfo {
+            id: id.to_string(),
+            node: format!("/dev/{id}"),
+            name: id.to_string(),
+            model: "Model".to_string(),
+            serial: "SERIAL".to_string(),
+            size_bytes: 1_000_000,
+            drive_type: DriveType::Usb,
+            partition_table: PartitionTable::Mbr,
+            partitions: Vec::new(),
+            is_system_drive: false,
+            is_removable: true,
+            is_readonly: false,
+        }
+    }
+
+    /// An app holding `count` writable drives, none of them selected.
+    fn app_with_drives(count: usize) -> DiskImagerApp {
+        let mut app = DiskImagerApp::new();
+        app.drives = (0..count)
+            .map(|i| test_drive(&format!("disk{i}")))
+            .collect();
+        app
+    }
 
     // ----------------------------------------------------------------
     // ImageFormat detection
@@ -4316,92 +4991,35 @@ mod tests {
 
     #[test]
     fn test_drive_info_size_display() {
-        let drive = DriveInfo {
-            id: "d".into(),
-            name: "Test".into(),
-            model: "M".into(),
-            serial: "S".into(),
-            size_bytes: 1_000_000_000,
-            drive_type: DriveType::Ssd,
-            partition_table: PartitionTable::Gpt,
-            partitions: vec![],
-            is_system_drive: false,
-            is_removable: false,
-            is_readonly: false,
-        };
+        let mut drive = test_drive("d");
+        drive.size_bytes = 1_000_000_000;
         let s = drive.size_display();
         assert!(s.contains("MiB") || s.contains("GiB"));
     }
 
     #[test]
     fn test_drive_write_blocked_system() {
-        let drive = DriveInfo {
-            id: "d".into(),
-            name: "Sys".into(),
-            model: "M".into(),
-            serial: "S".into(),
-            size_bytes: 1000,
-            drive_type: DriveType::Ssd,
-            partition_table: PartitionTable::Gpt,
-            partitions: vec![],
-            is_system_drive: true,
-            is_removable: false,
-            is_readonly: false,
-        };
+        let mut drive = test_drive("d");
+        drive.is_system_drive = true;
         assert!(drive.write_blocked());
     }
 
     #[test]
     fn test_drive_write_blocked_readonly() {
-        let drive = DriveInfo {
-            id: "d".into(),
-            name: "RO".into(),
-            model: "M".into(),
-            serial: "S".into(),
-            size_bytes: 1000,
-            drive_type: DriveType::Optical,
-            partition_table: PartitionTable::None,
-            partitions: vec![],
-            is_system_drive: false,
-            is_removable: true,
-            is_readonly: true,
-        };
+        let mut drive = test_drive("d");
+        drive.is_readonly = true;
         assert!(drive.write_blocked());
     }
 
     #[test]
     fn test_drive_write_allowed() {
-        let drive = DriveInfo {
-            id: "d".into(),
-            name: "USB".into(),
-            model: "M".into(),
-            serial: "S".into(),
-            size_bytes: 1000,
-            drive_type: DriveType::Usb,
-            partition_table: PartitionTable::Mbr,
-            partitions: vec![],
-            is_system_drive: false,
-            is_removable: true,
-            is_readonly: false,
-        };
-        assert!(!drive.write_blocked());
+        assert!(!test_drive("d").write_blocked());
     }
 
     #[test]
     fn test_drive_summary() {
-        let drive = DriveInfo {
-            id: "d0".into(),
-            name: "Test".into(),
-            model: "M".into(),
-            serial: "S".into(),
-            size_bytes: 1_073_741_824,
-            drive_type: DriveType::Usb,
-            partition_table: PartitionTable::Mbr,
-            partitions: vec![],
-            is_system_drive: false,
-            is_removable: true,
-            is_readonly: false,
-        };
+        let mut drive = test_drive("d0");
+        drive.size_bytes = 1_073_741_824;
         let s = drive.summary();
         assert!(s.contains("USB"));
         assert!(s.contains("MBR"));
@@ -5094,27 +5712,33 @@ mod tests {
     fn test_app_new() {
         let app = DiskImagerApp::new();
         assert_eq!(app.active_tab, MainTab::Write);
-        assert!(!app.drives.is_empty());
         assert_eq!(app.operation, Operation::Idle);
+        // No drives, because this machine's kernel publishes none. This
+        // assertion used to read `assert!(!app.drives.is_empty())` and passed
+        // against three drives the app had made up.
+        assert!(
+            app.drives.is_empty(),
+            "a fresh app must show only the drives the kernel reported"
+        );
     }
 
     #[test]
     fn test_app_select_drive_valid() {
-        let mut app = DiskImagerApp::new();
+        let mut app = app_with_drives(2);
         app.select_drive(0);
         assert_eq!(app.selected_drive_index, Some(0));
     }
 
     #[test]
     fn test_app_select_drive_invalid() {
-        let mut app = DiskImagerApp::new();
+        let mut app = app_with_drives(2);
         app.select_drive(999);
         assert_eq!(app.selected_drive_index, None);
     }
 
     #[test]
     fn test_app_selected_drive() {
-        let mut app = DiskImagerApp::new();
+        let mut app = app_with_drives(2);
         assert!(app.selected_drive().is_none());
         app.select_drive(1);
         assert!(app.selected_drive().is_some());
@@ -5131,7 +5755,7 @@ mod tests {
 
     #[test]
     fn test_app_start_write_no_image() {
-        let mut app = DiskImagerApp::new();
+        let mut app = app_with_drives(2);
         app.select_drive(1);
         assert!(app.start_write().is_err());
     }
@@ -5145,11 +5769,8 @@ mod tests {
 
     #[test]
     fn test_app_start_write_system_drive() {
-        let mut app = DiskImagerApp::new();
-        let mut info = ImageInfo::new("test.img");
-        info.file_size = 100;
-        app.loaded_image = Some(info);
-        app.select_drive(0); // system drive
+        let (mut app, _scratch) = app_ready_to_write();
+        app.drives[1].is_system_drive = true;
         let result = app.start_write();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("system drive"));
@@ -5157,31 +5778,44 @@ mod tests {
 
     #[test]
     fn test_app_start_write_image_too_large() {
-        let mut app = DiskImagerApp::new();
-        let mut info = ImageInfo::new("test.img");
-        info.file_size = u64::MAX;
-        app.loaded_image = Some(info);
-        app.select_drive(1); // USB drive
+        let (mut app, _scratch) = app_ready_to_write();
+        app.drives[1].size_bytes = 1;
         assert!(app.start_write().is_err());
     }
 
     #[test]
     fn test_app_start_write_success() {
-        let mut app = DiskImagerApp::new();
-        let mut info = ImageInfo::new("test.img");
-        info.file_size = 1024;
-        app.loaded_image = Some(info);
-        app.select_drive(1); // USB drive
+        let (mut app, _scratch) = app_ready_to_write();
         assert!(app.start_write().is_ok());
         assert_eq!(app.operation, Operation::WritingImage);
         assert!(app.locked_drive_id.is_some());
     }
 
+    /// A write with no device to open fails at the start, rather than
+    /// "succeeding" and filling a progress bar.
+    ///
+    /// This is what every machine does today: the drive list is empty because
+    /// `devfs` exposes no block devices, so there is no node to open. The test
+    /// exists so that the failure stays a *reported* one — the old code set
+    /// `operation` without opening anything, and the tick then ran the bar to
+    /// 100% and printed "Write complete".
+    #[test]
+    fn a_write_to_a_missing_device_fails_instead_of_pretending() {
+        let (mut app, _scratch) = app_ready_to_write();
+        app.drives[1].node = "/definitely/not/a/device".to_string();
+        let err = app
+            .start_write()
+            .expect_err("opened a node that is not there");
+        assert!(err.contains("/definitely/not/a/device"), "unhelpful: {err}");
+        assert_eq!(app.operation, Operation::Idle);
+        assert!(app.job.is_none(), "a failed start left I/O state behind");
+    }
+
     #[test]
     fn test_app_start_create() {
-        let mut app = DiskImagerApp::new();
-        app.select_drive(1);
-        assert!(app.start_create("/tmp/out.img").is_ok());
+        let (mut app, scratch) = app_ready_to_write();
+        let out = scratch.path("out.img").display().to_string();
+        assert!(app.start_create(&out).is_ok());
         assert_eq!(app.operation, Operation::CreatingImage);
     }
 
@@ -5193,10 +5827,7 @@ mod tests {
 
     #[test]
     fn test_app_start_hash() {
-        let mut app = DiskImagerApp::new();
-        let mut info = ImageInfo::new("test.img");
-        info.file_size = 1024;
-        app.loaded_image = Some(info);
+        let (mut app, _scratch) = app_ready_to_write();
         assert!(app.start_hash().is_ok());
         assert_eq!(app.operation, Operation::ComputingHash);
     }
@@ -5208,17 +5839,299 @@ mod tests {
     }
 
     #[test]
-    fn test_app_cancel_operation() {
+    fn a_hash_of_a_file_that_is_not_there_fails_at_the_start() {
         let mut app = DiskImagerApp::new();
-        let mut info = ImageInfo::new("test.img");
-        info.file_size = 1024;
-        app.loaded_image = Some(info);
-        app.select_drive(1);
+        app.loaded_image = Some(ImageInfo::new("/definitely/not/an/image.iso"));
+        let err = app
+            .start_hash()
+            .expect_err("opened a file that is not there");
+        assert!(err.contains("image.iso"), "unhelpful: {err}");
+        assert_eq!(app.operation, Operation::Idle);
+    }
+
+    #[test]
+    fn test_app_cancel_operation() {
+        let (mut app, _scratch) = app_ready_to_write();
         let _ = app.start_write();
         assert_eq!(app.operation, Operation::WritingImage);
         app.cancel_operation();
         assert_eq!(app.operation, Operation::Idle);
         assert!(app.locked_drive_id.is_none());
+        assert!(app.job.is_none(), "cancelling left the files open");
+    }
+
+    // ----------------------------------------------------------------
+    // Operations that do the I/O they claim to
+    // ----------------------------------------------------------------
+
+    /// Run the app's clock until nothing is in flight.
+    ///
+    /// Bounded, because a job that never reports `Done` is exactly the failure
+    /// worth catching, and a test that hangs reports it as a timeout half an
+    /// hour later with no name attached.
+    fn run_to_completion(app: &mut DiskImagerApp) {
+        for _ in 0..10_000 {
+            if !app.operation.is_active() {
+                return;
+            }
+            app.handle_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        panic!("{:?} never finished", app.operation);
+    }
+
+    /// The digest must be the file's, not the empty input's.
+    ///
+    /// `HashState` was already correct and already had known-answer tests
+    /// against the published vectors — and it was still wrong end to end,
+    /// because nothing ever fed it. `start_hash` built a hasher, the tick
+    /// advanced a byte counter beside it, and `complete_operation` finalised an
+    /// untouched hasher: every image of every size, under every algorithm,
+    /// produced the digest of zero bytes. Comparing an image against the
+    /// checksum its publisher printed therefore always said "mismatch".
+    ///
+    /// No test of the *hasher* can see that; the gap is between the hasher and
+    /// the file. Only a test that hashes a known file through the application
+    /// and compares against a published answer closes it.
+    #[test]
+    fn the_hash_is_of_the_file_and_not_of_nothing() {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_hash");
+        let path = scratch.path("abc.img");
+        fs::write(&path, b"abc").expect("scratch dir is writable");
+        let path = path.display().to_string();
+
+        // RFC 1321 A.5 and FIPS 180-4, for the input "abc".
+        for (algorithm, expected) in [
+            (HashAlgorithm::Md5, "900150983cd24fb0d6963f7d28e17f72"),
+            (
+                HashAlgorithm::Sha1,
+                "a9993e364706816aba3e25717850c26c9cd0d89d",
+            ),
+            (
+                HashAlgorithm::Sha256,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+        ] {
+            let mut app = DiskImagerApp::new();
+            app.hash_algorithm = algorithm;
+            app.load_image(&path, b"abc");
+            app.start_hash().expect("the image is on disk");
+            run_to_completion(&mut app);
+            assert_eq!(
+                app.computed_hash.as_deref(),
+                Some(expected),
+                "{} of a 3-byte file",
+                algorithm.name()
+            );
+        }
+    }
+
+    /// The bar must count bytes that were read, not a fraction of the total.
+    #[test]
+    fn hash_progress_counts_bytes_that_were_actually_read() {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_hashprog");
+        let path = scratch.path("abc.img");
+        fs::write(&path, b"abc").expect("scratch dir is writable");
+        let mut app = DiskImagerApp::new();
+        app.load_image(&path.display().to_string(), b"abc");
+        app.start_hash().expect("the image is on disk");
+
+        app.handle_event(&Event::Tick { elapsed_ms: 16 });
+        assert_eq!(
+            app.progress.bytes_done, 3,
+            "one tick read the whole 3-byte file, and nothing more"
+        );
+    }
+
+    /// An expected checksum that matches must be recognised as matching.
+    #[test]
+    fn a_matching_expected_checksum_verifies() {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_expect");
+        let path = scratch.path("abc.img");
+        fs::write(&path, b"abc").expect("scratch dir is writable");
+        let mut app = DiskImagerApp::new();
+        app.load_image(&path.display().to_string(), b"abc");
+        // Publishers print checksums in both cases and often with trailing
+        // whitespace from a copy-paste, and none of that is a mismatch.
+        app.expected_hash =
+            "  BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD ".to_string();
+        app.start_hash().expect("the image is on disk");
+        run_to_completion(&mut app);
+        assert_eq!(app.verification_result, VerificationResult::Match);
+    }
+
+    /// The write must put the image's bytes on the device.
+    #[test]
+    fn a_write_puts_the_image_bytes_on_the_device() {
+        let (mut app, scratch) = app_ready_to_write();
+        app.write_options.verify_after_write = false;
+        app.start_write().expect("image and device both exist");
+        run_to_completion(&mut app);
+
+        assert!(!app.status_is_error, "{}", app.status_message);
+        assert_eq!(app.status_message, "Write complete");
+        let landed = fs::read(scratch.path("usb.raw")).expect("the device is readable");
+        assert_eq!(
+            landed,
+            vec![0xA5u8; 1024],
+            "the write reported success without moving the bytes"
+        );
+    }
+
+    /// Verify-after-write must actually read the device back.
+    #[test]
+    fn verify_after_write_reads_the_device_back() {
+        let (mut app, _scratch) = app_ready_to_write();
+        app.write_options.verify_after_write = true;
+        app.start_write().expect("image and device both exist");
+        run_to_completion(&mut app);
+        assert!(!app.status_is_error, "{}", app.status_message);
+        assert_eq!(app.status_message, "Write verified successfully");
+    }
+
+    /// A device that does not match the image must fail verification, and say
+    /// where.
+    #[test]
+    fn verification_reports_where_the_device_differs() {
+        let (mut app, scratch) = app_ready_to_write();
+        let mut corrupt = vec![0xA5u8; 1024];
+        corrupt[700] = 0x00;
+        fs::write(scratch.path("usb.raw"), &corrupt).expect("scratch dir is writable");
+
+        app.start_verify_write().expect("both files exist");
+        run_to_completion(&mut app);
+        assert!(app.status_is_error, "a corrupt device verified clean");
+        assert!(
+            app.status_message.contains("byte 700"),
+            "the offset must be named: {}",
+            app.status_message
+        );
+    }
+
+    /// A device shorter than the image is a mismatch, not a success.
+    #[test]
+    fn a_truncated_device_fails_verification() {
+        let (mut app, scratch) = app_ready_to_write();
+        fs::write(scratch.path("usb.raw"), vec![0xA5u8; 512]).expect("scratch dir is writable");
+        app.start_verify_write().expect("both files exist");
+        run_to_completion(&mut app);
+        assert!(app.status_is_error, "a half-written device verified clean");
+        assert!(
+            app.status_message.contains("byte 512"),
+            "the offset must be named: {}",
+            app.status_message
+        );
+    }
+
+    /// Creating an image must copy the device's bytes into the output file.
+    #[test]
+    fn creating_an_image_copies_the_device_into_a_file() {
+        let (mut app, scratch) = app_ready_to_write();
+        fs::write(scratch.path("usb.raw"), vec![0x5Au8; 256]).expect("scratch dir is writable");
+        let out = scratch.path("captured.img");
+        app.start_create(&out.display().to_string())
+            .expect("device and output are both openable");
+        run_to_completion(&mut app);
+        assert!(!app.status_is_error, "{}", app.status_message);
+        assert_eq!(
+            fs::read(&out).expect("the output is readable"),
+            vec![0x5Au8; 256]
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Drive enumeration
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn no_block_node_means_no_drives_rather_than_invented_ones() {
+        // `/sys/hardware/block` does not exist on the machine running this, nor
+        // on any SlateOS build today. The answer must be "none", and it must
+        // not be an error.
+        let drives = DiskImagerApp::detect_drives().expect("a missing node is not a failure");
+        assert!(drives.is_empty());
+    }
+
+    #[test]
+    fn block_records_become_drives() {
+        let drives = parse_block_records(
+            "\
+# the kernel's block device table
+node=/dev/nvme0n1
+id=disk0
+name=System NVMe
+model=Example 1TB
+serial=ABC123
+capacity_bytes=1000204886016
+type=nvme
+partition_table=gpt
+system=1
+part0_label=EFI System
+part0_fs=FAT32
+part0_offset_bytes=1048576
+part0_capacity_bytes=268435456
+part0_boot=1
+
+node=/dev/sda
+capacity_bytes=31457280000
+type=usb
+partition_table=mbr
+removable=true
+",
+        );
+        assert_eq!(drives.len(), 2);
+
+        let nvme = &drives[0];
+        assert_eq!(nvme.id, "disk0");
+        assert_eq!(nvme.node, "/dev/nvme0n1");
+        assert_eq!(nvme.name, "System NVMe");
+        assert_eq!(nvme.size_bytes, 1_000_204_886_016);
+        assert_eq!(nvme.drive_type, DriveType::Ssd);
+        assert_eq!(nvme.partition_table, PartitionTable::Gpt);
+        assert!(nvme.is_system_drive);
+        assert!(nvme.write_blocked(), "the system disk must refuse a write");
+        assert_eq!(nvme.partitions.len(), 1);
+        assert_eq!(nvme.partitions[0].label, "EFI System");
+        assert_eq!(nvme.partitions[0].offset_bytes, 1_048_576);
+        assert!(nvme.partitions[0].is_boot);
+
+        // A record with no `id` and no `name` falls back to the node's last
+        // component, so the row is never blank.
+        let usb = &drives[1];
+        assert_eq!(usb.id, "sda");
+        assert_eq!(usb.name, "sda");
+        assert_eq!(usb.drive_type, DriveType::Usb);
+        assert!(usb.is_removable);
+        assert!(!usb.write_blocked());
+    }
+
+    #[test]
+    fn a_record_with_no_node_is_dropped() {
+        // A drive with no path is a drive nothing can open. Listing it only
+        // invites a click that fails for a reason the row does not explain.
+        let drives = parse_block_records("id=ghost\nname=Nowhere\ncapacity_bytes=100\n");
+        assert!(drives.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_partition_table_is_not_the_same_as_no_partition_table() {
+        // "the kernel looked and found no table" and "nobody has said" must not
+        // fold together: one of the two disks is safe to overwrite unasked.
+        let none = parse_block_records("node=/dev/a\npartition_table=none\n");
+        let unread = parse_block_records("node=/dev/b\n");
+        assert_eq!(none[0].partition_table, PartitionTable::None);
+        assert_eq!(unread[0].partition_table, PartitionTable::Unknown);
+    }
+
+    #[test]
+    fn an_empty_drive_list_says_why_it_is_empty() {
+        // A blank column under the word "Drives" reads as "still looking".
+        let mut app = DiskImagerApp::new();
+        assert!(app.drives.is_empty());
+        let drawn = drawn_text(&mut app).join(" ");
+        assert!(
+            drawn.contains("No drives detected"),
+            "the sidebar must explain itself; it drew: {drawn}"
+        );
     }
 
     #[test]
@@ -5323,7 +6236,7 @@ mod tests {
 
     #[test]
     fn test_handle_key_down_drive_select() {
-        let mut app = DiskImagerApp::new();
+        let mut app = app_with_drives(2);
         let ev = Event::Key(KeyEvent {
             key: Key::Down,
             pressed: true,
@@ -5354,7 +6267,7 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
-        let app = DiskImagerApp::new();
+        let mut app = DiskImagerApp::new();
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());
@@ -5409,60 +6322,345 @@ mod tests {
         assert!(!rt.is_empty());
     }
 
+    /// An app on the Write tab with an image loaded and the USB drive picked,
+    /// which is the only state from which a write can be confirmed.
+    ///
+    /// The image and the drive's device node are both real files in a scratch
+    /// directory, because `start_write` opens the node and streams bytes into
+    /// it. An ordinary file is not a stand-in for the missing hardware — it is
+    /// the same code path, byte for byte — and it is the only way to exercise
+    /// the transfer at all while `devfs` publishes no block devices.
+    ///
+    /// The `ScratchDir` comes back with the app and must be kept alive by the
+    /// caller: it deletes the directory when it drops, and the app holds paths
+    /// into it.
+    fn app_ready_to_write() -> (DiskImagerApp, scratchdir::ScratchDir) {
+        let scratch = scratchdir::ScratchDir::new("slate_diskimager_write");
+        let image = vec![0xA5u8; 1024];
+        let image_path = scratch.path("slateos.iso");
+        fs::write(&image_path, &image).expect("scratch dir is writable");
+        let device_path = scratch.path("usb.raw");
+        fs::write(&device_path, b"").expect("scratch dir is writable");
+
+        let mut usb = test_drive("disk1");
+        usb.name = "USB Flash Drive".to_string();
+        usb.node = device_path.display().to_string();
+
+        let mut app = DiskImagerApp::new();
+        app.drives = vec![test_drive("disk0"), usb];
+        app.active_tab = MainTab::Write;
+        app.load_image(&image_path.display().to_string(), &image);
+        app.select_drive(1);
+        (app, scratch)
+    }
+
+    /// A left click at (`x`, `y`).
+    fn click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// Every line of text the app draws, from the back.
+    ///
+    /// From the back because the confirmation is drawn last, over everything
+    /// else, and the window behind it has prose of its own.
+    fn drawn_text(app: &mut DiskImagerApp) -> Vec<String> {
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        rt.commands
+            .iter()
+            .rev()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn test_render_with_confirm_dialog() {
-        let mut app = DiskImagerApp::new();
-        app.confirm_dialog
-            .show_write_confirm("test.img", "USB Drive", 32_000_000_000);
+        let (mut app, _scratch) = app_ready_to_write();
+        assert!(app.confirm_write(), "nothing asked for confirmation");
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());
     }
 
-    /// Every `Text` command drawn by the confirm dialog, joined in order.
-    fn confirm_dialog_text(drive_name: &str) -> (Vec<(f32, String)>, f32, f32) {
-        let mut app = DiskImagerApp::new();
-        app.confirm_dialog
-            .show_write_confirm("test.img", drive_name, 32_000_000_000);
-        let mut rt = RenderTree::new();
-        // Just the dialog, not the whole app: rendering the app also draws the
-        // window chrome, and "Disk Imager" in the title bar is not prose that
-        // belongs to this dialog.
-        app.render_confirm_dialog(&mut rt);
-        let rows: Vec<(f32, String)> = rt
-            .commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
-                _ => None,
-            })
-            .collect();
-        // The dialog is the red-stroked rect; there is exactly one.
-        let (dialog_y, dialog_h) = rt
-            .commands
-            .iter()
-            .find_map(|c| match c {
-                RenderCommand::StrokeRect {
-                    y, height, color, ..
-                } if *color == colors::RED => Some((*y, *height)),
-                _ => None,
-            })
-            .expect("the confirm dialog draws a red border");
-        (rows, dialog_y, dialog_h)
+    #[test]
+    fn the_write_button_opens_the_confirmation() {
+        // The button was drawn from the day the tab was written and no handler
+        // anywhere listened for a click on it, which left the program's one
+        // destructive action unreachable and its confirmation dialog dead.
+        let (mut app, _scratch) = app_ready_to_write();
+        let lay = app.write_tab_layout();
+        app.handle_event(&click(lay.button_x + 4.0, lay.button_y + 4.0));
+        assert!(
+            app.confirm_dialog.is_some(),
+            "clicking Write Image did not ask for confirmation"
+        );
     }
 
     #[test]
-    fn the_destructive_warning_is_shown_in_full() {
-        // `max_width` clips rather than wraps, so this warning used to be cut
-        // mid-sentence -- and the half that got dropped was the half saying
-        // the write cannot be undone.
-        let (rows, _, _) = confirm_dialog_text("USB Drive");
-        let drawn: String = rows
-            .iter()
-            .map(|(_, t)| t.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        for phrase in ["permanently destroyed", "cannot be undone", "USB Drive"] {
+    fn the_write_button_is_drawn_where_the_click_is_tested() {
+        // Two copies of a rectangle agree only until one of them is edited.
+        let (mut app, _scratch) = app_ready_to_write();
+        let lay = app.write_tab_layout();
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        let found = rt.commands.iter().any(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                (*x - lay.button_x).abs() < 0.01
+                    && (*y - lay.button_y).abs() < 0.01
+                    && (*width - lay.button_w).abs() < 0.01
+                    && (*height - BUTTON_HEIGHT).abs() < 0.01
+            }
+            _ => false,
+        });
+        assert!(
+            found,
+            "no button was drawn at the rect the hit test uses: \
+             ({}, {}) {}x{BUTTON_HEIGHT}",
+            lay.button_x, lay.button_y, lay.button_w
+        );
+    }
+
+    #[test]
+    fn the_refresh_button_is_drawn_where_the_click_is_tested() {
+        // The Write button's twin: drawn every frame, hit-tested by nothing,
+        // so a drive that appeared after launch could only be picked up by
+        // restarting. Same rectangle, one source, pinned here.
+        let mut app = DiskImagerApp::new();
+        let lay = app.toolbar_layout();
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        let found = rt.commands.iter().any(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                (*x - lay.refresh_x).abs() < 0.01
+                    && (*y - lay.refresh_y).abs() < 0.01
+                    && (*width - lay.refresh_w).abs() < 0.01
+                    && (*height - BUTTON_HEIGHT).abs() < 0.01
+            }
+            _ => false,
+        });
+        assert!(
+            found,
+            "no button was drawn at the rect the hit test uses: \
+             ({}, {}) {}x{BUTTON_HEIGHT}",
+            lay.refresh_x, lay.refresh_y, lay.refresh_w
+        );
+    }
+
+    #[test]
+    fn clicking_refresh_re_reads_the_drive_list() {
+        // The click has to reach `refresh_drives`, not merely be swallowed by
+        // the toolbar. On a host with no `/sys/hardware/block` the honest
+        // answer is an empty list, and saying so is the observable effect.
+        let mut app = app_with_drives(3);
+        let lay = app.toolbar_layout();
+        let hit = click(lay.refresh_x + 4.0, lay.refresh_y + 4.0);
+        assert_eq!(app.handle_event(&hit), EventResult::Consumed);
+        assert!(
+            app.drives.is_empty(),
+            "the click did not re-run enumeration: {:?}",
+            app.drives.iter().map(|d| &d.id).collect::<Vec<_>>()
+        );
+        assert_eq!(app.status_message, "No drives detected");
+    }
+
+    #[test]
+    fn a_click_elsewhere_on_the_toolbar_does_not_refresh() {
+        let mut app = app_with_drives(3);
+        let hit = click(PANEL_PADDING + 4.0, TOOLBAR_HEIGHT / 2.0);
+        assert_eq!(app.handle_event(&hit), EventResult::Consumed);
+        assert_eq!(app.drives.len(), 3, "the title bar refreshed the list");
+    }
+
+    #[test]
+    fn a_refresh_follows_the_selection_by_id_not_by_index() {
+        // The selection is an index, and this program's next click erases the
+        // selected disk. Re-pointing that index at whatever landed in the slot
+        // is the worst available way to be wrong, so the drive is re-found by
+        // id -- and dropped outright when it is gone.
+        let mut app = app_with_drives(3);
+        app.select_drive(2);
+        let kept = app.drives[2].id.clone();
+
+        // Stand in for enumeration: the first drive was unplugged.
+        let previous = app.selected_drive().map(|d| d.id.clone());
+        app.drives.remove(0);
+        app.selected_drive_index =
+            previous.and_then(|id| app.drives.iter().position(|d| d.id == id));
+
+        assert_eq!(app.selected_drive_index, Some(1));
+        assert_eq!(app.selected_drive().map(|d| d.id.as_str()), Some(&*kept));
+    }
+
+    #[test]
+    fn a_refresh_is_refused_while_an_operation_is_running() {
+        // `locked_drive_id` names the drive being written and the streaming
+        // job holds it open; re-indexing under that would leave the status bar
+        // describing one drive while the bytes went to another.
+        let (mut app, _scratch) = app_ready_to_write();
+        app.start_write()
+            .expect("the scratch image and device exist");
+        let before: Vec<String> = app.drives.iter().map(|d| d.id.clone()).collect();
+
+        app.refresh_drives();
+
+        let after: Vec<String> = app.drives.iter().map(|d| d.id.clone()).collect();
+        assert_eq!(before, after, "the drive list moved under a live write");
+        assert!(app.status_is_error);
+        assert_eq!(
+            app.status_message,
+            "Cannot refresh while an operation is running"
+        );
+    }
+
+    #[test]
+    fn the_clock_runs_only_while_something_is_moving() {
+        // The pump moves one chunk per tick, so an app that asked for no clock
+        // would open both files, report the operation as running, and never
+        // move a byte -- lesson 47's shape, in a program that has already had
+        // its own version of it.
+        use oswindow::app::App as _;
+        let (mut app, _scratch) = app_ready_to_write();
+        assert!(app.tick_interval().is_none(), "asked for a clock at rest");
+
+        app.start_write()
+            .expect("the scratch image and device exist");
+        assert!(
+            app.tick_interval().is_some(),
+            "a running write got no clock, so it would never move a byte"
+        );
+
+        run_to_completion(&mut app);
+        assert!(app.job.is_none());
+        assert!(
+            app.tick_interval().is_none(),
+            "kept the desktop awake after the write finished"
+        );
+    }
+
+    #[test]
+    fn the_confirmation_keeps_the_clock_only_while_it_fades() {
+        // `is_animating`, not `is_active`. A confirmation sitting fully faded
+        // in, waiting for a human to click Write, is the state that waits
+        // longest -- and the compositor cannot park while any window has a
+        // deadline armed.
+        use oswindow::app::App as _;
+        let (mut app, _scratch) = app_ready_to_write();
+        app.active_tab = MainTab::Write;
+        assert!(app.confirm_write(), "nothing to confirm");
+        assert!(
+            app.tick_interval().is_some(),
+            "a dialog that has not finished appearing needs a clock"
+        );
+
+        for _ in 0..100 {
+            app.handle_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        assert!(
+            app.confirm_dialog
+                .as_ref()
+                .is_some_and(AlertDialog::is_active),
+            "the dialog put itself away"
+        );
+        assert!(
+            app.tick_interval().is_none(),
+            "held the clock through a dialog that had stopped moving"
+        );
+    }
+
+    #[test]
+    fn a_tick_that_moved_nothing_does_not_cost_a_frame() {
+        // A tick is 60 a second. Returning `Redraw` unconditionally is the easy
+        // mistake and costs a full frame every time the clock happens to be on
+        // for some other reason.
+        use oswindow::app::App as _;
+        let (mut app, _scratch) = app_ready_to_write();
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Idle,
+            "an idle tick asked for a frame"
+        );
+
+        app.start_write()
+            .expect("the scratch image and device exist");
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Redraw,
+            "a chunk moved and the progress bar was not redrawn"
+        );
+    }
+
+    #[test]
+    fn the_window_is_drawn_at_the_size_the_compositor_reported() {
+        // A frame drawn at the old geometry is a visibly stretched or clipped
+        // window for one refresh, so `render` takes the size it is handed
+        // rather than the one `initial_size` asked for.
+        use oswindow::app::App;
+        let mut app = DiskImagerApp::new();
+        let rt = App::render(&mut app, 1440.0, 900.0);
+        assert!((app.window_width - 1440.0).abs() < 0.01);
+        assert!((app.window_height - 900.0).abs() < 0.01);
+        assert!(!rt.commands.is_empty(), "the resized frame drew nothing");
+        // The toolbar's button follows the width it was given, which is the
+        // observable half of the same fact.
+        assert!(
+            (app.toolbar_layout().refresh_x - (1440.0 - 128.0 - 12.0)).abs() < 0.01,
+            "the toolbar was laid out at the old width"
+        );
+    }
+
+    #[test]
+    fn there_is_nothing_to_confirm_without_an_image_and_a_drive() {
+        // The same test that draws the button disabled, so the two cannot
+        // disagree about whether the click does anything.
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Write;
+        assert!(!app.confirm_write(), "confirmed a write of nothing");
+
+        let mut with_image = DiskImagerApp::new();
+        with_image.active_tab = MainTab::Write;
+        with_image.loaded_image = Some(ImageInfo::new("/images/slateos.iso"));
+        assert!(
+            !with_image.confirm_write(),
+            "confirmed a write with no target drive"
+        );
+    }
+
+    #[test]
+    fn the_confirmation_names_the_image_the_drive_and_the_consequence() {
+        // The warning used to be one `Text` command with a `max_width`, and
+        // `max_width` clips rather than wraps -- so it was cut mid-sentence,
+        // and the half that got dropped was the half saying the write cannot
+        // be undone.
+        let (mut app, _scratch) = app_ready_to_write();
+        assert!(app.confirm_write());
+        let drawn = drawn_text(&mut app).join(" ");
+        for phrase in [
+            "slateos.iso",
+            "USB Flash Drive",
+            "permanently destroyed",
+            "cannot be undone",
+            "Write",
+            "Cancel",
+        ] {
             assert!(
                 drawn.contains(phrase),
                 "the confirmation must show {phrase:?}; it drew: {drawn}"
@@ -5471,35 +6669,55 @@ mod tests {
     }
 
     #[test]
-    fn the_warning_never_runs_through_the_button_row() {
-        // A dialog that grows its prose but not itself puts text on top of the
-        // controls that dismiss it -- here, on top of the destructive button.
-        let (rows, dialog_y, dialog_h) = confirm_dialog_text(&"Very Long Drive Name ".repeat(8));
-        let button_top = dialog_y + dialog_h - 50.0;
-        let prose: Vec<&(f32, String)> = rows
-            .iter()
-            .filter(|(_, t)| t != "Cancel" && t != "Write")
-            .collect();
-        assert!(!prose.is_empty(), "the dialog drew no prose at all");
-        for (y, t) in prose {
-            assert!(
-                *y < button_top,
-                "prose line {t:?} at y={y} reaches the button row at {button_top}"
-            );
-            assert!(
-                *y >= dialog_y,
-                "prose line {t:?} at y={y} is above the dialog at {dialog_y}"
-            );
-        }
+    fn enter_on_the_write_confirmation_cancels_rather_than_writing() {
+        // Enter is what gets hit reflexively when a dialog appears unexpectedly.
+        // It must not thereby erase a drive.
+        let (mut app, _scratch) = app_ready_to_write();
+        assert!(app.confirm_write());
+        app.handle_event(&plain(Key::Enter));
+        assert!(app.confirm_dialog.is_none(), "the confirmation stayed up");
+        assert!(
+            !app.operation.is_active(),
+            "Enter started the write it was meant to decline"
+        );
     }
 
     #[test]
-    fn a_short_confirmation_keeps_the_original_dialog_size() {
-        // Wrapping must not resize the dialog for the common case.
-        let (_, _, dialog_h) = confirm_dialog_text("USB");
+    fn escape_declines_the_write() {
+        let (mut app, _scratch) = app_ready_to_write();
+        assert!(app.confirm_write());
+        app.handle_event(&plain(Key::Escape));
+        assert!(app.confirm_dialog.is_none(), "Escape left the dialog up");
+        assert!(!app.operation.is_active(), "Escape started the write");
+    }
+
+    #[test]
+    fn clicking_the_verb_starts_the_write() {
+        let (mut app, _scratch) = app_ready_to_write();
+        assert!(app.confirm_write());
+        // Rendering is what tells the dialog where it is, and therefore what a
+        // click means -- so it has to happen before the click, exactly as it
+        // does on screen.
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        // The button is found by what it *means*, not by its position in the
+        // row: an ordering the test hardcodes is an ordering the test stops
+        // checking, and clicking the wrong one here would erase a drive.
+        let dialog = app.confirm_dialog.as_ref().expect("confirmation is up");
+        let verb = dialog
+            .buttons()
+            .iter()
+            .position(|b| *b.result() == DialogResult::Ok)
+            .expect("a destructive confirmation needs a button that means yes");
+        let (bx, by) = dialog
+            .button_rect(verb)
+            .map(|(x, y, w, h)| (x + w / 2.0, y + h / 2.0))
+            .expect("the confirmation drew its buttons");
+        app.handle_event(&click(bx, by));
+        assert!(app.confirm_dialog.is_none(), "the confirmation stayed up");
         assert!(
-            (dialog_h - 200.0).abs() < 0.01,
-            "a short confirmation should still be 200 px tall, got {dialog_h}"
+            app.operation.is_active(),
+            "confirming the write did not start it"
         );
     }
 
@@ -5526,27 +6744,6 @@ mod tests {
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());
-    }
-
-    // ----------------------------------------------------------------
-    // ConfirmDialog
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_confirm_dialog_show() {
-        let mut d = ConfirmDialog::new();
-        d.show_write_confirm("img", "drive", 100);
-        assert!(d.visible);
-        assert!(!d.confirmed);
-        assert!(!d.title.is_empty());
-    }
-
-    #[test]
-    fn test_confirm_dialog_dismiss() {
-        let mut d = ConfirmDialog::new();
-        d.show_write_confirm("img", "drive", 100);
-        d.dismiss();
-        assert!(!d.visible);
     }
 
     // ----------------------------------------------------------------
@@ -5653,15 +6850,6 @@ mod tests {
         })
     }
 
-    /// A left click at a point in window coordinates.
-    fn click_at(x: f32, y: f32) -> Event {
-        Event::Mouse(MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        })
-    }
-
     fn rows_per_notch() -> usize {
         wheel::ROWS_PER_NOTCH as usize
     }
@@ -5669,10 +6857,8 @@ mod tests {
     /// An app whose drive list is longer than the sidebar can show.
     fn app_with_many_drives() -> DiskImagerApp {
         let mut app = DiskImagerApp::new();
-        let template = app.drives[0].clone();
-        for n in 0..12 {
-            let mut drive = template.clone();
-            drive.id = format!("extra{n}");
+        for n in 0..15 {
+            let mut drive = test_drive(&format!("extra{n}"));
             drive.name = format!("Extra Drive {n}");
             app.drives.push(drive);
         }
@@ -5858,7 +7044,7 @@ mod tests {
     fn clicking_a_drive_selects_the_one_that_was_drawn_there() {
         let mut app = app_with_many_drives();
         for slot in 0..3 {
-            app.handle_event(&click_at(40.0, drive_row_y(&app, slot)));
+            app.handle_event(&click(40.0, drive_row_y(&app, slot)));
             assert_eq!(
                 app.selected_drive_index,
                 Some(slot),
@@ -5873,7 +7059,7 @@ mod tests {
         app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -1.0));
         let scrolled = app.sidebar_scroll;
         assert!(scrolled > 0);
-        app.handle_event(&click_at(40.0, drive_row_y(&app, 0)));
+        app.handle_event(&click(40.0, drive_row_y(&app, 0)));
         assert_eq!(
             app.selected_drive_index,
             Some(scrolled),
@@ -5885,10 +7071,7 @@ mod tests {
     fn clicking_above_the_drive_list_selects_nothing() {
         let mut app = app_with_many_drives();
         let above = app.content_top() + DRIVE_LIST_HEADER - 4.0;
-        assert_eq!(
-            app.handle_event(&click_at(40.0, above)),
-            EventResult::Ignored,
-        );
+        assert_eq!(app.handle_event(&click(40.0, above)), EventResult::Ignored,);
         assert_eq!(app.selected_drive_index, None);
     }
 
@@ -5902,8 +7085,8 @@ mod tests {
         app.handle_event(&wheel_at(SIDEBAR_WIDTH / 2.0, -1.0));
         app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -1.0));
         for y in [1.0e9_f32, 1.0e30, f32::MAX, f32::INFINITY] {
-            app.handle_event(&click_at(40.0, y));
-            app.handle_event(&click_at(SIDEBAR_WIDTH + 100.0, y));
+            app.handle_event(&click(40.0, y));
+            app.handle_event(&click(SIDEBAR_WIDTH + 100.0, y));
         }
         // Selection is unchanged from what the earlier scrolls left, which is
         // nothing; the point is that none of the above panicked.
@@ -5916,7 +7099,7 @@ mod tests {
         let mut app = app_with_long_iso();
         // Well right of the arrow column, so this is a selection and not a
         // fold.
-        app.handle_event(&click_at(SIDEBAR_WIDTH + 200.0, iso_row_y(&app, 4)));
+        app.handle_event(&click(SIDEBAR_WIDTH + 200.0, iso_row_y(&app, 4)));
         assert_eq!(app.selected_iso_entry, Some(4));
     }
 
@@ -5926,7 +7109,7 @@ mod tests {
         app.handle_event(&wheel_at(SIDEBAR_WIDTH + 100.0, -2.0));
         let scrolled = app.iso_scroll;
         assert!(scrolled > 0);
-        app.handle_event(&click_at(SIDEBAR_WIDTH + 200.0, iso_row_y(&app, 2)));
+        app.handle_event(&click(SIDEBAR_WIDTH + 200.0, iso_row_y(&app, 2)));
         assert_eq!(app.selected_iso_entry, Some(scrolled + 2));
     }
 
@@ -5952,14 +7135,14 @@ mod tests {
 
         // Row 1 is the directory; its arrow sits at the row's own indent.
         let arrow_x = SIDEBAR_WIDTH + PANEL_PADDING + DiskImagerApp::iso_indent(1) + 2.0;
-        app.handle_event(&click_at(arrow_x, iso_row_y(&app, 1)));
+        app.handle_event(&click(arrow_x, iso_row_y(&app, 1)));
         assert_eq!(app.iso_entries().len(), 5, "the directory's files appeared");
         assert_eq!(
             app.selected_iso_entry, None,
             "the arrow folds; it does not select",
         );
 
-        app.handle_event(&click_at(arrow_x, iso_row_y(&app, 1)));
+        app.handle_event(&click(arrow_x, iso_row_y(&app, 1)));
         assert_eq!(app.iso_entries().len(), 2, "and disappeared again");
     }
 
@@ -6000,7 +7183,7 @@ mod tests {
         assert_eq!(app.iso_entries()[app.iso_scroll].name, "BIG");
 
         let arrow_x = SIDEBAR_WIDTH + PANEL_PADDING + DiskImagerApp::iso_indent(1) + 2.0;
-        app.handle_event(&click_at(arrow_x, iso_row_y(&app, 0)));
+        app.handle_event(&click(arrow_x, iso_row_y(&app, 0)));
         assert_eq!(app.iso_entries().len(), 22, "the directory folded shut");
         assert_eq!(
             app.max_iso_scroll(),
@@ -6072,7 +7255,7 @@ mod tests {
         // clicked from `iso_list_offset`/`iso_list_height`. If those two ever
         // describe different rectangles, clicks land on the wrong row and
         // nothing says so. This compares them directly.
-        let app = app_with_long_iso();
+        let mut app = app_with_long_iso();
         let mut rt = RenderTree::new();
         app.render(&mut rt);
 
@@ -6093,7 +7276,7 @@ mod tests {
 
     #[test]
     fn the_drive_lists_clip_matches_what_the_hit_test_uses() {
-        let app = app_with_many_drives();
+        let mut app = app_with_many_drives();
         let mut rt = RenderTree::new();
         app.render(&mut rt);
 

@@ -5,6 +5,10 @@ edition = "2024"
 description = "SlateOS Disk Cleanup — find and remove temporary files, caches, and other reclaimable space"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window and the event loop. The app names `oswindow`, never `guiremote` --
+# an application should no more name the display protocol than a Unix program
+# names the socket layer.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

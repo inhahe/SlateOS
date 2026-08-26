@@ -1313,14 +1313,37 @@ fn fixture(name: &str) -> String {
     )
 }
 
-/// A file with contents of our choosing, for the cases no valid fixture covers.
+/// The directory this process's scratch files live in, created once.
 ///
-/// Named per test rather than randomly: a leftover from a crashed run is
-/// overwritten by the next run, whereas a name that cannot collide leaves one
-/// file per run in the temp directory forever.
+/// Per *process*, not per test, and that is the whole point. The temp
+/// directory is shared by every `cargo test` running against every worktree on
+/// the machine, so a fixed name is a name two processes will write at the same
+/// moment. On Windows that does not race quietly: the second writer gets
+/// "Access is denied. (os error 5)" and the test fails outright. That is an
+/// observed failure, not a hypothesis — `userspace/firejail`'s
+/// `test_remove_sandbox_file` (fixed path `%TEMP%/firejail_test_rm`) failed
+/// exactly that way on 2026-08-26 when two workspace runs overlapped, and it
+/// passes on its own every time.
+///
+/// The name that was here before was per *test*, on the reasoning that a
+/// leftover from a crashed run would be overwritten by the next one rather
+/// than accumulating. That trades a guaranteed small leak for an intermittent
+/// failure, which is the wrong way round: a stray file costs bytes, a flaky
+/// test costs a fourteen-minute workspace run and the credibility of the next
+/// real failure. The PID keeps the leak to one directory per crashed run.
+fn scratch_dir() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<std::path::PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("slateos-wallpaper-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the temp directory is not writable");
+        dir
+    })
+}
+
+/// A file with contents of our choosing, for the cases no valid fixture covers.
 fn scratch(name: &str, bytes: &[u8]) -> String {
-    let mut path = std::env::temp_dir();
-    path.push(format!("slateos-wallpaper-{name}"));
+    let path = scratch_dir().join(name);
     std::fs::write(&path, bytes).expect("the temp directory is not writable");
     path.to_string_lossy().into_owned()
 }
@@ -1498,12 +1521,14 @@ fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
     // The failure a user actually hits: a config carried over from another
     // machine, naming a path that does not exist here. The taskbar still has to
     // draw.
-    let missing = format!(
-        "{}/slateos-wallpaper-nowhere-at-all.png",
-        std::env::temp_dir().display()
-    );
+    let missing = scratch_dir()
+        .join("nowhere-at-all.png")
+        .to_string_lossy()
+        .into_owned();
     // Not merely assumed absent: a leftover from an earlier run under this name
-    // would make the test pass for the wrong reason.
+    // would make the test pass for the wrong reason. The scratch directory is
+    // this process's own, so removing a file in it cannot disturb a concurrent
+    // run of the same test in another process.
     let _ = std::fs::remove_file(&missing);
     let (mut session, desktop) = session();
     session

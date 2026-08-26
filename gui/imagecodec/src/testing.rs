@@ -157,6 +157,14 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 /// The zlib stream checksum (RFC 1950 §9).
+///
+/// Not `deflate::adler32`, and deliberately not, for the same reason `crc32`
+/// above is computed bit by bit: this module builds the fixtures that the
+/// decoder is tested against, and the decoder checks this exact field. A
+/// fixture generator that computes a checksum with the very function the code
+/// under test verifies it with cannot detect a wrong checksum — both sides
+/// would be wrong in step and every test would still pass. The duplication is
+/// the test.
 fn adler32(data: &[u8]) -> u32 {
     let (mut a, mut b) = (1u32, 0u32);
     for &byte in data {

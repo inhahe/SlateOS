@@ -34,7 +34,8 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::inflate::zlib_decompress;
+use deflate::zlib_inflate_limited;
+
 use crate::{Image, ImageError, ImageResult, Limits};
 
 /// The eight bytes every PNG begins with (RFC 2083 §3.1).
@@ -304,7 +305,7 @@ pub fn decode(bytes: &[u8], limits: Limits) -> ImageResult<Image> {
             pixels,
             limit: limits.max_pixels,
         })?;
-    let raw = zlib_decompress(&idat, limit)?;
+    let raw = zlib_inflate_limited(&idat, limit)?;
     if raw.len() != limit {
         // Short is a truncated file; the decompressor already refuses long.
         return Err(ImageError::Truncated);
@@ -575,7 +576,8 @@ fn sample(row: &[u8], depth: u8, index: usize) -> u32 {
         }
         8 => u32::from(*row.get(index).unwrap_or(&0)),
         // Sub-byte samples are packed most-significant first within each byte,
-        // which is the opposite of DEFLATE's bit order two modules away.
+        // which is the opposite of the least-significant-first bit order that
+        // DEFLATE uses to deliver these very bytes.
         _ => {
             let per_byte = usize::from(8u8.checked_div(depth).unwrap_or(8)).max(1);
             let byte = *row
@@ -906,7 +908,7 @@ mod tests {
             out.extend_from_slice(&(!len).to_le_bytes());
             out.extend_from_slice(part);
         }
-        out.extend_from_slice(&crate::inflate::adler32(raw).to_be_bytes());
+        out.extend_from_slice(&deflate::adler32(raw).to_be_bytes());
         out
     }
 

@@ -81109,7 +81109,79 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **481 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **475 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-sixth batch): `cmd_fdtable` (6, plus
+> one uncounted) cleared — 481 → 475 across 217 → 216 functions. Pinned by
+> `kshell::self_test` rung 94.
+>
+> **In short:** `fdtable` shows and edits the table of open files a process
+> holds. Every one of its operands was guessed as `0` when it could not be read.
+> The process-id guesses were then caught by a guard and turned into a
+> complaint about the command's *shape*; the file-descriptor guesses were not
+> caught at all, and `0` is the first descriptor a process ever opens — so
+> `fdtable close 42 1O` closed it and said "Closed fd=0 for PID 42".
+>
+> **This is the first command in the burn-down that had already noticed the
+> problem and protected the wrong operand.** Both pid sites read
+>
+> ```rust
+> let pid = pid_str.parse::<u32>().unwrap_or(0);
+> if pid == 0 { shell_println!("Usage: fdtable close <pid> <fd>"); set_exit(1); return; }
+> ```
+>
+> which is the **conflation** row (`cmd_shmem`, `cmd_blkread`): one sentinel
+> serves as both the guess and the invalidity marker, so the shell reports that
+> the *form* of the command was wrong when the form was right and only the word
+> was unreadable. The reader's obvious response is to re-type the same shape and
+> get the same complaint. Note that the guard was not useless — `open`
+> auto-creates a table for whatever pid it is handed, so without it a mistyped
+> pid would have built a real fd table for process 0 — it was simply spent on
+> the operand that was not doing the damage.
+>
+> **The new row is the descriptor, and it turns on how the id space is
+> allocated.** Batch 25 established that a guessed `0` in `cgmem` was *safe but
+> dishonest*, because `next_id` starts at 1 and so cgroup 0 is unreachable. The
+> fd table inverts exactly that property: `next_fd` starts at **0**, so the
+> guess names the first descriptor the process ever opened — the entry most
+> likely to exist and the oldest one in the table. Reachability is not a
+> property of the number `0`; it is a property of where the allocator starts.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **selector in an allocation-ordered id space that starts at 0** (`cmd_fdtable close`) | destroys the process's first and oldest descriptor, reports success | you don't — and no later call can re-issue the number |
+>
+> **And it is not undoable at the number.** `open` and `dup` both allocate from
+> the monotonic `next_fd`, which never goes backwards and never reuses a freed
+> value. Re-opening the same path after a mistaken close returns *some later
+> fd*. In a table where the number is the interface — 0 being stdin by universal
+> convention — that is a permanent renumbering, not a recoverable deletion. This
+> is a stronger form of irreversibility than the `ipcns` accumulator row: there
+> the *count* could not be repaired, here the *identity* cannot.
+>
+> **`dup` is the additive twin.** The same guessed `0` there does not remove an
+> entry, it manufactures a second alias for the wrong descriptor, consumes a
+> number from `next_fd`, and bumps `total_dups` — which has no decrement. So
+> closing the surplus alias afterwards still leaves `dups=1` where the truth was
+> `dups=0`, the same laundered-audit-trail problem batch 25 found in `cgmem
+> charge`. One mistyped word thus reaches both the destructive and the
+> accumulating failure modes depending only on which subcommand it lands in.
+>
+> **The uncounted one** is `open`'s path, `parts.get(2).copied().unwrap_or("")`,
+> whose emptiness was folded into the *same* usage line as the pid — so an
+> omitted path and an unreadable pid produced byte-identical output. It now says
+> `fdtable: open: missing path`.
+>
+> **Rung 94 reads a fixture it does not create.** `fdtable::self_test` runs
+> earlier in the boot battery (main.rs:5115, well before kshell's at 5225) and
+> leaves tables for pids 1, 100 and 999; pid 100 holds fd 0 (the socket) and its
+> dup. The rung asserts that fixture is present *before* firing any refusal, so
+> a change in battery ordering fails loudly instead of silently testing an empty
+> table, and pins severity with a before/after equality on both `fdtable show
+> 100` and `fdtable stats` — the first proves the descriptor the refused `close`
+> would have destroyed is still listed, the second that no dup was tallied.
+> Neither reader takes the `with_state` path, so neither perturbs `ops` and the
+> two captures are comparable.
 
 > **Burn-down log.** 2026-08-26 (twenty-fifth batch): `cmd_cgmem` (6, plus
 > three uncounted) cleared — 487 → 481 across 218 → 217 functions. Pinned by
@@ -81201,9 +81273,13 @@ file` all still work — so the rung cannot pass by having broken the options.
 > default exists in the code.
 >
 > **Found while reading for evidence:** two independent `cgmem` defects, both
-> logged separately and both still open —
+> logged separately and both **since fixed** —
 > `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` and
-> `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`.
+> `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`. Fixing the
+> second is what armed this batch's ceiling guess: `high_events` is now printed,
+> so a wrong ceiling is finally falsifiable. The trap named above was not
+> hypothetical — it was resolved within the hour, and the refusal had to be in
+> place first.
 
 > **Burn-down log.** 2026-08-26 (twenty-fourth batch): `cmd_colortemp` (7,
 > plus two uncounted) cleared — 494 → 487 across 219 → 218 functions. Pinned

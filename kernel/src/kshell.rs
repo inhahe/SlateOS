@@ -19246,6 +19246,109 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("cgmem remove 1");
     }
 
+    serial_println!(
+        "  kshell::self_test 94: the guard was spent on the operand that did not need it, and the \
+         guessed descriptor was the first one rather than an unused one"
+    );
+    // `cmd_fdtable` is the first command in this burn-down that had *already*
+    // noticed the problem and then protected the wrong operand. Its pid sites
+    // were `unwrap_or(0)` followed by `if pid == 0 { usage; exit 1 }` — the
+    // conflation shape: `fdtable show 1O` answered "Usage: fdtable show <pid>",
+    // telling the reader the command's *form* was wrong when the form was right
+    // and only the word was unreadable, so the obvious response is to re-type
+    // the same thing.
+    //
+    // The descriptor operands of `close` and `dup` had no guard at all, and
+    // they are the ones that act. In this table `next_fd` starts at 0 and only
+    // ever increments, so unlike cgroup id 0 — unreachable, which is why that
+    // guess merely misdiagnosed — fd 0 is *the first descriptor the process
+    // ever opened*, present the moment the process holds any descriptor at all.
+    // The guess therefore named the most reachable and the oldest entry in the
+    // table, closed it, and reported success. Nothing re-issues the number:
+    // `open` and `dup` both allocate from `next_fd`, which has moved on, so in
+    // a table where the number *is* the interface the loss is a permanent
+    // renumbering rather than a recoverable deletion.
+    {
+        // `fdtable::self_test` runs earlier in the boot battery (main.rs) and
+        // leaves tables for pids 1, 100 and 999. Pid 100 holds fd 0, the
+        // socket, plus its dup — so it is a fixture that already exists and
+        // this rung neither creates nor destroys one. The needle below is what
+        // makes that dependency fail loudly if the ordering ever changes.
+        let before_show = capture_command("fdtable show 100");
+        assert_output_contains(
+            "the fixture this rung reads is present before any refusal",
+            &before_show,
+            b"] socket:[5678] flags=",
+        );
+        let before_stats = capture_command("fdtable stats");
+
+        let out = capture_command("fdtable show 1O0");
+        assert_output_contains(
+            "an unreadable pid names the word rather than complaining about the command's shape",
+            &out,
+            b"`1O0' is not a pid",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable pid in `show' errors");
+
+        let out = capture_command("fdtable open 1O0 /tmp/x");
+        assert_output_contains("and the same pid in `open'", &out, b"`1O0' is not a pid");
+        assert_eq!(last_exit(), 1, "an unreadable pid in `open' errors");
+
+        // The path was `unwrap_or("")` folded into the same usage line as the
+        // pid, so an omitted path and an unreadable pid were indistinguishable.
+        let out = capture_command("fdtable open 100");
+        assert_output_contains(
+            "an omitted path is reported as a missing path, not as a bad command",
+            &out,
+            b"fdtable: open: missing path",
+        );
+        assert_eq!(last_exit(), 1, "a missing path errors");
+
+        let out = capture_command("fdtable close 1O0 0");
+        assert_output_contains("and the pid in `close'", &out, b"`1O0' is not a pid");
+        assert_eq!(last_exit(), 1, "an unreadable pid in `close' errors");
+
+        // The one that acted. This closed fd 0 and printed
+        // "Closed fd=0 for PID 100".
+        let out = capture_command("fdtable close 100 1O");
+        assert_output_contains(
+            "an unreadable descriptor is named rather than resolved to the process's first fd",
+            &out,
+            b"`1O' is not a file descriptor",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable descriptor in `close' errors");
+
+        let out = capture_command("fdtable dup 1O0 0");
+        assert_output_contains("and the pid in `dup'", &out, b"`1O0' is not a pid");
+        assert_eq!(last_exit(), 1, "an unreadable pid in `dup' errors");
+
+        // The additive twin: this duplicated fd 0, consumed a number from
+        // `next_fd`, and bumped `total_dups` — a tally with no decrement, so
+        // even closing the surplus alias leaves the count permanently wrong.
+        let out = capture_command("fdtable dup 100 1O");
+        assert_output_contains(
+            "and the descriptor in `dup', which added an alias rather than removing an entry",
+            &out,
+            b"`1O' is not a file descriptor",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable descriptor in `dup' errors");
+
+        // The severity pin. Seven refusals: the descriptor the refused `close`
+        // would have destroyed is still listed, no alias was added beside it,
+        // and `next_fd` was not advanced — which the totals report, since a dup
+        // that had happened would still be counted after the alias was closed.
+        let after_show = capture_command("fdtable show 100");
+        assert!(
+            after_show == before_show,
+            "seven refusals left every descriptor of the process untouched"
+        );
+        let after_stats = capture_command("fdtable stats");
+        assert!(
+            after_stats == before_stats,
+            "and counted no open, no close and no dup for words the shell refused to read"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -95583,13 +95686,17 @@ fn cmd_fdtable(args: &str) {
             }
         }
         "show" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 {
-                shell_println!("Usage: fdtable show <pid>");
-                set_exit(1);
+            // The pid operands in this command were already half-guarded: the
+            // guess was `0` and `0` was then rejected with the usage line. That
+            // is the conflation shape — a mistyped `fdtable show 1O` answered
+            // "Usage: fdtable show <pid>", which says the *form* of the command
+            // was wrong when the form was right and only the word was
+            // unreadable. The reader re-types the same shape and gets the same
+            // complaint. `required_num` separates the two: a missing pid is
+            // "missing pid", an unreadable one names the word.
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
                 return;
-            }
+            };
             fdtable::init_defaults();
             let fds = fdtable::list(pid);
             shell_println!("FDs for PID {} ({}):", pid, fds.len());
@@ -95606,14 +95713,19 @@ fn cmd_fdtable(args: &str) {
             }
         }
         "open" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let path = parts.get(2).copied().unwrap_or("");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 || path.is_empty() {
-                shell_println!("Usage: fdtable open <pid> <path>");
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
+                return;
+            };
+            // The path was `unwrap_or("")` and the emptiness was folded into the
+            // same usage line as the pid, so an omitted path and an unreadable
+            // pid produced identical output. `open` auto-creates a table for
+            // whatever pid it is handed, so the old guess would have built a
+            // real fd table for process 0 had the guard not caught it.
+            let Some(path) = parts.get(2).copied() else {
+                shell_println!("fdtable: open: missing path");
                 set_exit(1);
                 return;
-            }
+            };
             fdtable::init_defaults();
             let flags = fdtable::FdFlags {
                 read: true,
@@ -95631,15 +95743,27 @@ fn cmd_fdtable(args: &str) {
             }
         }
         "close" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let fd_str = parts.get(2).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            let fd = fd_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 {
-                shell_println!("Usage: fdtable close <pid> <fd>");
-                set_exit(1);
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
                 return;
-            }
+            };
+            // The descriptor is the operand that mattered and the only one that
+            // had no guard at all. In this table `next_fd` starts at 0 and only
+            // ever increments, so `0` is not an unused sentinel the way cgroup
+            // id 0 was — it is *the first descriptor the process ever opened*,
+            // and it exists the moment the process holds any descriptor. A
+            // guessed `0` therefore names the most reachable and the oldest
+            // entry in the table, and `fdtable close 42 1O` closed it and
+            // reported "Closed fd=0 for PID 42".
+            //
+            // It cannot be undone at that number. `dup` and `open` both
+            // allocate from the monotonic `next_fd`, which has moved on, so
+            // re-opening the same path returns some later fd. In a table where
+            // the number *is* the interface — 0 being stdin by universal
+            // convention — that is a permanent renumbering, not a recoverable
+            // deletion.
+            let Some(fd) = required_num::<u32>(&parts, 2, "fdtable", sub, "file descriptor") else {
+                return;
+            };
             fdtable::init_defaults();
             match fdtable::close(pid, fd) {
                 Ok(()) => shell_println!("Closed fd={} for PID {}", fd, pid),
@@ -95650,15 +95774,19 @@ fn cmd_fdtable(args: &str) {
             }
         }
         "dup" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let fd_str = parts.get(2).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            let fd = fd_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 {
-                shell_println!("Usage: fdtable dup <pid> <fd>");
-                set_exit(1);
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
                 return;
-            }
+            };
+            // Same guess as `close`, and it succeeds just as quietly, but it
+            // adds rather than removes: a mistyped source fd manufactures a
+            // second alias for the wrong descriptor, consumes a number from
+            // `next_fd`, and bumps `total_dups` — a tally with no decrement, so
+            // closing the surplus alias afterwards leaves the count reading
+            // `dups=1` where the truth was `dups=0` (the `cgmem charge`
+            // accumulator problem again).
+            let Some(fd) = required_num::<u32>(&parts, 2, "fdtable", sub, "file descriptor") else {
+                return;
+            };
             fdtable::init_defaults();
             match fdtable::dup(pid, fd) {
                 Ok(new_fd) => {

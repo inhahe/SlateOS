@@ -54955,7 +54955,20 @@ impl Shell {
 
         // ---- -G globpat: pathname expansion, offered whole ----
         // The word never narrows this one: bash hands back everything the
-        // pattern expanded to, and hands it back in reverse.
+        // pattern expanded to.
+        //
+        // In the reverse of the order the directories were *read*, not of the
+        // order a word would have been expanded into. bash's `gen_globpat_
+        // matches` calls the glob matcher directly rather than through a word,
+        // so the sort that pathname expansion applies never happens; what is
+        // left is the matcher's own list, which it builds by prepending each
+        // name as it comes off `readdir` and therefore hands back backwards.
+        // Measured, bash 5.2.21 on ext4, in a directory whose `ls -f` reads
+        // `gc1 gm1 gk1 gb1 gq1 gd1 gz1 ga1`: `compgen -G 'g*1'` answers
+        // `ga1 gz1 gd1 gq1 gb1 gk1 gm1 gc1` while `echo g*1` answers the
+        // sorted `ga1 gb1 gc1 gd1 gk1 gm1 gq1 gz1`. A pattern spanning two
+        // directories is reversed whole (`d?/?` gives all of `d2`'s before
+        // any of `d1`'s), which is what reversing the flat list gives.
         if let Some(pat) = &globpat {
             let field: Vec<EChar> = bytes::chars(pat)
                 .map(|c| EChar {
@@ -54963,7 +54976,7 @@ impl Shell {
                     quoted: false,
                 })
                 .collect();
-            let mut m = glob_expand_field(
+            let mut m = glob_expand_field_unsorted(
                 self.cwd.as_bytes(),
                 &field,
                 self.shopt.get("dotglob").copied().unwrap_or(false),
@@ -54971,7 +54984,6 @@ impl Shell {
                 self.shopt.get("extglob").copied().unwrap_or(false),
                 self.shopt.get("globstar").copied().unwrap_or(false),
             );
-            m.sort();
             m.reverse();
             list.extend(m);
         }
@@ -55319,6 +55331,19 @@ impl Shell {
     /// entries `.` and `..` are held back from an empty basename. This is
     /// readline's own filename generator with `match-hidden-files` on, which is
     /// its default and therefore what `compgen` is expected to hand back.
+    ///
+    /// The order is the directory's own, which is what bash offers too — its
+    /// generator is a bare `readdir` loop, and `compgen -f ''` reproduces
+    /// `ls -f` exactly. The one place the two cannot be made to agree is
+    /// *where* `.` and `..` fall: to bash they are two `readdir` entries like
+    /// any other, so an ext4 directory scatters them through the answer
+    /// (measured: `compgen -f .` gave `.. .mhid .bhid .zhid .ahid .`, matching
+    /// that directory's `ls -f` positions), whereas `std::fs::read_dir` drops
+    /// both on every platform and leaves them to be named from outside the
+    /// loop. They are offered first here because there is nowhere else to put
+    /// them — the position they *should* have is data the OS was never asked
+    /// for. See the corpus case, which compares those lines sorted for exactly
+    /// this reason.
     fn compgen_paths(&self, word: BStr<'_>, dirs_only: bool) -> Vec<Str> {
         // Split into the directory prefix (kept verbatim on each result) and the
         // basename to prefix-match. `foo/ba` -> dir "foo/", base "ba"; "ba" ->
@@ -55340,10 +55365,11 @@ impl Shell {
             return Vec::new();
         };
         let mut out: Vec<Str> = Vec::new();
-        // A directory yields `.` and `..` before anything else — but only to a
-        // non-empty basename, since completing a whole directory listing with
-        // the two entries that name the directory itself would be no help.
-        // Nothing else is hidden: a leading dot is just a character here.
+        // `.` and `..` are offered only to a non-empty basename, since
+        // completing a whole directory listing with the two entries that name
+        // the directory itself would be no help. Nothing else is hidden: a
+        // leading dot is just a character here. Their *position* is arbitrary —
+        // see the doc comment.
         if !base.is_empty() {
             out.extend(
                 [b".".as_slice(), b".."]
@@ -59970,7 +59996,7 @@ fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
 }
 
 /// Expand an annotated field containing at least one unquoted metacharacter
-/// against the filesystem, returning the matching paths (unsorted).
+/// against the filesystem, returning the matching paths in collating order.
 ///
 /// `cwd` is the *shell's* working directory: the returned paths stay relative
 /// (bash substitutes the pattern's own spelling), but every directory read is
@@ -59983,6 +60009,38 @@ fn glob_expand_field(
     nocaseglob: bool,
     extglob: bool,
     globstar: bool,
+) -> Vec<Str> {
+    glob_expand_field_ordered(cwd, field, dotglob, nocaseglob, extglob, globstar, true)
+}
+
+/// [`glob_expand_field`] without the sort: each directory's matches come back
+/// in the order the filesystem handed them over.
+///
+/// Sorting a glob is the *word expansion's* doing, not the glob's — bash keeps
+/// the two apart too, and `compgen -G` is the one caller that reaches the
+/// matcher without going through a word. It offers them in the reverse of this
+/// order, which is why this exists; see the `-G` arm of `compgen`.
+fn glob_expand_field_unsorted(
+    cwd: BStr<'_>,
+    field: &[EChar],
+    dotglob: bool,
+    nocaseglob: bool,
+    extglob: bool,
+    globstar: bool,
+) -> Vec<Str> {
+    glob_expand_field_ordered(cwd, field, dotglob, nocaseglob, extglob, globstar, false)
+}
+
+/// The body of both: `sorted` chooses whether each directory's matches are put
+/// into collating order or left in the order the directory was read.
+fn glob_expand_field_ordered(
+    cwd: BStr<'_>,
+    field: &[EChar],
+    dotglob: bool,
+    nocaseglob: bool,
+    extglob: bool,
+    globstar: bool,
+    sorted: bool,
 ) -> Vec<Str> {
     // Split on `/` keeping the *empty* pieces. bash matches each component
     // against the entries of the text that precedes it and then pastes the two
@@ -60078,8 +60136,16 @@ fn glob_expand_field(
                 }
                 globstar_descend(cwd, base, sep, dotglob, terminal, &mut next);
             }
-            next.sort();
-            next.dedup();
+            if sorted {
+                next.sort();
+                next.dedup();
+            } else {
+                // The same duplicates, dropped without disturbing the order:
+                // a `**` reaches a directory both as its own zero-level match
+                // and as a descendant of the level above.
+                let mut seen: std::collections::HashSet<Str> = std::collections::HashSet::new();
+                next.retain(|c| seen.insert(c.clone()));
+            }
             cands = next;
             literal_prefix = false;
             continue;
@@ -60141,7 +60207,9 @@ fn glob_expand_field(
                         names.push(name);
                     }
                 }
-                names.sort();
+                if sorted {
+                    names.sort();
+                }
                 for name in names {
                     next.push(bfmt![base, &name, sep]);
                 }
@@ -86293,10 +86361,15 @@ st=1
     }
 
     #[test]
-    fn compgen_globpat_is_offered_whole_and_reversed() {
+    fn compgen_globpat_is_offered_whole_and_in_reverse_directory_order() {
         // `-G` is the one source the word does not narrow: the pattern is
-        // expanded as a pathname and the whole expansion is handed back, in
-        // reverse. Give it a directory of its own so nothing else can match.
+        // expanded as a pathname and the whole expansion is handed back — in
+        // the reverse of the order the *directory was read*, which on a
+        // filesystem that hashes its names is neither sorted nor reverse
+        // sorted. So the order is only ever compared against itself here;
+        // `compgen_g_offers_the_glob_in_reverse_readdir_order` is the test that
+        // pins what it actually is. Give it a directory of its own so nothing
+        // else can match.
         let dir = ScratchDir::new("compgen_g");
         std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
         std::fs::write(dir.join("a1"), b"").expect("a1");
@@ -86304,12 +86377,16 @@ st=1
         let base = dir.slashed();
         let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}")).0;
 
-        // Reverse order, and a word operand leaves the list alone.
-        assert_eq!(g("-G '*1'"), "b1\na1\n");
-        assert_eq!(g("-G '*1' zzz"), "b1\na1\n");
+        // The whole expansion, and a word operand leaves the list alone.
+        let whole = g("-G '*1'");
+        let mut names: Vec<&str> = whole.lines().collect();
+        names.sort_unstable();
+        assert_eq!(names, ["a1", "b1"]);
+        assert_eq!(g("-G '*1' zzz"), whole);
         // …but `-X` and `-P`/`-S` still apply to it.
         assert_eq!(g("-G '*1' -X 'b*'"), "a1\n");
-        assert_eq!(g("-G '*1' -P '<' -S '>'"), "<b1>\n<a1>\n");
+        let decorated: String = whole.lines().map(|l| format!("<{l}>\n")).collect();
+        assert_eq!(g("-G '*1' -P '<' -S '>'"), decorated);
         // A second `-G` overwrites the first: it is one compspec slot.
         assert_eq!(g("-G 'a*' -G 'b*'"), "b1\n");
         // A pattern that matches nothing contributes nothing, and with no other
@@ -86319,7 +86396,8 @@ st=1
             (String::new(), 1)
         );
         // Sources are emitted in bash's fixed order: actions, then -G, then -W.
-        assert_eq!(g("-k -G 'a*' -W 'iq' i"), "if\nin\nadir\na1\niq\n");
+        // One glob match, so the directory's order cannot enter into it.
+        assert_eq!(g("-k -G 'a1*' -W 'iq' i"), "if\nin\na1\niq\n");
     }
 
     #[test]
@@ -94046,6 +94124,49 @@ st=1
         let ci = glob_expand_field(&cwd, &field, false, true, false, false);
         assert_eq!(ci.len(), 1);
         assert!(ci[0].ends_with(b"Notes.TXT"));
+    }
+
+    #[test]
+    fn compgen_g_offers_the_glob_in_reverse_readdir_order() {
+        // bash reaches the glob matcher directly for `-G`, so the sort that
+        // pathname expansion applies never runs and the matcher's own list —
+        // built by prepending each name as `readdir` produces it — comes back
+        // as it stands, i.e. backwards. The order a directory is read in is the
+        // filesystem's business and cannot be asserted portably, so what is
+        // pinned here is the relationship: `-G` is exactly the unsorted
+        // expansion reversed, and it holds the same names as the sorted one.
+        let cwd = test_cwd();
+        let dir = ScratchDir::relative("compgen_g_order");
+        let uniq = dir.base();
+        // Names whose creation order is neither sorted nor reverse-sorted, so
+        // a filesystem that hashes them cannot accidentally agree with either.
+        for n in ["ga1", "gb1", "gc1", "gz1", "gm1", "gd1", "gq1", "gk1"] {
+            std::fs::File::create(dir.join(n)).expect("touch");
+        }
+
+        let field = field_lit(&format!("{uniq}/g*1"));
+        let sorted = glob_expand_field(&cwd, &field, false, false, false, false);
+        let raw = glob_expand_field_unsorted(&cwd, &field, false, false, false, false);
+        assert_eq!(raw.len(), 8);
+        // Same names; only the order differs.
+        let mut a = sorted.clone();
+        let mut b = raw.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        assert_eq!(sorted, a, "the sorted expansion really is in order");
+
+        let want: Vec<String> = raw
+            .iter()
+            .rev()
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect();
+        let (out, _) = run(&format!("compgen -G '{uniq}/g*1'"));
+        assert_eq!(out.lines().collect::<Vec<_>>(), want);
+        // And the word in front of it narrows nothing, unlike every other
+        // source: the pattern has already said what to match.
+        let (with_word, _) = run(&format!("compgen -G '{uniq}/g*1' -- {uniq}/gz"));
+        assert_eq!(with_word, out);
     }
 
     #[test]

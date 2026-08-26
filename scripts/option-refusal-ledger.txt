@@ -92,7 +92,6 @@ cmd_faceunlock 1
 cmd_fault_inject 3
 cmd_fdtable 6
 cmd_filelock 1
-cmd_filepicker 10
 cmd_filerules 1
 cmd_fileshare 2
 cmd_filetransfer 2

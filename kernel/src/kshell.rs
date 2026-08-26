@@ -17364,6 +17364,76 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "bare `pen events` succeeds");
     }
 
+    serial_println!(
+        "  kshell::self_test 77: a file dialog refuses an unreadable id rather than acting on \
+         dialog zero"
+    );
+    // `cmd_filepicker` (10 ledger sites) -- the most uniform batch on the
+    // ledger and, for that reason, the one worth a rung with the fewest
+    // assertions. All ten arms wrote the same two lines: read the dialog id
+    // with `unwrap_or(0)`, then reject `id == 0` with a synopsis. Ten copies of
+    // a sentinel check that cannot distinguish "no id" from "an id I could not
+    // read", so `fpick close abc` and `fpick close` printed the same thing, and
+    // neither mentioned `abc`.
+    //
+    // The rung samples the batch rather than enumerating it: the arms are
+    // literally the same code, so a per-arm assertion would test the same three
+    // lines ten times. What is *not* uniform, and so is asserted here, is the
+    // two-operand arms -- `nav`, `select`, `filename` -- whose `id == 0 ||
+    // x.is_empty()` guard had to be split in half, leaving the string operand
+    // with a check of its own. Getting that split wrong is how a bare
+    // `fpick nav 1` would start being accepted with an empty path.
+    {
+        let out = capture_command("fpick close abc");
+        assert_output_contains(
+            "fpick names the dialog id it could not read",
+            &out,
+            b"`abc' is not a dialog id",
+        );
+        assert_eq!(last_exit(), 1, "fpick close: an unreadable id errors");
+        assert_output_lacks("and closes nothing", &out, b"closed");
+
+        let out = capture_command("fpick close");
+        assert_output_contains(
+            "and says which operand is missing when there is none",
+            &out,
+            b"missing dialog id",
+        );
+        assert_eq!(last_exit(), 1, "fpick close: a missing id errors");
+
+        // The two-operand arms: the id must still be checked *before* the
+        // string, and the string must still be checked at all.
+        let out = capture_command("fpick nav zz /");
+        assert_output_contains(
+            "fpick nav refuses an unreadable id ahead of its path",
+            &out,
+            b"`zz' is not a dialog id",
+        );
+        assert_eq!(last_exit(), 1, "fpick nav: an unreadable id errors");
+
+        let out = capture_command("fpick nav 1");
+        assert_output_contains(
+            "fpick nav still refuses a path-less navigation",
+            &out,
+            b"missing path",
+        );
+        assert_eq!(last_exit(), 1, "fpick nav: a missing path errors");
+
+        let out = capture_command("fpick filename 1");
+        assert_output_contains(
+            "fpick filename still refuses a name-less rename",
+            &out,
+            b"missing name",
+        );
+        assert_eq!(last_exit(), 1, "fpick filename: a missing name errors");
+
+        // The control: a dialog that exists, driven end to end, so the batch is
+        // shown to have kept working rather than merely to have grown refusals.
+        let out = capture_command("fpick open /");
+        assert_output_contains("a dialog can still be opened", &out, b"OpenFile at /");
+        assert_eq!(last_exit(), 0, "fpick open succeeds");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -100400,14 +100470,13 @@ fn cmd_filepicker(args: &str) {
         }
         "nav" | "cd" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
+                    return;
+                };
                 let path = parts.get(2).copied().unwrap_or("");
-                if id == 0 || path.is_empty() {
-                    shell_println!("Usage: fpick nav <dialog-id> <path>");
+                if path.is_empty() {
+                    shell_println!("fpick: {}: missing path", sub);
                     set_exit(1);
                     return;
                 }
@@ -100427,20 +100496,14 @@ fn cmd_filepicker(args: &str) {
                     }
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "up" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if id == 0 {
-                    shell_println!("Usage: fpick up <dialog-id>");
-                    set_exit(1);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
                     return;
-                }
+                };
                 match filepicker::go_up(id) {
                     Ok(()) => {
                         if let Some(d) = filepicker::get_dialog(id) {
@@ -100453,20 +100516,14 @@ fn cmd_filepicker(args: &str) {
                     }
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "back" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if id == 0 {
-                    shell_println!("Usage: fpick back <dialog-id>");
-                    set_exit(1);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
                     return;
-                }
+                };
                 match filepicker::go_back(id) {
                     Ok(()) => {
                         if let Some(d) = filepicker::get_dialog(id) {
@@ -100479,18 +100536,17 @@ fn cmd_filepicker(args: &str) {
                     }
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "select" | "sel" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
+                    return;
+                };
                 let path = parts.get(2).copied().unwrap_or("");
-                if id == 0 || path.is_empty() {
-                    shell_println!("Usage: fpick select <dialog-id> <path>");
+                if path.is_empty() {
+                    shell_println!("fpick: {}: missing path", sub);
                     set_exit(1);
                     return;
                 }
@@ -100502,18 +100558,17 @@ fn cmd_filepicker(args: &str) {
                     }
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "filename" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
+                    return;
+                };
                 let name = parts.get(2).copied().unwrap_or("");
-                if id == 0 || name.is_empty() {
-                    shell_println!("Usage: fpick filename <dialog-id> <name>");
+                if name.is_empty() {
+                    shell_println!("fpick: {}: missing name", sub);
                     set_exit(1);
                     return;
                 }
@@ -100525,20 +100580,14 @@ fn cmd_filepicker(args: &str) {
                     }
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "confirm" | "ok" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if id == 0 {
-                    shell_println!("Usage: fpick confirm <dialog-id>");
-                    set_exit(1);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
                     return;
-                }
+                };
                 match filepicker::confirm(id) {
                     Ok(filepicker::DialogResult::Confirmed(paths)) => {
                         shell_println!("Confirmed ({} paths):", paths.len());
@@ -100553,20 +100602,14 @@ fn cmd_filepicker(args: &str) {
                     }
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "cancel" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if id == 0 {
-                    shell_println!("Usage: fpick cancel <dialog-id>");
-                    set_exit(1);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
                     return;
-                }
+                };
                 match filepicker::cancel(id) {
                     Ok(()) => shell_println!("Dialog #{} cancelled", id),
                     Err(e) => {
@@ -100575,20 +100618,14 @@ fn cmd_filepicker(args: &str) {
                     }
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "close" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if id == 0 {
-                    shell_println!("Usage: fpick close <dialog-id>");
-                    set_exit(1);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
                     return;
-                }
+                };
                 match filepicker::close(id) {
                     Ok(()) => shell_println!("Dialog #{} closed", id),
                     Err(e) => {
@@ -100597,20 +100634,14 @@ fn cmd_filepicker(args: &str) {
                     }
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "info" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if id == 0 {
-                    shell_println!("Usage: fpick info <dialog-id>");
-                    set_exit(1);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
                     return;
-                }
+                };
                 match filepicker::get_dialog(id) {
                     Some(d) => {
                         shell_println!("Dialog #{}", d.id);
@@ -100627,20 +100658,14 @@ fn cmd_filepicker(args: &str) {
                     None => shell_println!("Dialog not found: {}", id),
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "ls" => {
             #[inline(never)]
-            fn case(parts: &[&str]) {
-                let id = parts
-                    .get(1)
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if id == 0 {
-                    shell_println!("Usage: fpick ls <dialog-id>");
-                    set_exit(1);
+            fn case(parts: &[&str], sub: &str) {
+                let Some(id) = required_id(parts, "fpick", sub, "dialog") else {
                     return;
-                }
+                };
                 match filepicker::get_dialog(id) {
                     Some(d) => {
                         if d.listing.is_empty() {
@@ -100674,7 +100699,7 @@ fn cmd_filepicker(args: &str) {
                     None => shell_println!("Dialog not found: {}", id),
                 }
             }
-            case(&parts);
+            case(&parts, sub);
         }
         "bookmark" | "bm" => {
             #[inline(never)]

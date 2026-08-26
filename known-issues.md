@@ -80600,8 +80600,52 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **644 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **632 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (sixth batch): `cmd_winsnap` (12) cleared —
+> 644 → 632 across 237 → 236 functions. Pinned by `kshell::self_test` rung 73.
+>
+> Half of this function was the set/query conflation the fifth batch named, now
+> confirmed as the dominant shape in the settings commands rather than a
+> `cmd_vdesktop` quirk: **six** of the twelve sites — `enabled`, `preview`,
+> `corner`, `thirds`, `edge`, `animation` — reported the current value in
+> response to a word the user meant as a set. `wsnap enabled of` (one `f`)
+> printed `Snapping: true` and exited 0. Note that it printed the value the
+> user was trying to *change away from*, so the output reads as confirmation
+> of the opposite of the request. Two spellings produced it: a `_ =>` catch-all
+> after the `on`/`off` arms, and `if let Some(x) = …parse() … else { query }`.
+> Both are now `match parts.get(1) { None => query, Some(word) => … }`, so
+> absence still queries and a present word is either understood or refused.
+>
+> The shape unique to this command is **geometry**. `addzone` takes four
+> percentages and each defaulted to 0, so one mistyped field
+> (`addzone lay z 0 0 5oo 500`) built a zone of zero area and reported
+> `Zone 'z' added to 'lay'` — indistinguishable from a correct run, and
+> invisible until the layout is applied and a window disappears into a 0×0
+> rectangle. A guessed *dimension* is worse than a guessed *id* in one
+> specific way: an id usually names something that does not exist, and the
+> command then says so; a zero dimension is always valid input to the layer
+> below, so nothing downstream can object.
+>
+> Two sites worth separating from the other ten:
+>
+> * `wsnap remove abc` — **no guard at all**, the same shape as `vd unpin` in
+>   the fifth batch. It dropped window 0's tracking state and announced
+>   `Removed tracking for window 0`, exit 0. This is the third batch in a row
+>   to turn one up, so the "ledger is a lower bound" note below is not a
+>   one-off caveat: the missing-guard shape has no `unwrap_or` for the gate's
+>   regex to match, and only reading finds it.
+> * `wsnap screen` already had a `w > 0 && h > 0` guard and already exited 1 —
+>   the *status* was right. What it could not do is name the word: a mistyped
+>   width, an omitted one, and an honest `screen 0 0` all printed the same
+>   synopsis. It now names the unreadable word, and answers `screen 0 0`
+>   separately with `a screen must be at least 1x1`. A correct exit status is
+>   not the same as a usable diagnostic, and the gate cannot tell them apart.
+>
+> `snap`'s position operand was likewise already refused, but anonymously
+> (`Usage: wsnap snap <wid> <left|right|…>`); it now says which word it could
+> not read, with the alternatives on a second line.
+>
 > **Burn-down log.** 2026-08-26 (fifth batch): `cmd_vdesktop` (18) cleared —
 > 662 → 644 across 238 → 237 functions. Pinned by `kshell::self_test` rung 72.
 >

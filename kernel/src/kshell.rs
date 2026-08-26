@@ -16804,6 +16804,159 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "vd wp: a missing desktop errors");
     }
 
+    serial_println!(
+        "  kshell::self_test 73: a window snapper refuses a geometry rather than building a \
+         zero-sized one"
+    );
+    // `cmd_winsnap` (12 ledger sites, plus one the ledger cannot count).
+    // Six of the twelve are the set/query conflation seen in `vd`, but the
+    // shape unique to this command is *geometry*: four percentages that each
+    // defaulted to 0, so one mistyped field produced a zone of zero area and
+    // reported it as created.
+    {
+        // `remove` is the ledger-invisible one: no guard at all, so an
+        // unreadable id dropped window 0's tracking and said so, exit 0.
+        let out = capture_command("wsnap remove abc");
+        assert_output_contains(
+            "wsnap refuses a window id it cannot read",
+            &out,
+            b"`abc' is not a window id",
+        );
+        assert_eq!(last_exit(), 1, "wsnap remove: an unreadable id errors");
+        assert_output_lacks("and removes nothing", &out, b"Removed tracking");
+
+        // A snap whose id is unreadable moved *some other* window and printed
+        // the same sentence a correct run prints.
+        let out = capture_command("wsnap snap abc left");
+        assert_output_contains(
+            "wsnap refuses the window id before snapping",
+            &out,
+            b"`abc' is not a window id",
+        );
+        assert_eq!(last_exit(), 1, "wsnap snap: an unreadable id errors");
+        assert_output_lacks("and snaps nothing", &out, b"Left half");
+
+        // The position was already refused, but anonymously -- it printed a
+        // synopsis without naming the word that could not be read.
+        let out = capture_command("wsnap snap 7 lefft");
+        assert_output_contains(
+            "wsnap names the position it does not know",
+            &out,
+            b"`lefft' is not a snap position",
+        );
+        assert_eq!(last_exit(), 1, "wsnap snap: an unknown position errors");
+
+        // Both coordinates guessed 0, so a typo answered about the top-left
+        // pixel of the screen rather than the point asked about.
+        let out = capture_command("wsnap detect abc 400");
+        assert_output_contains(
+            "wsnap refuses a coordinate it cannot read",
+            &out,
+            b"`abc' is not a horizontal coordinate",
+        );
+        assert_eq!(last_exit(), 1, "wsnap detect: an unreadable x errors");
+        assert_output_lacks("and reports no zone", &out, b"Zone at");
+
+        // The geometry: a mistyped width used to make a zone 0 wide, and the
+        // shell said "Zone 'z' added to 'l'" -- indistinguishable from success.
+        let out = capture_command("wsnap addzone selftestlay selftestzone 0 0 5oo 500");
+        assert_output_contains(
+            "wsnap refuses a zone width it cannot read",
+            &out,
+            b"`5oo' is not a width percentage",
+        );
+        assert_eq!(last_exit(), 1, "wsnap addzone: an unreadable width errors");
+        assert_output_lacks("and adds no zone", &out, b"added to");
+
+        // The six set/query conflations, one representative of each spelling
+        // shape, each with the bare-query control that must survive the fix.
+        let out = capture_command("wsnap enabled of");
+        assert_output_contains(
+            "wsnap refuses a switch value that is neither on nor off",
+            &out,
+            b"`of' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "wsnap enabled: an unreadable value errors");
+        assert_output_lacks("and does not answer the query instead", &out, b"Snapping:");
+
+        let out = capture_command("wsnap enabled");
+        assert_output_contains(
+            "bare `wsnap enabled` still reports the setting",
+            &out,
+            b"Snapping:",
+        );
+        assert_eq!(last_exit(), 0, "bare `wsnap enabled` succeeds");
+
+        let out = capture_command("wsnap thirds zzz");
+        assert_output_contains(
+            "wsnap refuses an unreadable thirds value",
+            &out,
+            b"`zzz' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "wsnap thirds: an unreadable value errors");
+
+        // `edge` and `animation` used the `if let … else { query }` spelling,
+        // so a mistyped number reported the value already in effect.
+        let out = capture_command("wsnap edge 1o");
+        assert_output_contains(
+            "wsnap names the edge distance it cannot read",
+            &out,
+            b"`1o' is not a distance in pixels",
+        );
+        assert_eq!(last_exit(), 1, "wsnap edge: an unreadable distance errors");
+        assert_output_lacks(
+            "and does not answer the query instead",
+            &out,
+            b"Edge distance:",
+        );
+
+        let out = capture_command("wsnap edge");
+        assert_output_contains(
+            "bare `wsnap edge` still reports the setting",
+            &out,
+            b"Edge distance:",
+        );
+        assert_eq!(last_exit(), 0, "bare `wsnap edge` succeeds");
+
+        let out = capture_command("wsnap animation 2oo");
+        assert_output_contains(
+            "wsnap names the animation duration it cannot read",
+            &out,
+            b"`2oo' is not a duration in ms",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "wsnap animation: an unreadable duration errors"
+        );
+
+        // `screen` already exited 1, but could not say which word was wrong,
+        // and an honest `screen 0 0` was reported the same way as a typo.
+        let out = capture_command("wsnap screen 8oo 600");
+        assert_output_contains(
+            "wsnap names the screen width it cannot read",
+            &out,
+            b"`8oo' is not a width in pixels",
+        );
+        assert_eq!(last_exit(), 1, "wsnap screen: an unreadable width errors");
+
+        let out = capture_command("wsnap screen 0 600");
+        assert_output_contains(
+            "wsnap says why a readable zero is still refused",
+            &out,
+            b"at least 1x1",
+        );
+        assert_eq!(last_exit(), 1, "wsnap screen: a zero dimension errors");
+
+        let out = capture_command("wsnap screen 800 600");
+        assert_output_contains(
+            "a readable screen size is applied",
+            &out,
+            b"Screen: 800x600",
+        );
+        assert_eq!(last_exit(), 0, "wsnap screen: a readable size succeeds");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -36589,34 +36742,46 @@ fn cmd_winsnap(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "snap" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let pos_s = parts.get(2).copied().unwrap_or("");
-            if let Some(pos) = winsnap::SnapPosition::from_str(pos_s) {
-                let (x, y, w, h) = winsnap::snap(wid, pos, 0, 0, 800, 600);
+            // An unreadable window id used to mean window 0, so `wsnap snap
+            // abc left` moved *some other* window to the left half and said
+            // "Window 0 → Left half", which is what a correct run also says.
+            let Some(wid) = required_num::<u64>(&parts, 1, "wsnap", "snap", "window id") else {
+                return;
+            };
+            let Some(pos_s) = parts.get(2) else {
+                shell_println!("wsnap: snap: missing position");
                 shell_println!(
-                    "Window {} → {} at ({},{} {}x{})",
-                    wid,
-                    pos.label(),
-                    x,
-                    y,
-                    w,
-                    h
-                );
-            } else {
-                shell_println!(
-                    "Usage: wsnap snap <wid> <left|right|top|bottom|tl|tr|bl|br|max|l3|c3|r3|restore>"
+                    "Positions: left, right, top, bottom, tl, tr, bl, br, max, l3, c3, r3, restore"
                 );
                 set_exit(1);
-            }
+                return;
+            };
+            let Some(pos) = winsnap::SnapPosition::from_str(pos_s) else {
+                shell_println!("wsnap: snap: `{}' is not a snap position", pos_s);
+                shell_println!(
+                    "Positions: left, right, top, bottom, tl, tr, bl, br, max, l3, c3, r3, restore"
+                );
+                set_exit(1);
+                return;
+            };
+            let (x, y, w, h) = winsnap::snap(wid, pos, 0, 0, 800, 600);
+            shell_println!(
+                "Window {} → {} at ({},{} {}x{})",
+                wid,
+                pos.label(),
+                x,
+                y,
+                w,
+                h
+            );
         }
         "unsnap" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // "Window 0 not snapped" is a truthful sentence about a window the
+            // user never named, and it exits 0 -- so a mistyped id reported
+            // the same thing as unsnapping a window that was already free.
+            let Some(wid) = required_num::<u64>(&parts, 1, "wsnap", "unsnap", "window id") else {
+                return;
+            };
             if let Some((x, y, w, h)) = winsnap::unsnap(wid) {
                 shell_println!("Restored {} to ({},{} {}x{})", wid, x, y, w, h);
             } else {
@@ -36624,34 +36789,44 @@ fn cmd_winsnap(args: &str) {
             }
         }
         "state" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(wid) = required_num::<u64>(&parts, 1, "wsnap", "state", "window id") else {
+                return;
+            };
             match winsnap::window_snap_state(wid) {
                 Some(p) => shell_println!("Window {}: {}", wid, p.label()),
                 None => shell_println!("Window {} not snapped", wid),
             }
         }
         "detect" => {
-            let cx = parts
-                .get(1)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
-            let cy = parts
-                .get(2)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
+            // Both coordinates defaulted to 0, so `wsnap detect abc 400`
+            // answered about the top-left pixel and printed a zone name --
+            // an answer to a question nobody asked.
+            // The nouns are "horizontal"/"vertical" rather than "x"/"y" only
+            // because the helper's message reads "is not a {noun}", and "a x
+            // coordinate" is not a sentence.
+            let Some(cx) =
+                required_num::<i32>(&parts, 1, "wsnap", "detect", "horizontal coordinate")
+            else {
+                return;
+            };
+            let Some(cy) = required_num::<i32>(&parts, 2, "wsnap", "detect", "vertical coordinate")
+            else {
+                return;
+            };
             match winsnap::detect_zone(cx, cy) {
                 Some(p) => shell_println!("Zone at ({},{}): {}", cx, cy, p.label()),
                 None => shell_println!("No snap zone at ({},{})", cx, cy),
             }
         }
         "remove" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // `remove` had no guard at all: `wsnap remove abc` dropped the
+            // tracking state for window 0 and announced "Removed tracking for
+            // window 0" with status 0, while the window the user meant kept
+            // its snap. This is a site the guessed-value ledger cannot count,
+            // because there is no `unwrap_or` shape for it to match.
+            let Some(wid) = required_num::<u64>(&parts, 1, "wsnap", "remove", "window id") else {
+                return;
+            };
             winsnap::remove_window(wid);
             shell_println!("Removed tracking for window {}", wid);
         }
@@ -36704,119 +36879,151 @@ fn cmd_winsnap(args: &str) {
         "addzone" => {
             let lay = parts.get(1).copied().unwrap_or("");
             let zname = parts.get(2).copied().unwrap_or("");
-            let xp = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let yp = parts
-                .get(4)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let wp = parts
-                .get(5)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let hp = parts
-                .get(6)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
             if lay.is_empty() || zname.is_empty() {
                 shell_println!("Usage: wsnap addzone <layout> <name> <x> <y> <w> <h> (0-1000)");
                 set_exit(1);
-            } else {
-                match winsnap::add_zone(lay, zname, xp, yp, wp, hp) {
-                    Ok(()) => shell_println!("Zone '{}' added to '{}'", zname, lay),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            }
+            // Every geometry field defaulted to 0, so a mistyped width made a
+            // zone of zero area -- reported as "Zone 'foo' added to 'bar'",
+            // exactly like a correct run, and invisible until the layout is
+            // applied and the window vanishes into a 0x0 rectangle.
+            let Some(xp) =
+                required_num::<u32>(&parts, 3, "wsnap", "addzone", "left edge percentage")
+            else {
+                return;
+            };
+            let Some(yp) =
+                required_num::<u32>(&parts, 4, "wsnap", "addzone", "top edge percentage")
+            else {
+                return;
+            };
+            let Some(wp) = required_num::<u32>(&parts, 5, "wsnap", "addzone", "width percentage")
+            else {
+                return;
+            };
+            let Some(hp) = required_num::<u32>(&parts, 6, "wsnap", "addzone", "height percentage")
+            else {
+                return;
+            };
+            match winsnap::add_zone(lay, zname, xp, yp, wp, hp) {
+                Ok(()) => shell_println!("Zone '{}' added to '{}'", zname, lay),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
-        "enabled" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
+        // The six settings below were all the set/query conflation: with no
+        // operand they report the current value, and the *same* branch also
+        // answered that query for a word the user plainly meant as a set.
+        // `wsnap enabled of` (one f) printed "Snapping: true" and exited 0 --
+        // a truthful sentence that reads as confirmation of the opposite of
+        // what was asked. Absence still means query; a word present is now
+        // either understood or refused.
+        "enabled" => match parts.get(1).copied() {
+            None => shell_println!("Snapping: {}", winsnap::config().enabled),
+            Some("on" | "true") => {
                 winsnap::set_enabled(true);
                 shell_println!("Snapping enabled");
             }
-            "off" | "false" => {
+            Some("off" | "false") => {
                 winsnap::set_enabled(false);
                 shell_println!("Snapping disabled");
             }
-            _ => {
-                shell_println!("Snapping: {}", winsnap::config().enabled);
+            Some(word) => {
+                shell_println!("wsnap: enabled: `{}' is not on or off", word);
+                set_exit(1);
             }
         },
-        "edge" => {
-            if let Some(px) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+        "edge" => match parts.get(1) {
+            None => shell_println!("Edge distance: {}px", winsnap::config().edge_distance),
+            Some(_) => {
+                let Some(px) =
+                    required_num::<u32>(&parts, 1, "wsnap", "edge", "distance in pixels")
+                else {
+                    return;
+                };
                 winsnap::set_edge_distance(px);
                 shell_println!("Edge distance: {}px", px);
-            } else {
-                shell_println!("Edge distance: {}px", winsnap::config().edge_distance);
             }
-        }
-        "preview" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
+        },
+        "preview" => match parts.get(1).copied() {
+            None => shell_println!("Preview: {}", winsnap::config().show_preview),
+            Some("on" | "true") => {
                 winsnap::set_show_preview(true);
                 shell_println!("Preview: on");
             }
-            "off" | "false" => {
+            Some("off" | "false") => {
                 winsnap::set_show_preview(false);
                 shell_println!("Preview: off");
             }
-            _ => {
-                shell_println!("Preview: {}", winsnap::config().show_preview);
+            Some(word) => {
+                shell_println!("wsnap: preview: `{}' is not on or off", word);
+                set_exit(1);
             }
         },
-        "animation" => {
-            if let Some(ms) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+        "animation" => match parts.get(1) {
+            None => shell_println!("Animation: {}ms", winsnap::config().animation_ms),
+            Some(_) => {
+                let Some(ms) =
+                    required_num::<u32>(&parts, 1, "wsnap", "animation", "duration in ms")
+                else {
+                    return;
+                };
                 winsnap::set_animation_ms(ms);
                 shell_println!("Animation: {}ms", ms);
-            } else {
-                shell_println!("Animation: {}ms", winsnap::config().animation_ms);
             }
-        }
-        "corner" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
+        },
+        "corner" => match parts.get(1).copied() {
+            None => shell_println!("Corner snap: {}", winsnap::config().corner_snap),
+            Some("on" | "true") => {
                 winsnap::set_corner_snap(true);
                 shell_println!("Corner snap: on");
             }
-            "off" | "false" => {
+            Some("off" | "false") => {
                 winsnap::set_corner_snap(false);
                 shell_println!("Corner snap: off");
             }
-            _ => {
-                shell_println!("Corner snap: {}", winsnap::config().corner_snap);
+            Some(word) => {
+                shell_println!("wsnap: corner: `{}' is not on or off", word);
+                set_exit(1);
             }
         },
-        "thirds" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
+        "thirds" => match parts.get(1).copied() {
+            None => shell_println!("Thirds: {}", winsnap::config().thirds),
+            Some("on" | "true") => {
                 winsnap::set_thirds(true);
                 shell_println!("Thirds: on");
             }
-            "off" | "false" => {
+            Some("off" | "false") => {
                 winsnap::set_thirds(false);
                 shell_println!("Thirds: off");
             }
-            _ => {
-                shell_println!("Thirds: {}", winsnap::config().thirds);
+            Some(word) => {
+                shell_println!("wsnap: thirds: `{}' is not on or off", word);
+                set_exit(1);
             }
         },
         "screen" => {
-            let w = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let h = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            if w > 0 && h > 0 {
-                winsnap::set_screen(w, h);
-                shell_println!("Screen: {}x{}", w, h);
-            } else {
-                shell_println!("Usage: wsnap screen <width> <height>");
+            // The `w > 0 && h > 0` guard did give the right exit status, but
+            // it could not name the word: a mistyped width and an omitted one
+            // produced the same synopsis, and so did an honest `screen 0 0`.
+            let Some(w) = required_num::<u32>(&parts, 1, "wsnap", "screen", "width in pixels")
+            else {
+                return;
+            };
+            let Some(h) = required_num::<u32>(&parts, 2, "wsnap", "screen", "height in pixels")
+            else {
+                return;
+            };
+            if w == 0 || h == 0 {
+                shell_println!("wsnap: screen: a screen must be at least 1x1");
                 set_exit(1);
+                return;
             }
+            winsnap::set_screen(w, h);
+            shell_println!("Screen: {}x{}", w, h);
         }
         "config" => {
             let cfg = winsnap::config();

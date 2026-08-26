@@ -16170,6 +16170,147 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("cred rmautofill selftestapp password");
     }
 
+    serial_println!(
+        "  kshell::self_test 68: a synopsis rustfmt moved onto its own line still reports failure"
+    );
+    {
+        // Rung 67's 192 sites were hidden by a *brace* miscount. These 95 were
+        // hidden one layer further out, by the gate's `USAGE` regex requiring
+        // the synopsis literal to sit on the same line as `shell_println!(` --
+        // which `cargo fmt` decides, not the author. The longer the synopsis,
+        // the likelier rustfmt wraps it, so the blind spot was biased towards
+        // exactly the commands with the most subcommands to get wrong. See
+        // A-KSHELL-THE-USAGE-GATE-CANNOT-SEE-A-SYNOPSIS-RUSTFMT-PUT-ON-ITS-OWN-LINE.
+        //
+        // A sample, one per repair shape, for the same reason rung 67 samples:
+        // the gate proves completeness, a rung proves the status survives to
+        // the caller, and a shape is what a regression breaks all of at once.
+
+        // Shape 1 -- a catch-all `_ => { help }` arm that fell out of its match
+        // with no status at all, now ending in `end_help_arm`. The pair is the
+        // whole point of that helper: the *same arm* must fail for a word it
+        // could not use and succeed for a request to be told what it can use.
+        let out = capture_command("shmem zznosuchsub");
+        assert_output_contains(
+            "shmem names the subcommand it does not know",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 1, "shmem: an unknown subcommand is an error");
+
+        // Bare `shmem` reaches that same `_` arm -- there is no `""` arm ahead
+        // of it -- so this is the control that the fix did not make asking for
+        // help into an error.
+        let out = capture_command("shmem");
+        assert_output_lacks(
+            "and bare `shmem` is a request for the help it prints",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 0, "bare `shmem` is output, not a complaint");
+
+        // Shape 2 -- the same arm, but with its help text inside a nested
+        // `#[inline(never)] fn case()` (a stack-frame workaround used where the
+        // arm is very long). The gate cannot see through that, so these two are
+        // in `ALLOWED` and this rung is the only thing checking them.
+        let out = capture_command("fw zznosuchsub");
+        assert_output_contains(
+            "fw names the subcommand it does not know",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 1, "fw: an unknown subcommand is an error");
+
+        let out = capture_command("fw help");
+        assert_output_contains("`fw help` prints the synopsis", &out, b"Usage: fw");
+        assert_eq!(last_exit(), 0, "`fw help` is a request that was granted");
+
+        // Bare `fw` is caught by the `"" | "status"` arm ahead of the catch-all,
+        // so it must still be the status report and not a complaint. That is
+        // what makes `end_help_arm` safe to add to an arm `""` cannot reach.
+        let out = capture_command("fw");
+        assert_output_lacks(
+            "bare `fw` is still the firewall status",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 0, "bare `fw` reports status, not failure");
+
+        let out = capture_command("container zznosuchsub");
+        assert_output_contains(
+            "container names the subcommand it does not know",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 1, "container: an unknown subcommand errors");
+
+        let out = capture_command("container help");
+        assert_output_contains(
+            "`container help` prints the synopsis",
+            &out,
+            b"Usage: container",
+        );
+        assert_eq!(
+            last_exit(),
+            0,
+            "`container help` is a request that was granted"
+        );
+
+        // Shape 3 -- a guard branch that printed a synopsis because an operand
+        // was a word it could not use, and then exited 0. Each is paired with a
+        // control using a word it *can* use, so the rung cannot pass by having
+        // broken the command outright. The controls assert only the absence of
+        // the synopsis: the ids are deliberately ones that do not exist, so the
+        // command is expected to fail afterwards -- for the real reason.
+        let refusal_cases: &[(&str, &str)] = &[
+            ("wsnap snap 999 zznosuch", "wsnap snap 999 left"),
+            ("quicknote color 999 zznosuch", "quicknote color 999 yellow"),
+            ("appnotify display zzapp", "appnotify display zzapp banner"),
+            (
+                "sysresource setalert zznosuch 50",
+                "sysresource setalert cpu 50",
+            ),
+            (
+                "usagetime category zzapp zznosuch",
+                "usagetime category zzapp dev",
+            ),
+            ("startupopt category zznosuch", "startupopt category kernel"),
+        ];
+        for (bad, control) in refusal_cases {
+            let out = capture_command(bad);
+            assert_output_contains("an unusable operand is reported", &out, b"Usage:");
+            assert_eq!(last_exit(), 1, "an unusable operand must report failure");
+
+            let out = capture_command(control);
+            assert_output_lacks("a usable operand is not refused", &out, b"Usage:");
+        }
+
+        // Shape 4 -- the status was set, but *above* the line explaining it.
+        // Harmless at run time and invisible to a reader, which is why both had
+        // survived: only the gate's forward walk from the synopsis noticed. The
+        // repair reorders rather than adds, so what this asserts is that the
+        // reorder did not lose the status on the way.
+        let out = capture_command("overlay zznosuchsub");
+        assert_output_contains(
+            "overlay names the subcommand it does not know",
+            &out,
+            b"Unknown overlay subcommand",
+        );
+        assert_eq!(last_exit(), 1, "overlay: an unknown subcommand is an error");
+
+        let out = capture_command("container network zznosuchsub");
+        assert_output_contains(
+            "container network names the action it does not know",
+            &out,
+            b"Unknown network action",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "container network: an unknown action errors"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -19967,10 +20108,13 @@ fn cmd_integrity(args: &str) {
         }
 
         _ => {
-            shell_println!(
-                "Unknown subcommand '{}'. Use: baseline, verify, stats, clear, list",
-                subcommand
-            );
+            // The list is printed unconditionally because bare `integrity` is
+            // a request for exactly it; naming the offending word is
+            // `end_help_arm`'s job, and it does that only when there *is*
+            // one. The old message told someone who typed no subcommand at
+            // all that `''` was unknown, and then exited 0 either way.
+            shell_println!("Use: baseline, verify, stats, clear, list");
+            end_help_arm("integrity", subcommand);
         }
     }
 }
@@ -20294,10 +20438,12 @@ fn cmd_fhist(args: &str) {
         },
 
         _ => {
+            // Same shape as `integrity` above: the list answers bare `fhist`,
+            // and `end_help_arm` names the bad word only when one was typed.
             shell_println!(
-                "Unknown subcommand '{}'. Use: show, restore, record, clear, stats, list, enable, disable, autoversion",
-                subcommand
+                "Use: show, restore, record, clear, stats, list, enable, disable, autoversion"
             );
+            end_help_arm("fhist", subcommand);
         }
     }
 }
@@ -20468,6 +20614,7 @@ fn cmd_assoc(args: &str) {
                 "Unknown subcommand '{}'. Use: list, show, add, remove, lookup, stats",
                 parts[0]
             );
+            set_exit(1);
         }
     }
 }
@@ -21084,6 +21231,7 @@ fn cmd_intercept(args: &str) {
                 "Unknown subcommand '{}'. Use: list, stats, add-ro, add-nodelete, add-audit, enable, disable, remove",
                 parts[0]
             );
+            set_exit(1);
         }
     }
 }
@@ -21609,10 +21757,10 @@ fn cmd_overlay(args: &str) {
 
         _ => {
             shell_println!("Unknown overlay subcommand: {}", parts[0]);
-            set_exit(1);
             shell_println!(
                 "Usage: overlay <list|create|destroy|ls|cat|write|rm|which|whiteouts|stats|reset|commit>"
             );
+            set_exit(1);
         }
     }
 }
@@ -21885,6 +22033,7 @@ fn cmd_tmpwatch(args: &str) {
             shell_println!(
                 "Usage: tmpwatch [--run|--dry-run|--status|--max-age N|--add DIR|--remove DIR|--exclude PREFIX|--enable|--disable|--init]"
             );
+            set_exit(1);
         }
     }
 }
@@ -22222,6 +22371,7 @@ fn cmd_audit(args: &str) {
             shell_println!(
                 "Usage: audit [enable|disable|log|add-rule|rm-rule|rules|search|clear|stats]"
             );
+            set_exit(1);
         }
     }
 }
@@ -23159,6 +23309,7 @@ fn cmd_fstx(args: &str) {
             shell_println!(
                 "Usage: fstx <begin|write|remove|mkdir|rename|symlink|commit|rollback|info|list|delete> [args...]"
             );
+            set_exit(1);
         }
     }
 }
@@ -23356,6 +23507,7 @@ fn cmd_changetrack(args: &str) {
             shell_println!(
                 "Usage: ct <register|unregister|changes|peek|reset|info|list|flush> [args...]"
             );
+            set_exit(1);
         }
     }
 }
@@ -23684,6 +23836,7 @@ fn cmd_fcompress(args: &str) {
             shell_println!(
                 "Usage: fc <enable|disable|status|algo|minsize|rule|info|compress|decompress>"
             );
+            set_exit(1);
         }
     }
 }
@@ -26596,10 +26749,13 @@ fn cmd_prefetch(args: &str) {
                     prefetch::advise(&path, advice);
                     shell_println!("Advised {}: {}", path.display(), advice.label());
                 }
-                None => shell_println!(
-                    "Unknown advice: {} (use: normal, seq, rand, willneed, dontneed)",
-                    parts[2]
-                ),
+                None => {
+                    shell_println!(
+                        "Unknown advice: {} (use: normal, seq, rand, willneed, dontneed)",
+                        parts[2]
+                    );
+                    set_exit(1);
+                }
             }
         }
         "load" | "fetch" => {
@@ -30105,6 +30261,7 @@ fn cmd_sidebar(args: &str) {
                         "Unknown section: {}. Use: quickaccess, thispc, network, recent, tags",
                         section
                     );
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: sidebar toggle <section>");
@@ -31705,10 +31862,13 @@ fn cmd_theme(args: &str) {
                     theme::set_mode(m);
                     shell_println!("Mode set: {}", m.label());
                 }
-                None => shell_println!(
-                    "Unknown mode: {} (use: light, dark, highcontrast)",
-                    mode_str
-                ),
+                None => {
+                    shell_println!(
+                        "Unknown mode: {} (use: light, dark, highcontrast)",
+                        mode_str
+                    );
+                    set_exit(1);
+                }
             }
         }
         "accent" => {
@@ -34083,6 +34243,7 @@ fn cmd_display(args: &str) {
                 shell_println!(
                     "Usage: display orient <id> <landscape|portrait|landscape-flip|portrait-flip>"
                 );
+                set_exit(1);
             }
         }
         "primary" => {
@@ -35102,6 +35263,7 @@ fn cmd_a11y(args: &str) {
                 shell_println!(
                     "Usage: a11y regtool <kind> [name] (kinds: reader/mag/osk/voice/switch/eye/auto/custom)"
                 );
+                set_exit(1);
             }
         }
         "unregtool" => {
@@ -35965,6 +36127,7 @@ fn cmd_winsnap(args: &str) {
                 shell_println!(
                     "Usage: wsnap snap <wid> <left|right|top|bottom|tl|tr|bl|br|max|l3|c3|r3|restore>"
                 );
+                set_exit(1);
             }
         }
         "unsnap" => {
@@ -37572,6 +37735,7 @@ fn cmd_partmgr(args: &str) {
                 shell_println!(
                     "Usage: pmgr create <disk_id> <start_mb> <size_mb> [fstype] [label]"
                 );
+                set_exit(1);
             } else {
                 match partmgr::create_partition(
                     did,
@@ -37655,6 +37819,7 @@ fn cmd_partmgr(args: &str) {
                 shell_println!(
                     "Usage: pmgr format <disk_id> <part_id> <ext4|fat32|ntfs|btrfs|swap|efi>"
                 );
+                set_exit(1);
             }
         }
         "label" => {
@@ -37698,6 +37863,7 @@ fn cmd_partmgr(args: &str) {
                 shell_println!(
                     "Usage: pmgr flag <disk> <part> <boot|esp|hidden|readonly|system> [off]"
                 );
+                set_exit(1);
             }
         }
         "mount" => {
@@ -38059,6 +38225,7 @@ fn cmd_useracct(args: &str) {
                     shell_println!(
                         "Usage: useracct add <username> <password> [admin|standard|guest]"
                     );
+                    set_exit(1);
                 } else {
                     let name = parts[1];
                     let pass = parts[2];
@@ -38726,6 +38893,7 @@ fn cmd_progmgr(args: &str) {
                     shell_println!(
                         "Usage: progmgr uninstall <app_id> [full|keepfiles|keepsettings|keepall]"
                     );
+                    set_exit(1);
                 } else {
                     let opt = match parts.get(2).copied().unwrap_or("full") {
                         "keepfiles" | "keep-files" => progmgr::UninstallOption::KeepFiles,
@@ -38751,6 +38919,7 @@ fn cmd_progmgr(args: &str) {
                     shell_println!(
                         "Usage: progmgr priority <app_id> <idle|below|normal|above|high|rt>"
                     );
+                    set_exit(1);
                 } else {
                     let prio = match parts[2] {
                         "idle" => progmgr::PriorityLevel::Idle,
@@ -38911,6 +39080,7 @@ fn cmd_progmgr(args: &str) {
                     shell_println!(
                         "Usage: progmgr notifcfg <app_id> <name> <show|sound|banner|lock> <value>"
                     );
+                    set_exit(1);
                 } else {
                     let val = parts.get(4).copied().unwrap_or("");
                     match parts[3] {
@@ -39013,6 +39183,7 @@ fn cmd_progmgr(args: &str) {
                     shell_println!(
                         "Usage: progmgr snap <app_id> <name> [full|settings|data] [parent_id]"
                     );
+                    set_exit(1);
                 } else {
                     let scope = match parts.get(3).copied().unwrap_or("full") {
                         "settings" => progmgr::SnapshotScope::SettingsOnly,
@@ -39372,6 +39543,7 @@ fn cmd_scriptlang(args: &str) {
                 shell_println!(
                     "Usage: scriptlang register <name> <version> <path> [type] [sandbox]"
                 );
+                set_exit(1);
             } else {
                 let etype = match parts.get(4).copied().unwrap_or("interp") {
                     "jit" => scriptlang::EngineType::Jit,
@@ -39503,6 +39675,7 @@ fn cmd_scriptlang(args: &str) {
                 shell_println!(
                     "Usage: scriptlang limits <engine_id> <max_memory_mb> <max_time_ms>"
                 );
+                set_exit(1);
             } else {
                 match (
                     parts[1].parse::<u64>(),
@@ -40141,6 +40314,7 @@ fn cmd_bootcfg(args: &str) {
                 shell_println!(
                     "Usage: bootcfg add <name> <kernel_path> <params...> [--type os|linux|windows|recovery]"
                 );
+                set_exit(1);
             } else {
                 let kind = if parts.contains(&"linux") {
                     bootcfg::EntryKind::Linux
@@ -40491,6 +40665,7 @@ fn cmd_swapcfg(args: &str) {
                 shell_println!(
                     "Usage: swapcfg add <path> <size_mb> [file|partition|zram] [priority]"
                 );
+                set_exit(1);
             } else {
                 match parts[2].parse::<u64>() {
                     Ok(mb) => {
@@ -41265,9 +41440,12 @@ fn cmd_fstune(args: &str) {
                 set_exit(1);
             }
         },
-        _ => shell_println!(
-            "Usage: fstune <list|info|create|remove|workload|blocksize|journal|commit|reserved|inode|alloc|discard|checksum|compress|apply|tradeoffs|stats|init|test>"
-        ),
+        _ => {
+            shell_println!(
+                "Usage: fstune <list|info|create|remove|workload|blocksize|journal|commit|reserved|inode|alloc|discard|checksum|compress|apply|tradeoffs|stats|init|test>"
+            );
+            set_exit(1);
+        }
     }
 }
 
@@ -41598,9 +41776,12 @@ fn cmd_certmgr(args: &str) {
                 set_exit(1);
             }
         },
-        _ => shell_println!(
-            "Usage: certmgr <list|info|import|remove|san|service|status|autorenew|pin|renew|threshold|request|complete|requests|find|stats|init|test>"
-        ),
+        _ => {
+            shell_println!(
+                "Usage: certmgr <list|info|import|remove|san|service|status|autorenew|pin|renew|threshold|request|complete|requests|find|stats|init|test>"
+            );
+            set_exit(1);
+        }
     }
 }
 
@@ -42010,9 +42191,12 @@ fn cmd_installer(args: &str) {
                 set_exit(1);
             }
         },
-        _ => shell_println!(
-            "Usage: installer <list|info|create|remove|keyboard|scaling|workload|partition|check|install|firstboot|timezone|user|browser|theme|wifi|audio|complete|stats|init|test>"
-        ),
+        _ => {
+            shell_println!(
+                "Usage: installer <list|info|create|remove|keyboard|scaling|workload|partition|check|install|firstboot|timezone|user|browser|theme|wifi|audio|complete|stats|init|test>"
+            );
+            set_exit(1);
+        }
     }
 }
 
@@ -42203,9 +42387,12 @@ fn cmd_timezone(args: &str) {
                 set_exit(1);
             }
         },
-        _ => shell_println!(
-            "Usage: timezone <show|set|list|regions|detect|ntp|servers|addntp|rmntp|timefmt|datefmt|weekstart|seconds|showdate|stats|init|test>"
-        ),
+        _ => {
+            shell_println!(
+                "Usage: timezone <show|set|list|regions|detect|ntp|servers|addntp|rmntp|timefmt|datefmt|weekstart|seconds|showdate|stats|init|test>"
+            );
+            set_exit(1);
+        }
     }
 }
 
@@ -42493,9 +42680,12 @@ fn cmd_fontmgr(args: &str) {
                 set_exit(1);
             }
         },
-        _ => shell_println!(
-            "Usage: fontmgr <list|families|info|install|uninstall|enable|disable|default|size|hint|antialias|dpi|find|stats|init|test>"
-        ),
+        _ => {
+            shell_println!(
+                "Usage: fontmgr <list|families|info|install|uninstall|enable|disable|default|size|hint|antialias|dpi|find|stats|init|test>"
+            );
+            set_exit(1);
+        }
     }
 }
 
@@ -45875,6 +46065,7 @@ fn cmd_appnotify(args: &str) {
                 shell_println!(
                     "Usage: appnotify display <app-id> <banner-pane|pane|banner|suppress>"
                 );
+                set_exit(1);
             } else {
                 let mode = match parts[2] {
                     "banner-pane" | "both" => appnotify::DisplayMode::BannerAndPane,
@@ -46021,6 +46212,7 @@ fn cmd_appnotify(args: &str) {
                 shell_println!(
                     "Usage: appnotify type-sound <app-id> <type-key> <default|silent|filename>"
                 );
+                set_exit(1);
             } else {
                 let snd = match parts[3] {
                     "default" => Some(appnotify::SoundChoice::SystemDefault),
@@ -46612,6 +46804,7 @@ fn cmd_wakesensor(args: &str) {
                 shell_println!(
                     "Usage: wakesensor sensitivity <camera|mic> <low|medium|high|custom>"
                 );
+                set_exit(1);
             } else {
                 let sensor = match parts[1] {
                     "camera" | "cam" => Some(wakesensor::SensorType::Camera),
@@ -47030,6 +47223,7 @@ fn cmd_netsettings(args: &str) {
                     shell_println!(
                         "Usage: netsettings ipv4 <iface> <auto|manual> <addr> [mask] [gw]"
                     );
+                    set_exit(1);
                 } else {
                     let method = match parts[2] {
                         "auto" | "dhcp" => netsettings::IpMethod::Auto,
@@ -47061,6 +47255,7 @@ fn cmd_netsettings(args: &str) {
                     shell_println!(
                         "Usage: netsettings ipv6 <iface> <auto|manual|off> [addr] [prefix] [gw]"
                     );
+                    set_exit(1);
                 } else {
                     let method = match parts[2] {
                         "auto" | "slaac" => netsettings::IpMethod::Auto,
@@ -49050,6 +49245,7 @@ fn cmd_nightlight(args: &str) {
                             "Unknown mode: {}. Options: manual, scheduled, sunset",
                             mode
                         );
+                        set_exit(1);
                     }
                 }
             } else {
@@ -49379,6 +49575,7 @@ fn cmd_tasksched(args: &str) {
                     shell_println!(
                         "Usage: schtask create <name> <command> [daily|weekly|once|interval|boot|login]"
                     );
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -49469,6 +49666,7 @@ fn cmd_tasksched(args: &str) {
                                 "Unknown day: {}. Use sun/mon/tue/wed/thu/fri/sat",
                                 day_str
                             );
+                            set_exit(1);
                         }
                     } else {
                         shell_println!("Invalid task ID.");
@@ -49478,6 +49676,7 @@ fn cmd_tasksched(args: &str) {
                     shell_println!(
                         "Usage: schtask day <id> <sun|mon|tue|wed|thu|fri|sat> <on|off>"
                     );
+                    set_exit(1);
                 }
             }
             case(&parts);
@@ -51979,10 +52178,13 @@ fn cmd_defaultapps(args: &str) {
                             set_exit(1);
                         }
                     },
-                    None => shell_println!(
-                        "Unknown category '{}'. Try: browser email files editor terminal image video music pdf archive",
-                        cat_name
-                    ),
+                    None => {
+                        shell_println!(
+                            "Unknown category '{}'. Try: browser email files editor terminal image video music pdf archive",
+                            cat_name
+                        );
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: defaultapps category <type> <app> [uid]");
@@ -52494,6 +52696,7 @@ fn cmd_fwsettings(args: &str) {
                 shell_println!(
                     "Usage: firewall add <name> <in|out|both> <tcp|udp|icmp|any> <port> <allow|block>"
                 );
+                set_exit(1);
             }
         }
         "rm" | "remove" => {
@@ -52990,6 +53193,7 @@ fn cmd_notifprefs(args: &str) {
                 shell_println!(
                     "Usage: notifprefs priority <app> <critical|high|normal|low|silent>"
                 );
+                set_exit(1);
             }
         }
         "sound" => match parts.get(1).copied() {
@@ -53006,9 +53210,12 @@ fn cmd_notifprefs(args: &str) {
                 let _ = notifprefs::set_app_sound(app, val);
                 shell_println!("Sound for '{}': {}", app, val);
             }
-            _ => shell_println!(
-                "Usage: notifprefs sound <on|off> OR notifprefs sound <app> <on|off>"
-            ),
+            _ => {
+                shell_println!(
+                    "Usage: notifprefs sound <on|off> OR notifprefs sound <app> <on|off>"
+                );
+                set_exit(1);
+            }
         },
         "position" | "pos" => match parts.get(1).copied() {
             Some("tr") | Some("topright") => {
@@ -64230,9 +64437,12 @@ fn cmd_nat(args: &str) {
                                 }
                             }
                         }
-                        _ => shell_println!(
-                            "Invalid arguments. Usage: nat forward add <tcp|udp> <host_port> <ip> <port> <ns_id>"
-                        ),
+                        _ => {
+                            shell_println!(
+                                "Invalid arguments. Usage: nat forward add <tcp|udp> <host_port> <ip> <port> <ns_id>"
+                            );
+                            set_exit(1);
+                        }
                     }
                 }
                 "del" | "rm" => {
@@ -68014,6 +68224,7 @@ fn cmd_appsandbox(args: &str) {
                 shell_println!(
                     "Usage: sandbox create <app_name> [untrusted|low|standard|elevated|system]"
                 );
+                set_exit(1);
             } else {
                 let trust = match trust_str {
                     "untrusted" | "u" => appsandbox::TrustLevel::Untrusted,
@@ -77449,6 +77660,7 @@ fn cmd_quicknote(args: &str) {
                 shell_println!(
                     "Usage: quicknote color <id> <yellow|blue|green|pink|purple|orange|white>"
                 );
+                set_exit(1);
             }
         }
         "pin" => {
@@ -78631,6 +78843,7 @@ fn cmd_startupopt(args: &str) {
                 shell_println!(
                     "Usage: startupopt category <firmware|bootloader|kernel|drivers|services|session|desktop|autostart>"
                 );
+                set_exit(1);
             }
         }
         "begin" => {
@@ -78867,6 +79080,7 @@ fn cmd_usagetime(args: &str) {
                 shell_println!(
                     "Usage: usagetime category <app> <productivity|communication|entertainment|social|utility|dev|other>"
                 );
+                set_exit(1);
             }
         }
         "reset" => match usagetime::reset_usage() {
@@ -80043,6 +80257,7 @@ fn cmd_sysresource(args: &str) {
                 shell_println!(
                     "Usage: sysresource setalert <cpu|memory|swap|disk|network|gpu> <threshold%>"
                 );
+                set_exit(1);
             }
         }
         "avg" => {
@@ -87985,6 +88200,7 @@ fn cmd_kernlog(args: &str) {
             shell_println!(
                 "Usage: kernlog [dmesg|log <level> <source> <msg>|tail [n]|filter <level|source> <val>|clear|stats|test]"
             );
+            end_help_arm("kernlog", sub);
         }
     }
 }
@@ -88129,6 +88345,7 @@ fn cmd_coredump(args: &str) {
             shell_println!(
                 "Usage: coredump [list|get <id>|record <pid> <name> <size>|delete <id>|cleanup [keep]|enable|disable|stats|test]"
             );
+            end_help_arm("coredump", sub);
         }
     }
 }
@@ -88366,6 +88583,7 @@ fn cmd_timesync(args: &str) {
             shell_println!(
                 "Usage: timesync [status|list|add <addr> [stratum]|remove <id>|sync|history|stats|test]"
             );
+            end_help_arm("timesync", sub);
         }
     }
 }
@@ -88501,6 +88719,7 @@ fn cmd_kmod(args: &str) {
             shell_println!(
                 "Usage: kmod [list|info <name>|load <name> [type] [size]|unload <name>|param <mod> <key> <val>|stats|test]"
             );
+            end_help_arm("kmod", sub);
         }
     }
 }
@@ -88607,6 +88826,7 @@ fn cmd_entropy(args: &str) {
             shell_println!(
                 "Usage: entropy [status|sources|add <bits> [source]|drain <bits>|reseed|stats|test]"
             );
+            end_help_arm("entropy", sub);
         }
     }
 }
@@ -88737,6 +88957,7 @@ fn cmd_iosched(args: &str) {
             shell_println!(
                 "Usage: iosched [list|get <dev>|set <dev> <algo>|depth <dev> <n>|add <dev> [algo]|default <algo>|stats|test]"
             );
+            end_help_arm("iosched", sub);
         }
     }
 }
@@ -88993,6 +89214,7 @@ fn cmd_groupmgr(args: &str) {
             shell_println!(
                 "Usage: groupmgr [list|get <gid|name>|create <gid> <name> [type]|delete <gid>|adduser <gid> <uid>|rmuser <gid> <uid>|user <uid>|stats|test]"
             );
+            end_help_arm("groupmgr", sub);
         }
     }
 }
@@ -89119,6 +89341,7 @@ fn cmd_sysrq(args: &str) {
             shell_println!(
                 "Usage: sysrq [list|trigger <key>|register <key> <desc>|unregister <key>|enable <key>|disable <key>|mask [val]|stats|test]"
             );
+            end_help_arm("sysrq", sub);
         }
     }
 }
@@ -89251,6 +89474,7 @@ fn cmd_telemetry(args: &str) {
             shell_println!(
                 "Usage: telemetry [list|query <name>|record <name> <value>|register <name> [type] [unit]|remove <name>|export|stats|test]"
             );
+            end_help_arm("telemetry", sub);
         }
     }
 }
@@ -89345,6 +89569,7 @@ fn cmd_fscache(args: &str) {
             shell_println!(
                 "Usage: fscache [list|policy <dev> <wb|wt|wa|none>|readahead <dev> <pages>|flush <dev>|stats|test]"
             );
+            end_help_arm("fscache", sub);
         }
     }
 }
@@ -89458,6 +89683,7 @@ fn cmd_nameservice(args: &str) {
             shell_println!(
                 "Usage: nameservice [status|hostname [name]|resolve <host>|hosts|add <addr> <name>|remove <name>|flush|test]"
             );
+            end_help_arm("nameservice", sub);
         }
     }
 }
@@ -89615,6 +89841,7 @@ fn cmd_oomkiller(args: &str) {
             shell_println!(
                 "Usage: oomkiller [list|score <pid>|adjust <pid> <adj>|exempt <pid> [true|false]|victim|kill <pid>|policy <kill|panic|reap|disabled>|history|stats|test]"
             );
+            end_help_arm("oomkiller", sub);
         }
     }
 }
@@ -89730,6 +89957,7 @@ fn cmd_blktrace(args: &str) {
             shell_println!(
                 "Usage: blktrace [list|start <dev>|stop <dev>|dump <dev>|clear <dev>|stats|test]"
             );
+            end_help_arm("blktrace", sub);
         }
     }
 }
@@ -89860,6 +90088,7 @@ fn cmd_cgroupfs(args: &str) {
             shell_println!(
                 "Usage: cgroupfs [list|create <path>|delete <path>|cpu <path> <weight>|mem <path> <bytes>|addpid <path> <pid>|stats|test]"
             );
+            end_help_arm("cgroupfs", sub);
         }
     }
 }
@@ -89993,6 +90222,7 @@ fn cmd_secpolicy(args: &str) {
             shell_println!(
                 "Usage: secpolicy [list|mode [disabled|permissive|enforcing]|check <subj> <obj> <action>|label <id> <type> [label]|stats|test]"
             );
+            end_help_arm("secpolicy", sub);
         }
     }
 }
@@ -90106,6 +90336,7 @@ fn cmd_procstat(args: &str) {
             shell_println!(
                 "Usage: procstat [list|get <pid>|topcpu [n]|topmem [n]|register <pid> <name>|stats|test]"
             );
+            end_help_arm("procstat", sub);
         }
     }
 }
@@ -90208,6 +90439,7 @@ fn cmd_kernparam(args: &str) {
             shell_println!(
                 "Usage: kernparam [list|get <key>|set <key> <val>|remove <key>|cmdline|unconsumed|stats|test]"
             );
+            end_help_arm("kernparam", sub);
         }
     }
 }
@@ -90354,6 +90586,7 @@ fn cmd_tracemon(args: &str) {
             shell_println!(
                 "Usage: tracemon [list|enable <name>|disable <name>|on|off|read [n]|clear|filter <pid|none>|stats|test]"
             );
+            end_help_arm("tracemon", sub);
         }
     }
 }
@@ -90490,6 +90723,7 @@ fn cmd_authbroker(args: &str) {
             shell_println!(
                 "Usage: authbroker [list|auth <principal> [method]|unlock <principal>|grant <principal> <resource>|grants [principal]|revoke <id>|stats|test]"
             );
+            end_help_arm("authbroker", sub);
         }
     }
 }
@@ -90681,6 +90915,7 @@ fn cmd_prociso(args: &str) {
             shell_println!(
                 "Usage: prociso [list|create <type> <name>|delete <id>|attach <pid> <ns>|detach <pid> <ns>|container ...|stats|test]"
             );
+            end_help_arm("prociso", sub);
         }
     }
 }
@@ -90817,6 +91052,7 @@ fn cmd_dmevent(args: &str) {
             shell_println!(
                 "Usage: dmevent [devices|events [n]|notify <type> <subsys> <path> <name>|rules|clear|stats|test]"
             );
+            end_help_arm("dmevent", sub);
         }
     }
 }
@@ -90923,6 +91159,7 @@ fn cmd_pftrack(args: &str) {
             shell_println!(
                 "Usage: pftrack [list|top [n]|hotspots [n]|recent [n]|clear|stats|test]"
             );
+            end_help_arm("pftrack", sub);
         }
     }
 }
@@ -91066,6 +91303,7 @@ fn cmd_ipclog(args: &str) {
             shell_println!(
                 "Usage: ipclog [channels|recent [n]|pid <pid>|channel <id>|on|off|clear|stats|test]"
             );
+            end_help_arm("ipclog", sub);
         }
     }
 }
@@ -91279,6 +91517,7 @@ fn cmd_shmem(args: &str) {
             shell_println!(
                 "Usage: shmem [list|create <name> <size>|delete <id>|attach <id> <pid>|detach <id> <pid>|pid <pid>|stats|test]"
             );
+            end_help_arm("shmem", sub);
         }
     }
 }
@@ -91639,6 +91878,7 @@ fn cmd_fdtable(args: &str) {
             shell_println!(
                 "Usage: fdtable [list|show <pid>|open <pid> <path>|close <pid> <fd>|dup <pid> <fd>|stats|test]"
             );
+            end_help_arm("fdtable", sub);
         }
     }
 }
@@ -91751,6 +91991,7 @@ fn cmd_rcustat(args: &str) {
             shell_println!(
                 "Usage: rcustat [cpus|gp [n]|begin [flavor]|end [callbacks]|stall [cpu]|stats|test]"
             );
+            end_help_arm("rcustat", sub);
         }
     }
 }
@@ -91868,6 +92109,7 @@ fn cmd_kconsole(args: &str) {
             shell_println!(
                 "Usage: kconsole [list|active|switch <id>|create <name> [cols] [rows]|resize <id> <cols> <rows>|stats|test]"
             );
+            end_help_arm("kconsole", sub);
         }
     }
 }
@@ -92001,6 +92243,7 @@ fn cmd_signalq(args: &str) {
             shell_println!(
                 "Usage: signalq [list|pending <pid>|send <pid> <sig>|deliver <pid>|block <pid> <sig>|stats|test]"
             );
+            end_help_arm("signalq", sub);
         }
     }
 }
@@ -92161,6 +92404,7 @@ fn cmd_memcg(args: &str) {
             shell_println!(
                 "Usage: memcg [list|show <path>|create <path>|limit <path> <bytes>|charge <path> <bytes>|uncharge <path> <bytes>|overlimit|stats|test]"
             );
+            end_help_arm("memcg", sub);
         }
     }
 }
@@ -92623,6 +92867,7 @@ fn cmd_epollstat(args: &str) {
             shell_println!(
                 "Usage: epollstat [list|create <pid> [max]|destroy <id>|pid <pid>|stats|test]"
             );
+            end_help_arm("epollstat", sub);
         }
     }
 }
@@ -92744,6 +92989,7 @@ fn cmd_vmmap(args: &str) {
             shell_println!(
                 "Usage: vmmap [list|show <pid>|map <pid> <start> <size>|unmap <pid> <start>|stats|test]"
             );
+            end_help_arm("vmmap", sub);
         }
     }
 }
@@ -92929,6 +93175,7 @@ fn cmd_netfilter(args: &str) {
             shell_println!(
                 "Usage: netfilter [rules|chain <name>|conntrack|add <chain> <action> <desc>|stats|test]"
             );
+            end_help_arm("netfilter", sub);
         }
     }
 }
@@ -93216,6 +93463,7 @@ fn cmd_writeback(args: &str) {
             shell_println!(
                 "Usage: writeback [devices|flushers|dirty <dev> <n>|flush <dev>|threshold [pct]|stats|test]"
             );
+            end_help_arm("writeback", sub);
         }
     }
 }
@@ -93296,6 +93544,7 @@ fn cmd_iolatency(args: &str) {
             shell_println!(
                 "Usage: iolatency [devices|histogram <dev>|slow [n]|threshold [ns]|stats|test]"
             );
+            end_help_arm("iolatency", sub);
         }
     }
 }
@@ -93515,6 +93764,7 @@ fn cmd_kprobes(args: &str) {
             shell_println!(
                 "Usage: kprobes [list|register <name> <addr>|unregister <id>|enable <id>|disable <id>|type <t>|stats|test]"
             );
+            end_help_arm("kprobes", sub);
         }
     }
 }
@@ -100944,10 +101194,13 @@ fn cmd_viewstate(args: &str) {
                         }
                     }
                 }
-                None => shell_println!(
-                    "Unknown mode '{}'. Use: details, list, large, medium, small, tiles, content",
-                    mode_str
-                ),
+                None => {
+                    shell_println!(
+                        "Unknown mode '{}'. Use: details, list, large, medium, small, tiles, content",
+                        mode_str
+                    );
+                    set_exit(1);
+                }
             }
         }
         "remove" => {
@@ -105235,6 +105488,7 @@ fn cmd_firewall(args: &str) {
                 );
             }
             case();
+            end_help_arm("fw", cmd);
         }
     }
 }
@@ -109346,6 +109600,7 @@ fn cmd_container(args: &str) {
                 shell_println!("Aliases: ct");
             }
             case();
+            end_help_arm("container", cmd);
         }
     }
 }
@@ -109623,10 +109878,10 @@ fn cmd_container_network(parts: &[&str]) {
         }
         other => {
             shell_println!("Unknown network action '{}'", other);
-            set_exit(1);
             shell_println!(
                 "Usage: container network <create|ls|rm|inspect|prune|resolve|connect|disconnect> NAME [--subnet CIDR] [--gateway IP]"
             );
+            set_exit(1);
         }
     }
 }
@@ -110013,6 +110268,7 @@ fn cmd_docker(args: &str) {
             shell_println!();
             shell_println!("Native equivalents: `oci` (images) and `container`/`ct` (lifecycle).");
             shell_println!("Alias: dk");
+            end_help_arm("docker", sub);
         }
     }
 }

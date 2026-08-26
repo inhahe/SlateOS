@@ -95,8 +95,8 @@ use std::time::Duration;
 use guiremote::client::Transport;
 
 use crate::{
-    DISPLAY_VAR, Dispatch, Error, Event, EventLoop, EventResponse, Link, RenderTree, Window,
-    WindowBuilder,
+    DISPLAY_VAR, Dispatch, Error, Event, EventLoop, EventResponse, Link, PixelFormat, RenderTree,
+    Window, WindowBuilder,
 };
 
 // ---------------------------------------------------------------------------
@@ -146,6 +146,55 @@ pub struct Reloads {
     pub appearance: bool,
     /// `input.yaml` was rewritten.
     pub input: bool,
+}
+
+/// A picture an application wants the compositor to be holding, or to stop
+/// holding.
+///
+/// [`RenderCommand::Image`] names an `image_id` and carries no pixels — a
+/// protocol that shipped the pixels with the draw would re-send a megabyte
+/// sixty times a second to keep a still picture on screen. The pixels go up
+/// once, by a different route, and an id the compositor has never been given
+/// bytes for **draws nothing, silently**. That is the whole defect behind
+/// `known-issues.md`
+/// `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING`: several
+/// applications in this tree emit `Image` commands for ids nothing ever
+/// uploaded, and every one of them has passing tests over a window that shows
+/// blank where a picture should be.
+///
+/// One ordered list rather than an upload method and a separate drop method,
+/// because the order between the two is load-bearing. A picture viewer paging
+/// to the next photograph must give the old one back *before* it asks for the
+/// new one, or a link whose image budget fits one full-screen picture is
+/// refused the second — see `design-decisions.md` §557, which settled the same
+/// question for the desktop wallpaper. Two methods could not express "this
+/// drop happens before that upload" without a rule nobody would remember.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageChange {
+    /// Store these pixels under `id`, replacing whatever was there.
+    ///
+    /// The fields are [`WindowHandle::upload_image`]'s, in its order.
+    Upload {
+        /// The application's own number for the picture, scoped to its window.
+        id: u64,
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// Bytes per row, which may exceed `width * 4` for a crop out of a
+        /// larger buffer. A picture decoded by `imagecodec` is never padded,
+        /// so it passes `width * 4`.
+        stride: u32,
+        /// How to read the bytes.
+        format: PixelFormat,
+        /// `stride * height` bytes of picture.
+        bytes: Vec<u8>,
+    },
+    /// Give the pixels under `id` back to the link's image budget.
+    ///
+    /// Dropping an id that was never uploaded succeeds, so an application
+    /// cleaning up need not remember whether its last upload worked.
+    Drop(u64),
 }
 
 /// The part of an application the toolkit cannot write for it.
@@ -226,6 +275,36 @@ pub trait App {
         Reloads::default()
     }
 
+    /// Which pictures the compositor should be holding that it is not yet, and
+    /// which it may stop holding, since last asked.
+    ///
+    /// Draining, not peeking, on the same terms as [`App::take_reloads`]: the
+    /// loop asks and sends whatever comes back, so an implementation that does
+    /// not clear its queue re-uploads the same picture before every frame.
+    ///
+    /// **Asked immediately after [`App::render`] and before the frame goes
+    /// out**, so a picture queued *during* a render reaches the compositor
+    /// before the frame that names it. The reverse order is the defect this
+    /// hook exists to prevent: a frame naming an id whose pixels are still in
+    /// flight draws nothing at all, and — because the next frame usually does
+    /// have them — shows up as a picture that flickers in one refresh late,
+    /// which nobody attributes to ordering.
+    ///
+    /// Most applications leave this at its default. It exists for the ones that
+    /// draw something other than shapes and text: a picture viewer, a file
+    /// manager's thumbnails, a browser.
+    ///
+    /// Asked once per *frame*, not once per event — unlike
+    /// [`App::take_reloads`], which is drained per event because a setting
+    /// written by the last click before a window closes would otherwise never
+    /// be announced. A picture has no such fate: it exists to be drawn, so a
+    /// change with no frame behind it has nothing to be early for, and an
+    /// upload left queued when the application exits is freed with the window
+    /// anyway.
+    fn take_images(&mut self) -> Vec<ImageChange> {
+        Vec::new()
+    }
+
     /// Draw the current state at the current window size.
     ///
     /// The size is the one the compositor last reported, so a frame drawn
@@ -288,6 +367,10 @@ pub fn drive<T: Transport, A: App + ?Sized>(
     // frame, and a window that has never been drawn is blank.
     let (width, height) = client_size(events, window, app);
     let first = app.render(width, height);
+    // Between the render and the submit, never outside the pair: see
+    // `App::take_images`. An application that queues a picture while drawing
+    // still gets its pixels up before the frame that names them.
+    apply_images(events, window, app.take_images())?;
     events.submit(window, &first)?;
     // Armed before the first park, so an application whose clock is its only
     // input still receives one. Deferring this to the first `Settled` would
@@ -359,6 +442,10 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             }
             let (width, height) = client_size(events, window, app);
             let tree = app.render(width, height);
+            if let Err(e) = apply_images(events, window, app.take_images()) {
+                failure = Some(e);
+                return EventResponse::Exit;
+            }
             if let Err(e) = events.submit(window, &tree) {
                 failure = Some(e);
                 return EventResponse::Exit;
@@ -384,6 +471,45 @@ fn announce_reloads<T: Transport>(
     }
     if reloads.input {
         events.input_changed()?;
+    }
+    Ok(())
+}
+
+/// Put the pictures an application queued where the next frame can name them.
+///
+/// In the order given, which is the point of taking a list: a drop before an
+/// upload is a slideshow that never holds two full-screen pictures at once,
+/// and reordering them would make a link budget sized for one picture refuse
+/// every slide after the first. See [`ImageChange`] and `design-decisions.md`
+/// §557.
+///
+/// A window that has gone missing is not an error here. The only way to reach
+/// this with no window is a compositor that closed one it had granted, and the
+/// `submit` immediately afterwards is where that gets reported — failing here
+/// as well would report it twice and in less useful terms.
+fn apply_images<T: Transport>(
+    events: &mut EventLoop<T>,
+    window: u64,
+    changes: Vec<ImageChange>,
+) -> Result<(), Error<T>> {
+    if changes.is_empty() {
+        return Ok(());
+    }
+    let Some(mut handle) = events.window_mut(window) else {
+        return Ok(());
+    };
+    for change in changes {
+        match change {
+            ImageChange::Upload {
+                id,
+                width,
+                height,
+                stride,
+                format,
+                bytes,
+            } => handle.upload_image(id, width, height, stride, format, bytes)?,
+            ImageChange::Drop(id) => handle.drop_image(id)?,
+        }
     }
     Ok(())
 }
@@ -609,6 +735,14 @@ mod tests {
         /// What the next `take_reloads` will report, drained when it is asked —
         /// exactly as a real application's own record is.
         reloads: Rc<RefCell<Reloads>>,
+        /// Pictures to hand over the next time the loop asks, drained when it
+        /// does. Shared so a test can top it up from inside `render`, which is
+        /// how a real picture viewer queues one.
+        images: Rc<RefCell<Vec<ImageChange>>>,
+        /// Queued from inside `render` rather than before the loop starts, so
+        /// the ordering rule — pixels up before the frame that names them — is
+        /// under test rather than trivially satisfied.
+        queue_while_drawing: Option<Vec<ImageChange>>,
     }
 
     impl Recorder {
@@ -619,6 +753,8 @@ mod tests {
                 answer,
                 interval: None,
                 reloads: Rc::new(RefCell::new(Reloads::default())),
+                images: Rc::new(RefCell::new(Vec::new())),
+                queue_while_drawing: None,
             }
         }
 
@@ -631,6 +767,24 @@ mod tests {
         fn having_written(self, reloads: Reloads) -> Self {
             *self.reloads.borrow_mut() = reloads;
             self
+        }
+
+        /// Stand in for a picture viewer that decodes as it draws.
+        fn drawing_pictures(mut self, changes: Vec<ImageChange>) -> Self {
+            self.queue_while_drawing = Some(changes);
+            self
+        }
+    }
+
+    /// A one-pixel picture, which is all an ordering test needs.
+    fn pixel(id: u64) -> ImageChange {
+        ImageChange::Upload {
+            id,
+            width: 1,
+            height: 1,
+            stride: 4,
+            format: PixelFormat::Argb8888,
+            bytes: vec![0xFF, 0x00, 0x00, 0xFF],
         }
     }
 
@@ -656,8 +810,15 @@ mod tests {
             std::mem::take(&mut *self.reloads.borrow_mut())
         }
 
+        fn take_images(&mut self) -> Vec<ImageChange> {
+            std::mem::take(&mut *self.images.borrow_mut())
+        }
+
         fn render(&mut self, width: f32, height: f32) -> RenderTree {
             self.drawn.borrow_mut().push((width, height));
+            if let Some(changes) = self.queue_while_drawing.take() {
+                self.images.borrow_mut().extend(changes);
+            }
             RenderTree::new()
         }
     }
@@ -1153,6 +1314,176 @@ mod tests {
         drive(&mut events, window, &mut app).expect("the loop should have run");
 
         assert!(reloads_seen(&desktop).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Getting a picture's pixels to the compositor
+    // -----------------------------------------------------------------------
+
+    /// Every image request the desktop was sent, as `(name, id)`, in order.
+    ///
+    /// Named rather than matched on, so a field added to `UploadImage` does not
+    /// break these tests — the thing under test is *which requests, in what
+    /// order*, not the payload, which [`the_pixels_are_the_ones_the_app_gave`]
+    /// covers on its own.
+    fn images_seen(desktop: &Rc<RefCell<crate::testing::TestDesktop>>) -> Vec<(&'static str, u64)> {
+        desktop
+            .borrow()
+            .seen
+            .iter()
+            .filter_map(|r| match r.body {
+                crate::RequestBody::UploadImage { image_id, .. } => Some(("up", image_id)),
+                crate::RequestBody::DropImage { image_id, .. } => Some(("down", image_id)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The defect the hook exists to prevent, stated as an ordering.
+    ///
+    /// A frame naming an id whose pixels are still in flight draws *nothing*,
+    /// silently — and because the next frame usually does have them, it shows
+    /// up as a picture one refresh late, which nobody attributes to ordering.
+    ///
+    /// Ordering is not directly observable once `drive` has run to completion —
+    /// by then everything has arrived — so the upload is made to *fail*, which
+    /// stops the loop at exactly the point under test. If the pixels go first,
+    /// the frame is never written and the desktop sees no submission at all;
+    /// if the frame went first it is already in the pipe and `absorb` records
+    /// it. The assertion is therefore about ordering rather than arrival, and
+    /// cannot pass vacuously.
+    ///
+    /// The refusal is armed *after* the window is created, since a desktop that
+    /// refused everything would refuse the window too and there would be
+    /// nothing to draw on.
+    #[test]
+    fn the_pixels_go_up_before_the_frame_that_names_them() {
+        let mut app = Recorder::new(Response::Exit).drawing_pictures(vec![pixel(7)]);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        desktop.borrow_mut().refuse = Some("image budget exhausted".to_string());
+
+        events.inject_event(window, Event::CloseRequested);
+        let outcome = drive(&mut events, window, &mut app);
+
+        assert!(
+            outcome.is_err(),
+            "a refused upload must stop the loop rather than be swallowed"
+        );
+        assert!(
+            desktop.borrow_mut().asked().contains(&"UploadImage"),
+            "the picture never reached the compositor, so the test below proves \
+             nothing"
+        );
+        assert!(
+            desktop.borrow().submitted.is_empty(),
+            "a frame went out before the pixels it names — on screen that is a \
+             picture that draws blank for one refresh"
+        );
+    }
+
+    /// The geometry and the bytes are the application's, unaltered.
+    #[test]
+    fn the_pixels_are_the_ones_the_app_gave() {
+        let mut app = Recorder::new(Response::Exit).drawing_pictures(vec![ImageChange::Upload {
+            id: 3,
+            width: 2,
+            height: 1,
+            stride: 8,
+            format: PixelFormat::Argb8888,
+            bytes: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        }]);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        events.inject_event(window, Event::CloseRequested);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        let desk = desktop.borrow();
+        let upload = desk
+            .seen
+            .iter()
+            .find_map(|r| match r.body {
+                crate::RequestBody::UploadImage {
+                    window: w,
+                    image_id,
+                    width,
+                    height,
+                    stride,
+                    ref bytes,
+                    ..
+                } => Some((w, image_id, width, height, stride, bytes.clone())),
+                _ => None,
+            })
+            .expect("the picture never went out");
+        assert_eq!(upload, (window, 3, 2, 1, 8, vec![1, 2, 3, 4, 5, 6, 7, 8]));
+    }
+
+    /// The reason [`ImageChange`] is one ordered list and not two methods.
+    ///
+    /// A picture viewer paging to the next photograph must give the old one
+    /// back *before* it asks for the new one: a link whose image budget fits
+    /// one full-screen picture is refused the second otherwise, so every slide
+    /// after the first shows blank. See `design-decisions.md` §557, which
+    /// settled the same question for the wallpaper.
+    #[test]
+    fn a_drop_queued_before_an_upload_goes_out_before_it() {
+        let mut app =
+            Recorder::new(Response::Exit).drawing_pictures(vec![ImageChange::Drop(1), pixel(2)]);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        events.inject_event(window, Event::CloseRequested);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(
+            images_seen(&desktop),
+            [("down", 1), ("up", 2)],
+            "the list was reordered, or one of the two was dropped on the floor"
+        );
+    }
+
+    /// Drained, not peeked — the same rule as [`App::take_reloads`], and the
+    /// same symptom for breaking it: an implementation that answered the same
+    /// list for ever would re-send a full-screen picture before every frame.
+    #[test]
+    fn a_picture_is_uploaded_once_and_not_before_every_frame() {
+        let mut app = Recorder::new(Response::Redraw).drawing_pictures(vec![pixel(9)]);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        {
+            let mut desk = desktop.borrow_mut();
+            for _ in 0..4 {
+                desk.script
+                    .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+            }
+        }
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(
+            images_seen(&desktop),
+            [("up", 9)],
+            "the queue was read rather than taken, so every frame re-sent it"
+        );
+    }
+
+    /// The default must be silence: ~140 applications draw nothing but shapes
+    /// and text, and a loop that asked the compositor about pictures on their
+    /// behalf would cost a round trip per frame to say "none".
+    #[test]
+    fn an_application_with_no_pictures_sends_none() {
+        let mut app = Recorder::new(Response::Redraw);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert!(images_seen(&desktop).is_empty());
     }
 
     // -----------------------------------------------------------------------

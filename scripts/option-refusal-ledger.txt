@@ -115,7 +115,6 @@ cmd_ioport 3
 cmd_iosched 1
 cmd_iotdevice 2
 cmd_ipclog 3
-cmd_ipcns 7
 cmd_iperf 6
 cmd_irqstat 1
 cmd_kbmacro 2

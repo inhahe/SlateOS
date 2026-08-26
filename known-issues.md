@@ -81109,7 +81109,73 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **501 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **494 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-third batch): `cmd_ipcns` (7) cleared —
+> 501 → 494 across 220 → 219 functions. Pinned by `kshell::self_test` rung 91.
+>
+> **A new row for the taxonomy, and the first one about *recovery* rather than
+> about what the guess did.** In every earlier batch the question was what the
+> guessed value meant. Here the question is what happens *after* you notice.
+>
+> `ipcns shm` takes two guessed operands, and before this batch they answered
+> the same class of typo in opposite ways — which one you got depended only on
+> which word you fumbled:
+>
+> | Typed | What the guess did | What you saw |
+> |---|---|---|
+> | `ipcns shm 1O 1024` | id → `0` | `error: NotFound` — an error, but the *wrong* error |
+> | `ipcns shm 10 1O24` | size → `4096` | `ipcns: shm ns=10 4096B` — a success line |
+>
+> One character apart. The first was **safe only by accident**: `init_defaults`
+> sets `next_id: 1` and seeds no namespaces, and `create_ns` only ever hands out
+> `next_id`, so namespace 0 is unreachable and `destroy_ns(0)` / `record_*(0, …)`
+> could only return `NotFound`. Nothing was destroyed — but the message says the
+> namespace is missing when in fact the *word naming it* was unreadable, so the
+> reader goes to `ipcns list` looking for a namespace that was never in doubt.
+> That is the **misdiagnosis** row, already known from `cmd_aiostat`.
+>
+> **The second is the new one.** `record_shm` is `shm_segments += 1; shm_bytes
+> += bytes`, and the subsystem publishes no inverse — the whole public surface
+> is `init_defaults`, `create_ns`, `destroy_ns`, `record_shm`, `record_sem`,
+> `record_msg`, `ns_list`, `ns_info`, `stats`. There is no `unrecord`, no
+> setter, nothing between "add to the total" and "destroy the namespace."
+>
+> So the guess is not merely wrong; **it is wrong in a way that the obvious
+> correction compounds.** Notice the typo, re-run the line with `1024`, and you
+> do not replace the guessed 4096 — you add the right number underneath it, and
+> the namespace now reports two segments totalling 5120 where one of 1024 was
+> meant. Getting back to the truth means destroying the namespace and rebuilding
+> every other record in it.
+>
+> **`sem`'s guess of `1` is worse than `shm`'s 4096 in one specific way**: 4096
+> is at least a conspicuous round number, whereas `1` is also the *likeliest
+> true value*. A `sem_total` inflated by a guessed 1 is indistinguishable from a
+> `sem_total` that was correctly told 1, so nothing in the output ever invites
+> the second look that would catch it. This is the `cputhr` thesis again — the
+> guess is the reassuring value — sharpened: here the reassuring value is
+> reassuring precisely because it is usually *right*.
+>
+> **Scope, stated honestly:** these are bookkeeping counters. Nothing in the
+> kernel allocates against `shm_bytes` or refuses on `sem_total`; the damage is
+> to a report, not to an allocation. It belongs with `cmd_taskio` and
+> `cmd_aiostat` in the **measurement** row — a number nobody measured, filed as
+> though somebody had — and what this batch adds to that row is that when the
+> measurement is an accumulator, the error is not just undetected but
+> *uncorrectable in place*.
+>
+> **One non-numeric guess in the same function, which the ledger does not
+> count**, was fixed alongside: `create`'s name defaulted to `"unnamed"`, so a
+> bare `ipcns create` built a real namespace called `unnamed` and consumed an
+> id. Names are not unique and ids auto-increment, so a second bare `create`
+> gave a second `unnamed`, distinguishable only by id.
+>
+> The `[bytes]` and `[count]` operands stay **optional** per §607 — they are
+> bracketed in the synopsis, so an omitted word still means 4096 / 1 / 256. Only
+> an unreadable one is refused. Rung 91 asserts both halves, and pins the
+> severity with a single `ipcns list` line reading `shm=1(7777 B) sem=0(0)
+> msg=1(256 B)` after a refused size and a corrected one — which before the fix
+> would have read `shm=2(11873 B)`.
 
 > **Burn-down log.** 2026-08-26 (twenty-second batch): `cmd_groupmgr` (7)
 > cleared — 508 → 501 across 221 → 220 functions. Pinned by

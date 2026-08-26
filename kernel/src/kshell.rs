@@ -18780,6 +18780,140 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("groupmgr delete 4242");
     }
 
+    serial_println!(
+        "  kshell::self_test 91: one command answered two identical typos in opposite ways, and \
+         the guess it accepted went into a total with no inverse"
+    );
+    // Every earlier rung could point at a single guessed operand. `ipcns shm`
+    // has two, and before this batch they behaved as opposites:
+    //
+    //   ipcns shm 1O 1024   →  id guessed 0. Ids start at 1, so nothing has
+    //                          id 0, so this errored -- with `NotFound`, which
+    //                          says the namespace is missing when it is the
+    //                          word that was unreadable.
+    //   ipcns shm 10 1O24   →  size guessed 4096, and it *succeeded*.
+    //
+    // One character apart, one caught (for the wrong reason) and one not. The
+    // uncaught one is the one that lasts: `record_shm` is `+=` into a running
+    // total and the subsystem publishes no inverse, so noticing the typo and
+    // re-running the line correctly does not replace the guessed 4096 -- it
+    // adds the right number underneath it.
+    {
+        // `init` is idempotent (`init_defaults` returns early once state
+        // exists), and the id is read back rather than assumed: the boot
+        // battery calls `ipcns::self_test`, which creates namespaces of its
+        // own, so any number written here would depend on how many it made.
+        let _ = capture_command("ipcns init");
+        let created = capture_command("ipcns create zzrung91");
+        assert_output_contains(
+            "a namespace is created for this rung",
+            &created,
+            b"created 'zzrung91'",
+        );
+        let text = core::str::from_utf8(&created).unwrap_or("");
+        let ns_id: u32 = match text
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .find(|run| !run.is_empty())
+            .and_then(|run| run.parse::<u32>().ok())
+        {
+            Some(v) => v,
+            None => panic!("`ipcns create' must print the id it assigned"),
+        };
+
+        // The first direction: the id. It used to reach the subsystem as 0 and
+        // come back `NotFound`, which sends the reader to `ipcns list` to look
+        // for a namespace that was never in question.
+        let out = capture_command("ipcns shm 1O 1024");
+        assert_output_contains(
+            "an unreadable namespace id is named rather than misreported as NotFound",
+            &out,
+            b"`1O' is not a namespace id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable namespace id errors");
+
+        // The second direction, and the one with a lasting effect: the size.
+        let out = capture_command(&alloc::format!("ipcns shm {ns_id} 1O24"));
+        assert_output_contains(
+            "and an unreadable size is refused instead of being recorded as 4096",
+            &out,
+            b"`1O24' is not a size in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable size errors");
+
+        // Now the correction the user would actually make. This is the
+        // assertion that pins the severity: the total must read exactly one
+        // segment of 7777 bytes. Before the fix the refused line above had
+        // already banked 4096, so this same sequence left `shm=2(11873 B)` --
+        // the guess and the correction, added together, with no way back short
+        // of destroying the namespace and rebuilding everything else in it.
+        let out = capture_command(&alloc::format!("ipcns shm {ns_id} 7777"));
+        assert_eq!(last_exit(), 0, "a readable size is recorded");
+        assert_output_contains("the corrected size is recorded", &out, b"7777B");
+
+        // The sibling accumulators refuse on the same terms. `sem`'s guess was
+        // 1, which is worse than 4096 in one specific way: 1 is also the
+        // likeliest true value, so an inflated `sem_total` looks exactly like a
+        // correct one and nothing in the output invites a second look.
+        let out = capture_command(&alloc::format!("ipcns sem {ns_id} 1O"));
+        assert_output_contains(
+            "an unreadable semaphore count is refused rather than counted as one",
+            &out,
+            b"`1O' is not a semaphore count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable semaphore count errors");
+
+        let out = capture_command(&alloc::format!("ipcns msg {ns_id} 2O6"));
+        assert_output_contains(
+            "and the message-queue size is refused on the same terms",
+            &out,
+            b"`2O6' is not a size in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable message size errors");
+
+        // The §607 control: `[bytes]` is bracketed in the synopsis, so an
+        // *omitted* word still means 256. The refusals above cannot be passing
+        // by having quietly made the optional operand mandatory.
+        let out = capture_command(&alloc::format!("ipcns msg {ns_id}"));
+        assert_eq!(last_exit(), 0, "an omitted optional size still succeeds");
+        assert_output_contains(
+            "an omitted size keeps its documented default",
+            &out,
+            b"256B",
+        );
+
+        // One line proving all three at once, anchored by the distinctive 7777:
+        // one shm segment (not two), no sem set from the refused count, one msg
+        // queue at the default.
+        let out = capture_command("ipcns list");
+        assert_output_contains(
+            "the refusals recorded nothing and the totals hold exactly what was asked for",
+            &out,
+            b" shm=1(7777 B) sem=0(0) msg=1(256 B)",
+        );
+
+        // `destroy` guessed the same 0, and was safe only by accident.
+        let out = capture_command("ipcns destroy 1O");
+        assert_output_contains(
+            "`destroy' names the word it could not read instead of reporting NotFound",
+            &out,
+            b"`1O' is not a namespace id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `destroy' errors");
+
+        // The non-numeric guess the ledger never counted: a namespace called
+        // `unnamed`, created and given an id, because no name was supplied.
+        let out = capture_command("ipcns create");
+        assert_output_contains(
+            "an omitted name is reported, not invented as `unnamed'",
+            &out,
+            b"ipcns: create: missing namespace name",
+        );
+        assert_eq!(last_exit(), 1, "a missing namespace name errors");
+
+        // Leave the table as this rung found it, so rung order cannot matter.
+        let _ = capture_command(&alloc::format!("ipcns destroy {ns_id}"));
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -99517,7 +99651,19 @@ fn cmd_ipcns(args: &str) {
             shell_println!("ipcns: initialized");
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("unnamed");
+            // The synopsis says `create <name>`, and a namespace with no name
+            // is not a thing the user can have asked for. `"unnamed"` was not
+            // a default so much as a way to make the arity check unnecessary:
+            // `create_ns` takes the string straight to `String::from`, so bare
+            // `ipcns create` built a real namespace called `unnamed`, took the
+            // next id, and reported it as a success. Ids auto-increment and
+            // names are not unique, so a second bare `create` gives a second
+            // `unnamed` — indistinguishable in `list` except by id.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("ipcns: create: missing namespace name");
+                set_exit(1);
+                return;
+            };
             match ipcns::create_ns(name) {
                 Ok(id) => shell_println!("ipcns: created '{}' → id {}", name, id),
                 Err(e) => {
@@ -99527,10 +99673,17 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "destroy" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Ids begin at 1 (`init_defaults` sets `next_id: 1` and seeds no
+            // namespaces, and `create_ns` only ever hands out `next_id`), so
+            // namespace 0 is unreachable and `destroy_ns(0)` could only return
+            // `NotFound`. That made the guess *safe* — it destroyed nothing —
+            // but not *honest*: `ipcns destroy 1O` reported "error: NotFound",
+            // which says the namespace does not exist. It does exist; the word
+            // naming it could not be read. The reader is sent to check `list`
+            // instead of at what they typed.
+            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+                return;
+            };
             match ipcns::destroy_ns(id) {
                 Ok(()) => shell_println!("ipcns: destroyed {}", id),
                 Err(e) => {
@@ -99540,14 +99693,32 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "shm" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            // The two operands of this one command answered the same mistake
+            // in opposite ways, and which one you got depended only on which
+            // word you fumbled:
+            //
+            //   ipcns shm 1O 1024   →  id guessed 0, unreachable, NotFound.
+            //                          Wrong reason, but nothing changed.
+            //   ipcns shm 10 1O24   →  size guessed 4096, and it *worked*:
+            //                          "ipcns: shm ns=10 4096B", a success.
+            //
+            // The second is the one that lasts. `record_shm` is `shm_segments
+            // += 1; shm_bytes += bytes` — an accumulator, and the subsystem
+            // exposes no inverse: there is no `unrecord`, no setter, nothing
+            // between `record_*` and `destroy_ns`. So the obvious correction
+            // — notice the typo, run it again with 1024 — does not replace the
+            // guess, it *adds to* it, leaving two segments and 5120 bytes
+            // where one segment of 1024 was meant. Recovering means destroying
+            // the namespace and rebuilding every other record in it.
+            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+                return;
+            };
+            // `[bytes]` is bracketed in the synopsis, so an absent word still
+            // means 4096 (§607). Only an unreadable one is refused.
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "ipcns", sub, "size in bytes", 4096)
+            else {
+                return;
+            };
             match ipcns::record_shm(id, bytes) {
                 Ok(()) => shell_println!("ipcns: shm ns={} {}B", id, bytes),
                 Err(e) => {
@@ -99557,14 +99728,19 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "sem" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let count = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+                return;
+            };
+            // Same accumulator as `shm` (`sem_sets += 1; sem_total += count`),
+            // and the same absence of an inverse. The guess here was 1, which
+            // is worse than 4096 in one specific way: 1 is the *likeliest true
+            // value*, so a `sem_total` inflated by a guessed 1 looks exactly
+            // like a `sem_total` that was correctly told 1. There is nothing
+            // odd-looking in the output to make anyone go back and check.
+            let Some(count) = optional_num::<u32>(&parts, 2, "ipcns", sub, "semaphore count", 1)
+            else {
+                return;
+            };
             match ipcns::record_sem(id, count) {
                 Ok(()) => shell_println!("ipcns: sem ns={} count={}", id, count),
                 Err(e) => {
@@ -99574,14 +99750,13 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "msg" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(256);
+            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+                return;
+            };
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "ipcns", sub, "size in bytes", 256)
+            else {
+                return;
+            };
             match ipcns::record_msg(id, bytes) {
                 Ok(()) => shell_println!("ipcns: msg ns={} {}B", id, bytes),
                 Err(e) => {

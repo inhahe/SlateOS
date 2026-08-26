@@ -116,7 +116,6 @@ cmd_iperf 6
 cmd_irqstat 1
 cmd_kbmacro 2
 cmd_kbsettings 4
-cmd_kconsole 6
 cmd_kernlog 1
 cmd_kmod 1
 cmd_kprobes 3

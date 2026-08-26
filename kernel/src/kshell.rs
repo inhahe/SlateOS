@@ -19373,6 +19373,176 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "`fdtable exit' succeeds");
     }
 
+    serial_println!(
+        "  kshell::self_test 95: the same two operands were bracketed in one subcommand and \
+         angled in the next, and the value guessed for both was the textbook console size"
+    );
+    // `cmd_kconsole` is the cleanest illustration of design-decisions.md §607
+    // in the burn-down so far, because it does not need a second command to
+    // make the point: `create <name> [cols] [rows]` and `resize <id> <cols>
+    // <rows>` take the *same two operands*, bracketed in the subcommand that
+    // can start a console at a sensible size and angled in the one that exists
+    // for no other purpose than to set them. So an absent `cols` still means
+    // 80 in `create` and is refused in `resize`, and a *present* `cols` that
+    // cannot be read is refused in both.
+    //
+    // The guesses these replace were the hardest in the burn-down to catch by
+    // reading the output, because 80x25 is not an arbitrary default — it is the
+    // canonical console size, the number a reader would supply themselves if
+    // asked what a console is. `kconsole resize 2 l32 43` shrank tty1 from 120
+    // columns to 80 and said "Resized console 2 to 80x43.", a sentence domain
+    // knowledge cannot falsify. That is the `cputhr` thesis at its limit: the
+    // guessed default is the reassuring value, and here the reassuring value is
+    // also the textbook one.
+    //
+    // The id guess was `0`, and `init_defaults` seeds 1/2/3 with `next_id: 4`,
+    // so no console can ever hold it — the misdiagnosis shape. `kconsole switch
+    // l` answered "Error: NotFound", which says *create the console*, when what
+    // had happened says *fix the typo*.
+    {
+        // Establish the premise rather than assume it, which is rung 94's
+        // lesson. Nothing else in the boot mutates this module — the module's
+        // own suite runs under `with_pristine` and restores what it found — so
+        // this is the first call, `init_defaults` seeds the table here, and
+        // tty1 is 120x40. If that ever stops being true this assertion says so
+        // instead of the rung quietly testing something else.
+        let before_list = capture_command("kconsole list");
+        assert_output_contains(
+            "the console this rung resizes is seeded wider than the guess it used to be given",
+            &before_list,
+            b"2: tty1 type=fb 120x40",
+        );
+        let before_stats = capture_command("kconsole stats");
+
+        let out = capture_command("kconsole switch l");
+        assert_output_contains(
+            "an unreadable console id is named rather than reported as a console that is not there",
+            &out,
+            b"`l' is not a console id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `switch' errors");
+
+        let out = capture_command("kconsole switch");
+        assert_output_contains(
+            "and an omitted one is reported as omitted, not resolved to an id nothing can hold",
+            &out,
+            b"kconsole: switch: missing console id",
+        );
+        assert_eq!(last_exit(), 1, "a missing id in `switch' errors");
+
+        // The name was `unwrap_or("ttyN")` — not a placeholder the module
+        // expands, a console literally named with the letter N. Self-limiting
+        // in the way that hides it: the first omission succeeds, and every one
+        // after it fails with `AlreadyExists`, which reads as a collision with
+        // something the user never created.
+        let out = capture_command("kconsole create");
+        assert_output_contains(
+            "an omitted console name is refused rather than invented",
+            &out,
+            b"kconsole: create: missing console name",
+        );
+        assert_eq!(last_exit(), 1, "a missing name in `create' errors");
+
+        let out = capture_command("kconsole create rung95 l20 40");
+        assert_output_contains(
+            "a bracketed operand that is present and unreadable is still refused",
+            &out,
+            b"`l20' is not a column count",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "an unreadable column count in `create' errors"
+        );
+
+        let out = capture_command("kconsole create rung95 120 4O");
+        assert_output_contains(
+            "and the row count beside it",
+            &out,
+            b"`4O' is not a row count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable row count in `create' errors");
+
+        let out = capture_command("kconsole resize l 132 43");
+        assert_output_contains("the id in `resize'", &out, b"`l' is not a console id");
+        assert_eq!(last_exit(), 1, "an unreadable id in `resize' errors");
+
+        // The one that acted. This resized tty1 to 80 columns and said so.
+        let out = capture_command("kconsole resize 2 l32 43");
+        assert_output_contains(
+            "an unreadable width is named rather than resolved to the size a console usually is",
+            &out,
+            b"`l32' is not a column count",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "an unreadable column count in `resize' errors"
+        );
+
+        let out = capture_command("kconsole resize 2 132 4O");
+        assert_output_contains("and the height beside it", &out, b"`4O' is not a row count");
+        assert_eq!(last_exit(), 1, "an unreadable row count in `resize' errors");
+
+        // Angled here, so an omission is refused too — the half of §607 that
+        // distinguishes `resize` from `create`.
+        let out = capture_command("kconsole resize 2 132");
+        assert_output_contains(
+            "an angled operand is refused when omitted, unlike the bracketed one of the same name",
+            &out,
+            b"kconsole: resize: missing row count",
+        );
+        assert_eq!(last_exit(), 1, "a missing row count in `resize' errors");
+
+        // The severity pin: nine refusals, and every console is the size it
+        // was. `kconsole list` is the only witness a user would have had.
+        let after_list = capture_command("kconsole list");
+        assert!(
+            after_list == before_list,
+            "nine refusals left every console at the size it already had"
+        );
+        let after_stats = capture_command("kconsole stats");
+        assert!(
+            after_stats == before_stats,
+            "and counted no switch, no create and no resize for words the shell refused to read"
+        );
+
+        // The other half of §607, stated positively: the bracketed operands are
+        // genuinely optional, so omitting both still creates a console at the
+        // documented 80x25. Only a word that is *present* and unreadable is
+        // refused.
+        let out = capture_command("kconsole create rung95");
+        assert_output_contains(
+            "omitting a bracketed operand still means its documented default",
+            &out,
+            b"Created console rung95 (id=4).",
+        );
+        assert_eq!(last_exit(), 0, "`kconsole create' with defaults succeeds");
+        let out = capture_command("kconsole list");
+        assert_output_contains(
+            "and the default is the size the usage line advertises",
+            &out,
+            b"rung95 type=virtual 80x25",
+        );
+
+        // Tear the fixture down, so `/proc/kconsole` does not carry a console
+        // this rung invented. `destroy` is what makes that possible: before it
+        // the module could only grow, so a rung that created anything left it
+        // for the rest of the boot.
+        let out = capture_command("kconsole destroy 4");
+        assert_output_contains(
+            "the rung's console is destroyed, and the module now has a way to do that",
+            &out,
+            b"Destroyed console 4.",
+        );
+        assert_eq!(last_exit(), 0, "`kconsole destroy' succeeds");
+        let after = capture_command("kconsole list");
+        assert!(
+            after == before_list,
+            "leaving the table exactly as this rung found it"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -96001,13 +96171,20 @@ fn cmd_kconsole(args: &str) {
             }
         }
         "switch" => {
+            // Angled in the usage line, so both an absent word and an
+            // unreadable one are refused (design-decisions.md §607). The
+            // guess this replaces was `0`, and `init_defaults` seeds ids
+            // 1/2/3 with `next_id: 4` — so no console can ever *have* id 0
+            // and `kconsole switch l` reported `Error: NotFound`. That is
+            // the misdiagnosis shape: the shell was telling the user their
+            // console did not exist when what had actually happened is that
+            // the shell could not read the word they typed. The two have
+            // opposite remedies -- create the console, or fix the typo --
+            // and the message pointed at the wrong one.
+            let Some(id) = required_num::<u32>(&parts, 1, "kconsole", sub, "console id") else {
+                return;
+            };
             kconsole::init_defaults();
-            let id = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
             match kconsole::switch(id) {
                 Ok(()) => shell_println!("Switched to console {}.", id),
                 Err(e) => {
@@ -96017,20 +96194,33 @@ fn cmd_kconsole(args: &str) {
             }
         }
         "create" => {
+            // The name is angled, and its guess was the literal string
+            // `ttyN` -- not a placeholder the module expands, an actual
+            // console named with the letter N. It is also self-limiting in
+            // the way that makes it hard to notice: `create` rejects a
+            // duplicate name, so the *first* omission quietly succeeds and
+            // every one after it fails with `AlreadyExists`, which reads as
+            // a name collision with something the user never created.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("kconsole: {}: missing console name", sub);
+                set_exit(1);
+                return;
+            };
+            // `cols` and `rows` are *bracketed* here and angled in `resize`,
+            // which is the whole of §607 inside one command: the same two
+            // operands, required in the subcommand that exists to set them
+            // and optional in the one that merely needs somewhere to start.
+            // So an absent word still means 80x25, and only a word that is
+            // present and unreadable is refused.
+            let Some(cols) = optional_num::<u32>(&parts, 2, "kconsole", sub, "column count", 80)
+            else {
+                return;
+            };
+            let Some(rows) = optional_num::<u32>(&parts, 3, "kconsole", sub, "row count", 25)
+            else {
+                return;
+            };
             kconsole::init_defaults();
-            let name = parts.get(1).copied().unwrap_or("ttyN");
-            let cols = parts
-                .get(2)
-                .copied()
-                .unwrap_or("80")
-                .parse::<u32>()
-                .unwrap_or(80);
-            let rows = parts
-                .get(3)
-                .copied()
-                .unwrap_or("25")
-                .parse::<u32>()
-                .unwrap_or(25);
             match kconsole::create(name, kconsole::ConsoleType::Virtual, cols, rows) {
                 Ok(id) => shell_println!("Created console {} (id={}).", name, id),
                 Err(e) => {
@@ -96039,26 +96229,41 @@ fn cmd_kconsole(args: &str) {
                 }
             }
         }
-        "resize" => {
+        "destroy" => {
+            let Some(id) = required_num::<u32>(&parts, 1, "kconsole", sub, "console id") else {
+                return;
+            };
             kconsole::init_defaults();
-            let id = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let cols = parts
-                .get(2)
-                .copied()
-                .unwrap_or("80")
-                .parse::<u32>()
-                .unwrap_or(80);
-            let rows = parts
-                .get(3)
-                .copied()
-                .unwrap_or("25")
-                .parse::<u32>()
-                .unwrap_or(25);
+            match kconsole::destroy(id) {
+                Ok(()) => shell_println!("Destroyed console {}.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        "resize" => {
+            // All three are angled, and the guesses here were the sharpest
+            // in the command: 80x25 is the *canonical* console size, the
+            // number a reader would supply themselves if asked what a
+            // console is. `kconsole resize 2 l32 43` on tty1 -- seeded at
+            // 120x40 -- shrank it to 80 columns and printed `Resized
+            // console 2 to 80x43.`, a sentence with nothing wrong with it.
+            // Domain knowledge cannot falsify this guess the way it can
+            // falsify a `0`; the only witness is `kconsole list`, and only
+            // if the user knew the old width. This is the `cputhr` thesis
+            // at its limit -- the guessed default is the reassuring value,
+            // and here the reassuring value is also the textbook one.
+            let Some(id) = required_num::<u32>(&parts, 1, "kconsole", sub, "console id") else {
+                return;
+            };
+            let Some(cols) = required_num::<u32>(&parts, 2, "kconsole", sub, "column count") else {
+                return;
+            };
+            let Some(rows) = required_num::<u32>(&parts, 3, "kconsole", sub, "row count") else {
+                return;
+            };
+            kconsole::init_defaults();
             match kconsole::resize(id, cols, rows) {
                 Ok(()) => shell_println!("Resized console {} to {}x{}.", id, cols, rows),
                 Err(e) => {
@@ -96082,7 +96287,7 @@ fn cmd_kconsole(args: &str) {
         }
         _ => {
             shell_println!(
-                "Usage: kconsole [list|active|switch <id>|create <name> [cols] [rows]|resize <id> <cols> <rows>|stats|test]"
+                "Usage: kconsole [list|active|switch <id>|create <name> [cols] [rows]|destroy <id>|resize <id> <cols> <rows>|stats|test]"
             );
             end_help_arm("kconsole", sub);
         }

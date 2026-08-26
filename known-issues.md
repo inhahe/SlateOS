@@ -81109,7 +81109,78 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **475 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **469 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-seventh batch): `cmd_kconsole` (6, plus
+> one uncounted) cleared — 475 → 469 across 216 → 215 functions. Pinned by
+> `kshell::self_test` rung 95.
+>
+> **In short:** `kconsole` manages virtual consoles — the text screens you
+> switch between. When it could not read a number you typed it made one up, and
+> the number it made up was **80 columns by 25 rows**. That is not an arbitrary
+> default; it is what a console *is* to almost everyone who has seen one. So
+> `kconsole resize 2 l32 43` — a lowercase L where a 1 belonged — quietly shrank
+> a 120-column console to 80 and printed `Resized console 2 to 80x43.`, a
+> sentence that no amount of knowing the subsystem lets you recognise as wrong.
+>
+> **The new row is about where the guessed value comes from, not what it does.**
+> Every previous row in this table asked what the guess *is* — a length, a
+> ceiling, a selector, an accumulator — and derived the severity from that. This
+> one is about the guess's *provenance*. `0` is recognisable as a placeholder
+> because nothing means zero on purpose; `80x25` is recognisable as nothing at
+> all, because it is the answer the reader would have given.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **canonical value of its own domain** (`cmd_kconsole resize`) | the wrong size is applied and reported in a sentence that is internally consistent and idiomatic | you don't — the only witness is `kconsole list`, and only if you already knew the old size |
+>
+> This sharpens the `cputhr` thesis rather than adding to it. That thesis was
+> that the guessed default is always the *reassuring* value — the one that says
+> nothing is wrong. Here the reassuring value and the *textbook* value coincide,
+> which removes the last defence a reader has. Against a guessed `0` you can at
+> least ask "why would anything be zero?"; against a guessed `80x25` there is no
+> question to ask. A corollary worth carrying forward: **the more plausible a
+> default is as documentation, the more dangerous it is as a guess.**
+>
+> **It is also the cleanest illustration of §607 found so far, and it needs only
+> one command to be it.** `create <name> [cols] [rows]` and `resize <id> <cols>
+> <rows>` take the *same two operands*, bracketed in the subcommand that merely
+> needs somewhere to start and angled in the one that exists for no other purpose
+> than to set them. Previous batches had to put two commands side by side to show
+> that the usage line, not the operand's type, decides required-versus-optional.
+> Here the contrast is four lines apart in the same `match`: `create rung95` with
+> no size still means 80x25, `resize 2 132` with no row count is refused, and
+> `create rung95 l20` — present and unreadable — is refused just like `resize`.
+>
+> **The id guess is the misdiagnosis row again** (`cmd_cgmem`, batch 25):
+> `init_defaults` seeds ids 1/2/3 with `next_id: 4`, so id `0` is unreachable and
+> `kconsole switch l` answered `Error: NotFound`. Safe, but pointed at the wrong
+> remedy — "that console does not exist" says *create one*, when the truth says
+> *fix the typo*.
+>
+> **The uncounted one** is `create`'s name, `unwrap_or("ttyN")` — not a
+> placeholder the module expands, a console literally named with the letter N.
+> It is self-limiting in the way that hides it: `create` rejects duplicate names,
+> so the *first* omission succeeds and every one after it fails with
+> `AlreadyExists`, which reads as a collision with something the user never
+> created. It now says `kconsole: create: missing console name`.
+>
+> **Rung 95 owns its fixture, and doing so required the module to gain a destroy
+> path** — the same discovery as batch 26, in a module that had the same gap for
+> the same reason. `kconsole::create` only ever pushed, `MAX_CONSOLES` caps the
+> vector at 16, and nothing removed. See
+> `A-KCONSOLE-CAN-CREATE-A-CONSOLE-AND-HAS-NO-WAY-TO-DESTROY-ONE`. That this is
+> now the second consecutive batch to uncover a missing teardown is itself a
+> finding: *a module whose shell command has no destructive subcommand is worth
+> checking for a missing destructor*, because nothing else in the system was
+> ever the caller that would have needed one.
+>
+> The rung establishes its premise before relying on it (`2: tty1 type=fb
+> 120x40`), pins severity with a before/after equality on both `kconsole list`
+> and `kconsole stats` across nine refusals, then proves §607's positive half by
+> creating `rung95` with no size operands and asserting the list shows
+> `80x25` — and destroys it again, so `/proc/kconsole` does not carry a console
+> the boot battery invented.
 
 > **Burn-down log.** 2026-08-26 (twenty-sixth batch): `cmd_fdtable` (6, plus
 > one uncounted) cleared — 481 → 475 across 217 → 216 functions. Pinned by

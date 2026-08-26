@@ -82644,19 +82644,39 @@ were actually drawn, which is correct and means clicking is consistent with what
 is visible — the gap is purely that nothing changes *which* rows those are.
 
 **Why it is separate from the input work.** Scrolling is a viewport, not a key
-binding: it needs a first-visible-row offset threaded through layout, a
-scroll-into-view rule so keyboard movement drags the viewport with it, wheel
-handling in `handle_mouse` (`MouseEventKind::Scroll` is already delivered and
-currently ignored), and a scrollbar widget. That is a layout change, and folding
-it into the commit that made the window clickable would have made both harder to
-review.
+binding: it needs a first-visible-row offset threaded through all three view
+layouts, a scroll-into-view rule so keyboard movement drags the viewport with
+it, wheel handling in `handle_mouse` (`MouseEventKind::Scroll` is delivered and
+falls into the `_ => false` arm), and a scrollbar. That is a layout change, and
+folding it into the commit that made the window clickable would have made both
+harder to review.
 
-**What the proper fix is.** A `scroll_top: usize` on `ExplorerState`, clamped to
-`entries.len().saturating_sub(visible_rows)`; every layout path offsets by it;
-`move_selection` calls a `scroll_into_view` after it moves; `Scroll { dy }`
-adjusts it; Page Up/Page Down move by `visible_rows`. The icon and column views
-need the same offset expressed in their own units. A scrollbar in `gui/toolkit`
-would serve every other app that will hit this too.
+**What the proper fix is — and it is mostly *use what is already there*.**
+`gui/toolkit` has this solved, because a dozen settings panels hit it first:
+
+| Piece | Where it already lives |
+|---|---|
+| Offset + selection kept in agreement, so the picked row is never off screen | `guitk::listview::ListViewport` — `select_prev`/`select_next`/`page_up`/`page_down`/`set_height`/`visible_range`, all clamped against a `len` passed per call |
+| Which rows fit, for a renderer that only has `&self` | `guitk::scroll_window::visible_count` / `Rows` — truncates rather than drawing a row across the bottom edge, and clamps a stale offset to the last page instead of going blank |
+| Wheel notches → row steps, accumulating fractions so a trackpad is not dead | `guitk::wheel::Accumulator::rows` |
+
+So the work is to hold a `ListViewport` on `ExplorerState`, drive the three
+layout paths from `visible_range`, and route `Scroll { dy }` through an
+`Accumulator`. **Explorer's own `move_selection` should go away in the process**
+— it is a hand-rolled `select_prev`/`select_next` with its own first-press rule,
+written before this entry noticed the toolkit had one, and two implementations
+of "move a selection down a list, clamped" is the glob-matcher mistake
+(design-decisions.md → 555) in miniature.
+
+**The one genuine mismatch.** `ListViewport::selected` is `Option<usize>` — one
+picked row — while explorer holds a multi-selection (`Ctrl+A` selects
+everything). The viewport half applies unchanged; what needs deciding is whether
+`ListViewport` grows an anchor/extend notion or whether explorer keeps its
+`Vec<usize>` and uses the viewport purely for scrolling, syncing the "cursor"
+row into it. The second is smaller and probably right, since a multi-select
+anchor is a file-manager concern rather than a settings-panel one. The icon and
+column views also need the offset expressed in their own units (rows of icons,
+not rows of files).
 
 **How you would notice.** Open a directory with a hundred files. You can see
 about twenty. Press Down thirty times: the selection highlight vanishes off the

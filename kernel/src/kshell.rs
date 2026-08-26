@@ -42199,11 +42199,48 @@ fn required_id(parts: &[&str], cmd: &str, sub: &str, noun: &str) -> Option<u64> 
         return None;
     };
     let Ok(id) = word.parse::<u64>() else {
-        shell_println!("{}: {}: `{}' is not a {} id", cmd, sub, word, noun);
+        shell_println!(
+            "{}: {}: `{}' is not {}{} id",
+            cmd,
+            sub,
+            word,
+            article_for(noun),
+            noun
+        );
         set_exit(1);
         return None;
     };
     Some(id)
+}
+
+/// The indefinite article `noun` should be introduced by, as a prefix ready to
+/// print — `"a "`, `"an "`, or `""` when the caller has supplied its own.
+///
+/// The diagnostics these helpers print were written as `is not a {}`, which is
+/// wrong for a quarter of the nouns already in the file: the shell said "is not
+/// a element id", "is not a inode ratio", "is not a alpha (0-255)". Small, but
+/// these strings are the *only* thing a user gets when a command refuses them,
+/// and a refusal that reads like a typo undermines the message that the shell
+/// read their word carefully.
+///
+/// The rule here is spelling-based, which is right often enough to be worth
+/// having and wrong often enough to need an escape hatch — English picks the
+/// article by *sound*, so "a UID" (yoo-eye-dee) and "an hour" both defeat it.
+/// A caller in that position writes the article into the noun itself: a `noun`
+/// that already begins with "a " or "an " is printed exactly as given. That
+/// keeps the exception at the one call site that needs it instead of in a table
+/// here that the next noun would fall off the end of.
+fn article_for(noun: &str) -> &'static str {
+    if noun.starts_with("a ") || noun.starts_with("an ") {
+        ""
+    } else if matches!(
+        noun.as_bytes().first(),
+        Some(b'a' | b'e' | b'i' | b'o' | b'u' | b'A' | b'E' | b'I' | b'O' | b'U')
+    ) {
+        "an "
+    } else {
+        "a "
+    }
 }
 
 /// A numeric operand that the subcommand cannot do without: both an absent word
@@ -42258,7 +42295,14 @@ fn required_num<T: core::str::FromStr>(
         return None;
     };
     let Ok(v) = word.parse::<T>() else {
-        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
+        shell_println!(
+            "{}: {}: `{}' is not {}{}",
+            cmd,
+            sub,
+            word,
+            article_for(noun),
+            noun
+        );
         set_exit(1);
         return None;
     };
@@ -42301,7 +42345,14 @@ fn optional_num<T: core::str::FromStr>(
         return Some(default);
     };
     let Ok(v) = word.parse::<T>() else {
-        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
+        shell_println!(
+            "{}: {}: `{}' is not {}{}",
+            cmd,
+            sub,
+            word,
+            article_for(noun),
+            noun
+        );
         set_exit(1);
         return None;
     };
@@ -108159,7 +108210,7 @@ fn cmd_userns(args: &str) {
             let Some(parent) = optional_num(&parts, 1, "userns", cmd, "namespace ID", 0) else {
                 return;
             };
-            let Some(owner) = optional_num(&parts, 2, "userns", cmd, "UID", 0) else {
+            let Some(owner) = optional_num(&parts, 2, "userns", cmd, "a UID", 0) else {
                 return;
             };
             match userns::create(parent, owner) {
@@ -108207,10 +108258,10 @@ fn cmd_userns(args: &str) {
             let Some(ns) = required_num(&parts, 1, "userns", cmd, "namespace ID") else {
                 return;
             };
-            let Some(inner) = required_num(&parts, 2, "userns", cmd, "UID") else {
+            let Some(inner) = required_num(&parts, 2, "userns", cmd, "a UID") else {
                 return;
             };
-            let Some(outer) = required_num(&parts, 3, "userns", cmd, "UID") else {
+            let Some(outer) = required_num(&parts, 3, "userns", cmd, "a UID") else {
                 return;
             };
             let Some(count) = required_num(&parts, 4, "userns", cmd, "count") else {

@@ -212,6 +212,47 @@ pub trait App {
     /// per mouse move to answer "no".
     fn title(&self) -> String;
 
+    /// Which program this is, for anything that configures a program rather
+    /// than a window.
+    ///
+    /// The default is the executable's file stem, lower-cased — `terminal` for
+    /// `/usr/bin/terminal`, `settings` for `settings.exe` — which is both what
+    /// a user would type into a window rule and what the process is actually
+    /// called, so almost no application should override it. Override it when
+    /// one executable is genuinely several programs (a multi-call binary), or
+    /// when the executable's name is an implementation detail the user has
+    /// never seen.
+    ///
+    /// **This is not the title**, and the distinction is the point. The title
+    /// answers "which document?" and changes as the user works; this answers
+    /// "which program?" and must be the same for every window the program ever
+    /// opens, because a rule that said "keep Firefox off the taskbar" would
+    /// otherwise stop applying the moment the user opened a second tab.
+    ///
+    /// Advisory: the compositor takes the client's word for it and cannot check
+    /// it, so nothing may grant a permission on the strength of this string.
+    /// See [`WindowSpec::app_id`](guiremote::control::WindowSpec::app_id).
+    ///
+    /// Falling back to an empty string — which matches no rule — is deliberate,
+    /// and covers both ways this can fail to produce a name: the executable's
+    /// path cannot be read, or its stem is not UTF-8. The second is why
+    /// `to_str` and not `to_string_lossy`: a lossy conversion would hand back a
+    /// name with U+FFFD in it, which is a name no user can type and no rule can
+    /// match, yet which *looks* like a successful answer everywhere it is
+    /// printed. Declining to answer is the honest form of the same outcome, and
+    /// it is the one a reader can diagnose. Inventing a name would be worse
+    /// still — it would file the window under a program that does not exist.
+    fn app_id(&self) -> String {
+        std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_stem()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .map(str::to_lowercase)
+            })
+            .unwrap_or_default()
+    }
+
     /// How big to ask for the window to be, in pixels.
     ///
     /// A request, not a guarantee: the compositor may give a different size and
@@ -333,6 +374,7 @@ pub fn open<T: Transport, A: App + ?Sized>(
 ) -> Result<u64, Error<T>> {
     let (width, height) = app.initial_size();
     WindowBuilder::new(app.title(), width, height)
+        .app_id(app.app_id())
         .resizable(app.resizable())
         .build(events)
 }
@@ -837,6 +879,61 @@ mod tests {
         assert_eq!(w.title(), "Recorder");
         assert_eq!(w.size(), (640, 480));
         assert!(w.is_resizable(), "the default is resizable");
+    }
+
+    /// An app that says nothing about its identity still gets one, and it is
+    /// not its title. The value is the test binary's own file stem, which no
+    /// test can name literally, so what is asserted is every property the
+    /// default promises: that it is there, that it is lower-case, and that it
+    /// is nothing to do with the words in the title bar.
+    #[test]
+    fn an_app_that_names_no_program_is_still_named_after_its_executable() {
+        let app = Recorder::new(Response::Idle);
+        let (events, window) = opened(&app);
+        let w = events.window(window).expect("the loop should know it");
+
+        let id = w.app_id();
+        assert!(
+            !id.is_empty(),
+            "the default should have found the executable's name"
+        );
+        assert_eq!(id, id.to_lowercase(), "ids are conventionally lower-case");
+        assert_ne!(
+            id, "Recorder",
+            "the title is a different question and must not be the answer to this one"
+        );
+    }
+
+    /// A binary that answers to several names — the busybox shape — has to be
+    /// able to say which one it was invoked as, so the default must be
+    /// overridable and the override must be what reaches the window.
+    #[test]
+    fn an_app_that_names_its_program_is_taken_at_its_word() {
+        struct Renamed;
+
+        impl App for Renamed {
+            fn title(&self) -> String {
+                "Untitled 1".to_string()
+            }
+
+            fn app_id(&self) -> String {
+                "slateos-editor".to_string()
+            }
+
+            fn on_event(&mut self, _event: &Event) -> Response {
+                Response::Idle
+            }
+
+            fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+                RenderTree::new()
+            }
+        }
+
+        let (mut events, _desktop) = desktop();
+        let window = open(&mut events, &Renamed).expect("the compositor should have granted it");
+        let w = events.window(window).expect("the loop should know it");
+        assert_eq!(w.app_id(), "slateos-editor");
+        assert_eq!(w.title(), "Untitled 1");
     }
 
     /// The first frame is the one no event asks for: nothing has happened yet,

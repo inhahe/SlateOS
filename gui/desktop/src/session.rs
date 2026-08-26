@@ -1231,6 +1231,15 @@ impl<T: Transport> ShellSession<T> {
 fn chrome(title: &str, width: u32, height: u32, at: (i32, i32), layer: Layer) -> Spec {
     Spec {
         title: title.to_owned(),
+        // One id for all four surfaces, not one each: they are four windows of
+        // a single program, and saying so is exactly what an app id is for.
+        // Nothing reads it today — the shell's own chrome sits outside
+        // `Layer::Normal`, so it never reaches the window list rules are
+        // evaluated against — but leaving it empty would make the shell the one
+        // program on the desktop that declines to name itself, and the first
+        // tool to group windows by program would show it as four unrelated
+        // strangers.
+        app_id: "slateos-shell".to_owned(),
         width,
         height,
         position: Some(at),

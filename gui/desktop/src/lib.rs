@@ -428,6 +428,18 @@ pub struct WindowId(pub u64);
 pub struct ManagedWindow {
     pub id: WindowId,
     pub title: String,
+    /// Which program the window belongs to, as that program declares it.
+    ///
+    /// Read from the compositor's list on every update and never remembered
+    /// across one, for the same reason the title is not: the compositor is the
+    /// authority on what a window says about itself. Empty means the window
+    /// named no program.
+    ///
+    /// This is what [`window_rules`](crate::window_rules) matches on, and the
+    /// reason it can match anything useful: a rule keyed on
+    /// [`title`](Self::title) would stop applying the moment the user saved the
+    /// document under a new name.
+    pub app_id: String,
     pub state: WindowState,
     pub desktop: u32,
     /// Whether this window has focus.
@@ -2290,6 +2302,12 @@ impl DesktopShell {
                 ManagedWindow {
                     id,
                     title: info.title.clone(),
+                    // Not carried over from `previous` the way the icon is. An
+                    // icon is shell-local state the compositor has no opinion
+                    // about; this is the compositor's own report, and a window
+                    // whose program changed its mind should be described the
+                    // way the latest list describes it.
+                    app_id: info.app_id.clone(),
                     state: if info.minimized {
                         WindowState::Minimized
                     } else if info.maximized {
@@ -4687,6 +4705,11 @@ mod window_manager_tests {
         // that dropped it would move every window to desktop 0 on the next
         // list, and the desktop tests below would pass by accident.
         info.workspace = window.desktop;
+        // Round-tripped for the same reason, and with a sharper edge: a helper
+        // that dropped it would leave every window anonymous after the first
+        // list, so a test that opened a named window and then did anything at
+        // all would see the name vanish for reasons nothing in the test says.
+        info.app_id.clone_from(&window.app_id);
         info
     }
 
@@ -4917,6 +4940,59 @@ mod window_manager_tests {
         assert!(raised > z_of(&shell, top));
         assert_eq!(shell.taskbar_windows().last().map(|w| w.id), Some(bottom));
         assert!(!shell.windows.get(&middle).unwrap().focused);
+    }
+
+    #[test]
+    fn the_program_a_window_belongs_to_arrives_with_the_list() {
+        // The shell never asks a window what it is; it only ever knows what the
+        // last list said. Two windows of one program and one of another,
+        // because telling those apart is the only thing the field is for.
+        let mut shell = shell();
+        let mut notes = WindowInfo::new(1, 40, "notes.md");
+        notes.app_id = "editor".to_string();
+        let mut draft = WindowInfo::new(2, 40, "draft.md");
+        draft.app_id = "editor".to_string();
+        let anon = WindowInfo::new(3, 41, "Some Window");
+        shell.apply_window_list(&WindowList::new(0, vec![notes, draft, anon]));
+
+        let of = |id: u64| {
+            shell
+                .windows
+                .get(&WindowId(id))
+                .expect("known")
+                .app_id
+                .clone()
+        };
+        assert_eq!(of(1), "editor");
+        assert_eq!(of(2), "editor");
+        assert_eq!(
+            of(3),
+            "",
+            "a window that named no program was given one from somewhere"
+        );
+    }
+
+    #[test]
+    fn a_window_is_described_by_the_latest_list_and_not_the_one_before() {
+        // Unlike the taskbar icon, which is shell-local state carried across
+        // lists, this is the compositor's own report. Carrying the previous
+        // value forward would mean a window that had been anonymous stayed
+        // anonymous for the rest of the session even after its program spoke
+        // up -- and the rules that key off it would never fire.
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![WindowInfo::new(1, 40, "notes.md")],
+        ));
+        assert_eq!(shell.windows.get(&WindowId(1)).expect("known").app_id, "");
+
+        let mut named = WindowInfo::new(1, 40, "notes.md");
+        named.app_id = "editor".to_string();
+        shell.apply_window_list(&WindowList::new(0, vec![named]));
+        assert_eq!(
+            shell.windows.get(&WindowId(1)).expect("known").app_id,
+            "editor"
+        );
     }
 
     // ==================================================================

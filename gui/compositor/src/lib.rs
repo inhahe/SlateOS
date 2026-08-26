@@ -823,6 +823,19 @@ pub struct Window {
     pub id: WindowId,
     /// Window title (displayed in title bar).
     pub title: String,
+    /// Which program the client says this window belongs to.
+    ///
+    /// Stored and forwarded, never interpreted: the compositor has no opinion
+    /// about it and no way to verify it. It exists so that a shell can key a
+    /// window rule on something steadier than the title, which changes as the
+    /// user works.
+    ///
+    /// Fixed at creation, and there is deliberately no request to change it —
+    /// unlike the title, which has [`CompositorRequest::SetTitle`]. A program
+    /// able to rename itself mid-session could walk out from under a rule the
+    /// user wrote about it, which would make rules unreliable in exactly the
+    /// case they matter: a program misbehaving.
+    pub app_id: String,
     /// Position of the window's top-left corner (including decorations).
     pub x: i32,
     /// Position of the window's top-left corner (including decorations).
@@ -1023,6 +1036,7 @@ impl Window {
         Self {
             id: WindowId::allocate(),
             title: spec.title.clone(),
+            app_id: spec.app_id.clone(),
             x,
             y,
             width: spec.width,
@@ -8903,6 +8917,14 @@ impl Compositor {
                     pid: w.client_pid,
                     layer: w.layer,
                     title: w.title.clone(),
+                    // Passed through exactly as the client sent it, including
+                    // when that is the empty string. Substituting the title
+                    // for a window that named no program would be worse than
+                    // the gap it filled: every window of a program that
+                    // declined to identify itself would then carry a
+                    // *different* id, so a rule matching one of them would
+                    // silently be a rule about one document.
+                    app_id: w.app_id.clone(),
                     visible: w.visible,
                     minimized: w.minimized,
                     maximized: w.maximized,
@@ -18659,6 +18681,58 @@ mod tests {
             comp.window_list().windows.iter().any(|w| w.id == id.raw()),
             "a window on another desktop disappeared from the window list"
         );
+    }
+
+    #[test]
+    fn the_window_list_says_which_program_each_window_belongs_to() {
+        // Two windows of one program and one of another, because the single
+        // thing this field exists to make possible is telling those two cases
+        // apart. A shell keys a rule, a taskbar group and an icon lookup off
+        // it, and all three are wrong in the same way if the id travels but
+        // does not stay identical between siblings.
+        let mut comp = ungated_compositor(1920, 1080);
+        let mut notes = WindowSpec::new("notes.md", 400, 300);
+        notes.app_id = "editor".to_string();
+        let mut draft = WindowSpec::new("draft.md", 400, 300);
+        draft.app_id = "editor".to_string();
+        let mut other = WindowSpec::new("Files", 400, 300);
+        other.app_id = "explorer".to_string();
+
+        let notes_id = comp.create_window_from_spec(&notes, 1);
+        let draft_id = comp.create_window_from_spec(&draft, 1);
+        let other_id = comp.create_window_from_spec(&other, 2);
+
+        let list = comp.window_list();
+        let of = |id: WindowId| {
+            list.windows
+                .iter()
+                .find(|w| w.id == id.raw())
+                .expect("listed")
+                .app_id
+                .clone()
+        };
+        assert_eq!(of(notes_id), "editor");
+        assert_eq!(of(draft_id), "editor");
+        assert_eq!(of(other_id), "explorer");
+    }
+
+    #[test]
+    fn a_window_that_named_no_program_is_not_given_its_title_as_one() {
+        // The tempting gap-filler, and the wrong one. Every window of a
+        // program that declined to identify itself would get a *different*
+        // id -- its own document's name -- so a rule the user wrote against
+        // one of them would silently be a rule about one file, and would stop
+        // matching the moment they saved under a new name.
+        let mut comp = ungated_compositor(1920, 1080);
+        let id = comp.create_window_from_spec(&WindowSpec::new("notes.md", 400, 300), 1);
+        let list = comp.window_list();
+        let w = list
+            .windows
+            .iter()
+            .find(|w| w.id == id.raw())
+            .expect("listed");
+        assert_eq!(w.title, "notes.md");
+        assert_eq!(w.app_id, "", "the title was substituted for the app id");
     }
 
     #[test]

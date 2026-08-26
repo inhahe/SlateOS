@@ -14,6 +14,7 @@
 
 #![allow(dead_code)]
 
+use globmatch::glob_match;
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
@@ -1033,134 +1034,14 @@ fn search_content(index: &FileIndex, query: &str, limit: usize) -> Vec<SearchRes
 // ============================================================================
 // Glob Pattern Matching
 // ============================================================================
-
-/// Simple glob pattern matching supporting *, ?, and character classes [abc].
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let txt: Vec<char> = text.chars().collect();
-    glob_match_chars(&pat, &txt)
-}
-
-/// The matcher proper: one pass over `text` with a single backtrack point.
-///
-/// Everything is read through `get`, so each access carries its own bound
-/// instead of borrowing one from a `while` header several lines up. That is
-/// not cosmetic here. `apps/backup` had a glob matcher of the same shape whose
-/// bounds were argued rather than carried, and it shipped a pattern
-/// (`--exclude '**a'`) that recursed until the stack overflowed and took the
-/// backup down with it. This one is a single loop with no recursion, so it
-/// cannot fail that way -- and reading through `get` is what keeps the claim
-/// checkable instead of merely believed.
-///
-/// Termination: every iteration either advances `ti`, or advances `pi` on a
-/// `*` (which `pi` can only be reset behind by a backtrack, and a backtrack
-/// strictly increases `star_ti`, which bounds `ti` from below and never
-/// decreases). So the pair `(star_ti, pi)` increases lexicographically on
-/// every iteration and is bounded, and the loop must end.
-fn glob_match_chars(pattern: &[char], text: &[char]) -> bool {
-    let mut pi = 0usize;
-    let mut ti = 0usize;
-    // `Option` rather than a `usize::MAX` sentinel: "no star seen yet" is a
-    // distinct state, not a magic index, and the compiler will not let it be
-    // used as one by accident.
-    let mut star_pi: Option<usize> = None;
-    let mut star_ti = 0usize;
-
-    while let Some(&t) = text.get(ti) {
-        let consumed = match pattern.get(pi) {
-            Some('*') => {
-                star_pi = Some(pi);
-                star_ti = ti;
-                pi = pi.saturating_add(1);
-                continue;
-            }
-            Some('?') => true,
-            Some('[') => {
-                // A malformed class (no closing `]`) yields `None` and is
-                // treated as "did not match here", which sends us to the
-                // backtrack below rather than into a literal-`[` fallback.
-                match match_char_class(pattern.get(pi..).unwrap_or_default(), t) {
-                    Some((true, end)) => {
-                        pi = pi.saturating_add(end);
-                        ti = ti.saturating_add(1);
-                        continue;
-                    }
-                    _ => false,
-                }
-            }
-            Some(&ch) => ch == t,
-            None => false,
-        };
-
-        if consumed {
-            pi = pi.saturating_add(1);
-            ti = ti.saturating_add(1);
-            continue;
-        }
-
-        // Backtrack to just after the last `*`, having let it swallow one more
-        // character of the text.
-        let Some(resume_at) = star_pi else {
-            return false;
-        };
-        pi = resume_at.saturating_add(1);
-        star_ti = star_ti.saturating_add(1);
-        ti = star_ti;
-    }
-
-    // The text is exhausted; the pattern matches only if what is left of it can
-    // match nothing at all, which means trailing stars and then the end.
-    while pattern.get(pi) == Some(&'*') {
-        pi = pi.saturating_add(1);
-    }
-
-    pi == pattern.len()
-}
-
-/// Match a character class like [abc] or [a-z]. Returns (matched,
-/// characters consumed).
-fn match_char_class(pattern: &[char], ch: char) -> Option<(bool, usize)> {
-    if pattern.first() != Some(&'[') {
-        return None;
-    }
-
-    let mut i = 1usize;
-    let negate = pattern.get(i) == Some(&'!');
-    if negate {
-        i = i.saturating_add(1);
-    }
-
-    let mut matched = false;
-    // Reading the separator through `get` is what makes the range arm safe:
-    // `[a-` at the end of a pattern leaves no `hi` character, and asking for
-    // one returns `None` rather than reading past the class.
-    while let Some(&lo) = pattern.get(i).filter(|&&c| c != ']') {
-        match (
-            pattern.get(i.saturating_add(1)),
-            pattern.get(i.saturating_add(2)),
-        ) {
-            (Some('-'), Some(&hi)) if hi != ']' => {
-                if (lo..=hi).contains(&ch) {
-                    matched = true;
-                }
-                i = i.saturating_add(3);
-            }
-            _ => {
-                if lo == ch {
-                    matched = true;
-                }
-                i = i.saturating_add(1);
-            }
-        }
-    }
-
-    if pattern.get(i) != Some(&']') {
-        // Malformed — no closing bracket.
-        return None;
-    }
-    let consumed = i.saturating_add(1); // Include the ']'.
-    Some((matched != negate, consumed))
-}
+//
+// `globmatch` rather than a copy here. This file used to hold its own matcher,
+// and it shipped two bugs that a search tool can least afford: `[a-]` and
+// `[]]` matched *nothing at all*, so a search for a filename containing a
+// bracket returned an empty result set and no error, which reads to the user
+// as "there are no such files". `apps/filesearch` held a second copy with a
+// different set of bugs, so the two search tools in this desktop gave
+// different answers to the same pattern. See the `globmatch` module docs.
 
 // ============================================================================
 // Levenshtein Distance (for fuzzy matching)
@@ -2887,6 +2768,64 @@ exclude_extensions = .o, .tmp
 
         // Still malformed, because there is no closing bracket at all.
         assert!(!glob_match("[a-", "a"));
+    }
+
+    #[test]
+    fn a_leading_bracket_in_a_class_is_a_literal_member() {
+        // The other half of the same problem, and it has the same cause: a
+        // bracket expression has no escape character, so POSIX had to carve out
+        // one position where `]` does not terminate the class -- the first
+        // member position, immediately after `[` or `[!`. Without that rule
+        // there is no way to write a pattern matching a literal `]` at all.
+        //
+        // This matcher used to end the class at the first `]` unconditionally,
+        // so `[]]` parsed as an empty class followed by a stray `]`, which is
+        // malformed, and a malformed class matches nothing. Searching for a
+        // file whose name contains a bracket returned an empty result set with
+        // no error -- the same silent-wrong-answer shape as the `[a-]` bug
+        // above, which is why it deserves its own pin rather than a line in
+        // that test.
+        //
+        // Every assertion here was checked against bash first
+        // (`case "$t" in $pat) r=match;; *) r=no;; esac`).
+        assert!(glob_match("[]]", "]"));
+        assert!(!glob_match("[]]", "a"));
+        assert!(glob_match("[]a]", "]"));
+        assert!(glob_match("[]a]", "a"));
+
+        // Negation moves the special position past the `!` rather than
+        // cancelling it.
+        assert!(!glob_match("[!]]", "]"));
+        assert!(glob_match("[!]]", "a"));
+
+        // That position is an ordinary member position in every other respect,
+        // so it can start a range: `[]-a]` is `]`(0x5D) through `a`(0x61), which
+        // takes in `^` and `_` but not `-`.
+        assert!(glob_match("[]-a]", "]"));
+        assert!(glob_match("[]-a]", "^"));
+        assert!(glob_match("[]-a]", "_"));
+        assert!(glob_match("[]-a]", "a"));
+        assert!(!glob_match("[]-a]", "-"));
+
+        // ...and the trailing-dash rule still applies there, so `[]-]` is the
+        // two-element class `]` and `-`, not a range.
+        assert!(glob_match("[]-]", "]"));
+        assert!(glob_match("[]-]", "-"));
+        assert!(!glob_match("[]-]", "^"));
+
+        // A `]` anywhere later is the terminator, as always: `[a]]` is the
+        // one-element class `a` followed by a literal `]`.
+        assert!(glob_match("[a]]", "a]"));
+        assert!(!glob_match("[a]]", "]"));
+
+        // `[]` and `[]x` have no terminator at all under this rule -- the `]`
+        // is a member, and nothing closes the class -- so both are malformed
+        // and the `[` falls back to a literal. bash agrees: `[]` matches the
+        // two-character string `[]`.
+        assert!(glob_match("[]", "[]"));
+        assert!(!glob_match("[]", "]"));
+        assert!(glob_match("[]x", "[]x"));
+        assert!(!glob_match("[]x", "x"));
     }
 
     #[test]

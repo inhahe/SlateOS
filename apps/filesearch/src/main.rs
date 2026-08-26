@@ -30,124 +30,25 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 // ─── Glob Pattern Matching ───────────────────────────────────────────
-
-/// Match a string against a glob pattern
-/// Supports: * (any chars), ? (single char), [a-z] (char class)
-///
-/// Both engines in this module work on `&[char]`, not `&[u8]`. They used to
-/// step a byte at a time, which made `?` match one *byte*: `?.txt` did not
-/// match `\u{65e5}.txt`, and `[\u{e9}]` matched either half of the two-byte
-/// `\u{e9}` and so also matched part of the unrelated `\u{e8}`. Since both
-/// inputs here are `&str` — filenames already validated as UTF-8 — character
-/// semantics is both what these doc comments promise and what the caller can
-/// supply. (Contrast `apps/backup`, whose matcher runs on raw path bytes that
-/// need not be UTF-8, so there only the `?` advance could be fixed.)
-#[must_use]
-pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let pat: Vec<char> = pattern.chars().collect();
-    let txt: Vec<char> = text.chars().collect();
-    glob_match_chars(&pat, &txt)
-}
-
-/// `glob_match` for callers that already hold decoded characters. Searching an
-/// index calls this once per entry, so the pattern is decoded once by the
-/// caller instead of once per candidate.
-#[must_use]
-pub fn glob_match_chars(pattern: &[char], text: &[char]) -> bool {
-    glob_match_impl(pattern, text)
-}
-
-fn glob_match_impl(pattern: &[char], text: &[char]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
-
-    while ti < text.len() {
-        if pi < pattern.len() && (pattern.get(pi) == Some(&'?') || pattern.get(pi) == text.get(ti))
-        {
-            pi = pi.saturating_add(1);
-            ti = ti.saturating_add(1);
-        } else if pi < pattern.len() && pattern.get(pi) == Some(&'*') {
-            star_pi = pi;
-            star_ti = ti;
-            pi = pi.saturating_add(1);
-        } else if pi < pattern.len() && pattern.get(pi) == Some(&'[') {
-            // Character class
-            let class_end = pattern
-                .get(pi..)
-                .and_then(|s| s.iter().position(|&b| b == ']'));
-            if let Some(end_offset) = class_end {
-                let class_start = pi.saturating_add(1);
-                let class_end_pos = pi.saturating_add(end_offset);
-                let ch = text.get(ti).copied().unwrap_or('\0');
-                let class_bytes = pattern.get(class_start..class_end_pos).unwrap_or_default();
-
-                if char_class_matches(class_bytes, ch) {
-                    pi = class_end_pos.saturating_add(1);
-                    ti = ti.saturating_add(1);
-                } else if star_pi != usize::MAX {
-                    pi = star_pi.saturating_add(1);
-                    star_ti = star_ti.saturating_add(1);
-                    ti = star_ti;
-                } else {
-                    return false;
-                }
-            } else {
-                // Malformed class, treat as literal
-                if star_pi == usize::MAX {
-                    return false;
-                }
-                pi = star_pi.saturating_add(1);
-                star_ti = star_ti.saturating_add(1);
-                ti = star_ti;
-            }
-        } else if star_pi != usize::MAX {
-            pi = star_pi.saturating_add(1);
-            star_ti = star_ti.saturating_add(1);
-            ti = star_ti;
-        } else {
-            return false;
-        }
-    }
-
-    // Skip trailing stars
-    while pi < pattern.len() && pattern.get(pi) == Some(&'*') {
-        pi = pi.saturating_add(1);
-    }
-
-    pi == pattern.len()
-}
-
-/// Check if a character matches a character class like [a-z] or [abc]
-fn char_class_matches(class: &[char], ch: char) -> bool {
-    let negated = class.first() == Some(&'!') || class.first() == Some(&'^');
-    let class = if negated {
-        class.get(1..).unwrap_or_default()
-    } else {
-        class
-    };
-
-    let mut matches = false;
-    let mut i = 0;
-    while i < class.len() {
-        if i.saturating_add(2) < class.len() && class.get(i.saturating_add(1)) == Some(&'-') {
-            let lo = class.get(i).copied().unwrap_or('\0');
-            let hi = class.get(i.saturating_add(2)).copied().unwrap_or('\0');
-            if ch >= lo && ch <= hi {
-                matches = true;
-            }
-            i = i.saturating_add(3);
-        } else {
-            if class.get(i) == Some(&ch) {
-                matches = true;
-            }
-            i = i.saturating_add(1);
-        }
-    }
-
-    if negated { !matches } else { matches }
-}
+//
+// `globmatch` rather than a copy here. This file used to hold its own matcher,
+// and measured against CPython's `fnmatch` over every pattern of length <= 4
+// and text of length <= 3 drawn from the metacharacter alphabet -- 730,236
+// pairs -- it disagreed on 646. Three families, all silent:
+//
+//   * it tested literal equality *before* parsing a class, so any `[` in the
+//     text short-circuited the class: `[*]`, which is how one searches for a
+//     literal asterisk, matched `[]`, `[a]` and `[b]` and not `*`;
+//   * a `]` in the first member position ended the class instead of being a
+//     literal member, so `[]]` -- the only way to write "a bracket" -- matched
+//     nothing;
+//   * and consequently `[!]` was a negated *empty* class, which matches
+//     everything.
+//
+// `apps/indexer` held a second copy with a *different* set of bugs, so the two
+// search tools in this desktop gave different answers to the same pattern.
+// See the `globmatch` module docs.
+pub use globmatch::{glob_match, glob_match_chars};
 
 // ─── Simple Regex Engine ─────────────────────────────────────────────
 

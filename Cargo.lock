@@ -3833,6 +3833,7 @@ dependencies = [
 name = "filesearch"
 version = "0.1.0"
 dependencies = [
+ "globmatch",
  "guitk",
 ]
 
@@ -4637,6 +4638,10 @@ version = "0.1.0"
 
 [[package]]
 name = "glide-cli"
+version = "0.1.0"
+
+[[package]]
+name = "globmatch"
 version = "0.1.0"
 
 [[package]]
@@ -5501,6 +5506,7 @@ version = "0.1.0"
 name = "indexer-app"
 version = "0.1.0"
 dependencies = [
+ "globmatch",
  "scratchdir",
  "textfmt",
 ]

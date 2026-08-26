@@ -30,7 +30,6 @@
 # seeing what had been there all along. See
 # `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`.
 cmd_acpistat 1
-cmd_aiostat 8
 cmd_alloc_trace 1
 cmd_applaunch 1
 cmd_apppermissions 1
@@ -46,10 +45,8 @@ cmd_backupsched 2
 cmd_bluetooth 1
 cmd_bootcfg 1
 cmd_bpfstat 4
-cmd_brightness 7
 cmd_buddyinfo 3
 cmd_cal 2
-cmd_cgiostat 8
 cmd_cgmem 6
 cmd_cgroup 2
 cmd_cgroupfs 3
@@ -97,7 +94,6 @@ cmd_filevault 1
 cmd_findex 1
 cmd_firewall 4
 cmd_fnotify 1
-cmd_focusassist 9
 cmd_focussession 1
 cmd_fontpreview 3
 cmd_fsbench 5
@@ -207,7 +203,6 @@ cmd_shmem 7
 cmd_signalq 6
 cmd_slabstat 1
 cmd_snaplayout 1
-cmd_splice 9
 cmd_sshd 1
 cmd_strings 2
 cmd_surroundsound 3
@@ -220,7 +215,6 @@ cmd_sysresource 4
 cmd_systemimage 1
 cmd_tail_input 1
 cmd_taskbar 3
-cmd_taskio 8
 cmd_taskmon 1
 cmd_tasksched 1
 cmd_taskstats 2

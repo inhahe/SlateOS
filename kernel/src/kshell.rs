@@ -17679,6 +17679,633 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "an unreadable ac state errors");
     }
 
+    serial_println!(
+        "  kshell::self_test 80: an operand with a documented default still refuses a word it \
+         cannot read, and a list refuses the entries it used to drop"
+    );
+    // `focusassist` held nine guessed-value sites, but the reason it is worth a
+    // rung of its own is that it contains the two cases the earlier batches did
+    // not separate cleanly.
+    //
+    // The first is a default that is *not* a sentinel. `focusassist on [id]` is
+    // documented to mean profile 1 when the id is omitted, so `unwrap_or(1)`
+    // looked like the documentation rather than a bug — but it also silenced
+    // every notification under profile 1 when the id was merely mistyped, and
+    // then printed profile 1's name back, which reads as confirmation. The
+    // distinction `optional_num` draws (absent is the default, unreadable is a
+    // refusal) is the entire fix, and this is the first place it is asserted
+    // against a default a user could plausibly have meant.
+    //
+    // The second is §600's *other* prohibited shape, which the counted ledger
+    // does not track: a word read and silently dropped. `addsched`'s day list
+    // ran `if let Ok(n) = part.parse() { if n < 7 { … } }`, two conditions with
+    // no else between them, so `1,Tue,9` built a Monday-only schedule and said
+    // nothing about the two thirds it had discarded.
+    {
+        // `focusassist` is one of the subsystems behind a `with_state` that
+        // returns `NotSupported` until initialised (§604), so the success
+        // controls below have to initialise it first. `init_defaults` returns
+        // early when the state already exists, so this is safe to repeat.
+        let _ = capture_command("focusassist init");
+
+        // The documented default still applies when the operand is absent.
+        let out = capture_command("focusassist on");
+        assert_output_contains(
+            "an omitted profile id still means profile 1",
+            &out,
+            b"Focus assist ON: Priority Only",
+        );
+        assert_eq!(last_exit(), 0, "`focusassist on` succeeds");
+        let _ = capture_command("focusassist off");
+
+        // …and no longer applies when the operand is present but unreadable.
+        let out = capture_command("focusassist on 2o");
+        assert_output_contains(
+            "but a mistyped one is named rather than rounded to it",
+            &out,
+            b"`2o' is not a profile id",
+        );
+        assert_eq!(last_exit(), 1, "`focusassist on 2o` errors");
+        assert_output_lacks(
+            "and nothing is silenced behind the refusal",
+            &out,
+            b"Focus assist ON",
+        );
+
+        // The `id == 0` sentinel could not tell an omitted id from a mistyped
+        // one, and answered both with a synopsis naming two operands — so it
+        // could not say which of the two was wrong either.
+        let out = capture_command("focusassist mode");
+        assert_output_contains(
+            "an omitted profile id is reported as missing",
+            &out,
+            b"missing profile id",
+        );
+        assert_eq!(last_exit(), 1, "a bare `focusassist mode` errors");
+
+        let out = capture_command("focusassist mode 1");
+        assert_output_contains(
+            "and an omitted mode names the mode, not the whole synopsis",
+            &out,
+            b"missing mode (priority, alarms or total)",
+        );
+        assert_eq!(last_exit(), 1, "`focusassist mode 1` errors");
+
+        // A time the clock cannot show used to be stored, producing a schedule
+        // that could never fire.
+        let out = capture_command("focusassist addsched zznap 25:70 26:00 1");
+        assert_output_contains(
+            "an impossible time of day is refused",
+            &out,
+            b"`25:70' is not a time of day",
+        );
+        assert_eq!(last_exit(), 1, "an out-of-range start time errors");
+        assert_output_lacks("and no schedule is created", &out, b"Created schedule");
+
+        // The silently-dropped list entries: one unreadable, one out of range.
+        let out = capture_command("focusassist addsched zznap 09:00 10:00 1 1,Tue");
+        assert_output_contains(
+            "a day the shell cannot read is named instead of dropped",
+            &out,
+            b"`Tue' is not a day number",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable day errors");
+        assert_output_lacks(
+            "and no partial schedule is created",
+            &out,
+            b"Created schedule",
+        );
+
+        let out = capture_command("focusassist addsched zznap 09:00 10:00 1 1,9");
+        assert_output_contains(
+            "and so is one that is readable but out of range",
+            &out,
+            b"day 9 is out of range (0-6, 0=Sun)",
+        );
+        assert_eq!(last_exit(), 1, "an out-of-range day errors");
+
+        // The three auto-trigger switches accepted a narrower vocabulary than
+        // the rest of the shell and discarded the store's error under an
+        // unconditional success line.
+        let out = capture_command("focusassist autofs enabled");
+        assert_output_contains(
+            "an auto-trigger accepts the shared vocabulary",
+            &out,
+            b"Auto fullscreen: ON",
+        );
+        assert_eq!(last_exit(), 0, "`focusassist autofs enabled` succeeds");
+
+        let out = capture_command("focusassist autogame onn");
+        assert_output_contains(
+            "and refuses a word outside it by name",
+            &out,
+            b"`onn' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "`focusassist autogame onn` errors");
+        assert_output_lacks("without reporting the switch set", &out, b"Auto gaming:");
+    }
+
+    serial_println!(
+        "  kshell::self_test 81: a guessed file offset writes over data the user already had, so \
+         `splice' refuses the offset it cannot read"
+    );
+    // Every earlier batch in this burn-down guessed a *selector*: an id, a mode,
+    // a switch. The command then acted on the wrong object, or on nothing, and
+    // said it had done what was asked. Bad, but recoverable — the object the
+    // user meant is still there.
+    //
+    // `splice` is the first one where the guessed number is an *address in a
+    // file the command is about to write to*. `splice copy src dst 0 1O24 4096`
+    // — one mistyped character in the destination offset — used to fall to
+    // `unwrap_or(0)` and write four kilobytes over the *beginning* of `dst`,
+    // then report the transfer as successful. There is no id to look up
+    // afterwards and no setting to put back; the bytes that were at offset 0
+    // are gone.
+    //
+    // The lengths are the same defect one step quieter: `unwrap_or(1024 * 1024)`
+    // means a mistyped length asks for a megabyte, so `splice copy a b 0 0 4O96`
+    // transferred 256x what was asked for and printed the megabyte back as the
+    // byte count — output that is accurate about an operation nobody requested.
+    //
+    // These are genuine optional operands with genuine documented defaults, so
+    // the fix is `optional_num`, not `required_num`: omitting the offset must
+    // still mean 0. The assertions below pin both halves against real files,
+    // and the refusal is asserted *before* the control writes, so the
+    // "destination is untouched" check is meaningful.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let dir = "/tmp/kshell_splice";
+        let src = "/tmp/kshell_splice/src.txt";
+        let dst = "/tmp/kshell_splice/dst.txt";
+        Vfs::mkdir_all(Path::new(dir))?;
+        Vfs::write_file(Path::new(src), b"SOURCEDATA")?;
+        Vfs::write_file(Path::new(dst), b"PRESERVEME")?;
+
+        // The one that destroys data: a mistyped *destination* offset.
+        let out = capture_command(
+            "splice copy /tmp/kshell_splice/src.txt /tmp/kshell_splice/dst.txt 0 1O24 4",
+        );
+        assert_output_contains(
+            "a destination offset that cannot be read is named",
+            &out,
+            b"`1O24' is not a destination offset",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable destination offset errors");
+        assert_output_lacks("and no transfer is reported", &out, b"Copied");
+        assert_eq!(
+            Vfs::read_file(Path::new(dst))?,
+            b"PRESERVEME".to_vec(),
+            "and the destination still holds the bytes it held before the refusal"
+        );
+
+        // The quieter one: a mistyped length used to become a megabyte.
+        let out = capture_command(
+            "splice copy /tmp/kshell_splice/src.txt /tmp/kshell_splice/dst.txt 0 0 4O96",
+        );
+        assert_output_contains(
+            "a length that cannot be read is named too",
+            &out,
+            b"`4O96' is not a length",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable length errors");
+        assert_eq!(
+            Vfs::read_file(Path::new(dst))?,
+            b"PRESERVEME".to_vec(),
+            "and still nothing has been written"
+        );
+
+        // One synopsis used to answer for both paths, so it could not say which
+        // was missing.
+        let out = capture_command("splice send /tmp/kshell_splice/src.txt");
+        assert_output_contains(
+            "an omitted destination is named as the destination",
+            &out,
+            b"missing destination path",
+        );
+        assert_eq!(last_exit(), 1, "`splice send <src>` errors");
+
+        let out = capture_command("splice tee");
+        assert_output_contains(
+            "and an omitted source as the source",
+            &out,
+            b"missing source path",
+        );
+        assert_eq!(last_exit(), 1, "a bare `splice tee` errors");
+
+        // The control, run last because it writes: omitting the optional
+        // operands still means offset 0 and the default length. If this had been
+        // turned into a `required_num`, the fix would have broken the documented
+        // form — which is the failure `optional_num` exists to avoid.
+        let out =
+            capture_command("splice copy /tmp/kshell_splice/src.txt /tmp/kshell_splice/dst.txt");
+        assert_output_contains("omitted offsets still mean zero", &out, b"Copied 10 bytes");
+        assert_eq!(last_exit(), 0, "`splice copy <src> <dst>` succeeds");
+        assert_eq!(
+            Vfs::read_file(Path::new(dst))?,
+            b"SOURCEDATA".to_vec(),
+            "and the copy really landed at the start of the destination"
+        );
+    }
+
+    serial_println!(
+        "  kshell::self_test 82: a guessed number that is filed as a measurement becomes evidence, \
+         so `taskio' refuses the count it cannot read"
+    );
+    // §607 drew the line between a guess that misleads and a guess that
+    // destroys. `taskio` is a third kind, and arguably the worst-behaved of the
+    // three: the guessed number is written into a *statistic*, and statistics
+    // are read later, by someone who was not there when the command was typed
+    // and has nothing but the number to go on.
+    //
+    // `taskio read 5 8l92` (letter L) recorded **4096 bytes** of reads against
+    // pid 5 and printed `taskio: read 4096 bytes for pid 5`. Nothing was
+    // damaged and nothing acted wrongly — a counter simply acquired a value
+    // that no measurement produced, and from that moment it is indistinguishable
+    // from one that did. A missing statistic announces itself; a fabricated one
+    // does not.
+    //
+    // `taskio register 1O` was worse still, because there was no sentinel guard
+    // at all: it registered **pid 0** and reported `registered pid 0`, so a typo
+    // created a task record for a process that does not exist, which then
+    // collected every subsequent mistyped measurement.
+    //
+    // Unlike `splice` (§607) none of these defaults were documented — the
+    // synopsis has always said `read <pid> <bytes>`, both required — so here the
+    // right helper is `required_num` and removing the default breaks no
+    // documented form.
+    {
+        let _ = capture_command("taskio init");
+
+        let out = capture_command("taskio register 4242");
+        assert_output_contains("a task can be registered", &out, b"registered pid 4242");
+        assert_eq!(last_exit(), 0, "`taskio register 4242` succeeds");
+
+        let out = capture_command("taskio read 4242 8192");
+        assert_output_contains(
+            "and a real measurement is recorded",
+            &out,
+            b"read 8192 bytes for pid 4242",
+        );
+        assert_eq!(last_exit(), 0, "`taskio read 4242 8192` succeeds");
+
+        let out = capture_command("taskio list");
+        assert_output_contains(
+            "and shows up in the per-task table",
+            &out,
+            b"read=8192(1 calls)",
+        );
+
+        // The assertion this rung exists for: the refusal must leave the
+        // statistic exactly as it was, not merely avoid printing a wrong line.
+        let out = capture_command("taskio read 4242 8l92");
+        assert_output_contains(
+            "a byte count that cannot be read is named",
+            &out,
+            b"`8l92' is not a byte count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable byte count errors");
+        assert_output_lacks("and no transfer is reported", &out, b"bytes for pid");
+
+        let out = capture_command("taskio list");
+        assert_output_contains(
+            "and the counter has not moved behind the refusal",
+            &out,
+            b"read=8192(1 calls)",
+        );
+
+        // No sentinel stood between a mistyped pid and the task table, so this
+        // used to create a record for a process that does not exist.
+        let out = capture_command("taskio register 1O");
+        assert_output_contains(
+            "a process id that cannot be read is named",
+            &out,
+            b"`1O' is not a process id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable process id errors");
+        assert_output_lacks("and no phantom task is registered", &out, b"registered pid");
+
+        // Absence and unreadability are different events, and `taskio` could
+        // report neither: both used to become 0.
+        let out = capture_command("taskio unregister");
+        assert_output_contains(
+            "an omitted process id is reported as missing",
+            &out,
+            b"missing process id",
+        );
+        assert_eq!(last_exit(), 1, "a bare `taskio unregister` errors");
+
+        let _ = capture_command("taskio unregister 4242");
+    }
+
+    serial_println!(
+        "  kshell::self_test 83: zero means `unlimited', so a guessed zero is not a lost limit but \
+         the opposite of the one that was asked for"
+    );
+    // The fourth and worst way a guessed number goes wrong. In §607 the guess
+    // wrote to the wrong place; in rung 82 it invented a measurement. Here the
+    // guessed value is a legal, meaningful value that happens to be the
+    // *negation* of the request.
+    //
+    // `cgiostat` stores an I/O bandwidth cap, and `0` is its word for no cap —
+    // `list` renders it as the literal string `unlimited`. So
+    // `cgiostat create web 100O000` (letter O for a zero) asked for a 100 MB/s
+    // cap and created a cgroup with **no cap at all**, reporting it as created.
+    // Every other shape in this entry fails toward doing less than was asked;
+    // this one fails toward doing the exact opposite, and it does so in a
+    // subsystem whose entire purpose is to say no.
+    //
+    // The limits stay optional (§607): the synopsis brackets them, and omitting
+    // them to mean unlimited is a real request that must keep working. That is
+    // asserted here too, because a fix that quietly removed it would be a
+    // regression wearing the shape of a repair.
+    {
+        let _ = capture_command("cgiostat init");
+
+        let out = capture_command("cgiostat create zzweb 100000000 500");
+        assert_output_contains(
+            "a cgroup can be created with a cap",
+            &out,
+            b"(bw=100000000 iops=500)",
+        );
+        assert_eq!(last_exit(), 0, "`cgiostat create zzweb …` succeeds");
+
+        let out = capture_command("cgiostat list");
+        assert_output_contains("and the cap is what gets listed", &out, b" bw=100000000B/s");
+
+        // The inversion. Asserting the refusal is not enough on its own: the
+        // thing that mattered was that an uncapped cgroup came into existence,
+        // so the list is checked for its absence.
+        let out = capture_command("cgiostat create zzcap 100O000");
+        assert_output_contains(
+            "a bandwidth limit that cannot be read is named",
+            &out,
+            b"`100O000' is not a bandwidth limit in bytes/s",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable bandwidth limit errors");
+        assert_output_lacks("and nothing is reported created", &out, b"created");
+
+        let out = capture_command("cgiostat list");
+        assert_output_lacks(
+            "and no uncapped cgroup was brought into existence by the typo",
+            &out,
+            b"zzcap",
+        );
+
+        let out = capture_command("cgiostat create zzcap2 100000 5x");
+        assert_output_contains(
+            "and so is an IOPS limit",
+            &out,
+            b"`5x' is not an IOPS limit",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable IOPS limit errors");
+
+        // §607's control: omitting the limits still means unlimited. This is
+        // the request the `unwrap_or(0)` was pretending to serve, and it has to
+        // keep working, or the fix has removed a documented form.
+        let out = capture_command("cgiostat create zzfree");
+        assert_output_contains(
+            "omitting the limits still means unlimited",
+            &out,
+            b"(bw=0 iops=0)",
+        );
+        assert_eq!(last_exit(), 0, "`cgiostat create zzfree` succeeds");
+
+        let out = capture_command("cgiostat list");
+        assert_output_contains(
+            "and unlimited is what the listing says",
+            &out,
+            b"bw=unlimited",
+        );
+
+        // The cgroup id has no sentinel behind it either — `throttle 1O`
+        // recorded a throttle event against cgroup 0.
+        let out = capture_command("cgiostat throttle 1O");
+        assert_output_contains(
+            "a cgroup id that cannot be read is named",
+            &out,
+            b"`1O' is not a cgroup id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable cgroup id errors");
+        assert_output_lacks("and no throttle event is recorded", &out, b"throttle event");
+    }
+
+    serial_println!(
+        "  kshell::self_test 84: a refusal that names the wrong cause sends the reader to the \
+         wrong place, so `aiostat' refuses the word instead of the object"
+    );
+    // `aiostat` shows the two failure modes of a guessed number side by side in
+    // one subcommand, which is why it is worth a rung of its own after rung 83.
+    //
+    // Its ring ids start at 1, so a guessed `0` never collided with a live ring
+    // — `aiostat destroy 1O` did fail. It failed saying `error: NotFound`,
+    // which states that the ring the user named does not exist. The ring does
+    // exist. The *word* could not be read. A wrong-but-confident diagnosis is
+    // not a milder version of no diagnosis: it spends the reader's next hour in
+    // the subsystem rather than on the character they mistyped.
+    //
+    // The counts have no such luck. `submit <ring>` guessed `1`, so a mistyped
+    // count did not fail at all; it filed a measurement nobody took.
+    {
+        let _ = capture_command("aiostat init");
+
+        let out = capture_command("aiostat create 4243 256 512");
+        assert_output_contains("a ring can be created", &out, b"(pid=4243 sq=256 cq=512)");
+        assert_eq!(last_exit(), 0, "`aiostat create 4243 …` succeeds");
+
+        // The pid is the fact the whole ring is keyed on, and `unwrap_or(0)`
+        // made a ring for a process that does not exist — then reported it
+        // created, so every later submission against it looked legitimate.
+        let out = capture_command("aiostat create 4l43");
+        assert_output_contains(
+            "a process id that cannot be read is named",
+            &out,
+            b"`4l43' is not a process id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable process id errors");
+        assert_output_lacks("and no ring is reported created", &out, b"created ring");
+
+        // §607's control: the queue sizes are bracketed in the synopsis, so
+        // omitting them still means the documented defaults.
+        let out = capture_command("aiostat create 4244");
+        assert_output_contains(
+            "omitting the bracketed queue sizes still uses the documented defaults",
+            &out,
+            b"(pid=4244 sq=256 cq=512)",
+        );
+        assert_eq!(last_exit(), 0, "`aiostat create 4244` succeeds");
+
+        let out = capture_command("aiostat create 4245 25x");
+        assert_output_contains(
+            "but an unreadable queue size is named rather than defaulted",
+            &out,
+            b"`25x' is not a submission queue size",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable submission queue size errors");
+
+        // The fabricated measurement. Submit a real count, then a mistyped one,
+        // and check the counter did not move: that the refusal happened is less
+        // important than that nothing was recorded.
+        let _ = capture_command("aiostat submit 1 7");
+        let out = capture_command("aiostat rings");
+        assert_output_contains("a real submission is counted", &out, b" submitted=7");
+
+        let out = capture_command("aiostat submit 1 1O24");
+        assert_output_contains(
+            "an entry count that cannot be read is named",
+            &out,
+            b"`1O24' is not an entry count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable entry count errors");
+        assert_output_lacks("and nothing is reported submitted", &out, b"submitted 1 to");
+
+        let out = capture_command("aiostat rings");
+        assert_output_contains(
+            "and the counter still holds only the submissions that were really asked for",
+            &out,
+            b" submitted=7",
+        );
+
+        // The misdiagnosis. The old message blamed the ring; the new one blames
+        // the word, which is the thing that was actually wrong.
+        let out = capture_command("aiostat destroy 1O");
+        assert_output_contains(
+            "a ring id that cannot be read is named",
+            &out,
+            b"`1O' is not a ring id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable ring id errors");
+        // Asserted against the `aiostat: error:` prefix rather than against the
+        // word `NotFound`. The two are equivalent for this command — that
+        // prefix is the only line the subsystem's errors ever come out on — but
+        // `NotFound` reaches the screen solely through a `{:?}`, so no format
+        // string in the shell contains it and nothing outside a running kernel
+        // could tell whether the assertion was checking anything at all. The
+        // wording gate said exactly that, and it was right.
+        assert_output_lacks(
+            "and the failure is no longer reported as the subsystem's own error",
+            &out,
+            b"aiostat: error:",
+        );
+
+        let _ = capture_command("aiostat destroy 1");
+        let _ = capture_command("aiostat destroy 2");
+    }
+
+    serial_println!(
+        "  kshell::self_test 85: when the optional operand comes first, a guess eats the word the \
+         next operand needed, and the command reports it missing"
+    );
+    // `bright set [id] <level>` was fixed for this in an earlier rung; the same
+    // shape was still live in `mode [id] <type>`, and it is worth a rung because
+    // the two defects *compound* into a diagnostic that is actively misleading.
+    //
+    // `bright mode auto` is the documented one-word form. `parts[1]` was read as
+    // the display id unconditionally, so `auto` was parsed as a number, failed,
+    // and silently became display 1 — consuming the word. The mode operand then
+    // looked absent, and the command answered
+    //
+    //     brightness: mode: `' is not a mode
+    //
+    // quoting the empty string back at a user who had supplied the mode. Neither
+    // half of that message is true: the mode was given, and the thing that could
+    // not be read was a word the command had already decided was a display.
+    //
+    // The `.ok()` calls under `mode`/`dim`/`undim` are the same disease at the
+    // other end: they threw away the `NotFound` that said nothing had been set
+    // and printed the success line anyway.
+    {
+        let _ = capture_command("bright init");
+
+        // The documented one-word form, which did not work at all.
+        let out = capture_command("bright mode auto");
+        assert_output_contains(
+            "`bright mode <type>` is the documented one-word form and must work",
+            &out,
+            b"Mode \xe2\x86\x92 ",
+        );
+        assert_eq!(last_exit(), 0, "`bright mode auto` succeeds");
+        assert_output_lacks(
+            "and the mode word must not be read as the display id",
+            &out,
+            b"is not a mode",
+        );
+
+        // Absence and unreadability are now different answers, and neither
+        // quotes an empty string.
+        let out = capture_command("bright mode");
+        assert_output_contains(
+            "no mode at all is reported as missing",
+            &out,
+            b"missing mode (manual, auto or battery)",
+        );
+        assert_eq!(last_exit(), 1, "`bright mode` errors");
+
+        let out = capture_command("bright mode 1 zz");
+        assert_output_contains("an unreadable mode is named", &out, b"`zz' is not a mode");
+        assert_eq!(last_exit(), 1, "an unreadable mode errors");
+
+        // The discarded Result. Display 9 does not exist, so nothing was set;
+        // the command used to say it had been.
+        let out = capture_command("bright mode 9 auto");
+        assert_eq!(
+            last_exit(),
+            1,
+            "setting the mode of a display that is not there errors"
+        );
+        assert_output_lacks(
+            "and a mode that was not set is not reported as set",
+            &out,
+            b"Mode \xe2\x86\x92 ",
+        );
+
+        // The step and id of `up`/`down` keep their documented defaults (§607),
+        // so pin the arithmetic to a known level first rather than to whatever
+        // an earlier rung left behind.
+        let _ = capture_command("bright set 1 40");
+        let out = capture_command("bright up");
+        assert_output_contains(
+            "omitting both bracketed operands still steps display 1 by ten",
+            &out,
+            b"Brightness \xe2\x86\x92 50%",
+        );
+
+        let out = capture_command("bright up 1O");
+        assert_output_contains(
+            "a display ID that cannot be read is named",
+            &out,
+            b"`1O' is not a display ID",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable display ID errors");
+        assert_output_lacks(
+            "and no display is stepped",
+            &out,
+            b"Brightness \xe2\x86\x92 ",
+        );
+
+        let out = capture_command("bright down 1 5x");
+        assert_output_contains(
+            "and so is a step that cannot be read",
+            &out,
+            b"`5x' is not a step percentage",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable step errors");
+
+        // `dim`/`undim` discarded their Result too.
+        let out = capture_command("bright dim 9");
+        assert_eq!(last_exit(), 1, "dimming a display that is not there errors");
+        assert_output_lacks("and nothing is reported dimmed", &out, b"dimmed.");
+
+        let out = capture_command("bright dim");
+        assert_output_contains(
+            "while the documented default still dims display 1",
+            &out,
+            b"Display 1 dimmed.",
+        );
+        assert_eq!(last_exit(), 0, "`bright dim` succeeds");
+        let _ = capture_command("bright undim");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -28207,25 +28834,54 @@ fn cmd_prefetch(args: &str) {
     }
 }
 
+/// The `<src> <dst>` pair every `splice` transfer begins with, resolved — or
+/// refused, naming whichever of the two is missing.
+///
+/// All four transfers previously shared one `if parts.len() < 3 { synopsis }`
+/// guard, which is the two-operands-one-message defect: it knew something was
+/// absent and had already discarded which, so a user who typed a source and
+/// forgot a destination was answered with the syntax of the line they had just
+/// typed most of correctly.
+fn splice_paths(parts: &[&str], sub: &str) -> Option<(PathBuf, PathBuf)> {
+    let Some(src) = parts.get(1) else {
+        shell_println!("splice: {}: missing source path", sub);
+        set_exit(1);
+        return None;
+    };
+    let Some(dst) = parts.get(2) else {
+        shell_println!("splice: {}: missing destination path", sub);
+        set_exit(1);
+        return None;
+    };
+    Some((resolve_path(src), resolve_path(dst)))
+}
+
 fn cmd_splice(args: &str) {
     use crate::fs::splice;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "copy" | "cp" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: splice copy <src> <dst> [src_offset] [dst_offset] [len]");
-                set_exit(1);
+            let Some((src, dst)) = splice_paths(&parts, sub) else {
                 return;
-            }
-            let src = resolve_path(parts[1]);
-            let dst = resolve_path(parts[2]);
-            let src_off: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let dst_off: u64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: usize = parts
-                .get(5)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1024 * 1024);
+            };
+            // `dst_offset` is where the bytes land. Guessing it as 0 does not
+            // merely act on the wrong thing, as a guessed id does -- it writes
+            // over the *start* of the destination file, which is the one guess
+            // in this family that destroys data the user already had.
+            let Some(src_off) = optional_num::<u64>(&parts, 3, "splice", sub, "source offset", 0)
+            else {
+                return;
+            };
+            let Some(dst_off) =
+                optional_num::<u64>(&parts, 4, "splice", sub, "destination offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<usize>(&parts, 5, "splice", sub, "length", 1024 * 1024)
+            else {
+                return;
+            };
             match splice::copy_file_range(&src, src_off, &dst, dst_off, len) {
                 Ok(r) => shell_println!(
                     "Copied {} bytes ({} chunks): {} -> {}",
@@ -28241,18 +28897,17 @@ fn cmd_splice(args: &str) {
             }
         }
         "send" | "sendfile" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: splice send <src> <dst> [offset] [len]");
-                set_exit(1);
+            let Some((src, dst)) = splice_paths(&parts, sub) else {
                 return;
-            }
-            let src = resolve_path(parts[1]);
-            let dst = resolve_path(parts[2]);
-            let offset: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: usize = parts
-                .get(4)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1024 * 1024);
+            };
+            let Some(offset) = optional_num::<u64>(&parts, 3, "splice", sub, "source offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<usize>(&parts, 4, "splice", sub, "length", 1024 * 1024)
+            else {
+                return;
+            };
             match splice::sendfile(&src, &dst, offset, len) {
                 Ok(r) => shell_println!(
                     "Sent {} bytes ({} chunks): {} -> {}",
@@ -28268,18 +28923,17 @@ fn cmd_splice(args: &str) {
             }
         }
         "pipe" | "splice" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: splice pipe <src> <dst> [src_offset] [len]");
-                set_exit(1);
+            let Some((src, dst)) = splice_paths(&parts, sub) else {
                 return;
-            }
-            let src = resolve_path(parts[1]);
-            let dst = resolve_path(parts[2]);
-            let src_off: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: usize = parts
-                .get(4)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1024 * 1024);
+            };
+            let Some(src_off) = optional_num::<u64>(&parts, 3, "splice", sub, "source offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<usize>(&parts, 4, "splice", sub, "length", 1024 * 1024)
+            else {
+                return;
+            };
             match splice::splice(&src, src_off, &dst, len) {
                 Ok(r) => shell_println!(
                     "Spliced {} bytes ({} chunks): {} -> {}",
@@ -28295,18 +28949,17 @@ fn cmd_splice(args: &str) {
             }
         }
         "tee" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: splice tee <src> <dst> [offset] [len]");
-                set_exit(1);
+            let Some((src, dst)) = splice_paths(&parts, sub) else {
                 return;
-            }
-            let src = resolve_path(parts[1]);
-            let dst = resolve_path(parts[2]);
-            let offset: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: usize = parts
-                .get(4)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1024 * 1024);
+            };
+            let Some(offset) = optional_num::<u64>(&parts, 3, "splice", sub, "source offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<usize>(&parts, 4, "splice", sub, "length", 1024 * 1024)
+            else {
+                return;
+            };
             match splice::tee(&src, offset, &dst, len) {
                 Ok(r) => shell_println!(
                     "Tee'd {} bytes: {} -> {}",
@@ -49818,10 +50471,16 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "on" => {
-            let profile_id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
+            // The synopsis says `on [id]` defaults to 1, so an *absent* id
+            // legitimately means profile 1 -- but an unreadable one never did.
+            // `focusassist on 2o` used to silence every notification under
+            // profile 1 and report profile 1's name back, which reads as
+            // confirmation of a request nobody made.
+            let Some(profile_id) =
+                optional_num::<u64>(&parts, 1, "focusassist", "on", "profile id", 1)
+            else {
+                return;
+            };
             match focusassist::activate(profile_id) {
                 Ok(()) => {
                     if let Some(p) = focusassist::active_profile() {
@@ -49886,13 +50545,15 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            let mode_str = parts.get(2).copied().unwrap_or("priority");
-            if name.is_empty() {
-                shell_println!("Usage: focusassist create <name> [priority|alarms|total]");
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("focusassist: create: missing profile name");
                 set_exit(1);
                 return;
-            }
+            };
+            // The mode really is optional and really does default to
+            // `priority`; the arm below already refuses a word it cannot read,
+            // so this `unwrap_or` stands for absence only.
+            let mode_str = parts.get(2).copied().unwrap_or("priority");
             let mode = match mode_str {
                 "priority" => focusassist::FocusMode::PriorityOnly,
                 "alarms" => focusassist::FocusMode::AlarmsOnly,
@@ -49912,15 +50573,10 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "remove" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: focusassist remove <profile_id>");
-                set_exit(1);
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "remove", "profile id")
+            else {
                 return;
-            }
+            };
             match focusassist::remove_profile(id) {
                 Ok(()) => shell_println!("Removed profile {}", id),
                 Err(e) => {
@@ -49930,16 +50586,19 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "mode" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let mode_str = parts.get(2).copied().unwrap_or("");
-            if id == 0 || mode_str.is_empty() {
-                shell_println!("Usage: focusassist mode <profile_id> <priority|alarms|total>");
+            // The old guard was `id == 0 || mode_str.is_empty()`, one synopsis
+            // for two different operands: it could not say which of the two you
+            // had left out, and a mistyped id reached it looking exactly like an
+            // omitted one.
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "mode", "profile id")
+            else {
+                return;
+            };
+            let Some(mode_str) = parts.get(2).copied() else {
+                shell_println!("focusassist: mode: missing mode (priority, alarms or total)");
                 set_exit(1);
                 return;
-            }
+            };
             let mode = match mode_str {
                 "priority" => focusassist::FocusMode::PriorityOnly,
                 "alarms" => focusassist::FocusMode::AlarmsOnly,
@@ -49959,16 +50618,15 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "addapp" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let app_id = parts.get(2).copied().unwrap_or("");
-            if id == 0 || app_id.is_empty() {
-                shell_println!("Usage: focusassist addapp <profile_id> <app_id>");
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "addapp", "profile id")
+            else {
+                return;
+            };
+            let Some(app_id) = parts.get(2).copied() else {
+                shell_println!("focusassist: addapp: missing app id");
                 set_exit(1);
                 return;
-            }
+            };
             match focusassist::add_priority_app(id, app_id) {
                 Ok(()) => shell_println!("Added '{}' to profile {} priority apps", app_id, id),
                 Err(e) => {
@@ -49978,16 +50636,15 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "rmapp" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let app_id = parts.get(2).copied().unwrap_or("");
-            if id == 0 || app_id.is_empty() {
-                shell_println!("Usage: focusassist rmapp <profile_id> <app_id>");
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "rmapp", "profile id")
+            else {
+                return;
+            };
+            let Some(app_id) = parts.get(2).copied() else {
+                shell_println!("focusassist: rmapp: missing app id");
                 set_exit(1);
                 return;
-            }
+            };
             match focusassist::remove_priority_app(id, app_id) {
                 Ok(()) => shell_println!("Removed '{}' from profile {} priority apps", app_id, id),
                 Err(e) => {
@@ -49997,15 +50654,10 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "apps" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: focusassist apps <profile_id>");
-                set_exit(1);
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "apps", "profile id")
+            else {
                 return;
-            }
+            };
             match focusassist::priority_apps(id) {
                 Ok(apps) => {
                     if apps.is_empty() {
@@ -50024,15 +50676,10 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "reply" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: focusassist reply <profile_id> [message]");
-                set_exit(1);
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "reply", "profile id")
+            else {
                 return;
-            }
+            };
             let msg = if parts.len() > 2 {
                 Some(parts[2..].join(" "))
             } else {
@@ -50105,32 +50752,47 @@ fn cmd_focusassist(args: &str) {
         }
         "addsched" => {
             // focusassist addsched <name> <start_hh:mm> <end_hh:mm> <profile_id> [days]
-            let name = parts.get(1).copied().unwrap_or("");
-            let start = parts.get(2).copied().unwrap_or("");
-            let end = parts.get(3).copied().unwrap_or("");
-            let pid = parts
-                .get(4)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if name.is_empty() || start.is_empty() || end.is_empty() || pid == 0 {
-                shell_println!(
-                    "Usage: focusassist addsched <name> <HH:MM> <HH:MM> <profile_id> [days]"
-                );
-                shell_println!("  days: comma-separated 0-6 (0=Sun). Default: all days.");
+            // One synopsis stood in for four operands, so it could never say
+            // which one was wrong -- and a mistyped profile id arrived at it in
+            // the same shape as an omitted one.
+            let missing = |noun: &str| {
+                shell_println!("focusassist: addsched: missing {}", noun);
                 set_exit(1);
+            };
+            let Some(name) = parts.get(1).copied() else {
+                missing("schedule name");
                 return;
-            }
+            };
+            let Some(start) = parts.get(2).copied() else {
+                missing("start time (HH:MM)");
+                return;
+            };
+            let Some(end) = parts.get(3).copied() else {
+                missing("end time (HH:MM)");
+                return;
+            };
+            let Some(pid) = required_num::<u64>(&parts, 4, "focusassist", "addsched", "profile id")
+            else {
+                return;
+            };
             let parse_time = |t: &str| -> Option<(u8, u8)> {
                 let p: Vec<&str> = t.split(':').collect();
                 if p.len() != 2 {
                     return None;
                 }
-                Some((p[0].parse().ok()?, p[1].parse().ok()?))
+                let (h, m): (u8, u8) = (p[0].parse().ok()?, p[1].parse().ok()?);
+                // A time the clock cannot show is not a time. Without this,
+                // `25:70` was accepted and stored, and the schedule it made
+                // could never fire.
+                if h > 23 || m > 59 {
+                    return None;
+                }
+                Some((h, m))
             };
             let (sh, sm) = match parse_time(start) {
                 Some(t) => t,
                 None => {
-                    shell_println!("Invalid start time");
+                    shell_println!("focusassist: addsched: `{}' is not a time of day", start);
                     set_exit(1);
                     return;
                 }
@@ -50138,7 +50800,7 @@ fn cmd_focusassist(args: &str) {
             let (eh, em) = match parse_time(end) {
                 Some(t) => t,
                 None => {
-                    shell_println!("Invalid end time");
+                    shell_println!("focusassist: addsched: `{}' is not a time of day", end);
                     set_exit(1);
                     return;
                 }
@@ -50147,11 +50809,24 @@ fn cmd_focusassist(args: &str) {
             if let Some(d) = parts.get(5) {
                 days = [false; 7];
                 for part in d.split(',') {
-                    if let Ok(n) = part.parse::<usize>() {
-                        if n < 7 {
-                            days[n] = true;
-                        }
-                    }
+                    // Both arms of this used to fall through in silence: an
+                    // unreadable day and an out-of-range one were each dropped,
+                    // so `--days 1,Tue,9` created a Monday-only schedule and
+                    // said nothing about the two thirds it had thrown away.
+                    let Ok(n) = part.parse::<usize>() else {
+                        shell_println!("focusassist: addsched: `{}' is not a day number", part);
+                        set_exit(1);
+                        return;
+                    };
+                    let Some(slot) = days.get_mut(n) else {
+                        shell_println!(
+                            "focusassist: addsched: day {} is out of range (0-6, 0=Sun)",
+                            n
+                        );
+                        set_exit(1);
+                        return;
+                    };
+                    *slot = true;
                 }
             }
             match focusassist::add_schedule(name, days, sh, sm, eh, em, pid) {
@@ -50163,15 +50838,10 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "rmsched" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: focusassist rmsched <schedule_id>");
-                set_exit(1);
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "rmsched", "schedule id")
+            else {
                 return;
-            }
+            };
             match focusassist::remove_schedule(id) {
                 Ok(()) => shell_println!("Removed schedule {}", id),
                 Err(e) => {
@@ -50180,53 +50850,46 @@ fn cmd_focusassist(args: &str) {
                 }
             }
         }
+        // These three shared a shape that refused the right words for the wrong
+        // reason: the `_ =>` arm caught an omitted operand and a misspelt one
+        // alike and answered both with a synopsis, which tells a user who typed
+        // `autofs onn` only that the syntax is `<on|off>` -- which is what they
+        // typed. They also accepted a narrower vocabulary than the rest of the
+        // shell (`true`/`enable`/`1` were refused here and accepted elsewhere),
+        // and each discarded the store's `Result` under an unconditional
+        // success line, so a failed write still printed `Auto fullscreen: ON`.
         "autofs" => {
-            let val = parts.get(1).copied().unwrap_or("");
-            match val {
-                "on" => {
-                    let _ = focusassist::set_auto_fullscreen(true);
-                    shell_println!("Auto fullscreen: ON");
-                }
-                "off" => {
-                    let _ = focusassist::set_auto_fullscreen(false);
-                    shell_println!("Auto fullscreen: OFF");
-                }
-                _ => {
-                    shell_println!("Usage: focusassist autofs <on|off>");
+            let Some(v) = required_toggle(&parts, 1, "focusassist", "autofs") else {
+                return;
+            };
+            match focusassist::set_auto_fullscreen(v) {
+                Ok(()) => shell_println!("Auto fullscreen: {}", if v { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
                     set_exit(1);
                 }
             }
         }
         "autogame" => {
-            let val = parts.get(1).copied().unwrap_or("");
-            match val {
-                "on" => {
-                    let _ = focusassist::set_auto_gaming(true);
-                    shell_println!("Auto gaming: ON");
-                }
-                "off" => {
-                    let _ = focusassist::set_auto_gaming(false);
-                    shell_println!("Auto gaming: OFF");
-                }
-                _ => {
-                    shell_println!("Usage: focusassist autogame <on|off>");
+            let Some(v) = required_toggle(&parts, 1, "focusassist", "autogame") else {
+                return;
+            };
+            match focusassist::set_auto_gaming(v) {
+                Ok(()) => shell_println!("Auto gaming: {}", if v { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
                     set_exit(1);
                 }
             }
         }
         "autopres" => {
-            let val = parts.get(1).copied().unwrap_or("");
-            match val {
-                "on" => {
-                    let _ = focusassist::set_auto_presentation(true);
-                    shell_println!("Auto presentation: ON");
-                }
-                "off" => {
-                    let _ = focusassist::set_auto_presentation(false);
-                    shell_println!("Auto presentation: OFF");
-                }
-                _ => {
-                    shell_println!("Usage: focusassist autopres <on|off>");
+            let Some(v) = required_toggle(&parts, 1, "focusassist", "autopres") else {
+                return;
+            };
+            match focusassist::set_auto_presentation(v) {
+                Ok(()) => shell_println!("Auto presentation: {}", if v { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
                     set_exit(1);
                 }
             }
@@ -73336,14 +73999,18 @@ fn cmd_brightness(args: &str) {
             }
         }
         "up" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let step = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(10);
+            // Both operands are bracketed — `up [id] [step]` — so both defaults
+            // are documented and survive (§607). What does not survive is
+            // `bright up 1O`, which used to raise display **1** instead of
+            // display 10 and print `Brightness → 60%`: a number that is true of
+            // a screen the user was not looking at.
+            let Some(id) = optional_num::<u32>(&parts, 1, "bright", sub, "display ID", 1) else {
+                return;
+            };
+            let Some(step) = optional_num::<u32>(&parts, 2, "bright", sub, "step percentage", 10)
+            else {
+                return;
+            };
             match brightness::brightness_up(id, step) {
                 Ok(new) => shell_println!("Brightness → {}%", new),
                 Err(e) => {
@@ -73353,14 +74020,13 @@ fn cmd_brightness(args: &str) {
             }
         }
         "down" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let step = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(10);
+            let Some(id) = optional_num::<u32>(&parts, 1, "bright", sub, "display ID", 1) else {
+                return;
+            };
+            let Some(step) = optional_num::<u32>(&parts, 2, "bright", sub, "step percentage", 10)
+            else {
+                return;
+            };
             match brightness::brightness_down(id, step) {
                 Ok(new) => shell_println!("Brightness → {}%", new),
                 Err(e) => {
@@ -73370,11 +74036,26 @@ fn cmd_brightness(args: &str) {
             }
         }
         "mode" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let mode_str = parts.get(2).copied().unwrap_or("");
+            // `mode [id] <type>` has the same shape as `set` above: the
+            // *optional* operand comes first, so only the operand count says
+            // which word is which. Reading `parts[1]` as the id unconditionally
+            // meant `bright mode auto` — the form anyone with one screen would
+            // type, and the form the synopsis documents — parsed `auto` as a
+            // display id, failed, silently became display 1, then found no mode
+            // word at all and answered ``brightness: mode: `' is not a mode``.
+            // A diagnostic quoting the empty string, about an operand the user
+            // did supply, is the arity bug and the guess compounding: the guess
+            // consumed the word and the arity guard then reported its absence.
+            let (id_idx, mode_idx) = if parts.len() >= 3 {
+                (Some(1), 2)
+            } else {
+                (None, 1)
+            };
+            let Some(mode_str) = parts.get(mode_idx).copied() else {
+                shell_println!("brightness: mode: missing mode (manual, auto or battery)");
+                set_exit(1);
+                return;
+            };
             let mode = match mode_str {
                 "manual" | "man" => brightness::BrightnessMode::Manual,
                 "auto" | "automatic" => brightness::BrightnessMode::Automatic,
@@ -73386,24 +74067,51 @@ fn cmd_brightness(args: &str) {
                     return;
                 }
             };
-            brightness::set_mode(id, mode).ok();
-            shell_println!("Mode → {}", mode.label());
+            let id = match id_idx {
+                None => 1,
+                Some(i) => {
+                    let Some(v) = optional_num::<u32>(&parts, i, "bright", sub, "display ID", 1)
+                    else {
+                        return;
+                    };
+                    v
+                }
+            };
+            // `.ok()` followed by an unconditional success line is the same
+            // defect as a guessed operand, one layer down: `bright mode 9 auto`
+            // set nothing, discarded the `NotFound` that said so, and printed
+            // `Mode → Automatic`. The report has to depend on the outcome.
+            match brightness::set_mode(id, mode) {
+                Ok(()) => shell_println!("Mode → {}", mode.label()),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
         }
         "dim" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            brightness::dim(id).ok();
-            shell_println!("Display {} dimmed.", id);
+            let Some(id) = optional_num::<u32>(&parts, 1, "bright", sub, "display ID", 1) else {
+                return;
+            };
+            match brightness::dim(id) {
+                Ok(()) => shell_println!("Display {} dimmed.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
         }
         "undim" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            brightness::undim(id).ok();
-            shell_println!("Display {} undimmed.", id);
+            let Some(id) = optional_num::<u32>(&parts, 1, "bright", sub, "display ID", 1) else {
+                return;
+            };
+            match brightness::undim(id) {
+                Ok(()) => shell_println!("Display {} undimmed.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
         }
         "stats" => {
             let (count, adj, auto, ops) = brightness::stats();
@@ -96539,18 +97247,29 @@ fn cmd_aiostat(args: &str) {
             shell_println!("aiostat: initialized");
         }
         "create" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let sq = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(256);
-            let cq = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(512);
+            // `aiostat create 1O 256` created a ring owned by **pid 0** and
+            // reported it created. Every later `submit`/`complete` against that
+            // ring then filed real-looking io_uring traffic against a process
+            // that does not exist — the ring is the object the whole subsystem
+            // is keyed on, so one unreadable pid at creation time poisons every
+            // statistic downstream of it.
+            //
+            // The queue sizes keep their defaults: the synopsis brackets them as
+            // `create <pid> [sq_size] [cq_size]`, so omitting them is a
+            // documented request (§607). Only the unreadable word is refused.
+            let Some(pid) = required_num::<u32>(&parts, 1, "aiostat", sub, "process id") else {
+                return;
+            };
+            let Some(sq) =
+                optional_num::<u32>(&parts, 2, "aiostat", sub, "submission queue size", 256)
+            else {
+                return;
+            };
+            let Some(cq) =
+                optional_num::<u32>(&parts, 3, "aiostat", sub, "completion queue size", 512)
+            else {
+                return;
+            };
             match aiostat::create_ring(pid, sq, cq) {
                 Ok(id) => shell_println!(
                     "aiostat: created ring {} (pid={} sq={} cq={})",
@@ -96566,10 +97285,17 @@ fn cmd_aiostat(args: &str) {
             }
         }
         "destroy" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Ring ids are allocated from 1, so the guessed `0` did at least
+            // fail rather than destroy someone else's ring. It failed *with the
+            // wrong reason*: `aiostat destroy 1O` printed
+            // `aiostat: error: NotFound`, which tells the user that ring 1 does
+            // not exist. Ring 1 does exist; the word `1O` is what could not be
+            // read. A diagnostic that blames the right operand for the wrong
+            // cause is worse than a bare failure, because it sends the reader
+            // to look at the subsystem instead of at what they typed.
+            let Some(id) = required_num::<u32>(&parts, 1, "aiostat", sub, "ring id") else {
+                return;
+            };
             match aiostat::destroy_ring(id) {
                 Ok(()) => shell_println!("aiostat: destroyed ring {}", id),
                 Err(e) => {
@@ -96579,14 +97305,23 @@ fn cmd_aiostat(args: &str) {
             }
         }
         "submit" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let n = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            // The two operands failed in the two different ways this entry has
+            // been cataloguing, in one statement. The id's guessed `0` is not a
+            // live ring, so it surfaced as `NotFound` — a refusal, but one that
+            // names the wrong culprit. The count's guessed `1` is a
+            // *measurement*: `aiostat submit 3 1O24` recorded **one**
+            // submission where a thousand and twenty-four were meant, reported
+            // `submitted 1 to ring 3`, and left a counter that is now simply
+            // wrong with nothing anywhere to contradict it.
+            //
+            // The count stays optional (`submit <ring_id> [count]` — §607); the
+            // id does not.
+            let Some(id) = required_num::<u32>(&parts, 1, "aiostat", sub, "ring id") else {
+                return;
+            };
+            let Some(n) = optional_num::<u32>(&parts, 2, "aiostat", sub, "entry count", 1) else {
+                return;
+            };
             match aiostat::submit(id, n) {
                 Ok(()) => shell_println!("aiostat: submitted {} to ring {}", n, id),
                 Err(e) => {
@@ -96596,14 +97331,12 @@ fn cmd_aiostat(args: &str) {
             }
         }
         "complete" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let n = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            let Some(id) = required_num::<u32>(&parts, 1, "aiostat", sub, "ring id") else {
+                return;
+            };
+            let Some(n) = optional_num::<u32>(&parts, 2, "aiostat", sub, "entry count", 1) else {
+                return;
+            };
             match aiostat::complete(id, n) {
                 Ok(()) => shell_println!("aiostat: completed {} from ring {}", n, id),
                 Err(e) => {
@@ -97137,15 +97870,31 @@ fn cmd_cgiostat(args: &str) {
             shell_println!("cgiostat: initialized");
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("unnamed");
-            let bw = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let iops = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // `0` is this subsystem's word for *unlimited* — `list` renders it
+            // as the string `unlimited` — so `unwrap_or(0)` did not merely lose
+            // the number, it inverted the request. `cgiostat create web 100O000`
+            // (letter O) asked for a 100 MB/s cap and created a cgroup with no
+            // cap at all, then reported it as created. A throttle that silently
+            // becomes no throttle is the one failure a throttle must not have.
+            //
+            // The limits stay *optional* per §607 — the synopsis documents
+            // `[bw_limit] [iops_limit]`, and omitting them to mean unlimited is
+            // a real request — but an unreadable word is no longer routed into
+            // that meaning.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("cgiostat: create: missing cgroup name");
+                set_exit(1);
+                return;
+            };
+            let Some(bw) =
+                optional_num::<u64>(&parts, 2, "cgiostat", sub, "bandwidth limit in bytes/s", 0)
+            else {
+                return;
+            };
+            let Some(iops) = optional_num::<u64>(&parts, 3, "cgiostat", sub, "IOPS limit", 0)
+            else {
+                return;
+            };
             match cgiostat::create_cgroup(name, bw, iops) {
                 Ok(id) => shell_println!(
                     "cgiostat: created '{}' → id {} (bw={} iops={})",
@@ -97161,10 +97910,9 @@ fn cmd_cgiostat(args: &str) {
             }
         }
         "remove" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "cgiostat", sub, "cgroup id") else {
+                return;
+            };
             match cgiostat::remove_cgroup(id) {
                 Ok(()) => shell_println!("cgiostat: removed cgroup {}", id),
                 Err(e) => {
@@ -97174,14 +97922,16 @@ fn cmd_cgiostat(args: &str) {
             }
         }
         "read" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            // Unlike `taskio`, this synopsis brackets the count — `read <cg_id>
+            // [bytes]` — so omitting it is a documented request and the default
+            // survives (§607). Only the unreadable word is refused.
+            let Some(id) = required_num::<u32>(&parts, 1, "cgiostat", sub, "cgroup id") else {
+                return;
+            };
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "cgiostat", sub, "byte count", 4096)
+            else {
+                return;
+            };
             match cgiostat::record_read(id, bytes) {
                 Ok(()) => shell_println!("cgiostat: read {} bytes cgroup {}", bytes, id),
                 Err(e) => {
@@ -97191,14 +97941,13 @@ fn cmd_cgiostat(args: &str) {
             }
         }
         "write" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            let Some(id) = required_num::<u32>(&parts, 1, "cgiostat", sub, "cgroup id") else {
+                return;
+            };
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "cgiostat", sub, "byte count", 4096)
+            else {
+                return;
+            };
             match cgiostat::record_write(id, bytes) {
                 Ok(()) => shell_println!("cgiostat: write {} bytes cgroup {}", bytes, id),
                 Err(e) => {
@@ -97208,10 +97957,9 @@ fn cmd_cgiostat(args: &str) {
             }
         }
         "throttle" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "cgiostat", sub, "cgroup id") else {
+                return;
+            };
             match cgiostat::record_throttle(id) {
                 Ok(()) => shell_println!("cgiostat: throttle event cgroup {}", id),
                 Err(e) => {
@@ -97222,22 +97970,40 @@ fn cmd_cgiostat(args: &str) {
         }
         "list" => {
             for cg in cgiostat::per_cgroup() {
-                let bw = if cg.bw_limit_bps > 0 {
-                    alloc::format!("{}B/s", cg.bw_limit_bps)
+                // The two spellings of the limit are branches of the *format
+                // string*, not a `String` built above it. Written the other way
+                // — `let bw = format!("{}B/s", …)` interpolated through a
+                // trailing `bw={}` — the unit and the word `unlimited` exist
+                // nowhere a reader of this function can see them, and nothing
+                // outside a running kernel can establish that a zero limit is
+                // reported as `unlimited` rather than as `0`. That is precisely
+                // the inversion the `create` arm above was fixed for, so the
+                // line that displays it is the last place it should be
+                // undiscoverable.
+                if cg.bw_limit_bps > 0 {
+                    shell_println!(
+                        "  [{}] {:<16} R={}B ({}io) W={}B ({}io) throttle={} bw={}B/s",
+                        cg.cg_id,
+                        cg.name,
+                        cg.read_bytes,
+                        cg.read_ios,
+                        cg.write_bytes,
+                        cg.write_ios,
+                        cg.throttle_count,
+                        cg.bw_limit_bps
+                    );
                 } else {
-                    alloc::string::String::from("unlimited")
-                };
-                shell_println!(
-                    "  [{}] {:<16} R={}B ({}io) W={}B ({}io) throttle={} bw={}",
-                    cg.cg_id,
-                    cg.name,
-                    cg.read_bytes,
-                    cg.read_ios,
-                    cg.write_bytes,
-                    cg.write_ios,
-                    cg.throttle_count,
-                    bw
-                );
+                    shell_println!(
+                        "  [{}] {:<16} R={}B ({}io) W={}B ({}io) throttle={} bw=unlimited",
+                        cg.cg_id,
+                        cg.name,
+                        cg.read_bytes,
+                        cg.read_ios,
+                        cg.write_bytes,
+                        cg.write_ios,
+                        cg.throttle_count
+                    );
+                }
             }
         }
         "stats" => {
@@ -99741,10 +100507,9 @@ fn cmd_taskio(args: &str) {
             shell_println!("taskio: initialized");
         }
         "register" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
             match taskio::register(pid) {
                 Ok(()) => shell_println!("taskio: registered pid {}", pid),
                 Err(e) => {
@@ -99754,10 +100519,9 @@ fn cmd_taskio(args: &str) {
             }
         }
         "unregister" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
             match taskio::unregister(pid) {
                 Ok(()) => shell_println!("taskio: unregistered pid {}", pid),
                 Err(e) => {
@@ -99767,14 +100531,17 @@ fn cmd_taskio(args: &str) {
             }
         }
         "read" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            // The byte count is what this command exists to record, and the
+            // synopsis has always written it `<bytes>`. The 4096 was never a
+            // documented default -- it was a number invented on the spot and
+            // then filed as a measurement, which is the one kind of wrong
+            // answer that later looks like evidence.
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
+            let Some(bytes) = required_num::<u64>(&parts, 2, "taskio", sub, "byte count") else {
+                return;
+            };
             match taskio::record_read(pid, bytes) {
                 Ok(()) => shell_println!("taskio: read {} bytes for pid {}", bytes, pid),
                 Err(e) => {
@@ -99784,14 +100551,12 @@ fn cmd_taskio(args: &str) {
             }
         }
         "write" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
+            let Some(bytes) = required_num::<u64>(&parts, 2, "taskio", sub, "byte count") else {
+                return;
+            };
             match taskio::record_write(pid, bytes) {
                 Ok(()) => shell_println!("taskio: write {} bytes for pid {}", bytes, pid),
                 Err(e) => {
@@ -99801,14 +100566,15 @@ fn cmd_taskio(args: &str) {
             }
         }
         "cancel" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // `unwrap_or(0)` here recorded a cancellation of nothing and called
+            // it a success, so an unreadable count produced a line in the log
+            // saying the command had run and a counter that had not moved.
+            let Some(pid) = required_num::<u32>(&parts, 1, "taskio", sub, "process id") else {
+                return;
+            };
+            let Some(bytes) = required_num::<u64>(&parts, 2, "taskio", sub, "byte count") else {
+                return;
+            };
             match taskio::record_cancelled(pid, bytes) {
                 Ok(()) => shell_println!("taskio: cancelled {} bytes for pid {}", bytes, pid),
                 Err(e) => {

@@ -81109,8 +81109,303 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **581 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **529 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (eighteenth batch): `cmd_brightness` (7) cleared
+> — 536 → 529 across 225 → 224 functions. Pinned by `kshell::self_test` rung 85.
+>
+> **The guess and the arity guard compound, and the result is a message that is
+> false in both halves.** `cmd_brightness`'s `set` arm was fixed for this in an
+> earlier batch and is quoted at the top of this entry; what was missed then is
+> that `mode [id] <type>` has the identical shape — the *optional* operand
+> first, so only the operand count says which word is which.
+>
+> `bright mode auto` is the form the command's own help text documents. It did
+> this:
+>
+> 1. `parts[1]` is read as the display id unconditionally, so `auto` is parsed
+>    as a number. It fails. `unwrap_or(1)` makes it display 1 — **and the word
+>    is now consumed.**
+> 2. The mode operand is looked for at `parts[2]`, which is absent, so it
+>    becomes `""`.
+> 3. The command answers ``brightness: mode: `' is not a mode``.
+>
+> Neither half of that sentence is true. The mode *was* supplied. The thing that
+> could not be read was a word the command had already decided was a display id.
+> And it quotes the empty string back at someone who typed exactly what the help
+> text told them to. This is the first site in the entry where the guess does not
+> merely cause a wrong action or a wrong explanation but **manufactures the
+> evidence for its own wrong explanation** — the emptiness the message complains
+> about was created two lines earlier by the guess.
+>
+> The lesson generalises to the rest of the ledger and is worth carrying into
+> triage: **wherever a synopsis brackets its *first* operand, the guess is
+> load-bearing for the arity check below it, and fixing the guess alone is not
+> enough** — the index has to be chosen by operand count first. Grep the
+> remaining functions for `[` appearing before `<` in their usage lines.
+>
+> The same batch removes three `.ok()`-then-report-success sites under
+> `mode`/`dim`/`undim`. `bright mode 9 auto` discarded the `NotFound` that said
+> nothing had been set and printed `Mode → Automatic` anyway. That is the
+> discarded-`Result` defect rather than the guessed-operand one, but it is the
+> same failure viewed from the other end of the statement — the guess invents an
+> input nobody supplied, and `.ok()` invents an outcome nobody got — so it is
+> fixed here rather than filed for later.
+>
+> `up`/`down` keep their documented defaults per §607 and the rung asserts they
+> still work. Before this, `bright up 1O` raised display **1** instead of display
+> 10 and printed a percentage that was perfectly true of a screen the user was
+> not looking at.
+>
+> **Burn-down log.** 2026-08-26 (seventeenth batch): `cmd_aiostat` (8) cleared —
+> 544 → 536 across 226 → 225 functions. Pinned by `kshell::self_test` rung 84.
+>
+> **A fifth row, and it is about what the command *says* rather than what it
+> does.** Every batch so far has been about a command acting wrongly and
+> reporting success. `cmd_aiostat` allocates its ring ids from 1, so the guessed
+> `0` never collided with a live ring — `aiostat destroy 1O` genuinely failed.
+> It failed like this:
+>
+> ```
+> aiostat: error: NotFound
+> ```
+>
+> which says that the ring the user named does not exist. The ring exists. The
+> word `1O` is what could not be read. **A confident wrong diagnosis is not a
+> milder version of no diagnosis** — a bare failure sends the reader back to
+> what they typed; this sends them into the subsystem to hunt for a ring that
+> was sitting there the whole time. The cost of a defect is measured in where it
+> makes someone look next, and this is the worst answer available.
+>
+> That generalises, and it is the reason this batch gets a write-up rather than
+> a line. A large share of the remaining ledger sits behind a `NotFound`-style
+> lookup, and wherever the guessed sentinel happens *not* to name a live object,
+> the D1 defect stops producing a wrong **action** and starts producing a wrong
+> **explanation**. Those sites look harmless when skimmed — the command errors,
+> the status is 1, the shape looks like a refusal — and they are not. When
+> triaging the rest of the ledger, do not treat "it already fails" as evidence
+> that a site is low priority.
+>
+> The rest of the command is shapes already catalogued. `create`'s pid is the
+> fact the ring is keyed on, so `unwrap_or(0)` produced a ring owned by a
+> process that does not exist and reported it created, after which every
+> submission against it looked legitimate. The `submit`/`complete` counts are
+> the rung-82 measurement shape: `aiostat submit 3 1O24` recorded **one**
+> submission where 1024 were meant, and left a counter with nothing anywhere to
+> contradict it.
+>
+> Per §607 the bracketed operands keep their defaults — `create <pid> [sq_size]
+> [cq_size]`, `submit <ring_id> [count]` — and rung 84 asserts they still work.
+>
+> **The wording gate earned its keep a second time in two batches**, in the
+> opposite direction from the last one. Rung 84's closing assertion was written
+> `assert_output_lacks(.., b"NotFound")`; the gate reported it as *an assertion
+> that can never fire*, because `NotFound` reaches the screen only through a
+> `{:?}` and appears in no format string in the shell. It was right — that
+> assertion would have passed against an unfixed kernel, and against one that
+> printed nothing at all. Rewritten against the `aiostat: error:` prefix, which
+> is fixed text, it means what it was meant to mean. Note the pair: in batch
+> sixteen the gate rejected a `contains` that was true but underivable and the
+> fix belonged in the **code**; here it rejected a `lacks` that was vacuous and
+> the fix belonged in the **test**. Both times the useful move was to believe
+> the gate rather than to soften the assertion.
+>
+> **Burn-down log.** 2026-08-26 (sixteenth batch): `cmd_cgiostat` (8) cleared —
+> 552 → 544 across 227 → 226 functions. Pinned by `kshell::self_test` rung 83.
+>
+> **A fourth row for the table below, and it is the worst one.** In the first
+> thirteen batches the guessed number selected the wrong object; in `cmd_splice`
+> it wrote to the wrong address; in `cmd_taskio` it invented a measurement. In
+> all three the command did *less* than, or *other* than, what was asked. Here
+> it does the **opposite** of what was asked, and the guessed value is a
+> perfectly legal one:
+>
+> | The guessed number is a… | What the command does | How you find out |
+> |---|---|---|
+> | **inversion** — `cmd_cgiostat` | the guessed `0` is the subsystem's word for *unlimited*, so the request is negated | you don't — the cgroup exists, `create` reported success, and the cap it was created to enforce simply isn't one |
+>
+> `cgiostat create web 100O000` — a capital O where a zero belongs — asked for a
+> 100 MB/s bandwidth cap and created a cgroup with **no cap at all**, printing
+> `cgiostat: created 'web' → id 3 (bw=0 iops=0)`. Every other shape in this entry
+> fails toward doing less than was asked. This one fails toward doing the exact
+> reverse, in a subsystem whose entire purpose is to say no. A throttle that
+> silently becomes no throttle is the one failure a throttle must not have.
+>
+> Note what makes it invisible in a way the other three are not. A guessed
+> selector leaves the object you meant untouched, so you notice. A guessed write
+> address destroys something, so eventually you notice. A guessed measurement is
+> at least *anomalous* if you look hard. But an uncapped cgroup looks exactly
+> like a cgroup that is not being asked for much — it is only ever discovered by
+> the load that the cap was supposed to prevent.
+>
+> Per §607 the limits stay **optional**: `create <name> [bw_limit] [iops_limit]`
+> brackets them, so omitting them to mean unlimited is a documented request that
+> must keep working, and rung 83 asserts it still does. The fix removes the
+> *guess*, not the *default*. Same for the bracketed byte counts in `read`/
+> `write`; the cgroup id, written `<cg_id>`, becomes `required_num`.
+>
+> **The `list` arm changed too, and that part is not incidental.** It built the
+> limit string separately — `alloc::format!("{}B/s", …)` or
+> `String::from("unlimited")` — and interpolated the result through a trailing
+> `bw={}`. So the unit and the word `unlimited` existed nowhere a reader of
+> `cmd_cgiostat` could see them, and nothing short of booting a kernel could
+> establish that a zero limit prints as `unlimited` rather than as `0`. That is
+> the same inversion the `create` arm was being fixed for, hiding one layer
+> down, in the one line whose job is to *reveal* it. Both spellings are now
+> branches of the format string.
+>
+> `check-selftest-wording.py` is what surfaced this: it rejected the rung's
+> `bw=100000000B/s` and `bw=unlimited` assertions as text the command cannot
+> print, which was **correct** — no format literal in the function contained
+> either. The temptation was to weaken the assertions; the right reading is that
+> the gate had found a real defect in the code under test, not in the test. That
+> is the second time this gate has paid for itself by refusing an assertion that
+> was true of the running kernel but underivable from its source.
+>
+> **Burn-down log.** 2026-08-26 (fifteenth batch): `cmd_taskio` (8) cleared —
+> 560 → 552 across 228 → 227 functions. Pinned by `kshell::self_test` rung 82.
+>
+> Taken with the batch before it, this one completes a three-way split that is
+> worth stating explicitly, because it changes how severe a given site is:
+>
+> | The guessed number is a… | What the command does | How you find out |
+> |---|---|---|
+> | **selector** (id, mode, switch) — batches 1–13 | acts on the wrong object, or on none, and reports success | the thing you meant is still there, unchanged; you notice when you look at it |
+> | **address to write to** — `cmd_splice`, §607 | overwrites bytes that existed before the command ran | you don't; the old bytes are gone and the only record is a success line |
+> | **measurement** — `cmd_taskio` | files a number nobody measured into a counter | you don't, and neither does anyone reading the counter afterwards |
+>
+> `taskio read 5 8l92` (letter L) recorded **4096 bytes** of reads against pid 5
+> and printed `taskio: read 4096 bytes for pid 5`. Nothing was damaged and
+> nothing acted on the wrong object. A counter simply acquired a value that no
+> measurement produced — and from that moment it is indistinguishable from one
+> that did. This is the failure mode with the longest half-life in the entry:
+> a missing statistic announces itself, a fabricated one is read later, by
+> someone who was not there when the command was typed and has nothing but the
+> number to go on.
+>
+> `taskio register 1O` was sharper still, because unlike almost every other site
+> in this entry it had **no sentinel guard at all** — not even the useless
+> `if id == 0` — so it registered **pid 0**, printed `registered pid 0`, and
+> created a task record for a process that does not exist. That record then
+> became the destination for every subsequent mistyped measurement, which is how
+> two independent instances of this bug compound into a plausible-looking table
+> of numbers about a process that was never running.
+>
+> Note the helper differs from the batch before it and the difference is
+> principled, not stylistic: none of `taskio`'s defaults were ever documented —
+> the synopsis has always read `read <pid> <bytes>`, both required — so
+> `required_num` removes nothing a user could have been relying on. `splice`'s
+> were documented, so it took `optional_num`. §607 is the rule that decides
+> which.
+>
+> **Burn-down log.** 2026-08-26 (fourteenth batch): `cmd_splice` (9) cleared —
+> 569 → 560 across 229 → 228 functions. Pinned by `kshell::self_test` rung 81.
+>
+> **This is the batch that changes what the entry is about.** Every one of the
+> thirteen before it guessed a *selector* — an id, a mode, a switch. The command
+> then acted on the wrong object, or on no object, and reported success. That is
+> bad, and it is recoverable: the thing the user meant is still sitting there
+> untouched, and the wrong thing can usually be put back.
+>
+> `cmd_splice` is the first place in this family where the guessed number is an
+> **address in a file the command is about to write to**.
+> `splice copy src dst 0 1O24 4096` — one mistyped character in the destination
+> offset, a capital O for a zero — fell to `unwrap_or(0)` and wrote four
+> kilobytes over the *beginning* of `dst`, then printed
+> `Copied 4096 bytes: src -> dst`. There is no id to re-look-up and no setting
+> to restore. The bytes that were at offset 0 are gone, and the only record of
+> the mistake is a success line.
+>
+> The four length operands are the same defect one step quieter.
+> `unwrap_or(1024 * 1024)` means an unreadable length asks for a megabyte, so
+> `splice copy a b 0 0 4O96` moved 256× what was asked for and reported the
+> megabyte back as the byte count — a number that is *accurate*, describing an
+> operation nobody requested.
+>
+> All nine are genuine optional operands with genuine documented defaults
+> (`[src_offset]`, `[len]`), so the fix is `optional_num` and not
+> `required_num`; making them required would fix the guess by breaking the
+> documented short form. See §607 for why that tradeoff was resolved the way it
+> was even here, where the guess is the destructive one.
+>
+> One uncounted defect went with them: all four transfers shared a single
+> `if parts.len() < 3 { "Usage: …" }` covering both paths, so the refusal knew
+> something was absent and had already discarded which. `splice_paths` now names
+> whichever of source and destination is the missing one.
+>
+> **Burn-down log.** 2026-08-26 (thirteenth batch): `cmd_focusassist` (9)
+> cleared — 578 → 569 across 230 → 229 functions. Pinned by
+> `kshell::self_test` rung 80.
+>
+> Eight of the nine were the familiar `unwrap_or(0)` sentinel, but `mode`,
+> `addapp`, `rmapp` and `addsched` each ran *one* `if a == 0 || b.is_empty()`
+> guard over two-to-four operands and answered it with one synopsis. That is a
+> distinct defect from the sentinel and worth naming separately: even when the
+> guard correctly decides that something is wrong, it has thrown away which
+> operand it was, so the user is handed the syntax of a line they already typed
+> correctly. Split into per-operand `missing …` lines.
+>
+> The ninth is the reason the batch got a rung. `focusassist on [id]` is
+> *documented* to default to profile 1, so `…parse().ok().unwrap_or(1)` read
+> like the documentation rather than like a guess — this is the shape most
+> likely to survive review. It does not survive use: `focusassist on 2o`
+> silenced every notification under profile 1 and then printed profile 1's
+> name back, which a reader takes as confirmation of what they asked for. Every
+> earlier batch tested `optional_num` against a default that was a *sentinel*
+> (`0` for unlimited, absence for query), where the wrongness is visible in the
+> output. This is the first assertion that the distinction also holds when the
+> default is a value the user could plausibly have meant.
+>
+> Three uncounted defects rode along, all of them §600's *other* prohibited
+> shape — a word read and silently dropped, which the ledger does not count:
+>
+> * **`focusassist addsched … 1,Tue,9`** built a Monday-only schedule. The day
+>   list was `if let Ok(n) = part.parse() { if n < 7 { … } }` — two conditions,
+>   no `else` on either — so an unreadable day and an out-of-range one were both
+>   discarded in silence and the command reported success. Two thirds of the
+>   request vanished without a word.
+> * **`focusassist addsched zznap 25:70 26:00 1`** was accepted and stored. The
+>   time parser checked that both halves were integers and not that either was a
+>   time, so it produced a schedule that could never fire — a silent no-op with a
+>   success line, discoverable only by waiting for it not to happen.
+> * **`autofs` / `autogame` / `autopres`** did three wrong things in eight lines
+>   each: they accepted a narrower vocabulary than the rest of the shell (`true`,
+>   `enable`, `1` all refused here and accepted elsewhere), answered both an
+>   omitted operand and a misspelt one with the same synopsis, and discarded
+>   `set_auto_*`'s `Result` under an unconditional success line — so a failed
+>   write still printed `Auto fullscreen: ON`.
+>
+> **Burn-down log.** 2026-08-26 (twelfth batch): the boolean sweep — 21 sites
+> across 16 commands, of which 3 were counted (`cmd_battery`, `cmd_fileshare`,
+> `cmd_swapcfg`) — 581 → 578 across 231 → 230 functions. Pinned by
+> `kshell::self_test` rung 79.
+>
+> This batch was organised by *shape* rather than by command, because the shape
+> had been copied faster than any per-command sweep could catch it:
+> `matches!(word, "on" | "true" | …)`. `matches!` has exactly two outputs and
+> both of them are answers, so it cannot express "I did not understand you" —
+> every unreadable word became `false`.
+>
+> That is not a neutral failure. `false` is the permissive side of most of these
+> settings, so the shell failed *consistently toward less protection*:
+> `reslimit enforce` stopped enforcing, `datausage limit block` stopped
+> blocking, `kernelbuild auto` stopped rebuilding — each reporting the setting
+> as applied and exiting 0.
+>
+> Drift made it reachable. Five different vocabularies had grown across the 21
+> sites, the sharpest split being `1`: seven sites accepted it and six others,
+> printing the *identical* `Usage: … <on|off>` line, did not. So a user who
+> learned from `bootcfg activity 1` that `1` means on got, from
+> `datausage limit block home 1`, a data cap silently switched off — taught the
+> wrong lesson by documentation that was word-for-word the same in both places.
+>
+> The fix is `toggle_word`, the single place that decides which words mean what,
+> reached through `required_toggle` (no query form; absence is an error) or
+> `toggle_arg` (§605, has one). `batt ac` keeps its own diagnostic because it
+> accepts two words the shared vocabulary does not, and a refusal naming a
+> narrower vocabulary than the command accepts would teach a reader to stop
+> using a word that works.
+>
 > **Burn-down log.** 2026-08-26 (eleventh batch): `cmd_a11y` (10) cleared —
 > 591 → 581 across 232 → 231 functions. Pinned by `kshell::self_test` rung 78.
 >

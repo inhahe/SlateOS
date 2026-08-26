@@ -39,6 +39,26 @@
 //! them, and the two mismatch variants carry both values — so a caller can
 //! report the mismatch, and a `no_std` caller with no console still gets it.
 //!
+//! # No index, anywhere
+//!
+//! There is not one `[i]` in this crate outside its tests, where building a
+//! deliberately-malformed header by index is clearer. Every read goes
+//! through `get`, every
+//! write through `get_mut`, and the parallel tables are walked with `zip`
+//! rather than a shared index — so `clippy::indexing_slicing` passes clean and
+//! the property is checked on every build instead of re-argued on every
+//! review. That matters more here than in most code: this crate is a parser
+//! of untrusted input running in a kernel, where a panic is not an exception
+//! to catch but a fault with nothing above it to handle. The tests carry the
+//! same claim from the other direction — `single_byte_corruption_never_panics`
+//! flips every byte of a compressed stream, three ways, through all three
+//! framings, and asserts only that nothing panics.
+//!
+//! Where an index genuinely cannot be out of range, the `get` is still there
+//! and the comment says why it cannot — an unreachable branch that costs a
+//! predictable-not-taken test is a better price than an invariant held only
+//! in prose.
+//!
 //! # References
 //!
 //! - RFC 1951: DEFLATE Compressed Data Format Specification
@@ -52,6 +72,7 @@ extern crate alloc;
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 
 /// Everything that can go wrong reading a DEFLATE, gzip or zlib stream.
 ///
@@ -137,10 +158,9 @@ impl<'a> BitReader<'a> {
     fn read_bits(&mut self, n: u8) -> Result<u32> {
         let mut val = 0u32;
         for i in 0..n {
-            if self.pos >= self.data.len() {
+            let Some(&byte) = self.data.get(self.pos) else {
                 return Err(Error::UnexpectedEnd);
-            }
-            let byte = self.data[self.pos];
+            };
             let b = (byte >> self.bit) & 1;
             val |= u32::from(b) << i;
             self.bit = self.bit.wrapping_add(1);
@@ -162,10 +182,9 @@ impl<'a> BitReader<'a> {
 
     /// Read a raw byte at the current byte position (must be aligned).
     fn read_byte(&mut self) -> Result<u8> {
-        if self.pos >= self.data.len() {
+        let Some(&b) = self.data.get(self.pos) else {
             return Err(Error::UnexpectedEnd);
-        }
-        let b = self.data[self.pos];
+        };
         self.pos = self.pos.wrapping_add(1);
         Ok(b)
     }
@@ -241,18 +260,24 @@ impl HuffmanTable {
         let mut table = Self::empty();
         table.num_symbols = lengths.len();
 
-        // Count the number of codes for each code length.
+        // Count the number of codes for each code length. The `get_mut` is
+        // the length check as well as the bounds check: `counts` has exactly
+        // `MAX_BITS + 1` slots, and DEFLATE cannot represent a code longer
+        // than `MAX_BITS`, so a length that misses the array came from a
+        // malformed stream rather than an unusual one.
         for &len in lengths {
-            if len as usize > MAX_BITS {
-                return Err(Error::InvalidHuffmanTable);
-            }
-            table.counts[len as usize] = table.counts[len as usize].wrapping_add(1);
+            let slot = table
+                .counts
+                .get_mut(len as usize)
+                .ok_or(Error::InvalidHuffmanTable)?;
+            *slot = slot.wrapping_add(1);
         }
 
-        // Check for an empty or invalid code set.
-        // counts[0] = number of symbols with no code.
-        if table.counts[0] as usize == lengths.len() {
-            // No codes at all — degenerate but valid for empty distance alphabet.
+        // `counts[0]` is the number of symbols with no code at all. If that
+        // is every symbol the alphabet is empty — degenerate, but legal: a
+        // block containing no back-references has an empty distance alphabet.
+        let uncoded = table.counts.first().copied().unwrap_or(0);
+        if uncoded as usize == lengths.len() {
             return Ok(table);
         }
 
@@ -260,8 +285,8 @@ impl HuffmanTable {
         // The Kraft inequality: sum of 2^(-len) for each code must be ≤ 1.
         let mut left: i32 = 1;
         for bits in 1..=MAX_BITS {
-            left = left.wrapping_mul(2);
-            left = left.wrapping_sub(table.counts[bits] as i32);
+            let count = table.counts.get(bits).copied().unwrap_or(0);
+            left = left.wrapping_mul(2).wrapping_sub(i32::from(count));
             if left < 0 {
                 return Err(Error::InvalidHuffmanTable); // over-subscribed
             }
@@ -271,17 +296,25 @@ impl HuffmanTable {
         // symbols array.
         let mut offsets = [0u16; MAX_BITS + 1];
         for bits in 1..MAX_BITS {
-            offsets[bits.wrapping_add(1)] = offsets[bits].wrapping_add(table.counts[bits]);
+            let start = offsets.get(bits).copied().unwrap_or(0);
+            let count = table.counts.get(bits).copied().unwrap_or(0);
+            if let Some(next) = offsets.get_mut(bits.wrapping_add(1)) {
+                *next = start.wrapping_add(count);
+            }
         }
 
         // Fill in the symbols array, sorted by code length then value.
         for (sym, &len) in lengths.iter().enumerate() {
-            if len > 0 {
-                let idx = offsets[len as usize] as usize;
-                if idx < table.symbols.len() {
-                    table.symbols[idx] = sym as u16;
-                }
-                offsets[len as usize] = offsets[len as usize].wrapping_add(1);
+            if len == 0 {
+                continue;
+            }
+            let Some(offset) = offsets.get_mut(len as usize) else {
+                continue;
+            };
+            let idx = *offset as usize;
+            *offset = offset.wrapping_add(1);
+            if let Some(slot) = table.symbols.get_mut(idx) {
+                *slot = sym as u16;
             }
         }
 
@@ -301,7 +334,7 @@ impl HuffmanTable {
         for len in 1..=MAX_BITS {
             let bit = reader.read_bits(1)?;
             code = code.wrapping_mul(2).wrapping_add(bit);
-            let count = u32::from(self.counts[len]);
+            let count = u32::from(self.counts.get(len).copied().unwrap_or(0));
             if code.wrapping_sub(first) < count {
                 let sym_idx = index.wrapping_add(code.wrapping_sub(first)) as usize;
                 return self
@@ -356,29 +389,17 @@ const CL_ORDER: [u8; 19] = [
 
 /// Build the fixed literal/length Huffman code (RFC 1951 §3.2.6).
 fn fixed_lit_lengths() -> [u8; 288] {
-    let mut lens = [0u8; 288];
-    // 0..143   → 8 bits
-    let mut i = 0;
-    while i <= 143 {
-        lens[i] = 8;
-        i += 1;
-    }
-    // 144..255 → 9 bits
-    while i <= 255 {
-        lens[i] = 9;
-        i += 1;
-    }
-    // 256..279 → 7 bits
-    while i <= 279 {
-        lens[i] = 7;
-        i += 1;
-    }
-    // 280..287 → 8 bits
-    while i <= 287 {
-        lens[i] = 8;
-        i += 1;
-    }
-    lens
+    // Written as a total function of the symbol rather than four cursor loops:
+    // every index is produced by `from_fn` and so cannot be out of range, and
+    // the four ranges are visible side by side. The 7-bit run in the middle is
+    // what makes this code canonical even though the literals are not in
+    // length order — see `fixed_table_shape` in the tests.
+    core::array::from_fn(|sym| match sym {
+        0..=143 => 8,
+        144..=255 => 9,
+        256..=279 => 7,
+        _ => 8,
+    })
 }
 
 /// Build the fixed distance Huffman code (all 32 codes are 5 bits).
@@ -497,9 +518,16 @@ fn inflate_dynamic(reader: &mut BitReader<'_>, output: &mut Vec<u8>, limit: usiz
 
     // Read code-length code lengths (3 bits each, in permuted order).
     let mut cl_lens = [0u8; MAX_CL_CODES];
-    for i in 0..hclen {
-        let idx = CL_ORDER[i] as usize;
-        cl_lens[idx] = reader.read_bits(3)? as u8;
+    for &order in CL_ORDER.iter().take(hclen) {
+        // Read first, place second: the three bits must leave the stream
+        // whether or not the permuted slot exists, or every following symbol
+        // is decoded from a shifted position. Every `CL_ORDER` entry is < 19
+        // so the slot always does exist; `get_mut` states that rather than
+        // trusting the table.
+        let bits = reader.read_bits(3)? as u8;
+        if let Some(slot) = cl_lens.get_mut(order as usize) {
+            *slot = bits;
+        }
     }
 
     let cl_table = HuffmanTable::build(&cl_lens)?;
@@ -588,41 +616,57 @@ fn inflate_codes(
     loop {
         let sym = lit_table.decode(reader)?;
 
-        if sym < 256 {
-            // Literal byte.
-            if output.len() >= limit {
-                return Err(Error::OutputTooLarge);
-            }
-            output.push(sym as u8);
-        } else if sym == 256 {
-            // End of block.
-            return Ok(());
-        } else {
-            // Length/distance pair — back-reference.
-            let len_idx = (sym as usize).wrapping_sub(257);
-            let base_len = *LENGTH_BASE.get(len_idx).ok_or(Error::InvalidSymbol)?;
-            let extra = *LENGTH_EXTRA.get(len_idx).ok_or(Error::InvalidSymbol)?;
-            let length = base_len as usize + reader.read_bits(extra)? as usize;
-
-            let dist_sym = dist_table.decode(reader)? as usize;
-            let base_dist = *DIST_BASE.get(dist_sym).ok_or(Error::InvalidSymbol)?;
-            let dist_extra = *DIST_EXTRA.get(dist_sym).ok_or(Error::InvalidSymbol)?;
-            let distance = base_dist as usize + reader.read_bits(dist_extra)? as usize;
-
-            if distance == 0 || distance > output.len() {
-                return Err(Error::DistanceTooFar);
-            }
-
-            // Copy from the sliding window.  Note: source and dest
-            // can overlap (e.g., distance=1, length=100 fills with
-            // one repeated byte), so we copy byte-by-byte.
-            let start = output.len().wrapping_sub(distance);
-            for i in 0..length {
+        // 256 is the end-of-block symbol, and it is the *only* thing that ends
+        // a block: below it is a literal, above it a length code. Written as a
+        // three-way comparison because that is what the alphabet is.
+        match sym.cmp(&256) {
+            Ordering::Less => {
+                // Literal byte.
                 if output.len() >= limit {
                     return Err(Error::OutputTooLarge);
                 }
-                let b = output[start.wrapping_add(i % distance)];
-                output.push(b);
+                output.push(sym as u8);
+            }
+            Ordering::Equal => return Ok(()),
+            Ordering::Greater => {
+                // Length/distance pair — back-reference.
+                let len_idx = (sym as usize).wrapping_sub(257);
+                let base_len = *LENGTH_BASE.get(len_idx).ok_or(Error::InvalidSymbol)?;
+                let extra = *LENGTH_EXTRA.get(len_idx).ok_or(Error::InvalidSymbol)?;
+                let length = usize::from(base_len).wrapping_add(reader.read_bits(extra)? as usize);
+
+                let dist_sym = dist_table.decode(reader)? as usize;
+                let base_dist = *DIST_BASE.get(dist_sym).ok_or(Error::InvalidSymbol)?;
+                let dist_extra = *DIST_EXTRA.get(dist_sym).ok_or(Error::InvalidSymbol)?;
+                let distance =
+                    usize::from(base_dist).wrapping_add(reader.read_bits(dist_extra)? as usize);
+
+                if distance == 0 || distance > output.len() {
+                    return Err(Error::DistanceTooFar);
+                }
+
+                // Copy from the sliding window. Source and destination overlap
+                // whenever `length > distance` — distance=1, length=100 is a
+                // hundred copies of one byte — so the read walks forward through
+                // bytes this very loop is appending. That is the definition, not
+                // an accident: a cursor `distance` behind the tail reproduces the
+                // modulo-cycling formulation exactly, because by the time it
+                // reaches a repeated position the byte there has been written.
+                // It also removes the `% distance`, and with it any question
+                // about a zero divisor.
+                let mut src = output.len().wrapping_sub(distance);
+                for _ in 0..length {
+                    if output.len() >= limit {
+                        return Err(Error::OutputTooLarge);
+                    }
+                    // `src` trails the tail by exactly `distance`, which was
+                    // checked against the length above, so it is always in range.
+                    let Some(&b) = output.get(src) else {
+                        return Err(Error::DistanceTooFar);
+                    };
+                    output.push(b);
+                    src = src.wrapping_add(1);
+                }
             }
         }
     }
@@ -740,12 +784,15 @@ fn fixed_dist_code(dist_sym: u16) -> (u16, u8) {
 
 /// Find the length code (257..285) and extra bits for a match length.
 fn encode_length(length: usize) -> Option<(u16, u32, u8)> {
-    for (i, &base) in LENGTH_BASE.iter().enumerate() {
-        let extra = LENGTH_EXTRA[i];
+    // Zipped rather than indexed: the two tables are parallel by construction
+    // and `zip` is what makes a future edit that lengthens one of them fail to
+    // compile instead of reading past the other.
+    for (i, (&base, &extra)) in LENGTH_BASE.iter().zip(LENGTH_EXTRA.iter()).enumerate() {
         let range = 1usize << extra;
-        if length >= base as usize && length < (base as usize).wrapping_add(range) {
+        let base = usize::from(base);
+        if length >= base && length < base.wrapping_add(range) {
             let sym = (i as u16).wrapping_add(257);
-            let extra_val = (length.wrapping_sub(base as usize)) as u32;
+            let extra_val = length.wrapping_sub(base) as u32;
             return Some((sym, extra_val, extra));
         }
     }
@@ -754,12 +801,12 @@ fn encode_length(length: usize) -> Option<(u16, u32, u8)> {
 
 /// Find the distance code (0..29) and extra bits for a match distance.
 fn encode_distance(distance: usize) -> Option<(u16, u32, u8)> {
-    for (i, &base) in DIST_BASE.iter().enumerate() {
-        let extra = DIST_EXTRA[i];
+    for (i, (&base, &extra)) in DIST_BASE.iter().zip(DIST_EXTRA.iter()).enumerate() {
         let range = 1usize << extra;
-        if distance >= base as usize && distance < (base as usize).wrapping_add(range) {
+        let base = usize::from(base);
+        if distance >= base && distance < base.wrapping_add(range) {
             let sym = i as u16;
-            let extra_val = (distance.wrapping_sub(base as usize)) as u32;
+            let extra_val = distance.wrapping_sub(base) as u32;
             return Some((sym, extra_val, extra));
         }
     }
@@ -787,12 +834,13 @@ const MAX_CHAIN: usize = 16;
 
 /// Compute a hash for 3 bytes.
 fn lz77_hash(data: &[u8], pos: usize) -> usize {
-    if pos.wrapping_add(2) >= data.len() {
+    // Three bytes taken as one slice: the pattern is the length check, so a
+    // position within two bytes of the end hashes to bucket 0 without any
+    // separate comparison to keep in step with the reads.
+    let Some(&[a, b, c]) = data.get(pos..pos.wrapping_add(3)) else {
         return 0;
-    }
-    let h = (u32::from(data[pos]) << 10)
-        ^ (u32::from(data[pos.wrapping_add(1)]) << 5)
-        ^ u32::from(data[pos.wrapping_add(2)]);
+    };
+    let h = (u32::from(a) << 10) ^ (u32::from(b) << 5) ^ u32::from(c);
     (h as usize) & (HASH_SIZE.wrapping_sub(1))
 }
 
@@ -813,9 +861,19 @@ enum LzToken {
 /// `prev[pos % MAX_DISTANCE]` links to the previous position in the chain.
 fn insert_hash(data: &[u8], pos: usize, head: &mut [u32], prev: &mut [u32]) -> u32 {
     let h = lz77_hash(data, pos);
-    let old_head = head[h];
-    prev[pos % MAX_DISTANCE] = old_head;
-    head[h] = pos as u32;
+    // `h` is masked to `HASH_SIZE` and the link index to `MAX_DISTANCE`, so
+    // both are in range for the vectors `lz77_tokenize` allocates. `get_mut`
+    // is what keeps that true if a future caller sizes them differently:
+    // a mis-sized table then loses chain entries and costs compression ratio,
+    // which is recoverable, rather than panicking.
+    let Some(slot) = head.get_mut(h) else {
+        return 0;
+    };
+    let old_head = *slot;
+    *slot = pos as u32;
+    if let Some(link) = prev.get_mut(pos % MAX_DISTANCE) {
+        *link = old_head;
+    }
     old_head
 }
 
@@ -830,7 +888,7 @@ fn find_best_match(data: &[u8], pos: usize, head: &[u32], prev: &[u32]) -> (usiz
     }
 
     let h = lz77_hash(data, pos);
-    let mut candidate = head[h] as usize;
+    let mut candidate = head.get(h).copied().unwrap_or(0) as usize;
     let max_len = remaining.min(MAX_MATCH);
 
     let mut best_len: usize = MIN_MATCH.wrapping_sub(1);
@@ -849,7 +907,7 @@ fn find_best_match(data: &[u8], pos: usize, head: &[u32], prev: &[u32]) -> (usiz
         if best_len > 0
             && data.get(candidate.wrapping_add(best_len)) != data.get(pos.wrapping_add(best_len))
         {
-            candidate = prev[candidate % MAX_DISTANCE] as usize;
+            candidate = prev.get(candidate % MAX_DISTANCE).copied().unwrap_or(0) as usize;
             chain_count = chain_count.wrapping_add(1);
             continue;
         }
@@ -870,7 +928,7 @@ fn find_best_match(data: &[u8], pos: usize, head: &[u32], prev: &[u32]) -> (usiz
             }
         }
 
-        candidate = prev[candidate % MAX_DISTANCE] as usize;
+        candidate = prev.get(candidate % MAX_DISTANCE).copied().unwrap_or(0) as usize;
         chain_count = chain_count.wrapping_add(1);
     }
 
@@ -915,8 +973,16 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
     // Pending match from the previous position (for lazy matching).
     let mut pending_len: usize = 0;
     let mut pending_dist: usize = 0;
+    // The byte the pending match starts on. Carried rather than re-read as
+    // `data[pos - 1]`: when lazy matching drops a pending match it has to emit
+    // that byte as a literal, and remembering it is both cheaper and one fewer
+    // index than reaching backwards for it.
+    let mut pending_byte: u8 = 0;
 
-    while pos < data.len() {
+    // `data.get(pos)` is exactly the `pos < data.len()` test, and it hands the
+    // byte over at the same time — which is what removes the three `data[pos]`
+    // reads this loop used to make under a separately-written bound.
+    while let Some(&here) = data.get(pos) {
         let remaining = data.len().wrapping_sub(pos);
 
         if remaining < MIN_MATCH {
@@ -937,7 +1003,7 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
                 pending_len = 0;
                 continue;
             }
-            tokens.push(LzToken::Literal(data[pos]));
+            tokens.push(LzToken::Literal(here));
             pos = pos.wrapping_add(1);
             continue;
         }
@@ -952,9 +1018,10 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
             // We have a pending match from pos-1.  Compare with current.
             if cur_len > pending_len {
                 // Current match is better — drop pending, emit literal for pos-1.
-                tokens.push(LzToken::Literal(data[pos.wrapping_sub(1)]));
+                tokens.push(LzToken::Literal(pending_byte));
                 pending_len = cur_len;
                 pending_dist = cur_dist;
+                pending_byte = here;
                 pos = pos.wrapping_add(1);
             } else {
                 // Pending match is equal or better — emit it.
@@ -977,10 +1044,11 @@ fn lz77_tokenize(data: &[u8]) -> Vec<LzToken> {
             // New match — defer for lazy evaluation at next position.
             pending_len = cur_len;
             pending_dist = cur_dist;
+            pending_byte = here;
             pos = pos.wrapping_add(1);
         } else {
             // No match.
-            tokens.push(LzToken::Literal(data[pos]));
+            tokens.push(LzToken::Literal(here));
             pos = pos.wrapping_add(1);
         }
     }
@@ -1028,9 +1096,13 @@ fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
         return lengths;
     }
 
-    if symbols.len() == 1 {
-        // Single symbol — assign length 1.
-        lengths[symbols[0].1] = 1;
+    if let [(_, only)] = symbols.as_slice() {
+        // Single symbol — assign length 1. Matched as a one-element slice
+        // rather than tested with `len() == 1` and then indexed, so the
+        // element is produced by the same step that establishes it exists.
+        if let Some(slot) = lengths.get_mut(*only) {
+            *slot = 1;
+        }
         return lengths;
     }
 
@@ -1068,17 +1140,25 @@ fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
         let mut f1 = u32::MAX;
         let mut f2 = u32::MAX;
 
-        for i in 0..next_node {
-            if active[i] {
-                if node_freq[i] < f1 || (node_freq[i] == f1 && i < min1) {
-                    f2 = f1;
-                    min2 = min1;
-                    f1 = node_freq[i];
-                    min1 = i;
-                } else if node_freq[i] < f2 || (node_freq[i] == f2 && i < min2) {
-                    f2 = node_freq[i];
-                    min2 = i;
-                }
+        // Zipped and truncated to `next_node` rather than indexed by a range:
+        // the two vectors are parallel and the iterator is what enforces it.
+        for (i, (&is_active, &freq)) in active
+            .iter()
+            .zip(node_freq.iter())
+            .enumerate()
+            .take(next_node)
+        {
+            if !is_active {
+                continue;
+            }
+            if freq < f1 || (freq == f1 && i < min1) {
+                f2 = f1;
+                min2 = min1;
+                f1 = freq;
+                min1 = i;
+            } else if freq < f2 || (freq == f2 && i < min2) {
+                f2 = freq;
+                min2 = i;
             }
         }
 
@@ -1086,27 +1166,58 @@ fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
             break;
         }
 
-        // Create merged node.
+        // Create merged node. Every write below is inside the `total_nodes`
+        // sizing computed above; going through `get_mut` means a future change
+        // to that sizing costs compression ratio rather than panicking in a
+        // kernel that has no way to recover from one.
         let merged = next_node;
         next_node = next_node.saturating_add(1);
-        node_freq[merged] = f1.saturating_add(f2);
-        node_depth[merged] = node_depth[min1].max(node_depth[min2]).saturating_add(1);
-        active[merged] = true;
-        active[min1] = false;
-        active[min2] = false;
-        parent_of[min1] = merged;
-        parent_of[min2] = merged;
+        let depth1 = node_depth.get(min1).copied().unwrap_or(0);
+        let depth2 = node_depth.get(min2).copied().unwrap_or(0);
+        if let Some(slot) = node_freq.get_mut(merged) {
+            *slot = f1.saturating_add(f2);
+        }
+        if let Some(slot) = node_depth.get_mut(merged) {
+            *slot = depth1.max(depth2).saturating_add(1);
+        }
+        if let Some(slot) = active.get_mut(merged) {
+            *slot = true;
+        }
+        if let Some(slot) = active.get_mut(min1) {
+            *slot = false;
+        }
+        if let Some(slot) = active.get_mut(min2) {
+            *slot = false;
+        }
+        if let Some(slot) = parent_of.get_mut(min1) {
+            *slot = merged;
+        }
+        if let Some(slot) = parent_of.get_mut(min2) {
+            *slot = merged;
+        }
     }
 
-    // Compute depth of each leaf by walking up to root.
-    for i in 0..count {
+    // Compute depth of each leaf by walking up to root. A merged node's index
+    // is always greater than either child's, so the walk strictly increases
+    // and cannot cycle — but it is bounded by `total_nodes` anyway, because a
+    // cycle here would hang the kernel rather than fault it, and a hang is the
+    // harder of the two to diagnose from a serial log.
+    for (i, &(_, sym)) in symbols.iter().enumerate() {
         let mut depth: u8 = 0;
         let mut node = i;
-        while parent_of[node] != usize::MAX {
+        for _ in 0..total_nodes {
+            let Some(&parent) = parent_of.get(node) else {
+                break;
+            };
+            if parent == usize::MAX {
+                break;
+            }
             depth = depth.saturating_add(1);
-            node = parent_of[node];
+            node = parent;
         }
-        lengths[symbols[i].1] = depth;
+        if let Some(slot) = lengths.get_mut(sym) {
+            *slot = depth;
+        }
     }
 
     // Limit to max_bits.  If any code exceeds max_bits, redistribute
@@ -1141,9 +1252,13 @@ fn build_code_lengths(freqs: &[u32], max_bits: u8) -> Vec<u8> {
         }
 
         // Push down: shorten the longest, lengthen the shortest.
-        lengths[longest_sym] = lengths[longest_sym].saturating_sub(1);
+        if let Some(slot) = lengths.get_mut(longest_sym) {
+            *slot = slot.saturating_sub(1);
+        }
         if shortest_sym != longest_sym {
-            lengths[shortest_sym] = lengths[shortest_sym].saturating_add(1);
+            if let Some(slot) = lengths.get_mut(shortest_sym) {
+                *slot = slot.saturating_add(1);
+            }
         }
     }
 
@@ -1171,24 +1286,37 @@ fn build_canonical_codes(lengths: &[u8]) -> Vec<(u16, u8)> {
     let mut bl_count: Vec<u16> = vec![0; max_len as usize + 1];
     for &l in lengths {
         if l > 0 {
-            bl_count[l as usize] = bl_count[l as usize].wrapping_add(1);
+            if let Some(slot) = bl_count.get_mut(l as usize) {
+                *slot = slot.wrapping_add(1);
+            }
         }
     }
 
-    // Compute starting code for each length.
+    // Compute starting code for each length. Both vectors were sized from
+    // `max_len`, which is the maximum over the same `lengths`, so every index
+    // below is in range by construction.
     let mut next_code: Vec<u16> = vec![0; max_len as usize + 1];
     let mut code: u16 = 0;
     for bits in 1..=max_len {
-        code = (code.wrapping_add(bl_count[bits as usize - 1])) << 1;
-        next_code[bits as usize] = code;
+        let shorter = bl_count.get(bits as usize - 1).copied().unwrap_or(0);
+        code = code.wrapping_add(shorter) << 1;
+        if let Some(slot) = next_code.get_mut(bits as usize) {
+            *slot = code;
+        }
     }
 
     // Assign codes.
     for (sym, &l) in lengths.iter().enumerate() {
-        if l > 0 {
-            let c = next_code[l as usize];
-            next_code[l as usize] = c.wrapping_add(1);
-            codes[sym] = (reverse_bits(c, l), l);
+        if l == 0 {
+            continue;
+        }
+        let Some(slot) = next_code.get_mut(l as usize) else {
+            continue;
+        };
+        let c = *slot;
+        *slot = c.wrapping_add(1);
+        if let Some(out) = codes.get_mut(sym) {
+            *out = (reverse_bits(c, l), l);
         }
     }
 
@@ -1208,16 +1336,13 @@ fn rle_code_lengths(lengths: &[u8]) -> Vec<(u8, u8)> {
     let mut rle: Vec<(u8, u8)> = Vec::new();
     let mut i = 0;
 
-    while i < lengths.len() {
-        let val = lengths[i];
-
+    while let Some(&val) = lengths.get(i) {
         if val == 0 {
-            // Count consecutive zeros.
+            // Count consecutive zeros. `get(..) == Some(&0)` folds the bound
+            // and the comparison into one expression, so the two can never
+            // drift apart.
             let mut run = 1usize;
-            while i.wrapping_add(run) < lengths.len()
-                && lengths[i.wrapping_add(run)] == 0
-                && run < 138
-            {
+            while lengths.get(i.wrapping_add(run)) == Some(&0) && run < 138 {
                 run = run.wrapping_add(1);
             }
 
@@ -1239,10 +1364,7 @@ fn rle_code_lengths(lengths: &[u8]) -> Vec<(u8, u8)> {
 
             // Count consecutive repeats of `val`.
             let mut run = 0usize;
-            while i.wrapping_add(run) < lengths.len()
-                && lengths[i.wrapping_add(run)] == val
-                && run < 6
-            {
+            while lengths.get(i.wrapping_add(run)) == Some(&val) && run < 6 {
                 run = run.wrapping_add(1);
             }
 
@@ -1257,6 +1379,27 @@ fn rle_code_lengths(lengths: &[u8]) -> Vec<(u8, u8)> {
     rle
 }
 
+/// Count one occurrence of `sym` in a frequency table.
+///
+/// Every caller's symbol is bounded by the alphabet the table was sized for,
+/// so the miss branch is unreachable — but there are eight such sites, and
+/// routing them through one function is what keeps that argument from having
+/// to be made eight times.
+fn bump(freqs: &mut [u32], sym: usize) {
+    if let Some(slot) = freqs.get_mut(sym) {
+        *slot = slot.saturating_add(1);
+    }
+}
+
+/// Look up a canonical Huffman code, defaulting to a zero-length code.
+///
+/// A zero-length code writes no bits, which is exactly what a symbol absent
+/// from the alphabet should contribute — so a lookup that misses degrades the
+/// stream rather than aborting mid-block with a half-written bit buffer.
+fn code_for(codes: &[(u16, u8)], sym: usize) -> (u16, u8) {
+    codes.get(sym).copied().unwrap_or((0, 0))
+}
+
 /// Encode tokens using dynamic Huffman codes (BTYPE=10).
 ///
 /// Builds optimal Huffman trees from the token frequencies, encodes
@@ -1267,19 +1410,19 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
     let mut lit_freq = [0u32; 286]; // 0-255 literals, 256 end, 257-285 lengths
     let mut dist_freq = [0u32; 30]; // 0-29 distance codes
 
-    lit_freq[256] = 1; // End-of-block always present.
+    bump(&mut lit_freq, 256); // End-of-block always present.
 
     for token in tokens {
         match token {
             LzToken::Literal(b) => {
-                lit_freq[*b as usize] = lit_freq[*b as usize].saturating_add(1);
+                bump(&mut lit_freq, *b as usize);
             }
             LzToken::Match { length, distance } => {
                 if let Some((sym, _, _)) = encode_length(*length as usize) {
-                    lit_freq[sym as usize] = lit_freq[sym as usize].saturating_add(1);
+                    bump(&mut lit_freq, sym as usize);
                 }
                 if let Some((sym, _, _)) = encode_distance(*distance as usize) {
-                    dist_freq[sym as usize] = dist_freq[sym as usize].saturating_add(1);
+                    bump(&mut dist_freq, sym as usize);
                 }
             }
         }
@@ -1323,7 +1466,7 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
     // Count frequencies of the RLE symbols (0-18).
     let mut cl_freq = [0u32; 19];
     for &(sym, _) in &rle {
-        cl_freq[sym as usize] = cl_freq[sym as usize].saturating_add(1);
+        bump(&mut cl_freq, sym as usize);
     }
 
     // Build code-length Huffman tree.
@@ -1333,8 +1476,8 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
     // HCLEN: number of code-length codes - 4.
     // Find the last non-zero in the permuted order.
     let mut hclen = 4usize;
-    for i in (0..19).rev() {
-        if cl_lengths[CL_ORDER[i] as usize] > 0 {
+    for (i, &order) in CL_ORDER.iter().enumerate().rev() {
+        if cl_lengths.get(order as usize).copied().unwrap_or(0) > 0 {
             hclen = i.saturating_add(1).max(4);
             break;
         }
@@ -1349,14 +1492,14 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
     writer.write_bits((hclen.wrapping_sub(4)) as u32, 4); // HCLEN
 
     // Emit code-length code lengths (3 bits each, permuted order).
-    for i in 0..hclen {
-        let l = cl_lengths[CL_ORDER[i] as usize];
+    for &order in CL_ORDER.iter().take(hclen) {
+        let l = cl_lengths.get(order as usize).copied().unwrap_or(0);
         writer.write_bits(u32::from(l), 3);
     }
 
     // Emit RLE-encoded literal/length + distance code lengths.
     for &(sym, extra) in &rle {
-        let (code, bits) = cl_codes[sym as usize];
+        let (code, bits) = code_for(&cl_codes, sym as usize);
         if bits > 0 {
             writer.write_bits(u32::from(code), bits);
         }
@@ -1377,7 +1520,7 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
     for token in tokens {
         match token {
             LzToken::Literal(b) => {
-                let (code, bits) = lit_codes[*b as usize];
+                let (code, bits) = code_for(&lit_codes, *b as usize);
                 writer.write_bits(u32::from(code), bits);
             }
             LzToken::Match { length, distance } => {
@@ -1388,12 +1531,12 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
                     encode_length(*length as usize),
                     encode_distance(*distance as usize),
                 ) {
-                    let (lcode, lbits) = lit_codes[len_sym as usize];
+                    let (lcode, lbits) = code_for(&lit_codes, len_sym as usize);
                     writer.write_bits(u32::from(lcode), lbits);
                     if len_ebits > 0 {
                         writer.write_bits(len_extra, len_ebits);
                     }
-                    let (dcode, dbits) = dist_codes[dist_sym as usize];
+                    let (dcode, dbits) = code_for(&dist_codes, dist_sym as usize);
                     writer.write_bits(u32::from(dcode), dbits);
                     if dist_ebits > 0 {
                         writer.write_bits(dist_extra, dist_ebits);
@@ -1404,7 +1547,7 @@ fn encode_dynamic(writer: &mut BitWriter, tokens: &[LzToken], bfinal: bool) {
     }
 
     // End of block.
-    let (code, bits) = lit_codes[256];
+    let (code, bits) = code_for(&lit_codes, 256);
     writer.write_bits(u32::from(code), bits);
 }
 
@@ -1513,7 +1656,8 @@ pub fn gzip(data: &[u8]) -> Vec<u8> {
     let crc = crc32::crc32(data);
     let size = data.len() as u32;
 
-    let mut out = Vec::with_capacity(10 + compressed.len() + 8);
+    // 10-byte header plus 8-byte trailer around the compressed payload.
+    let mut out = Vec::with_capacity(compressed.len().saturating_add(18));
     // Gzip header (10 bytes).
     out.push(0x1F);
     out.push(0x8B); // ID

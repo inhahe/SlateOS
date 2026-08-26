@@ -9220,9 +9220,14 @@ verified against MSYS bash). Still **missing** relative to bash:
   made more visible by the more-faithful real-var model used for EUID/UID. The
   proper long-term fix is to migrate the remaining readonly-integer specials
   (`PPID`, and `BASHPID` for readonly-ness) to the same real-var model.
-- **`PPID`** (parent process id, readonly in bash). Needs a parent-pid source;
+- **`PPID`** (parent process id, readonly in bash). ~~Needs a parent-pid source;
   `std::process` doesn't expose it portably on the host and the SlateOS syscall
-  isn't wired. Deferred until a `getppid`-equivalent exists.
+  isn't wired. Deferred until a `getppid`-equivalent exists.~~ **Superseded:** the
+  *source* exists — `parent_pid()` (`interp.rs`) calls `NtQueryInformationProcess`
+  on Windows and libc `getppid` on unix, and `$PPID` reads correctly on both. What
+  remains is only the *model*: `PPID` is a dynamic `param_value` case rather than a
+  real readonly var, which is the "latent inconsistency" described in the `EUID`
+  bullet above, not a missing-value problem.
 - **`HOSTNAME`** — **RESOLVED 2026-07-20.** Now synthesized inside
   `import_environment` (after the `SHLVL` block) via the free function
   `system_hostname()`: on unix it reads `/proc/sys/kernel/hostname` then
@@ -9240,6 +9245,56 @@ verified against MSYS bash). Still **missing** relative to bash:
 **Proper fix:** once SlateOS credential/`getuid`/`getppid` syscalls exist, wire
 `EUID`/`UID`/`PPID` as dynamic `param_value` cases (readonly). The identity
 *default* (for host runs and pre-login target state) needs the operator's call.
+
+**Update 2026-08-25 — the *host* half of that is done (commits `60a63c49f`,
+`c10a69c24`).** On unix, `reported_identity` no longer consults a policy at all:
+it asks libc, via `unsafe extern "C" { fn getuid() -> u32; fn geteuid() -> u32; }`,
+and a sibling `os_egid()` declares `getegid` for `-G`. The shell now reports the
+process's real credential on any unix-family target.
+
+This was not cosmetic: with the identity pinned at root, `[ -O file ]` answered
+*backwards* on a host — every file the user owned tested false and every
+root-owned file true — and three corpus cases were failing on it.
+
+**Why `extern "C"` and not `/proc/self/status`.** The first cut of this fix
+(`60a63c49f`) read procfs, on the reasoning that `std` exposes no `getuid` and
+`oils` deliberately carries no `libc` dependency, with `system_hostname`'s
+`/proc/sys/kernel/hostname` read as precedent. That was rewritten in `c10a69c24`
+for two reasons, both discovered by checking rather than recalling:
+
+1. **The file already had the precedent, and it was the other one.**
+   `parent_pid()` declares `unsafe extern "C" { fn getppid() -> i32; }` for unix.
+   Two different mechanisms for "ask the OS a credential question," in one file,
+   is a bug waiting for whoever adds the third.
+2. **The failure modes are not comparable.** SlateOS mounts no procfs, so on the
+   actual target the `/proc` read *fails*, and the caller falls back to the Q28
+   default — a shell that answers "yes, you own it" about every file on the
+   machine. A missing symbol is a link error, which is loud and immediate; a
+   missing `/proc` is a silent lie about privilege. `system_hostname` is not a
+   counter-example: its fallback is to leave `$HOSTNAME` unset, which lies about
+   nothing.
+
+The symbols resolve on SlateOS: `posix/src/unistd.rs` exports `getuid` (620),
+`geteuid` (628), `getgid` (638) and `getegid` (646), each
+`#[cfg_attr(target_os = "none", unsafe(no_mangle))]`, reading the credentials the
+kernel recorded at spawn. So the Q28 decision survives on the target *by asking
+the system* rather than by assuming — which is what the decision was always
+standing in for. (`toolchain/x86_64-slateos.json` sets `"os": "linux"`, so
+`#[cfg(unix)]` covers the target as well as the host.)
+
+The Q28 fallback survives as the pure function `configured_identity(uid, euid)`,
+still honouring `OSH_UID`/`OSH_EUID`, still defaulting to root, and reachable now
+only on non-unix (the Windows host build). It takes its inputs as arguments
+rather than reading the environment so that it stays testable on unix — where it
+is never the answer — and so that its test does not write process-global state
+that no parallel test can safely share.
+
+**`-G` asks the effective gid and nothing else.** Measured against bash 5.2.21,
+not recalled: a file `chgrp`ed to a group the caller genuinely belongs to (group
+24, for a member of 24) is `[ -G f ]` **false**. The supplementary group list is
+not consulted, so the earlier implementation — which derived a gid from the passwd
+entry — was answering a different question. `reported_groups()` (which backs
+`${GROUPS[@]}`) is unaffected and was verified against `id -G` separately.
 
 **Sub-issue — several `BASH_*` internal variables are still absent.** `${!BASH*}`
 diverges from bash because osh does not define `BASH_LOADABLES_PATH`.
@@ -79071,7 +79126,7 @@ failure class, and because fixing any one of them in isolation would leave a
 rung, no script — so the stricter parser cannot turn something green red.
 
 
-### TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH. `scripts/osh-bash-diff.py` compares a Windows `osh.exe` against Git-for-Windows bash, so every osh behaviour it certifies was learned from a Cygwin port — 2026-08-25 — OPEN
+### TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH. `scripts/osh-bash-diff.py` compares a Windows `osh.exe` against Git-for-Windows bash, so every osh behaviour it certifies was learned from a Cygwin port — 2026-08-25 — **FIXED 2026-08-25** (harness migrated; triage of what it exposed is in progress, see below)
 
 **Where:** `scripts/osh-bash-diff.py`. Two lists decide what is compared:
 
@@ -79158,6 +79213,148 @@ the migration is another case written against the wrong reference, and every
 `# EXPECT-DIFF` waiver added is a divergence pinned into the corpus as though
 it were behaviour. `sort` is the precedent: eleven option cases sat green for
 weeks while the implementation faithfully copied a Windows porting artifact.
+
+### FIXED 2026-08-25 — and what the migration found
+
+**The harness is migrated.** `scripts/osh-diff.sh` (commit `45fe3300c`) runs the
+corpus with a `x86_64-unknown-linux-gnu` osh against `/usr/bin/bash` inside WSL.
+
+**The fix was not the one predicted above.** The six-step plan was to port
+`diff-wsl.sh` into Python. None of that was needed: `osh-bash-diff.py` already
+took `--osh` and `--bash`, so a ten-line `sh` wrapper that *does* match the
+`*-diff.sh` glob inherits all six steps — the WSL re-exec, the shared target
+dir, the build-every-run, the freshness assert, the locale pin — from the same
+copy the twenty-five coreutils harnesses source. The diagnosis above ("not part
+of that migration only because it is Python and does not match the `*-diff.sh`
+glob") named the cause correctly and then reached for the expensive remedy: the
+thing that did not match the glob was a *file name*, and the cheap fix is to add
+a file that matches it. Worth remembering the next time a harness needs the same
+plumbing.
+
+**The first measurement, which the entry rightly demanded first: it builds.**
+`userspace/oils` compiled for `x86_64-unknown-linux-gnu` on the first attempt
+with no source change. Its tests pass there too — 1460 lib tests on
+`x86_64-unknown-linux-gnu` against 1486 on `x86_64-pc-windows-gnu` (the
+difference is `cfg`-gated cases, not failures).
+
+**First full sweep against glibc: 641 matched, 0 waived, 21 failed**, plus 2
+cases that exceeded their budget on a busy host and so were never measured.
+
+**The `0 waived` is the finding, not the good news.** `git grep EXPECT-DIFF`
+over every corpus case, at every commit in this repo's history, matches
+`README.md` and nothing else: **the waiver mechanism was never once used.** So
+`TOOL-OSH-BASH-DIFF`'s stated resolution — "cases hitting those need an
+`# EXPECT-DIFF` waiver" — describes a policy that was never exercised, and the
+picture in the entry above (MSYS-isms parked in visible waivers) is wrong in the
+worse direction. Nothing was parked. Every Cygwin behaviour the corpus met was
+*implemented in osh and certified green*, because that is what a differential
+harness does with a wrong reference: it does not fail, it agrees. The 21
+failures are the first time any of it became visible, and each one is a place
+where osh was shaped by a port nobody runs.
+
+**The four dependent entries came out as predicted** — all four re-examined the
+same day:
+
+| entry | outcome |
+|---|---|
+| `TD-OILS-SIGNAL-NUMBERS-…-AGAINST-MSYS` | now checkable, and checked: **VERIFIED CORRECT**; the "unverifiable on this host" premise is retired |
+| `TD-OILS-MSYS-CHMOD-TYPE-A` | **WONTFIX** — confirmed a dev-host measurement artifact, not an osh bug |
+| `TD-OILS-HOST-ARGV0` | subject-side; the `cfg(unix)` path is now **measured** rather than argued |
+| `TD-OILS-A-NON-UTF-8-ARGUMENT-…` | subject-side; **not reproducible off Windows**, now measured |
+
+**Triage of the 21, in progress.** Closed so far: the GNU-`time` page-fault
+leak (2 cases); the Cygwin-isms osh had transcribed — `pwd -W`, `shopt igncr`,
+the `paste-from-clipboard` bind name — plus the two `help test` paragraphs bash
+5.2 has and osh did not; `compgen` ordering; the POSIX `time` path; child CPU
+accounting on unix (`TD-OILS10`); and `-O`/`-G`, which asked an invented root
+identity and therefore answered *backwards* on every file (commit `60a63c49f`);
+and the job-death group described just below (3 cases, commit `eb23cc57e`).
+Remaining groups: shebang handling
+(`shebang-interpreter-line`, `exec-shebangless-script`,
+`a-command-path-that-will-not-run…`); and ten one-off defects (`enable -f`, an
+arithmetic subscript expanded in place, a debug trap's `PIPESTATUS`, `nounset`
+array length, `printf`'s `strtod` float parsing, the status of a fatal expansion
+abort, `TIMEFORMAT`, a std fd bound to a read-only source, `compgen` actions,
+and pipeline `xtrace` ordering).
+
+**One guard added so this cannot recur silently.** The harness now asks the
+reference shell for its own `$MACHTYPE` — baked in at bash's configure time, so
+a copy, a symlink or an explicit `--bash` cannot fool it the way a path
+heuristic would — and prints a warning above the first case when the answer is
+not a Linux triple. A wrong reference announces itself as a green run, so it now
+gets announced somewhere the reader will still be paying attention.
+
+### The job-death group: one wrong belief, three cases, and a doc comment that stated the inverse — 2026-08-25 — **FIXED** (`eb23cc57e`)
+
+**In short:** when a background job is killed by a signal, osh kept the job in
+the table so a later `jobs` could report `Terminated`. bash does not: it drops
+the job the moment it hears of the death, whether or not it prints anything
+about it, so a script's `jobs` listing can never name a signal at all. Three
+corpus cases had been written around osh's version and certified green against
+MSYS bash.
+
+**The belief, quoted from the code it was written into:**
+
+> Those three, and only those, are the signal names a `jobs` listing can ever
+> show.
+
+— `signal_announced_when_reaped`'s doc comment, of `INT`, `TERM` and `PIPE`.
+This is the exact inverse of what bash does. Those three are the signals bash
+prints *no message* for (`DONT_REPORT_SIGTERM`, `DONT_REPORT_SIGPIPE`, and an
+interrupt being the user's own doing), and the exemption is from the **message
+and nothing else**. The shell still notices the death, and noticing is what
+takes the row.
+
+**Measured, bash 5.2.21, non-interactive:**
+
+| line | result |
+|---|---|
+| `sleep 5 & kill -TERM %1; sleep 0.02; jobs` | prints **nothing**, 8 runs out of 8 |
+| `sleep 5 & kill -TERM %1; jobs` | prints `Running`, 8 runs out of 8 |
+| `… ; wait %1` after the first | `no such job`; `%1` is free for the next job |
+
+So there is no listing that words the death: the sweep either has not happened
+yet (`Running`) or has (the row is gone). A non-interactive listing has exactly
+two states, `Done` and `Exit N`. `Interrupt` is doubly impossible — an
+asynchronous job is handed `SIGINT` already ignored.
+
+**Interactive bash is a different shell here** and *does* print `[1]+
+Terminated sleep 5`. That is presumably where the belief came from, since it is
+what one sees by hand at a prompt. The corpus runs non-interactively, so the
+non-interactive answer is the one osh owes.
+
+**The fix** splits the two questions that had been one.
+`announce_signalled_job` → `notice_signalled_job`: it prints only when bash
+prints, and returns `true` either way, so the caller drops the row
+unconditionally. `signal_announced_when_reaped` keeps its body and loses its
+claim about listings. What genuinely *does* suppress the notice is unrelated and
+unchanged: a command substitution, whose announcement would land on a stderr
+that has nothing to do with the value being collected, so bash holds the death
+for the substitution's own `jobs`.
+
+**Three unit tests changed with it**, and one of them is worth recording
+because it nearly produced a second wrong fix.
+`jobs_marks_the_current_and_previous_job` used `kill %1` to make a finished job
+to hang the `-` marker on; with the fix there is no row left to mark, so it now
+gates on a file instead:
+
+```sh
+until [ -e gate ]; do sleep 0.01; done & sleep 30 &
+: > gate
+```
+
+The listing then read `until [ -e gate ]; do` / `    sleep 0.01;` / `done` —
+which looked like a second osh defect, since the source text is one line. It is
+not: **both shells re-print a compound command in the `jobs` command column from
+the parse tree**, four-space indented and broken over lines. Verified against
+bash 5.2.21 for `until`, `for`, `while` and `if`. The expectation was wrong and
+osh was right; the note is in the test.
+
+**The general lesson, which is the same one the migration keeps teaching.** A
+differential harness with a wrong reference does not fail — it agrees. This
+belief was not parked in a waiver or flagged in `todo.txt`; it was implemented,
+documented in prose, asserted by three unit tests and three corpus cases, and
+green throughout. The only thing that found it was changing the reference.
 
 ---
 
@@ -81109,8 +81306,50 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **469 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **463 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (twenty-eighth batch): `cmd_kstack` (6) cleared
+> — 469 → 463 across 215 → 214 functions. Not pinned by a rung: no self-test
+> asserts on `kstack` output, which is itself the reason the guesses survived
+> this long.
+>
+> **In short:** `kstack` records how much of each CPU's kernel stack is in use.
+> Four of its subcommands took a CPU number, and when they could not read the
+> word you typed they used **cpu 0**. `register` did the same and also invented
+> a **16384-byte** stack. So `kstack register l 8192` — a lowercase L for a 1 —
+> registered cpu 0 with a 16 KiB stack and said so; the later `kstack usage l
+> 900` then found that cpu and recorded against it.
+>
+> **The new row is about guesses that corroborate each other.** Every previous
+> row assumed the guessed value lands in a table that already exists, so the
+> wrong row is at least a row someone put there. Here `init_defaults` seeds an
+> **empty** CPU list, so `register`'s guessed cpu 0 *manufactures the very CPU*
+> that the next three guesses then resolve against successfully. Nothing ever
+> returns `NotFound`; there is no dangling reference to trip over. The table is
+> not inconsistent — it is **self-consistently wrong**, which removes the last
+> witness a reader had.
+>
+> Two aggravations worth recording, both of which recur elsewhere:
+>
+> * **16384 is `kconsole`'s `80x25` again** (batch 27's provenance row): it is
+>   simultaneously this OS's page size and the textbook kernel stack size, so it
+>   reads as documentation rather than as a guess. Worse than `80x25`, though,
+>   because `list` *divides* by it — `pct = high_water * 100 / stack_size` — so
+>   the guess silently rescales a **derived** column the operator reads as a
+>   measurement.
+> * **`record_usage(cpu, 0)` is an uncorrectable accumulator** (the `ipcns`
+>   thesis applied to a mean): it increments `samples` and adds 0 to
+>   `total_used_samples`, so a phantom sample drags the `avg` column down
+>   permanently. There is no operation that retracts a sample; the only repair
+>   is to discard the whole table.
+>
+> `overflow` and `guard` had **no usage line at all**, so their operand was
+> undocumented as well as guessed — the batch-26/27 generalisation holding
+> again, that a module whose only caller is an interactive shell command is
+> missing precisely what no test ever needed. Both now have one, and the arm
+> uses `end_help_arm` so an explicit `kstack help` exits 0 while an unknown
+> subcommand still exits 1.
+>
 > **Burn-down log.** 2026-08-26 (twenty-seventh batch): `cmd_kconsole` (6, plus
 > one uncounted) cleared — 475 → 469 across 216 → 215 functions. Pinned by
 > `kshell::self_test` rung 95.

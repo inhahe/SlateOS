@@ -9,8 +9,11 @@
 #
 # INT, TERM and PIPE are the exceptions — bash is built with
 # DONT_REPORT_SIGTERM/DONT_REPORT_SIGPIPE, and an interrupt is the user's own
-# doing — which is why those are the only signals a `jobs` listing can ever
-# name. See jobs-listing.sh.
+# doing. The exception is from the *message* and nothing else: the shell still
+# notices the death, and noticing is what takes the row, so a quiet death empties
+# the table exactly as a loud one does. Those three are therefore not "the
+# signals a listing can name" — a non-interactive listing names no signal at
+# all. See jobs-listing.sh.
 #
 # Every kill is followed by a settle delay before anything looks: bash hears of
 # a death asynchronously, so a job killed and inspected in the same breath may
@@ -44,20 +47,20 @@ echo "=== the announcement is the report, so a wait is left with nothing to say"
 
 echo "=== …and its number is free for the next job"
 { sleep 5 & sleep 0.1; kill -HUP %1; sleep 0.1; :; } 2>/dev/null; sleep 5 & jobs; kill %1
-# …and then reap it, because a TERM is *not* announced: nothing else forces the
-# shell to notice this death, so without the `wait` the row would linger in the
-# table for an unbounded time and every section below would be numbered around
-# it or not, depending on how quickly the shell got round to it. That is a real
-# race and not a theoretical one — bash still lists this job as `Running` a fifth
-# of a second after the kill on roughly a third of runs under load.
+# …and then reap it explicitly. A TERM leaves the table like any other death,
+# but only once the shell has *heard* of it, and how long that takes is not ours
+# to say: bash still lists this job as `Running` a fifth of a second after the
+# kill on roughly a third of runs under load. Without the `wait`, every section
+# below would be numbered around this row or not, depending on the machine.
 wait %1 2>/dev/null
 
-echo "=== a signal the listing can word is not announced at all"
-# These stay in the table, still owed to whoever asks — the contrast that says
-# the announcement above was a report and not merely a death. Each block runs in
-# a subshell and makes *both* of the jobs it names, so it starts from an empty
-# table and leaves nothing behind: the survivor of a block like this is precisely
-# the row that would otherwise make the next section's numbering a race.
+echo "=== a death nobody announces still empties the row"
+# The quiet signals leave exactly as much behind as the loud one: nothing. Only
+# the *other* job of each pair is listed, and it holds the `+` the departed one
+# would have had. Each block runs in a subshell and makes both of the jobs it
+# names, so it starts from an empty table and leaves nothing behind: the survivor
+# of a block like this is precisely the row that would otherwise make the next
+# section's numbering a race.
 ( sleep 5 & sleep 5 & sleep 0.1; kill -TERM %2; sleep 0.1; jobs ) 2>/dev/null
 ( sleep 5 & sleep 5 & sleep 0.1; kill -PIPE %1; sleep 0.1; jobs ) 2>/dev/null
 

@@ -120,7 +120,6 @@ cmd_kernlog 1
 cmd_kmod 1
 cmd_kprobes 3
 cmd_ksmstat 2
-cmd_kstack 6
 cmd_kstat 1
 cmd_kthread 4
 cmd_lavg 2

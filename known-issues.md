@@ -81306,6 +81306,88 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
+## `A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT` (lane A, 2026-08-26) — **open**, 142 of 146
+
+**In short:** the kernel has ~430 little modules that each keep a table of
+numbers for `/proc` to print. Each has an `init_defaults()` that opens its
+table, and a `self_test()` that runs at boot to check the module works. The
+self-test *closes the table again when it finishes* and nobody opens it back
+up — so for the rest of the boot the module refuses every write and `/proc`
+prints zeros. Reading `/proc/cpustat` on a busy machine gets you the same
+output as reading it on an idle one.
+
+**The mechanism, exactly.** Each of these modules keeps its data in
+`static STATE: Mutex<Option<State>>`. `init_defaults()` sets it to `Some(...)`;
+every writer goes through a `with_state` helper that returns
+`KernelError::NotSupported` when it is `None`. The self-tests end with:
+
+```rust
+    // Leave NO residue: reset to the uninitialised state ...
+    *STATE.lock() = None;
+```
+
+which is the right *intent* — a diagnostic must not leave its fixtures in the
+live table — but the wrong *end state*. It leaves the table dead rather than
+empty. `init_defaults()` is not idempotent-and-re-called; it is called once, and
+for most of these modules the once is *inside the self-test itself*.
+
+**Measured** (both counts are from a scan of `kernel/src/fs/*.rs` against
+`main.rs` and `kshell.rs`; re-run it before trusting them):
+
+| | modules | what `/proc` shows after boot |
+|---|---|---|
+| null `STATE` at the end of `self_test` | 146 | — |
+| …re-opened at boot in `main.rs` | **4** | live |
+| …opened only by the kshell command's lazy init | **124** | zeros until someone types the command, then live |
+| …opened by *nothing* but their own self-test | **18** | zeros forever; not even the shell can open them |
+
+The 18 that nothing can open: `binfmt`, `blkqueue`, `cpucache`, `cpustat`,
+`inodestat`, `iolatency`, `kprobes`, `mempress`, `migstat`, `netdev`,
+`netsock`, `pidstat`, `pipestat`, `powerstat`, `schedlat`, `sockbuf`,
+`taskstats`, `writeback`.
+
+**Why this is the prerequisite for the other burn-down, not a separate chore.**
+That list is almost exactly the set of category-3 modules named as the
+high-value targets in
+`A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` — the accounting tables a real
+subsystem ought to be feeding. **Wiring a recorder into any of them today would
+be a no-op**: the call would run, `with_state` would return `NotSupported`, and
+the caller (which must discard accounting errors, or statistics could fail a
+real operation) would drop it. The number in `/proc` would not move, and nothing
+would say why. Fix the table's lifetime first, or the recorder work is invisible
+and looks like it did not work.
+
+**How it stayed hidden.** For the same reason as everything else in this family:
+nothing wrote to these tables, so a table that refused writes and a table that
+had no writers produced identical output. The two defects concealed each other.
+It surfaced only when `futexstat` got a real writer and the writes still did not
+appear — see the fix in `fs/futexstat.rs` and `main.rs`.
+
+**The proper fix, per module:**
+
+1. End `self_test` with a clear **and** a re-`init_defaults()`, so the table is
+   left empty rather than dead. (`fs/futexstat.rs` and `fs/pagecache.rs` are the
+   worked examples.)
+2. For anything `/proc` publishes, call `init_defaults()` at boot rather than
+   relying on a kshell handler's lazy init — a `/proc` file whose contents
+   depend on whether an operator has ever run the matching shell command is not
+   a `/proc` file, it is a shell cache. `fs::sysuptime` is the precedent already
+   in `main.rs`, with the reasoning written out at its call site.
+
+Do **not** fix it by deleting the reset: the fixtures genuinely must not survive
+into the live table, and rungs like `pagecache`'s "empty after init" depend on
+starting clean.
+
+**A gate is worth adding once the burn-down is under way** — "no `self_test`
+ends with `STATE` left `None`" is a one-line regex over `kernel/src/fs/*.rs`,
+and it is the kind of rule that silently rots without one. Not added yet
+because 142 modules would fail it on day one; add it as the count approaches
+zero, the same way `check-option-refusal.py` pins a shrinking backlog.
+
+**Not a regression.** True of each module since its self-test was written.
+
+---
+
 ## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 516 of 1940
 
 **In short:** the kernel has ~430 small modules that each keep a table of numbers
@@ -81357,6 +81439,14 @@ increasing order of harm:
    exists to count**, while still printing totals of zero as though zero were
    measured.
 
+**Check the table is even open before wiring a recorder into it.** Most of these
+modules' `self_test`s close their `STATE` when they finish and nothing reopens
+it, so a newly-wired `record_*` returns `NotSupported` and is discarded, and the
+number in `/proc` does not move — see
+`A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT`, which lists the 18
+modules nothing can open at all. That list and the high-value targets below are
+nearly the same set, so for most of them it is the first step, not a footnote.
+
 **The proper fix is per-module and is a burn-down, not a patch.** For each
 module, decide which of the two it is: an accounting table a *subsystem* should
 be feeding — in which case wire the call site in the subsystem, which is the
@@ -81377,6 +81467,7 @@ separately and cleared separately.
 
 | date | module | 520 → | what changed |
 |---|---|---|---|
+| 2026-08-26 | `pagecache` | 516 (unchanged, and that is the point) | category 3, fixed *without* moving this count. `mm/page_cache.rs` carries the comment "Counters (monitoring; mirror what fs::pagecache exposes for stats)" above its `STAT_HITS`/`STAT_MISSES`/`STAT_EVICTIONS` — the two halves of one intent, never joined, so `/proc/pagecache` reported a 0.00% hit rate while the cache served VFS reads and demand paging. Joined at *read* time (a projected `kernel` row) rather than by calling `record_hit` on the cache's fast path, which would put this module's spin lock and a per-device string compare inside an operation whose purpose is to beat the disk. The four `record_*` stay unreachable and now legitimately so, reserved for a per-device source that does not exist. **Lesson for the metric: it counts functions, but the defect is an unfed table.** Where the subsystem already keeps free counters, projection is the fix and the count will not move. Do not read a flat count as no progress. |
 | 2026-08-26 | `futexstat` | 516 | category 3, the sharpest instance found so far. `procfs.rs` publishes `futexstat::stats()` and `hotspots(10)` under `/proc`, and the `futexstat` shell command prints the same table — while all four of `record_wait` / `record_wake` / `record_timeout` / `record_contention` were unreachable. So `/proc`'s futex hotspot list was permanently empty and its wait/wake/timeout totals permanently zero, on a kernel whose futex implementation works. A reader takes that as *measured* zero contention. Fixed by wiring the four recorders into `kernel/src/ipc/futex.rs` at the real blocking and waking points. |
 
 The futexstat fix is worth reading before doing the next category-3 module,

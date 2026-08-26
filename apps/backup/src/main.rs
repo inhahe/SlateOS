@@ -129,13 +129,18 @@ fn utf8_char_len(text: &[u8], i: usize) -> usize {
 
 fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
     // Check for ** at the start — matches any number of path segments
-    if pattern.len() >= 2 && pattern[0] == b'*' && pattern[1] == b'*' {
-        let rest = if pattern.len() > 2 && pattern[2] == b'/' {
-            &pattern[3..]
+    if pattern.starts_with(b"**") {
+        let rest = if pattern.get(2) == Some(&b'/') {
+            pattern.get(3..).unwrap_or_default()
         } else if pattern.len() == 2 {
-            &pattern[2..]
+            // `**` with nothing after it: there is no remainder to match.
+            &[]
         } else {
-            // "**" followed by something other than "/" — treat as literal
+            // `**` followed by something other than `/` is not a globstar.
+            // Handing it back to `glob_match_simple` is safe now that
+            // `glob_match_simple` agrees about that and degrades it to a
+            // single `*`; while the two disagreed this line was half of an
+            // infinite mutual recursion. See the note there.
             return glob_match_simple(pattern, text);
         };
 
@@ -144,10 +149,12 @@ fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
             return true;
         }
 
-        // Try matching rest against every suffix of text starting at path boundaries
+        // Try matching rest against every suffix of text starting at path
+        // boundaries. `i` runs to `text.len()` inclusive, so the suffix may be
+        // empty — that is the zero-segment case.
         for i in 0..=text.len() {
-            if (i == 0 || (i > 0 && text[i - 1] == b'/')) && glob_match_recursive(rest, &text[i..])
-            {
+            let at_boundary = i == 0 || i.checked_sub(1).and_then(|k| text.get(k)) == Some(&b'/');
+            if at_boundary && glob_match_recursive(rest, text.get(i..).unwrap_or_default()) {
                 return true;
             }
         }
@@ -159,45 +166,82 @@ fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
 }
 
 fn glob_match_simple(pattern: &[u8], text: &[u8]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    // `None` until a single `*` has been seen. This was `usize::MAX` as a
+    // sentinel, which is a valid index the loop could in principle reach;
+    // `Option` says the same thing without borrowing a value from the range.
+    let mut star_pi: Option<usize> = None;
+    let mut star_ti = 0usize;
 
-    while ti < text.len() {
-        if pi < pattern.len() && pattern[pi] == b'?' && text[ti] != b'/' {
-            pi += 1;
-            // One character, not one byte — see `utf8_char_len`.
-            ti += utf8_char_len(text, ti);
-        } else if pi < pattern.len() && pattern[pi] == b'*' {
-            // Handle ** in the middle of a pattern
-            if pi + 1 < pattern.len() && pattern[pi + 1] == b'*' {
-                // Delegate to recursive handler for **
-                return glob_match_recursive(&pattern[pi..], &text[ti..]);
+    // Matching `text.get(ti)` rather than testing `ti < text.len()` and then
+    // indexing gives the loop its bound and its byte in one step, so there is
+    // no window in which the two could disagree.
+    while let Some(&t) = text.get(ti) {
+        match pattern.get(pi) {
+            // `?` matches one character that is not a separator.
+            Some(&b'?') if t != b'/' => {
+                pi = pi.saturating_add(1);
+                // One character, not one byte — see `utf8_char_len`.
+                ti = ti.saturating_add(utf8_char_len(text, ti));
             }
-            // Single * — match anything except /
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if pi < pattern.len() && pattern[pi] == text[ti] {
-            pi += 1;
-            ti += 1;
-        } else if star_pi != usize::MAX {
-            // Backtrack to last star
-            star_ti += 1;
-            if star_ti > text.len() || text[star_ti - 1] == b'/' {
-                return false; // * doesn't cross /
+            Some(&b'*') => {
+                // Hand `**` to the recursive matcher, but only for a `**` that
+                // is a whole path segment — `**` at the end of the pattern, or
+                // `**/`. That is exactly the condition
+                // `glob_match_recursive` accepts, and the two MUST agree.
+                //
+                // They did not. This delegated on any `**` while
+                // `glob_match_recursive` accepted only a whole segment, so
+                // `**a` bounced between the two forever: `recursive` saw a `**`
+                // it would not handle and passed the pattern to `simple`
+                // unchanged, `simple` saw `**` and passed it straight back, and
+                // neither consumed a byte. `backup create --exclude '**a'`
+                // overflowed the stack and took the backup down with it.
+                //
+                // A `**` that is not a whole segment is not a globstar; bash's
+                // `globstar` and gitignore both degrade it to a single `*`, and
+                // falling through to the ordinary-star arm below does that —
+                // `**a` behaves as `*a`, which also guarantees progress because
+                // `pi` advances every time.
+                let is_whole_segment = pattern.get(pi.saturating_add(1)) == Some(&b'*')
+                    && matches!(pattern.get(pi.saturating_add(2)), None | Some(&b'/'));
+                if is_whole_segment {
+                    return glob_match_recursive(
+                        pattern.get(pi..).unwrap_or_default(),
+                        text.get(ti..).unwrap_or_default(),
+                    );
+                }
+                // Single * — match anything except /
+                star_pi = Some(pi);
+                star_ti = ti;
+                pi = pi.saturating_add(1);
             }
-            ti = star_ti;
-            pi = star_pi + 1;
-        } else {
-            return false;
+            Some(&p) if p == t => {
+                pi = pi.saturating_add(1);
+                ti = ti.saturating_add(1);
+            }
+            // Either the pattern ran out or this byte does not match. Both are
+            // recoverable only by making the last single `*` swallow one more
+            // byte — and `None` here (no star yet) is the outright failure.
+            _ => {
+                let Some(resume_at) = star_pi else {
+                    return false;
+                };
+                star_ti = star_ti.saturating_add(1);
+                let swallowed = star_ti.checked_sub(1).and_then(|k| text.get(k));
+                if star_ti > text.len() || swallowed == Some(&b'/') {
+                    return false; // * doesn't cross /
+                }
+                ti = star_ti;
+                pi = resume_at.saturating_add(1);
+            }
         }
     }
 
     // Consume trailing stars
-    while pi < pattern.len() && pattern[pi] == b'*' {
-        pi += 1;
+    while pattern.get(pi) == Some(&b'*') {
+        pi = pi.saturating_add(1);
     }
 
     pi == pattern.len()
@@ -367,41 +411,49 @@ fn json_pretty(value: &JsonValue, indent: usize) -> String {
 }
 
 fn json_pretty_inner(value: &JsonValue, indent: usize, depth: usize, out: &mut String) {
-    let prefix = " ".repeat(indent * depth);
-    let inner_prefix = " ".repeat(indent * (depth + 1));
+    // Saturating because `depth` is recursion depth over attacker-shaped input:
+    // a manifest nested a few thousand deep would overflow the multiplication
+    // long before it produced a line anyone would read.
+    let prefix = " ".repeat(indent.saturating_mul(depth));
+    let inner_depth = depth.saturating_add(1);
+    let inner_prefix = " ".repeat(indent.saturating_mul(inner_depth));
 
     match value {
+        // The separator is written *before* every entry but the first rather
+        // than after every entry but the last. Both produce the same bytes, but
+        // the leading form needs no lookahead to the container's length, so
+        // there is no `i + 1` to compare against it.
         JsonValue::Object(entries) if !entries.is_empty() => {
             out.push_str("{\n");
             for (i, (key, val)) in entries.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
                 out.push_str(&inner_prefix);
                 out.push('"');
                 out.push_str(key);
                 out.push_str("\": ");
-                json_pretty_inner(val, indent, depth + 1, out);
-                if i + 1 < entries.len() {
-                    out.push(',');
-                }
-                out.push('\n');
+                json_pretty_inner(val, indent, inner_depth, out);
             }
+            out.push('\n');
             out.push_str(&prefix);
             out.push('}');
         }
         JsonValue::Array(items) if !items.is_empty() => {
             out.push_str("[\n");
             for (i, item) in items.iter().enumerate() {
-                out.push_str(&inner_prefix);
-                json_pretty_inner(item, indent, depth + 1, out);
-                if i + 1 < items.len() {
-                    out.push(',');
+                if i > 0 {
+                    out.push_str(",\n");
                 }
-                out.push('\n');
+                out.push_str(&inner_prefix);
+                json_pretty_inner(item, indent, inner_depth, out);
             }
+            out.push('\n');
             out.push_str(&prefix);
             out.push(']');
         }
         _ => {
-            out.push_str(&format!("{}", value));
+            out.push_str(&value.to_string());
         }
     }
 }
@@ -414,20 +466,22 @@ fn json_parse(input: &str) -> Result<JsonValue, String> {
     }
     let (val, rest) = parse_value(trimmed)?;
     if !rest.trim().is_empty() {
-        return Err(format!(
-            "trailing characters: {:?}",
-            &rest[..rest.len().min(20)]
-        ));
+        // Take twenty *characters*, not twenty bytes. `&rest[..20]` panics if
+        // byte 20 lands inside a multi-byte character, and trailing garbage is
+        // precisely where a stray non-ASCII byte turns up — so the diagnostic
+        // for a corrupt manifest would itself have been the crash.
+        let shown: String = rest.chars().take(20).collect();
+        return Err(format!("trailing characters: {shown:?}"));
     }
     Ok(val)
 }
 
 fn parse_value(input: &str) -> Result<(JsonValue, &str), String> {
     let s = input.trim_start();
-    if s.is_empty() {
+    let Some(&lead) = s.as_bytes().first() else {
         return Err("unexpected end of input".to_string());
-    }
-    match s.as_bytes()[0] {
+    };
+    match lead {
         b'"' => parse_string(s),
         b'{' => parse_object(s),
         b'[' => parse_array(s),
@@ -4383,6 +4437,90 @@ mod tests {
         assert_eq!(
             restore_path_within(dest, Path::new("\\\\server\\share\\file.txt")),
             None
+        );
+    }
+
+    // --- Glob matching ---
+
+    /// `glob_match_recursive` and `glob_match_simple` disagreed about which
+    /// `**` was a globstar: `simple` delegated on any `**`, `recursive`
+    /// accepted only a whole path segment and handed anything else straight
+    /// back. Neither consumed a byte, so `--exclude '**a'` recursed until the
+    /// stack ran out and killed the backup mid-run.
+    ///
+    /// Every pattern here reached that loop before the fix. The test asserts
+    /// results rather than merely returning, but the real assertion is that it
+    /// terminates at all — a regression hangs the suite rather than failing it,
+    /// which is the loudest signal available for this shape of bug.
+    #[test]
+    fn a_double_star_that_is_not_a_path_segment_terminates() {
+        // Degraded to a single `*`, per bash's `globstar` and gitignore.
+        assert!(glob_matches("**a", "ba"));
+        assert!(glob_matches("**a", "a"));
+        assert!(!glob_matches("**a", "b"));
+        assert!(glob_matches("**.tmp", "scratch.tmp"));
+        assert!(!glob_matches("**.tmp", "scratch.txt"));
+        // A single `*` does not cross a separator, and the degraded `**`
+        // inherits that.
+        assert!(!glob_matches("**a", "x/a"));
+        assert!(glob_matches("***", "ab"));
+    }
+
+    /// The whole-segment forms must keep their globstar meaning — the fix
+    /// narrowed which `**` is special, so this pins that it did not narrow it
+    /// to nothing.
+    #[test]
+    fn a_double_star_that_is_a_path_segment_still_spans_directories() {
+        assert!(glob_matches("**/*.txt", "a/b/c/note.txt"));
+        assert!(glob_matches("src/**/mod.rs", "src/a/b/mod.rs"));
+        assert!(glob_matches("src/**/mod.rs", "src/mod.rs"));
+        assert!(glob_matches("src/**", "src/a/b"));
+        assert!(!glob_matches("src/**/mod.rs", "lib/a/mod.rs"));
+    }
+
+    // --- JSON pretty-printing ---
+
+    /// The manifest round-trip tests cannot see this: the parser discards
+    /// whitespace, so a printer that lost an indent, doubled a comma or put the
+    /// closing brace in the wrong column would still parse back to an equal
+    /// value. A manifest is a file a person opens when a backup goes wrong, so
+    /// its shape is a feature. Pinned exactly.
+    #[test]
+    fn the_pretty_printer_lays_a_manifest_out_readably() {
+        let value = JsonValue::Object(vec![
+            ("name".to_string(), JsonValue::Str("backup-42".to_string())),
+            (
+                "files".to_string(),
+                JsonValue::Array(vec![
+                    JsonValue::Str("a.txt".to_string()),
+                    JsonValue::Str("b.txt".to_string()),
+                ]),
+            ),
+            ("count".to_string(), JsonValue::Number(2.0)),
+        ]);
+        assert_eq!(
+            json_pretty(&value, 2),
+            "{\n  \"name\": \"backup-42\",\n  \"files\": [\n    \"a.txt\",\n    \"b.txt\"\n  ],\n  \"count\": 2\n}"
+        );
+    }
+
+    /// An empty container has no entries to separate, so it never reaches the
+    /// indenting arms at all — it must still print as valid JSON rather than as
+    /// an open brace waiting for a newline.
+    #[test]
+    fn empty_containers_print_flat() {
+        assert_eq!(json_pretty(&JsonValue::Object(vec![]), 2), "{}");
+        assert_eq!(json_pretty(&JsonValue::Array(vec![]), 2), "[]");
+    }
+
+    /// The byte-offset truncation this replaced would panic here: the twentieth
+    /// byte of the trailing text lands inside a two-byte character.
+    #[test]
+    fn trailing_garbage_is_reported_without_splitting_a_character() {
+        let err = json_parse("{} ééééééééééééééééééé").unwrap_err();
+        assert!(
+            err.starts_with("trailing characters:"),
+            "unexpected message: {err}"
         );
     }
 

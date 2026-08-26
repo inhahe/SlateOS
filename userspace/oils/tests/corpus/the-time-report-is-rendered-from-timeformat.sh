@@ -10,7 +10,11 @@
 #     its second `9`. The fraction *truncates*: 140 ms at `%2R` is `0.14`.
 #   * `%P` is the CPU percentage, and bash matches it *before* the modifier scan
 #     — so it accepts neither of them, and `%0P` is an error rather than a
-#     two-place `%P`.
+#     two-place `%P`. It is `((user + sys) * 10000) / real` in **microseconds**
+#     (`lib/sh/timeval.c`, `timeval_to_cpu`), which is why it reports a ratio
+#     for a command whose `%3R`, `%3U` and `%3S` all read `0.000`. It is **not**
+#     capped at 100: bash's clamp is `#if 0`'d out, so a pipeline that used four
+#     cores reports `385.42`.
 #   * `%%` is a literal `%`, a `%` at the very end of the string is itself, and
 #     everything else is copied through. One newline is always appended.
 #   * An **unrecognised** directive is reported and throws the whole report
@@ -31,6 +35,10 @@
 # the report through `d`, which blanks digit runs. The one exception is a
 # *cumulative* figure, which is the shell's whole run and so not even zero
 # reliably; those go through `d` too.
+#
+# `%P` is the one figure that cannot take the precision-0 route, since it takes
+# no modifier at all, and it is not stable between two runs of the *same* shell
+# — so it goes through `d` without exception.
 
 d() { sed 's/[0-9][0-9]*/N/g'; }
 # bash's line number for the report is a parser artifact — inside a compound
@@ -45,7 +53,16 @@ echo "=== the fallbacks are format strings like any other"
 TIMEFORMAT=; { time : ; } 2>&1; echo "  an empty one prints nothing"
 
 echo "=== the directives and their modifiers"
-TIMEFORMAT="[%0R][%0U][%0S][%P]"; { time : ; } 2>&1
+TIMEFORMAT="[%0R][%0U][%0S]"; { time : ; } 2>&1
+# `%P` gets a line of its own, through `d`, because it is the one figure that
+# takes no precision modifier — so the `%0` trick that makes the other three
+# comparable is not available to it. Nor would a higher precision help: it is a
+# ratio of two spans that are *both* under a millisecond for `time :`, so it is
+# not stable even between two runs of the same shell. Measured, bash 5.2.21,
+# eight consecutive `{ time : ; }`: 100.00, 100.00, 150.00, 66.66, 75.00,
+# 75.00, 150.00, 100.00 — small integer ratios of a few hundred microseconds.
+# This file recorded 75.00 as though it were a fact until 2026-08-26.
+TIMEFORMAT="[%P]"; { time : ; } 2>&1 | d
 TIMEFORMAT="[%2U][%3S][%1U][%0lU][%2lS][%3lU]"; { time : ; } 2>&1
 TIMEFORMAT="[%R][%2R][%lR][%4R][%9R]"; { time : ; } 2>&1 | d
 

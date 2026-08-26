@@ -2647,14 +2647,24 @@ enum InputSrc {
     /// directory` — so refusing the redirect would put the wrong diagnostic on
     /// the wrong line.
     ///
-    /// A shape of its own rather than a real handle, because the development
-    /// host cannot supply one that behaves: Win32 fails `CreateFile` on a
-    /// directory outright unless `FILE_FLAG_BACKUP_SEMANTICS` is asked for, and
-    /// even then every read through the handle comes back
+    /// A shape of its own rather than plain [`InputSrc::File`], because the
+    /// development host cannot supply a handle that behaves: Win32 fails
+    /// `CreateFile` on a directory outright unless `FILE_FLAG_BACKUP_SEMANTICS`
+    /// is asked for, and even then every read through the handle comes back
     /// `ERROR_ACCESS_DENIED`, which is `Permission denied` and not what bash
-    /// says. Carrying the fact in the variant costs nothing on the SlateOS
-    /// target, where the same `EISDIR` would arrive from the kernel.
-    Directory,
+    /// says. So the `EISDIR` is named by the variant and every reader gets it
+    /// alike, on the host that would have said something else and on the one —
+    /// SlateOS, and any POSIX host — that would have said exactly this.
+    ///
+    /// The handle is still opened where the host will give one, because a
+    /// *child* is not one of those readers: what it makes of a directory
+    /// descriptor is its own business, and it can only make anything of one it
+    /// actually receives. `sh -c 'echo W >&2' 2<dir` is the case that shows the
+    /// difference — with the descriptor there, the child's `>&2` dups it and
+    /// the *write* fails, exiting 1; with fd 2 missing, the dup fails first and
+    /// it exits 2. `None` is what Win32 leaves, and the approximation there is
+    /// unchanged.
+    Directory(Option<File>),
 }
 
 /// Wrap the absence of a descriptor as an [`InputFd`], so a closed fd 0 can be
@@ -2673,9 +2683,10 @@ fn write_only_input() -> InputFd {
 
 /// A directory bound to a descriptor — see [`InputSrc::Directory`]. Like
 /// [`write_only_input`], each call makes its own handle: there is no position
-/// to share when no byte will ever be read.
-fn directory_input() -> InputFd {
-    Arc::new(Mutex::new(InputSrc::Directory))
+/// to share when no byte will ever be read *here*, whatever a child does with
+/// the descriptor it is handed.
+fn directory_input(handle: Option<File>) -> InputFd {
+    Arc::new(Mutex::new(InputSrc::Directory(handle)))
 }
 
 impl io::Read for InputSrc {
@@ -2684,7 +2695,7 @@ impl io::Read for InputSrc {
             InputSrc::Bytes(c) => c.read(out),
             InputSrc::File(f) => f.read(out),
             InputSrc::Closed | InputSrc::WriteOnly => Err(ebadf()),
-            InputSrc::Directory => Err(io::Error::from(io::ErrorKind::IsADirectory)),
+            InputSrc::Directory(_) => Err(io::Error::from(io::ErrorKind::IsADirectory)),
         }
     }
 }
@@ -2695,7 +2706,7 @@ impl BufRead for InputSrc {
             InputSrc::Bytes(c) => c.fill_buf(),
             InputSrc::File(f) => f.fill_buf(),
             InputSrc::Closed | InputSrc::WriteOnly => Err(ebadf()),
-            InputSrc::Directory => Err(io::Error::from(io::ErrorKind::IsADirectory)),
+            InputSrc::Directory(_) => Err(io::Error::from(io::ErrorKind::IsADirectory)),
         }
     }
 
@@ -2704,7 +2715,7 @@ impl BufRead for InputSrc {
             InputSrc::Bytes(c) => c.consume(n),
             InputSrc::File(f) => f.consume(n),
             // Nothing was ever handed out to consume.
-            InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => {}
+            InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory(_) => {}
         }
     }
 }
@@ -2719,7 +2730,11 @@ impl std::fmt::Debug for InputSrc {
             InputSrc::File(_) => f.write_str("InputSrc::File"),
             InputSrc::Closed => f.write_str("InputSrc::Closed"),
             InputSrc::WriteOnly => f.write_str("InputSrc::WriteOnly"),
-            InputSrc::Directory => f.write_str("InputSrc::Directory"),
+            InputSrc::Directory(h) => f.write_str(if h.is_some() {
+                "InputSrc::Directory(open)"
+            } else {
+                "InputSrc::Directory(none)"
+            }),
         }
     }
 }
@@ -2862,19 +2877,20 @@ fn child_input(c: &InputFd) -> ChildIn {
             let _ = cur.read_to_end(&mut rest);
             ChildIn::Bytes(rest)
         }
-        // None of these has bytes to hand over, and all three are given the
-        // child as a *closed* fd 0. That is exact for the closed one. A
-        // write-only fd 0 is a descriptor the child would really receive and
-        // really fail to read: `EBADF` either way, though a child that says so
-        // by name would name the read rather than the descriptor's absence.
-        // A directory is the same trade for a different reason: the host
-        // *would* give up a handle for it, but reads through that handle say
-        // `Permission denied` rather than `Is a directory`, so an approximation
-        // is all there is either way. It is why the corpus case for this keeps
-        // to the shell's own readers (`read`, `mapfile`), where the answer is
-        // exact — bash's `cat < dir` fails inside `cat`, and what a host's
-        // `cat` makes of a directory is not the shell's business.
-        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => ChildIn::Closed,
+        // A directory the host opened is a real description and is handed over
+        // as one. The shell's own readers still get `Is a directory` from the
+        // variant rather than from a read (see [`InputSrc::Directory`]), but a
+        // child is not one of them: it receives the descriptor and answers for
+        // it itself, which is the whole of what bash does here and the only way
+        // its status can be reproduced.
+        InputSrc::Directory(Some(f)) => f.try_clone().map_or(ChildIn::Closed, ChildIn::Handle),
+        // Neither of these has bytes to hand over, and both are given the child
+        // a *closed* fd 0 — as is a directory on a host that would not open
+        // one. That is exact for the closed one. A write-only fd 0 is a
+        // descriptor the child would really receive and really fail to read:
+        // `EBADF` either way, though a child that says so by name would name
+        // the read rather than the descriptor's absence.
+        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory(None) => ChildIn::Closed,
     }
 }
 
@@ -2901,10 +2917,11 @@ fn child_input(c: &InputFd) -> ChildIn {
 /// consuming on its behalf would empty an `exec 3<<HD` for the shell's own later
 /// `read <&3`, which is the far likelier script.
 ///
-/// The shapes with neither an OS object nor bytes — a directory, a source
-/// already closed, a handle the host declines to duplicate — are handed over
-/// **closed** ([`ReadOnlyOut::Closed`]). A closed descriptor is not what bash
-/// gives the child (bash's is open and merely unwritable), but it fails the
+/// The shapes with neither an OS object nor bytes — a source already closed, a
+/// handle the host declines to duplicate, a directory on a host that would not
+/// open one — are handed over **closed** ([`ReadOnlyOut::Closed`]). A closed
+/// descriptor is not what bash gives the child (bash's is open and merely
+/// unwritable), but it fails the
 /// child's write with the same `EBADF` and the same status, which is everything
 /// such a descriptor is used for. `Stdio::null()` is the one answer that must
 /// not be given: it takes the bytes and lets the child exit 0.
@@ -2935,7 +2952,14 @@ fn child_read_only_out(src: &ReadOnlySrc) -> ReadOnlyOut {
                 Err(_) => ReadOnlyOut::Closed,
             }
         }
-        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => ReadOnlyOut::Closed,
+        // Handed over as the description it is, for the reason in
+        // [`child_input`]: `sh -c 'echo W >&2' 2<dir` dups a descriptor that is
+        // there and fails the write (status 1), and fails the dup itself when
+        // it is not (status 2).
+        InputSrc::Directory(Some(f)) => f
+            .try_clone()
+            .map_or(ReadOnlyOut::Closed, |d| ReadOnlyOut::Handle(Stdio::from(d))),
+        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory(None) => ReadOnlyOut::Closed,
     }
 }
 
@@ -5686,6 +5710,40 @@ pub struct Shell {
     /// A `[[ ]]`/`case` word is one of these contexts too, but it already has
     /// [`Shell::cond_word`] to say so and the predicate asks that separately.
     no_split_star: bool,
+    /// bash's `W_NOTILDE`, armed for exactly one word: the subscript
+    /// `expand_subscript_string` is about to expand.
+    ///
+    /// ```c
+    ///   td.flags = W_NOPROCSUB|W_NOTILDE|W_NOSPLIT2;
+    ///   td.word = savestring (string);
+    ///   tlist = call_expand_word_internal (&td, quoted, 0, …);
+    ///                                          /* subst.c:10800-10812 */
+    /// ```
+    ///
+    /// A flag on the **word**, not on the expansion, and the difference is
+    /// visible: a subscript's own leading `~` stands, but the same `~` written
+    /// inside an operand within it is expanded, the operand being a word of its
+    /// own that bash builds without the flag. Measured, bash 5.2.21, `HOME=/zz`
+    /// and `z` unset:
+    ///
+    /// ```text
+    ///   (( a[~] ))            \~: syntax error … (error token is "\~")
+    ///   (( a[${z:-~}] ))      /zz: syntax error … (error token is "/zz")
+    ///   [[ -v a[~] ]]         \~: syntax error … (error token is "\~")
+    ///   [[ -v a[${z:-~}] ]]   /zz: syntax error … (error token is "/zz")
+    /// ```
+    ///
+    /// so each of the three word-level walks — [`Shell::expand_word_annotated`],
+    /// [`Shell::expand_word_joined_annotated`] and the pattern one — *takes* it
+    /// rather than reading it: the outermost word consumes the arming and every
+    /// word nested inside that one sees it clear, which is what confines it to
+    /// one word without a stack. (A subscript goes through the *joining* walk,
+    /// so arming only the splitting one inverts the two cases rather than fixing
+    /// either.)
+    /// (The `\` in those tokens is the `abstab` quoting the subscript's result
+    /// is given afterwards — see [`backslash_quote_subscript`] — and is itself
+    /// the proof the `~` reached it unexpanded.)
+    no_tilde: bool,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
@@ -6649,6 +6707,7 @@ impl Shell {
             dquote: false,
             pat_quote: false,
             no_split_star: false,
+            no_tilde: false,
             cond_regex_error: false,
             arith_cmd: None,
             expand_cmd: None,
@@ -9689,6 +9748,75 @@ impl Shell {
         (total_ms / 1000, (total_ms % 1000) as u32)
     }
 
+    /// bash's `timeval_to_cpu` (`lib/sh/timeval.c`): `((user + sys) * 10000) /
+    /// real`, in hundredths of a percent, done in fixed point on two
+    /// `timeval`s rather than in floating point.
+    ///
+    /// The shape is worth reproducing rather than approximating, because the
+    /// truncation is observable. The first loop shifts one decimal digit at a
+    /// time out of `tv_usec` and into `tv_sec`, six times, which leaves each
+    /// side as a plain **microsecond** count — bash's `%P` is therefore a
+    /// microsecond ratio, not a millisecond one, which is why `time :` reports
+    /// a percentage at all when `%3R`, `%3U` and `%3S` all read `0.000`. The
+    /// second loop scales the numerator up by the four digits of `10000`,
+    /// switching to scaling the *denominator* down once the numerator would
+    /// pass `10^8`, so that the product cannot overflow a 32-bit `time_t`.
+    ///
+    /// **It does not clamp at 100%**, however much the arithmetic looks like a
+    /// percentage: bash's clamp is `#if 0`'d out (`execute_cmd.c:1281-1286`),
+    /// so a parallel pipeline really does report `385.42`. Measured, bash
+    /// 5.2.21 (glibc), four background loops on this machine:
+    ///
+    /// ```text
+    /// [R=0.456][U=1.574][S=0.182][P=385.42]
+    /// ```
+    ///
+    /// A `real` under a microsecond divides by a zero denominator, which bash
+    /// answers with 0 rather than trapping; so does this.
+    fn timeval_to_cpu(real: f64, user: f64, sys: f64) -> i64 {
+        // A `timeval`, as `(tv_sec, tv_usec)`. Negative and NaN durations are
+        // no clock's output and would only make the fixed point meaningless.
+        fn tv(v: f64) -> (i64, i64) {
+            if v.is_nan() || v <= 0.0 {
+                return (0, 0);
+            }
+            // `as` truncates toward zero and saturates, so a duration past the
+            // age of the universe cannot wrap into a negative one.
+            let us = (v * 1_000_000.0) as i64;
+            (us / 1_000_000, us % 1_000_000)
+        }
+        let (rs, ru) = tv(real);
+        let (uts, utu) = tv(user);
+        let (sts, stu) = tv(sys);
+        // `addtimeval`: carry the microseconds at a whole second.
+        let (mut n_s, mut n_u) = (uts.saturating_add(sts), utu.saturating_add(stu));
+        if n_u >= 1_000_000 {
+            n_u -= 1_000_000;
+            n_s = n_s.saturating_add(1);
+        }
+        let (mut d_s, mut d_u) = (rs, ru);
+        // Six digits: `tv_sec` now holds the whole duration in microseconds.
+        for _ in 0..6 {
+            if n_s > 99_999_999 || d_s > 99_999_999 {
+                break;
+            }
+            n_s = n_s.saturating_mul(10).saturating_add(n_u / 100_000);
+            n_u = n_u.saturating_mul(10) % 1_000_000;
+            d_s = d_s.saturating_mul(10).saturating_add(d_u / 100_000);
+            d_u = d_u.saturating_mul(10) % 1_000_000;
+        }
+        // The four digits of the 10000 scale, taken off the denominator once
+        // the numerator has no room left for them.
+        for _ in 0..4 {
+            if n_s < 100_000_000 {
+                n_s = n_s.saturating_mul(10);
+            } else {
+                d_s /= 10;
+            }
+        }
+        if d_s == 0 { 0 } else { n_s / d_s }
+    }
+
     /// bash's `mkfmt`: `SECS[.FFF]` at `prec` places, or `NmSECS.FFFs` when the
     /// `l` (length-extender) modifier asked for minutes.
     ///
@@ -9739,21 +9867,18 @@ impl Shell {
     /// is a `builtin_error`, not a `report_error`). The character reported is
     /// whatever `*s` was, so a format ending mid-directive names the NUL.
     ///
-    /// The CPU figures come from [`Shell::cpu_used`], which is real on Windows
-    /// and zero elsewhere for want of the host accounting — see TD-OILS10.
+    /// The CPU figures come from [`Shell::cpu_used`]. `%P` is the ratio between
+    /// them and the elapsed time, computed by [`Shell::timeval_to_cpu`] the way
+    /// bash computes it — at microsecond precision, and without the 100% clamp
+    /// bash's source has but does not compile.
     fn render_time_report(&mut self, fmt: BStr<'_>, real: f64, user: f64, sys: f64) -> Option<Str> {
         let (rs, rsf) = Self::time_parts(real);
         let (us, usf) = Self::time_parts(user);
         let (ss, ssf) = Self::time_parts(sys);
-        // Hundredths of a percent of the wall-clock span spent on the CPU,
-        // capped at 100% the way bash caps it.
-        let cpu = if rs == 0 && rsf == 0 {
-            0
-        } else {
-            let cpu_ms = (us + ss) * 1000 + u64::from(usf + ssf);
-            let real_ms = rs * 1000 + u64::from(rsf);
-            (cpu_ms * 10000 / real_ms).min(10000)
-        };
+        // Hundredths of a percent of the wall-clock span spent on the CPU. Not
+        // capped at 100%: bash's clamp is `#if 0`'d out, so a pipeline that
+        // used four cores really does report `385.42`.
+        let cpu = Self::timeval_to_cpu(real, user, sys);
 
         let mut out = Str::new();
         let mut i = 0usize;
@@ -9771,12 +9896,12 @@ impl Shell {
                     i += 2;
                 }
                 Some(b'P') => {
-                    out.extend_from_slice(&Self::mkfmt(
-                        2,
-                        false,
-                        cpu / 100,
-                        (cpu % 100) as u32 * 10,
-                    ));
+                    // bash's `sum = cpu / 100; sum_frac = (cpu % 100) * 10`.
+                    // `cpu` is a ratio of two non-negative durations, so both
+                    // halves are non-negative and the widening cannot fail.
+                    let whole = u64::try_from(cpu / 100).unwrap_or(0);
+                    let frac = u32::try_from(cpu % 100).unwrap_or(0) * 10;
+                    out.extend_from_slice(&Self::mkfmt(2, false, whole, frac));
                     i += 2;
                 }
                 _ => {
@@ -13306,6 +13431,7 @@ impl Shell {
             dquote: false,
             pat_quote: false,
             no_split_star: false,
+            no_tilde: false,
             cond_regex_error: false,
             arith_cmd: None,
             // A fork inherits the name in force, because bash's is an ordinary
@@ -28236,6 +28362,10 @@ impl Shell {
         // out of, so it is here that the text after an abandoned extent read
         // stops contributing.
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        // Taken, not read — the arming belongs to this word alone. See
+        // [`Shell::no_tilde`] and the matching line in
+        // [`Shell::expand_word_annotated`].
+        let no_tilde = std::mem::take(&mut self.no_tilde);
         let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
             // One `${!…}` resolution per part — see [`PointerPart`].
@@ -28247,7 +28377,7 @@ impl Shell {
                     // double quotes, which is the other half of the same guard —
                     // see [`Shell::push_literal_annotated`]. `"${z=~}"` reaches
                     // this walk and assigns the tilde as it stands.
-                    if idx == 0 && !self.dquote_bits() {
+                    if idx == 0 && !no_tilde && !self.dquote_bits() {
                         let home = self.tilde_expand(s.as_bytes());
                         push_chars(&mut cur, &home, false);
                     } else {
@@ -28760,6 +28890,11 @@ impl Shell {
         // `m: bad array subscript` for the *empty* key the abandoned read left,
         // then `AB`. See [`Shell::extent_consumed`].
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        // `W_NOTILDE` belongs to the word it was armed for and to no word inside
+        // that one, so it is *taken* here rather than read: the outermost call
+        // consumes the arming and every nested one sees it clear. See
+        // [`Shell::no_tilde`].
+        let no_tilde = std::mem::take(&mut self.no_tilde);
         let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
             // Asked at the *top* rather than at the tail, because the arms
@@ -28775,7 +28910,7 @@ impl Shell {
             self.begin_pointer_part();
             match part {
                 WordPart::Literal(s) => {
-                    self.push_literal_annotated(&mut cur, s, idx == 0);
+                    self.push_literal_annotated(&mut cur, s, idx == 0 && !no_tilde);
                     open = true;
                 }
                 WordPart::SingleQuoted { text: s, .. } => {
@@ -29416,9 +29551,17 @@ impl Shell {
         // its call (subst.c:10801-10812), so an unquoted `$*` in a subscript
         // joins rather than splitting.
         let saved_star = std::mem::replace(&mut self.no_split_star, true);
+        // …and builds the word it hands `call_expand_word_internal` with
+        // `W_NOTILDE`, so the subscript's own leading `~` is not a tilde
+        // expansion but a character — and one `abstab` then backslash-quotes,
+        // which is why bash's arithmetic reader complains about `\~` and not
+        // about `$HOME`. See [`Shell::no_tilde`], which the word's own
+        // expansion takes back off again so nothing nested inherits it.
+        let saved_tilde = std::mem::replace(&mut self.no_tilde, true);
         let val = self.expand_to_string(&Word {
             parts: parts.to_vec(),
         });
+        self.no_tilde = saved_tilde;
         self.no_split_star = saved_star;
         bfmt![b"[", &backslash_quote_subscript(&val), b"]"]
     }
@@ -29831,6 +29974,9 @@ impl Shell {
         // answers `AzzB`, the failed `$(` in the pattern having ended the
         // pattern's walk only.
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        // A pattern is a word of its own here as much as anywhere, so it takes
+        // the arming rather than reading it — see [`Shell::no_tilde`].
+        let no_tilde = std::mem::take(&mut self.no_tilde);
         let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
             if self.extent_consumed {
@@ -29839,7 +29985,9 @@ impl Shell {
             // One `${!…}` resolution per part — see [`PointerPart`].
             self.begin_pointer_part();
             match part {
-                WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
+                WordPart::Literal(s) => {
+                    self.push_literal_annotated(&mut buf, s, idx == 0 && !no_tilde);
+                }
                 WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text.as_bytes(), true),
                 WordPart::DoubleQuoted { parts, .. } => {
                     let items = quoted_echars(&self.cond_dquote_items(parts));
@@ -39049,7 +39197,11 @@ impl Shell {
         let resolved = self.host_path(path);
         let host = bytes::bytes_to_path(&resolved);
         if host.is_dir() {
-            return Ok(directory_input());
+            // Asked for anyway, and kept if the host gives it: the shell's own
+            // readers answer `EISDIR` from the variant either way, but a child
+            // handed `2<dir` must receive the real description — see
+            // [`InputSrc::Directory`]. Win32 refuses and leaves `None`.
+            return Ok(directory_input(std::fs::File::open(&host).ok()));
         }
         std::fs::File::open(&host)
             .map(file_input)
@@ -54889,7 +55041,20 @@ impl Shell {
 
         // ---- -G globpat: pathname expansion, offered whole ----
         // The word never narrows this one: bash hands back everything the
-        // pattern expanded to, and hands it back in reverse.
+        // pattern expanded to.
+        //
+        // In the reverse of the order the directories were *read*, not of the
+        // order a word would have been expanded into. bash's `gen_globpat_
+        // matches` calls the glob matcher directly rather than through a word,
+        // so the sort that pathname expansion applies never happens; what is
+        // left is the matcher's own list, which it builds by prepending each
+        // name as it comes off `readdir` and therefore hands back backwards.
+        // Measured, bash 5.2.21 on ext4, in a directory whose `ls -f` reads
+        // `gc1 gm1 gk1 gb1 gq1 gd1 gz1 ga1`: `compgen -G 'g*1'` answers
+        // `ga1 gz1 gd1 gq1 gb1 gk1 gm1 gc1` while `echo g*1` answers the
+        // sorted `ga1 gb1 gc1 gd1 gk1 gm1 gq1 gz1`. A pattern spanning two
+        // directories is reversed whole (`d?/?` gives all of `d2`'s before
+        // any of `d1`'s), which is what reversing the flat list gives.
         if let Some(pat) = &globpat {
             let field: Vec<EChar> = bytes::chars(pat)
                 .map(|c| EChar {
@@ -54897,7 +55062,7 @@ impl Shell {
                     quoted: false,
                 })
                 .collect();
-            let mut m = glob_expand_field(
+            let mut m = glob_expand_field_unsorted(
                 self.cwd.as_bytes(),
                 &field,
                 self.shopt.get("dotglob").copied().unwrap_or(false),
@@ -54905,7 +55070,6 @@ impl Shell {
                 self.shopt.get("extglob").copied().unwrap_or(false),
                 self.shopt.get("globstar").copied().unwrap_or(false),
             );
-            m.sort();
             m.reverse();
             list.extend(m);
         }
@@ -55253,6 +55417,19 @@ impl Shell {
     /// entries `.` and `..` are held back from an empty basename. This is
     /// readline's own filename generator with `match-hidden-files` on, which is
     /// its default and therefore what `compgen` is expected to hand back.
+    ///
+    /// The order is the directory's own, which is what bash offers too — its
+    /// generator is a bare `readdir` loop, and `compgen -f ''` reproduces
+    /// `ls -f` exactly. The one place the two cannot be made to agree is
+    /// *where* `.` and `..` fall: to bash they are two `readdir` entries like
+    /// any other, so an ext4 directory scatters them through the answer
+    /// (measured: `compgen -f .` gave `.. .mhid .bhid .zhid .ahid .`, matching
+    /// that directory's `ls -f` positions), whereas `std::fs::read_dir` drops
+    /// both on every platform and leaves them to be named from outside the
+    /// loop. They are offered first here because there is nowhere else to put
+    /// them — the position they *should* have is data the OS was never asked
+    /// for. See the corpus case, which compares those lines sorted for exactly
+    /// this reason.
     fn compgen_paths(&self, word: BStr<'_>, dirs_only: bool) -> Vec<Str> {
         // Split into the directory prefix (kept verbatim on each result) and the
         // basename to prefix-match. `foo/ba` -> dir "foo/", base "ba"; "ba" ->
@@ -55274,10 +55451,11 @@ impl Shell {
             return Vec::new();
         };
         let mut out: Vec<Str> = Vec::new();
-        // A directory yields `.` and `..` before anything else — but only to a
-        // non-empty basename, since completing a whole directory listing with
-        // the two entries that name the directory itself would be no help.
-        // Nothing else is hidden: a leading dot is just a character here.
+        // `.` and `..` are offered only to a non-empty basename, since
+        // completing a whole directory listing with the two entries that name
+        // the directory itself would be no help. Nothing else is hidden: a
+        // leading dot is just a character here. Their *position* is arbitrary —
+        // see the doc comment.
         if !base.is_empty() {
             out.extend(
                 [b".".as_slice(), b".."]
@@ -59904,7 +60082,7 @@ fn glob_starts_with_dot(toks: &[PatTok]) -> bool {
 }
 
 /// Expand an annotated field containing at least one unquoted metacharacter
-/// against the filesystem, returning the matching paths (unsorted).
+/// against the filesystem, returning the matching paths in collating order.
 ///
 /// `cwd` is the *shell's* working directory: the returned paths stay relative
 /// (bash substitutes the pattern's own spelling), but every directory read is
@@ -59917,6 +60095,38 @@ fn glob_expand_field(
     nocaseglob: bool,
     extglob: bool,
     globstar: bool,
+) -> Vec<Str> {
+    glob_expand_field_ordered(cwd, field, dotglob, nocaseglob, extglob, globstar, true)
+}
+
+/// [`glob_expand_field`] without the sort: each directory's matches come back
+/// in the order the filesystem handed them over.
+///
+/// Sorting a glob is the *word expansion's* doing, not the glob's — bash keeps
+/// the two apart too, and `compgen -G` is the one caller that reaches the
+/// matcher without going through a word. It offers them in the reverse of this
+/// order, which is why this exists; see the `-G` arm of `compgen`.
+fn glob_expand_field_unsorted(
+    cwd: BStr<'_>,
+    field: &[EChar],
+    dotglob: bool,
+    nocaseglob: bool,
+    extglob: bool,
+    globstar: bool,
+) -> Vec<Str> {
+    glob_expand_field_ordered(cwd, field, dotglob, nocaseglob, extglob, globstar, false)
+}
+
+/// The body of both: `sorted` chooses whether each directory's matches are put
+/// into collating order or left in the order the directory was read.
+fn glob_expand_field_ordered(
+    cwd: BStr<'_>,
+    field: &[EChar],
+    dotglob: bool,
+    nocaseglob: bool,
+    extglob: bool,
+    globstar: bool,
+    sorted: bool,
 ) -> Vec<Str> {
     // Split on `/` keeping the *empty* pieces. bash matches each component
     // against the entries of the text that precedes it and then pastes the two
@@ -60012,8 +60222,16 @@ fn glob_expand_field(
                 }
                 globstar_descend(cwd, base, sep, dotglob, terminal, &mut next);
             }
-            next.sort();
-            next.dedup();
+            if sorted {
+                next.sort();
+                next.dedup();
+            } else {
+                // The same duplicates, dropped without disturbing the order:
+                // a `**` reaches a directory both as its own zero-level match
+                // and as a descendant of the level above.
+                let mut seen: std::collections::HashSet<Str> = std::collections::HashSet::new();
+                next.retain(|c| seen.insert(c.clone()));
+            }
             cands = next;
             literal_prefix = false;
             continue;
@@ -60075,7 +60293,9 @@ fn glob_expand_field(
                         names.push(name);
                     }
                 }
-                names.sort();
+                if sorted {
+                    names.sort();
+                }
                 for name in names {
                     next.push(bfmt![base, &name, sep]);
                 }
@@ -72659,6 +72879,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // 0, and an array with nothing in it.
         let (o, _) = run(&format!("mapfile v < '{p}'; echo \"e=$? n=${{#v[@]}}\""));
         assert_eq!(o, "e=0 n=0\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_reaches_a_child_as_a_real_descriptor() {
+        // The `Is a directory` above is the *shell's* answer, named by the
+        // descriptor's shape rather than read out of the OS — but a child is
+        // not one of the shell's readers. It receives the description and
+        // answers for it itself, which is the only way its status can come out
+        // like bash's: `sh -c 'echo W >&2' 2<dir` dups a descriptor that is
+        // there and fails the *write* (status 1), where a missing fd 2 fails
+        // the dup and exits 2. Unix only — Win32 will not open a directory
+        // without `FILE_FLAG_BACKUP_SEMANTICS`, and reads through the handle it
+        // then gives say `Permission denied`, so there the child keeps getting
+        // no descriptor at all.
+        let dir = ScratchDir::new("dir_child_fd");
+        std::fs::create_dir_all(dir.join("dd")).expect("mkdir");
+        let base = dir.slashed();
+
+        // fd 2 bound to the directory: the redirect and the child's dup both
+        // succeed, and only the write fails.
+        let (o, _) = run(&format!(
+            "cd {base}\nsh -c 'echo W >&2' 2<dd; echo \"fd2 rc=$?\""
+        ));
+        assert_eq!(o, "fd2 rc=1\n");
+        // fd 1 likewise — the same answer, for the plainer reason that the
+        // child's own stdout is unwritable.
+        let (o, _) = run(&format!(
+            "cd {base}\nsh -c 'echo W' 1<dd 2>/dev/null; echo \"fd1 rc=$?\""
+        ));
+        assert_eq!(o, "fd1 rc=1\n");
+        // And through a dup the child makes for itself.
+        let (o, _) = run(&format!(
+            "cd {base}\nsh -c 'echo W' 3<dd 1>&3 2>/dev/null; echo \"dup rc=$?\""
+        ));
+        assert_eq!(o, "dup rc=1\n");
     }
 
     #[test]
@@ -86227,10 +86483,15 @@ st=1
     }
 
     #[test]
-    fn compgen_globpat_is_offered_whole_and_reversed() {
+    fn compgen_globpat_is_offered_whole_and_in_reverse_directory_order() {
         // `-G` is the one source the word does not narrow: the pattern is
-        // expanded as a pathname and the whole expansion is handed back, in
-        // reverse. Give it a directory of its own so nothing else can match.
+        // expanded as a pathname and the whole expansion is handed back — in
+        // the reverse of the order the *directory was read*, which on a
+        // filesystem that hashes its names is neither sorted nor reverse
+        // sorted. So the order is only ever compared against itself here;
+        // `compgen_g_offers_the_glob_in_reverse_readdir_order` is the test that
+        // pins what it actually is. Give it a directory of its own so nothing
+        // else can match.
         let dir = ScratchDir::new("compgen_g");
         std::fs::create_dir_all(dir.join("adir")).expect("mkdir");
         std::fs::write(dir.join("a1"), b"").expect("a1");
@@ -86238,12 +86499,16 @@ st=1
         let base = dir.slashed();
         let g = |rest: &str| run(&format!("cd {base}\ncompgen {rest}")).0;
 
-        // Reverse order, and a word operand leaves the list alone.
-        assert_eq!(g("-G '*1'"), "b1\na1\n");
-        assert_eq!(g("-G '*1' zzz"), "b1\na1\n");
+        // The whole expansion, and a word operand leaves the list alone.
+        let whole = g("-G '*1'");
+        let mut names: Vec<&str> = whole.lines().collect();
+        names.sort_unstable();
+        assert_eq!(names, ["a1", "b1"]);
+        assert_eq!(g("-G '*1' zzz"), whole);
         // …but `-X` and `-P`/`-S` still apply to it.
         assert_eq!(g("-G '*1' -X 'b*'"), "a1\n");
-        assert_eq!(g("-G '*1' -P '<' -S '>'"), "<b1>\n<a1>\n");
+        let decorated: String = whole.lines().map(|l| format!("<{l}>\n")).collect();
+        assert_eq!(g("-G '*1' -P '<' -S '>'"), decorated);
         // A second `-G` overwrites the first: it is one compspec slot.
         assert_eq!(g("-G 'a*' -G 'b*'"), "b1\n");
         // A pattern that matches nothing contributes nothing, and with no other
@@ -86253,7 +86518,8 @@ st=1
             (String::new(), 1)
         );
         // Sources are emitted in bash's fixed order: actions, then -G, then -W.
-        assert_eq!(g("-k -G 'a*' -W 'iq' i"), "if\nin\nadir\na1\niq\n");
+        // One glob match, so the directory's order cannot enter into it.
+        assert_eq!(g("-k -G 'a1*' -W 'iq' i"), "if\nin\na1\niq\n");
     }
 
     #[test]
@@ -93983,6 +94249,49 @@ st=1
     }
 
     #[test]
+    fn compgen_g_offers_the_glob_in_reverse_readdir_order() {
+        // bash reaches the glob matcher directly for `-G`, so the sort that
+        // pathname expansion applies never runs and the matcher's own list —
+        // built by prepending each name as `readdir` produces it — comes back
+        // as it stands, i.e. backwards. The order a directory is read in is the
+        // filesystem's business and cannot be asserted portably, so what is
+        // pinned here is the relationship: `-G` is exactly the unsorted
+        // expansion reversed, and it holds the same names as the sorted one.
+        let cwd = test_cwd();
+        let dir = ScratchDir::relative("compgen_g_order");
+        let uniq = dir.base();
+        // Names whose creation order is neither sorted nor reverse-sorted, so
+        // a filesystem that hashes them cannot accidentally agree with either.
+        for n in ["ga1", "gb1", "gc1", "gz1", "gm1", "gd1", "gq1", "gk1"] {
+            std::fs::File::create(dir.join(n)).expect("touch");
+        }
+
+        let field = field_lit(&format!("{uniq}/g*1"));
+        let sorted = glob_expand_field(&cwd, &field, false, false, false, false);
+        let raw = glob_expand_field_unsorted(&cwd, &field, false, false, false, false);
+        assert_eq!(raw.len(), 8);
+        // Same names; only the order differs.
+        let mut a = sorted.clone();
+        let mut b = raw.clone();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        assert_eq!(sorted, a, "the sorted expansion really is in order");
+
+        let want: Vec<String> = raw
+            .iter()
+            .rev()
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect();
+        let (out, _) = run(&format!("compgen -G '{uniq}/g*1'"));
+        assert_eq!(out.lines().collect::<Vec<_>>(), want);
+        // And the word in front of it narrows nothing, unlike every other
+        // source: the pattern has already said what to match.
+        let (with_word, _) = run(&format!("compgen -G '{uniq}/g*1' -- {uniq}/gz"));
+        assert_eq!(with_word, out);
+    }
+
+    #[test]
     fn glob_no_match_stays_literal() {
         // With no match and no `nullglob`, the pattern is left as the word.
         assert_eq!(
@@ -94380,7 +94689,9 @@ st=1
         assert_eq!(render("a%%b\tc", 0.5).as_deref(), Some("a%b\tc\n"));
         assert_eq!(render("%", 0.5).as_deref(), Some("%\n"));
         assert_eq!(render("", 0.5).as_deref(), Some("\n"));
-        // User and system are zero until TD-OILS10; `%P` follows them.
+        // This helper hands the report no CPU time at all, so `%P` is 0.00
+        // above and the two CPU directives are zero here. The real ratio has
+        // its own test — see `the_cpu_percentage_is_a_microsecond_ratio…`.
         assert_eq!(render("%0U %0S %2U", 0.5).as_deref(), Some("0 0 0.00\n"));
 
         // A bad directive suppresses the whole report, including the part
@@ -94400,6 +94711,56 @@ st=1
             run("TIMEFORMAT='%5'; { time :; } 2>&1").0,
             "osh: TIMEFORMAT: `\0': invalid format character\n"
         );
+    }
+
+    /// `%P` is bash's `timeval_to_cpu`, which is neither a millisecond ratio
+    /// nor a percentage clamped at 100 — both of which this shell used to
+    /// assume, and both of which are visibly wrong against bash 5.2.21.
+    #[test]
+    fn the_cpu_percentage_is_a_microsecond_ratio_and_is_not_clamped_at_100() {
+        let render = |real: f64, user: f64, sys: f64| {
+            let mut sh = new_shell();
+            sh.render_time_report(b"%P", real, user, sys)
+                .map(|r| String::from_utf8_lossy(&r).trim_end().to_string())
+        };
+        // Measured, bash 5.2.21 (glibc), four background CPU loops:
+        //     [R=0.456][U=1.574][S=0.182][P=385.42]
+        // A clamp would have made that 100.00, and bash's clamp is `#if 0`'d
+        // out (`execute_cmd.c:1281-1286`). The figure reproduced here is
+        // 385.08 rather than 385.42 only because the three readings above are
+        // `%3R`/`%3U`/`%3S` — rounded to milliseconds — while bash divided the
+        // microseconds behind them; 385.42 needs a real of 0.45608 s, which is
+        // inside 0.456's rounding. What is being pinned is the algorithm and
+        // the absence of the cap, not the third decimal place of one sample.
+        assert_eq!(render(0.456, 1.574, 0.182).as_deref(), Some("385.08"));
+        assert!(Shell::timeval_to_cpu(0.456, 1.574, 0.182) > 10000);
+        // The precision is microseconds, not milliseconds: `time :` spends
+        // hundreds of microseconds, which every one of `%3R`, `%3U` and `%3S`
+        // renders as `0.000` while `%P` still reports a ratio. Measured, the
+        // same bash, over eight runs of `{ time : ; }`: 66.66, 75.00, 100.00,
+        // 150.00 — small integer ratios of a sub-millisecond span.
+        assert_eq!(render(0.000_4, 0.000_3, 0.0).as_deref(), Some("75.00"));
+        assert_eq!(render(0.000_3, 0.000_2, 0.0).as_deref(), Some("66.66"));
+        assert_eq!(render(0.000_2, 0.000_2, 0.000_1).as_deref(), Some("150.00"));
+        // Truncation, not rounding, and the two halves of bash's `sum` /
+        // `sum_frac` split: 1/3 is 3333 hundredths of a percent.
+        assert_eq!(render(3.0, 1.0, 0.0).as_deref(), Some("33.33"));
+        assert_eq!(render(1.0, 1.0, 0.0).as_deref(), Some("100.00"));
+        // A span too short to have a microsecond in it divides by zero, which
+        // bash answers with 0 rather than trapping.
+        assert_eq!(render(0.0, 1.0, 1.0).as_deref(), Some("0.00"));
+        assert_eq!(Shell::timeval_to_cpu(0.000_000_4, 1.0, 0.0), 0);
+        // Neither a negative duration nor a NaN is any clock's output, and
+        // neither may turn the fixed point into nonsense.
+        assert_eq!(Shell::timeval_to_cpu(-1.0, 1.0, 0.0), 0);
+        assert_eq!(Shell::timeval_to_cpu(f64::NAN, f64::NAN, f64::NAN), 0);
+        assert_eq!(Shell::timeval_to_cpu(1.0, -1.0, -1.0), 0);
+        // A duration long enough to exhaust the numerator's headroom scales
+        // the denominator down instead, which keeps the ratio and cannot
+        // overflow. Half of a two-hour span is still 50%.
+        assert_eq!(render(7200.0, 3600.0, 0.0).as_deref(), Some("50.00"));
+        // A duration no clock will ever produce must saturate, not wrap.
+        assert!(render(f64::MAX, f64::MAX, 0.0).is_some());
     }
 
     #[test]
@@ -104241,6 +104602,54 @@ st=1
             o8,
             "osh: '1': syntax error: operand expected (error token is \"'1'\")\nrc=1\n"
         );
+    }
+
+    /// bash's `W_NOTILDE` is a flag on the word `expand_subscript_string`
+    /// builds, so it stops the subscript's *own* leading tilde and stops
+    /// nothing inside it. Both halves are asserted here, because a suppression
+    /// implemented as a mode the expansion is left in would pass the first and
+    /// fail the second. See [`Shell::no_tilde`].
+    #[test]
+    fn a_subscripts_own_tilde_stands_but_an_operands_inside_it_expands() {
+        let err = |src: &str| {
+            let (o, _) = run(&format!("a=(0 1 2)\nHOME=/zz\nunset z\n{{ {src}; }} 2>&1"));
+            o
+        };
+        // Unexpanded, and then backslash-quoted against `abstab` — the `\` is
+        // the proof the `~` survived as a character.
+        assert_eq!(
+            err("(( a[~] ))"),
+            "osh: \\~: syntax error: operand expected (error token is \"\\~\")\n"
+        );
+        assert_eq!(
+            err("(( a[~/p] ))"),
+            "osh: \\~/p: syntax error: operand expected (error token is \"\\~/p\")\n"
+        );
+        // One word in, the flag is gone and the tilde is a home directory.
+        assert_eq!(
+            err("(( a[${z:-~}] ))"),
+            "osh: /zz: syntax error: operand expected (error token is \"/zz\")\n"
+        );
+        // `[[ -v ]]` is the other word bash expands under `Q_ARITH`, and it
+        // divides the same way.
+        assert_eq!(
+            err("[[ -v a[~] ]]"),
+            "osh: \\~: syntax error: operand expected (error token is \"\\~\")\n"
+        );
+        assert_eq!(
+            err("[[ -v a[${z:-~}] ]]"),
+            "osh: /zz: syntax error: operand expected (error token is \"/zz\")\n"
+        );
+        // A tilde that is not the word's first character was never a candidate,
+        // so the flag changes nothing about it either way.
+        assert_eq!(
+            err("q=X; (( a[$q~] ))"),
+            "osh: X\\~: syntax error: invalid arithmetic operator (error token is \"\\~\")\n"
+        );
+        // And the flag really is spent: an ordinary word expanded afterwards
+        // still has its tilde.
+        let (o, _) = run("a=(0 1 2)\nHOME=/zz\n{ (( a[~] )); } 2>/dev/null\necho ~");
+        assert_eq!(o, "/zz\n");
     }
 
     #[test]

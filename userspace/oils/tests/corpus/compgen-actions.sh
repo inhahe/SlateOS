@@ -49,8 +49,10 @@ compgen -e -A alias xv
 compgen -A alias -e xv
 # The wordlist is appended after every action…
 compgen -W 'if1' -k i
-# …and the two filesystem actions are held back to the very end, behind even
-# that, so `-d -f` answers files first and directories last.
+# …and the two filesystem actions are the last entries in that table, so `-d -f`
+# answers files first and directories second — with the wordlist behind both,
+# because it is not an action at all. (`-G` sits between the two: actions,
+# then the glob, then the wordlist, whatever order the options were written in.)
 mkdir gd; touch g1
 compgen -d -f -W 'gw' g
 
@@ -63,8 +65,17 @@ compgen -A alias -A alias aw; echo "  A rc=$?"
 
 echo "=== -G is expanded as a pathname and offered whole"
 touch ga1 gb1
-# The word does not narrow it — the pattern already said what to match — and
-# the expansion comes back reversed.
+# The word does not narrow it — the pattern already said what to match — and the
+# expansion comes back in the reverse of the order the *directory was read*, not
+# of the order the pattern would have expanded to as a word. bash reaches the
+# glob matcher directly here, so the sort that pathname expansion applies never
+# runs, and what is left is the matcher's list, built by prepending each name as
+# it comes off readdir. In a directory whose `ls -f` reads
+# `gc1 gm1 gk1 gb1 gq1 gd1 gz1 ga1`, `compgen -G 'g*1'` answers
+# `ga1 gz1 gd1 gq1 gb1 gk1 gm1 gc1` where `echo g*1` answers the sorted list.
+# Both shells read the same directory here, so the two agree; this file said
+# only "reversed" until 2026-08-26, which was true of the sorted order it was
+# measured against on MSYS and is not true of a filesystem that hashes names.
 compgen -G 'g*1'
 compgen -G 'g*1' zzz
 # But -X and -P/-S still reach it, because those are about the answer.
@@ -98,14 +109,20 @@ mkdir pd && cd pd
 mkdir adir && touch a1 .ahid
 # A hidden name is offered to an empty word like any other; only `.` and `..`
 # are held back from one, because naming the directory itself would be no help.
+# The order is the directory's own — this is a bare readdir loop, so it is `ls
+# -f` order and not a sorted one.
 compgen -f ''
 compgen -d ''
-# A word that is a dot reaches all three.
-compgen -f .
-compgen -d .
+# A word that is a dot reaches all three. Sorted, and only here, because to bash
+# `.` and `..` are two readdir entries like any other and so land wherever the
+# filesystem put them (measured: `.. .mhid .bhid .zhid .ahid .`), while Rust's
+# directory reader drops both on every platform and leaves osh to name them from
+# outside the loop. The set is the fact; the position is the filesystem's.
+compgen -f . | sort
+compgen -d . | sort
 compgen -f a
 # The rule follows the word's own directory component, not the cwd.
-compgen -f adir/.
+compgen -f adir/. | sort
 cd ..
 
 echo "=== the tables both shells build from the language itself"

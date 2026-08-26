@@ -23,6 +23,18 @@
 # result against `abstab` (`[`, `]`, `$`, `` ` ``, `~`, `\`, `'`, `"`;
 # subst.c:10848-10857) so the reading that follows cannot expand it again.
 #
+# `expand_subscript_string` itself adds three word flags on the way in —
+#
+#     td.flags = W_NOPROCSUB|W_NOTILDE|W_NOSPLIT2;
+#     td.word = savestring (string);
+#     tlist = call_expand_word_internal (&td, quoted, 0, …);
+#                                                /* subst.c:10800-10812 */
+#
+# — so a `<( … )` in a subscript is not a process substitution and a leading `~`
+# is not a tilde expansion. They are flags on the *word*, not on the expansion,
+# and do not reach the words nested inside it: see the section below, where
+# `a[~]` reports `\~` and `a[${z:-~}]` reports `/zz`.
+#
 # **Which words get it.** `[[ -v ]]` always does: `cond_expand_word (…, varop ?
 # 3 : 0)` (execute_cmd.c:3913-3919) reaches `call_expand_word_internal (w,
 # Q_ARITH)` unconditionally, however plain the operand. Every other arithmetic
@@ -129,9 +141,23 @@ echo "=== expanded once, not twice ==="
 (( a[$x] ));                echo "46 rc=$?"
 (( a["$x"] ));              echo "47 rc=$?"
 
-echo "=== tilde expansion happens, at quoting 0 ==="
-HOME=/zz; (( a[~] ));       echo "48 rc=$?"
-HOME=/zz; (( a[~/p] ));     echo "49 rc=$?"
+echo "=== a tilde does not expand, and what stops it covers one word ==="
+# The word `expand_subscript_string` builds carries `W_NOTILDE` alongside the
+# no-split flags (`td.flags = W_NOPROCSUB|W_NOTILDE|W_NOSPLIT2`, subst.c:10800),
+# so the subscript's own leading `~` stays a character — and `abstab` then puts
+# a backslash on it, which is why the arithmetic complains about `\~` rather
+# than about `/zz`. The flag is on the *word*, though, and an operand inside the
+# subscript is a word of its own that bash builds without it, so the same tilde
+# one level in does expand. That contrast is the whole of the scoping, and it is
+# why the suppression cannot be a mode the expansion is left in.
+unset ztil
+HOME=/zz; (( a[~] ));             echo "48 rc=$?"
+HOME=/zz; (( a[~/p] ));           echo "49 rc=$?"
+HOME=/zz; (( a[${ztil:-~}] ));    echo "49a rc=$?"
+HOME=/zz; [[ -v a[~] ]];          echo "49b rc=$?"
+HOME=/zz; [[ -v a[${ztil:-~}] ]]; echo "49c rc=$?"
+# Not the word's first character, so no tilde expansion was ever on offer here.
+HOME=/zz; qtil=X; (( a[$qtil~] )); echo "49d rc=$?"
 
 echo "=== a nested subscript survives the closed gate only ==="
 b=(0 1 2 3 4); i=3

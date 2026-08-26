@@ -119,10 +119,13 @@ echo "=== an <> source is the case that keeps both"
 ( { echo W; } 3<>rw2 1>&3;           echo "  rw2 rc=$?"; cat rw2 )
 
 echo "=== a directory is the source with no bytes, and no write half either"
-# Nothing here can be handed over as a *description* — a directory yields no
-# usable handle — so what the child gets is no fd at all, which fails its write
-# with the same `EBADF` and the same status. An empty stream would not: it would
-# take the bytes and let the child exit 0.
+# A directory opens read-only like anything else, so what a child is handed here
+# is a real description and not an absence — and the difference shows in the one
+# place the two are told apart. `>&2` on a descriptor that is *there* dups it and
+# then fails the write, which is dash's status 1; with no fd 2 at all the dup is
+# what fails, and that is status 2. Every line below is a 1, which is the proof
+# the fd arrived. An empty stream would not do this: it would take the bytes and
+# let the child exit 0.
 ( { echo W; } 1<dd;                     echo "  builtin rc=$?" )
 ( { echo W >&2; } 2<dd;                 echo "  builtin-fd2 rc=$?" )
 ( { echo W >&3; } 1<dd 3>&1;            echo "  dup rc=$?" )

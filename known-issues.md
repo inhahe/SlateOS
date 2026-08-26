@@ -81306,7 +81306,7 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 520 of 1940
+## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 516 of 1940
 
 **In short:** the kernel has ~430 small modules that each keep a table of numbers
 and print it — how much swap is compressed, which signals a process has blocked,
@@ -81371,6 +81371,43 @@ invent an operand they could not read; this one is about operations no command
 offers at all. They keep appearing together because both come from the same
 habit — writing the arm that shows the feature working — but they are counted
 separately and cleared separately.
+
+**Burn-down log.** Count at the head of this entry is
+`scripts/find-unreachable-mutators.py`'s, not hand arithmetic.
+
+| date | module | 520 → | what changed |
+|---|---|---|---|
+| 2026-08-26 | `futexstat` | 516 | category 3, the sharpest instance found so far. `procfs.rs` publishes `futexstat::stats()` and `hotspots(10)` under `/proc`, and the `futexstat` shell command prints the same table — while all four of `record_wait` / `record_wake` / `record_timeout` / `record_contention` were unreachable. So `/proc`'s futex hotspot list was permanently empty and its wait/wake/timeout totals permanently zero, on a kernel whose futex implementation works. A reader takes that as *measured* zero contention. Fixed by wiring the four recorders into `kernel/src/ipc/futex.rs` at the real blocking and waking points. |
+
+The futexstat fix is worth reading before doing the next category-3 module,
+because it ran into the constraint that shapes all of them: **you usually cannot
+put the accounting call beside the existing counter.** `ipc::stats::futex_*` are
+plain relaxed atomics and every one of their call sites bumps them while
+`FUTEX_TABLE` is held; `fs::futexstat` keeps a `Vec` behind a spin lock, so the
+same placement would take a second lock inside the futex table's critical
+section and invert a lock order (`scripts/check-recursive-locks.py` is the live
+gate for that). The wiring therefore went in as four named `note_*` helpers with
+a module note saying they must only be called from outside the lock, placed at
+the points that are provably outside it: after the enqueue block in
+`futex_wait_bitset` and `futex_wait_bitset_timeout`, after the wake loop in
+`futex_wake_bitset` and `requeue_inner`.
+
+Two smaller judgment calls recorded there, in case a later reader disagrees:
+`requeue_inner` attributes its wake to `addr1` only, because the requeued tasks
+are still blocked (now on `addr2`) and so are not a wake of anything; and the
+`timeout_ns == 0` non-blocking "try" return is not counted as a wait *or* a
+timeout, because it never enqueued and never blocked, so counting it would
+report contention that did not happen.
+
+**Still unwired in that file, deliberately:** `futex_wait_multiple` and the
+priority-inheritance paths (`lock_pi_inner`, `futex_wait_requeue_pi`,
+`futex_cmp_requeue_pi`), whose `ipc::stats::futex_*` sites sit at roughly lines
+461, 630, 2363 and 2666. They are not instrumented because their enclosing lock
+scope was not read closely enough to prove a call would be outside
+`FUTEX_TABLE`, and a wrong answer there is a lock-order inversion rather than a
+wrong number. The consequence while they stay unwired is bounded and known:
+`/proc`'s futex table under-counts PI and multi-wait contention, rather than
+reporting zero for everything.
 
 **Not a regression.** True of each module since it was written.
 
@@ -86833,3 +86870,201 @@ Two corpus cases were added or corrected —
 — and `shebang-interpreter-line.sh` and `exec-shebangless-script.sh` now match
 bash byte for byte. Six new unit tests; three existing expectations corrected to
 the measured answers.
+
+---
+
+## `TD-B-THE-CORPUS-CARRIES-MSYS-CERTIFIED-ORDERINGS-THAT-A-HASHING-FILESYSTEM-DISPROVES` (lane B, 2026-08-26) — ✅ **FIXED** 2026-08-26
+
+**In short:** the osh test corpus records what real bash does, and until now it
+was recorded against an MSYS (Git-for-Windows) bash sitting on NTFS. NTFS hands
+directory entries back already in alphabetical order, so any bash behaviour that
+is really "whatever order the directory came out in" *looked* like "sorted", and
+was written down as such. On Linux, where ext4 hands entries back in the order a
+hash function put them, those notes are simply false — and osh, built to satisfy
+them, was answering `compgen -G` in an order bash never uses. Two such notes have
+now been found and corrected; this entry exists so the next one is recognised
+for what it is rather than debugged as a fresh mystery.
+
+**Where:** `userspace/oils/tests/corpus/*.sh` (the prose *and* the cases),
+`userspace/oils/src/interp.rs`.
+
+### The two found so far
+
+| Corpus claim | Written as | Actually |
+|---|---|---|
+| `compgen -G PAT` order | "the expansion comes back reversed" | reverse of the order the **directory was read**, which equals reverse-sorted only on a filesystem that sorts |
+| `TIMEFORMAT="%P"` for `time :` | `75.00`, as a fact | a ratio of two sub-millisecond spans; eight consecutive runs of one bash gave 100.00, 100.00, 150.00, 66.66, 75.00, 75.00, 150.00, 100.00 |
+
+The second was fixed in `80f1eefda`; the first is this entry's subject.
+
+### `compgen -G`, measured
+
+bash's `gen_globpat_matches` (`pcomplete.c`) calls the glob matcher directly
+rather than expanding a *word*, so the sort that pathname expansion applies
+never runs. What comes back is the matcher's own list, which it builds by
+prepending each name as `readdir` produces it — hence backwards. bash 5.2.21 on
+ext4, in a directory whose `ls -f` reads `gc1 gm1 gk1 gb1 gq1 gd1 gz1 ga1`:
+
+```
+$ compgen -G 'g*1'     ->  ga1 gz1 gd1 gq1 gb1 gk1 gm1 gc1     # reverse readdir
+$ echo g*1             ->  ga1 gb1 gc1 gd1 gk1 gm1 gq1 gz1     # sorted
+$ compgen -f g         ->  gc1 gm1 gk1 gb1 gq1 gd1 gz1 ga1     # plain readdir
+```
+
+A pattern spanning two directories is reversed *whole* — `d?/?` answers all of
+`d2`'s matches before any of `d1`'s — which is what reversing the flat list
+gives, and is why the fix reverses once at the end rather than per level.
+
+Three neighbouring facts were measured at the same time and are now recorded in
+the corpus case, because two of them were also wrong there:
+
+- **Source order is actions, then `-G`, then `-W`**, whatever order the options
+  were written in. The corpus said the two filesystem actions were "held back to
+  the very end, behind even" the wordlist; measured, `compgen -d -f -W gw g`
+  answers files, then directories, then `gw`. `-f`/`-d` are simply the last two
+  entries in the *action* table, and the wordlist is not an action.
+- **`compgen` does not de-duplicate.** `compgen -W ga1 -G 'g*1'` answers
+  `ga1 gb1 gc1 ga1`.
+- **`-G` honours `dotglob` and `nocaseglob`** and is not narrowed by the word.
+
+### The one thing that cannot be reproduced
+
+To bash, `.` and `..` are two `readdir` entries like any other, so `compgen -f .`
+scatters them through the answer wherever the filesystem put them — measured
+`.. .mhid .bhid .zhid .ahid .`, matching that directory's `ls -f` positions
+exactly. `std::fs::read_dir` drops both entries on **every** platform, so osh
+must name them from outside the loop and has no way to learn the position they
+should have had. They are offered first, and the three affected corpus lines are
+compared `| sort`ed with a comment saying why. The *set* is the shell fact; the
+position is the filesystem's.
+
+Getting this last part right would mean a raw directory reader — `getdents64` on
+Linux, `FindFirstFileW` on Windows, and a third for SlateOS — carried solely to
+place two entries. Not worth it, and recorded here so the decision is not
+re-litigated silently.
+
+### Fix
+
+`glob_expand_field` is now a thin wrapper over `glob_expand_field_ordered`,
+which takes a `sorted` flag; `glob_expand_field_unsorted` is the other face of
+it and is what `compgen -G` calls before reversing. Sorting a glob is the word
+expansion's doing, not the glob's, and bash keeps the two apart for the same
+reason. The globstar branch, which needs `sort`+`dedup` to drop the duplicate a
+`**` produces by matching a directory both as itself and as a descendant, keeps
+first occurrence through a `HashSet` when unsorted.
+
+Two unit tests: one pins the relationship (`-G` output is exactly the unsorted
+expansion reversed, and holds the same names as the sorted one), and the
+pre-existing `compgen_globpat_is_offered_whole_and_reversed` — which asserted a
+literal reverse-*sorted* order, passed on NTFS, and failed the moment it was run
+against ext4 — was rewritten to compare the order only against itself, and
+renamed `…_and_in_reverse_directory_order` so its name stops asserting the thing
+that was wrong.
+
+**The lesson worth keeping:** a Windows-only test run is not a check on this
+class of claim, because NTFS agrees with `sort` by construction. Any corpus note
+about *order* has to be re-measured on ext4 before it is believed.
+
+## `TD-B-CORPUS-PROSE-THAT-RECORDS-OSHS-LIMIT-AS-BASHS-BEHAVIOUR` (lane B, 2026-08-26) — ✅ **FIXED** 2026-08-26
+
+**In short:** the shell test corpus is written as prose — each case file explains
+*why* bash answers the way it does, and the explanation is as much the artifact
+as the commands are. Two of those explanations turned out to describe **osh**
+rather than bash: they stated a limitation of our implementation as though it
+were a fact about the reference shell. Because the harness compares live output
+rather than a stored transcript, a wrong explanation is invisible until the two
+shells disagree — and when they do, the explanation argues for the wrong side.
+Both were found by running the corpus against glibc bash and reading the prose
+next to the diff instead of only the diff.
+
+The disease is not "a comment went stale." It is that the comment was written
+*from the implementation*, which makes it evidence for whatever the
+implementation already does, and therefore worthless exactly when it is needed.
+
+### The two instances
+
+| Case | What the prose claimed | What bash actually does |
+|---|---|---|
+| `a-std-fd-bound-to-a-read-only-source.sh` | "Nothing here can be handed over as a *description* — a directory yields no usable handle — so what the child gets is no fd at all" | A directory opens read-only like anything else and the child is handed the real description |
+| `a-subscript-in-an-arithmetic-word-is-expanded-in-place-first.sh` | "=== tilde expansion happens, at quoting 0 ===" | It does not happen at all: the word carries `W_NOTILDE` |
+
+Neither claim was ever measured. The first is osh's own behaviour on Windows
+(where `File::open` of a directory does fail) generalised into a claim about
+POSIX; the second is a guess at what "quoting 0" implies, `Q_ARITH` and
+`Q_DOUBLE_QUOTES` being the two bits the source visibly masks off, with the
+third suppression — a *word* flag rather than a quoting bit — never looked for.
+
+### Instance 1 — a directory reaches a child as a real descriptor
+
+`sh -c 'echo W >&2' 2<dd` is the one line in the case that can tell an absent
+descriptor from an unwritable one, and it was the one line that differed:
+
+```
+  ext-fd2 rc=1     bash
+  ext-fd2 rc=2     osh
+```
+
+The status is **dash's**, not the outer shell's. With fd 2 present, `>&2` dups
+it successfully and the *write* fails — dash exits 1. With no fd 2 at all the
+`dup` is what fails, and dash exits 2. osh handed the child nothing, so it took
+the second path. Every other line in the section is a 1 either way, which is why
+the wrong explanation survived: eight of the nine cases cannot tell the two
+stories apart.
+
+**Fix.** `InputSrc::Directory` became `Directory(Option<File>)`.
+`open_input_source` asks the host for the handle and keeps it when the host
+gives one (Win32 refuses, and leaves `None` — the approximation there is
+unchanged). The shell's *own* readers still synthesise `EISDIR` from the variant
+rather than from a read, because that is what they saw before and it is
+independent of whether a handle exists; but `child_input` and
+`child_read_only_out` now `try_clone()` the handle and hand it over, so a child
+answers for the descriptor itself. A `#[cfg(unix)]` test
+`a_directory_reaches_a_child_as_a_real_descriptor` pins all three statuses.
+
+### Instance 2 — `W_NOTILDE` is a flag on one word
+
+`expand_subscript_string` builds the word it expands, and the flags it puts on
+it are as much a part of the semantics as the quoting it is passed:
+
+```c
+  td.flags = W_NOPROCSUB|W_NOTILDE|W_NOSPLIT2;
+  td.word = savestring (string);
+  tlist = call_expand_word_internal (&td, quoted, 0, …);
+                                            /* subst.c:10800-10812 */
+```
+
+So the subscript's own leading `~` stands, and `abstab` then backslash-quotes
+it, which is why bash's arithmetic reader complains about `\~`. osh expanded it
+and complained about `/zz`.
+
+The half that matters for the *implementation*, and the reason this could not be
+fixed with a mode the expansion is left in: the flag is on the word and does not
+reach the words nested inside it. Measured, bash 5.2.21, `HOME=/zz`, `z` unset:
+
+```text
+  (( a[~] ))            \~: syntax error … (error token is "\~")
+  (( a[${z:-~}] ))      /zz: syntax error … (error token is "/zz")
+  [[ -v a[~] ]]         \~: syntax error … (error token is "\~")
+  [[ -v a[${z:-~}] ]]   /zz: syntax error … (error token is "/zz")
+```
+
+**Fix.** A `Shell::no_tilde` field armed by `expand_arith_subscript` and
+**taken** — `std::mem::take` — at the top of each of the three word-level walks
+(`expand_word_annotated`, `expand_word_joined_annotated`, and the pattern walk).
+Taking is what confines it to one word without a stack: the outermost word
+consumes the arming, and every word nested in it sees the flag clear. A first
+attempt armed only `expand_word_annotated`, which is the *splitting* walk; a
+subscript goes through the joining one, so the flag was still set when the
+operand's literal was pushed and the two cases came out exactly inverted — the
+bare tilde expanded and the operand's did not. That inversion is a useful
+signature: it means the flag was read by the wrong walk, not that the rule was
+wrong.
+
+The corpus case gained the `${z:-~}` and `[[ -v ]]` contrasts, so the scoping is
+now part of what the harness checks rather than something the fix knew and the
+test did not.
+
+**The lesson worth keeping:** a corpus explanation must be written from a
+*measurement of bash*, never from what osh does or from what the C source
+appears to imply. Where a claim cannot be measured, say so in the file. The two
+above cost nothing to check — one `bash -c` each — and both were wrong.

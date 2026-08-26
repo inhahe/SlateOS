@@ -17805,6 +17805,109 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("without reporting the switch set", &out, b"Auto gaming:");
     }
 
+    serial_println!(
+        "  kshell::self_test 81: a guessed file offset writes over data the user already had, so \
+         `splice' refuses the offset it cannot read"
+    );
+    // Every earlier batch in this burn-down guessed a *selector*: an id, a mode,
+    // a switch. The command then acted on the wrong object, or on nothing, and
+    // said it had done what was asked. Bad, but recoverable — the object the
+    // user meant is still there.
+    //
+    // `splice` is the first one where the guessed number is an *address in a
+    // file the command is about to write to*. `splice copy src dst 0 1O24 4096`
+    // — one mistyped character in the destination offset — used to fall to
+    // `unwrap_or(0)` and write four kilobytes over the *beginning* of `dst`,
+    // then report the transfer as successful. There is no id to look up
+    // afterwards and no setting to put back; the bytes that were at offset 0
+    // are gone.
+    //
+    // The lengths are the same defect one step quieter: `unwrap_or(1024 * 1024)`
+    // means a mistyped length asks for a megabyte, so `splice copy a b 0 0 4O96`
+    // transferred 256x what was asked for and printed the megabyte back as the
+    // byte count — output that is accurate about an operation nobody requested.
+    //
+    // These are genuine optional operands with genuine documented defaults, so
+    // the fix is `optional_num`, not `required_num`: omitting the offset must
+    // still mean 0. The assertions below pin both halves against real files,
+    // and the refusal is asserted *before* the control writes, so the
+    // "destination is untouched" check is meaningful.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let dir = "/tmp/kshell_splice";
+        let src = "/tmp/kshell_splice/src.txt";
+        let dst = "/tmp/kshell_splice/dst.txt";
+        Vfs::mkdir_all(Path::new(dir))?;
+        Vfs::write_file(Path::new(src), b"SOURCEDATA")?;
+        Vfs::write_file(Path::new(dst), b"PRESERVEME")?;
+
+        // The one that destroys data: a mistyped *destination* offset.
+        let out = capture_command(
+            "splice copy /tmp/kshell_splice/src.txt /tmp/kshell_splice/dst.txt 0 1O24 4",
+        );
+        assert_output_contains(
+            "a destination offset that cannot be read is named",
+            &out,
+            b"`1O24' is not a destination offset",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable destination offset errors");
+        assert_output_lacks("and no transfer is reported", &out, b"Copied");
+        assert_eq!(
+            Vfs::read_file(Path::new(dst))?,
+            b"PRESERVEME".to_vec(),
+            "and the destination still holds the bytes it held before the refusal"
+        );
+
+        // The quieter one: a mistyped length used to become a megabyte.
+        let out = capture_command(
+            "splice copy /tmp/kshell_splice/src.txt /tmp/kshell_splice/dst.txt 0 0 4O96",
+        );
+        assert_output_contains(
+            "a length that cannot be read is named too",
+            &out,
+            b"`4O96' is not a length",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable length errors");
+        assert_eq!(
+            Vfs::read_file(Path::new(dst))?,
+            b"PRESERVEME".to_vec(),
+            "and still nothing has been written"
+        );
+
+        // One synopsis used to answer for both paths, so it could not say which
+        // was missing.
+        let out = capture_command("splice send /tmp/kshell_splice/src.txt");
+        assert_output_contains(
+            "an omitted destination is named as the destination",
+            &out,
+            b"missing destination path",
+        );
+        assert_eq!(last_exit(), 1, "`splice send <src>` errors");
+
+        let out = capture_command("splice tee");
+        assert_output_contains(
+            "and an omitted source as the source",
+            &out,
+            b"missing source path",
+        );
+        assert_eq!(last_exit(), 1, "a bare `splice tee` errors");
+
+        // The control, run last because it writes: omitting the optional
+        // operands still means offset 0 and the default length. If this had been
+        // turned into a `required_num`, the fix would have broken the documented
+        // form — which is the failure `optional_num` exists to avoid.
+        let out =
+            capture_command("splice copy /tmp/kshell_splice/src.txt /tmp/kshell_splice/dst.txt");
+        assert_output_contains("omitted offsets still mean zero", &out, b"Copied 10 bytes");
+        assert_eq!(last_exit(), 0, "`splice copy <src> <dst>` succeeds");
+        assert_eq!(
+            Vfs::read_file(Path::new(dst))?,
+            b"SOURCEDATA".to_vec(),
+            "and the copy really landed at the start of the destination"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -28333,25 +28436,54 @@ fn cmd_prefetch(args: &str) {
     }
 }
 
+/// The `<src> <dst>` pair every `splice` transfer begins with, resolved — or
+/// refused, naming whichever of the two is missing.
+///
+/// All four transfers previously shared one `if parts.len() < 3 { synopsis }`
+/// guard, which is the two-operands-one-message defect: it knew something was
+/// absent and had already discarded which, so a user who typed a source and
+/// forgot a destination was answered with the syntax of the line they had just
+/// typed most of correctly.
+fn splice_paths(parts: &[&str], sub: &str) -> Option<(PathBuf, PathBuf)> {
+    let Some(src) = parts.get(1) else {
+        shell_println!("splice: {}: missing source path", sub);
+        set_exit(1);
+        return None;
+    };
+    let Some(dst) = parts.get(2) else {
+        shell_println!("splice: {}: missing destination path", sub);
+        set_exit(1);
+        return None;
+    };
+    Some((resolve_path(src), resolve_path(dst)))
+}
+
 fn cmd_splice(args: &str) {
     use crate::fs::splice;
     let parts: Vec<&str> = args.split_whitespace().collect();
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "copy" | "cp" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: splice copy <src> <dst> [src_offset] [dst_offset] [len]");
-                set_exit(1);
+            let Some((src, dst)) = splice_paths(&parts, sub) else {
                 return;
-            }
-            let src = resolve_path(parts[1]);
-            let dst = resolve_path(parts[2]);
-            let src_off: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let dst_off: u64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: usize = parts
-                .get(5)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1024 * 1024);
+            };
+            // `dst_offset` is where the bytes land. Guessing it as 0 does not
+            // merely act on the wrong thing, as a guessed id does -- it writes
+            // over the *start* of the destination file, which is the one guess
+            // in this family that destroys data the user already had.
+            let Some(src_off) = optional_num::<u64>(&parts, 3, "splice", sub, "source offset", 0)
+            else {
+                return;
+            };
+            let Some(dst_off) =
+                optional_num::<u64>(&parts, 4, "splice", sub, "destination offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<usize>(&parts, 5, "splice", sub, "length", 1024 * 1024)
+            else {
+                return;
+            };
             match splice::copy_file_range(&src, src_off, &dst, dst_off, len) {
                 Ok(r) => shell_println!(
                     "Copied {} bytes ({} chunks): {} -> {}",
@@ -28367,18 +28499,17 @@ fn cmd_splice(args: &str) {
             }
         }
         "send" | "sendfile" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: splice send <src> <dst> [offset] [len]");
-                set_exit(1);
+            let Some((src, dst)) = splice_paths(&parts, sub) else {
                 return;
-            }
-            let src = resolve_path(parts[1]);
-            let dst = resolve_path(parts[2]);
-            let offset: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: usize = parts
-                .get(4)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1024 * 1024);
+            };
+            let Some(offset) = optional_num::<u64>(&parts, 3, "splice", sub, "source offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<usize>(&parts, 4, "splice", sub, "length", 1024 * 1024)
+            else {
+                return;
+            };
             match splice::sendfile(&src, &dst, offset, len) {
                 Ok(r) => shell_println!(
                     "Sent {} bytes ({} chunks): {} -> {}",
@@ -28394,18 +28525,17 @@ fn cmd_splice(args: &str) {
             }
         }
         "pipe" | "splice" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: splice pipe <src> <dst> [src_offset] [len]");
-                set_exit(1);
+            let Some((src, dst)) = splice_paths(&parts, sub) else {
                 return;
-            }
-            let src = resolve_path(parts[1]);
-            let dst = resolve_path(parts[2]);
-            let src_off: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: usize = parts
-                .get(4)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1024 * 1024);
+            };
+            let Some(src_off) = optional_num::<u64>(&parts, 3, "splice", sub, "source offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<usize>(&parts, 4, "splice", sub, "length", 1024 * 1024)
+            else {
+                return;
+            };
             match splice::splice(&src, src_off, &dst, len) {
                 Ok(r) => shell_println!(
                     "Spliced {} bytes ({} chunks): {} -> {}",
@@ -28421,18 +28551,17 @@ fn cmd_splice(args: &str) {
             }
         }
         "tee" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: splice tee <src> <dst> [offset] [len]");
-                set_exit(1);
+            let Some((src, dst)) = splice_paths(&parts, sub) else {
                 return;
-            }
-            let src = resolve_path(parts[1]);
-            let dst = resolve_path(parts[2]);
-            let offset: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: usize = parts
-                .get(4)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(1024 * 1024);
+            };
+            let Some(offset) = optional_num::<u64>(&parts, 3, "splice", sub, "source offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<usize>(&parts, 4, "splice", sub, "length", 1024 * 1024)
+            else {
+                return;
+            };
             match splice::tee(&src, offset, &dst, len) {
                 Ok(r) => shell_println!(
                     "Tee'd {} bytes: {} -> {}",

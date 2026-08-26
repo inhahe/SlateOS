@@ -206,7 +206,6 @@ cmd_shmem 7
 cmd_signalq 6
 cmd_slabstat 1
 cmd_snaplayout 1
-cmd_splice 9
 cmd_sshd 1
 cmd_strings 2
 cmd_surroundsound 3

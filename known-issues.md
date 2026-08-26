@@ -80987,8 +80987,44 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **560 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **552 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (fifteenth batch): `cmd_taskio` (8) cleared —
+> 560 → 552 across 228 → 227 functions. Pinned by `kshell::self_test` rung 82.
+>
+> Taken with the batch before it, this one completes a three-way split that is
+> worth stating explicitly, because it changes how severe a given site is:
+>
+> | The guessed number is a… | What the command does | How you find out |
+> |---|---|---|
+> | **selector** (id, mode, switch) — batches 1–13 | acts on the wrong object, or on none, and reports success | the thing you meant is still there, unchanged; you notice when you look at it |
+> | **address to write to** — `cmd_splice`, §607 | overwrites bytes that existed before the command ran | you don't; the old bytes are gone and the only record is a success line |
+> | **measurement** — `cmd_taskio` | files a number nobody measured into a counter | you don't, and neither does anyone reading the counter afterwards |
+>
+> `taskio read 5 8l92` (letter L) recorded **4096 bytes** of reads against pid 5
+> and printed `taskio: read 4096 bytes for pid 5`. Nothing was damaged and
+> nothing acted on the wrong object. A counter simply acquired a value that no
+> measurement produced — and from that moment it is indistinguishable from one
+> that did. This is the failure mode with the longest half-life in the entry:
+> a missing statistic announces itself, a fabricated one is read later, by
+> someone who was not there when the command was typed and has nothing but the
+> number to go on.
+>
+> `taskio register 1O` was sharper still, because unlike almost every other site
+> in this entry it had **no sentinel guard at all** — not even the useless
+> `if id == 0` — so it registered **pid 0**, printed `registered pid 0`, and
+> created a task record for a process that does not exist. That record then
+> became the destination for every subsequent mistyped measurement, which is how
+> two independent instances of this bug compound into a plausible-looking table
+> of numbers about a process that was never running.
+>
+> Note the helper differs from the batch before it and the difference is
+> principled, not stylistic: none of `taskio`'s defaults were ever documented —
+> the synopsis has always read `read <pid> <bytes>`, both required — so
+> `required_num` removes nothing a user could have been relying on. `splice`'s
+> were documented, so it took `optional_num`. §607 is the rule that decides
+> which.
+>
 > **Burn-down log.** 2026-08-26 (fourteenth batch): `cmd_splice` (9) cleared —
 > 569 → 560 across 229 → 228 functions. Pinned by `kshell::self_test` rung 81.
 >

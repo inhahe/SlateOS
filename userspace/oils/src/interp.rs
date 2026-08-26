@@ -2647,14 +2647,24 @@ enum InputSrc {
     /// directory` — so refusing the redirect would put the wrong diagnostic on
     /// the wrong line.
     ///
-    /// A shape of its own rather than a real handle, because the development
-    /// host cannot supply one that behaves: Win32 fails `CreateFile` on a
-    /// directory outright unless `FILE_FLAG_BACKUP_SEMANTICS` is asked for, and
-    /// even then every read through the handle comes back
+    /// A shape of its own rather than plain [`InputSrc::File`], because the
+    /// development host cannot supply a handle that behaves: Win32 fails
+    /// `CreateFile` on a directory outright unless `FILE_FLAG_BACKUP_SEMANTICS`
+    /// is asked for, and even then every read through the handle comes back
     /// `ERROR_ACCESS_DENIED`, which is `Permission denied` and not what bash
-    /// says. Carrying the fact in the variant costs nothing on the SlateOS
-    /// target, where the same `EISDIR` would arrive from the kernel.
-    Directory,
+    /// says. So the `EISDIR` is named by the variant and every reader gets it
+    /// alike, on the host that would have said something else and on the one —
+    /// SlateOS, and any POSIX host — that would have said exactly this.
+    ///
+    /// The handle is still opened where the host will give one, because a
+    /// *child* is not one of those readers: what it makes of a directory
+    /// descriptor is its own business, and it can only make anything of one it
+    /// actually receives. `sh -c 'echo W >&2' 2<dir` is the case that shows the
+    /// difference — with the descriptor there, the child's `>&2` dups it and
+    /// the *write* fails, exiting 1; with fd 2 missing, the dup fails first and
+    /// it exits 2. `None` is what Win32 leaves, and the approximation there is
+    /// unchanged.
+    Directory(Option<File>),
 }
 
 /// Wrap the absence of a descriptor as an [`InputFd`], so a closed fd 0 can be
@@ -2673,9 +2683,10 @@ fn write_only_input() -> InputFd {
 
 /// A directory bound to a descriptor — see [`InputSrc::Directory`]. Like
 /// [`write_only_input`], each call makes its own handle: there is no position
-/// to share when no byte will ever be read.
-fn directory_input() -> InputFd {
-    Arc::new(Mutex::new(InputSrc::Directory))
+/// to share when no byte will ever be read *here*, whatever a child does with
+/// the descriptor it is handed.
+fn directory_input(handle: Option<File>) -> InputFd {
+    Arc::new(Mutex::new(InputSrc::Directory(handle)))
 }
 
 impl io::Read for InputSrc {
@@ -2684,7 +2695,7 @@ impl io::Read for InputSrc {
             InputSrc::Bytes(c) => c.read(out),
             InputSrc::File(f) => f.read(out),
             InputSrc::Closed | InputSrc::WriteOnly => Err(ebadf()),
-            InputSrc::Directory => Err(io::Error::from(io::ErrorKind::IsADirectory)),
+            InputSrc::Directory(_) => Err(io::Error::from(io::ErrorKind::IsADirectory)),
         }
     }
 }
@@ -2695,7 +2706,7 @@ impl BufRead for InputSrc {
             InputSrc::Bytes(c) => c.fill_buf(),
             InputSrc::File(f) => f.fill_buf(),
             InputSrc::Closed | InputSrc::WriteOnly => Err(ebadf()),
-            InputSrc::Directory => Err(io::Error::from(io::ErrorKind::IsADirectory)),
+            InputSrc::Directory(_) => Err(io::Error::from(io::ErrorKind::IsADirectory)),
         }
     }
 
@@ -2704,7 +2715,7 @@ impl BufRead for InputSrc {
             InputSrc::Bytes(c) => c.consume(n),
             InputSrc::File(f) => f.consume(n),
             // Nothing was ever handed out to consume.
-            InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => {}
+            InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory(_) => {}
         }
     }
 }
@@ -2719,7 +2730,13 @@ impl std::fmt::Debug for InputSrc {
             InputSrc::File(_) => f.write_str("InputSrc::File"),
             InputSrc::Closed => f.write_str("InputSrc::Closed"),
             InputSrc::WriteOnly => f.write_str("InputSrc::WriteOnly"),
-            InputSrc::Directory => f.write_str("InputSrc::Directory"),
+            InputSrc::Directory(h) => {
+                f.write_str(if h.is_some() {
+                    "InputSrc::Directory(open)"
+                } else {
+                    "InputSrc::Directory(none)"
+                })
+            }
         }
     }
 }
@@ -2862,19 +2879,20 @@ fn child_input(c: &InputFd) -> ChildIn {
             let _ = cur.read_to_end(&mut rest);
             ChildIn::Bytes(rest)
         }
-        // None of these has bytes to hand over, and all three are given the
-        // child as a *closed* fd 0. That is exact for the closed one. A
-        // write-only fd 0 is a descriptor the child would really receive and
-        // really fail to read: `EBADF` either way, though a child that says so
-        // by name would name the read rather than the descriptor's absence.
-        // A directory is the same trade for a different reason: the host
-        // *would* give up a handle for it, but reads through that handle say
-        // `Permission denied` rather than `Is a directory`, so an approximation
-        // is all there is either way. It is why the corpus case for this keeps
-        // to the shell's own readers (`read`, `mapfile`), where the answer is
-        // exact — bash's `cat < dir` fails inside `cat`, and what a host's
-        // `cat` makes of a directory is not the shell's business.
-        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => ChildIn::Closed,
+        // A directory the host opened is a real description and is handed over
+        // as one. The shell's own readers still get `Is a directory` from the
+        // variant rather than from a read (see [`InputSrc::Directory`]), but a
+        // child is not one of them: it receives the descriptor and answers for
+        // it itself, which is the whole of what bash does here and the only way
+        // its status can be reproduced.
+        InputSrc::Directory(Some(f)) => f.try_clone().map_or(ChildIn::Closed, ChildIn::Handle),
+        // Neither of these has bytes to hand over, and both are given the child
+        // a *closed* fd 0 — as is a directory on a host that would not open
+        // one. That is exact for the closed one. A write-only fd 0 is a
+        // descriptor the child would really receive and really fail to read:
+        // `EBADF` either way, though a child that says so by name would name
+        // the read rather than the descriptor's absence.
+        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory(None) => ChildIn::Closed,
     }
 }
 
@@ -2901,10 +2919,11 @@ fn child_input(c: &InputFd) -> ChildIn {
 /// consuming on its behalf would empty an `exec 3<<HD` for the shell's own later
 /// `read <&3`, which is the far likelier script.
 ///
-/// The shapes with neither an OS object nor bytes — a directory, a source
-/// already closed, a handle the host declines to duplicate — are handed over
-/// **closed** ([`ReadOnlyOut::Closed`]). A closed descriptor is not what bash
-/// gives the child (bash's is open and merely unwritable), but it fails the
+/// The shapes with neither an OS object nor bytes — a source already closed, a
+/// handle the host declines to duplicate, a directory on a host that would not
+/// open one — are handed over **closed** ([`ReadOnlyOut::Closed`]). A closed
+/// descriptor is not what bash gives the child (bash's is open and merely
+/// unwritable), but it fails the
 /// child's write with the same `EBADF` and the same status, which is everything
 /// such a descriptor is used for. `Stdio::null()` is the one answer that must
 /// not be given: it takes the bytes and lets the child exit 0.
@@ -2935,7 +2954,14 @@ fn child_read_only_out(src: &ReadOnlySrc) -> ReadOnlyOut {
                 Err(_) => ReadOnlyOut::Closed,
             }
         }
-        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory => ReadOnlyOut::Closed,
+        // Handed over as the description it is, for the reason in
+        // [`child_input`]: `sh -c 'echo W >&2' 2<dir` dups a descriptor that is
+        // there and fails the write (status 1), and fails the dup itself when
+        // it is not (status 2).
+        InputSrc::Directory(Some(f)) => f
+            .try_clone()
+            .map_or(ReadOnlyOut::Closed, |d| ReadOnlyOut::Handle(Stdio::from(d))),
+        InputSrc::Closed | InputSrc::WriteOnly | InputSrc::Directory(None) => ReadOnlyOut::Closed,
     }
 }
 
@@ -39115,7 +39141,11 @@ impl Shell {
         let resolved = self.host_path(path);
         let host = bytes::bytes_to_path(&resolved);
         if host.is_dir() {
-            return Ok(directory_input());
+            // Asked for anyway, and kept if the host gives it: the shell's own
+            // readers answer `EISDIR` from the variant either way, but a child
+            // handed `2<dir` must receive the real description — see
+            // [`InputSrc::Directory`]. Win32 refuses and leaves `None`.
+            return Ok(directory_input(std::fs::File::open(&host).ok()));
         }
         std::fs::File::open(&host)
             .map(file_input)
@@ -72793,6 +72823,42 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         // 0, and an array with nothing in it.
         let (o, _) = run(&format!("mapfile v < '{p}'; echo \"e=$? n=${{#v[@]}}\""));
         assert_eq!(o, "e=0 n=0\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_reaches_a_child_as_a_real_descriptor() {
+        // The `Is a directory` above is the *shell's* answer, named by the
+        // descriptor's shape rather than read out of the OS — but a child is
+        // not one of the shell's readers. It receives the description and
+        // answers for it itself, which is the only way its status can come out
+        // like bash's: `sh -c 'echo W >&2' 2<dir` dups a descriptor that is
+        // there and fails the *write* (status 1), where a missing fd 2 fails
+        // the dup and exits 2. Unix only — Win32 will not open a directory
+        // without `FILE_FLAG_BACKUP_SEMANTICS`, and reads through the handle it
+        // then gives say `Permission denied`, so there the child keeps getting
+        // no descriptor at all.
+        let dir = ScratchDir::new("dir_child_fd");
+        std::fs::create_dir_all(dir.join("dd")).expect("mkdir");
+        let base = dir.slashed();
+
+        // fd 2 bound to the directory: the redirect and the child's dup both
+        // succeed, and only the write fails.
+        let (o, _) = run(&format!(
+            "cd {base}\nsh -c 'echo W >&2' 2<dd; echo \"fd2 rc=$?\""
+        ));
+        assert_eq!(o, "fd2 rc=1\n");
+        // fd 1 likewise — the same answer, for the plainer reason that the
+        // child's own stdout is unwritable.
+        let (o, _) = run(&format!(
+            "cd {base}\nsh -c 'echo W' 1<dd 2>/dev/null; echo \"fd1 rc=$?\""
+        ));
+        assert_eq!(o, "fd1 rc=1\n");
+        // And through a dup the child makes for itself.
+        let (o, _) = run(&format!(
+            "cd {base}\nsh -c 'echo W' 3<dd 1>&3 2>/dev/null; echo \"dup rc=$?\""
+        ));
+        assert_eq!(o, "dup rc=1\n");
     }
 
     #[test]

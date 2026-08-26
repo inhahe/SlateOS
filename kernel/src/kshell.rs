@@ -18780,6 +18780,317 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("groupmgr delete 4242");
     }
 
+    serial_println!(
+        "  kshell::self_test 91: one command answered two identical typos in opposite ways, and \
+         the guess it accepted went into a total with no inverse"
+    );
+    // Every earlier rung could point at a single guessed operand. `ipcns shm`
+    // has two, and before this batch they behaved as opposites:
+    //
+    //   ipcns shm 1O 1024   →  id guessed 0. Ids start at 1, so nothing has
+    //                          id 0, so this errored -- with `NotFound`, which
+    //                          says the namespace is missing when it is the
+    //                          word that was unreadable.
+    //   ipcns shm 10 1O24   →  size guessed 4096, and it *succeeded*.
+    //
+    // One character apart, one caught (for the wrong reason) and one not. The
+    // uncaught one is the one that lasts: `record_shm` is `+=` into a running
+    // total and the subsystem publishes no inverse, so noticing the typo and
+    // re-running the line correctly does not replace the guessed 4096 -- it
+    // adds the right number underneath it.
+    {
+        // `init` is idempotent (`init_defaults` returns early once state
+        // exists), and the id is read back rather than assumed: the boot
+        // battery calls `ipcns::self_test`, which creates namespaces of its
+        // own, so any number written here would depend on how many it made.
+        let _ = capture_command("ipcns init");
+        let created = capture_command("ipcns create zzrung91");
+        assert_output_contains(
+            "a namespace is created for this rung",
+            &created,
+            b"created 'zzrung91'",
+        );
+        let text = core::str::from_utf8(&created).unwrap_or("");
+        let ns_id: u32 = match text
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .find(|run| !run.is_empty())
+            .and_then(|run| run.parse::<u32>().ok())
+        {
+            Some(v) => v,
+            None => panic!("`ipcns create' must print the id it assigned"),
+        };
+
+        // The first direction: the id. It used to reach the subsystem as 0 and
+        // come back `NotFound`, which sends the reader to `ipcns list` to look
+        // for a namespace that was never in question.
+        let out = capture_command("ipcns shm 1O 1024");
+        assert_output_contains(
+            "an unreadable namespace id is named rather than misreported as NotFound",
+            &out,
+            b"`1O' is not a namespace id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable namespace id errors");
+
+        // The second direction, and the one with a lasting effect: the size.
+        let out = capture_command(&alloc::format!("ipcns shm {ns_id} 1O24"));
+        assert_output_contains(
+            "and an unreadable size is refused instead of being recorded as 4096",
+            &out,
+            b"`1O24' is not a size in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable size errors");
+
+        // Now the correction the user would actually make. This is the
+        // assertion that pins the severity: the total must read exactly one
+        // segment of 7777 bytes. Before the fix the refused line above had
+        // already banked 4096, so this same sequence left `shm=2(11873 B)` --
+        // the guess and the correction, added together, with no way back short
+        // of destroying the namespace and rebuilding everything else in it.
+        let out = capture_command(&alloc::format!("ipcns shm {ns_id} 7777"));
+        assert_eq!(last_exit(), 0, "a readable size is recorded");
+        assert_output_contains("the corrected size is recorded", &out, b"7777B");
+
+        // The sibling accumulators refuse on the same terms. `sem`'s guess was
+        // 1, which is worse than 4096 in one specific way: 1 is also the
+        // likeliest true value, so an inflated `sem_total` looks exactly like a
+        // correct one and nothing in the output invites a second look.
+        let out = capture_command(&alloc::format!("ipcns sem {ns_id} 1O"));
+        assert_output_contains(
+            "an unreadable semaphore count is refused rather than counted as one",
+            &out,
+            b"`1O' is not a semaphore count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable semaphore count errors");
+
+        let out = capture_command(&alloc::format!("ipcns msg {ns_id} 2O6"));
+        assert_output_contains(
+            "and the message-queue size is refused on the same terms",
+            &out,
+            b"`2O6' is not a size in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable message size errors");
+
+        // The §607 control: `[bytes]` is bracketed in the synopsis, so an
+        // *omitted* word still means 256. The refusals above cannot be passing
+        // by having quietly made the optional operand mandatory.
+        let out = capture_command(&alloc::format!("ipcns msg {ns_id}"));
+        assert_eq!(last_exit(), 0, "an omitted optional size still succeeds");
+        assert_output_contains(
+            "an omitted size keeps its documented default",
+            &out,
+            b"256B",
+        );
+
+        // One line proving all three at once, anchored by the distinctive 7777:
+        // one shm segment (not two), no sem set from the refused count, one msg
+        // queue at the default.
+        let out = capture_command("ipcns list");
+        assert_output_contains(
+            "the refusals recorded nothing and the totals hold exactly what was asked for",
+            &out,
+            b" shm=1(7777 B) sem=0(0) msg=1(256 B)",
+        );
+
+        // `destroy` guessed the same 0, and was safe only by accident.
+        let out = capture_command("ipcns destroy 1O");
+        assert_output_contains(
+            "`destroy' names the word it could not read instead of reporting NotFound",
+            &out,
+            b"`1O' is not a namespace id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `destroy' errors");
+
+        // The non-numeric guess the ledger never counted: a namespace called
+        // `unnamed`, created and given an id, because no name was supplied.
+        let out = capture_command("ipcns create");
+        assert_output_contains(
+            "an omitted name is reported, not invented as `unnamed'",
+            &out,
+            b"ipcns: create: missing namespace name",
+        );
+        assert_eq!(last_exit(), 1, "a missing namespace name errors");
+
+        // Leave the table as this rung found it, so rung order cannot matter.
+        let _ = capture_command(&alloc::format!("ipcns destroy {ns_id}"));
+    }
+
+    serial_println!(
+        "  kshell::self_test 92: every operand was written required and implemented optional, and \
+         the guesses landed hours after the typo"
+    );
+    // Two things make `colortemp` read differently from every batch before it.
+    //
+    // First, its ids already refused an unreadable word — the `match … parse()`
+    // was correct. What they guessed was an *absent* word, `unwrap_or(&"1")`,
+    // and the synopsis brackets say `<id>`, not `[id]`. So the defect was not
+    // "cannot read" but "was never told", and bare `colortemp set` edited
+    // profile 1 without being asked to. Every operand of this command is
+    // documented required and was implemented optional.
+    //
+    // Second, most of these values are *stored, not applied*. `daynight` and
+    // `schedule` write a pair and return; nothing recomputes until the next
+    // `update`. A guessed value therefore does not appear when the command is
+    // typed — it appears at the next transition, hours later, with nothing
+    // connecting the wrong colour to the line that caused it.
+    {
+        // `colortemp::self_test` runs from the boot battery under
+        // `with_pristine`, so the table may be `None` here. `init` is
+        // idempotent and seeds profile 1.
+        let _ = capture_command("colortemp init");
+
+        // Put known, distinctive values in place. These are what the refusals
+        // below must leave untouched.
+        let out = capture_command("colortemp mode 1 scheduled");
+        assert_output_contains(
+            "the profile is put in scheduled mode",
+            &out,
+            b"Mode: Scheduled",
+        );
+        assert_eq!(last_exit(), 0, "`colortemp mode' succeeds");
+        let out = capture_command("colortemp daynight 1 6000 3000");
+        assert_output_contains(
+            "with a known day/night pair",
+            &out,
+            b"Day: 6000K, Night: 3000K",
+        );
+        let out = capture_command("colortemp schedule 1 1140 400 20");
+        assert_output_contains(
+            "and a known schedule",
+            &out,
+            b"Sunset: 19:00, Sunrise: 06:40",
+        );
+
+        // Snapshot everything the subsystem will admit to, so the severity pin
+        // at the bottom can be an *equality* rather than a needle. It has to
+        // be: `list` prints the current temperature as `{} {}K [{}]`, where
+        // the only fixed text between the mode and the enabled flag is `K [`,
+        // so no assertion on a literal can anchor `current_kelvin` — the value
+        // that both `set` and `update` write. `list` carries the mode, the
+        // enabled flag, `current_kelvin` and the whole schedule; `stats`
+        // carries `total_adjustments`, the counter `update` bumps. Neither
+        // reader takes the `with_state` path, so neither perturbs `ops` and
+        // the two captures are comparable.
+        let before_list = capture_command("colortemp list");
+        let before_stats = capture_command("colortemp stats");
+
+        // The absent-operand half: required in the synopsis, defaulted in the
+        // code. Bare `set` used to mean "profile 1, 4000K".
+        let out = capture_command("colortemp set");
+        assert_output_contains(
+            "an omitted profile id is reported rather than assumed to be 1",
+            &out,
+            b"colortemp: set: missing profile id",
+        );
+        assert_eq!(last_exit(), 1, "an omitted profile id errors");
+
+        // The unreadable-operand half. `set_temperature` clamps to
+        // 1000..=10000, so the guessed 4000 was always a legal, plausible
+        // colour temperature — nothing downstream could have caught it.
+        let out = capture_command("colortemp set 1 4O00");
+        assert_output_contains(
+            "an unreadable temperature is named rather than clamped to a plausible 4000",
+            &out,
+            b"`4O00' is not a temperature in K",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable temperature errors");
+
+        // The guess that pointed the wrong way: `_ => Off`. Three of the four
+        // modes are ways of being on, and every misspelling collapsed onto the
+        // fourth — so a typo turned the night-light *off* and said so as
+        // though asked.
+        let out = capture_command("colortemp mode 1 sunsynk");
+        assert_output_contains(
+            "a mistyped mode is refused rather than silently meaning `off'",
+            &out,
+            b"`sunsynk' is not a mode",
+        );
+        assert_eq!(last_exit(), 1, "an unrecognised mode errors");
+
+        let out = capture_command("colortemp daynight 1 65OO 3000");
+        assert_output_contains(
+            "an unreadable day temperature is named",
+            &out,
+            b"`65OO' is not a day temperature in K",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable day temperature errors");
+
+        // The times. A guessed 1200 is 20:00, and the success line formats it
+        // back as `20:00` rather than echoing the digits typed — so the shell
+        // used to answer a typo with a plausible schedule in a shape that made
+        // it look deliberate.
+        let out = capture_command("colortemp schedule 1 12OO 420 30");
+        assert_output_contains(
+            "an unreadable sunset is named rather than presented back as 20:00",
+            &out,
+            b"`12OO' is not a sunset time in minutes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable sunset errors");
+
+        // `update` reads like a query and writes: it stores `current_kelvin`.
+        let out = capture_command("colortemp update 1 72O");
+        assert_output_contains(
+            "an unreadable time is refused rather than answered about noon",
+            &out,
+            b"`72O' is not a time in minutes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable time errors");
+
+        let out = capture_command("colortemp active 1O");
+        assert_output_contains(
+            "and an unreadable id in `active' names the word",
+            &out,
+            b"`1O' is not a profile id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `active' errors");
+
+        // The uncounted non-numeric guess. `MAX_PROFILES` is 8, so repeated
+        // bare `create`s used to exhaust the table with profiles named
+        // `Profile` that nothing could tell apart.
+        let out = capture_command("colortemp create");
+        assert_output_contains(
+            "an omitted name is reported, not invented as `Profile'",
+            &out,
+            b"colortemp: create: missing profile name",
+        );
+        assert_eq!(last_exit(), 1, "a missing profile name errors");
+
+        // The assertions that pin the severity rather than the wording: after
+        // seven refusals, every stored value is exactly what was set at the
+        // top.
+        //
+        // The needle comes first, because an equality between two *empty*
+        // captures would hold just as well. It is the schedule line, and it
+        // proves the `mode` defect specifically: `list` prints that line only
+        // when the mode is `Scheduled` or `SunSync`, so its mere presence is
+        // the evidence that the mistyped `sunsynk` did not fall through to
+        // `Off`. Before this batch it would have been absent, with `enabled`
+        // cleared.
+        let after_list = capture_command("colortemp list");
+        assert_output_contains(
+            "the refused mode left the profile in a scheduled mode, not off",
+            &after_list,
+            b"Day: 6000K, Night: 3000K, Sunset: 19:00, Sunrise: 06:40",
+        );
+        // Then the equality, which covers what no literal in `list` can
+        // anchor: `current_kelvin` is the value `set 1 4O00` used to clamp to
+        // 4000 and `update 1 72O` used to recompute for noon, and it sits
+        // between two placeholders.
+        assert!(
+            after_list == before_list,
+            "seven refusals changed nothing `colortemp list' reports"
+        );
+        let after_stats = capture_command("colortemp stats");
+        assert!(
+            after_stats == before_stats,
+            "and the refused `update' counted no adjustment for a time it could not read"
+        );
+
+        // Leave the profile as this rung found it, so rung order cannot matter.
+        let _ = capture_command("colortemp mode 1 off");
+        let _ = capture_command("colortemp daynight 1 6500 3400");
+        let _ = capture_command("colortemp schedule 1 1200 420 30");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -76193,15 +76504,27 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "set" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            // Two separate defects sat in these two lines, and the id one is
+            // the reason this function reads differently from every earlier
+            // batch: the id *did* refuse an unreadable word already. What it
+            // guessed was an **absent** one — `parts.get(1).unwrap_or(&"1")`
+            // — and the synopsis says `set <id> <kelvin>`, angle brackets, so
+            // there is no documented default to fall back to. Every operand of
+            // this command is written required and was implemented optional.
+            //
+            // The refusal was also anonymous: "Invalid profile ID" never says
+            // *which* word it could not read, which is the §604 wording rule.
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
-            let kelvin: u32 = parts.get(2).unwrap_or(&"4000").parse().unwrap_or(4000);
+            // `set_temperature` clamps to 1000..=10000, so the guessed 4000 was
+            // always a legal, plausible-looking colour temperature — there is
+            // no out-of-range value to catch it, and the success line prints
+            // the clamped number as though it had been asked for.
+            let Some(kelvin) = required_num::<u32>(&parts, 2, "colortemp", sub, "temperature in K")
+            else {
+                return;
+            };
             match colortemp::set_temperature(id, kelvin) {
                 Ok(()) => shell_println!("Temperature: {}K", kelvin.clamp(1000, 10000)),
                 Err(e) => {
@@ -76211,19 +76534,35 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "mode" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
+            };
+            // The uncounted guess, and the one that points the wrong way:
+            // `_ => Off` meant every unrecognised word turned the feature
+            // **off**. `off` is not a neutral reading of a typo — it is the
+            // one value of the four that stops the profile doing anything, so
+            // `colortemp mode 1 sunsynk` disabled the night-light and reported
+            // "Mode: Off" as though that had been the request. Three of the
+            // four modes are ways of being on; the guess collapsed all
+            // misspellings onto the fourth.
+            let mode = match parts.get(2).copied() {
+                Some("off") => colortemp::TempMode::Off,
+                Some("manual") => colortemp::TempMode::Manual,
+                Some("scheduled" | "sched") => colortemp::TempMode::Scheduled,
+                Some("sunsync" | "sun") => colortemp::TempMode::SunSync,
+                Some(word) => {
+                    shell_println!(
+                        "colortemp: mode: `{}' is not a mode (off, manual, scheduled, sunsync)",
+                        word
+                    );
                     set_exit(1);
                     return;
                 }
-            };
-            let mode = match parts.get(2).copied().unwrap_or("off") {
-                "manual" => colortemp::TempMode::Manual,
-                "scheduled" | "sched" => colortemp::TempMode::Scheduled,
-                "sunsync" | "sun" => colortemp::TempMode::SunSync,
-                _ => colortemp::TempMode::Off,
+                None => {
+                    shell_println!("colortemp: mode: missing mode");
+                    set_exit(1);
+                    return;
+                }
             };
             match colortemp::set_mode(id, mode) {
                 Ok(()) => shell_println!("Mode: {}", mode.label()),
@@ -76234,16 +76573,28 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "daynight" | "dn" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
-            let day: u32 = parts.get(2).unwrap_or(&"6500").parse().unwrap_or(6500);
-            let night: u32 = parts.get(3).unwrap_or(&"3400").parse().unwrap_or(3400);
+            // These two are stored, not applied: `set_day_night` writes the
+            // pair and returns, and nothing is recomputed until the next
+            // `update`. So a guessed value here does not show up when the
+            // command is typed — it shows up hours later, at the next
+            // transition, with nothing on screen connecting the wrong colour
+            // to the line that caused it. That is the same delayed
+            // manifestation as `schedule` below, and it is what makes these
+            // guesses harder to trace than a wrong `set`, which at least
+            // takes effect immediately.
+            let Some(day) =
+                required_num::<u32>(&parts, 2, "colortemp", sub, "day temperature in K")
+            else {
+                return;
+            };
+            let Some(night) =
+                required_num::<u32>(&parts, 3, "colortemp", sub, "night temperature in K")
+            else {
+                return;
+            };
             match colortemp::set_day_night(id, day, night) {
                 Ok(()) => shell_println!(
                     "Day: {}K, Night: {}K",
@@ -76257,17 +76608,32 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "schedule" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
-            let sunset: u16 = parts.get(2).unwrap_or(&"1200").parse().unwrap_or(1200);
-            let sunrise: u16 = parts.get(3).unwrap_or(&"420").parse().unwrap_or(420);
-            let trans: u16 = parts.get(4).unwrap_or(&"30").parse().unwrap_or(30);
+            // The sharpest of the delayed ones, because these operands are
+            // *times*. A guessed sunset of 1200 is 20:00 — a reading the
+            // output then confirms, since the success line formats it back as
+            // `20:00` rather than echoing the digits the user typed. So the
+            // shell answered `colortemp schedule 1 12OO 420 30` by printing a
+            // plausible schedule that nobody had asked for, in a format that
+            // made it look deliberate, to take effect at a time of day when
+            // whoever typed it would be long past connecting the two.
+            let Some(sunset) =
+                required_num::<u16>(&parts, 2, "colortemp", sub, "sunset time in minutes")
+            else {
+                return;
+            };
+            let Some(sunrise) =
+                required_num::<u16>(&parts, 3, "colortemp", sub, "sunrise time in minutes")
+            else {
+                return;
+            };
+            let Some(trans) =
+                required_num::<u16>(&parts, 4, "colortemp", sub, "transition length in minutes")
+            else {
+                return;
+            };
             match colortemp::set_schedule_times(id, sunset, sunrise, trans) {
                 Ok(()) => shell_println!(
                     "Sunset: {:02}:{:02}, Sunrise: {:02}:{:02}, Transition: {}m",
@@ -76284,15 +76650,24 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "update" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
-            let time: u16 = parts.get(2).unwrap_or(&"720").parse().unwrap_or(720);
+            // `update` reads like a query and is not one: `update_for_time`
+            // *writes* `p.current_kelvin` and bumps `total_adjustments`. So a
+            // guessed 720 did not merely answer a question about noon that
+            // nobody asked — it set the profile's current temperature to
+            // whatever noon implies, on a mistyped word.
+            //
+            // Honest mitigation, unlike most of this burn-down: the success
+            // line is `Temperature at {:02}:{:02}`, so it does echo the time
+            // it used, and a reader who looks would see `12:00` where they
+            // meant something else. That makes this the most discoverable
+            // guess in the function — which is not the same as discovered.
+            let Some(time) = required_num::<u16>(&parts, 2, "colortemp", sub, "time in minutes")
+            else {
+                return;
+            };
             match colortemp::update_for_time(id, time) {
                 Ok(k) => shell_println!("Temperature at {:02}:{:02}: {}K", time / 60, time % 60, k),
                 Err(e) => {
@@ -76302,7 +76677,16 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("Profile");
+            // `create <name>` in the synopsis, so the name is not optional.
+            // The guess built a real profile called `Profile` and consumed one
+            // of only eight slots (`MAX_PROFILES`), which is the detail that
+            // makes this one more than cosmetic: a handful of bare `create`s
+            // exhausts the table with profiles nobody can tell apart.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("colortemp: create: missing profile name");
+                set_exit(1);
+                return;
+            };
             match colortemp::create_profile(name) {
                 Ok(id) => shell_println!("Created profile #{}: {}", id, name),
                 Err(e) => {
@@ -76312,13 +76696,8 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "active" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
             match colortemp::set_active(id) {
                 Ok(()) => shell_println!("Active profile: #{}", id),
@@ -99517,7 +99896,19 @@ fn cmd_ipcns(args: &str) {
             shell_println!("ipcns: initialized");
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("unnamed");
+            // The synopsis says `create <name>`, and a namespace with no name
+            // is not a thing the user can have asked for. `"unnamed"` was not
+            // a default so much as a way to make the arity check unnecessary:
+            // `create_ns` takes the string straight to `String::from`, so bare
+            // `ipcns create` built a real namespace called `unnamed`, took the
+            // next id, and reported it as a success. Ids auto-increment and
+            // names are not unique, so a second bare `create` gives a second
+            // `unnamed` — indistinguishable in `list` except by id.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("ipcns: create: missing namespace name");
+                set_exit(1);
+                return;
+            };
             match ipcns::create_ns(name) {
                 Ok(id) => shell_println!("ipcns: created '{}' → id {}", name, id),
                 Err(e) => {
@@ -99527,10 +99918,17 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "destroy" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Ids begin at 1 (`init_defaults` sets `next_id: 1` and seeds no
+            // namespaces, and `create_ns` only ever hands out `next_id`), so
+            // namespace 0 is unreachable and `destroy_ns(0)` could only return
+            // `NotFound`. That made the guess *safe* — it destroyed nothing —
+            // but not *honest*: `ipcns destroy 1O` reported "error: NotFound",
+            // which says the namespace does not exist. It does exist; the word
+            // naming it could not be read. The reader is sent to check `list`
+            // instead of at what they typed.
+            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+                return;
+            };
             match ipcns::destroy_ns(id) {
                 Ok(()) => shell_println!("ipcns: destroyed {}", id),
                 Err(e) => {
@@ -99540,14 +99938,32 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "shm" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            // The two operands of this one command answered the same mistake
+            // in opposite ways, and which one you got depended only on which
+            // word you fumbled:
+            //
+            //   ipcns shm 1O 1024   →  id guessed 0, unreachable, NotFound.
+            //                          Wrong reason, but nothing changed.
+            //   ipcns shm 10 1O24   →  size guessed 4096, and it *worked*:
+            //                          "ipcns: shm ns=10 4096B", a success.
+            //
+            // The second is the one that lasts. `record_shm` is `shm_segments
+            // += 1; shm_bytes += bytes` — an accumulator, and the subsystem
+            // exposes no inverse: there is no `unrecord`, no setter, nothing
+            // between `record_*` and `destroy_ns`. So the obvious correction
+            // — notice the typo, run it again with 1024 — does not replace the
+            // guess, it *adds to* it, leaving two segments and 5120 bytes
+            // where one segment of 1024 was meant. Recovering means destroying
+            // the namespace and rebuilding every other record in it.
+            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+                return;
+            };
+            // `[bytes]` is bracketed in the synopsis, so an absent word still
+            // means 4096 (§607). Only an unreadable one is refused.
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "ipcns", sub, "size in bytes", 4096)
+            else {
+                return;
+            };
             match ipcns::record_shm(id, bytes) {
                 Ok(()) => shell_println!("ipcns: shm ns={} {}B", id, bytes),
                 Err(e) => {
@@ -99557,14 +99973,19 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "sem" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let count = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+                return;
+            };
+            // Same accumulator as `shm` (`sem_sets += 1; sem_total += count`),
+            // and the same absence of an inverse. The guess here was 1, which
+            // is worse than 4096 in one specific way: 1 is the *likeliest true
+            // value*, so a `sem_total` inflated by a guessed 1 looks exactly
+            // like a `sem_total` that was correctly told 1. There is nothing
+            // odd-looking in the output to make anyone go back and check.
+            let Some(count) = optional_num::<u32>(&parts, 2, "ipcns", sub, "semaphore count", 1)
+            else {
+                return;
+            };
             match ipcns::record_sem(id, count) {
                 Ok(()) => shell_println!("ipcns: sem ns={} count={}", id, count),
                 Err(e) => {
@@ -99574,14 +99995,13 @@ fn cmd_ipcns(args: &str) {
             }
         }
         "msg" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(256);
+            let Some(id) = required_num::<u32>(&parts, 1, "ipcns", sub, "namespace id") else {
+                return;
+            };
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "ipcns", sub, "size in bytes", 256)
+            else {
+                return;
+            };
             match ipcns::record_msg(id, bytes) {
                 Ok(()) => shell_println!("ipcns: msg ns={} {}B", id, bytes),
                 Err(e) => {

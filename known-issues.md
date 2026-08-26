@@ -81109,7 +81109,161 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **501 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **487 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-fourth batch): `cmd_colortemp` (7,
+> plus two uncounted) cleared — 494 → 487 across 219 → 218 functions. Pinned
+> by `kshell::self_test` rung 92.
+>
+> **In short:** every operand of `colortemp` is written `<required>` in the
+> command's own synopsis, and every one of them was implemented optional. The
+> shell did not merely guess at words it could not read — it also guessed at
+> words that were never typed, so bare `colortemp set` meant "profile 1, 4000
+> Kelvin" and did it.
+>
+> **The half that is new: the guess for an *absent* word, not an unreadable
+> one.** Twenty-three batches of this burn-down have been about the second
+> prohibited shape in §600 — a word read, not parsed, replaced. `cmd_colortemp`
+> has those too, but its `set` arm had already been refusing unreadable ids
+> before this batch. What it had not been refusing was an id that was not
+> there: `parts.get(1).unwrap_or(&"1")`. §607 says a bracketed `[operand]`
+> keeps its documented default and only an *unreadable* one is refused. The
+> converse is what applies here — an operand written `<id>` has no documented
+> default, so inventing one is the same defect wearing the other shape. Every
+> operand in this function is angle-bracketed.
+>
+> **The refusal it did have was anonymous.** `set 1 4O00` printed `Invalid
+> profile ID`, which never says which word could not be read, and in a
+> two-operand command names the wrong one. That is the §604 wording rule: a
+> refusal must name the word it could not read.
+>
+> **The mode guess points the wrong way.** `mode` matched four names and had
+> `_ => TempMode::Off` — an uncounted guess, because the checker matches numeric
+> parses and this one is an enum. `off` is not a neutral reading of a typo. It
+> is the one value of the four that stops the profile doing anything: three of
+> the four modes are ways of being *on*, and every misspelling collapsed onto
+> the fourth. `colortemp mode 1 sunsynk` turned the night-light off and printed
+> `Mode: Off` as though that had been the request. The `cputhr` thesis — the
+> guessed default is always the *reassuring* value — inverts here: the guess is
+> the value that quietly disables the feature, and it still reads as a success.
+>
+> **The severity row this batch adds: *delayed manifestation*.** Every earlier
+> row is about what the guess did at the moment it was typed. Here most of the
+> values are *stored, not applied*. `set_day_night` writes a pair and returns.
+> `set_schedule_times` writes three numbers and returns. Nothing recomputes
+> until the next `update_for_time`, which in real use is a clock tick hours
+> away. So the guess produces no wrong output at all when the command is typed
+> — it produces a wrong *colour on the screen* at 20:00, with nothing on screen
+> connecting it to a line typed at lunchtime.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **stored, not applied** (`cmd_colortemp` `daynight`, `schedule`) | nothing, until the next transition | the screen is the wrong colour hours later, with no line to blame |
+>
+> **`schedule` is the sharpest case, because its operands are *times*.** The
+> guessed sunset was `1200`, and the success line does not echo the digits
+> typed — it formats them back as `20:00`. So `colortemp schedule 1 12OO 420
+> 30` answered a typo with a plausible-looking schedule, in a shape that made
+> it look deliberate, to take effect at an hour when whoever typed it would be
+> long past connecting the two.
+>
+> **`update` reads like a query and is not one.** `update_for_time` *writes*
+> `p.current_kelvin` and bumps `total_adjustments`. A guessed `720` did not
+> merely answer a question about noon that nobody asked; it set the profile's
+> current temperature to whatever noon implies. This is the one honest
+> mitigation in the function: the success line is `Temperature at {:02}:{:02}`,
+> so it does echo the time it used, and a reader who looked would see `12:00`
+> where they meant something else. That makes it the most discoverable guess
+> here, which is not the same as discovered.
+>
+> **`create` was the second uncounted one**, and matters because the table is
+> small: `MAX_PROFILES` is 8, and bare `colortemp create` built a real profile
+> named `Profile`. A handful of them exhausts the table with entries nothing
+> can tell apart — the same shape as `ipcns create`'s `unnamed` in the previous
+> batch, in a namespace an eighth the size.
+>
+> **A note on the pin.** Rung 92's severity assertion is an *equality* between
+> two `colortemp list` captures, not a needle, and that is forced rather than
+> chosen. `list` prints the current temperature as `{} {}K [{}]`, whose longest
+> run of fixed text is the three bytes `K [` — below `check-selftest-wording.py`'s
+> four-byte `MIN_FIXED_RUN`, and rightly so, since three bytes cannot anchor an
+> alignment. `current_kelvin` is exactly the value `set` and `update` write, so
+> the only way to assert it went unchanged is to compare the whole capture. The
+> needle that remains is the schedule line, which `list` prints *only* when the
+> mode is `Scheduled` or `SunSync` — so its presence is itself the proof that
+> the mistyped `sunsynk` did not fall through to `Off`. (Neither `list_profiles`
+> nor `stats` takes the `with_state` path, so neither perturbs the `ops`
+> counter and the before/after captures are comparable.)
+>
+> **Found while reading for evidence:** an inverted day/night pair panicked the
+> kernel from the shell. Fixed separately —
+> `A-COLORTEMP-AN-INVERTED-DAY-NIGHT-PAIR-PANICS-THE-KERNEL`.
+
+> **Burn-down log.** 2026-08-26 (twenty-third batch): `cmd_ipcns` (7) cleared —
+> 501 → 494 across 220 → 219 functions. Pinned by `kshell::self_test` rung 91.
+>
+> **A new row for the taxonomy, and the first one about *recovery* rather than
+> about what the guess did.** In every earlier batch the question was what the
+> guessed value meant. Here the question is what happens *after* you notice.
+>
+> `ipcns shm` takes two guessed operands, and before this batch they answered
+> the same class of typo in opposite ways — which one you got depended only on
+> which word you fumbled:
+>
+> | Typed | What the guess did | What you saw |
+> |---|---|---|
+> | `ipcns shm 1O 1024` | id → `0` | `error: NotFound` — an error, but the *wrong* error |
+> | `ipcns shm 10 1O24` | size → `4096` | `ipcns: shm ns=10 4096B` — a success line |
+>
+> One character apart. The first was **safe only by accident**: `init_defaults`
+> sets `next_id: 1` and seeds no namespaces, and `create_ns` only ever hands out
+> `next_id`, so namespace 0 is unreachable and `destroy_ns(0)` / `record_*(0, …)`
+> could only return `NotFound`. Nothing was destroyed — but the message says the
+> namespace is missing when in fact the *word naming it* was unreadable, so the
+> reader goes to `ipcns list` looking for a namespace that was never in doubt.
+> That is the **misdiagnosis** row, already known from `cmd_aiostat`.
+>
+> **The second is the new one.** `record_shm` is `shm_segments += 1; shm_bytes
+> += bytes`, and the subsystem publishes no inverse — the whole public surface
+> is `init_defaults`, `create_ns`, `destroy_ns`, `record_shm`, `record_sem`,
+> `record_msg`, `ns_list`, `ns_info`, `stats`. There is no `unrecord`, no
+> setter, nothing between "add to the total" and "destroy the namespace."
+>
+> So the guess is not merely wrong; **it is wrong in a way that the obvious
+> correction compounds.** Notice the typo, re-run the line with `1024`, and you
+> do not replace the guessed 4096 — you add the right number underneath it, and
+> the namespace now reports two segments totalling 5120 where one of 1024 was
+> meant. Getting back to the truth means destroying the namespace and rebuilding
+> every other record in it.
+>
+> **`sem`'s guess of `1` is worse than `shm`'s 4096 in one specific way**: 4096
+> is at least a conspicuous round number, whereas `1` is also the *likeliest
+> true value*. A `sem_total` inflated by a guessed 1 is indistinguishable from a
+> `sem_total` that was correctly told 1, so nothing in the output ever invites
+> the second look that would catch it. This is the `cputhr` thesis again — the
+> guess is the reassuring value — sharpened: here the reassuring value is
+> reassuring precisely because it is usually *right*.
+>
+> **Scope, stated honestly:** these are bookkeeping counters. Nothing in the
+> kernel allocates against `shm_bytes` or refuses on `sem_total`; the damage is
+> to a report, not to an allocation. It belongs with `cmd_taskio` and
+> `cmd_aiostat` in the **measurement** row — a number nobody measured, filed as
+> though somebody had — and what this batch adds to that row is that when the
+> measurement is an accumulator, the error is not just undetected but
+> *uncorrectable in place*.
+>
+> **One non-numeric guess in the same function, which the ledger does not
+> count**, was fixed alongside: `create`'s name defaulted to `"unnamed"`, so a
+> bare `ipcns create` built a real namespace called `unnamed` and consumed an
+> id. Names are not unique and ids auto-increment, so a second bare `create`
+> gave a second `unnamed`, distinguishable only by id.
+>
+> The `[bytes]` and `[count]` operands stay **optional** per §607 — they are
+> bracketed in the synopsis, so an omitted word still means 4096 / 1 / 256. Only
+> an unreadable one is refused. Rung 91 asserts both halves, and pins the
+> severity with a single `ipcns list` line reading `shm=1(7777 B) sem=0(0)
+> msg=1(256 B)` after a refused size and a corrected one — which before the fix
+> would have read `shm=2(11873 B)`.
 
 > **Burn-down log.** 2026-08-26 (twenty-second batch): `cmd_groupmgr` (7)
 > cleared — 508 → 501 across 221 → 220 functions. Pinned by
@@ -84321,3 +84475,291 @@ happen and types the path instead. Nothing is lost or corrupted.
 **Not a regression.** `run_dialog.rs` had no caller of any kind until 2026-08-26
 — the button has never worked, because until this commit the box had no way to
 be opened.
+
+---
+
+## `A-IPCNS-RECORDS-ONLY-ACCUMULATE-AND-NOTHING-EVER-RELEASES` (lane A, 2026-08-26) — **open**
+
+**In short:** the IPC-namespace accounting can be told that a shared-memory
+segment, a semaphore set or a message queue was *created*, but there is no way
+to tell it that one was *destroyed*. Every counter only ever goes up. A machine
+that creates and tears down IPC objects normally will, over time, report a
+namespace holding far more than it holds — and the numbers can never come back
+down short of destroying the namespace.
+
+Found while clearing `cmd_ipcns` for
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`;
+filed separately because it is not a parsing defect and refusing an unreadable
+word does not touch it.
+
+**Where.** `kernel/src/fs/ipcns.rs`. The public surface is `init_defaults`,
+`create_ns`, `destroy_ns`, `record_shm`, `record_sem`, `record_msg`, `ns_list`,
+`ns_info`, `stats`, `self_test`. Each `record_*` is a pair of `+=`:
+
+```rust
+ns.shm_segments += 1;
+ns.shm_bytes += bytes;
+state.total_shm += 1;
+```
+
+There is no `release_shm`, no setter, and nothing that ever decrements. The
+only operation that reduces a count is `destroy_ns`, which removes the whole
+namespace — and note it does not subtract that namespace's contribution from
+the global `total_shm` / `total_sem` / `total_msg` either, so the *global*
+totals survive even that.
+
+**Two consequences, both live:**
+
+1. **Per-namespace counts drift upward forever.** Whatever real IPC objects
+   these are meant to track, they have lifetimes; the accounting does not model
+   the end of one.
+2. **The global totals in `stats()` are monotonic across namespace destruction.**
+   `destroy_ns` removes the namespace from `state.namespaces` but leaves
+   `total_shm` and friends where they were, so `stats()` can report more
+   segments than the sum of every namespace it can still list. Those two
+   numbers are supposed to describe the same thing.
+
+**Reproduce** (kernel shell):
+
+```
+ipcns init
+ipcns create demo          → id N
+ipcns shm N 1024
+ipcns stats                → SHM: 1
+ipcns destroy N
+ipcns list                 → demo is gone
+ipcns stats                → SHM: 1   ← still counted, nothing holds it
+```
+
+**Proper fix.** Give the subsystem the other half of each lifetime —
+`release_shm(ns_id, bytes)`, `release_sem(ns_id, count)`,
+`release_msg(ns_id, bytes)` — decrementing with `saturating_sub` (an
+underflowing counter is a worse lie than a stale one) and returning
+`KernelError::NotFound` for an unknown namespace, as the `record_*` pair
+already does. Have `destroy_ns` subtract the departing namespace's
+contribution from the global totals rather than orphaning it. Then expose them
+as `ipcns unshm|unsem|unmsg <ns_id> [n]` — or, better, rename the pair to
+`ipcns shm add|del`, since two verbs on one noun read better than two commands.
+
+Worth deciding at the same time whether `record_*` should take an object
+*identity* rather than a bare size, because `release_shm(ns, 1024)` requires
+the caller to remember the size it passed in, and a caller that misremembers
+silently corrupts the total in the other direction. That is the same class of
+mistake this subsystem's parsing has just been cleaned of, so it should not be
+reintroduced in the API.
+
+**Not a regression.** True since the subsystem was written; the `record_*`
+functions have never had counterparts.
+
+---
+
+## `A-COLORTEMP-AN-INVERTED-DAY-NIGHT-PAIR-PANICS-THE-KERNEL` (lane A, 2026-08-26) — **fixed 2026-08-26**
+
+**In short:** the night-light feature let you say "during the day make the
+screen 3000K, at night make it 6500K" — the two numbers the wrong way round
+from how people normally use it, but a setting it accepted without complaint.
+The next time it recalculated the colour during the twilight fade, the
+arithmetic subtracted the larger number from the smaller one on a type that
+cannot go below zero, and **the whole kernel panicked.** Any user of the shell
+could reach it with two ordinary commands.
+
+**Where.** `kernel/src/fs/colortemp.rs`, `update_for_time`, the two transition
+arms. The code read:
+
+```rust
+// Evening transition: day → night.
+day_k - ((day_k - night_k) * elapsed / total.max(1))
+// Morning transition: night → day.
+night_k + ((day_k - night_k) * elapsed / total.max(1))
+```
+
+Both compute `day_k - night_k` on `u32`. Nothing establishes that `day_k >=
+night_k`: `set_day_night` clamps its two arguments into `1000..=10000`
+*independently* and never compares them, and the shell surface
+(`colortemp daynight <id> <d> <n>`) passes whatever it is given. The kernel
+builds under `[profile.dev]`, which does not turn `overflow-checks` off, so the
+underflow is a panic rather than a wrapped value.
+
+That distinction matters for severity: this is not "the screen goes the wrong
+colour." It is an unprivileged shell command halting the kernel.
+
+**Reproduce** (kernel shell), before the fix:
+
+```
+colortemp init
+colortemp daynight 1 3000 6500     ← accepted; day cooler than night
+colortemp mode 1 scheduled
+colortemp schedule 1 1200 420 30   ← sunset 20:00, sunrise 07:00, 30m fade
+colortemp update 1 1215            ← 15 min into the evening fade → PANIC
+```
+
+The window is narrow but not obscure: any `current_min` inside
+`[sunset, sunset + trans)` or the morning equivalent lands in a transition arm.
+Outside those windows the function returns `day_k` or `night_k` whole and never
+subtracts, which is why the existing tests 4 and 5 — noon and 01:40 — never
+touched it.
+
+**Fix.** Replaced both arms with a shared `lerp_kelvin(from, to, elapsed,
+total)` that subtracts only in the direction the values actually run:
+
+```rust
+if to >= from { from + (to - from) * elapsed / total }
+else          { from - (from - to) * elapsed / total }
+```
+
+This removes the assumption rather than documenting it — the alternative,
+making `set_day_night` reject or swap an inverted pair, would impose a policy
+the feature does not otherwise have (there is no rule that a "day" temperature
+must be cooler; a user working nights may genuinely want the inversion) and
+would still leave the raw subtraction one careless caller away from the same
+panic. `elapsed` is clamped to `total` so a caller cannot extrapolate past
+`to`, and `total` is floored at 1 so a zero-length transition divides safely.
+
+**Regression test.** `colortemp::self_test` test 9 sets day 3000 / night 6500
+and asserts both transition directions return 4750K — the exact midpoint, 15
+minutes into a 30-minute fade. The evening call is the one that used to panic.
+
+**How it was found.** Reading the subsystem for severity evidence while
+clearing `cmd_colortemp` for
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+Unrelated to the parsing defect, and not reachable through it — the guessed
+values are all in range; it is the *stored* pair that has to be inverted.
+
+**Not a regression.** True since `update_for_time` was written.
+
+---
+
+## `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` (lane A, 2026-08-26) — **open**
+
+**In short:** `cgmem` tracks a cgroup's memory as one total (`usage`) plus a
+breakdown of that same memory into two buckets (`rss` for a program's own
+pages, `cache` for cached file data). Charging always keeps the two in step.
+Un-charging does not: it subtracts from the total and from one bucket
+*separately*, and each subtraction stops at zero on its own. Two shell commands
+are enough to leave a cgroup reporting a total smaller than one of its own
+parts.
+
+**Where.** `kernel/src/fs/cgmem.rs`, `record_uncharge` (~line 176):
+
+```rust
+c.usage_pages = c.usage_pages.saturating_sub(pages);
+if is_cache {
+    c.cache_pages = c.cache_pages.saturating_sub(pages);
+} else {
+    c.rss_pages = c.rss_pages.saturating_sub(pages);
+}
+```
+
+`record_charge` maintains the invariant `usage_pages == rss_pages +
+cache_pages`: it adds `pages` to `usage_pages` and to exactly one of the two
+buckets, and `swap_pages` is never written by either function. `record_uncharge`
+subtracts from `usage_pages` and from one bucket, but the two `saturating_sub`
+calls floor independently, so whenever the named bucket holds fewer pages than
+are being un-charged the total drops by more than the breakdown does.
+
+**Reproduce.**
+
+```
+cgmem init
+cgmem create demo 1000
+cgmem charge 1 100 rss      → usage=100 rss=100 cache=0
+cgmem uncharge 1 50 cache   → usage=50  rss=100 cache=0
+cgmem list                  →   [1] demo  usage=50/1000 rss=100 cache=0 swap=0 oom=0
+```
+
+The cgroup now reports 50 pages of memory of which 100 are resident.
+
+**Why it matters beyond the arithmetic.** `usage_pages` is the number
+`record_charge` compares against `limit_pages` to decide whether the cgroup has
+exceeded its ceiling. An un-charge that deflates the total without deflating
+the breakdown therefore buys the cgroup headroom it does not have: after the
+sequence above the cgroup may charge another 950 pages before it trips its
+limit, while genuinely holding 100. The error is in the permissive direction,
+which is the direction that does not announce itself.
+
+**Not reachable only through a typo.** This was noticed while surveying
+`cmd_cgmem` for the guessed-value burn-down, where the `[rss|cache]` operand
+was read with `unwrap_or("rss") == "cache"` and so turned any misspelling into
+`rss`. But the sequence above types `cache` correctly; the defect is in the
+subsystem, not in the parse, and clearing the parse does not clear it.
+
+**Proper fix.** Un-charge no more from the aggregate than actually left the
+bucket, so the two can never diverge:
+
+```rust
+let actual = if is_cache {
+    let n = pages.min(c.cache_pages);
+    c.cache_pages -= n;
+    n
+} else {
+    let n = pages.min(c.rss_pages);
+    c.rss_pages -= n;
+    n
+};
+c.usage_pages -= actual;   // == rss + cache still holds
+```
+
+An alternative — refusing an un-charge larger than the bucket with
+`KernelError::InvalidArgument` — is worth considering *instead*, since silently
+un-charging less than asked is itself a kind of guess. The reason to prefer the
+clamp is that `record_uncharge` has exactly one honest job, keeping the two
+views of the same memory consistent, and a caller who over-un-charges has
+already lost track; refusing leaves the caller's own accounting wrong with no
+way to resynchronise. That is a genuine trade-off and is recorded here rather
+than decided in passing.
+
+**Not a regression.** True since `record_uncharge` was written.
+
+---
+
+## `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN` (lane A, 2026-08-26) — **open**
+
+**In short:** `cgmem create` takes a memory ceiling, and every charge checks
+whether the cgroup has gone over it. The result of that check is written to a
+counter that no command prints. So the shell asks you for a limit, watches it
+being exceeded, and has no way to tell you that it was.
+
+**Where.** `kernel/src/fs/cgmem.rs`. `record_charge` (~line 167) does:
+
+```rust
+if c.usage_pages > c.limit_pages {
+    c.high_events += 1;
+}
+```
+
+`high_events` is declared at line 49 with the comment `// Times usage exceeded
+high watermark`, incremented there, asserted once inside `cgmem::self_test`
+(test 6), and read nowhere else. It is absent from `stats()`, which returns
+`(cgroup_count, total_charges, total_uncharges, total_oom_kills, ops)`, and
+absent from `cmd_cgmem`'s `list`, which prints `usage`, `rss`, `cache`, `swap`
+and `oom`. There is no accessor for it.
+
+**The same section has a second dead field.** `swap_pages` is initialised to 0
+in `create` and is never assigned again by any function in the module —
+`record_charge` and `record_uncharge` touch `rss_pages` and `cache_pages` only.
+`cmd_cgmem list` prints it as `swap={}`, so every cgroup the shell has ever
+displayed reports `swap=0`, not because no pages were swapped but because
+nothing can ever make it say otherwise. A statistic that is structurally
+constant is worse than an absent one: it reads as evidence.
+
+**Why these two are one entry.** They are the same failure at the two ends of
+the pipe. `high_events` is measured and not reported; `swap_pages` is reported
+and not measured. Between them, `cgmem list`'s eight columns include one that
+cannot be wrong and one that cannot be right, and the limit the user was asked
+for at `create` time influences neither.
+
+**Relation to `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.**
+That entry is the stricter version of this one — there the limit is stored and
+never compared at all. Here the comparison happens; only its output is
+unreachable. The two share a cause worth naming: a limit operand is easy to
+accept and store, and the work of *acting* on it is a separate change that the
+shape of the code does not force anyone to make.
+
+**Proper fix.** Add `high_events` to the `list` line and to `stats()`, so the
+comparison that already happens is visible. `swap_pages` needs the opposite
+decision made first — either give the module a `record_swap` (which is what the
+field's presence implies was intended) or delete the field and its column,
+since a column that is always zero misinforms. Do not leave it printed and
+unwritten.
+
+**Not a regression.** True since the module was written.

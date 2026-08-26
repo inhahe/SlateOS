@@ -81020,53 +81020,68 @@ makes, and now a future call that breaks it says so instead of hanging.
 
 ---
 
-## TD-B-SED-TEST-FIXTURES-SHARE-ONE-PATH — three `sed` tests build fixtures at a fixed temp path, so two concurrent runs clobber each other (lane B's tree; filed by lane C, 2026-08-25) — **open**
+## TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR — twelve test fixtures in three of lane B's files name a fixed temp path, so two concurrent runs delete each other's (filed by lane C, 2026-08-25) — **open**
 
-**Not lane C's to fix** — `userspace/coreutils/src/bin/sed.rs` is lane B's.
-Filed as `requests/c-b-sed-test-fixtures-share-one-path-across-processes.md`;
+**Not lane C's to fix** — `userspace/coreutils/src/bin/sed.rs`,
+`userspace/firejail/src/main.rs` and `userspace/useradd/src/main.rs` are lane
+B's. Filed as
+`requests/c-b-twelve-test-fixtures-skip-scratchdir-and-collide-between-runs.md`;
 recorded here because it fails the *workspace* gate, which
 `TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING` makes mandatory for
 every lane, so the next lane to hit it should find this rather than re-derive
 it.
 
-**Symptom.** `cargo test --workspace` fails with
+**Symptom.** Two `cargo test --workspace --no-fail-fast` runs on one commit,
+each failing a *different* single test and passing the other:
 
 ```
 thread 'tests::capital_r_takes_one_line_per_cycle_from_a_shared_position'
 panicked at userspace\coreutils\src\bin\sed.rs:4728:9:
-assertion `left == right` failed
-  left: "1\n2\n"
- right: "1\nA\n2\nB\n"
+  left: "1\n2\n"   right: "1\nA\n2\nB\n"
+```
+```
+thread 'tests::test_file_roundtrip_passwd'
+panicked at userspace\useradd\src\main.rs:2775:73: failed to rename
+  ...\useradd_test_7\passwd.tmp -> ...\useradd_test_7\passwd (os error 2)
 ```
 
-and passes on the next run of the same commit with nothing changed.
+**Observed, not inferred.** Two `cargo test --workspace` processes were alive
+at once on the same worktree. One exited **0**; the other failed. Two processes,
+one commit, one fixture directory, opposite results.
 
-**Mechanism.** Three tests name their fixture directory with no per-process
-component — `sed-w-test` (4696), `sed-r-test` (4721), `sed-wz-test` (4822),
-all under `std::env::temp_dir()`. `fs::write` truncates before it writes, so a
-second process running the same binary empties the include file inside the
-window where the first has opened it and not yet read. `Action::ReadLine`
-treats `Ok(0)` as a deliberate silent no-op — correct for `sed`, and precisely
-what turns a clobbered fixture into a wrong answer with no diagnostic.
+**Mechanism.** `userspace/scratchdir` exists precisely for this and states the
+rule: uniqueness needs the pid **and** a process-wide counter, because they
+cover two different axes — concurrent *runs* and concurrent *threads*. Twelve
+sites cover one axis or neither: `sed.rs` 4696/4721/4822 and `firejail`
+3050/3082/3094/3122/3134/3143/3159/3171 vary nothing at all, and `useradd`'s
+`TestEnv::new` (1615) varies an `AtomicU32` but not the pid — so two runs both
+produce `useradd_test_7`, and `TestEnv::new` opens with `remove_dir_all`, which
+is why the loser sees a vanished directory rather than a wrong value.
 
-**Two lessons, both general.**
+**Three lessons, all general.**
 
 1. **A fixture path with no per-process component is a shared mutable global.**
-   It looks local because it is written inside the test. Concurrency between
-   *processes* is invisible to `cargo test`'s own thread scheduling, so the
-   usual "tests run in parallel" reasoning does not reach it, and the collision
-   only appears when someone runs the suite twice at once — which on this
-   project is normal, since three lanes and an operator share one machine.
-2. **A silent-by-design no-op in the code under test erases the evidence its own
-   tests need.** `R` is *right* to say nothing about a short file. But that
-   makes "the fixture was destroyed" and "the feature is broken" produce byte-
-   identical output, so the failure points at the wrong file. The cheap remedy
-   is for the test to assert its fixture immediately after writing it, so a
-   corrupted one is reported as a corrupted fixture. Worth copying anywhere a
-   test feeds a file to code that treats an empty read as a legitimate answer.
+   It looks local because it is written inside the test. `cargo test`'s own
+   thread scheduling never exposes it, so the usual "tests run in parallel"
+   reasoning does not reach the case; it only appears when the suite runs twice
+   at once — which on this project is normal, with three lanes and an operator
+   sharing one machine.
+2. **A per-process counter is the *right* fix to the *other* axis.** `useradd`'s
+   comment ("Each test uses a unique temp directory to avoid interference") is
+   true and still insufficient. Half a uniqueness scheme reads exactly like a
+   whole one.
+3. **A silent-by-design no-op in the code under test erases the evidence its own
+   tests need.** `sed`'s `R` is right to say nothing about a short file — but
+   that makes "the fixture was destroyed" and "the feature is broken"
+   byte-identical, so the failure points at the innocent file. Where a test
+   feeds a file to code that treats an empty read as a legitimate answer, assert
+   the fixture immediately after writing it.
 
-**Suggested fix** (lane B's call; spelled out in the request): suffix each
-directory with `std::process::id()`, remove the directory rather than just the
-files, and assert the fixture's contents before the first run.
+**A grep for `pid` will not audit this.** `firejail_test_nopid` is a fixed name
+that contains the letters.
+
+**Suggested fix** (lane B's call; spelled out in the request): convert all
+twelve to `scratchdir::ScratchDir`, which also gets cleanup on the *failing*
+path — `Drop` runs during unwind where a trailing `remove_dir_all` does not.
 
 ---

@@ -16557,6 +16557,132 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "sysdiag run: an unknown category errors");
     }
 
+    serial_println!(
+        "  kshell::self_test 71: a partition manager refuses an operand instead of guessing 0"
+    );
+    // `cmd_partmgr` was the largest remaining entry in the guessed-value
+    // ledger: 21 `…parse().ok().unwrap_or(0)` sites plus one `!= Some("off")`.
+    // It is worth a rung of its own because the objects it names are disks and
+    // partitions -- the one place in the shell where acting on the wrong object
+    // is not recoverable by retyping the command.
+    //
+    // Every refusal below is paired with a control that runs the *same*
+    // subcommand with readable operands and asserts the refusal message is
+    // absent. Refusing too much is the failure mode this fix can introduce,
+    // and it would otherwise look identical to success in the ledger.
+    {
+        // The start offset. `pmgr create 1 abc 100` put the partition at byte 0
+        // -- on top of the partition table -- and said "Partition #3 created",
+        // which is also what a correct run says.
+        let out = capture_command("pmgr create 1 abc 100");
+        assert_output_contains(
+            "pmgr refuses a start offset it cannot read",
+            &out,
+            b"`abc' is not a start offset in MB",
+        );
+        assert_eq!(last_exit(), 1, "pmgr create: an unreadable start errors");
+        assert_output_lacks("and creates nothing", &out, b"created");
+
+        // The filesystem type is optional when *absent* and refused when
+        // present-but-unreadable: `ext5` used to become Unformatted.
+        let out = capture_command("pmgr create 999 0 100 ext5");
+        assert_output_contains(
+            "pmgr refuses a filesystem type it does not know",
+            &out,
+            b"`ext5' is not a filesystem type",
+        );
+        assert_eq!(last_exit(), 1, "pmgr create: an unknown fstype errors");
+
+        // The control: readable operands must reach the disk lookup, which is
+        // where a nonexistent disk is supposed to be caught.
+        let out = capture_command("pmgr create 999 0 100");
+        assert_output_lacks(
+            "readable create operands are not refused as unreadable",
+            &out,
+            b"is not a",
+        );
+
+        // A query that answered *successfully and wrongly*: `pmgr parts abc`
+        // guessed disk 0 and reported "No partitions on disk #0" with status 0,
+        // so a script could not tell a typo from an empty disk.
+        let out = capture_command("pmgr parts abc");
+        assert_output_contains(
+            "pmgr refuses a disk id it cannot read",
+            &out,
+            b"`abc' is not a disk id",
+        );
+        assert_eq!(last_exit(), 1, "pmgr parts: an unreadable disk id errors");
+        assert_output_lacks("and answers nothing", &out, b"No partitions");
+
+        let out = capture_command("pmgr parts 999");
+        assert_output_lacks(
+            "a readable disk id is not refused as unreadable",
+            &out,
+            b"is not a disk id",
+        );
+        assert_eq!(last_exit(), 0, "listing an empty disk is not a complaint");
+
+        // A destructive one. Disk ids start at 1, so the guessed 0 landed on
+        // nothing -- but it reported `Error: NotFound`, which names the wrong
+        // cause, and the guess would have been fatal had the id space been
+        // zero-based.
+        let out = capture_command("pmgr rmdisk abc");
+        assert_output_contains(
+            "pmgr rmdisk refuses a disk id it cannot read",
+            &out,
+            b"`abc' is not a disk id",
+        );
+        assert_eq!(last_exit(), 1, "pmgr rmdisk: an unreadable disk id errors");
+        assert_output_lacks("and removes nothing", &out, b"removed");
+
+        // The `!= Some("off")` operand: every spelling other than exactly
+        // "off" meant ON, so `flag … OFF` set the flag the user was clearing
+        // and reported "Flag boot = true".
+        let out = capture_command("pmgr flag 999 1 boot OFF");
+        assert_output_contains(
+            "pmgr refuses a flag value that is neither on nor off",
+            &out,
+            b"`OFF' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "pmgr flag: an unreadable value errors");
+        assert_output_lacks("and sets no flag", &out, b"Flag boot");
+
+        let out = capture_command("pmgr flag 999 1 boot off");
+        assert_output_lacks(
+            "an exact `off' is still accepted",
+            &out,
+            b"is not on or off",
+        );
+
+        // The flag name itself, which was refused before but only with a
+        // synopsis that did not say which word was rejected.
+        let out = capture_command("pmgr flag 999 1 zzflag off");
+        assert_output_contains(
+            "pmgr names the partition flag it does not know",
+            &out,
+            b"`zzflag' is not a partition flag",
+        );
+        assert_eq!(last_exit(), 1, "pmgr flag: an unknown flag errors");
+
+        // `adddisk` takes no id, so it is the one subcommand whose control can
+        // run end to end.
+        let out = capture_command("pmgr adddisk selftestdisk selftestmodel 4o");
+        assert_output_contains(
+            "pmgr refuses a disk size it cannot read",
+            &out,
+            b"`4o' is not a size in GB",
+        );
+        assert_eq!(last_exit(), 1, "pmgr adddisk: an unreadable size errors");
+
+        let out = capture_command("pmgr adddisk selftestdisk selftestmodel 4");
+        assert_output_contains(
+            "a readable size still registers the disk",
+            &out,
+            b"selftestdisk 4GB",
+        );
+        assert_eq!(last_exit(), 0, "pmgr adddisk: a readable size succeeds");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -37926,36 +38052,39 @@ fn cmd_partmgr(args: &str) {
         "adddisk" => {
             let name = parts.get(1).copied().unwrap_or("");
             let model = parts.get(2).copied().unwrap_or("");
-            let gb = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if name.is_empty() || gb == 0 {
+            if name.is_empty() {
                 shell_println!("Usage: pmgr adddisk <name> <model> <size_gb>");
                 set_exit(1);
-            } else {
-                match partmgr::register_disk(
-                    name,
-                    model,
-                    "",
-                    gb * 1024 * 1024 * 1024,
-                    512,
-                    partmgr::TableType::Gpt,
-                    false,
-                ) {
-                    Ok(id) => shell_println!("Disk #{}: {} {}GB", id, name, gb),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            }
+            let Some(gb) = required_num::<u64>(&parts, 3, "pmgr", "adddisk", "size in GB") else {
+                return;
+            };
+            if gb == 0 {
+                shell_println!("pmgr: adddisk: a disk must be at least 1GB");
+                set_exit(1);
+                return;
+            }
+            match partmgr::register_disk(
+                name,
+                model,
+                "",
+                gb * 1024 * 1024 * 1024,
+                512,
+                partmgr::TableType::Gpt,
+                false,
+            ) {
+                Ok(id) => shell_println!("Disk #{}: {} {}GB", id, name, gb),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "rmdisk" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(did) = required_id(&parts, "pmgr", "rmdisk", "disk") else {
+                return;
+            };
             match partmgr::unregister_disk(did) {
                 Ok(()) => shell_println!("Disk #{} removed", did),
                 Err(e) => {
@@ -37965,29 +38094,32 @@ fn cmd_partmgr(args: &str) {
             }
         }
         "table" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let tt = parts.get(2).and_then(|s| partmgr::TableType::from_str(s));
-            if let Some(tt) = tt {
-                match partmgr::set_table_type(did, tt) {
-                    Ok(()) => shell_println!("Disk #{}: {}", did, tt.label()),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
+            let Some(did) = required_id(&parts, "pmgr", "table", "disk") else {
+                return;
+            };
+            let Some(word) = parts.get(2) else {
                 shell_println!("Usage: pmgr table <disk_id> <gpt|mbr|none>");
                 set_exit(1);
+                return;
+            };
+            let Some(tt) = partmgr::TableType::from_str(word) else {
+                shell_println!("pmgr: table: `{}' is not a partition table type", word);
+                shell_println!("Table types: gpt, mbr, none");
+                set_exit(1);
+                return;
+            };
+            match partmgr::set_table_type(did, tt) {
+                Ok(()) => shell_println!("Disk #{}: {}", did, tt.label()),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "parts" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(did) = required_id(&parts, "pmgr", "parts", "disk") else {
+                return;
+            };
             let plist = partmgr::list_partitions(did);
             if plist.is_empty() {
                 shell_println!("No partitions on disk #{}", did);
@@ -38016,55 +38148,68 @@ fn cmd_partmgr(args: &str) {
             }
         }
         "create" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let start_mb = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let size_mb = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let fs = parts
-                .get(4)
-                .and_then(|s| partmgr::FsType::from_str(s))
-                .unwrap_or(partmgr::FsType::Unformatted);
-            let label = parts.get(5).copied().unwrap_or("");
-            if did == 0 || size_mb == 0 {
-                shell_println!(
-                    "Usage: pmgr create <disk_id> <start_mb> <size_mb> [fstype] [label]"
-                );
-                set_exit(1);
-            } else {
-                match partmgr::create_partition(
-                    did,
-                    start_mb * 1024 * 1024,
-                    size_mb * 1024 * 1024,
-                    fs,
-                    label,
-                ) {
-                    Ok(id) => {
-                        shell_println!("Partition #{} created ({}MB {})", id, size_mb, fs.label())
-                    }
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
+            let Some(did) = required_id(&parts, "pmgr", "create", "disk") else {
+                return;
+            };
+            // The start offset is the operand this command must never guess.
+            // `unwrap_or(0)` put the partition at byte 0 of the disk -- on top
+            // of the partition table -- and reported "Partition #3 created",
+            // which is what a correct run also says.
+            let Some(start_mb) =
+                required_num::<u64>(&parts, 2, "pmgr", "create", "start offset in MB")
+            else {
+                return;
+            };
+            let Some(size_mb) = required_num::<u64>(&parts, 3, "pmgr", "create", "size in MB")
+            else {
+                return;
+            };
+            // The filesystem is genuinely optional -- an unformatted partition
+            // is a real thing to create -- but only when the word is *absent*.
+            // `unwrap_or(Unformatted)` also swallowed `ext5`.
+            let fs = match parts.get(4) {
+                None => partmgr::FsType::Unformatted,
+                Some(word) => {
+                    let Some(fs) = partmgr::FsType::from_str(word) else {
+                        shell_println!("pmgr: create: `{}' is not a filesystem type", word);
+                        shell_println!(
+                            "Filesystems: ext4, fat32, fat16, ntfs, btrfs, swap, efi, raw"
+                        );
                         set_exit(1);
-                    }
+                        return;
+                    };
+                    fs
+                }
+            };
+            let label = parts.get(5).copied().unwrap_or("");
+            if size_mb == 0 {
+                shell_println!("pmgr: create: a partition must be at least 1MB");
+                set_exit(1);
+                return;
+            }
+            match partmgr::create_partition(
+                did,
+                start_mb * 1024 * 1024,
+                size_mb * 1024 * 1024,
+                fs,
+                label,
+            ) {
+                Ok(id) => {
+                    shell_println!("Partition #{} created ({}MB {})", id, size_mb, fs.label());
+                }
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "delete" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let pid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(did) = required_id(&parts, "pmgr", "delete", "disk") else {
+                return;
+            };
+            let Some(pid) = required_num::<u64>(&parts, 2, "pmgr", "delete", "partition id") else {
+                return;
+            };
             match partmgr::delete_partition(did, pid) {
                 Ok(()) => shell_println!("Partition deleted"),
                 Err(e) => {
@@ -38074,68 +38219,77 @@ fn cmd_partmgr(args: &str) {
             }
         }
         "resize" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let pid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let new_mb = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(did) = required_id(&parts, "pmgr", "resize", "disk") else {
+                return;
+            };
+            let Some(pid) = required_num::<u64>(&parts, 2, "pmgr", "resize", "partition id") else {
+                return;
+            };
+            let Some(new_mb) = required_num::<u64>(&parts, 3, "pmgr", "resize", "new size in MB")
+            else {
+                return;
+            };
             if new_mb == 0 {
-                shell_println!("Usage: pmgr resize <disk_id> <part_id> <new_size_mb>");
+                shell_println!("pmgr: resize: a partition must be at least 1MB");
                 set_exit(1);
-            } else {
-                match partmgr::resize_partition(did, pid, new_mb * 1024 * 1024) {
-                    Ok(()) => shell_println!("Resized to {}MB", new_mb),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            }
+            match partmgr::resize_partition(did, pid, new_mb * 1024 * 1024) {
+                Ok(()) => shell_println!("Resized to {}MB", new_mb),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "format" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let pid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let fs = parts.get(3).and_then(|s| partmgr::FsType::from_str(s));
-            if let Some(fs) = fs {
-                match partmgr::format_partition(did, pid, fs) {
-                    Ok(()) => shell_println!("Formatted as {}", fs.label()),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
+            let Some(did) = required_id(&parts, "pmgr", "format", "disk") else {
+                return;
+            };
+            let Some(pid) = required_num::<u64>(&parts, 2, "pmgr", "format", "partition id") else {
+                return;
+            };
+            let Some(word) = parts.get(3) else {
                 shell_println!(
                     "Usage: pmgr format <disk_id> <part_id> <ext4|fat32|ntfs|btrfs|swap|efi>"
                 );
                 set_exit(1);
+                return;
+            };
+            let Some(fs) = partmgr::FsType::from_str(word) else {
+                shell_println!("pmgr: format: `{}' is not a filesystem type", word);
+                shell_println!("Filesystems: ext4, fat32, fat16, ntfs, btrfs, swap, efi, raw");
+                set_exit(1);
+                return;
+            };
+            match partmgr::format_partition(did, pid, fs) {
+                Ok(()) => shell_println!("Formatted as {}", fs.label()),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "label" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let pid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(did) = required_id(&parts, "pmgr", "label", "disk") else {
+                return;
+            };
+            let Some(pid) = required_num::<u64>(&parts, 2, "pmgr", "label", "partition id") else {
+                return;
+            };
+            // An absent label clears the existing one -- a real operation, and
+            // the only way to express it, since `split_whitespace` cannot yield
+            // an empty word. It is reported as a clear rather than as
+            // `Label: ` so the two outcomes cannot be confused.
             let lbl = parts.get(3).copied().unwrap_or("");
             match partmgr::set_label(did, pid, lbl) {
-                Ok(()) => shell_println!("Label: {}", lbl),
+                Ok(()) => {
+                    if lbl.is_empty() {
+                        shell_println!("Label cleared");
+                    } else {
+                        shell_println!("Label: {}", lbl);
+                    }
+                }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -38143,43 +38297,63 @@ fn cmd_partmgr(args: &str) {
             }
         }
         "flag" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let pid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let f = parts.get(3).and_then(|s| partmgr::PartFlag::from_str(s));
-            let v = parts.get(4).copied() != Some("off");
-            if let Some(f) = f {
-                match partmgr::set_flag(did, pid, f, v) {
-                    Ok(()) => shell_println!("Flag {} = {}", f.label(), v),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
+            let Some(did) = required_id(&parts, "pmgr", "flag", "disk") else {
+                return;
+            };
+            let Some(pid) = required_num::<u64>(&parts, 2, "pmgr", "flag", "partition id") else {
+                return;
+            };
+            let Some(word) = parts.get(3) else {
                 shell_println!(
-                    "Usage: pmgr flag <disk> <part> <boot|esp|hidden|readonly|system> [off]"
+                    "Usage: pmgr flag <disk> <part> <boot|esp|hidden|readonly|system> [on|off]"
                 );
                 set_exit(1);
+                return;
+            };
+            let Some(f) = partmgr::PartFlag::from_str(word) else {
+                shell_println!("pmgr: flag: `{}' is not a partition flag", word);
+                shell_println!("Flags: boot, esp, hidden, readonly, system");
+                set_exit(1);
+                return;
+            };
+            // `parts.get(4) != Some("off")` made every spelling other than
+            // exactly "off" mean ON -- including "OFF", "0", "false" and any
+            // typo of "off", each of which set the flag while the user was
+            // asking to clear it, and each reported as "Flag boot = true".
+            let v = match parts.get(4).copied() {
+                None | Some("on") => true,
+                Some("off") => false,
+                Some(w) => {
+                    shell_println!("pmgr: flag: `{}' is not on or off", w);
+                    set_exit(1);
+                    return;
+                }
+            };
+            match partmgr::set_flag(did, pid, f, v) {
+                Ok(()) => shell_println!("Flag {} = {}", f.label(), v),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "mount" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let pid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(did) = required_id(&parts, "pmgr", "mount", "disk") else {
+                return;
+            };
+            let Some(pid) = required_num::<u64>(&parts, 2, "pmgr", "mount", "partition id") else {
+                return;
+            };
+            // As for `label`: an absent mount point clears it, and says so.
             let mp = parts.get(3).copied().unwrap_or("");
             match partmgr::set_mount_point(did, pid, mp) {
-                Ok(()) => shell_println!("Mount: {}", mp),
+                Ok(()) => {
+                    if mp.is_empty() {
+                        shell_println!("Mount point cleared");
+                    } else {
+                        shell_println!("Mount: {}", mp);
+                    }
+                }
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -38187,10 +38361,9 @@ fn cmd_partmgr(args: &str) {
             }
         }
         "free" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(did) = required_id(&parts, "pmgr", "free", "disk") else {
+                return;
+            };
             match partmgr::free_space(did) {
                 Ok(bytes) => {
                     let mb = bytes / (1024 * 1024);

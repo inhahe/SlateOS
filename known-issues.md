@@ -80600,8 +80600,41 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **683 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **662 of 800 remain**
 
+> **Burn-down log.** 2026-08-25 (fourth batch): `cmd_partmgr` (21) cleared —
+> the largest remaining entry — 683 → 662 across 239 → 238 functions. Pinned
+> by `kshell::self_test` rung 71.
+>
+> This one matters for *what it names*: disks and partitions, the one place in
+> the shell where acting on the wrong object is not undone by retyping the
+> command. Three shapes turned up that the earlier batches had not:
+>
+> * **A guess that was reported as a completed operation.** `pmgr create 1 abc
+>   100` read the start offset as 0 and put the partition on top of the
+>   partition table, then printed `Partition #3 created (100MB unformatted)` —
+>   which is exactly what a correct run prints.
+> * **A guess that answered a query successfully and wrongly.** `pmgr parts
+>   abc` guessed disk 0 and printed `No partitions on disk #0` with status 0.
+>   A missing disk and a mistyped disk gave the same answer, and both looked
+>   like an empty one.
+> * **A boolean read as "anything that is not `off`".** `let v =
+>   parts.get(4).copied() != Some("off");` made `OFF`, `0`, `false` and every
+>   typo of `off` mean **on** — so a user clearing a boot flag set it, and the
+>   shell reported `Flag boot = true`. This is the 22nd site in the function
+>   and the one the ledger could not count, because it is not a `parse()` call
+>   at all. It is the same shape as the 21 `matches!(…, "on" | "true" | "yes" |
+>   "1")` sites still outstanding (see the boolean sweep below), and the first
+>   evidence that the ledger's count is a *lower* bound on this class.
+>
+> Two operands were deliberately **not** made required. `pmgr label <d> <p>`
+> and `pmgr mount <d> <p>` with the trailing word absent clear the label and
+> the mount point — a real operation, and the only way to express it, because
+> `split_whitespace` cannot yield an empty word. §600 is about words that could
+> not be *read*, not words that were not typed. Both now report `Label cleared`
+> / `Mount point cleared` rather than `Label: ` with nothing after it, so the
+> two outcomes cannot be confused in a transcript.
+>
 > **Burn-down log.** 2026-08-25 (third batch): `cmd_colorpicker` (23) cleared —
 > the single largest entry in the ledger — 706 → 683 across 240 → 239
 > functions. Pinned by `kshell::self_test` rung 69.

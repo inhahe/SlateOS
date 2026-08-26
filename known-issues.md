@@ -87034,8 +87034,10 @@ above cost nothing to check — one `bash -c` each — and both were wrong.
 
 ## osh: a special redirection filename must re-open fd N's file, not dup fd N
 
-**Status:** open (found 2026-08-26 while triaging
-`the-status-of-a-fatal-expansion-abort-belongs-to-whoever-caught-it`).
+**Status:** fixed 2026-08-26 (found the same day while triaging
+`the-status-of-a-fatal-expansion-abort-belongs-to-whoever-caught-it`). The
+`source` half landed in `0f3dfac29`; the redirect half, and the two structural
+blind spots it exposed, are described at the end of this entry.
 
 `interp.rs::resolve_special_redirect` resolves `/dev/stdin`, `/dev/stdout`,
 `/dev/stderr` and `/dev/fd/N` into the *dup* of descriptor N, and says so:
@@ -87114,7 +87116,7 @@ redirect's own mode. Consequences, all measured above:
 |---|---|
 | a seekable file | an independent description at offset 0; `>` truncates, `>>` appends |
 | a pipe | the same pipe — no rewind is possible, so reading continues |
-| a here-document / here-string | bash's temp file, i.e. the whole document from 0 |
+| a here-document / here-string | **this row was wrong** — it is a *pipe* at or below 64 KiB and a temp file above, and only the temp file rewinds. Corrected and measured in "a here-document over 64 KiB is a temp file, which `/dev/stdin` re-opens from the start", below. |
 | write-only (fd 1 over a file) | still readable — `source /dev/stdout >> f` sources `f` |
 | unbound or closed (`<&-`) | `<path>: No such file or directory`, status 1 |
 | a directory | `<path>: is a directory`, status 1 |
@@ -87128,3 +87130,189 @@ case and the closed/unbound/directory shapes mapped to the diagnostics above.
 Recording the origin path on the handle instead would be simpler but diverges
 for the `exec 3< f; rm f; cat < /dev/fd/3` idiom, which bash serves from the
 still-open inode.
+
+### How it was fixed
+
+`/proc/self/fd/<raw>` is not merely *a* way to re-open the descriptor's file —
+it is literally what `/dev/fd` is a symlink to, so substituting it and letting
+the ordinary open proceed **inherits** every one of the six behaviours in the
+table above rather than emulating them. `O_TRUNC`, `>>`, `set -C` having a real
+file to protect, the descriptor's access mode not constraining the redirect,
+the live inode behind an unlinked path, and the fresh offset all fall out for
+free. So the shape of the fix is *substitute the path and fall through*:
+`resolve_special_redirect` now returns a path to open, and the callers open it
+exactly as they would have opened the word the user wrote.
+
+Two consequences of that shape needed structure of their own:
+
+- **The word the user wrote is what a diagnostic must name.** `>` on a
+  protected file has to say `/dev/fd/3: cannot overwrite existing file`, never
+  `/proc/self/fd/3: …`. `noclobber_check`, `open_input_source` and
+  `open_output_target` therefore take the original word alongside the path to
+  open.
+- **`/proc/self/fd/N` names a file only while fd N is open.** Some of the
+  descriptors answered here are made on the spot — a snapshot of a pipeline
+  stage's pipe, a dup of the real stdout — so returning the path alone let the
+  handle drop at the end of the resolver and the caller's `open` fail with
+  `ENOENT`. Measured: `{ echo hi > /dev/stdout; } | sed` died exactly that way.
+  `struct Reopen { path, _keep: Option<Arc<File>> }` ties the two lifetimes
+  together.
+
+### Two blind spots the fix exposed, both now closed
+
+Neither was introduced by this change; both were latent and only became
+visible once the special names started asking the shell "what *is* fd N here?"
+in earnest.
+
+**Redirect resolution could not see the command's own stdin.** A `RedirPlan` is
+built from the redirect list alone, so when nothing in the list and no `exec`
+had touched fd 0, the resolver had nothing left to consult and fell back to the
+*process's* fd 0 — the harness's pipe, not the command's. `AmbientStdin`
+(`Process` / `Fd(InputFd)` / `Opaque`) is now recorded on the plan when it is
+built, so fd 0 resolves to what the command was actually handed. The `Opaque`
+arm — a pipeline stage's reader, which has no name and no rewind — deliberately
+falls through to the dup, because that is what bash's re-open of a pipe yields
+anyway.
+
+**The write side had the same hole, one number over, and it was worse.**
+`write_special_src` fell back to `host_reopen_path(1)` / `(2)`: the process's
+descriptors. Inside a command substitution fd 1 is a capture buffer, in a
+pipeline stage it is the stage's pipe, and a scoped `2>` lives on
+`stderr_stack` — naming `/proc/self/fd/1` walked straight past all three and
+wrote to the terminal. `x=$(echo hi > /dev/stdout)` printed `hi` and left `x`
+empty. The fix reuses `alias_write_fd(n, out)`, which already answers "what is
+fd `n` *here*" for `N>&n` and already knows about `exec_stdout_shadowing`,
+`Out::Capture`, `Out::Pipe` and `snapshot_std_fd`; fd 2 additionally consults
+`stderr_target_at`. Writing a second, parallel answer would have been the
+mistake.
+
+### Verified
+
+`tests/corpus/redirect-dev-fd.sh` was rewritten around the open-not-dup
+contract — the old file asserted the dup reading in its header *and* in a probe
+(`"and it is a dup, so noclobber has no file to protect"`), both false — and
+now probes all six differences. A 28-probe scratch suite run side by side with
+glibc bash matches on 26; the two exceptions involve no special filename at all
+and are the separate pipeline-stage-stdin defect recorded below.
+
+## osh: a `read` in a pipeline stage swallows the rest of the pipe
+
+**Status:** open (found 2026-08-26 while verifying the special-redirection-filename
+fix; **not** caused by it — it reproduces with no special filename involved).
+
+After `read` consumes a line from a pipeline stage's stdin, any *later command*
+in that same stage sees EOF. Measured, bash 5.2.21 vs osh, glibc:
+
+```text
+                                                    bash        osh
+printf 'A\nB\n' | { read -r l; /bin/cat; }          B           (nothing)
+printf 'A\nB\n' | { read -r l; cat; }               B           (nothing)
+printf 'A\nB\n' | { read -r l; sed 's/^/x/'; }      xB          (nothing)
+printf 'A\nB\n' | { read -r l; head -1; }           B           (nothing)
+printf 'A\nB\nC\n' | { read -r l; /bin/cat; }       B|C         (nothing)
+printf 'P1\nP2\n' | { exec 3<&0; read -u 3 l
+  ; cat < /dev/fd/3; }                              P2          (nothing)
+```
+
+Two neighbouring cases are *right*, which localises it precisely: two
+successive `read`s work (`l=A m=B`), and so does `while read`. Both of those
+stay inside the shell. Only handing the descriptor to a **child** loses data.
+
+**Cause.** `StdinSrc::pipe` (interp.rs:3200) wraps the pipe's read end in
+`io::BufReader::new(r)` — the default 8 KiB buffer. `read_record` peeks through
+`fill_buf`, which drains up to 8 KiB of the pipe into that buffer; the child
+then inherits the raw fd (`try_clone`, interp.rs:25933) and finds it already
+empty. The bytes are not lost, they are sitting in the shell's buffer where
+nothing will ever hand them back — a pipe has no `seek` to give them back with.
+
+The shortcut is already acknowledged in a comment at the `try_clone` site
+("Bytes already buffered by an earlier in-stage `read` are not replayed — a
+rare edge case"), but `read header; cat` is not a rare idiom, and bash gets it
+right.
+
+**Fix.** The rule this needs is one osh has already written down, one type over.
+`FileInput::build` (interp.rs:2506) sizes its buffer from seekability —
+`FILE_INPUT_READAHEAD` when the descriptor can seek, **1 byte when it cannot** —
+precisely because "without it `sync` cannot give the unconsumed remainder back,
+so there must not be one." A pipe can never seek, so `StdinSrc::pipe` must use
+`io::BufReader::with_capacity(1, r)`. That is also what bash does: `zsyncfd`
+reads unseekable input one byte at a time so the descriptor is left exactly
+after the delimiter. The cost — one `read(2)` per byte for `cmd | while read` —
+is the same cost bash pays, and correctness here is the point of the exercise.
+
+`take` (mapfile) and `read_to_end` are unaffected: both consume to EOF, and
+`BufReader` overrides `read_to_end` to drain its buffer and then delegate.
+
+## osh: a here-document over 64 KiB is a temp file, which `/dev/stdin` re-opens from the start
+
+**Status:** open (found 2026-08-26, same session; a corner of the
+special-redirection-filename work that was left unmatched deliberately).
+
+Since bash 5.1 a here-document is **not** always a temp file. bash writes it
+down a *pipe* when it fits in the pipe buffer and spills to a temp file only
+when it does not — and the two re-open differently, because a pipe cannot
+rewind and a file can. Measured, bash 5.2.21, with
+`{ read a; read b < /dev/stdin; echo "a=${#a} b=${#b}"; }` over a document
+whose first line is `n` bytes and whose second is `second`:
+
+```text
+document total   bash              osh
+<= 65536         b=6   (no rewind) b=6   — matches
+>  65536         b=n   (rewinds)   b=6   — diverges
+```
+
+The boundary is exact and was bisected: a total of 65536 bytes is a pipe, 65537
+is a temp file. That is the pipe capacity, not a bash constant to guess at.
+
+osh models every here-document as an `InputSrc::Bytes` snapshot and always
+continues from the cursor, so it is right below the boundary and wrong above
+it. The false comment that used to sit on the `InputSrc::Bytes` arm of
+`Shell::input_special_src` — "bash's here-documents are temp files, which a
+re-open reads from the start" — asserted the opposite of the measurement and
+has been replaced with it.
+
+**Fix.** Split on the snapshot's length at the point the re-open is resolved:
+above the pipe capacity hand back the whole buffer (a rewind), at or below it
+hand back the remainder. The threshold should be read from the host rather than
+hardcoded, since it is the pipe capacity.
+
+**Why it was not fixed with the rest.** It is a behaviour of *here-document
+storage*, not of the special filenames, and touching how here-documents are
+held is a change with its own blast radius. The measurement is recorded here so
+the fix does not have to rediscover the boundary.
+
+## osh: a shell started with fd 0 closed sees `/dev/null` there, where bash sees nothing
+
+**Status:** open, and arguably **won't fix** — recorded so it is not
+rediscovered as a defect. Found 2026-08-26.
+
+```text
+$ bash --norc -c 'read l < /dev/stdin <<< x; echo "[$l]"' <&-
+bash: /dev/stdin: No such file or directory
+[]
+$ osh  --norc -c 'read l < /dev/stdin <<< x; echo "[$l]"' <&-
+[x]
+```
+
+The cause is not in osh's code at all. Rust's standard library sanitises the
+standard descriptors before `main` runs: if fd 0, 1 or 2 is closed at `exec`,
+it opens `/dev/null` onto it, so that a program which later opens a file cannot
+have it silently become "stdout". Inspecting the fd table shows it plainly —
+with fd 0 closed at exec, bash's fd 0 is absent while osh's is `/dev/null`.
+
+Every *shell-modelled* closed descriptor is handled correctly and matches bash
+exactly, which is the case that actually occurs in scripts:
+
+```text
+{ read l < /dev/stdin; echo "[$l]"; } <&-        both: /dev/stdin: No such file or directory
+exec 0<&-; { read l < /dev/stdin; ... }          both: /dev/stdin: No such file or directory
+{ cat < /dev/stdin; } <&-; echo "st=$?"          both: … + st=1
+exec 3<&-; cat < /dev/fd/3; echo "st=$?"         both: /dev/fd/3: … + st=1
+```
+
+Only the *invocation* form — the shell process itself started with fd 0
+already closed — differs. Matching bash would mean defeating std's guard, and
+by the time `main` runs the distinction is gone: `/dev/null` on fd 0 looks the
+same whether std put it there or the caller did. Detecting it would require a
+pre-`main` constructor in `.init_array`, which trades a real safety property
+for a corner case no script can reach.

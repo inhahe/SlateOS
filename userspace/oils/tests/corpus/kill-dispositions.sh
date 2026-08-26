@@ -45,13 +45,20 @@ for s in INT QUIT; do
 done
 
 echo "=== and one whose default is to terminate kills every shape"
-# The job is listed as dead well before its own `sleep` would have ended, which
-# is what says the signal landed. Nothing is echoed from inside a job here: a
-# pipeline is left out because bash signals only its leading stage, so the job
-# takes the last stage's clean exit and reads `Done` — and osh runs a compound
-# job in a thread it cannot cancel, so a killed one still finishes its body.
+# What says the signal landed is that the job is *gone* from the table well
+# before its own `sleep` would have ended — the row does not survive the death to
+# be worded, because the shell drops a signalled job the moment it notices it,
+# whether or not it announces it (TERM and PIPE are the two it does not
+# announce). So each shape is listed twice: once before the kill, where it reads
+# `Running`, and once after, where the listing is empty. The pair is the
+# assertion; an empty listing on its own would say nothing.
+#
+# Nothing is echoed from inside a job here: a pipeline is left out because bash
+# signals only its leading stage, so the job takes the last stage's clean exit
+# and reads `Done` — and osh runs a compound job in a thread it cannot cancel,
+# so a killed one still finishes its body.
 for s in TERM PIPE; do
-  sleep 1 & sleep 0.1; kill -"$s" %1; echo "$s rc=$?"; sleep 0.1; jobs; wait
-  { sleep 1; } & sleep 0.1; kill -"$s" %1; echo "$s rc=$?"; sleep 0.1; jobs; wait
-  ( sleep 1 ) & sleep 0.1; kill -"$s" %1; echo "$s rc=$?"; sleep 0.1; jobs; wait
+  sleep 1 & sleep 0.1; jobs; kill -"$s" %1; echo "$s rc=$?"; sleep 0.1; jobs; wait
+  { sleep 1; } & sleep 0.1; jobs; kill -"$s" %1; echo "$s rc=$?"; sleep 0.1; jobs; wait
+  ( sleep 1 ) & sleep 0.1; jobs; kill -"$s" %1; echo "$s rc=$?"; sleep 0.1; jobs; wait
 done

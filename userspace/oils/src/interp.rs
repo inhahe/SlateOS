@@ -40325,20 +40325,27 @@ impl Shell {
         }
     }
 
-    /// Announce every reaped job that a signal killed, the way bash does
-    /// asynchronously — `<name>: line N: <pid> <state padded to 24><command>`
-    /// on stderr — and forget it.
+    /// Take notice of every reaped job that a signal killed — announcing it the
+    /// way bash does asynchronously, `<name>: line N: <pid> <state padded to
+    /// 24><command>` on stderr, when it is one bash announces — and forget it
+    /// either way.
     ///
-    /// bash does not make a script ask about a job that was *killed*. Most
-    /// signals mean something the script did not arrange, so the news is pushed
-    /// out at the next opportunity rather than held for the next `jobs`; the
-    /// three that a script normally does arrange (`INT`, `TERM`, `PIPE` — see
-    /// [`signal_announced_when_reaped`]) are the exception, and are the only
-    /// signal states a listing ever shows.
+    /// bash does not make a script ask about a job that was *killed*: it notices
+    /// the death at the next opportunity, and noticing *is* reporting, so the
+    /// job is dropped in the same breath — `%1` becomes unknown to `wait` and
+    /// free for the next job to reuse, unlike the row a `jobs` listing leaves
+    /// behind for one more sweep.
     ///
-    /// Announcing *is* reporting, so the job is dropped in the same breath —
-    /// `%1` becomes unknown to `wait` and free for the next job to reuse, unlike
-    /// the row a `jobs` listing leaves behind for one more sweep.
+    /// **The message and the sweep are separate questions.**
+    /// [`signal_announced_when_reaped`] decides only whether a line is printed;
+    /// the row goes regardless. So `TERM` and `PIPE`, which print nothing, still
+    /// leave the table silently, and a non-interactive `jobs` can never word a
+    /// signal death at all: it either finds the job not yet reaped (`Running`)
+    /// or finds it already gone. Measured against bash 5.2.21 — `sleep 5 &
+    /// kill -TERM %1; sleep 0.02; jobs` lists nothing, on every one of eight
+    /// runs, while the same line without the settle delay lists `Running` on
+    /// every one. (Interactive bash is a different shell here: with job control
+    /// on, `jobs` does show `Terminated`.)
     ///
     /// The line number is the one still current when the announcement is made:
     /// the news arrives *between* commands, so it carries the line of the
@@ -40357,7 +40364,7 @@ impl Shell {
         let mut swept = false;
         let mut idx = 0;
         while idx < self.jobs.len() {
-            if self.announce_signalled_job(idx) {
+            if self.notice_signalled_job(idx) {
                 let gone = self.jobs.remove(idx);
                 self.remember_reaped(gone.pid, gone.status.unwrap_or(0));
                 swept = true;
@@ -40370,34 +40377,40 @@ impl Shell {
         }
     }
 
-    /// Say the one line [`Shell::notify_signalled_jobs`] would say about the job
-    /// at `idx`, if that job is one bash announces. Returns whether it did —
-    /// which is also whether the job has now been reported, and so whether the
-    /// caller should drop it.
+    /// Notice the signal death of the job at `idx`: say the one line
+    /// [`Shell::notify_signalled_jobs`] would say about it, if it is one bash
+    /// announces, and report back whether the shell has now taken notice — which
+    /// is whether the caller should drop the row.
+    ///
+    /// The two are not the same question. A `TERM` or a `PIPE` prints nothing
+    /// (`DONT_REPORT_SIGTERM`/`DONT_REPORT_SIGPIPE`) and is still noticed, so
+    /// this returns `true` having said nothing at all. What suppresses the
+    /// *notice* is something else entirely: a command substitution, whose
+    /// announcement would land on a stderr unrelated to the value being
+    /// collected, so bash holds the death for the substitution's own `jobs` to
+    /// report.
     ///
     /// Split out because `wait -n` reaps a job itself and must announce it on
     /// the way past, before it removes the row it is about to answer with.
-    fn announce_signalled_job(&mut self, idx: usize) -> bool {
+    fn notice_signalled_job(&mut self, idx: usize) -> bool {
         let Some(job) = self.jobs.get(idx) else {
             return false;
         };
         let Some(sig) = job.signal else {
             return false;
         };
-        if self.in_comsub
-            || job.status.is_none()
-            || job.notified
-            || !signal_announced_when_reaped(sig)
-        {
+        if self.in_comsub || job.status.is_none() || job.notified {
             return false;
         }
-        let msg = bfmt![
-            self.err_prefix(),
-            format!("{} {:<24}", job.pid, signal_description(sig)),
-            &job.cmd,
-            b"\n"
-        ];
-        self.emit_stderr(&msg);
+        if signal_announced_when_reaped(sig) {
+            let msg = bfmt![
+                self.err_prefix(),
+                format!("{} {:<24}", job.pid, signal_description(sig)),
+                &job.cmd,
+                b"\n"
+            ];
+            self.emit_stderr(&msg);
+        }
         true
     }
 
@@ -41277,8 +41290,9 @@ impl Shell {
                     job.status = Some(status);
                     job.exit_seen = true;
                     // A killed job is announced wherever the shell hears of it,
-                    // the very job `wait -n` is answering with included.
-                    self.announce_signalled_job(idx);
+                    // the very job `wait -n` is answering with included. The
+                    // row goes either way, so the verdict is not consulted.
+                    self.notice_signalled_job(idx);
                     self.jobs.remove(idx);
                     self.reset_job_markers();
                     // `wait -n` reaps just like a targeted `wait PID`, so the
@@ -60296,17 +60310,24 @@ fn signal_terminates_async_job(signum: u8) -> bool {
     !matches!(signum, 2 /* INT */ | 3 /* QUIT */) && signal_default_terminates(signum)
 }
 
-/// Whether a job's death by this signal is *announced* rather than left for
-/// `jobs` to report.
+/// Whether a job's death by this signal is announced on stderr — and *only*
+/// that. Whether the job leaves the table is a separate question, answered
+/// `yes` for every signal; see [`Shell::notice_signalled_job`].
 ///
 /// bash tells a script about a background job killed by a signal the moment it
-/// notices, on stderr, instead of holding the news until something asks — but
-/// only for signals that say something the script did not already know. `INT`
-/// is exempt because an interrupt is normally the user's own doing and was
-/// aimed at the whole shell; `TERM` and `PIPE` are exempt because bash is built
-/// with `DONT_REPORT_SIGTERM` and `DONT_REPORT_SIGPIPE`, both being ordinary
-/// ways for a job to be told to stop. Those three, and only those, are the
-/// signal names a `jobs` listing can ever show.
+/// notices, on stderr, but only for signals that say something the script did
+/// not already know. `INT` is exempt because an interrupt is normally the
+/// user's own doing and was aimed at the whole shell; `TERM` and `PIPE` are
+/// exempt because bash is built with `DONT_REPORT_SIGTERM` and
+/// `DONT_REPORT_SIGPIPE`, both being ordinary ways for a job to be told to
+/// stop.
+///
+/// The exemption is from the *message*, not from the reaping. This once read
+/// "those three are the only signal names a `jobs` listing can ever show" — the
+/// exact inverse of what bash does, learned from an MSYS bash and believed for
+/// as long as the corpus measured against one. A non-interactive `jobs` shows
+/// no signal name at all, because the sweep that says nothing still takes the
+/// row.
 fn signal_announced_when_reaped(signum: u8) -> bool {
     !matches!(signum, 2 /* INT */ | 13 /* PIPE */ | 15 /* TERM */)
 }
@@ -100038,23 +100059,30 @@ st=1
         // The older one keeps its `-` after finishing — and loses its `&`,
         // because there is no longer anything running in the background.
         //
-        // Job 1 is ended by a `kill` rather than by outliving a short `sleep`,
-        // for the reason above: the mark it is given depends on its being
-        // *alive* when job 2 is created. `Terminated` in place of `Done` is
-        // incidental; what is under test is that death does not disturb the
-        // marker.
-        sh.run_source("sleep 30 & sleep 30 &".as_bytes());
-        sh.run_source("kill %1".as_bytes());
+        // Job 1 has to be *alive* when job 2 is created (that is what earns it
+        // the `-`) and then finish *cleanly*, and neither half can be left to
+        // the clock. A `kill` would settle the lifetime but not the row: a
+        // signal-killed job is swept out of the table the moment the shell
+        // notices it, taking the marker under test with it (see
+        // `Shell::notice_signalled_job`). So job 1 waits on a file we create,
+        // which ends it exactly when we choose and ends it with status 0.
+        sh.run_source("until [ -e gate ]; do sleep 0.01; done & sleep 30 &".as_bytes());
+        sh.run_source(": > gate".as_bytes());
         // Wait for the shell to *admit* job 1 is over rather than for a fixed
         // stretch of wall clock.
         settle_job(&mut sh, 1);
+        // The command column is not the source text for a compound command:
+        // both shells re-print it from the parse tree, four-space indented and
+        // broken over lines. Verified against bash 5.2.21, which renders this
+        // job identically (`until …; do` / `    sleep 0.01;` / `done`).
         assert_eq!(
             listing(&mut sh, "jobs"),
-            "[1]-  Terminated              sleep 30\n\
+            "[1]-  Done                    until [ -e gate ]; do\n    sleep 0.01;\ndone\n\
              [2]+  Running                 sleep 30 &\n"
         );
         sh.run_source("kill %2".as_bytes());
         sh.run_source("wait".as_bytes());
+        sh.run_source("rm -f gate".as_bytes());
 
         // A job that had *already* finished when the next one started never
         // gets the `-` at all: with no older job running, previous falls back
@@ -100138,15 +100166,19 @@ st=1
             wait_for_bg(&mut sh);
             assert_eq!(listing(&mut sh, "jobs"), format!("[1]+  {want}\n"), "{src}");
         }
-        for (sig, want) in [("TERM", "Terminated"), ("PIPE", "Broken pipe")] {
+        // A signal produces no such row at all. `TERM` and `PIPE` are the two
+        // deaths bash does not announce (`DONT_REPORT_SIGTERM`,
+        // `DONT_REPORT_SIGPIPE`), which is exactly why they are the tempting
+        // ones to expect here — but not announcing is not the same as not
+        // noticing, and the sweep that says nothing still takes the row. So a
+        // non-interactive listing can word `Done` and `Exit N` and never
+        // `Terminated`. (Measured against bash 5.2.21: `sleep 5 & kill -TERM
+        // %1; sleep 0.02; jobs` printed nothing on eight runs out of eight.)
+        for sig in ["TERM", "PIPE"] {
             sh.run_source("sleep 5 &".as_bytes());
             sh.run_source(format!("kill -{sig} %1").as_bytes());
-            wait_for_bg(&mut sh);
-            assert_eq!(
-                listing(&mut sh, "jobs"),
-                format!("[1]+  {want:<24}sleep 5\n"),
-                "kill -{sig}"
-            );
+            settle_job(&mut sh, 1);
+            assert_eq!(listing(&mut sh, "jobs"), "", "kill -{sig}");
         }
         // `INT` and `QUIT` cannot produce such a row at all — no background job
         // is ever listed as `Interrupt` or `Quit` — because an asynchronous job
@@ -100186,17 +100218,19 @@ st=1
         assert_eq!(o, "osh: wait: %1: no such job\n");
         assert_eq!(s, 127);
 
-        // The three signals a listing can word are the three that are never
-        // announced: the job is left in the table, still owed.
-        for (sig, want) in [("TERM", "Terminated"), ("PIPE", "Broken pipe")] {
+        // `TERM` and `PIPE` are the deaths bash does not announce — and it
+        // forgets them all the same. Silence is not a deferral: the row is gone
+        // by the next command just as the announced one was, so nothing is left
+        // for a listing to report and `%1` is already unknown.
+        for sig in ["TERM", "PIPE"] {
             sh.run_source("sleep 5 &".as_bytes());
             let (o, _) = run_in(&mut sh, &format!("{{ kill -{sig} %1; :; }} 2>&1"));
             assert_eq!(o, "", "kill -{sig} says nothing");
-            assert_eq!(
-                listing(&mut sh, "jobs"),
-                format!("[1]+  {want:<24}sleep 5\n")
-            );
-            sh.run_source("disown -a".as_bytes());
+            assert!(sh.jobs.is_empty(), "kill -{sig} still forgets the job");
+            assert_eq!(listing(&mut sh, "jobs"), "", "kill -{sig} lists nothing");
+            let (o, s) = run_in(&mut sh, "wait %1 2>&1");
+            assert_eq!(o, "osh: wait: %1: no such job\n", "kill -{sig}");
+            assert_eq!(s, 127, "kill -{sig}");
         }
     }
 

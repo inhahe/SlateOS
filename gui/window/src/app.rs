@@ -537,11 +537,31 @@ pub fn launch<A: App + ?Sized>(program: &str, app: &mut A) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    if let Some(unexpected) = args.rest.first() {
-        eprintln!("{program}: unexpected argument `{unexpected}`");
+    if let Some(complaint) = leftover_complaint(program, &args.rest) {
+        eprintln!("{complaint}");
         return ExitCode::from(2);
     }
     launch_with(program, args.display.as_deref(), app)
+}
+
+/// What to say about arguments an application has no use for, if there are any.
+///
+/// Refused rather than ignored: an application reached through [`launch`] takes
+/// no file and no subject, so an argument it does not recognise is a user who
+/// expected something to happen. Starting anyway would be a wrong answer
+/// delivered confidently — the window opens, looks right, and is not what was
+/// asked for.
+///
+/// Returned rather than printed so that the rule can be tested. It is the only
+/// part of [`launch`] that can be: everything else needs a compositor on the
+/// other end of a socket, and this is the half that decides whether to dial at
+/// all.
+fn leftover_complaint(program: &str, rest: &[String]) -> Option<String> {
+    let unexpected = rest.first()?;
+    // The first one, not all of them: a user who typed two wrong arguments has
+    // one mistake to understand, and naming the first is what points at where
+    // the command line went wrong.
+    Some(format!("{program}: unexpected argument `{unexpected}`"))
 }
 
 /// [`launch`] with the display address supplied, for an application that has
@@ -1133,6 +1153,45 @@ mod tests {
         drive(&mut events, window, &mut app).expect("the loop should have run");
 
         assert!(reloads_seen(&desktop).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Arguments an application has no use for
+    // -----------------------------------------------------------------------
+
+    /// Silence is the whole of the success case: an application launched with
+    /// nothing but a display address has nothing to complain about.
+    #[test]
+    fn a_clean_command_line_draws_no_complaint() {
+        assert_eq!(leftover_complaint("settings", &[]), None);
+    }
+
+    /// Refused rather than ignored. An application reached through `launch`
+    /// takes no file and no subject, so starting anyway on whatever page it
+    /// happened to open on would be a wrong answer delivered confidently.
+    #[test]
+    fn an_argument_the_application_cannot_use_is_refused_and_named() {
+        let complaint =
+            leftover_complaint("settings", &["notes.txt".to_string()]).expect("it must complain");
+        assert!(
+            complaint.contains("notes.txt"),
+            "the message names the argument: {complaint}"
+        );
+        assert!(
+            complaint.starts_with("settings:"),
+            "and says which program is refusing it: {complaint}"
+        );
+    }
+
+    /// The first, not a list of all of them: one mistake to understand.
+    #[test]
+    fn the_first_unusable_argument_is_the_one_reported() {
+        let complaint = leftover_complaint("settings", &["a".to_string(), "b".to_string()])
+            .expect("it must complain");
+        assert!(
+            complaint.contains('a') && !complaint.contains('b'),
+            "{complaint}"
+        );
     }
 
     /// A transport that stops accepting bytes when the flag is set.

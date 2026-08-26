@@ -90,7 +90,13 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// desynchronises for the rest of the message. There is no way to add it that
 /// an older peer could skip — the encoding carries no per-field lengths — which
 /// is what the version number is for.
-pub const CONTROL_VERSION: u8 = 3;
+///
+/// **4** — [`WindowSpec`] gained [`app_id`](WindowSpec::app_id), a
+/// length-prefixed string written directly after `title`. Moves bytes for the
+/// same reason 3 did, and worse: the new field's own length prefix would be
+/// read by a version-3 decoder as the window's *width*, so the failure is not a
+/// wrong flag but a window several hundred million pixels across.
+pub const CONTROL_VERSION: u8 = 4;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -482,6 +488,35 @@ impl ShellControlAction {
 pub struct WindowSpec {
     /// Title for the decoration bar and the taskbar.
     pub title: String,
+    /// Which *program* this window belongs to, as the program itself says.
+    ///
+    /// Next to the title because the two are the same kind of thing — text a
+    /// window is identified by — and different in exactly one way that matters:
+    /// the title is what this *document* is called and changes as the user
+    /// works, while this is what the *application* is called and never changes
+    /// for the life of the window. Anything that wants to say "all of Firefox's
+    /// windows" has to key on something that does not move, and before this
+    /// field the only candidate was the pid, which is a number no user can
+    /// type into a rule.
+    ///
+    /// Conventionally the executable's file stem, lower-cased —
+    /// [`oswindow`'s `App::app_id`] defaults to exactly that, so a program gets
+    /// a usable id without writing a line. An empty string is allowed and means
+    /// "this window declines to identify itself"; it matches no rule rather
+    /// than matching every one, since a rule about an unnamed program is a rule
+    /// about all of them.
+    ///
+    /// **Advisory, and never a security claim.** The client sends it, so a
+    /// client may send anything — the compositor cannot tell `terminal` that
+    /// really is the terminal from `terminal` that is not. That is acceptable
+    /// for what it is for (window rules, grouping taskbar buttons, an icon
+    /// lookup), all of which are cosmetic, and it is why the pid is still
+    /// carried separately: [`WindowInfo::pid`] comes from the connection and
+    /// cannot be forged. Never gate a capability on this string.
+    ///
+    /// [`oswindow`'s `App::app_id`]: https://docs.rs/oswindow
+    /// [`WindowInfo::pid`]: crate::window_list::WindowInfo::pid
+    pub app_id: String,
     /// Requested client-area width in pixels.
     pub width: u32,
     /// Requested client-area height in pixels.
@@ -529,11 +564,19 @@ pub struct WindowSpec {
 
 impl WindowSpec {
     /// A titled window of the given size, with the ordinary defaults:
-    /// resizable, decorated, opaque, clickable, placed by the compositor.
+    /// resizable, decorated, opaque, clickable, placed by the compositor, and
+    /// declining to name the program it belongs to.
+    ///
+    /// [`app_id`](Self::app_id) is empty rather than derived from the title,
+    /// because a title is a document name and reusing it would give every
+    /// window of the same program a different id — the exact opposite of what
+    /// the field is for. Callers that want one should set it, or go through
+    /// [`oswindow::app`], whose default reads the executable's name.
     #[must_use]
     pub fn new(title: impl Into<String>, width: u32, height: u32) -> Self {
         Self {
             title: title.into(),
+            app_id: String::new(),
             width,
             height,
             position: None,
@@ -1132,6 +1175,7 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         RequestBody::CreateWindow(spec) => {
             out.push(RequestTag::CreateWindow as u8);
             write_string(out, &spec.title);
+            write_string(out, &spec.app_id);
             write_u32(out, spec.width);
             write_u32(out, spec.height);
             write_optional_point(out, spec.position);
@@ -1416,6 +1460,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
     Ok(match tag {
         RequestTag::CreateWindow => {
             let title = r.read_string()?;
+            let app_id = r.read_string()?;
             let width = r.read_u32()?;
             let height = r.read_u32()?;
             let position = read_optional_point(r)?;
@@ -1429,6 +1474,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             let layer = Layer::from_byte(layer_byte).ok_or(DecodeError::BadTag(layer_byte))?;
             RequestBody::CreateWindow(WindowSpec {
                 title,
+                app_id,
                 width,
                 height,
                 position,
@@ -1657,6 +1703,11 @@ mod tests {
     fn spec() -> WindowSpec {
         WindowSpec {
             title: "Text Editor — notes.md".to_string(),
+            // Deliberately unlike the title, and not a prefix of it: the two are
+            // adjacent length-prefixed strings, so a codec that wrote one twice
+            // or read them back swapped would still round-trip if they shared
+            // any text.
+            app_id: "notepad".to_string(),
             width: 900,
             height: 600,
             position: Some((-40, 17)),
@@ -2258,6 +2309,58 @@ mod tests {
             assert_eq!(got.min_size, Some((320, 240)));
             assert_eq!(got.layer, Layer::Overlay);
         }
+    }
+
+    #[test]
+    fn the_program_a_window_belongs_to_survives_the_wire_separately_from_its_title() {
+        // Two length-prefixed strings side by side is the one place this codec
+        // can go wrong invisibly: write either one twice, or read them back
+        // swapped, and every field after them still decodes — the frame is
+        // self-consistent and merely describes the wrong windows. Both cases
+        // are only caught by a pair that disagrees, so the pair below is chosen
+        // to disagree in length as well as in content.
+        for (title, app_id) in [
+            ("Text Editor — notes.md", "notepad"),
+            // Named but untitled, and titled but unnamed. A codec that dropped
+            // one string and duplicated the other passes on two non-empty
+            // strings and fails on these.
+            ("", "notepad"),
+            ("Text Editor — notes.md", ""),
+            ("", ""),
+        ] {
+            let mut s = spec();
+            s.title = title.to_string();
+            s.app_id = app_id.to_string();
+            let req = Request::new(1, RequestBody::CreateWindow(s));
+            let back = round_trip_requests(std::slice::from_ref(&req));
+            let RequestBody::CreateWindow(got) = &back[0].body else {
+                panic!("wrong variant back")
+            };
+            assert_eq!(got.title, title);
+            assert_eq!(got.app_id, app_id);
+            // The fields written after the new string must still line up. A
+            // reader that lost its place in a variable-length field reads the
+            // *next* one as garbage rather than reporting an error, so this is
+            // the assertion that catches a desynchronised decoder — and it has
+            // to be a field whose value is distinctive, not a boolean.
+            assert_eq!(got.width, 900);
+            assert_eq!(got.height, 600);
+            assert_eq!(got.min_size, Some((320, 240)));
+            assert_eq!(got.layer, Layer::Overlay);
+        }
+    }
+
+    #[test]
+    fn a_window_names_no_program_until_it_says_one() {
+        // Empty rather than borrowed from the title. A title is a document
+        // name — it changes when the user saves under another name, and two
+        // windows of the same program have different ones — so deriving the id
+        // from it would give the field the one property it exists not to have.
+        assert!(
+            WindowSpec::new("notes.md — Text Editor", 640, 480)
+                .app_id
+                .is_empty()
+        );
     }
 
     #[test]

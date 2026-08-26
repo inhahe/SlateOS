@@ -527,6 +527,62 @@ fn a_second_press_on_the_focused_windows_button_asks_for_it_to_be_minimised() {
     );
 }
 
+/// A window rule reaches the compositor, which is the only way a rule can do
+/// anything at all.
+///
+/// `apply_window_list` decides what a rule asks for but holds no connection, so
+/// it hands the requests back and the session sends them. Between those two
+/// halves is the seam this covers: the rules engine sat in the tree for 2,600
+/// lines with nothing calling it, and a shell that evaluated rules and then
+/// dropped the answer on the floor would look exactly the same from either end.
+#[test]
+fn a_window_rule_about_an_arriving_window_reaches_the_compositor() {
+    let (mut session, desktop) = session();
+    let mut rule = crate::window_rules::WindowRule::new(
+        0,
+        "editors start maximised",
+        crate::window_rules::MatchCriteria::AppId("slateos-editor".to_string()),
+    );
+    rule.actions.initial_state = Some(crate::window_rules::InitialState::Maximized);
+    assert!(session.shell_mut().rules.add_rule(rule).is_some());
+
+    let mut editor = app(1, "notes.md");
+    editor.app_id = "slateos-editor".to_string();
+    desktop.borrow_mut().send_window_list(&[editor.clone()]);
+    session.pump().expect("pump");
+
+    assert_eq!(
+        controls(&desktop),
+        vec![(1, ShellControlAction::Maximize)],
+        "the rule never left the shell"
+    );
+
+    // And it is not asked again on the next frame: "initial state" is the
+    // state it starts in, so a user who un-maximises it must be able to.
+    desktop.borrow_mut().send_window_list(&[editor]);
+    session.pump().expect("pump");
+    assert_eq!(
+        controls(&desktop).len(),
+        1,
+        "the rule fired a second time on an unchanged window"
+    );
+}
+
+/// A window nothing matches costs nothing.
+///
+/// The rules engine is consulted for every window that arrives, so the
+/// no-rules case is the common one and must be silent — a shell that sent
+/// something per window would recomposite the desktop on every launch.
+#[test]
+fn an_arriving_window_no_rule_matches_asks_for_nothing() {
+    let (mut session, desktop) = session();
+    desktop
+        .borrow_mut()
+        .send_window_list(&[app(1, "Terminal"), app(2, "notes.txt")]);
+    session.pump().expect("pump");
+    assert!(controls(&desktop).is_empty());
+}
+
 /// The keyboard half of the same rule the taskbar obeys.
 ///
 /// Alt+F4 used to call the shell's own `remove_window`, which dropped the

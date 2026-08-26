@@ -428,6 +428,35 @@ pub struct WindowId(pub u64);
 pub struct ManagedWindow {
     pub id: WindowId,
     pub title: String,
+    /// Which program the window belongs to, as that program declares it.
+    ///
+    /// Read from the compositor's list on every update and never remembered
+    /// across one, for the same reason the title is not: the compositor is the
+    /// authority on what a window says about itself. Empty means the window
+    /// named no program.
+    ///
+    /// This is what [`window_rules`](crate::window_rules) matches on, and the
+    /// reason it can match anything useful: a rule keyed on
+    /// [`title`](Self::title) would stop applying the moment the user saved the
+    /// document under a new name.
+    pub app_id: String,
+    /// Whether a window rule asked for this window to have no taskbar button.
+    ///
+    /// Shell-local, and carried across window lists the way the icon is rather
+    /// than re-read the way the title is: the rule that set it fired once, when
+    /// the window arrived, and there is nothing in the compositor's list that
+    /// could confirm or deny it afterwards. Re-deriving it per list would mean
+    /// re-running the rules per list, which is the thing
+    /// [`WindowRulesManager::evaluate`](crate::window_rules::WindowRulesManager::evaluate)
+    /// must not have done to it.
+    pub skip_taskbar: bool,
+    /// Whether a window rule asked for this window to be left out of Alt+Tab.
+    ///
+    /// Separate from [`skip_taskbar`](Self::skip_taskbar) because the two are
+    /// separate rule actions and users mean different things by them: a chat
+    /// window docked to the edge might want no button but must still be
+    /// reachable by keyboard, and a background helper the reverse.
+    pub skip_alt_tab: bool,
     pub state: WindowState,
     pub desktop: u32,
     /// Whether this window has focus.
@@ -1007,6 +1036,23 @@ pub struct DesktopShell {
     /// report one until this surface existed, which is what
     /// [`HotkeyOutcome::launches`] is for.
     pub run_dialog: run_dialog::RunDialog,
+    /// The window rules, and the state of the ones that have fired.
+    ///
+    /// Consulted from exactly one place —
+    /// [`apply_window_list`](Self::apply_window_list), for each window the
+    /// shell has not seen before. That "not seen before" is the whole contract:
+    /// [`evaluate`](window_rules::WindowRulesManager::evaluate) takes `&mut
+    /// self` because it counts firings and deletes one-shot rules, so a shell
+    /// that ran it per *list* rather than per *arrival* would delete every
+    /// one-shot rule on the first frame after it was written, and would
+    /// re-maximise a window one frame after the user restored it.
+    ///
+    /// It was an orphan island of 2,600 lines before this: a rules engine, a
+    /// settings panel and 120 tests, and nothing that ever called `evaluate`.
+    /// It could not have been wired sooner — its two program criteria were a
+    /// process name and a window class, neither of which existed anywhere in
+    /// this system. See `design-decisions.md` §569.
+    pub rules: window_rules::WindowRulesManager,
 }
 
 /// Desktop visual theme — every colour the shell paints with.
@@ -1229,6 +1275,7 @@ impl DesktopShell {
             // centred on the screen it is opened on instead, in
             // `toggle_run_dialog`.
             run_dialog: run_dialog::RunDialog::new(),
+            rules: window_rules::WindowRulesManager::new(),
         };
         shell.sync_snap_area();
         shell
@@ -2256,8 +2303,9 @@ impl DesktopShell {
     ///
     /// # What is kept
     ///
-    /// Per-window shell-local state that the compositor has no opinion about —
-    /// now only the icon. A window already known keeps it across the update.
+    /// Per-window shell-local state that the compositor has no opinion about:
+    /// the icon, and the two "leave me out of that list" flags a window rule
+    /// may have set. A window already known keeps all three across the update.
     ///
     /// **Which virtual desktop a window is on used to be kept here too**, and
     /// that was the bug. The compositor had no notion of desktops, so switching
@@ -2271,9 +2319,24 @@ impl DesktopShell {
     /// Stacking comes from the list's own order, which the compositor emits
     /// bottom-to-top, so `taskbar_windows().last()` is the topmost window here
     /// for the same reason it is there.
-    pub fn apply_window_list(&mut self, list: &WindowList) {
+    ///
+    /// # What comes back
+    ///
+    /// The [window rules](crate::window_rules) a *newly arrived* window matched,
+    /// turned into asks for the compositor. The caller must send them — see
+    /// [`ShellSession`](session::ShellSession), which does. Returning them
+    /// rather than sending them keeps this method what the rest of the shell
+    /// is: something that computes an answer and hands it over, with no
+    /// connection of its own.
+    ///
+    /// "Newly arrived" means an id the shell was not already holding, which is
+    /// why it can be read off `previous` and needs no second set to remember.
+    /// Ids are issued by a sequence and never reused, so a window cannot arrive
+    /// twice under the same name.
+    pub fn apply_window_list(&mut self, list: &WindowList) -> Vec<ShellRequest> {
         let mut kept: BTreeMap<WindowId, ManagedWindow> = BTreeMap::new();
         let mut focused = None;
+        let mut requests = Vec::new();
         self.current_desktop = list.current_workspace;
 
         for (index, info) in list.windows.iter().enumerate() {
@@ -2281,7 +2344,34 @@ impl DesktopShell {
                 continue;
             }
             let id = WindowId(info.id);
-            let previous = self.windows.get(&id);
+            // Read out rather than held: `evaluate` below needs `&mut
+            // self.rules`, and a live borrow of `self.windows` across it would
+            // be a borrow of the same `self`.
+            let carried = self
+                .windows
+                .get(&id)
+                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));
+            let (icon_id, mut skip_taskbar, mut skip_alt_tab) =
+                carried.unwrap_or((0, false, false));
+
+            if carried.is_none() {
+                let actions = self.rules.evaluate(&info.title, &info.app_id);
+                skip_taskbar = actions.skip_taskbar.unwrap_or(false);
+                skip_alt_tab = actions.skip_alt_tab.unwrap_or(false);
+                requests.extend(Self::rule_requests(id, info, &actions, self.num_desktops));
+            }
+
+            // Recorded on every list, not only on arrival: "remember last
+            // position" means the position the window was last *at*, and the
+            // window moves long after it arrives. Skipped while minimised or
+            // maximised, because the rectangle then is the state's and not the
+            // window's — restoring one would hand back a full-screen size the
+            // user never chose.
+            if !info.minimized && !info.maximized {
+                self.rules
+                    .remember_state(&info.app_id, info.x, info.y, info.width, info.height);
+            }
+
             if info.focused {
                 focused = Some(id);
             }
@@ -2290,6 +2380,14 @@ impl DesktopShell {
                 ManagedWindow {
                     id,
                     title: info.title.clone(),
+                    // Not carried over from `previous` the way the icon is. An
+                    // icon is shell-local state the compositor has no opinion
+                    // about; this is the compositor's own report, and a window
+                    // whose program changed its mind should be described the
+                    // way the latest list describes it.
+                    app_id: info.app_id.clone(),
+                    skip_taskbar,
+                    skip_alt_tab,
                     state: if info.minimized {
                         WindowState::Minimized
                     } else if info.maximized {
@@ -2316,7 +2414,7 @@ impl DesktopShell {
                     // feature, so it saturates instead — a pid that large is
                     // already outside anything the system can produce.
                     pid: u32::try_from(info.pid).unwrap_or(u32::MAX),
-                    icon_id: previous.map_or(0, |w| w.icon_id),
+                    icon_id,
                     z_order: u32::try_from(index).unwrap_or(u32::MAX),
                 },
             );
@@ -2334,29 +2432,125 @@ impl DesktopShell {
         // them could have been refreshed and the other not.
         self.overview
             .apply_window_list(list, self.num_desktops.max(1));
+        requests
+    }
+
+    /// Turn the actions a rule matched into asks the compositor understands.
+    ///
+    /// Five of [`RuleActions`](window_rules::RuleActions)'s seventeen fields
+    /// have somewhere to go. Two of those — `skip_taskbar` and `skip_alt_tab` —
+    /// are the shell's own business and are handled by the caller; the three
+    /// here need the compositor.
+    ///
+    /// The twelve that are missing are missing on purpose, not by oversight.
+    /// `position` and `size` are the loudest: the control protocol's `Move` and
+    /// `Resize` resolve against the *sender's own* window, so the shell cannot
+    /// use them on somebody else's, and placement is the compositor's to decide
+    /// (§506) — the shell is not even told the display bounds. `always_on_top`,
+    /// `opacity`, `no_decorations`, `prevent_close` and the rest have no
+    /// request at all. They are stored, exported and shown, and doing nothing
+    /// visible is a better failure than a shell that moves windows to the
+    /// wrong place. See `known-issues.md`
+    /// `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
+    fn rule_requests(
+        id: WindowId,
+        info: &WindowInfo,
+        actions: &window_rules::RuleActions,
+        num_desktops: u32,
+    ) -> Vec<ShellRequest> {
+        let mut out = Vec::new();
+
+        // Desktop first: where the window lives, before anything about how it
+        // looks there. Asking for the desktop it is already on would be a
+        // request the compositor answers by switching to it — activating a
+        // window files nothing, but `MoveWindowToDesktop` still costs a
+        // recomposite — so the no-op is dropped here.
+        if let Some(desktop) = actions.desktop {
+            if desktop < num_desktops && desktop != info.workspace {
+                out.push(ShellRequest::MoveWindowToDesktop {
+                    window: id,
+                    desktop,
+                });
+            }
+        }
+
+        // `Normal` is not "restore it": a rule that says a window should start
+        // normal is describing what a window already is, and sending `Restore`
+        // to a window that opened maximized of its own accord would be the rule
+        // overriding the program rather than the default. `Fullscreen` has no
+        // request the shell may send about another client's window.
+        match actions.initial_state {
+            Some(window_rules::InitialState::Minimized) => {
+                out.push(ShellRequest::window(id, ShellControlAction::Minimize));
+            }
+            Some(window_rules::InitialState::Maximized) => {
+                out.push(ShellRequest::window(id, ShellControlAction::Maximize));
+            }
+            Some(window_rules::InitialState::Normal | window_rules::InitialState::Fullscreen)
+            | None => {}
+        }
+
+        // Last, so that a rule setting both a state and a zone lands in the
+        // zone: a snap is the more specific of the two instructions, and the
+        // compositor applies whichever it is told about second.
+        if let Some(zone) = actions.snap_zone {
+            if let Some(slot) = u8::try_from(zone).ok().and_then(snap::SnapSlot::from_index) {
+                out.push(ShellRequest::window(
+                    id,
+                    ShellControlAction::SnapToZone(slot),
+                ));
+            }
+        }
+
+        out
     }
 
     /// The windows the shell **lists** on the current desktop, in stacking
     /// order (bottom-to-top, so `.last()` is the topmost).
     ///
-    /// This is the taskbar's set, the Alt+Tab switcher's set and the overview's
-    /// set, and it deliberately **includes minimised windows**: a taskbar
-    /// button and a switcher row exist precisely so that a window the user put
-    /// away can be got back. It was called `taskbar_windows` and filtered on a
+    /// This is the taskbar's set and the overview's set, and it deliberately
+    /// **includes minimised windows**: a taskbar button exists precisely so
+    /// that a window the user put away can be got back. It used to filter on a
     /// flag that folded "unmapped" together with "minimised", which meant
     /// minimising a window removed its button *and* its switcher row in the
     /// same instant — leaving it reachable by nothing the shell draws. The
     /// `Activate`-rather-than-`Restore` care taken in `handle_press` was
     /// unreachable code for exactly as long as that lasted.
     ///
+    /// It is no longer the Alt+Tab switcher's set: see
+    /// [`switcher_windows`](Self::switcher_windows).
+    ///
     /// For the narrower "is it being drawn?" question, ask
     /// [`ManagedWindow::on_glass`].
     #[must_use]
     pub fn taskbar_windows(&self) -> Vec<&ManagedWindow> {
+        self.listed_windows(|w| !w.skip_taskbar)
+    }
+
+    /// The windows Alt+Tab cycles through, in the same order.
+    ///
+    /// The same set as [`taskbar_windows`](Self::taskbar_windows) until a
+    /// window rule says otherwise, and a separate method because
+    /// `skip_taskbar` and `skip_alt_tab` are separate rule actions: a docked
+    /// chat panel may want no button but must stay reachable from the
+    /// keyboard, and a background helper the other way round. One list serving
+    /// both would silently make each flag mean the other as well.
+    ///
+    /// The switcher's index counts into *this* list. That is why the two are
+    /// derived from one filter with one sort rather than written twice — an
+    /// index into a differently-ordered list would switch to a window the user
+    /// was not looking at.
+    #[must_use]
+    pub fn switcher_windows(&self) -> Vec<&ManagedWindow> {
+        self.listed_windows(|w| !w.skip_alt_tab)
+    }
+
+    /// The windows on the current desktop that `also` admits, bottom-to-top.
+    fn listed_windows(&self, also: impl Fn(&ManagedWindow) -> bool) -> Vec<&ManagedWindow> {
         let mut windows: Vec<&ManagedWindow> = self
             .windows
             .values()
-            .filter(|w| w.mapped && w.desktop == self.current_desktop)
+            .filter(|w| w.mapped && w.desktop == self.current_desktop && also(w))
             .collect();
         windows.sort_by_key(|w| w.z_order);
         windows
@@ -2441,13 +2635,14 @@ impl DesktopShell {
     /// Open the window switcher, on the window below the top one.
     ///
     /// That is the window the user was in before this one, which is what
-    /// Alt+Tab is for. `taskbar_windows` is ordered bottom to top, so it is the
-    /// second entry from the *end* — not index 1, which is what this used to
-    /// say. With exactly two windows index 1 *is* the focused window, so
-    /// press-and-release Alt+Tab — much the commonest use there is — re-focused
-    /// the window you were already in and appeared to do nothing at all.
+    /// Alt+Tab is for. [`switcher_windows`](Self::switcher_windows) is ordered
+    /// bottom to top, so it is the second entry from the *end* — not index 1,
+    /// which is what this used to say. With exactly two windows index 1 *is*
+    /// the focused window, so press-and-release Alt+Tab — much the commonest
+    /// use there is — re-focused the window you were already in and appeared to
+    /// do nothing at all.
     pub fn start_alt_tab(&mut self) {
-        let count = self.taskbar_windows().len();
+        let count = self.switcher_windows().len();
         if count > 1 {
             self.alt_tab_active = true;
             self.alt_tab_index = step::wrapping_before(count, count.saturating_sub(1));
@@ -2455,7 +2650,7 @@ impl DesktopShell {
     }
 
     pub fn next_alt_tab(&mut self) {
-        let count = self.taskbar_windows().len();
+        let count = self.switcher_windows().len();
         if count > 0 {
             // `step::wrapping_after` carries the "the list is not empty" condition
             // inside the expression that depends on it, and lands on the first
@@ -2467,7 +2662,7 @@ impl DesktopShell {
 
     /// Step the switcher to the previous window, for Shift+Alt+Tab.
     pub fn prev_alt_tab(&mut self) {
-        let count = self.taskbar_windows().len();
+        let count = self.switcher_windows().len();
         if let Some(last) = count.checked_sub(1) {
             // Clamping first matters: a stale index — windows closed while the
             // switcher was open — would otherwise step from one out-of-range
@@ -2487,7 +2682,7 @@ impl DesktopShell {
             return None;
         }
         self.alt_tab_active = false;
-        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;
+        let id = self.switcher_windows().get(self.alt_tab_index)?.id;
         Some(ShellRequest::window(id, ShellControlAction::Activate))
     }
 
@@ -3386,7 +3581,11 @@ impl DesktopShell {
         }
 
         let mut tree = RenderTree::new();
-        let windows = self.taskbar_windows();
+        // The same list `alt_tab_index` counts into — see
+        // [`switcher_windows`](Self::switcher_windows). Drawing the taskbar's
+        // list instead would highlight the wrong entry the moment any window
+        // was in one list and not the other.
+        let windows = self.switcher_windows();
 
         if windows.is_empty() {
             return None;
@@ -4670,7 +4869,8 @@ mod window_manager_tests {
 
     use super::{
         DesktopShell, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers, ShellControlAction,
-        ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState, text,
+        ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState, snap, text,
+        window_rules,
     };
 
     fn shell() -> DesktopShell {
@@ -4687,6 +4887,11 @@ mod window_manager_tests {
         // that dropped it would move every window to desktop 0 on the next
         // list, and the desktop tests below would pass by accident.
         info.workspace = window.desktop;
+        // Round-tripped for the same reason, and with a sharper edge: a helper
+        // that dropped it would leave every window anonymous after the first
+        // list, so a test that opened a named window and then did anything at
+        // all would see the name vanish for reasons nothing in the test says.
+        info.app_id.clone_from(&window.app_id);
         info
     }
 
@@ -4917,6 +5122,344 @@ mod window_manager_tests {
         assert!(raised > z_of(&shell, top));
         assert_eq!(shell.taskbar_windows().last().map(|w| w.id), Some(bottom));
         assert!(!shell.windows.get(&middle).unwrap().focused);
+    }
+
+    #[test]
+    fn the_program_a_window_belongs_to_arrives_with_the_list() {
+        // The shell never asks a window what it is; it only ever knows what the
+        // last list said. Two windows of one program and one of another,
+        // because telling those apart is the only thing the field is for.
+        let mut shell = shell();
+        let mut notes = WindowInfo::new(1, 40, "notes.md");
+        notes.app_id = "editor".to_string();
+        let mut draft = WindowInfo::new(2, 40, "draft.md");
+        draft.app_id = "editor".to_string();
+        let anon = WindowInfo::new(3, 41, "Some Window");
+        shell.apply_window_list(&WindowList::new(0, vec![notes, draft, anon]));
+
+        let of = |id: u64| {
+            shell
+                .windows
+                .get(&WindowId(id))
+                .expect("known")
+                .app_id
+                .clone()
+        };
+        assert_eq!(of(1), "editor");
+        assert_eq!(of(2), "editor");
+        assert_eq!(
+            of(3),
+            "",
+            "a window that named no program was given one from somewhere"
+        );
+    }
+
+    #[test]
+    fn a_window_is_described_by_the_latest_list_and_not_the_one_before() {
+        // Unlike the taskbar icon, which is shell-local state carried across
+        // lists, this is the compositor's own report. Carrying the previous
+        // value forward would mean a window that had been anonymous stayed
+        // anonymous for the rest of the session even after its program spoke
+        // up -- and the rules that key off it would never fire.
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![WindowInfo::new(1, 40, "notes.md")],
+        ));
+        assert_eq!(shell.windows.get(&WindowId(1)).expect("known").app_id, "");
+
+        let mut named = WindowInfo::new(1, 40, "notes.md");
+        named.app_id = "editor".to_string();
+        shell.apply_window_list(&WindowList::new(0, vec![named]));
+        assert_eq!(
+            shell.windows.get(&WindowId(1)).expect("known").app_id,
+            "editor"
+        );
+    }
+
+    // ==================================================================
+    // Window rules
+    //
+    // The rules engine decides; the shell only carries out the five actions
+    // it has a channel for. Every test here goes through `apply_window_list`,
+    // because that is the one place the engine is consulted and the
+    // once-per-arrival contract is the thing most likely to be broken by a
+    // later edit.
+    // ==================================================================
+
+    /// A window arriving, named, with whatever rules are in place.
+    fn arrive(shell: &mut DesktopShell, id: u64, app_id: &str) -> Vec<ShellRequest> {
+        let mut list = as_list(shell);
+        for other in &mut list {
+            other.focused = false;
+        }
+        let mut fresh = WindowInfo::new(id, 1, "A Window");
+        fresh.app_id = app_id.to_string();
+        fresh.focused = true;
+        fresh.workspace = shell.current_desktop;
+        list.push(fresh);
+        shell.apply_window_list(&WindowList::new(shell.current_desktop, list))
+    }
+
+    /// The same windows again, unchanged — the next frame.
+    fn again(shell: &mut DesktopShell) -> Vec<ShellRequest> {
+        let list = as_list(shell);
+        shell.apply_window_list(&WindowList::new(shell.current_desktop, list))
+    }
+
+    /// A rule about `app_id` whose actions `set` fills in.
+    fn rule(shell: &mut DesktopShell, app_id: &str, set: impl Fn(&mut window_rules::RuleActions)) {
+        let mut r = window_rules::WindowRule::new(
+            0,
+            "test rule",
+            window_rules::MatchCriteria::AppId(app_id.to_string()),
+        );
+        set(&mut r.actions);
+        assert!(
+            shell.rules.add_rule(r).is_some(),
+            "the rule should be taken"
+        );
+    }
+
+    #[test]
+    fn hiding_a_window_from_the_taskbar_does_not_hide_it_from_alt_tab() {
+        // The two flags are separate actions, and users mean different things
+        // by them: a chat window kept out of the taskbar is still somewhere
+        // you want to Alt+Tab to. One list serving both would make each flag
+        // silently mean the other.
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| a.skip_taskbar = Some(true));
+        arrive(&mut shell, 1, "chat");
+        arrive(&mut shell, 2, "editor");
+
+        let taskbar: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
+        let switcher: Vec<WindowId> = shell.switcher_windows().iter().map(|w| w.id).collect();
+        assert_eq!(taskbar, vec![WindowId(2)]);
+        assert_eq!(switcher, vec![WindowId(1), WindowId(2)]);
+    }
+
+    #[test]
+    fn hiding_a_window_from_alt_tab_does_not_hide_it_from_the_taskbar() {
+        let mut shell = shell();
+        rule(&mut shell, "monitor", |a| a.skip_alt_tab = Some(true));
+        arrive(&mut shell, 1, "monitor");
+        arrive(&mut shell, 2, "editor");
+
+        let taskbar: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
+        let switcher: Vec<WindowId> = shell.switcher_windows().iter().map(|w| w.id).collect();
+        assert_eq!(taskbar, vec![WindowId(1), WindowId(2)]);
+        assert_eq!(switcher, vec![WindowId(2)]);
+    }
+
+    #[test]
+    fn the_switcher_lands_on_the_window_its_index_names() {
+        // `alt_tab_index` counts into `switcher_windows`, so a switcher drawn
+        // from the taskbar's list — which this shell's rule makes a different
+        // list — would activate a window the user was not looking at.
+        let mut shell = shell();
+        rule(&mut shell, "monitor", |a| a.skip_alt_tab = Some(true));
+        arrive(&mut shell, 1, "monitor");
+        arrive(&mut shell, 2, "editor");
+        arrive(&mut shell, 3, "editor");
+
+        shell.start_alt_tab();
+        let request = shell.finish_alt_tab().expect("the switcher was open");
+        assert_eq!(
+            request,
+            ShellRequest::window(WindowId(2), ShellControlAction::Activate),
+            "Alt+Tab should reach the window below the top one, skipping the \
+             one the rule excluded"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_hides_a_window_keeps_hiding_it_on_later_lists() {
+        // Nothing in a window list says "this window is not in the taskbar" —
+        // the rule fired once, on arrival, and the answer is the shell's to
+        // keep. Re-evaluating instead of carrying it would be the other bug:
+        // one-shot rules would be destroyed on the frame after they were
+        // written.
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| a.skip_taskbar = Some(true));
+        arrive(&mut shell, 1, "chat");
+        again(&mut shell);
+        again(&mut shell);
+        assert!(shell.taskbar_windows().is_empty());
+    }
+
+    #[test]
+    fn a_rule_asking_for_a_maximized_start_asks_once_and_never_again() {
+        // "Initial state" means the state it *starts* in. Asking again on
+        // every list would snap a window the user un-maximised back within
+        // the frame, and there would be no way to un-maximise it at all.
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.initial_state = Some(window_rules::InitialState::Maximized);
+        });
+
+        let first = arrive(&mut shell, 1, "editor");
+        assert_eq!(
+            first,
+            vec![ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::Maximize
+            )]
+        );
+        assert!(again(&mut shell).is_empty(), "asked twice");
+        assert!(again(&mut shell).is_empty(), "asked a third time");
+    }
+
+    #[test]
+    fn a_one_shot_rule_is_spent_by_the_window_it_fired_on_and_not_by_the_frame() {
+        // The trap this guards: `evaluate` deletes one-shot rules, so calling
+        // it per *list* rather than per newly-arrived *window* would spend the
+        // rule on whatever window happened to be open when it was written.
+        let mut shell = shell();
+        let mut r = window_rules::WindowRule::new(
+            0,
+            "once",
+            window_rules::MatchCriteria::AppId("editor".to_string()),
+        );
+        r.one_shot = true;
+        r.actions.initial_state = Some(window_rules::InitialState::Minimized);
+        let id = shell.rules.add_rule(r).expect("the rule should be taken");
+
+        // Some unrelated window is already open, and several frames pass.
+        arrive(&mut shell, 1, "terminal");
+        again(&mut shell);
+        again(&mut shell);
+        assert!(
+            shell.rules.rule_by_id(id).is_some(),
+            "a one-shot rule was spent by a window it does not match"
+        );
+
+        let requests = arrive(&mut shell, 2, "editor");
+        assert_eq!(
+            requests,
+            vec![ShellRequest::window(
+                WindowId(2),
+                ShellControlAction::Minimize
+            )]
+        );
+        assert!(shell.rules.rule_by_id(id).is_none(), "now it is spent");
+        assert!(arrive(&mut shell, 3, "editor").is_empty());
+    }
+
+    #[test]
+    fn a_rule_files_a_window_on_another_desktop_only_when_that_is_a_move() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| a.desktop = Some(2));
+        assert_eq!(
+            arrive(&mut shell, 1, "editor"),
+            vec![ShellRequest::MoveWindowToDesktop {
+                window: WindowId(1),
+                desktop: 2,
+            }]
+        );
+
+        // A window that is already there needs no request. Sending one anyway
+        // would be a recomposite for nothing, every time such a window opened.
+        shell.current_desktop = 2;
+        assert!(
+            arrive(&mut shell, 2, "editor").is_empty(),
+            "asked to move a window to the desktop it is already on"
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_a_desktop_that_does_not_exist_is_dropped() {
+        // The number comes from a config file the user edits by hand. The
+        // compositor would refuse it, but the shell knows how many desktops
+        // there are and there is no reason to ask.
+        let mut shell = shell();
+        let beyond = shell.num_desktops;
+        rule(&mut shell, "editor", |a| a.desktop = Some(beyond));
+        assert!(arrive(&mut shell, 1, "editor").is_empty());
+    }
+
+    #[test]
+    fn a_rule_snaps_a_window_into_a_slot_the_compositor_knows() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| a.snap_zone = Some(1));
+        let slot = snap::SnapSlot::from_index(1).expect("1 names a slot");
+        assert_eq!(
+            arrive(&mut shell, 1, "editor"),
+            vec![ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::SnapToZone(slot)
+            )]
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_a_snap_slot_that_does_not_exist_is_dropped() {
+        let mut shell = shell();
+        let beyond = u32::from(snap::SnapSlot::COUNT);
+        rule(&mut shell, "editor", |a| a.snap_zone = Some(beyond));
+        assert!(arrive(&mut shell, 1, "editor").is_empty());
+    }
+
+    #[test]
+    fn a_rule_setting_both_a_state_and_a_zone_lands_in_the_zone() {
+        // Both are sent, in that order, because a snap is the more specific of
+        // the two instructions and the compositor applies whichever it hears
+        // about last.
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.initial_state = Some(window_rules::InitialState::Maximized);
+            a.snap_zone = Some(1);
+        });
+        let slot = snap::SnapSlot::from_index(1).expect("1 names a slot");
+        assert_eq!(
+            arrive(&mut shell, 1, "editor"),
+            vec![
+                ShellRequest::window(WindowId(1), ShellControlAction::Maximize),
+                ShellRequest::window(WindowId(1), ShellControlAction::SnapToZone(slot)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_that_names_no_program_is_left_alone_by_every_app_rule() {
+        // An unnamed program is not every program. If it were, one rule about
+        // one application would rearrange every window that declined to
+        // identify itself.
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.initial_state = Some(window_rules::InitialState::Minimized);
+            a.skip_taskbar = Some(true);
+        });
+        assert!(arrive(&mut shell, 1, "").is_empty());
+        assert_eq!(shell.taskbar_windows().len(), 1);
+    }
+
+    #[test]
+    fn where_a_window_was_last_left_is_remembered_from_the_lists_not_the_arrival() {
+        // "Remember last position" means the position it was last *at*, and a
+        // window moves long after it arrives — so this is the one thing read
+        // off every list rather than only the first.
+        let mut shell = shell();
+        arrive(&mut shell, 1, "editor");
+
+        let mut moved = as_list(&shell);
+        moved[0].x = 400;
+        moved[0].y = 300;
+        moved[0].width = 900;
+        moved[0].height = 700;
+        shell.apply_window_list(&WindowList::new(0, moved));
+
+        // Asked of the engine directly, because `position` is one of the
+        // twelve actions with no channel to the compositor — see
+        // `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
+        // What is under test is that the shell fed the rectangle in, which is
+        // the shell's half of the job.
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::RememberLast);
+        });
+        assert_eq!(
+            shell.rules.evaluate("A Window", "editor").position,
+            Some(window_rules::PositionSpec::Absolute { x: 400, y: 300 })
+        );
     }
 
     // ==================================================================

@@ -768,8 +768,20 @@ impl<T: Transport> ShellSession<T> {
             // Whole, not just the windows: which desktop is showing arrives
             // in the same frame, and a shell that read the two separately
             // could read them from different frames.
-            if let Some(list) = self.events.desktop() {
-                self.shell.apply_window_list(list);
+            //
+            // The requests are collected rather than sent inside the `if`
+            // because sending borrows `self.events` mutably and the list is a
+            // borrow *of* it. They are what the user's window rules asked for
+            // about windows that arrived in this list: a rule can only be
+            // carried out by asking the compositor, and the shell is the only
+            // thing here holding a connection.
+            let requests = if let Some(list) = self.events.desktop() {
+                self.shell.apply_window_list(list)
+            } else {
+                Vec::new()
+            };
+            for request in requests {
+                self.request(request)?;
             }
             self.dirty = true;
             worked = true;
@@ -1231,6 +1243,15 @@ impl<T: Transport> ShellSession<T> {
 fn chrome(title: &str, width: u32, height: u32, at: (i32, i32), layer: Layer) -> Spec {
     Spec {
         title: title.to_owned(),
+        // One id for all four surfaces, not one each: they are four windows of
+        // a single program, and saying so is exactly what an app id is for.
+        // Nothing reads it today — the shell's own chrome sits outside
+        // `Layer::Normal`, so it never reaches the window list rules are
+        // evaluated against — but leaving it empty would make the shell the one
+        // program on the desktop that declines to name itself, and the first
+        // tool to group windows by program would show it as four unrelated
+        // strangers.
+        app_id: "slateos-shell".to_owned(),
         width,
         height,
         position: Some(at),

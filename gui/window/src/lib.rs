@@ -235,6 +235,15 @@ pub struct WindowAttributes {
 pub struct Window {
     id: u64,
     title: String,
+    /// Which program this window belongs to; see [`Window::app_id`].
+    ///
+    /// A creation term rather than a report — nothing ever changes it — so by
+    /// rights it belongs in [`WindowAttributes`] beside `resizable`. It is here
+    /// instead because that struct is `Copy`, which is what lets
+    /// [`Window::attributes`] hand out a whole copy for the price of a move,
+    /// and a `String` would cost every caller of that accessor an allocation to
+    /// buy one field a tidier home.
+    app_id: String,
     width: u32,
     height: u32,
     x: i32,
@@ -255,6 +264,24 @@ impl Window {
     #[must_use]
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// Which *program* this window belongs to, as this program declared it.
+    ///
+    /// Unlike [`title`](Self::title), which answers "which document?" and
+    /// changes as the user works, this answers "which program?" and is the same
+    /// for every window the program opens, for as long as it runs. Empty when
+    /// the window declined to name one — which is what
+    /// [`WindowBuilder`] produces unless [`app_id`](WindowBuilder::app_id) was
+    /// called, and never what a title falls back to.
+    ///
+    /// Reading it back here is reading what *we* sent, not what the compositor
+    /// believes: the value is recorded at creation from the spec and there is no
+    /// event that revises it, by design — a program that could rename itself
+    /// mid-session could walk out from under a rule the user wrote about it.
+    #[must_use]
+    pub fn app_id(&self) -> &str {
+        &self.app_id
     }
 
     /// Client-area size in pixels.
@@ -604,6 +631,27 @@ impl WindowBuilder {
         }
     }
 
+    /// Name the program this window belongs to.
+    ///
+    /// Not the title. The title says which *document* is open and changes as
+    /// the user works; this says which *application* is running and must not
+    /// change, because it is what anything grouping or configuring "all of this
+    /// program's windows" keys on — window rules, taskbar grouping, the icon
+    /// lookup. Conventionally the executable's file stem, lower-cased.
+    ///
+    /// Applications built on [`app::run`](crate::app::run) do not call this:
+    /// [`App::app_id`](crate::app::App::app_id) supplies the executable's name
+    /// for them, and overriding *that* is the place to disagree.
+    ///
+    /// Advisory only — the compositor has no way to check it, so nothing may
+    /// grant a permission on the strength of it. See
+    /// [`WindowSpec::app_id`](guiremote::control::WindowSpec::app_id).
+    #[must_use]
+    pub fn app_id(mut self, app_id: impl Into<String>) -> Self {
+        self.spec.app_id = app_id.into();
+        self
+    }
+
     /// Ask for a specific screen position. Left unset, the compositor places
     /// it — which is what a window should normally allow, since only the
     /// compositor knows what else is on screen.
@@ -810,6 +858,7 @@ impl<T: Transport> EventLoop<T> {
         self.windows.push(Window {
             id,
             title: spec.title,
+            app_id: spec.app_id,
             width: spec.width,
             height: spec.height,
             // The compositor places an unpositioned window and reports where
@@ -1863,6 +1912,7 @@ mod tests {
     fn building_a_window_sends_the_spec_the_builder_describes() {
         let (mut events, server) = wired();
         let id = WindowBuilder::new("Settings", 640, 480)
+            .app_id("settings")
             .position(10, -20)
             .resizable(false)
             .decorations(false)
@@ -1879,6 +1929,10 @@ mod tests {
                 panic!("expected a create");
             };
             assert_eq!(sent.title, "Settings");
+            // Distinct from the title in case, so a builder that assigned the
+            // title to both fields would fail here rather than pass by looking
+            // close enough.
+            assert_eq!(sent.app_id, "settings");
             assert_eq!(sent.position, Some((10, -20)));
             assert!(!sent.resizable);
             assert!(!sent.decorations);
@@ -1971,6 +2025,25 @@ mod tests {
             .send_input(&[InputEvent::new(id, Event::Moved { x: 1900, y: 0 })]);
         events.poll().unwrap();
         assert_eq!(events.window(id).unwrap().position(), (1900, 0));
+    }
+
+    #[test]
+    fn a_window_that_names_no_program_sends_an_empty_id_rather_than_its_title() {
+        // The builder must not "helpfully" fall back to the title. A window
+        // that declines to identify its program has to say so, because the
+        // alternative — every window of a program carrying a *different* id,
+        // one per document — is worse than no id at all: it makes rules look
+        // like they work and then stop working when the user saves the file.
+        let (mut events, server) = wired();
+        let _ = WindowBuilder::new("notes.md — Editor", 640, 480)
+            .build(&mut events)
+            .unwrap();
+        let borrowed = server.borrow();
+        let RequestBody::CreateWindow(sent) = &borrowed.seen[0].body else {
+            panic!("expected a create");
+        };
+        assert_eq!(sent.title, "notes.md — Editor");
+        assert_eq!(sent.app_id, "");
     }
 
     #[test]
@@ -2286,6 +2359,7 @@ mod tests {
                 pid: 1234,
                 layer: Layer::Background,
                 title: "Wallpaper".to_owned(),
+                app_id: "wallpaper".to_owned(),
                 visible: true,
                 minimized: false,
                 maximized: false,
@@ -2307,6 +2381,10 @@ mod tests {
                 pid: 5678,
                 layer: Layer::Normal,
                 title: "Editor".to_owned(),
+                // Not "editor": the fixture's contract is that no field matches
+                // the other window's, and a lower-cased title would be exactly
+                // the value a store that reused the title for the id produced.
+                app_id: "notepad".to_owned(),
                 visible: false,
                 minimized: true,
                 maximized: true,

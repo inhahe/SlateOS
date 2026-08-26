@@ -84763,3 +84763,78 @@ since a column that is always zero misinforms. Do not leave it printed and
 unwritten.
 
 **Not a regression.** True since the module was written.
+
+---
+
+## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) — **open**, tech debt
+
+**In short:** The Settings panel has a "Window rules" page where you can say
+things like *"the editor should always open maximised on desktop 2"* or *"chat
+windows should be 80% transparent and always on top"*. As of today five of the
+seventeen things you can ask for actually happen. The other twelve are accepted
+by the panel, saved to the config file, shown in the rule list — and then
+nothing. There is no error and no greyed-out control: the rule simply has no
+effect, and the only way to find out is to write one and watch nothing happen.
+
+**Where:** `gui/desktop/src/window_rules.rs` (the `rule_actions!` field list,
+~line 255) declares the seventeen. `gui/desktop/src/lib.rs`
+`DesktopShell::rule_requests` turns the five that work into `ShellRequest`s.
+`gui/remote/src/control.rs` is the protocol that would have to grow for the
+rest.
+
+**What works today**
+
+| Field | How it is carried out |
+|---|---|
+| `skip_taskbar` | shell-local: `ManagedWindow::skip_taskbar`, filtered out of `taskbar_windows` |
+| `skip_alt_tab` | shell-local: filtered out of `switcher_windows` |
+| `initial_state` | `ShellControlAction::Minimize` / `Maximize` (but not `Fullscreen` — see below) |
+| `snap_zone` | `ShellControlAction::SnapToZone(SnapSlot)` |
+| `desktop` | `ShellRequest::MoveWindowToDesktop` |
+
+**What does not, and why.** The shell may only ask the compositor for things
+`ShellControlAction` names — eight verbs about *another client's* window
+(`Activate`, `Minimize`, `Restore`, `Maximize`, `Close`, `SnapLeft`,
+`SnapRight`, `SnapToZone`). Every other request in the protocol —
+`Move`, `Resize`, `SetOpacity`, `SetFullscreen`, `SetVisible` — resolves
+against **the sender's own window**, so a shell cannot use them on someone
+else's. That is a deliberate property of the protocol, not an oversight: it is
+what stops any client that can talk to the compositor from moving every other
+client's windows around.
+
+| Field | What it would need |
+|---|---|
+| `position` (incl. `RememberLast`, `CenterOnMonitor`) | a `ShellMove { window, x, y }` request |
+| `size` (incl. `RememberLast`) | a `ShellResize { window, w, h }` request |
+| `min_size`, `max_size` | a size-constraint request; the compositor has no per-window constraint store at all |
+| `opacity` | a `ShellSetOpacity { window, alpha }` request |
+| `always_on_top`, `always_on_bottom` | a per-window layer override; today `Layer` is fixed at creation by the client |
+| `target_monitor` | multi-monitor placement, which the compositor does not model yet |
+| `no_decorations` | decorations are the client's own; there is no request to strip them |
+| `prevent_close`, `prevent_move`, `prevent_resize` | a per-window policy the *compositor* enforces — these cannot be shell-side, because the shell is not in the path when the user drags a title bar |
+| `initial_state: Fullscreen` | `SetFullscreen` is self-only; needs a `ShellControlAction::Fullscreen` verb |
+
+**The proper fix**, and why it is not one commit: the eight-verb
+`ShellControlAction` is a lane-C-owned enum in `gui/remote`, so adding verbs is
+cheap — but `CONTROL_VERSION` is a wire version and each addition costs a bump
+plus a compositor-side implementation, and three of the twelve (`prevent_*`)
+need a policy store the compositor does not have. The honest increments are:
+
+1. `ShellMove` + `ShellResize` (unblocks `position`, `size`, and the
+   already-working `remember_state` bookkeeping that currently feeds nothing).
+2. `ShellSetOpacity` and a `Fullscreen` verb — both are one-line compositor
+   changes on top of state that already exists.
+3. A per-window layer override for `always_on_top` / `always_on_bottom`.
+4. A compositor-side policy store for `prevent_close` / `prevent_move` /
+   `prevent_resize`, and constraints for `min_size` / `max_size`.
+5. `target_monitor` last, behind multi-monitor support.
+
+**Severity while open:** low but *dishonest*, which is the part that matters.
+Nothing breaks; the user is shown a control that does nothing. If the fix is
+going to be deferred past the next Settings pass, the panel should grey out or
+mark the twelve rather than let them be written — a rule that is saved and
+ignored is worse than a control that says it is not available yet.
+
+**Not a regression.** Until 2026-08-26 the rules engine had no caller at all, so
+*seventeen* of seventeen did nothing. This is the state after wiring five of
+them up.

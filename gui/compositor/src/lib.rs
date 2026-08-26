@@ -922,6 +922,23 @@ pub struct Window {
     /// from [`opacity`](Self::opacity), which fades the *whole* window
     /// uniformly including its decorations.
     pub transparent: bool,
+    /// Whether the pointer passes straight through this window.
+    ///
+    /// When set, [`window_at`](Compositor::window_at) and
+    /// [`window_at_with_decorations`](Compositor::window_at_with_decorations)
+    /// behave as though the window were not there, so clicks, hovers, drags and
+    /// scrolls all land on whatever is behind it. The window is consequently
+    /// unfocusable by pointer and receives no pointer events at all.
+    ///
+    /// Orthogonal to [`transparent`](Self::transparent), which is about pixels
+    /// rather than the hit test. A heads-up overlay — the volume OSD floating
+    /// over the middle of the screen — needs this one: it is briefly on top of
+    /// everything, and must not swallow the click aimed at what is underneath.
+    ///
+    /// It does not affect painting, stacking, or keyboard routing. A window
+    /// that something else focuses still receives keys; see
+    /// `design-decisions.md` 566.
+    pub input_transparent: bool,
     /// Smallest client area the window may be resized to, if it named one.
     pub min_size: Option<(u32, u32)>,
     /// Largest client area the window may be resized to, if it named one.
@@ -1030,6 +1047,7 @@ impl Window {
             decorations: spec.decorations,
             resizable: spec.resizable,
             transparent: spec.transparent,
+            input_transparent: spec.input_transparent,
             min_size: spec.min_size,
             max_size: spec.max_size,
             cursor: CursorShape::Arrow,
@@ -7093,11 +7111,17 @@ impl Compositor {
     // -----------------------------------------------------------------------
 
     /// Find the topmost window whose client area contains the point.
+    ///
+    /// A window with [`input_transparent`](Window::input_transparent) set is
+    /// skipped rather than returned, so the search continues *past* it to what
+    /// is behind — which is the whole point: the click was aimed at the window
+    /// under the overlay, not at the overlay.
     fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
         // Iterate z_stack from top to bottom.
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
                 && win.is_showing(self.current_workspace)
+                && !win.input_transparent
                 && win.client_rect().contains(x, y)
             {
                 return Some(window_id);
@@ -7107,10 +7131,17 @@ impl Compositor {
     }
 
     /// Find the topmost window whose full area (including decorations) contains the point.
+    ///
+    /// Skips click-through windows for the same reason [`window_at`] does. Both
+    /// paths must agree: a window the pointer falls through for a click but not
+    /// for a title-bar drag would be draggable by an edge the user cannot see.
+    ///
+    /// [`window_at`]: Self::window_at
     fn window_at_with_decorations(&self, x: i32, y: i32) -> Option<WindowId> {
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
                 && win.is_showing(self.current_workspace)
+                && !win.input_transparent
                 && win.outer_rect().contains(x, y)
             {
                 return Some(window_id);
@@ -18329,6 +18360,79 @@ mod tests {
             comp.window_at_with_decorations(x, y),
             None,
             "a window on another desktop swallowed a click on its frame"
+        );
+    }
+
+    #[test]
+    fn a_click_through_window_hands_the_click_to_what_is_behind_it() {
+        // The point of the flag: an overlay covering the middle of the screen
+        // for two seconds must not eat the click aimed at the window under it.
+        // Note this asserts the click reaches the *lower* window, not merely
+        // that the upper one missed -- a hit test that stopped at the first
+        // click-through window and returned `None` would be just as broken,
+        // and would look identical from the overlay's side.
+        let mut comp = ungated_compositor(400, 300);
+        let rect = Rect::new(20, 20, 100, 80);
+        let (under, x, y) = painted_window(&mut comp, Layer::Normal, rect, 0xFF11_2233);
+
+        let mut spec = WindowSpec::new("Overlay", rect.width, rect.height);
+        spec.position = Some((rect.x, rect.y));
+        spec.decorations = false;
+        spec.layer = Layer::Overlay;
+        spec.input_transparent = true;
+        let over = comp.create_window_from_spec(&spec, 2);
+
+        assert!(
+            comp.z_stack.iter().position(|&w| w == over)
+                > comp.z_stack.iter().position(|&w| w == under),
+            "the overlay is not above the window it is meant to cover"
+        );
+        assert_eq!(
+            comp.window_at(x, y),
+            Some(under),
+            "a click-through overlay swallowed the click"
+        );
+        assert_eq!(
+            comp.window_at_with_decorations(x, y),
+            Some(under),
+            "a click-through overlay swallowed a click on the frame"
+        );
+    }
+
+    #[test]
+    fn a_click_through_window_is_still_drawn() {
+        // Click-through is a fact about the hit test alone. An overlay culled
+        // from the frame because it takes no clicks would be a volume
+        // indicator nobody can see -- the one thing it exists to do.
+        let mut comp = ungated_compositor(400, 300);
+        let rect = Rect::new(20, 20, 100, 80);
+        painted_window(&mut comp, Layer::Normal, rect, 0xFF11_2233);
+
+        let over = 0xFF44_5566;
+        let mut spec = WindowSpec::new("Overlay", rect.width, rect.height);
+        spec.position = Some((rect.x, rect.y));
+        spec.decorations = false;
+        spec.layer = Layer::Overlay;
+        spec.input_transparent = true;
+        let id = comp.create_window_from_spec(&spec, 2);
+        let bytes = solid_buffer_bytes(rect.width, rect.height, over);
+        comp.attach_buffer(
+            id,
+            u64::from(rect.width),
+            rect.width,
+            rect.height,
+            rect.width.saturating_mul(4),
+            BufferFormat::Xrgb8888,
+            &bytes,
+        )
+        .expect("attach buffer");
+
+        assert!(comp.compose_frame(), "nothing was drawn");
+        let client = comp.window_ref(id).expect("window").client_rect();
+        assert_eq!(
+            pixel_at(&comp, client.x + 1, client.y + 1),
+            over,
+            "a click-through window was not painted"
         );
     }
 

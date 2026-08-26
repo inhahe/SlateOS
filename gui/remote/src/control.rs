@@ -81,7 +81,16 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// than skipping one message in it. As with
 /// [`INPUT_VERSION`](crate::input::INPUT_VERSION) 2, "incompatible" is about
 /// what the other end can read, not only about where the bytes sit.
-pub const CONTROL_VERSION: u8 = 2;
+///
+/// **3** — [`WindowSpec`] gained
+/// [`input_transparent`](WindowSpec::input_transparent), one byte written
+/// directly after `transparent`. Unlike 2, this one *does* move bytes: every
+/// field after it in a `CreateWindow` message shifts by one, so a version-2
+/// decoder reads the min-size presence flag out of the new byte and
+/// desynchronises for the rest of the message. There is no way to add it that
+/// an older peer could skip — the encoding carries no per-field lengths — which
+/// is what the version number is for.
+pub const CONTROL_VERSION: u8 = 3;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -489,6 +498,22 @@ pub struct WindowSpec {
     pub decorations: bool,
     /// Whether the window's background may be transparent.
     pub transparent: bool,
+    /// Whether pointer input passes straight through the window to whatever is
+    /// behind it.
+    ///
+    /// Distinct from [`transparent`](Self::transparent), which is about pixels:
+    /// a window can be see-through and still clickable (a frosted panel), and
+    /// opaque yet click-through (a debug overlay). This flag is about the
+    /// hit test alone — the compositor behaves as though the window were not
+    /// there when deciding where a click, a hover or a scroll lands.
+    ///
+    /// The window can therefore never be focused by clicking it, and gets no
+    /// pointer events at all. It can still be raised, moved and painted by its
+    /// owner, and still receives keyboard input if something else focuses it.
+    ///
+    /// This is what a heads-up overlay needs — a volume OSD covering the middle
+    /// of the screen must not eat the click aimed at the window underneath it.
+    pub input_transparent: bool,
     /// Smallest client area the window can usefully be shown at.
     pub min_size: Option<(u32, u32)>,
     /// Largest client area the window wants to be shown at.
@@ -504,7 +529,7 @@ pub struct WindowSpec {
 
 impl WindowSpec {
     /// A titled window of the given size, with the ordinary defaults:
-    /// resizable, decorated, opaque, placed by the compositor.
+    /// resizable, decorated, opaque, clickable, placed by the compositor.
     #[must_use]
     pub fn new(title: impl Into<String>, width: u32, height: u32) -> Self {
         Self {
@@ -515,6 +540,7 @@ impl WindowSpec {
             resizable: true,
             decorations: true,
             transparent: false,
+            input_transparent: false,
             min_size: None,
             max_size: None,
             layer: Layer::Normal,
@@ -1112,6 +1138,7 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(u8::from(spec.resizable));
             out.push(u8::from(spec.decorations));
             out.push(u8::from(spec.transparent));
+            out.push(u8::from(spec.input_transparent));
             write_optional_size(out, spec.min_size);
             write_optional_size(out, spec.max_size);
             out.push(spec.layer.as_byte());
@@ -1395,6 +1422,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             let resizable = read_bool(r)?;
             let decorations = read_bool(r)?;
             let transparent = read_bool(r)?;
+            let input_transparent = read_bool(r)?;
             let min_size = read_optional_size(r)?;
             let max_size = read_optional_size(r)?;
             let layer_byte = r.read_u8()?;
@@ -1407,6 +1435,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 resizable,
                 decorations,
                 transparent,
+                input_transparent,
                 min_size,
                 max_size,
                 layer,
@@ -1634,6 +1663,10 @@ mod tests {
             resizable: true,
             decorations: false,
             transparent: true,
+            // Opposite to `transparent`, so a codec that confused the two —
+            // wrote one twice, or read the pair back in the wrong order —
+            // fails the round trip instead of passing by coincidence.
+            input_transparent: false,
             min_size: Some((320, 240)),
             max_size: Some((3840, 2160)),
             layer: Layer::Overlay,
@@ -2199,6 +2232,39 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), ALL.len());
+    }
+
+    #[test]
+    fn see_through_and_click_through_are_two_different_things() {
+        // All four combinations are meaningful and must survive the wire
+        // independently: a frosted panel is transparent and clickable, a debug
+        // overlay is opaque and click-through. If the codec ever wrote one flag
+        // for both, two of these four would come back wrong.
+        for (transparent, input_transparent) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let mut s = spec();
+            s.transparent = transparent;
+            s.input_transparent = input_transparent;
+            let req = Request::new(1, RequestBody::CreateWindow(s));
+            let back = round_trip_requests(std::slice::from_ref(&req));
+            let RequestBody::CreateWindow(got) = &back[0].body else {
+                panic!("wrong variant back")
+            };
+            assert_eq!(got.transparent, transparent);
+            assert_eq!(got.input_transparent, input_transparent);
+            // The fields written after the new byte must still line up; a
+            // desynchronised reader shows up here first.
+            assert_eq!(got.min_size, Some((320, 240)));
+            assert_eq!(got.layer, Layer::Overlay);
+        }
+    }
+
+    #[test]
+    fn a_new_window_is_clickable_until_it_says_otherwise() {
+        // The default matters more than most: a window that silently ignored
+        // every click would look broken in a way that gives no clue why.
+        assert!(!WindowSpec::new("Untitled", 640, 480).input_transparent);
     }
 
     #[test]

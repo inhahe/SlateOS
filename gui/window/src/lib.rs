@@ -211,6 +211,12 @@ pub struct WindowAttributes {
     pub decorations: bool,
     /// Whether its client area may be see-through.
     pub transparent: bool,
+    /// Whether the pointer passes through it to whatever is behind.
+    ///
+    /// See-through is about pixels; click-through is about the hit test, and
+    /// the two are independent — a frosted panel is the first without the
+    /// second, a heads-up overlay the second without necessarily the first.
+    pub input_transparent: bool,
     /// The smallest size the user may resize it to, if constrained.
     pub min_size: Option<(u32, u32)>,
     /// The largest size the user may resize it to, if constrained.
@@ -312,6 +318,12 @@ impl Window {
     #[must_use]
     pub const fn is_transparent(&self) -> bool {
         self.attributes.transparent
+    }
+
+    /// Whether the pointer passes through it to whatever is behind.
+    #[must_use]
+    pub const fn is_input_transparent(&self) -> bool {
+        self.attributes.input_transparent
     }
 
     /// The smallest size the user may resize it to, if constrained.
@@ -636,6 +648,23 @@ impl WindowBuilder {
         self
     }
 
+    /// Whether the pointer passes through the window to whatever is behind it.
+    ///
+    /// A click-through window is invisible to the hit test: it can never be
+    /// focused by clicking, receives no pointer events, and does not shield the
+    /// windows it covers. Painting, stacking and keyboard delivery are
+    /// unaffected.
+    ///
+    /// This is for heads-up overlays — a volume indicator that appears over the
+    /// middle of the screen for two seconds and must not swallow the click
+    /// aimed at what is underneath it. An ordinary window must not set it: a
+    /// window that silently ignores every click looks broken with no clue why.
+    #[must_use]
+    pub const fn input_transparent(mut self, input_transparent: bool) -> Self {
+        self.spec.input_transparent = input_transparent;
+        self
+    }
+
     /// Which band of the stacking order the window lives in.
     ///
     /// Almost every application wants the default, [`Layer::Normal`], and
@@ -794,6 +823,7 @@ impl<T: Transport> EventLoop<T> {
                 resizable: spec.resizable,
                 decorations: spec.decorations,
                 transparent: spec.transparent,
+                input_transparent: spec.input_transparent,
                 min_size: spec.min_size,
                 max_size: spec.max_size,
             },
@@ -1837,6 +1867,7 @@ mod tests {
             .resizable(false)
             .decorations(false)
             .transparent(true)
+            .input_transparent(true)
             .min_size(320, 240)
             .max_size(1280, 960)
             .build(&mut events)
@@ -1852,6 +1883,7 @@ mod tests {
             assert!(!sent.resizable);
             assert!(!sent.decorations);
             assert!(sent.transparent);
+            assert!(sent.input_transparent);
             assert_eq!(sent.min_size, Some((320, 240)));
             assert_eq!(sent.max_size, Some((1280, 960)));
         }
@@ -1863,6 +1895,7 @@ mod tests {
         assert!(!w.is_resizable());
         assert!(!w.has_decorations());
         assert!(w.is_transparent());
+        assert!(w.is_input_transparent());
         assert_eq!(w.min_size(), Some((320, 240)));
         assert_eq!(w.max_size(), Some((1280, 960)));
         assert_eq!(
@@ -1871,6 +1904,7 @@ mod tests {
                 resizable: false,
                 decorations: false,
                 transparent: true,
+                input_transparent: true,
                 min_size: Some((320, 240)),
                 max_size: Some((1280, 960)),
             }

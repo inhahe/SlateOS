@@ -1090,6 +1090,10 @@ impl<T: Transport> ShellSession<T> {
 /// would be a title bar on the title bars, and a shell panel the user could
 /// drag to a different size is a shell panel that no longer matches the work
 /// area the windows were tiled into.
+///
+/// Clickable, too. The one surface that is not — the heads-up overlay — says so
+/// at its own call site with `Spec { input_transparent: true, ..chrome(..) }`,
+/// which is where a reader will be asking the question.
 fn chrome(title: &str, width: u32, height: u32, at: (i32, i32), layer: Layer) -> Spec {
     Spec {
         title: title.to_owned(),
@@ -1099,6 +1103,7 @@ fn chrome(title: &str, width: u32, height: u32, at: (i32, i32), layer: Layer) ->
         resizable: false,
         decorations: false,
         transparent: true,
+        input_transparent: false,
         min_size: None,
         max_size: None,
         layer,

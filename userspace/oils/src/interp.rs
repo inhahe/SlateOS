@@ -2730,13 +2730,11 @@ impl std::fmt::Debug for InputSrc {
             InputSrc::File(_) => f.write_str("InputSrc::File"),
             InputSrc::Closed => f.write_str("InputSrc::Closed"),
             InputSrc::WriteOnly => f.write_str("InputSrc::WriteOnly"),
-            InputSrc::Directory(h) => {
-                f.write_str(if h.is_some() {
-                    "InputSrc::Directory(open)"
-                } else {
-                    "InputSrc::Directory(none)"
-                })
-            }
+            InputSrc::Directory(h) => f.write_str(if h.is_some() {
+                "InputSrc::Directory(open)"
+            } else {
+                "InputSrc::Directory(none)"
+            }),
         }
     }
 }

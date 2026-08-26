@@ -178,7 +178,6 @@ cmd_rcustat 3
 cmd_reclaim 2
 cmd_recoverypart 1
 cmd_remotedesktop 1
-cmd_rqstat 6
 cmd_rundialog 1
 cmd_schedclass 1
 cmd_schedwait 1

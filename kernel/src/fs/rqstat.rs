@@ -172,8 +172,28 @@ pub fn dequeue(cpu_id: u32) -> KernelResult<()> {
 }
 
 /// Record a load balance event (pull from `from` to `to`).
+///
+/// # Errors
+///
+/// [`KernelError::NotFound`] if *either* CPU is unregistered, and in that case
+/// neither counter moves and `total_balances` does not advance.
+///
+/// Both ids are resolved before either is written, which is the whole point.
+/// This used to be two independent `if let Some(…)` arms followed by an
+/// unconditional `Ok(())`, so a balance naming a CPU that does not exist was
+/// reported as success and still advanced `total_balances` — the module's own
+/// self-test asserts `enqueue(0).is_err()` before registration on the grounds
+/// that "no phantom CPU is created", and this was the one operation that broke
+/// that rule. It also made the pushes and pulls columns disagree by
+/// construction: a half-applied balance increments one side and not the other,
+/// and nothing in the output says so.
 pub fn record_balance(from_cpu: u32, to_cpu: u32) -> KernelResult<()> {
     with_state(|state| {
+        if !state.cpus.iter().any(|c| c.cpu_id == from_cpu)
+            || !state.cpus.iter().any(|c| c.cpu_id == to_cpu)
+        {
+            return Err(KernelError::NotFound);
+        }
         if let Some(c) = state.cpus.iter_mut().find(|c| c.cpu_id == from_cpu) {
             c.balance_pushes += 1;
         }
@@ -279,6 +299,26 @@ pub fn self_test() {
 
     // 5: Balance — push counted on `from`, pull on `to`.
     record_balance(0, 1).expect("balance");
+    let from = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 0)
+        .expect("find0");
+    let to = per_cpu()
+        .into_iter()
+        .find(|c| c.cpu_id == 1)
+        .expect("find1");
+    assert_eq!(from.balance_pushes, 1);
+    assert_eq!(to.balance_pulls, 1);
+    // A balance naming an unregistered CPU is refused from either side, and is
+    // refused *without partial effect*: the surviving CPU's counters and the
+    // global total are unchanged. Checked in both directions because the bug
+    // this replaces was two independent lookups — an implementation that
+    // resolved only the first id would still pass a one-sided test.
+    let (_, _, _, balances_before, _) = stats();
+    assert!(record_balance(0, 99).is_err());
+    assert!(record_balance(99, 1).is_err());
+    let (_, _, _, balances_after, _) = stats();
+    assert_eq!(balances_before, balances_after);
     let from = per_cpu()
         .into_iter()
         .find(|c| c.cpu_id == 0)

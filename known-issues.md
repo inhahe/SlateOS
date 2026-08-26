@@ -81306,8 +81306,54 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **457 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **451 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (thirtieth batch): `cmd_rqstat` (6) cleared —
+> 457 → 451 across 213 → 212 functions. Not pinned by a rung; nothing asserts
+> on `rqstat` shell output. Batch 29's rule was used as a *screen* rather than
+> a description: grepping the remaining modules for a register-like function
+> beside an `init_defaults` that seeds an empty `Vec` predicted `rqstat` before
+> any of its shell code was read, and the prediction held.
+>
+> **In short:** `rqstat` tracks each CPU's run-queue — how many tasks are
+> queued, how long they wait, how often the scheduler moves one CPU's work to
+> another. Where it could not read a number it used **cpu 0**, a **1000 ns**
+> wait, and for a migration, the pair **cpu 0 → cpu 1**. Three separate things
+> turned out to be wrong here, and only the first is the ledger's.
+>
+> * **The command had no `register` subcommand at all.** `rqstat init` seeds an
+>   empty table and `rqstat::register_cpu` existed in the module with nothing
+>   calling it, so `enqueue`, `dequeue`, `balance` and `wait` returned
+>   `NotFound` for the entire life of the shell. That is batch 26/27's
+>   generalisation again — *a module whose only caller is an interactive
+>   command is missing exactly the operation no test needed* — except that this
+>   time the missing operation was **creation**. It is also why the guessed
+>   `unwrap_or(0)` had never yet done damage: there was no cpu 0 for it to hit.
+>   The defect was latent, not absent, and adding the `register` arm is what
+>   would have armed it. Fixed together, in that order, deliberately.
+> * **`balance` guessed a *relationship*, not a value.** Its two operands had
+>   two *different* defaults — `from` fell back to 0 and `to` to 1 — so a
+>   mistyped pair did not record a vague or zeroed event, it fabricated a
+>   migration between two specific CPUs that never exchanged a task. And it
+>   fabricated the **same edge every time**, which is the part that matters:
+>   repeated identical errors read as a pattern, and a load-balancer report
+>   whose whole purpose is to show which CPUs feed which would show a hot 0→1
+>   edge that is an artifact of typing.
+> * **`rqstat::record_balance` was a write that could not fail** — a module
+>   bug, outside the ledger's scope, found while fixing the shell arm above it.
+>   It looked up each CPU with an independent `if let Some(…)` and then returned
+>   `Ok(())` unconditionally, so a balance naming a CPU that does not exist was
+>   *reported as success* and still advanced `total_balances`. The module's own
+>   self-test asserts `enqueue(0).is_err()` before registration, on the stated
+>   grounds that "no phantom CPU is created" — `record_balance` was the one
+>   operation that broke its own module's contract. It also made the `pushes`
+>   and `pulls` columns disagree by construction: a half-applied balance
+>   increments one side and not the other, and nothing in the output says so.
+>   Now both ids are resolved before either is written, and the self-test
+>   checks refusal from **both** directions with no partial effect — one-sided,
+>   because an implementation that resolved only the first id would still pass
+>   a one-directional test.
+>
 > **Burn-down log.** 2026-08-26 (twenty-ninth batch): `cmd_mmapstat` (6, plus
 > two uncounted) cleared — 463 → 457 across 214 → 213 functions. Not pinned by
 > a rung; nothing asserts on `mmapstat` output.

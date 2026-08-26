@@ -299,10 +299,25 @@ impl fmt::Display for JsonValue {
             JsonValue::Null => write!(f, "null"),
             JsonValue::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
             JsonValue::Number(n) => {
-                if *n == (*n as u64) as f64 && *n >= 0.0 {
+                // The exact comparison is the point, and clippy's suggested
+                // epsilon would be a bug: this asks "is this float an integer,
+                // so I may print it without a decimal point?", and only an
+                // exact round-trip answers it. Within a margin of error,
+                // 3.0000001 would print as `3` and the manifest would claim a
+                // file size, mtime or block count that was never measured.
+                // `as u64` saturates rather than wrapping, so a value too large
+                // for u64 round-trips to u64::MAX-as-f64, compares unequal, and
+                // correctly takes the float branch; NaN fails every comparison
+                // and does the same.
+                #[allow(
+                    clippy::float_cmp,
+                    reason = "exactness is the question being asked; see comment"
+                )]
+                let integral = *n == (*n as u64) as f64 && *n >= 0.0;
+                if integral {
                     write!(f, "{}", *n as u64)
                 } else {
-                    write!(f, "{}", n)
+                    write!(f, "{n}")
                 }
             }
             JsonValue::Str(s) => {
@@ -1177,7 +1192,7 @@ fn relative_path(full: &Path, base: &Path) -> PathBuf {
     for comp in rel.components() {
         match comp {
             Component::Prefix(prefix) => {
-                out.extend_from_slice(prefix.as_os_str().as_encoded_bytes())
+                out.extend_from_slice(prefix.as_os_str().as_encoded_bytes());
             }
             Component::RootDir => out.push(b'/'),
             _ => {
@@ -2616,24 +2631,82 @@ enum Command {
     Help,
 }
 
+/// A one-pass reader over one command's arguments.
+///
+/// Every `parse_*_args` function below walks its slice the same way: take an
+/// argument, and if it is a flag that carries a value, take the following one
+/// too. Written by hand that is an index and a counter — `args[i]`, `i += 1` —
+/// and there were forty-five of them across the nine parsers. Each is a panic
+/// if the counter passes the end and an overflow if it wraps, but the real cost
+/// was that every parser re-implemented the advance, so a new option could be
+/// added that stepped the counter in one branch and forgot it in another. That
+/// bug does not announce itself: the parser silently reads a flag's value as
+/// the next flag, and `backup prune --keep-last 5 --dest /d` quietly prunes
+/// somewhere else.
+///
+/// Holding an iterator makes both problems unstatable — there is no index to
+/// run off the end, no counter to increment, and advancing is the only way to
+/// read. [`value`](Self::value) and [`number`](Self::number) additionally put
+/// the "flag requires an argument" wording in one place, so a tenth option
+/// cannot arrive phrased differently from its nine neighbours.
+struct ArgCursor<'a> {
+    rest: std::slice::Iter<'a, String>,
+}
+
+impl<'a> ArgCursor<'a> {
+    fn new(args: &'a [String]) -> Self {
+        Self { rest: args.iter() }
+    }
+
+    /// The next argument, or `None` once they are exhausted.
+    fn next(&mut self) -> Option<&'a str> {
+        self.rest.next().map(String::as_str)
+    }
+
+    /// The next argument, required, because `flag` carries a value.
+    ///
+    /// `what` completes the sentence "`--dest` requires …": pass `"a path"`,
+    /// `"a pattern"`, `"a value"`.
+    fn value(&mut self, flag: &str, what: &str) -> Result<&'a str, String> {
+        self.next().ok_or_else(|| format!("{flag} requires {what}"))
+    }
+
+    /// The next argument parsed as a count, required, because `flag` carries
+    /// one. Kept distinct from [`value`](Self::value) so that the four
+    /// `--keep-*` retention options cannot disagree about how a non-number is
+    /// reported.
+    fn number(&mut self, flag: &str) -> Result<u64, String> {
+        self.value(flag, "a number")?
+            .parse::<u64>()
+            .map_err(|_| format!("{flag} must be a number"))
+    }
+}
+
 fn parse_args() -> Result<Command, String> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 2 {
+    // `split_first` drops argv[0] without naming an index, and its `None` arm
+    // covers the argv[0]-less case that `args[1]` would have panicked on
+    // instead. A process can be spawned with an empty argv; a backup tool that
+    // aborts rather than printing its usage in that case is a worse answer.
+    let Some((_program, rest)) = args.split_first() else {
         return Ok(Command::Help);
-    }
+    };
+    let Some((command, options)) = rest.split_first() else {
+        return Ok(Command::Help);
+    };
 
-    match args[1].as_str() {
+    match command.as_str() {
         "help" | "--help" | "-h" => Ok(Command::Help),
-        "create" => parse_create_args(&args[2..]),
-        "restore" => parse_restore_args(&args[2..]),
-        "list" => parse_list_args(&args[2..]),
-        "verify" => parse_verify_args(&args[2..]),
-        "prune" => parse_prune_args(&args[2..]),
-        "schedule" => parse_schedule_args(&args[2..]),
-        "diff" => parse_diff_args(&args[2..]),
-        "info" => parse_info_args(&args[2..]),
-        cmd => Err(format!("unknown command: {}", cmd)),
+        "create" => parse_create_args(options),
+        "restore" => parse_restore_args(options),
+        "list" => parse_list_args(options),
+        "verify" => parse_verify_args(options),
+        "prune" => parse_prune_args(options),
+        "schedule" => parse_schedule_args(options),
+        "diff" => parse_diff_args(options),
+        "info" => parse_info_args(options),
+        cmd => Err(format!("unknown command: {cmd}")),
     }
 }
 
@@ -2644,30 +2717,18 @@ fn parse_create_args(args: &[String]) -> Result<Command, String> {
     let mut exclude: Vec<String> = Vec::new();
     let mut follow_symlinks = false;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
             "--full" => backup_type = BackupType::Full,
             "--incremental" => backup_type = BackupType::Incremental,
             "--differential" => backup_type = BackupType::Differential,
             "--follow-symlinks" => follow_symlinks = true,
-            "--source" => {
-                i += 1;
-                source = Some(PathBuf::from(
-                    args.get(i).ok_or("--source requires a path")?,
-                ));
-            }
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--exclude" => {
-                i += 1;
-                exclude.push(args.get(i).ok_or("--exclude requires a pattern")?.clone());
-            }
-            other => return Err(format!("unknown option for create: {}", other)),
+            "--source" => source = Some(PathBuf::from(cur.value("--source", "a path")?)),
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--exclude" => exclude.push(cur.value("--exclude", "a pattern")?.to_string()),
+            other => return Err(format!("unknown option for create: {other}")),
         }
-        i += 1;
     }
 
     let source = source.ok_or("--source is required")?;
@@ -2683,33 +2744,23 @@ fn parse_create_args(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_restore_args(args: &[String]) -> Result<Command, String> {
-    if args.is_empty() {
-        return Err("restore requires a BACKUP_ID".to_string());
-    }
+    let mut cur = ArgCursor::new(args);
+    let backup_id = cur
+        .next()
+        .ok_or("restore requires a BACKUP_ID")?
+        .to_string();
 
-    let backup_id = args[0].clone();
     let mut backup_dest: Option<PathBuf> = None;
     let mut restore_dest: Option<PathBuf> = None;
     let mut file_pattern: Option<String> = None;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                restore_dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--from" => {
-                i += 1;
-                backup_dest = Some(PathBuf::from(args.get(i).ok_or("--from requires a path")?));
-            }
-            "--files" => {
-                i += 1;
-                file_pattern = Some(args.get(i).ok_or("--files requires a pattern")?.clone());
-            }
-            other => return Err(format!("unknown option for restore: {}", other)),
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => restore_dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--from" => backup_dest = Some(PathBuf::from(cur.value("--from", "a path")?)),
+            "--files" => file_pattern = Some(cur.value("--files", "a pattern")?.to_string()),
+            other => return Err(format!("unknown option for restore: {other}")),
         }
-        i += 1;
     }
 
     let backup_dest = backup_dest.ok_or("--from is required (backup repository path)")?;
@@ -2727,27 +2778,17 @@ fn parse_list_args(args: &[String]) -> Result<Command, String> {
     let mut dest: Option<PathBuf> = None;
     let mut source: Option<String> = None;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--source" => {
-                i += 1;
-                source = Some(args.get(i).ok_or("--source requires a path")?.clone());
-            }
-            other => {
-                // Positional: treat as dest
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for list: {}", other));
-                }
-            }
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--source" => source = Some(cur.value("--source", "a path")?.to_string()),
+            // The first bare word is the destination, so `backup list /backups`
+            // works without the flag. A second one is a typo, not a second
+            // destination, and saying so beats silently backing up elsewhere.
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for list: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("destination path is required")?;
@@ -2755,29 +2796,16 @@ fn parse_list_args(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_verify_args(args: &[String]) -> Result<Command, String> {
-    if args.is_empty() {
-        return Err("verify requires a BACKUP_ID".to_string());
-    }
-
-    let backup_id = args[0].clone();
+    let mut cur = ArgCursor::new(args);
+    let backup_id = cur.next().ok_or("verify requires a BACKUP_ID")?.to_string();
     let mut dest: Option<PathBuf> = None;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            other => {
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for verify: {}", other));
-                }
-            }
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for verify: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("--dest is required")?;
@@ -2791,58 +2819,17 @@ fn parse_prune_args(args: &[String]) -> Result<Command, String> {
     let mut keep_weekly: Option<u64> = None;
     let mut keep_monthly: Option<u64> = None;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--keep-last" => {
-                i += 1;
-                keep_last = Some(
-                    args.get(i)
-                        .ok_or("--keep-last requires a number")?
-                        .parse::<u64>()
-                        .map_err(|_| "--keep-last must be a number")?,
-                );
-            }
-            "--keep-daily" => {
-                i += 1;
-                keep_daily = Some(
-                    args.get(i)
-                        .ok_or("--keep-daily requires a number")?
-                        .parse::<u64>()
-                        .map_err(|_| "--keep-daily must be a number")?,
-                );
-            }
-            "--keep-weekly" => {
-                i += 1;
-                keep_weekly = Some(
-                    args.get(i)
-                        .ok_or("--keep-weekly requires a number")?
-                        .parse::<u64>()
-                        .map_err(|_| "--keep-weekly must be a number")?,
-                );
-            }
-            "--keep-monthly" => {
-                i += 1;
-                keep_monthly = Some(
-                    args.get(i)
-                        .ok_or("--keep-monthly requires a number")?
-                        .parse::<u64>()
-                        .map_err(|_| "--keep-monthly must be a number")?,
-                );
-            }
-            other => {
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for prune: {}", other));
-                }
-            }
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--keep-last" => keep_last = Some(cur.number("--keep-last")?),
+            "--keep-daily" => keep_daily = Some(cur.number("--keep-daily")?),
+            "--keep-weekly" => keep_weekly = Some(cur.number("--keep-weekly")?),
+            "--keep-monthly" => keep_monthly = Some(cur.number("--keep-monthly")?),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for prune: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("--dest is required")?;
@@ -2860,24 +2847,14 @@ fn parse_schedule_args(args: &[String]) -> Result<Command, String> {
     let mut dest: Option<PathBuf> = None;
     let mut interval: Option<String> = None;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--source" => {
-                i += 1;
-                source = Some(args.get(i).ok_or("--source requires a path")?.clone());
-            }
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--interval" => {
-                i += 1;
-                interval = Some(args.get(i).ok_or("--interval requires a value")?.clone());
-            }
-            other => return Err(format!("unknown option for schedule: {}", other)),
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--source" => source = Some(cur.value("--source", "a path")?.to_string()),
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--interval" => interval = Some(cur.value("--interval", "a value")?.to_string()),
+            other => return Err(format!("unknown option for schedule: {other}")),
         }
-        i += 1;
     }
 
     let source = source.ok_or("--source is required")?;
@@ -2892,30 +2869,23 @@ fn parse_schedule_args(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_diff_args(args: &[String]) -> Result<Command, String> {
-    if args.len() < 2 {
-        return Err("diff requires two BACKUP_IDs".to_string());
-    }
-
-    let id1 = args[0].clone();
-    let id2 = args[1].clone();
+    let mut cur = ArgCursor::new(args);
+    let id1 = cur
+        .next()
+        .ok_or("diff requires two BACKUP_IDs")?
+        .to_string();
+    let id2 = cur
+        .next()
+        .ok_or("diff requires two BACKUP_IDs")?
+        .to_string();
     let mut dest: Option<PathBuf> = None;
 
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            other => {
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for diff: {}", other));
-                }
-            }
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for diff: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("--dest is required")?;
@@ -2923,29 +2893,16 @@ fn parse_diff_args(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_info_args(args: &[String]) -> Result<Command, String> {
-    if args.is_empty() {
-        return Err("info requires a BACKUP_ID".to_string());
-    }
-
-    let backup_id = args[0].clone();
+    let mut cur = ArgCursor::new(args);
+    let backup_id = cur.next().ok_or("info requires a BACKUP_ID")?.to_string();
     let mut dest: Option<PathBuf> = None;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            other => {
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for info: {}", other));
-                }
-            }
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for info: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("--dest is required")?;
@@ -4097,7 +4054,7 @@ mod tests {
 
     #[test]
     fn test_json_parse_array() {
-        let val = json_parse(r#"[1, 2, 3]"#).unwrap();
+        let val = json_parse(r"[1, 2, 3]").unwrap();
         let arr = val.as_array().unwrap();
         assert_eq!(arr.len(), 3);
         assert_eq!(arr[0].as_u64(), Some(1));
@@ -4427,5 +4384,226 @@ mod tests {
             restore_path_within(dest, Path::new("\\\\server\\share\\file.txt")),
             None
         );
+    }
+
+    // --- Argument parsing ---
+    //
+    // The nine `parse_*_args` functions had no tests at all, which is how they
+    // came to share forty-five hand-written `args[i]` / `i += 1` pairs: nothing
+    // would have noticed a parser that stepped its counter in one branch and
+    // forgot it in another. `ArgCursor` removed the counter; these pin the
+    // behaviour it replaced, and in particular that a flag's *value* is
+    // consumed rather than re-read as the next flag.
+
+    /// Builds an argument slice the way `parse_args` hands one over — the
+    /// command word already stripped.
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The rejection message from a parse that was supposed to fail.
+    ///
+    /// `Result::unwrap_err` would need `Command: Debug`, and deriving one on
+    /// four production types so that a test can phrase an assertion is the
+    /// tail wagging the dog. This asks the same question without the bound.
+    fn parse_err(result: Result<Command, String>) -> String {
+        match result {
+            Ok(_) => panic!("expected the parse to be rejected, but it succeeded"),
+            Err(message) => message,
+        }
+    }
+
+    #[test]
+    fn create_reads_every_option() {
+        let args = argv(&[
+            "--incremental",
+            "--source",
+            "/home/u",
+            "--dest",
+            "/backups",
+            "--exclude",
+            "*.tmp",
+            "--exclude",
+            "*.log",
+            "--follow-symlinks",
+        ]);
+        let Ok(Command::Create(opts)) = parse_create_args(&args) else {
+            panic!("expected a create command");
+        };
+        assert!(matches!(opts.backup_type, BackupType::Incremental));
+        assert_eq!(opts.source, PathBuf::from("/home/u"));
+        assert_eq!(opts.dest, PathBuf::from("/backups"));
+        assert_eq!(opts.exclude, vec!["*.tmp".to_string(), "*.log".to_string()]);
+        assert!(opts.follow_symlinks);
+    }
+
+    /// The bug the cursor makes unstatable. A parser that consumed `--dest`'s
+    /// value but forgot to step past it would read `/backups` as an option and
+    /// reject it — or worse, read a *later* flag's value as a flag and prune
+    /// somewhere the user never named. Every value-taking option is followed
+    /// here by another option, so a missed advance cannot pass.
+    #[test]
+    fn a_flag_value_is_consumed_not_reparsed_as_a_flag() {
+        let args = argv(&[
+            "--keep-last",
+            "5",
+            "--keep-daily",
+            "7",
+            "--keep-weekly",
+            "4",
+            "--keep-monthly",
+            "12",
+            "--dest",
+            "/backups",
+        ]);
+        let Ok(Command::Prune(opts)) = parse_prune_args(&args) else {
+            panic!("expected a prune command");
+        };
+        assert_eq!(opts.keep_last, Some(5));
+        assert_eq!(opts.keep_daily, Some(7));
+        assert_eq!(opts.keep_weekly, Some(4));
+        assert_eq!(opts.keep_monthly, Some(12));
+        assert_eq!(opts.dest, PathBuf::from("/backups"));
+    }
+
+    #[test]
+    fn a_flag_with_no_value_left_names_itself() {
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--source"]))),
+            "--source requires a path"
+        );
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--exclude"]))),
+            "--exclude requires a pattern"
+        );
+        assert_eq!(
+            parse_err(parse_prune_args(&argv(&["--keep-last"]))),
+            "--keep-last requires a number"
+        );
+        assert_eq!(
+            parse_err(parse_schedule_args(&argv(&["--interval"]))),
+            "--interval requires a value"
+        );
+    }
+
+    #[test]
+    fn a_retention_count_that_is_not_a_number_is_refused() {
+        assert_eq!(
+            parse_err(parse_prune_args(&argv(&["--keep-daily", "weekly"]))),
+            "--keep-daily must be a number"
+        );
+        // Negative counts parse as `u64` failures rather than as flags, which
+        // is the honest answer: "keep the last -1 backups" has no meaning.
+        assert_eq!(
+            parse_err(parse_prune_args(&argv(&["--keep-last", "-1"]))),
+            "--keep-last must be a number"
+        );
+    }
+
+    #[test]
+    fn create_requires_a_source_and_a_destination() {
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--dest", "/backups"]))),
+            "--source is required"
+        );
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--source", "/home/u"]))),
+            "--dest is required"
+        );
+    }
+
+    #[test]
+    fn an_unknown_option_names_the_command_it_was_given_to() {
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--verbose"]))),
+            "unknown option for create: --verbose"
+        );
+        assert_eq!(
+            parse_err(parse_schedule_args(&argv(&["--daily"]))),
+            "unknown option for schedule: --daily"
+        );
+    }
+
+    /// The commands that take an operand must not read the following option as
+    /// one. `restore`, `verify`, `info` take one; `diff` takes two.
+    #[test]
+    fn an_operand_is_read_before_the_options() {
+        let Ok(Command::Restore(opts)) = parse_restore_args(&argv(&[
+            "backup-42",
+            "--from",
+            "/backups",
+            "--dest",
+            "/restore",
+            "--files",
+            "*.txt",
+        ])) else {
+            panic!("expected a restore command");
+        };
+        assert_eq!(opts.backup_id, "backup-42");
+        assert_eq!(opts.backup_dest, PathBuf::from("/backups"));
+        assert_eq!(opts.restore_dest, PathBuf::from("/restore"));
+        assert_eq!(opts.file_pattern, Some("*.txt".to_string()));
+
+        let Ok(Command::Diff { id1, id2, dest }) =
+            parse_diff_args(&argv(&["a", "b", "--dest", "/backups"]))
+        else {
+            panic!("expected a diff command");
+        };
+        assert_eq!(id1, "a");
+        assert_eq!(id2, "b");
+        assert_eq!(dest, PathBuf::from("/backups"));
+    }
+
+    #[test]
+    fn a_missing_operand_says_which_one() {
+        assert_eq!(
+            parse_err(parse_restore_args(&argv(&[]))),
+            "restore requires a BACKUP_ID"
+        );
+        assert_eq!(
+            parse_err(parse_verify_args(&argv(&[]))),
+            "verify requires a BACKUP_ID"
+        );
+        assert_eq!(
+            parse_err(parse_info_args(&argv(&[]))),
+            "info requires a BACKUP_ID"
+        );
+        assert_eq!(
+            parse_err(parse_diff_args(&argv(&["only-one"]))),
+            "diff requires two BACKUP_IDs"
+        );
+    }
+
+    /// `backup list /backups` and `backup list --dest /backups` mean the same
+    /// thing, but a *second* bare word is a typo rather than a second
+    /// destination — silently ignoring it would list the wrong repository.
+    #[test]
+    fn a_bare_word_is_the_destination_but_only_the_first() {
+        let Ok(Command::List { dest, source }) = parse_list_args(&argv(&["/backups"])) else {
+            panic!("expected a list command");
+        };
+        assert_eq!(dest, PathBuf::from("/backups"));
+        assert_eq!(source, None);
+
+        assert_eq!(
+            parse_err(parse_list_args(&argv(&["/backups", "/other"]))),
+            "unknown option for list: /other"
+        );
+    }
+
+    /// `--dest --source` takes `--source` as the destination rather than
+    /// reporting a missing value. That is what the hand-written parsers did and
+    /// what most Unix tools do: an option's value is the next word, whatever it
+    /// looks like, so a path that genuinely begins with `-` stays reachable.
+    /// Pinned because it is a decision, not an accident.
+    #[test]
+    fn a_flags_value_may_itself_look_like_a_flag() {
+        let Ok(Command::Create(opts)) =
+            parse_create_args(&argv(&["--source", "--dest", "--dest", "/backups"]))
+        else {
+            panic!("expected a create command");
+        };
+        assert_eq!(opts.source, PathBuf::from("--dest"));
+        assert_eq!(opts.dest, PathBuf::from("/backups"));
     }
 }

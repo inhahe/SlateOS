@@ -80630,7 +80630,48 @@ the detector-style checkers use, replacing both ad-hoc copies. Filed as
 
 ---
 
-## `TD-A-CHECKERS-STRIP-COMMENTS-WITH-A-LINE-LOCAL-SCANNER` (lane A, 2026-08-25) — **open**
+## `TD-A-CHECKERS-STRIP-COMMENTS-WITH-A-LINE-LOCAL-SCANNER` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (both findings); two lower-risk copies remain, below
+
+> **Resolution.** `strip_noise` in `check-recursive-locks.py` gained a
+> `keep_literals=True` mode — literals are still *scanned*, so a `//` inside
+> `"https://x"` opens no comment and a `"` inside a comment opens no string,
+> but their characters pass through instead of being blanked. Seven new
+> self-test cases assert the exact output (22 cases total), because the mode is
+> about *which characters survive* and a body list would not notice a literal
+> being blanked.
+>
+> `check-option-refusal.py`, `check-usage-status.py` and `check-query-status.py`
+> now use it, each taking three identically-numbered views of one file:
+> verbatim for reporting, comments-gone/literals-kept for matching, both-gone
+> for brace counting. Four of the five hand-rolled scanners are retired.
+>
+> **Verified by replay rather than by assertion**, which is this family's own
+> stated test convention. Against a 130 000-line revision from before the fix,
+> with the exemption tables emptied, `check-usage-status.py` reports the same
+> **24** findings and `check-option-refusal.py` the same **53**, byte for byte,
+> under both the old and new scanners. Finding 2 was demonstrated the other
+> way: on a synthetic block ending `return;  // deliberately no set_exit(1)
+> here`, the old `check-query-status.py` reports a false positive and the new
+> one is clean, while both still report an unmodified true positive
+> identically.
+>
+> **A third defect surfaced while testing Finding 2.** `check-query-status.py`
+> shipped with two `ALLOWED` exemptions that never exempted anything: replaying
+> the introducing commit (`425d37b27`) with `ALLOWED` emptied reports zero
+> findings, so the detector had never reached those two blocks. Both sites
+> still exist and both stated reasons are still correct — the entries were
+> written against a shape the checker does not match. They are now prose in the
+> file (to paste back if the guard rule is ever widened) and the table is
+> empty, with a staleness guard added mirroring the one its sibling has carried
+> from the start. An exemption that exempts nothing is exactly the "rubber
+> stamp" that file's own comment warns about, and nothing was looking for it.
+>
+> **Still open, deliberately.** `check-variant-lists.py` and
+> `check-tick-wiring.py` keep their own `strip_comments`. Both already blank
+> comments *before* counting braces — they are the two that documented the
+> hazard in the first place — so neither has the defect this entry is about.
+> They are worth folding in for the raw-string and char-literal cases, but that
+> is tidying, not a fix.
 
 **In short:** the fix above taught two gate scripts to ignore comments, but
 each got its own small comment-stripper that only understands `// …` to

@@ -81197,18 +81197,31 @@ file` all still work — so the rung cannot pass by having broken the options.
 > Per §607 the bracketed operands keep their defaults — `create <pid> [sq_size]
 > [cq_size]`, `submit <ring_id> [count]` — and rung 84 asserts they still work.
 >
-> **The wording gate earned its keep a second time in two batches**, in the
-> opposite direction from the last one. Rung 84's closing assertion was written
+> **The wording gate fired again**, in the opposite direction from the last
+> batch. Rung 84's closing assertion was written
 > `assert_output_lacks(.., b"NotFound")`; the gate reported it as *an assertion
 > that can never fire*, because `NotFound` reaches the screen only through a
-> `{:?}` and appears in no format string in the shell. It was right — that
-> assertion would have passed against an unfixed kernel, and against one that
-> printed nothing at all. Rewritten against the `aiostat: error:` prefix, which
-> is fixed text, it means what it was meant to mean. Note the pair: in batch
-> sixteen the gate rejected a `contains` that was true but underivable and the
-> fix belonged in the **code**; here it rejected a `lacks` that was vacuous and
-> the fix belonged in the **test**. Both times the useful move was to believe
-> the gate rather than to soften the assertion.
+> `{:?}` and appears in no format string in the shell. Rewritten against the
+> `aiostat: error:` prefix, which is fixed text, it says the same thing in a
+> form the gate can check.
+>
+> **Be precise about what the gate did and did not establish** — the first
+> version of this paragraph said the old assertion "would have passed against an
+> unfixed kernel", and that is simply false. Checked: an unfixed `aiostat
+> destroy 1O` prints `aiostat: error: NotFound`, so `lacks b"NotFound"` would
+> have **failed**. The assertion discriminated correctly at run time. What the
+> gate objects to is narrower and still worth objecting to: it cannot verify
+> that `NotFound` is text this command can produce, so it cannot tell a working
+> `lacks` from one whose needle is misspelled — and a misspelled `lacks` passes
+> forever, silently, against every kernel. The assertion was right by luck of
+> spelling, and depending on that luck is the thing the gate exists to stop.
+>
+> Two corrections in two consecutive entries, both in the same direction —
+> crediting the gate with more than it found — is itself the finding. The gate
+> is a spelling check on assertions with a four-byte fixed-run rule. It is not
+> an oracle, it does not know what a command *should* print, and every claim
+> here that it "caught a bug" should be read back against what it actually
+> reported before being believed.
 >
 > **Burn-down log.** 2026-08-26 (sixteenth batch): `cmd_cgiostat` (8) cleared —
 > 552 → 544 across 227 → 226 functions. Pinned by `kshell::self_test` rung 83.
@@ -81254,13 +81267,31 @@ file` all still work — so the rung cannot pass by having broken the options.
 > down, in the one line whose job is to *reveal* it. Both spellings are now
 > branches of the format string.
 >
-> `check-selftest-wording.py` is what surfaced this: it rejected the rung's
+> `check-selftest-wording.py` is what surfaced it: it rejected the rung's
 > `bw=100000000B/s` and `bw=unlimited` assertions as text the command cannot
-> print, which was **correct** — no format literal in the function contained
-> either. The temptation was to weaken the assertions; the right reading is that
-> the gate had found a real defect in the code under test, not in the test. That
-> is the second time this gate has paid for itself by refusing an assertion that
-> was true of the running kernel but underivable from its source.
+> print, and pointed at the interpolated `bw={}` that made them underivable.
+>
+> **Correction, made the same day, because the first version of this paragraph
+> overstated the gate's role and this file is only useful if it is trustworthy.**
+> The gate did *not* force the code change. Its rule is a run of four consecutive
+> bytes of fixed text, and the rejected needles fell one byte short — `bw=` is
+> three. Measured directly against the checker's own `producible()`, ` bw=unlimited`
+> with a single leading space is accepted against the **old** format string:
+>
+> | needle | against old `… throttle={} bw={}` |
+> |---|---|
+> | `bw=unlimited` | rejected (fixed run `bw=`, 3 bytes) |
+> | ` bw=unlimited` | **accepted** (fixed run ` bw=`, 4 bytes) |
+>
+> So widening the needle by one character would have satisfied the gate and left
+> the `alloc::format!` in place. The code change stands on the argument above it
+> — that a zero limit rendering as `unlimited` should be visible in the function
+> that renders it — and not on any demand from the checker. What the gate
+> actually did was smaller and still worth having: it drew attention to a line
+> whose two spellings were invented outside its own format string. Claiming it
+> had "found a defect the fix was forced to address" would make the gate sound
+> stronger than it is, and would teach the next reader to stop investigating at
+> the first plausible story.
 >
 > **Burn-down log.** 2026-08-26 (fifteenth batch): `cmd_taskio` (8) cleared —
 > 560 → 552 across 228 → 227 functions. Pinned by `kshell::self_test` rung 82.

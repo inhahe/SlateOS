@@ -101711,14 +101711,24 @@ fn cmd_kstack(args: &str) {
             shell_println!("kstack: initialized");
         }
         "register" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(16384);
+            // `size` is required, and the usage line was corrected to say so.
+            // It is the one place §607's read-the-brackets rule is overridden:
+            // the old `[size]` promised a default, but `list` divides by it —
+            // the `(N%)` column is
+            // `high_water * 100 / stack_size`. A guessed denominator does not
+            // produce a wrong *cell*, it rescales a column the operator reads
+            // as a measurement — and 16384 was the worst possible guess for
+            // it, being both this OS's page size and the textbook kernel stack
+            // size, so the rescaled figure looks exactly as authoritative as a
+            // real one. There is no stack size a CPU can be assumed to have;
+            // the operand states a fact about the machine.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "kstack", sub, "CPU number") else {
+                return;
+            };
+            let Some(size) = required_num::<u32>(&parts, 2, "kstack", sub, "stack size in bytes")
+            else {
+                return;
+            };
             match kstack::register_cpu(cpu, size) {
                 Ok(()) => shell_println!("kstack: registered cpu {} size={}", cpu, size),
                 Err(e) => {
@@ -101728,14 +101738,18 @@ fn cmd_kstack(args: &str) {
             }
         }
         "usage" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let used = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // A guessed `used` is not a recoverable mistake: `record_usage`
+            // increments `samples` and adds to `total_used_samples`, and the
+            // `avg` column is the quotient. Recording a phantom zero-byte
+            // sample therefore drags the mean down permanently — there is no
+            // operation that retracts a sample, so the only repair is to
+            // discard the whole table.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "kstack", sub, "CPU number") else {
+                return;
+            };
+            let Some(used) = required_num::<u32>(&parts, 2, "kstack", sub, "byte count") else {
+                return;
+            };
             match kstack::record_usage(cpu, used) {
                 Ok(()) => shell_println!("kstack: cpu {} usage={}", cpu, used),
                 Err(e) => {
@@ -101745,10 +101759,9 @@ fn cmd_kstack(args: &str) {
             }
         }
         "overflow" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(cpu) = required_num::<u32>(&parts, 1, "kstack", sub, "CPU number") else {
+                return;
+            };
             match kstack::record_overflow(cpu) {
                 Ok(()) => shell_println!("kstack: overflow on cpu {}", cpu),
                 Err(e) => {
@@ -101758,10 +101771,9 @@ fn cmd_kstack(args: &str) {
             }
         }
         "guard" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(cpu) = required_num::<u32>(&parts, 1, "kstack", sub, "CPU number") else {
+                return;
+            };
             match kstack::record_guard_hit(cpu) {
                 Ok(()) => shell_println!("kstack: guard hit on cpu {}", cpu),
                 Err(e) => {
@@ -101809,9 +101821,11 @@ fn cmd_kstack(args: &str) {
         "test" => kstack::self_test(),
         _ => {
             shell_println!("Usage: kstack <init|register|usage|overflow|guard|list|stats|test>");
-            shell_println!("  register <cpu> [size]   — register CPU stack");
-            shell_println!("  usage <cpu> <bytes>     — record stack usage");
-            set_exit(1);
+            shell_println!("  register <cpu> <size>   — register a CPU stack, size in bytes");
+            shell_println!("  usage <cpu> <bytes>     — record a stack-usage sample");
+            shell_println!("  overflow <cpu>          — record a stack overflow");
+            shell_println!("  guard <cpu>             — record a guard-page hit");
+            end_help_arm("kstack", sub);
         }
     }
 }

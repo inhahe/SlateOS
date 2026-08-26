@@ -30,7 +30,6 @@
 # seeing what had been there all along. See
 # `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`.
 cmd_acpistat 1
-cmd_aiostat 8
 cmd_alloc_trace 1
 cmd_applaunch 1
 cmd_apppermissions 1

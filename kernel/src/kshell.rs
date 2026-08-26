@@ -18090,6 +18090,108 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and no throttle event is recorded", &out, b"throttle event");
     }
 
+    serial_println!(
+        "  kshell::self_test 84: a refusal that names the wrong cause sends the reader to the \
+         wrong place, so `aiostat' refuses the word instead of the object"
+    );
+    // `aiostat` shows the two failure modes of a guessed number side by side in
+    // one subcommand, which is why it is worth a rung of its own after rung 83.
+    //
+    // Its ring ids start at 1, so a guessed `0` never collided with a live ring
+    // — `aiostat destroy 1O` did fail. It failed saying `error: NotFound`,
+    // which states that the ring the user named does not exist. The ring does
+    // exist. The *word* could not be read. A wrong-but-confident diagnosis is
+    // not a milder version of no diagnosis: it spends the reader's next hour in
+    // the subsystem rather than on the character they mistyped.
+    //
+    // The counts have no such luck. `submit <ring>` guessed `1`, so a mistyped
+    // count did not fail at all; it filed a measurement nobody took.
+    {
+        let _ = capture_command("aiostat init");
+
+        let out = capture_command("aiostat create 4243 256 512");
+        assert_output_contains("a ring can be created", &out, b"(pid=4243 sq=256 cq=512)");
+        assert_eq!(last_exit(), 0, "`aiostat create 4243 …` succeeds");
+
+        // The pid is the fact the whole ring is keyed on, and `unwrap_or(0)`
+        // made a ring for a process that does not exist — then reported it
+        // created, so every later submission against it looked legitimate.
+        let out = capture_command("aiostat create 4l43");
+        assert_output_contains(
+            "a process id that cannot be read is named",
+            &out,
+            b"`4l43' is not a process id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable process id errors");
+        assert_output_lacks("and no ring is reported created", &out, b"created ring");
+
+        // §607's control: the queue sizes are bracketed in the synopsis, so
+        // omitting them still means the documented defaults.
+        let out = capture_command("aiostat create 4244");
+        assert_output_contains(
+            "omitting the bracketed queue sizes still uses the documented defaults",
+            &out,
+            b"(pid=4244 sq=256 cq=512)",
+        );
+        assert_eq!(last_exit(), 0, "`aiostat create 4244` succeeds");
+
+        let out = capture_command("aiostat create 4245 25x");
+        assert_output_contains(
+            "but an unreadable queue size is named rather than defaulted",
+            &out,
+            b"`25x' is not a submission queue size",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable submission queue size errors");
+
+        // The fabricated measurement. Submit a real count, then a mistyped one,
+        // and check the counter did not move: that the refusal happened is less
+        // important than that nothing was recorded.
+        let _ = capture_command("aiostat submit 1 7");
+        let out = capture_command("aiostat rings");
+        assert_output_contains("a real submission is counted", &out, b" submitted=7");
+
+        let out = capture_command("aiostat submit 1 1O24");
+        assert_output_contains(
+            "an entry count that cannot be read is named",
+            &out,
+            b"`1O24' is not an entry count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable entry count errors");
+        assert_output_lacks("and nothing is reported submitted", &out, b"submitted 1 to");
+
+        let out = capture_command("aiostat rings");
+        assert_output_contains(
+            "and the counter still holds only the submissions that were really asked for",
+            &out,
+            b" submitted=7",
+        );
+
+        // The misdiagnosis. The old message blamed the ring; the new one blames
+        // the word, which is the thing that was actually wrong.
+        let out = capture_command("aiostat destroy 1O");
+        assert_output_contains(
+            "a ring id that cannot be read is named",
+            &out,
+            b"`1O' is not a ring id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable ring id errors");
+        // Asserted against the `aiostat: error:` prefix rather than against the
+        // word `NotFound`. The two are equivalent for this command — that
+        // prefix is the only line the subsystem's errors ever come out on — but
+        // `NotFound` reaches the screen solely through a `{:?}`, so no format
+        // string in the shell contains it and nothing outside a running kernel
+        // could tell whether the assertion was checking anything at all. The
+        // wording gate said exactly that, and it was right.
+        assert_output_lacks(
+            "and the failure is no longer reported as the subsystem's own error",
+            &out,
+            b"aiostat: error:",
+        );
+
+        let _ = capture_command("aiostat destroy 1");
+        let _ = capture_command("aiostat destroy 2");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -96986,18 +97088,29 @@ fn cmd_aiostat(args: &str) {
             shell_println!("aiostat: initialized");
         }
         "create" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let sq = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(256);
-            let cq = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(512);
+            // `aiostat create 1O 256` created a ring owned by **pid 0** and
+            // reported it created. Every later `submit`/`complete` against that
+            // ring then filed real-looking io_uring traffic against a process
+            // that does not exist — the ring is the object the whole subsystem
+            // is keyed on, so one unreadable pid at creation time poisons every
+            // statistic downstream of it.
+            //
+            // The queue sizes keep their defaults: the synopsis brackets them as
+            // `create <pid> [sq_size] [cq_size]`, so omitting them is a
+            // documented request (§607). Only the unreadable word is refused.
+            let Some(pid) = required_num::<u32>(&parts, 1, "aiostat", sub, "process id") else {
+                return;
+            };
+            let Some(sq) =
+                optional_num::<u32>(&parts, 2, "aiostat", sub, "submission queue size", 256)
+            else {
+                return;
+            };
+            let Some(cq) =
+                optional_num::<u32>(&parts, 3, "aiostat", sub, "completion queue size", 512)
+            else {
+                return;
+            };
             match aiostat::create_ring(pid, sq, cq) {
                 Ok(id) => shell_println!(
                     "aiostat: created ring {} (pid={} sq={} cq={})",
@@ -97013,10 +97126,17 @@ fn cmd_aiostat(args: &str) {
             }
         }
         "destroy" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Ring ids are allocated from 1, so the guessed `0` did at least
+            // fail rather than destroy someone else's ring. It failed *with the
+            // wrong reason*: `aiostat destroy 1O` printed
+            // `aiostat: error: NotFound`, which tells the user that ring 1 does
+            // not exist. Ring 1 does exist; the word `1O` is what could not be
+            // read. A diagnostic that blames the right operand for the wrong
+            // cause is worse than a bare failure, because it sends the reader
+            // to look at the subsystem instead of at what they typed.
+            let Some(id) = required_num::<u32>(&parts, 1, "aiostat", sub, "ring id") else {
+                return;
+            };
             match aiostat::destroy_ring(id) {
                 Ok(()) => shell_println!("aiostat: destroyed ring {}", id),
                 Err(e) => {
@@ -97026,14 +97146,23 @@ fn cmd_aiostat(args: &str) {
             }
         }
         "submit" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let n = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            // The two operands failed in the two different ways this entry has
+            // been cataloguing, in one statement. The id's guessed `0` is not a
+            // live ring, so it surfaced as `NotFound` — a refusal, but one that
+            // names the wrong culprit. The count's guessed `1` is a
+            // *measurement*: `aiostat submit 3 1O24` recorded **one**
+            // submission where a thousand and twenty-four were meant, reported
+            // `submitted 1 to ring 3`, and left a counter that is now simply
+            // wrong with nothing anywhere to contradict it.
+            //
+            // The count stays optional (`submit <ring_id> [count]` — §607); the
+            // id does not.
+            let Some(id) = required_num::<u32>(&parts, 1, "aiostat", sub, "ring id") else {
+                return;
+            };
+            let Some(n) = optional_num::<u32>(&parts, 2, "aiostat", sub, "entry count", 1) else {
+                return;
+            };
             match aiostat::submit(id, n) {
                 Ok(()) => shell_println!("aiostat: submitted {} to ring {}", n, id),
                 Err(e) => {
@@ -97043,14 +97172,12 @@ fn cmd_aiostat(args: &str) {
             }
         }
         "complete" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let n = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            let Some(id) = required_num::<u32>(&parts, 1, "aiostat", sub, "ring id") else {
+                return;
+            };
+            let Some(n) = optional_num::<u32>(&parts, 2, "aiostat", sub, "entry count", 1) else {
+                return;
+            };
             match aiostat::complete(id, n) {
                 Ok(()) => shell_println!("aiostat: completed {} from ring {}", n, id),
                 Err(e) => {

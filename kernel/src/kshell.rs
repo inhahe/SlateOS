@@ -129675,7 +129675,7 @@ fn cmd_unzip(args: &str) {
                 entry.uncompressed_size,
                 entry.compressed_size,
                 method_str,
-                entry.name.display()
+                Path::new(&entry.name).display()
             );
             total_size = total_size.saturating_add(entry.uncompressed_size);
             total_compressed = total_compressed.saturating_add(entry.compressed_size);
@@ -129710,8 +129710,11 @@ fn cmd_unzip(args: &str) {
         let Ok(out_path) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
             // A name that resolves to nothing under the base is an archive
             // artefact, not an attack; only report a real escape.
-            if entry.name.components().any(|c| c == Path::new("..")) {
-                shell_println!("  unzip: refusing unsafe member '{}'", entry.name.display());
+            // The `zip` crate carries entry names as raw bytes -- an archive
+            // member name is not a path until `confine_under` has accepted it.
+            let name = Path::new(&entry.name);
+            if name.components().any(|c| c == Path::new("..")) {
+                shell_println!("  unzip: refusing unsafe member '{}'", name.display());
                 errors = errors.saturating_add(1);
             }
             continue;
@@ -129744,7 +129747,7 @@ fn cmd_unzip(args: &str) {
         let file_data = match zip::extract_entry(&data, entry) {
             Ok(d) => d,
             Err(e) => {
-                shell_println!("  unzip: '{}': {:?}", entry.name.display(), e);
+                shell_println!("  unzip: '{}': {:?}", Path::new(&entry.name).display(), e);
                 errors = errors.saturating_add(1);
                 set_exit(1);
                 continue;
@@ -131395,7 +131398,7 @@ fn cmd_zip(args: &str) {
         if abs_path.is_empty() {
             // Directory marker.
             entries.push(zip::ZipWriteEntry {
-                name: name.clone(),
+                name: name.clone().into_vec(),
                 data: Vec::new(),
                 store_only: true,
             });
@@ -131417,7 +131420,7 @@ fn cmd_zip(args: &str) {
         total_in = total_in.wrapping_add(raw_data.len() as u64);
 
         entries.push(zip::ZipWriteEntry {
-            name: name.clone(),
+            name: name.clone().into_vec(),
             data: raw_data,
             store_only,
         });

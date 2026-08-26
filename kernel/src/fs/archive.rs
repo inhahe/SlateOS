@@ -311,7 +311,10 @@ fn list_zip(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
     Ok(zip_entries
         .iter()
         .map(|e| ArchiveEntry {
-            name: e.name.clone(),
+            // The `zip` crate carries names as raw bytes, because an entry
+            // name out of an untrusted archive is not a path until it has been
+            // confined under a destination (see `extract_all` below).
+            name: PathBuf::from(e.name.clone()),
             size: e.uncompressed_size,
             kind: if e.is_dir {
                 EntryKind::Directory
@@ -466,7 +469,7 @@ pub fn extract_one_format<N: AsRef<Path> + ?Sized>(
             let entries = crate::fs::zip::parse(data)?;
             let entry = entries
                 .iter()
-                .find(|e| e.name.as_path() == name)
+                .find(|e| Path::new(&e.name) == name)
                 .ok_or(KernelError::NotFound)?;
             crate::fs::zip::extract_entry(data, entry)
         }
@@ -693,7 +696,7 @@ fn create_zip(entries: &[CreateEntry]) -> Vec<u8> {
         zip_entries.push(ZipWriteEntry {
             // The zip writer carries names as bytes end to end, so no UTF-8
             // narrowing is needed (unlike the `ar` writer below).
-            name: dir_member_name(&e.name, e.kind == EntryKind::Directory),
+            name: dir_member_name(&e.name, e.kind == EntryKind::Directory).into_vec(),
             data: e.data.clone(),
             store_only: false,
         });

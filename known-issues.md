@@ -84569,3 +84569,140 @@ Unrelated to the parsing defect, and not reachable through it — the guessed
 values are all in range; it is the *stored* pair that has to be inverted.
 
 **Not a regression.** True since `update_for_time` was written.
+
+---
+
+## `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` (lane A, 2026-08-26) — **open**
+
+**In short:** `cgmem` tracks a cgroup's memory as one total (`usage`) plus a
+breakdown of that same memory into two buckets (`rss` for a program's own
+pages, `cache` for cached file data). Charging always keeps the two in step.
+Un-charging does not: it subtracts from the total and from one bucket
+*separately*, and each subtraction stops at zero on its own. Two shell commands
+are enough to leave a cgroup reporting a total smaller than one of its own
+parts.
+
+**Where.** `kernel/src/fs/cgmem.rs`, `record_uncharge` (~line 176):
+
+```rust
+c.usage_pages = c.usage_pages.saturating_sub(pages);
+if is_cache {
+    c.cache_pages = c.cache_pages.saturating_sub(pages);
+} else {
+    c.rss_pages = c.rss_pages.saturating_sub(pages);
+}
+```
+
+`record_charge` maintains the invariant `usage_pages == rss_pages +
+cache_pages`: it adds `pages` to `usage_pages` and to exactly one of the two
+buckets, and `swap_pages` is never written by either function. `record_uncharge`
+subtracts from `usage_pages` and from one bucket, but the two `saturating_sub`
+calls floor independently, so whenever the named bucket holds fewer pages than
+are being un-charged the total drops by more than the breakdown does.
+
+**Reproduce.**
+
+```
+cgmem init
+cgmem create demo 1000
+cgmem charge 1 100 rss      → usage=100 rss=100 cache=0
+cgmem uncharge 1 50 cache   → usage=50  rss=100 cache=0
+cgmem list                  →   [1] demo  usage=50/1000 rss=100 cache=0 swap=0 oom=0
+```
+
+The cgroup now reports 50 pages of memory of which 100 are resident.
+
+**Why it matters beyond the arithmetic.** `usage_pages` is the number
+`record_charge` compares against `limit_pages` to decide whether the cgroup has
+exceeded its ceiling. An un-charge that deflates the total without deflating
+the breakdown therefore buys the cgroup headroom it does not have: after the
+sequence above the cgroup may charge another 950 pages before it trips its
+limit, while genuinely holding 100. The error is in the permissive direction,
+which is the direction that does not announce itself.
+
+**Not reachable only through a typo.** This was noticed while surveying
+`cmd_cgmem` for the guessed-value burn-down, where the `[rss|cache]` operand
+was read with `unwrap_or("rss") == "cache"` and so turned any misspelling into
+`rss`. But the sequence above types `cache` correctly; the defect is in the
+subsystem, not in the parse, and clearing the parse does not clear it.
+
+**Proper fix.** Un-charge no more from the aggregate than actually left the
+bucket, so the two can never diverge:
+
+```rust
+let actual = if is_cache {
+    let n = pages.min(c.cache_pages);
+    c.cache_pages -= n;
+    n
+} else {
+    let n = pages.min(c.rss_pages);
+    c.rss_pages -= n;
+    n
+};
+c.usage_pages -= actual;   // == rss + cache still holds
+```
+
+An alternative — refusing an un-charge larger than the bucket with
+`KernelError::InvalidArgument` — is worth considering *instead*, since silently
+un-charging less than asked is itself a kind of guess. The reason to prefer the
+clamp is that `record_uncharge` has exactly one honest job, keeping the two
+views of the same memory consistent, and a caller who over-un-charges has
+already lost track; refusing leaves the caller's own accounting wrong with no
+way to resynchronise. That is a genuine trade-off and is recorded here rather
+than decided in passing.
+
+**Not a regression.** True since `record_uncharge` was written.
+
+---
+
+## `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN` (lane A, 2026-08-26) — **open**
+
+**In short:** `cgmem create` takes a memory ceiling, and every charge checks
+whether the cgroup has gone over it. The result of that check is written to a
+counter that no command prints. So the shell asks you for a limit, watches it
+being exceeded, and has no way to tell you that it was.
+
+**Where.** `kernel/src/fs/cgmem.rs`. `record_charge` (~line 167) does:
+
+```rust
+if c.usage_pages > c.limit_pages {
+    c.high_events += 1;
+}
+```
+
+`high_events` is declared at line 49 with the comment `// Times usage exceeded
+high watermark`, incremented there, asserted once inside `cgmem::self_test`
+(test 6), and read nowhere else. It is absent from `stats()`, which returns
+`(cgroup_count, total_charges, total_uncharges, total_oom_kills, ops)`, and
+absent from `cmd_cgmem`'s `list`, which prints `usage`, `rss`, `cache`, `swap`
+and `oom`. There is no accessor for it.
+
+**The same section has a second dead field.** `swap_pages` is initialised to 0
+in `create` and is never assigned again by any function in the module —
+`record_charge` and `record_uncharge` touch `rss_pages` and `cache_pages` only.
+`cmd_cgmem list` prints it as `swap={}`, so every cgroup the shell has ever
+displayed reports `swap=0`, not because no pages were swapped but because
+nothing can ever make it say otherwise. A statistic that is structurally
+constant is worse than an absent one: it reads as evidence.
+
+**Why these two are one entry.** They are the same failure at the two ends of
+the pipe. `high_events` is measured and not reported; `swap_pages` is reported
+and not measured. Between them, `cgmem list`'s eight columns include one that
+cannot be wrong and one that cannot be right, and the limit the user was asked
+for at `create` time influences neither.
+
+**Relation to `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.**
+That entry is the stricter version of this one — there the limit is stored and
+never compared at all. Here the comparison happens; only its output is
+unreachable. The two share a cause worth naming: a limit operand is easy to
+accept and store, and the work of *acting* on it is a separate change that the
+shape of the code does not force anyone to make.
+
+**Proper fix.** Add `high_events` to the `list` line and to `stats()`, so the
+comparison that already happens is visible. `swap_pages` needs the opposite
+decision made first — either give the module a `record_swap` (which is what the
+field's presence implies was intended) or delete the field and its column,
+since a column that is always zero misinforms. Do not leave it printed and
+unwritten.
+
+**Not a regression.** True since the module was written.

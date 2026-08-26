@@ -9258,8 +9258,13 @@ pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
 
     // The parent process blocks in os.waitpid until its forked child exits, so
     // this can take a bit longer than a single-process test — give it headroom.
+    //
+    // Named rather than inlined so the verdict below can report the budget it
+    // actually used. A failure that says "after 4000 yields" and a constant
+    // that someone later raises to 8000 must not be able to disagree.
+    const FORKEXEC_MAX_YIELDS: u32 = 4000;
     let mut became_zombie = false;
-    for _ in 0..4000 {
+    for _ in 0..FORKEXEC_MAX_YIELDS {
         if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
             became_zombie = true;
             break;
@@ -9268,6 +9273,15 @@ pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
     }
 
     let state = pcb::state(result.pid);
+    // Capture the *scheduler* state too, while the Task is still alive — the
+    // `on_thread_exit` below destroys it. `pcb::state` reports `Running` both
+    // for a task that is merely starved (`Ready`: the poll budget was too
+    // small) and for one parked on an event that already happened (`Blocked`:
+    // a lost wakeup, a real bug). Those want opposite fixes, and logging only
+    // the process state records the same word for both — which is how the one
+    // observed failure of this test came to be diagnosed twice and wrongly.
+    // See `A-FASTPY-FORKEXEC-PARENT-MISSES-THE-4000-YIELD-POLL-BUDGET`.
+    let sched_state = crate::sched::task_state(result.task_id);
     let exit_code = pcb::exit_code(result.pid);
 
     thread::on_thread_exit(result.task_id);
@@ -9275,10 +9289,19 @@ pub fn self_test_fastpy_slateos_forkexec() -> KernelResult<()> {
     let _ = crate::fs::Vfs::remove(FE_PATH);
 
     if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        // Say what actually happened: the poll budget ran out. The previous
+        // wording — "faulted on the fork / execv / waitpid path" — named a
+        // fault that had not occurred, sending the reader to look at fork/exec
+        // when the evidence was about waiting. A diagnostic that asserts a
+        // cause it has not established is the same defect the `kshell` option
+        // work is burning down, one subsystem over.
         serial_println!(
-            "[spawn]   FAIL: fastpy-forkexec (ring 3) — expected Zombie, got {:?} (faulted on the \
-             fork / execv / waitpid path)",
-            state
+            "[spawn]   FAIL: fastpy-forkexec (ring 3) — parent still {:?} (task {:?}) after {} \
+             yields; expected Zombie. Ready = starved, budget too small; Blocked = parked on an \
+             event that already fired (lost wakeup)",
+            state,
+            sched_state,
+            FORKEXEC_MAX_YIELDS
         );
         return Err(KernelError::InternalError);
     }

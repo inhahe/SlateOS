@@ -59,6 +59,7 @@
 //!     width   : u32                    outer size, decorations included
 //!     height  : u32
 //!     title   : u32 length + UTF-8 bytes
+//!     app_id  : u32 length + UTF-8 bytes
 //! ```
 //!
 //! Scalars are little-endian, matching every other codec in this crate.
@@ -95,7 +96,15 @@ pub const WINDOW_LIST_MAGIC: [u8; 4] = *b"WLST";
 ///   reading a v3 frame would see zero-by-zero windows, and a zero-sized
 ///   rectangle is not drawn and matches no click, so an overview built on one
 ///   would look like an empty desktop rather than like a decoding error.
-pub const WINDOW_LIST_VERSION: u8 = 3;
+/// - `4` — added each window's [`app_id`](WindowInfo::app_id), last in the
+///   per-window record. Appended rather than placed next to the title, unlike
+///   the same field in [`WindowSpec`](crate::control::WindowSpec): a window
+///   list is a stream of fixed-shape records, and putting a second
+///   variable-length string in the middle of one costs a decoder the ability
+///   to skip a record it does not care about. It is still a version bump, for
+///   the reason `3` gives — a v3 decoder stops one record early and reports the
+///   frame as truncated, which is the loud failure this numbering exists for.
+pub const WINDOW_LIST_VERSION: u8 = 4;
 
 /// Window-list header: magic + version + flags + showing desktop + window count.
 const WINDOW_LIST_HEADER_LEN: usize = 4 + 1 + 1 + 4 + 4;
@@ -141,6 +150,23 @@ pub struct WindowInfo {
     pub layer: Layer,
     /// The window's title, as last set by its client.
     pub title: String,
+    /// Which program the window belongs to, as that program declares it.
+    ///
+    /// The field a shell keys a *program*-level decision on — a window rule, a
+    /// taskbar group, an icon lookup — because [`title`](Self::title) cannot
+    /// carry one: a title says which document is open and changes while the
+    /// user works, so a rule keyed on it stops applying the moment the user
+    /// saves under a new name. Conventionally the executable's file stem,
+    /// lower-cased.
+    ///
+    /// Empty means the window declined to name its program. Treat that as
+    /// matching nothing rather than as matching everything: an unnamed program
+    /// is not every program.
+    ///
+    /// **Client-supplied and therefore unverified.** [`pid`](Self::pid) comes
+    /// from the connection and cannot be forged; this cannot be checked at all.
+    /// It is fine for the cosmetic uses above and must never gate a permission.
+    pub app_id: String,
     /// Whether the window is mapped at all. A hidden window keeps its id and
     /// its place in the stack, and should not get a taskbar button.
     pub visible: bool,
@@ -179,6 +205,13 @@ pub struct WindowInfo {
 impl WindowInfo {
     /// An ordinary visible, unfocused window on the first desktop — the base a
     /// builder-ish caller (mostly a test) can adjust.
+    ///
+    /// [`app_id`](Self::app_id) starts empty, matching what an unmodified
+    /// [`WindowSpec`](crate::control::WindowSpec) sends, and is set with
+    /// [`of_app`](Self::of_app) by a caller that cares which program the window
+    /// belongs to. It is not derived from the title here for the reason the
+    /// field's own documentation gives: a title is a document name, and reusing
+    /// it would give each of a program's windows a different id.
     #[must_use]
     pub fn new(id: u64, pid: u64, title: impl Into<String>) -> Self {
         Self {
@@ -186,6 +219,7 @@ impl WindowInfo {
             pid,
             layer: Layer::Normal,
             title: title.into(),
+            app_id: String::new(),
             visible: true,
             minimized: false,
             maximized: false,
@@ -207,6 +241,19 @@ impl WindowInfo {
         self.y = y;
         self.width = width;
         self.height = height;
+        self
+    }
+
+    /// The same window, belonging to a named program.
+    ///
+    /// Chained after [`new`](Self::new) rather than being a fourth argument to
+    /// it, so that the two strings a window carries can never be passed in the
+    /// wrong order — `new(id, pid, "Firefox")` and `new(id, pid, "firefox")`
+    /// are both accepted and mean quite different things, and a positional
+    /// fourth argument would make that mistake silent.
+    #[must_use]
+    pub fn of_app(mut self, app_id: impl Into<String>) -> Self {
+        self.app_id = app_id.into();
         self
     }
 
@@ -304,6 +351,7 @@ pub fn encode_window_list_into(out: &mut Vec<u8>, list: &WindowList) {
         write_u32(out, win.width);
         write_u32(out, win.height);
         write_string(out, &win.title);
+        write_string(out, &win.app_id);
     }
 }
 
@@ -390,11 +438,13 @@ fn decode_one(r: &mut Reader<'_>) -> Result<WindowInfo, DecodeError> {
     let width = r.read_u32()?;
     let height = r.read_u32()?;
     let title = r.read_string()?;
+    let app_id = r.read_string()?;
     Ok(WindowInfo {
         id,
         pid,
         layer,
         title,
+        app_id,
         visible: state & STATE_VISIBLE != 0,
         minimized: state & STATE_MINIMIZED != 0,
         maximized: state & STATE_MAXIMIZED != 0,
@@ -428,6 +478,13 @@ mod tests {
                     pid: 100,
                     layer: Layer::Background,
                     title: "Wallpaper".to_string(),
+                    // Titled but unnamed. Paired with window 3 below, which is
+                    // named but untitled: between them a codec that wrote the
+                    // two strings in the wrong order, or wrote one of them
+                    // twice, fails on one window or the other. Two non-empty
+                    // strings could not catch either mistake as long as both
+                    // round-tripped.
+                    app_id: String::new(),
                     visible: true,
                     minimized: false,
                     maximized: false,
@@ -449,6 +506,10 @@ mod tests {
                     pid: 200,
                     layer: Layer::Normal,
                     title: "Editor — notes.txt".to_string(),
+                    // Shared with window 3, which shares its pid: one program
+                    // with two windows open, which is the case the field exists
+                    // for and the one a per-window id could not express.
+                    app_id: "editor".to_string(),
                     visible: true,
                     minimized: false,
                     maximized: true,
@@ -465,6 +526,9 @@ mod tests {
                     pid: 200,
                     layer: Layer::Normal,
                     title: String::new(),
+                    // Named but untitled — the mirror of window 1. Also the
+                    // editor's, because it is the editor's second window.
+                    app_id: "editor".to_string(),
                     visible: false,
                     minimized: true,
                     maximized: false,
@@ -480,6 +544,7 @@ mod tests {
                     pid: 300,
                     layer: Layer::Overlay,
                     title: "Taskbar".to_string(),
+                    app_id: "slateos-shell".to_string(),
                     visible: true,
                     minimized: false,
                     maximized: false,
@@ -503,6 +568,72 @@ mod tests {
         let (back, used) = decode_window_list(&bytes).expect("decodes");
         assert_eq!(back, windows);
         assert_eq!(used, bytes.len(), "the frame consumes exactly its bytes");
+    }
+
+    #[test]
+    fn two_windows_of_one_program_say_so_and_a_third_stays_a_stranger() {
+        // The whole point of the field, stated as an assertion: the editor's
+        // two windows share an id and differ in everything else — title, size,
+        // desktop, every state bit — while the wallpaper, which named no
+        // program, must not be swept in with them. Grouping on the *pid* would
+        // pass the first half of this and is not what a shell can use, since a
+        // rule the user wrote survives the program being restarted and a pid
+        // does not.
+        let list = sample();
+        let by_app = |id: &str| -> Vec<u64> {
+            list.windows
+                .iter()
+                .filter(|w| w.app_id == id)
+                .map(|w| w.id)
+                .collect()
+        };
+        assert_eq!(by_app("editor"), vec![2, 3]);
+        assert_eq!(by_app("slateos-shell"), vec![4]);
+        // An unnamed window is not a window named "": asking for the empty id
+        // must not be a way to select every program that declined to answer, so
+        // callers filter on a *named* id and this is only here to pin which
+        // entry is the unnamed one.
+        assert_eq!(by_app(""), vec![1]);
+    }
+
+    #[test]
+    fn a_window_can_be_named_without_being_titled_and_the_reverse() {
+        // Adjacent length-prefixed strings, so the failure a swap produces is a
+        // frame that still decodes and describes the wrong thing. Only a pair
+        // where one side is empty catches it.
+        let list = sample();
+        let untitled = &list.windows[2];
+        assert_eq!(untitled.title, "");
+        assert_eq!(untitled.app_id, "editor");
+        let unnamed = &list.windows[0];
+        assert_eq!(unnamed.title, "Wallpaper");
+        assert_eq!(unnamed.app_id, "");
+
+        let bytes = encode_window_list(&list);
+        let (back, _) = decode_window_list(&bytes).expect("decodes");
+        assert_eq!(back.windows[2].title, "");
+        assert_eq!(back.windows[2].app_id, "editor");
+        assert_eq!(back.windows[0].title, "Wallpaper");
+        assert_eq!(back.windows[0].app_id, "");
+    }
+
+    #[test]
+    fn a_window_built_the_short_way_names_no_program_until_asked_to() {
+        // `new` cannot invent one: the only string it is handed is the title,
+        // and reusing that would give each of a program's windows a different
+        // id. `of_app` is the way in, and it changes nothing else.
+        let plain = WindowInfo::new(1, 100, "notes.md — Editor");
+        assert_eq!(plain.app_id, "");
+        let named = WindowInfo::new(1, 100, "notes.md — Editor").of_app("editor");
+        assert_eq!(named.app_id, "editor");
+        assert_eq!(named.title, plain.title);
+        assert_eq!(
+            WindowInfo {
+                app_id: String::new(),
+                ..named
+            },
+            plain
+        );
     }
 
     #[test]

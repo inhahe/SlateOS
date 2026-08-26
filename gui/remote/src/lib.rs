@@ -131,7 +131,7 @@ pub mod frame;
 pub use frame::{Frame, decode_any, try_decode_any};
 
 pub mod client;
-pub use client::{App, Client, ClientError, Connection, Response, Transport};
+pub use client::{ClientError, Connection, Transport};
 
 pub mod loopback;
 pub use loopback::{Pipe, pipe};
@@ -201,6 +201,24 @@ pub const MAX_STRING_LEN: u32 = 4 * 1024 * 1024;
 /// spans over a three-byte string and have the decoder find that out one
 /// eight-byte read at a time.
 pub const MAX_SPANS: u32 = MAX_STRING_LEN;
+
+/// Maximum byte payload of a single
+/// [`UploadImage`](control::RequestBody::UploadImage) request.
+///
+/// Deliberately *not* [`MAX_STRING_LEN`]: a string field on this wire is a
+/// window title or a font name, and four megabytes is already absurd for one.
+/// An image is pixels, and a full-screen one at 3840×2160 in a four-byte format
+/// is 32 MiB before anyone has done anything unreasonable. This is the same
+/// number one pixel wider and taller than the compositor's largest framebuffer
+/// (7680×4320 at 4 bytes per pixel, ≈126 MiB), because the largest picture that
+/// can be *shown* is the largest one worth accepting; the compositor rejects
+/// anything above that again on import, so the wire limit is the cheap check
+/// and not the authoritative one.
+///
+/// This bounds **one** upload. It says nothing about how many a client may
+/// send, which is a resource question the compositor answers per connection —
+/// see `ClientLink` in the compositor's `wire` module.
+pub const MAX_IMAGE_BYTES: u32 = 7680 * 4320 * 4;
 
 // ============================================================================
 // Command tags
@@ -417,6 +435,16 @@ pub enum DecodeError {
     /// A [`ShellControlAction`](control::ShellControlAction) byte is not in this
     /// decoder's table.
     BadShellAction(u8),
+    /// An [`UploadImage`](control::RequestBody::UploadImage) byte payload
+    /// exceeds [`MAX_IMAGE_BYTES`].
+    ///
+    /// Separate from [`StringTooLarge`](Self::StringTooLarge) even though both
+    /// are "a length prefix that is too big", because they are different limits
+    /// on different fields and a client that hits one wants to be told which.
+    ImageTooLarge(u32),
+    /// A [`BufferFormat`](control::BufferFormat) byte is not in this decoder's
+    /// table.
+    BadBufferFormat(u8),
 }
 
 impl core::fmt::Display for DecodeError {
@@ -476,6 +504,10 @@ impl core::fmt::Display for DecodeError {
                 )
             }
             Self::BadShellAction(b) => write!(f, "unknown shell control action {b:#04x}"),
+            Self::ImageTooLarge(n) => {
+                write!(f, "image byte length {n} exceeds limit {MAX_IMAGE_BYTES}")
+            }
+            Self::BadBufferFormat(b) => write!(f, "unknown buffer format {b:#04x}"),
         }
     }
 }
@@ -830,6 +862,23 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
     // than 4 GiB, which violates MAX_STRING_LEN on decode anyway. We
     // saturate on encode to avoid silent truncation.
     let bytes = s.as_bytes();
+    let len_u32 = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+    write_u32(out, len_u32);
+    out.extend_from_slice(bytes);
+}
+
+/// A length-prefixed run of raw bytes: a u32 LE count, then the bytes.
+///
+/// The same shape as [`write_string`] without the UTF-8 promise, for the one
+/// field on this wire that carries pixels rather than text. Kept separate so
+/// that neither field can be decoded with the other's limit — an image is
+/// allowed to be far larger than a title, and a title must not be allowed to be
+/// as large as an image.
+fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    // Saturating for the same reason `write_string` does: a slice longer than
+    // `u32::MAX` cannot be described by this prefix at all, and a wrapped
+    // length would encode a frame whose payload silently disagreed with its
+    // header. `MAX_IMAGE_BYTES` rejects it on decode either way.
     let len_u32 = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
     write_u32(out, len_u32);
     out.extend_from_slice(bytes);

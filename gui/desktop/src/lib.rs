@@ -177,13 +177,16 @@ pub use guiremote::control::{Layer, ShellControlAction};
 // made virtual desktops a taskbar filter.
 pub use guiremote::window_list::{WindowInfo, WindowList};
 use guitk::color::Color;
-use guitk::event::{Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use guitk::render::RenderTree;
 use guitk::step;
 use guitk::style::{Border, CornerRadii, Shadow};
 use guitk::text;
 use guitk::theme::with_alpha;
 use guitk::wheel;
+use hotkeys::HotkeyAction;
 use launcher::{AppEntry, Category};
 // The same zone engine the libc's `localtime`, osh's `printf '%(…)T'`, the
 // calendar panel and the Date & Time settings page render through, so the
@@ -307,6 +310,24 @@ const TASKBAR_BUTTON_MAX_WIDTH: f32 = 160.0;
 const TRAY_MIN_WIDTH: f32 = 120.0;
 /// Gap at the tray's outer edge and between the items inside it.
 const TRAY_PADDING: f32 = 8.0;
+/// Width of the notification bell's slot in the tray.
+///
+/// A fixed square rather than a measured one: the bell is a glyph, not a
+/// reading, so nothing about it changes width when the clock's switches do.
+/// The unread badge is drawn *inside* this slot for the same reason — a count
+/// that widened the tray as notifications arrived would shuffle the window
+/// buttons sideways every time something was posted.
+const TRAY_BELL_WIDTH: f32 = 24.0;
+/// The bell the tray draws when nothing is being silenced.
+///
+/// Not read by the renderer, which asks the focus manager for the glyph of
+/// whatever mode is in force; this is the same codepoint that
+/// [`focus_assist::FocusMode::Off`] answers, kept so a test can say *which*
+/// glyph "not silencing anything" is without asserting it against the very
+/// function under test. `focus_assist` and `widgets` use the same codepoint, so
+/// the desktop has one bell rather than three.
+#[cfg(test)]
+const NOTIF_BELL_GLYPH: &str = "\u{1F514}";
 /// Extra room the window buttons leave beyond the tray, so the last button does
 /// not end flush against the desktop indicator.
 const TRAY_RESERVE_GAP: f32 = 20.0;
@@ -408,6 +429,35 @@ pub struct WindowId(pub u64);
 pub struct ManagedWindow {
     pub id: WindowId,
     pub title: String,
+    /// Which program the window belongs to, as that program declares it.
+    ///
+    /// Read from the compositor's list on every update and never remembered
+    /// across one, for the same reason the title is not: the compositor is the
+    /// authority on what a window says about itself. Empty means the window
+    /// named no program.
+    ///
+    /// This is what [`window_rules`](crate::window_rules) matches on, and the
+    /// reason it can match anything useful: a rule keyed on
+    /// [`title`](Self::title) would stop applying the moment the user saved the
+    /// document under a new name.
+    pub app_id: String,
+    /// Whether a window rule asked for this window to have no taskbar button.
+    ///
+    /// Shell-local, and carried across window lists the way the icon is rather
+    /// than re-read the way the title is: the rule that set it fired once, when
+    /// the window arrived, and there is nothing in the compositor's list that
+    /// could confirm or deny it afterwards. Re-deriving it per list would mean
+    /// re-running the rules per list, which is the thing
+    /// [`WindowRulesManager::evaluate`](crate::window_rules::WindowRulesManager::evaluate)
+    /// must not have done to it.
+    pub skip_taskbar: bool,
+    /// Whether a window rule asked for this window to be left out of Alt+Tab.
+    ///
+    /// Separate from [`skip_taskbar`](Self::skip_taskbar) because the two are
+    /// separate rule actions and users mean different things by them: a chat
+    /// window docked to the edge might want no button but must still be
+    /// reachable by keyboard, and a background helper the reverse.
+    pub skip_alt_tab: bool,
     pub state: WindowState,
     pub desktop: u32,
     /// Whether this window has focus.
@@ -508,6 +558,8 @@ pub enum Hit {
     TaskbarPanel,
     /// The tray clock, which opens the calendar popup.
     Clock,
+    /// The tray's notification bell, which opens the notification pane.
+    NotificationBell,
     /// A control of the open calendar popup — including
     /// [`calendar::CalendarHit::Panel`], which is the popup's own inert space
     /// and must **not** dismiss it. A point off the popup is not this variant
@@ -694,6 +746,20 @@ pub struct HotkeyOutcome {
     pub consumed: bool,
     /// What to ask the compositor for, in the order the shortcut named it.
     pub requests: Vec<ShellRequest>,
+    /// Programs to start, by path, in the order the keystroke named them.
+    ///
+    /// The keyboard counterpart of [`ShellAction::Launch`], and it exists for
+    /// the same reason that variant does: the shell has no connection to the
+    /// process server and reports the intent instead of acting on it. Until the
+    /// Run box was wired up there was no keystroke that could start a program —
+    /// every shortcut in the table acts on a window that already exists — so
+    /// this half of the parallel was simply missing, and Enter in the command
+    /// box had nowhere to go.
+    ///
+    /// A `Vec` rather than an `Option` to match `requests` above: both are
+    /// unordered, independent asks, and a caller that can already loop over one
+    /// should not need a second shape for the other.
+    pub launches: Vec<String>,
 }
 
 impl HotkeyOutcome {
@@ -706,7 +772,7 @@ impl HotkeyOutcome {
     fn consumed() -> Self {
         Self {
             consumed: true,
-            requests: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -715,6 +781,7 @@ impl HotkeyOutcome {
         Self {
             consumed: true,
             requests: request.into_iter().collect(),
+            ..Self::default()
         }
     }
 
@@ -723,6 +790,16 @@ impl HotkeyOutcome {
         Self {
             consumed: true,
             requests,
+            ..Self::default()
+        }
+    }
+
+    /// The shell claimed the key and wants these programs started.
+    fn start(launches: Vec<String>) -> Self {
+        Self {
+            consumed: true,
+            launches,
+            ..Self::default()
         }
     }
 }
@@ -788,6 +865,14 @@ pub struct DesktopShell {
     /// to have opened it. [`close_start_menu`](Self::close_start_menu) is what
     /// keeps the two in step.
     pub power_menu_open: bool,
+    /// Whether the card listing every keyboard shortcut is showing.
+    ///
+    /// A plain `bool` rather than a widget with state of its own, because the
+    /// card has none: [`hotkeys::render_settings_panel`] draws it from
+    /// [`hotkeys`](Self::hotkeys) every frame, so what it shows is whatever the
+    /// registry says right now — a shortcut rebound while the card is up is
+    /// redrawn under its new chord without anyone telling the card.
+    pub shortcut_card_open: bool,
     /// The programs this desktop can start, shared with the search launcher so
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
@@ -842,6 +927,44 @@ pub struct DesktopShell {
     /// missed assignment away from a popup that is drawn and not clickable, or
     /// the reverse. See `design-decisions.md` §493.
     pub calendar: calendar::CalendarView,
+    /// The notification pane the tray bell opens: the desktop's only place for
+    /// a message the user did not ask for.
+    ///
+    /// `notif_pane.rs` was the same kind of island `calendar.rs` was — a full
+    /// pane with quick settings, per-app rules, a history and 130 tests, and
+    /// nothing anywhere that constructed a `NotificationPane`. The shell could
+    /// therefore *notice* things and had nowhere to say them: the wallpaper
+    /// that failed to decode set `ShellSession::wallpaper_error` and the user
+    /// saw a plain colour with no explanation.
+    ///
+    /// As with the calendar, the pane's own
+    /// [`PaneState::is_visible`](notif_pane::PaneState::is_visible) **is** the
+    /// open flag. See `design-decisions.md` §493.
+    pub notifications: notif_pane::NotificationPane,
+    /// Whether — and how much — notifications are being silenced right now.
+    ///
+    /// The single truth for Do Not Disturb. The pane's two quick-setting
+    /// switches are *views* of this: pressing one is reported to the shell,
+    /// applied here, and pushed back onto both switches by
+    /// [`sync_quick_settings`](Self::sync_quick_settings), so the pair can
+    /// never disagree with what is actually happening to arriving
+    /// notifications.
+    ///
+    /// It was the second-largest orphan island in the shell (1,466 lines that
+    /// nothing constructed) for the same reason the pane was: a complete
+    /// module with a settings page, per-app priorities and automatic rules,
+    /// and no owner. See known-issues.md
+    /// `TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
+    ///
+    /// One half is still unwired: [`evaluate_auto_rules`] needs a wall clock
+    /// and a "the foreground window went fullscreen" signal, neither of which
+    /// reaches the shell yet, so [`effective_mode`] is today exactly the manual
+    /// mode. That is recorded in known-issues.md rather than papered over with
+    /// a clock read from the wrong place.
+    ///
+    /// [`evaluate_auto_rules`]: focus_assist::FocusAssistManager::evaluate_auto_rules
+    /// [`effective_mode`]: focus_assist::FocusAssistManager::effective_mode
+    pub focus: focus_assist::FocusAssistManager,
     /// The events the popup marks and lists.
     ///
     /// Empty until something fills it. It lives on the shell rather than
@@ -867,6 +990,92 @@ pub struct DesktopShell {
     /// exists. [`sync_snap_area`](Self::sync_snap_area) re-seeds it at the top
     /// of every gesture that reads it instead.
     pub snap: snap::SnapManager,
+    /// The heads-up overlays: what the volume keys put on screen.
+    ///
+    /// The only part of the shell that draws *without* the user having asked to
+    /// look at anything — every other surface here is opened by a click or a
+    /// chord and stays until it is closed. An OSD appears because something
+    /// changed, says what it was, and goes away on a timer.
+    ///
+    /// Consequences, both of which the session honours: it is the one surface
+    /// that must not take clicks (a volume indicator that ate the press aimed
+    /// at the document beneath it would be worse than no indicator — see
+    /// `design-decisions.md` 566), and it is the one that keeps animating with
+    /// no input at all, so it has to be counted in
+    /// [`ShellSession::anything_moving`](session::ShellSession) or its fade
+    /// stops halfway and the overlay stays on screen for ever.
+    ///
+    /// Timed off [`osd_clock_ms`](Self::osd_clock_ms) rather than off the wall
+    /// clock; see that field for why the difference does not matter here.
+    pub osd: osd::OsdManager,
+    /// Milliseconds of animation time the shell has been told about, and the
+    /// only clock [`show_osd`](Self::show_osd) consults.
+    ///
+    /// [`OsdManager`](osd::OsdManager) works in absolute stamps, because a
+    /// timeout is a deadline and a deadline cannot be computed from a delta.
+    /// But the *origin* of those stamps is arbitrary: every one the manager
+    /// compares is one this counter issued, so an epoch of "when this shell was
+    /// constructed" answers every question the manager asks, and the shell does
+    /// not have to be handed a wall clock — which is what keeps it testable
+    /// without also controlling the machine's time.
+    ///
+    /// It advances only when [`advance_osd`](Self::advance_osd) is called, so
+    /// it stands still while the desktop is idle. That is exactly right rather
+    /// than merely tolerable: nothing is scheduled while the desktop is idle,
+    /// so no deadline can fall due during the gap, and `oswindow` resets a
+    /// window's delta origin when it is ticked without re-arming — so the first
+    /// frame after a park reports the length of *that frame*, not the length of
+    /// the pause, and the pause never lands on an overlay's deadline at all.
+    osd_clock_ms: u64,
+    /// The Run box: type a command, press Enter, the program starts.
+    ///
+    /// The only shell surface with a text field that is *also* a dialog — the
+    /// overview and the start menu have search boxes, but neither has an OK
+    /// button or an error line. Two consequences follow, and both are why it
+    /// could not simply be added to the popup list and left there:
+    ///
+    /// It is modal about keys, because every printable key belongs to it while
+    /// it is up. `handle_hotkey_inner` gives it every press before the binding
+    /// table sees one, exactly as it does for the overview: without that, typing
+    /// `d` into the command box would show the desktop out from under the box
+    /// being typed into.
+    ///
+    /// And Enter is a *launch*, which is the one thing the shell cannot do
+    /// itself (see [`ShellAction::Launch`]). The keyboard path had no way to
+    /// report one until this surface existed, which is what
+    /// [`HotkeyOutcome::launches`] is for.
+    pub run_dialog: run_dialog::RunDialog,
+    /// The window rules, and the state of the ones that have fired.
+    ///
+    /// Consulted from exactly one place —
+    /// [`apply_window_list`](Self::apply_window_list), for each window the
+    /// shell has not seen before. That "not seen before" is the whole contract:
+    /// [`evaluate`](window_rules::WindowRulesManager::evaluate) takes `&mut
+    /// self` because it counts firings and deletes one-shot rules, so a shell
+    /// that ran it per *list* rather than per *arrival* would delete every
+    /// one-shot rule on the first frame after it was written, and would
+    /// re-maximise a window one frame after the user restored it.
+    ///
+    /// It was an orphan island of 2,600 lines before this: a rules engine, a
+    /// settings panel and 120 tests, and nothing that ever called `evaluate`.
+    /// It could not have been wired sooner — its two program criteria were a
+    /// process name and a window class, neither of which existed anywhere in
+    /// this system. See `design-decisions.md` §569.
+    pub rules: window_rules::WindowRulesManager,
+
+    /// Which chord does what.
+    ///
+    /// The desktop's whole binding table, and the only one: the shortcuts used
+    /// to live in a private `DesktopAction::for_chord` match hardcoded a few
+    /// hundred lines below, while [`hotkeys`] sat beside it with a registry, a
+    /// config file and 2,400 lines and was reachable from nothing. Two tables
+    /// meant two answers to "what does Super+E do", and the *live* one was the
+    /// one a user could not change. See `design-decisions.md` §571.
+    ///
+    /// Public so a settings panel can rebind without going through the shell,
+    /// on the same terms as [`rules`](Self::rules) above. Anything that changes
+    /// it has to re-grab: see [`global_chords`](Self::global_chords).
+    pub hotkeys: hotkeys::HotkeyRegistry,
 }
 
 /// Desktop visual theme — every colour the shell paints with.
@@ -1061,6 +1270,7 @@ impl DesktopShell {
             start_menu_scroll: 0,
             start_menu_wheel: wheel::Accumulator::default(),
             power_menu_open: false,
+            shortcut_card_open: false,
             apps: launcher::builtin_app_database(),
             alt_tab_active: false,
             alt_tab_index: 0,
@@ -1070,6 +1280,8 @@ impl DesktopShell {
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
+            notifications: notif_pane::NotificationPane::new(),
+            focus: focus_assist::FocusAssistManager::new(),
             events: calendar::EventStore::new(),
             // Placeholder: the real area needs `taskbar_rect()`, which needs
             // the appearance scaling that is only set two fields up. Seeded
@@ -1077,6 +1289,18 @@ impl DesktopShell {
             // a caller reading `shell.snap.layout()` before ever opening the
             // overlay gets the screen it is actually on.
             snap: snap::SnapManager::new(snap::WorkArea::whole_screen(0.0, 0.0)),
+            // Screen-sized from the start, unlike `snap` above: the OSD centres
+            // itself on the whole display rather than on the work area, because
+            // it is a heads-up overlay and may sit over the taskbar.
+            osd: osd::OsdManager::new(screen_width as f32, screen_height as f32),
+            osd_clock_ms: 0,
+            // Not positioned here. `set_position` needs a screen size, and this
+            // one would go stale the moment the display changed; the dialog is
+            // centred on the screen it is opened on instead, in
+            // `toggle_run_dialog`.
+            run_dialog: run_dialog::RunDialog::new(),
+            rules: window_rules::WindowRulesManager::new(),
+            hotkeys: hotkeys::HotkeyRegistry::defaults(),
         };
         shell.sync_snap_area();
         shell
@@ -1455,6 +1679,12 @@ impl DesktopShell {
             self.close_start_menu();
         } else {
             self.start_menu_open = true;
+            // The card is centred and the menu rises from the corner, so the two
+            // do not overlap — but the card is dismissed anyway, because it is
+            // opened to be *read* and a user who has gone to the start menu has
+            // stopped reading it. Symmetrical with `toggle_shortcut_card`, which
+            // closes this menu.
+            self.shortcut_card_open = false;
             self.start_menu_scroll = 0;
             // The offset is being rewound, so the fraction that was pushing it
             // must be rewound too — otherwise a menu opened just after a
@@ -1562,6 +1792,13 @@ impl DesktopShell {
             if self.clock_rect().contains(x, y) {
                 return Hit::Clock;
             }
+            // Left of the clock, and tested after it: the two slots abut, and
+            // `bell_rect` is derived from `clock_rect` so they cannot overlap —
+            // but the order makes the clock's edge belong to the clock by rule
+            // rather than by a rounding error going the way it happens to.
+            if self.bell_rect().contains(x, y) {
+                return Hit::NotificationBell;
+            }
             // The slot is resolved to a window *here*, while the list that
             // produced the rectangle is still in hand — see
             // [`Hit::TaskbarButton`].
@@ -1583,7 +1820,88 @@ impl DesktopShell {
     /// Handle a pointer event.
     ///
     /// Returns what the caller should do with it — see [`ShellAction`].
+    ///
+    /// The drain is here, wrapping the whole of the handling, rather than on
+    /// the branch that forwards to the pane. *Every* path out of this function
+    /// can have touched the pane — the bell toggles it, a press elsewhere on
+    /// the bar dismisses it, `dismiss_popups` closes it along with everything
+    /// else — and each of those reports a [`Closed`] nobody else empties. A
+    /// drain on the forwarding branch alone bounded the buffer for clicks
+    /// *inside* the pane and let it grow once per click that closed it, which
+    /// is the more common of the two.
+    ///
+    /// [`Closed`]: notif_pane::NotifPaneEvent::Closed
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        let action = self.handle_mouse_inner(event);
+        match (action, self.apply_pane_events()) {
+            // A click on a notification card that names a program. The pane
+            // consumed the press and marked the card read; starting the
+            // program is the part only the caller can do.
+            (ShellAction::Consumed, Some(path)) => ShellAction::Launch(path),
+            (action, _) => action,
+        }
+    }
+
+    fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
+        // The Run box first, ahead of even the pane's scrim: it is painted over
+        // everything, so a press anywhere landed on it or on the space around
+        // it, and the dialog answers both — inside, a button; outside, dismiss.
+        // Either way the press is consumed, which is what "modal" means and is
+        // the behaviour `RunDialog::handle_mouse_event` already implements.
+        //
+        // Motion is the one exception, and it is the dialog that makes it: a
+        // move outside the box returns `Ignored` rather than dismissing, because
+        // only a press dismisses. Consuming it anyway would freeze every hover
+        // highlight on the desktop while the box is up; passing it on lets the
+        // taskbar keep lighting under the cursor, which is what a user moving
+        // the mouse *towards* the box sees.
+        if self.run_dialog.is_visible() {
+            let handled = self.run_dialog.handle_mouse_event(event);
+            // `next()` rather than a loop, and nothing is thrown away by it: one
+            // press reaches at most one button, and only the OK button executes,
+            // so the drained list holds at most one path. The keyboard path
+            // returns the whole `Vec` because `HotkeyOutcome` can carry one;
+            // `ShellAction::Launch` names a single program and cannot.
+            if let Some(path) = self.drain_run_dialog().into_iter().next() {
+                return ShellAction::Launch(path);
+            }
+            if handled == EventResult::Consumed {
+                return ShellAction::Consumed;
+            }
+        }
+
+        // Before the match, and before `handle_press`'s own overview check: the
+        // notification pane draws a scrim across everything above the taskbar,
+        // so while it is up an event there landed on it whatever is underneath.
+        //
+        // The taskbar is the exception, and deliberately so — see
+        // [`notification_pane_height`](Self::notification_pane_height). The bar
+        // is neither covered nor dimmed while the pane is open, so a press on
+        // it is a real press on it, and falls through to `hit_test` below.
+        // That is what lets the bell close the pane it opened.
+        //
+        // Everything else is consumed unconditionally rather than forwarding
+        // the pane's `Ignored`. The pane ignores motion outside its column
+        // because it has no hover state out there, not because the event
+        // belongs to whatever is behind it; passing that through would light a
+        // button under an overlay, which is exactly what the overview arm below
+        // guards against.
+        if self.notifications.pane_state().is_visible()
+            && !self.taskbar_rect().contains(event.x, event.y)
+        {
+            // Result deliberately discarded: see the paragraph above. Whether
+            // the pane found something under the cursor does not change the
+            // answer, which is that the click cannot reach past the scrim.
+            let _ = self.notifications.handle_mouse_event(
+                event,
+                self.screen_width as f32,
+                self.notification_pane_height(),
+            );
+            // The events this produced are drained by `handle_mouse`, which
+            // wraps this call and turns a clicked action into a `Launch`.
+            return ShellAction::Consumed;
+        }
+
         match event.kind {
             // The two are the same event to this shell. Nothing it draws does
             // anything on the second click that it did not do on the first:
@@ -1696,6 +2014,17 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
+        // And for the notification pane, which by this point can only be a
+        // press on the taskbar: every other press was consumed by the pane
+        // above. Pressing the bell falls through to its own arm, which toggles
+        // — otherwise the button that opened the pane would close it here and
+        // then reopen it a line later. Anything else on the bar closes the pane
+        // and is spent doing so, like every other dismissal in this function.
+        if self.notifications.pane_state().is_visible() && !matches!(hit, Hit::NotificationBell) {
+            self.notifications.hide();
+            return ShellAction::Consumed;
+        }
+
         // Only the primary button acts. The rest still cannot fall through to a
         // client when they land on the shell's own surfaces.
         if button != MouseButton::Left {
@@ -1747,6 +2076,10 @@ impl DesktopShell {
             }
             Hit::Clock => {
                 self.toggle_calendar();
+                ShellAction::Consumed
+            }
+            Hit::NotificationBell => {
+                self.toggle_notifications();
                 ShellAction::Consumed
             }
             Hit::CalendarControl(control) => {
@@ -2001,8 +2334,9 @@ impl DesktopShell {
     ///
     /// # What is kept
     ///
-    /// Per-window shell-local state that the compositor has no opinion about —
-    /// now only the icon. A window already known keeps it across the update.
+    /// Per-window shell-local state that the compositor has no opinion about:
+    /// the icon, and the two "leave me out of that list" flags a window rule
+    /// may have set. A window already known keeps all three across the update.
     ///
     /// **Which virtual desktop a window is on used to be kept here too**, and
     /// that was the bug. The compositor had no notion of desktops, so switching
@@ -2016,9 +2350,24 @@ impl DesktopShell {
     /// Stacking comes from the list's own order, which the compositor emits
     /// bottom-to-top, so `taskbar_windows().last()` is the topmost window here
     /// for the same reason it is there.
-    pub fn apply_window_list(&mut self, list: &WindowList) {
+    ///
+    /// # What comes back
+    ///
+    /// The [window rules](crate::window_rules) a *newly arrived* window matched,
+    /// turned into asks for the compositor. The caller must send them — see
+    /// [`ShellSession`](session::ShellSession), which does. Returning them
+    /// rather than sending them keeps this method what the rest of the shell
+    /// is: something that computes an answer and hands it over, with no
+    /// connection of its own.
+    ///
+    /// "Newly arrived" means an id the shell was not already holding, which is
+    /// why it can be read off `previous` and needs no second set to remember.
+    /// Ids are issued by a sequence and never reused, so a window cannot arrive
+    /// twice under the same name.
+    pub fn apply_window_list(&mut self, list: &WindowList) -> Vec<ShellRequest> {
         let mut kept: BTreeMap<WindowId, ManagedWindow> = BTreeMap::new();
         let mut focused = None;
+        let mut requests = Vec::new();
         self.current_desktop = list.current_workspace;
 
         for (index, info) in list.windows.iter().enumerate() {
@@ -2026,7 +2375,34 @@ impl DesktopShell {
                 continue;
             }
             let id = WindowId(info.id);
-            let previous = self.windows.get(&id);
+            // Read out rather than held: `evaluate` below needs `&mut
+            // self.rules`, and a live borrow of `self.windows` across it would
+            // be a borrow of the same `self`.
+            let carried = self
+                .windows
+                .get(&id)
+                .map(|w| (w.icon_id, w.skip_taskbar, w.skip_alt_tab));
+            let (icon_id, mut skip_taskbar, mut skip_alt_tab) =
+                carried.unwrap_or((0, false, false));
+
+            if carried.is_none() {
+                let actions = self.rules.evaluate(&info.title, &info.app_id);
+                skip_taskbar = actions.skip_taskbar.unwrap_or(false);
+                skip_alt_tab = actions.skip_alt_tab.unwrap_or(false);
+                requests.extend(Self::rule_requests(id, info, &actions, self.num_desktops));
+            }
+
+            // Recorded on every list, not only on arrival: "remember last
+            // position" means the position the window was last *at*, and the
+            // window moves long after it arrives. Skipped while minimised or
+            // maximised, because the rectangle then is the state's and not the
+            // window's — restoring one would hand back a full-screen size the
+            // user never chose.
+            if !info.minimized && !info.maximized {
+                self.rules
+                    .remember_state(&info.app_id, info.x, info.y, info.width, info.height);
+            }
+
             if info.focused {
                 focused = Some(id);
             }
@@ -2035,6 +2411,14 @@ impl DesktopShell {
                 ManagedWindow {
                     id,
                     title: info.title.clone(),
+                    // Not carried over from `previous` the way the icon is. An
+                    // icon is shell-local state the compositor has no opinion
+                    // about; this is the compositor's own report, and a window
+                    // whose program changed its mind should be described the
+                    // way the latest list describes it.
+                    app_id: info.app_id.clone(),
+                    skip_taskbar,
+                    skip_alt_tab,
                     state: if info.minimized {
                         WindowState::Minimized
                     } else if info.maximized {
@@ -2061,7 +2445,7 @@ impl DesktopShell {
                     // feature, so it saturates instead — a pid that large is
                     // already outside anything the system can produce.
                     pid: u32::try_from(info.pid).unwrap_or(u32::MAX),
-                    icon_id: previous.map_or(0, |w| w.icon_id),
+                    icon_id,
                     z_order: u32::try_from(index).unwrap_or(u32::MAX),
                 },
             );
@@ -2079,29 +2463,125 @@ impl DesktopShell {
         // them could have been refreshed and the other not.
         self.overview
             .apply_window_list(list, self.num_desktops.max(1));
+        requests
+    }
+
+    /// Turn the actions a rule matched into asks the compositor understands.
+    ///
+    /// Five of [`RuleActions`](window_rules::RuleActions)'s seventeen fields
+    /// have somewhere to go. Two of those — `skip_taskbar` and `skip_alt_tab` —
+    /// are the shell's own business and are handled by the caller; the three
+    /// here need the compositor.
+    ///
+    /// The twelve that are missing are missing on purpose, not by oversight.
+    /// `position` and `size` are the loudest: the control protocol's `Move` and
+    /// `Resize` resolve against the *sender's own* window, so the shell cannot
+    /// use them on somebody else's, and placement is the compositor's to decide
+    /// (§506) — the shell is not even told the display bounds. `always_on_top`,
+    /// `opacity`, `no_decorations`, `prevent_close` and the rest have no
+    /// request at all. They are stored, exported and shown, and doing nothing
+    /// visible is a better failure than a shell that moves windows to the
+    /// wrong place. See `known-issues.md`
+    /// `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
+    fn rule_requests(
+        id: WindowId,
+        info: &WindowInfo,
+        actions: &window_rules::RuleActions,
+        num_desktops: u32,
+    ) -> Vec<ShellRequest> {
+        let mut out = Vec::new();
+
+        // Desktop first: where the window lives, before anything about how it
+        // looks there. Asking for the desktop it is already on would be a
+        // request the compositor answers by switching to it — activating a
+        // window files nothing, but `MoveWindowToDesktop` still costs a
+        // recomposite — so the no-op is dropped here.
+        if let Some(desktop) = actions.desktop {
+            if desktop < num_desktops && desktop != info.workspace {
+                out.push(ShellRequest::MoveWindowToDesktop {
+                    window: id,
+                    desktop,
+                });
+            }
+        }
+
+        // `Normal` is not "restore it": a rule that says a window should start
+        // normal is describing what a window already is, and sending `Restore`
+        // to a window that opened maximized of its own accord would be the rule
+        // overriding the program rather than the default. `Fullscreen` has no
+        // request the shell may send about another client's window.
+        match actions.initial_state {
+            Some(window_rules::InitialState::Minimized) => {
+                out.push(ShellRequest::window(id, ShellControlAction::Minimize));
+            }
+            Some(window_rules::InitialState::Maximized) => {
+                out.push(ShellRequest::window(id, ShellControlAction::Maximize));
+            }
+            Some(window_rules::InitialState::Normal | window_rules::InitialState::Fullscreen)
+            | None => {}
+        }
+
+        // Last, so that a rule setting both a state and a zone lands in the
+        // zone: a snap is the more specific of the two instructions, and the
+        // compositor applies whichever it is told about second.
+        if let Some(zone) = actions.snap_zone {
+            if let Some(slot) = u8::try_from(zone).ok().and_then(snap::SnapSlot::from_index) {
+                out.push(ShellRequest::window(
+                    id,
+                    ShellControlAction::SnapToZone(slot),
+                ));
+            }
+        }
+
+        out
     }
 
     /// The windows the shell **lists** on the current desktop, in stacking
     /// order (bottom-to-top, so `.last()` is the topmost).
     ///
-    /// This is the taskbar's set, the Alt+Tab switcher's set and the overview's
-    /// set, and it deliberately **includes minimised windows**: a taskbar
-    /// button and a switcher row exist precisely so that a window the user put
-    /// away can be got back. It was called `taskbar_windows` and filtered on a
+    /// This is the taskbar's set and the overview's set, and it deliberately
+    /// **includes minimised windows**: a taskbar button exists precisely so
+    /// that a window the user put away can be got back. It used to filter on a
     /// flag that folded "unmapped" together with "minimised", which meant
     /// minimising a window removed its button *and* its switcher row in the
     /// same instant — leaving it reachable by nothing the shell draws. The
     /// `Activate`-rather-than-`Restore` care taken in `handle_press` was
     /// unreachable code for exactly as long as that lasted.
     ///
+    /// It is no longer the Alt+Tab switcher's set: see
+    /// [`switcher_windows`](Self::switcher_windows).
+    ///
     /// For the narrower "is it being drawn?" question, ask
     /// [`ManagedWindow::on_glass`].
     #[must_use]
     pub fn taskbar_windows(&self) -> Vec<&ManagedWindow> {
+        self.listed_windows(|w| !w.skip_taskbar)
+    }
+
+    /// The windows Alt+Tab cycles through, in the same order.
+    ///
+    /// The same set as [`taskbar_windows`](Self::taskbar_windows) until a
+    /// window rule says otherwise, and a separate method because
+    /// `skip_taskbar` and `skip_alt_tab` are separate rule actions: a docked
+    /// chat panel may want no button but must stay reachable from the
+    /// keyboard, and a background helper the other way round. One list serving
+    /// both would silently make each flag mean the other as well.
+    ///
+    /// The switcher's index counts into *this* list. That is why the two are
+    /// derived from one filter with one sort rather than written twice — an
+    /// index into a differently-ordered list would switch to a window the user
+    /// was not looking at.
+    #[must_use]
+    pub fn switcher_windows(&self) -> Vec<&ManagedWindow> {
+        self.listed_windows(|w| !w.skip_alt_tab)
+    }
+
+    /// The windows on the current desktop that `also` admits, bottom-to-top.
+    fn listed_windows(&self, also: impl Fn(&ManagedWindow) -> bool) -> Vec<&ManagedWindow> {
         let mut windows: Vec<&ManagedWindow> = self
             .windows
             .values()
-            .filter(|w| w.mapped && w.desktop == self.current_desktop)
+            .filter(|w| w.mapped && w.desktop == self.current_desktop && also(w))
             .collect();
         windows.sort_by_key(|w| w.z_order);
         windows
@@ -2186,13 +2666,14 @@ impl DesktopShell {
     /// Open the window switcher, on the window below the top one.
     ///
     /// That is the window the user was in before this one, which is what
-    /// Alt+Tab is for. `taskbar_windows` is ordered bottom to top, so it is the
-    /// second entry from the *end* — not index 1, which is what this used to
-    /// say. With exactly two windows index 1 *is* the focused window, so
-    /// press-and-release Alt+Tab — much the commonest use there is — re-focused
-    /// the window you were already in and appeared to do nothing at all.
+    /// Alt+Tab is for. [`switcher_windows`](Self::switcher_windows) is ordered
+    /// bottom to top, so it is the second entry from the *end* — not index 1,
+    /// which is what this used to say. With exactly two windows index 1 *is*
+    /// the focused window, so press-and-release Alt+Tab — much the commonest
+    /// use there is — re-focused the window you were already in and appeared to
+    /// do nothing at all.
     pub fn start_alt_tab(&mut self) {
-        let count = self.taskbar_windows().len();
+        let count = self.switcher_windows().len();
         if count > 1 {
             self.alt_tab_active = true;
             self.alt_tab_index = step::wrapping_before(count, count.saturating_sub(1));
@@ -2200,7 +2681,7 @@ impl DesktopShell {
     }
 
     pub fn next_alt_tab(&mut self) {
-        let count = self.taskbar_windows().len();
+        let count = self.switcher_windows().len();
         if count > 0 {
             // `step::wrapping_after` carries the "the list is not empty" condition
             // inside the expression that depends on it, and lands on the first
@@ -2212,7 +2693,7 @@ impl DesktopShell {
 
     /// Step the switcher to the previous window, for Shift+Alt+Tab.
     pub fn prev_alt_tab(&mut self) {
-        let count = self.taskbar_windows().len();
+        let count = self.switcher_windows().len();
         if let Some(last) = count.checked_sub(1) {
             // Clamping first matters: a stale index — windows closed while the
             // switcher was open — would otherwise step from one out-of-range
@@ -2232,7 +2713,7 @@ impl DesktopShell {
             return None;
         }
         self.alt_tab_active = false;
-        let id = self.taskbar_windows().get(self.alt_tab_index)?.id;
+        let id = self.switcher_windows().get(self.alt_tab_index)?.id;
         Some(ShellRequest::window(id, ShellControlAction::Activate))
     }
 
@@ -2252,7 +2733,23 @@ impl DesktopShell {
     /// reason a taskbar click does not: the compositor owns which windows exist
     /// and what state they are in, and the shell finds out from the next window
     /// list like everything else.
+    ///
+    /// Wrapped for the same reason [`handle_mouse`](Self::handle_mouse) is: a
+    /// key can close the pane by several routes — Escape into the pane itself,
+    /// Escape into `dismiss_popups`, Super+N — and every one of them reports a
+    /// `Closed` that nothing else empties.
+    ///
+    /// Nothing the pane reports from a key is a launch, and it is as well:
+    /// [`HotkeyOutcome`] carries compositor requests, not program starts.
+    /// Should the pane grow an "Enter opens the selected card" key, it needs a
+    /// launch channel here rather than a path quietly dropped — see todo.txt.
     pub fn handle_hotkey(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        let outcome = self.handle_hotkey_inner(key);
+        drop(self.apply_pane_events());
+        outcome
+    }
+
+    fn handle_hotkey_inner(&mut self, key: &KeyEvent) -> HotkeyOutcome {
         if !key.pressed {
             // Key release — check for Alt+Tab completion
             if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {
@@ -2267,14 +2764,48 @@ impl DesktopShell {
         // desktop out from under the overlay the user is typing into, and "e"
         // would open a file manager behind it. A modal surface with a text field
         // has to be modal about keys as well as clicks.
+        // The Run box first, because it is drawn last: `paint_chrome` puts it
+        // over every other popup, and the surface on top is the one that owns
+        // the keyboard. In practice nothing else is open underneath it —
+        // `toggle_run_dialog` dismisses the popups on the way in and a click
+        // outside the box closes the box — but the ordering here has to agree
+        // with the paint order regardless of whether the case arises, or the
+        // day it does arise is the day keys go to a window the user cannot see.
+        if self.run_dialog.is_visible() {
+            return self.key_on_run_dialog(key);
+        }
+
         if self.overview.visible {
             return self.key_on_overview(key);
         }
 
-        match DesktopAction::for_chord(key.modifiers, key.key) {
-            Some(action) => self.run_desktop_action(action),
+        // The notification pane is modal for the same reason and gets presses
+        // on the same terms — with the same one-way-toggle exception, so that
+        // the chord that opened it closes it again.
+        if self.notifications.pane_state().is_visible() {
+            if self.bound_action(key) == Some(HotkeyAction::ToggleNotifications) {
+                return self.run_desktop_action(&HotkeyAction::ToggleNotifications);
+            }
+            // Result deliberately discarded: consumed even when the pane had no
+            // meaning for the key, because a press the overlay did not use is
+            // not therefore the desktop's.
+            let _ = self.notifications.handle_key_event(key);
+            return HotkeyOutcome::consumed();
+        }
+
+        match self.bound_action(key) {
+            Some(action) => self.run_desktop_action(&action),
             None => HotkeyOutcome::ignored(),
         }
+    }
+
+    /// What the user has bound this press to, if anything.
+    ///
+    /// Cloned out of the registry rather than borrowed, because carrying the
+    /// action out takes `&mut self` and two of them own a `String`. One clone
+    /// per *recognised* shortcut is not on any path that runs per frame.
+    fn bound_action(&self, key: &KeyEvent) -> Option<HotkeyAction> {
+        self.hotkeys.lookup(key.key, &key.modifiers).cloned()
     }
 
     /// One press while the overview is up.
@@ -2283,8 +2814,8 @@ impl DesktopShell {
         // the overview closes it. Without this the binding would be one-way —
         // Super+Tab would open the overlay and then, arriving as a bare Tab,
         // cycle its mode — and a toggle you cannot press twice is a trap.
-        if DesktopAction::for_chord(key.modifiers, key.key) == Some(DesktopAction::ToggleOverview) {
-            return self.run_desktop_action(DesktopAction::ToggleOverview);
+        if self.bound_action(key) == Some(HotkeyAction::ToggleOverview) {
+            return self.run_desktop_action(&HotkeyAction::ToggleOverview);
         }
         let Some(ok) = Self::overview_key(key) else {
             // Not a key the overview has a meaning for — a bare modifier, a
@@ -2345,12 +2876,12 @@ impl DesktopShell {
 
     /// Carry out a shortcut that has already been recognised.
     ///
-    /// Every binding but [`DismissPopup`](DesktopAction::DismissPopup) consumes
+    /// Every binding but [`DismissPopup`](HotkeyAction::DismissPopup) consumes
     /// the press; that one is bare Escape, and a key the shell claims
     /// unconditionally is a key no window can ever see. Closing a dialog is what
     /// Escape does far more often than closing the start menu.
     ///
-    /// The arms divide into two kinds, and the division is the whole point of
+    /// The arms divide into three kinds, and the division is the whole point of
     /// the return type. The start menu, the Alt-Tab switcher's *stepping*, and
     /// popup dismissal are the shell's own surfaces and are done here. Anything
     /// naming a window — close, minimise, maximise, tile, raise — is a
@@ -2358,10 +2889,13 @@ impl DesktopShell {
     /// do the second kind itself, against the shell's private copy of the window
     /// list, which on a live session the next
     /// [`apply_window_list`](DesktopShell::apply_window_list) discards: Alt+F4
-    /// removed a taskbar button and left the window open.
-    fn run_desktop_action(&mut self, action: DesktopAction) -> HotkeyOutcome {
+    /// removed a taskbar button and left the window open. The third kind starts
+    /// a program, and is handed back for the same reason in
+    /// [`launches`](HotkeyOutcome::launches): the shell has no connection to the
+    /// process server either.
+    fn run_desktop_action(&mut self, action: &HotkeyAction) -> HotkeyOutcome {
         match action {
-            DesktopAction::CycleWindows => {
+            HotkeyAction::CycleWindows => {
                 if self.alt_tab_active {
                     self.next_alt_tab();
                 } else {
@@ -2369,7 +2903,7 @@ impl DesktopShell {
                 }
                 HotkeyOutcome::consumed()
             }
-            DesktopAction::CycleWindowsBackwards => {
+            HotkeyAction::CycleWindowsBackwards => {
                 if !self.alt_tab_active {
                     self.start_alt_tab();
                 }
@@ -2378,16 +2912,19 @@ impl DesktopShell {
                 }
                 HotkeyOutcome::consumed()
             }
-            DesktopAction::CloseFocused => {
+            HotkeyAction::CloseWindow => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Close))
             }
-            DesktopAction::ToggleStartMenu => {
+            HotkeyAction::MinimizeWindow => {
+                HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Minimize))
+            }
+            HotkeyAction::ToggleStartMenu => {
                 self.toggle_start_menu();
                 HotkeyOutcome::consumed()
             }
             // The one shortcut that names more than one window, and the reason
             // `handle_hotkey` cannot return a single request.
-            DesktopAction::ShowDesktop => HotkeyOutcome::ask_all(
+            HotkeyAction::ShowDesktop => HotkeyOutcome::ask_all(
                 self.windows
                     .values()
                     // `on_glass`, not `mapped`: this is the one caller that
@@ -2399,32 +2936,49 @@ impl DesktopShell {
                     .map(|w| ShellRequest::window(w.id, ShellControlAction::Minimize))
                     .collect(),
             ),
-            DesktopAction::SnapLeft => {
+            HotkeyAction::SnapLeft => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapLeft))
             }
-            DesktopAction::SnapRight => {
+            HotkeyAction::SnapRight => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::SnapRight))
             }
-            DesktopAction::Maximize => {
+            HotkeyAction::MaximizeWindow => {
                 HotkeyOutcome::ask(self.request_on_focused(ShellControlAction::Maximize))
             }
-            // Consumed whether or not the overlay opened. Super+Z is the
-            // shell's key in either case, and letting it through to the focused
-            // window on an empty desktop would make a shortcut that sometimes
-            // types a `z`.
-            // Consumed unconditionally, for the same reason as the zone
-            // overlay: Super+Tab is the shell's chord whether or not there is
-            // anything to show, and a shortcut that sometimes reaches the
-            // focused window is a shortcut that sometimes types a Tab into it.
-            DesktopAction::ToggleOverview => {
+            // Consumed unconditionally: Super+Tab is the shell's chord whether
+            // or not there is anything to show, and a shortcut that sometimes
+            // reaches the focused window is a shortcut that sometimes types a
+            // Tab into it.
+            HotkeyAction::ToggleOverview => {
                 self.overview.toggle(overview::OverviewMode::AllDesktops);
                 HotkeyOutcome::consumed()
             }
-            DesktopAction::ToggleZoneOverlay => {
+            // Consumed whether or not the overlay opened, for the same reason.
+            // Super+Z is the shell's key in either case, and letting it through
+            // to the focused window on an empty desktop would make a shortcut
+            // that sometimes types a `z`.
+            HotkeyAction::ToggleZoneOverlay => {
                 self.toggle_zone_overlay();
                 HotkeyOutcome::consumed()
             }
-            DesktopAction::RestoreOrMinimize => {
+            // Consumed unconditionally, like the two above: Super+N is the
+            // shell's chord whether or not there is anything in the pane, and a
+            // shortcut that sometimes types an `n` into the focused window is
+            // worse than one that sometimes opens an empty panel.
+            HotkeyAction::ToggleNotifications => {
+                self.toggle_notifications();
+                HotkeyOutcome::consumed()
+            }
+            // Consumed unconditionally, for the same reason as the three above.
+            // The card is also the one surface that can be *closed* by the
+            // chord that lists it, which is why it must not fall through: a
+            // Super+/ that reached the focused window while the card was up
+            // would leave the user unable to shut what they opened.
+            HotkeyAction::ToggleShortcutCard => {
+                self.toggle_shortcut_card();
+                HotkeyOutcome::consumed()
+            }
+            HotkeyAction::RestoreOrMinimize => {
                 // Which of the two it is depends on the state the *compositor*
                 // last reported, not on anything the shell decided: Super+Down
                 // un-maximizes a maximized window and minimizes an ordinary one,
@@ -2440,20 +2994,164 @@ impl DesktopShell {
                 };
                 HotkeyOutcome::ask(self.request_on_focused(want))
             }
-            DesktopAction::PreviousDesktop => {
+            HotkeyAction::PreviousDesktop => {
                 HotkeyOutcome::ask(self.previous_desktop().and_then(|d| self.switch_desktop(d)))
             }
-            DesktopAction::NextDesktop => {
+            HotkeyAction::NextDesktop => {
                 HotkeyOutcome::ask(self.next_desktop().and_then(|d| self.switch_desktop(d)))
             }
-            DesktopAction::DismissPopup => {
+            // A number the user wrote in a config file, so it can name a desktop
+            // that does not exist. `switch_desktop` answers `None` for one that
+            // is already showing or out of range, and the press is consumed
+            // either way: the chord is the shell's whether or not the desktop is
+            // there, and letting it through would type into the focused window.
+            HotkeyAction::SwitchDesktop(index) => {
+                HotkeyOutcome::ask(self.switch_desktop(u32::from(*index)))
+            }
+            HotkeyAction::DismissPopup => {
                 if self.dismiss_popups() {
                     HotkeyOutcome::consumed()
                 } else {
                     HotkeyOutcome::ignored()
                 }
             }
+            // The overlay is shown from the level the pane reports back, not
+            // from the level this arm asked for: `adjust_volume` clamps, so at
+            // either end of the range the two differ, and an indicator that
+            // read 105% would be reporting a keystroke rather than a volume.
+            HotkeyAction::VolumeUp | HotkeyAction::VolumeDown => {
+                let step = if matches!(action, HotkeyAction::VolumeUp) {
+                    VolumeStep::Up
+                } else {
+                    VolumeStep::Down
+                };
+                let level = self.notifications.adjust_volume(step.delta());
+                self.show_osd(osd::OsdKind::Volume {
+                    level,
+                    muted: self.notifications.is_muted(),
+                });
+                HotkeyOutcome::consumed()
+            }
+            HotkeyAction::VolumeMute => {
+                let muted = self.notifications.toggle_mute();
+                // The level as well as the flag, because muting does not change
+                // the level and the overlay is what tells you what unmuting
+                // will bring back.
+                self.show_osd(osd::OsdKind::Volume {
+                    level: self.notifications.volume(),
+                    muted,
+                });
+                HotkeyOutcome::consumed()
+            }
+            // Consumed unconditionally, like the three toggles above. Super+R is
+            // the shell's chord in either direction, and a second press that
+            // reached the focused window would type an `r` into the program the
+            // *first* press was used to start.
+            HotkeyAction::ToggleRunDialog => {
+                self.toggle_run_dialog();
+                HotkeyOutcome::consumed()
+            }
+            // The six that start a program instead of touching a window. The
+            // command is the action's own — see [`HotkeyAction::command`] — and
+            // it is reported rather than run, because the shell has no
+            // connection to the process server.
+            HotkeyAction::LaunchApp(_)
+            | HotkeyAction::ShowTaskManager
+            | HotkeyAction::SystemSettings
+            | HotkeyAction::ScreenLock
+            | HotkeyAction::Screenshot
+            | HotkeyAction::ScreenshotRegion => {
+                HotkeyOutcome::start(action.command().map(str::to_owned).into_iter().collect())
+            }
+            // Nothing can carry these out: there is no backlight channel out of
+            // the shell, and inventing one would mean a request the compositor
+            // has no verb for. Consumed regardless — the user bound the chord,
+            // so passing it to the focused window would be worse than doing
+            // nothing visibly. See `known-issues.md` →
+            // `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+            HotkeyAction::BrightnessUp | HotkeyAction::BrightnessDown => HotkeyOutcome::consumed(),
         }
+    }
+
+    /// Open the Run box, or close it if it is already open.
+    ///
+    /// Centred on each opening rather than once at construction: the display can
+    /// change size under a shell that is already running
+    /// ([`ShellSession::resize_display`](session::ShellSession)), and a position
+    /// computed at startup would put the box off the edge of the new screen. The
+    /// same pull-on-use reasoning as [`sync_osd_screen`](Self::sync_osd_screen),
+    /// for the same reason: `screen_width` and `screen_height` are public fields
+    /// that anything may assign.
+    pub fn toggle_run_dialog(&mut self) {
+        if self.run_dialog.is_visible() {
+            self.run_dialog.hide();
+            return;
+        }
+        // The other popups close, because the Run box is modal about keys: with
+        // the start menu still open behind it, the menu would be showing a
+        // search field that can no longer be typed into.
+        self.dismiss_popups();
+        self.run_dialog.show();
+        self.centre_run_dialog();
+    }
+
+    /// Put the Run box in the middle of the display.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "screen dimensions are far inside f32's exact-integer range"
+    )]
+    fn centre_run_dialog(&mut self) {
+        self.run_dialog
+            .centre_on(self.screen_width as f32, self.screen_height as f32);
+    }
+
+    /// One press while the Run box is up.
+    ///
+    /// Modal on the same terms as [`key_on_overview`](Self::key_on_overview),
+    /// and for the same reason — the box has a text field, so a press that
+    /// reached the binding table would run a shortcut instead of typing a
+    /// character. The chord that opened it still reaches the table, so that
+    /// Super+R closes what Super+R opened.
+    fn key_on_run_dialog(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        if self.bound_action(key) == Some(HotkeyAction::ToggleRunDialog) {
+            return self.run_desktop_action(&HotkeyAction::ToggleRunDialog);
+        }
+        // Result deliberately discarded, exactly as the notification pane's is:
+        // a press the dialog had no meaning for is still not the desktop's while
+        // the dialog is up.
+        let _ = self.run_dialog.handle_key_event(key);
+        HotkeyOutcome::start(self.drain_run_dialog())
+    }
+
+    /// Answer whatever the Run box has asked for since it was last emptied, and
+    /// report the programs it wants started.
+    ///
+    /// `Cancel` and `Closed` need no answer — the dialog has already hidden
+    /// itself by the time it reports them — but they must still be drained, or
+    /// the buffer grows by one on every dismissal. That is the whole reason this
+    /// is called on *every* press rather than only on the ones that could have
+    /// executed something.
+    ///
+    /// [`Browse`](run_dialog::RunDialogEvent::Browse) is dropped, deliberately
+    /// and visibly. It asks for a file *picker* — a chooser whose answer goes
+    /// back into the command box — not for a file manager to be started, and the
+    /// shell cannot yet put one up: `guitk::dialog::FileDialog` exists and would
+    /// serve, but it has to be fed directory entries, and this crate performs no
+    /// filesystem reads at all. Starting the file explorer instead would be the
+    /// tempting substitute and is the wrong one: the user would get a window
+    /// they did not ask for and an empty command box. See `known-issues.md`
+    /// `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
+    fn drain_run_dialog(&mut self) -> Vec<String> {
+        self.run_dialog
+            .drain_events()
+            .into_iter()
+            .filter_map(|event| match event {
+                run_dialog::RunDialogEvent::Execute(command) => Some(command),
+                run_dialog::RunDialogEvent::Browse
+                | run_dialog::RunDialogEvent::Cancel
+                | run_dialog::RunDialogEvent::Closed => None,
+            })
+            .collect()
     }
 
     /// `action` aimed at whatever is focused, or `None` if nothing is.
@@ -2467,104 +3165,59 @@ impl DesktopShell {
     }
 }
 
-/// A desktop-level keyboard shortcut, named separately from the chord that
-/// invokes it and from the code that carries it out.
-///
-/// The bindings used to be a chain of `if`s, each testing only the modifiers it
-/// happened to care about, so a loose chord earlier in the chain swallowed a
-/// tighter one later on: `Super+Left`/`Super+Right` (snap the focused window)
-/// were tested before `Ctrl+Super+Left`/`Ctrl+Super+Right` (switch virtual
-/// desktop), and matched with Ctrl held as well — so the virtual-desktop
-/// shortcuts were unreachable and had never once fired. Pressing them snapped
-/// a window instead.
-///
-/// Matching the whole modifier set at once makes that class of bug impossible:
-/// every binding states its full chord, a modifier the chord does not list is a
-/// modifier the binding does *not* fire with, and two arms claiming the same
-/// chord are an unreachable-pattern warning rather than a silently dead
-/// shortcut.
+/// Which way a volume key moves the level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DesktopAction {
-    CycleWindows,
-    CycleWindowsBackwards,
-    CloseFocused,
-    ToggleStartMenu,
-    ShowDesktop,
-    SnapLeft,
-    SnapRight,
-    Maximize,
-    /// Open (or close) the multi-zone tiling chooser for the focused window.
-    ///
-    /// Distinct from [`SnapLeft`](Self::SnapLeft) and its neighbours, which are
-    /// one keystroke each and place the window immediately. This one opens a
-    /// chooser, because there are twenty-two zones across the six layouts and
-    /// no plausible set of chords for them.
-    ToggleZoneOverlay,
-    /// Open (or close) the Exposé overlay — every window on every desktop.
-    ///
-    /// Distinct from [`CycleWindows`](Self::CycleWindows), which is the same
-    /// job for the common case: Alt-Tab is fast and blind, showing a strip of
-    /// titles you step through without looking. This shows all of them at once,
-    /// to scale, and is what you reach for when you do not remember how many
-    /// presses away the window is — or which desktop it is on, which Alt-Tab
-    /// cannot answer at all.
-    ToggleOverview,
-    RestoreOrMinimize,
-    PreviousDesktop,
-    NextDesktop,
-    /// Close whatever popup is open. Unlike every other action here, this one
-    /// can decline: see [`DesktopShell::run_desktop_action`].
-    DismissPopup,
+enum VolumeStep {
+    Up,
+    Down,
 }
 
-impl DesktopAction {
-    /// The action a chord invokes, if it invokes one.
+impl VolumeStep {
+    /// How far one press moves the volume, in percentage points.
     ///
-    /// This match is the whole binding table — there is no desktop shortcut
-    /// recognised anywhere else.
-    fn for_chord(modifiers: Modifiers, key: Key) -> Option<Self> {
-        let Modifiers {
-            shift,
-            ctrl,
-            alt,
-            super_key,
-        } = modifiers;
-        match (shift, ctrl, alt, super_key, key) {
-            (false, false, true, false, Key::Tab) => Some(Self::CycleWindows),
-            (true, false, true, false, Key::Tab) => Some(Self::CycleWindowsBackwards),
-            (false, false, true, false, Key::F4) => Some(Self::CloseFocused),
-            // The Super key on its own. It is itself a modifier, so whether the
-            // modifier bit is already set when it is the key being pressed is
-            // the keyboard driver's business, and neither answer should change
-            // what the key does.
-            (false, false, false, _, Key::LeftSuper | Key::RightSuper) => {
-                Some(Self::ToggleStartMenu)
-            }
-            (false, false, false, true, Key::D) => Some(Self::ShowDesktop),
-            (false, false, false, true, Key::Left) => Some(Self::SnapLeft),
-            (false, false, false, true, Key::Right) => Some(Self::SnapRight),
-            (false, false, false, true, Key::Up) => Some(Self::Maximize),
-            (false, false, false, true, Key::Down) => Some(Self::RestoreOrMinimize),
-            // Super+Z, as in "zones". Super plus an arrow is already taken by
-            // the four one-press placements above, and the chooser needs a key
-            // that is not one of them.
-            (false, false, false, true, Key::Z) => Some(Self::ToggleZoneOverlay),
-            // Super+Tab, which is the chord every other desktop uses for this
-            // and is not one of the four above. Alt+Tab is deliberately left
-            // alone: the two are complements, not alternatives.
-            (false, false, false, true, Key::Tab) => Some(Self::ToggleOverview),
-            (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),
-            (false, true, false, true, Key::Right) => Some(Self::NextDesktop),
-            // Bare Escape. The shell had no binding for it at all, so the only
-            // way to close the start menu or the calendar was to click
-            // somewhere else — and a popup that a click opened but Escape
-            // cannot close is the one every other desktop has taught the user
-            // to expect. It is claimed *conditionally*: with nothing open the
-            // press is not consumed and reaches the focused window, whose own
-            // dialog may be what the user meant to dismiss.
-            (false, false, false, false, Key::Escape) => Some(Self::DismissPopup),
-            _ => None,
+    /// Five, so twenty presses cross the whole range: a step small enough to
+    /// aim with and large enough that turning the volume down from a startle is
+    /// a few presses rather than a drum roll. The same number every desktop
+    /// picks, for the same reason.
+    const SIZE: i16 = 5;
+
+    /// The signed step this direction applies.
+    const fn delta(self) -> i16 {
+        match self {
+            Self::Up => Self::SIZE,
+            Self::Down => -Self::SIZE,
         }
+    }
+}
+
+impl DesktopShell {
+    /// The chords the shell needs delivered wherever the keyboard is.
+    ///
+    /// Derived from [`hotkeys`](Self::hotkeys) — every binding in the registry
+    /// except the [conditional](hotkeys::HotkeyAction::is_conditional) ones,
+    /// expanded to the exact chords a grab can name. This used to be a `const`
+    /// list written out beside the binding table and kept in step with it by two
+    /// tests, which is an arrangement that only works while the table is fixed at
+    /// compile time; the moment a user can rebind a shortcut, the grab set has
+    /// to be computed from what they bound.
+    ///
+    /// Built rather than returned by reference because of that expansion. It is
+    /// read at startup and again whenever the bindings change, neither of which
+    /// is a path that runs per frame.
+    #[must_use]
+    pub fn global_chords(&self) -> Vec<(Key, Modifiers)> {
+        self.hotkeys.global_chords()
+    }
+
+    /// The chords to hold only while [`any_popup_open`](Self::any_popup_open).
+    ///
+    /// Bare Escape, out of the box. A grab is not conditional, so this set is
+    /// grabbed and released as the shell's surfaces open and close instead of
+    /// being held for the session — holding Escape permanently would break it in
+    /// every dialog on the desktop.
+    #[must_use]
+    pub fn conditional_chords(&self) -> Vec<(Key, Modifiers)> {
+        self.hotkeys.conditional_chords()
     }
 }
 
@@ -2660,6 +3313,72 @@ impl DesktopShell {
             self.font_size(TextRole::Body),
         );
 
+        // The notification bell, in its own slot immediately left of the clock.
+        // Without it the pane this shell owns had exactly one way in — Super+N
+        // — which is a route nobody discovers, and the pane's own module doc
+        // has always claimed a "system tray click" as the other.
+        //
+        // The glyph is the focus mode's own — a plain bell when nothing is
+        // being silenced, a struck bell / alarm clock / no-entry sign when
+        // something is — so one slot carries both "here is your history" and
+        // "here is why it has been quiet", without the tray growing a second
+        // item and shuffling every window button sideways.
+        let bell = self.bell_rect();
+        let unread = self.notifications.attention_count();
+        tree.text(
+            bell.x,
+            tray_text_y,
+            self.focus.effective_mode().icon(),
+            // Accent when something is waiting. The glyph alone would be a
+            // silent difference: a bell that looks the same whether or not it
+            // has anything behind it is a bell nobody presses.
+            //
+            // The mode is deliberately *not* tinted with `focus_assist`'s
+            // severity hues here. Those are measured against that module's
+            // pill fill; on the taskbar the only pair this theme guarantees
+            // legible is accent-on-background (pinned by
+            // `the_taskbar_accent_contrasts_with_the_bar`), and the changed
+            // glyph already carries the mode.
+            if unread == 0 {
+                self.theme.taskbar_fg
+            } else {
+                self.theme.taskbar_accent
+            },
+            self.font_size(TextRole::Glyph),
+        );
+        if unread > 0 {
+            // Two characters at most, so a hundred notifications cannot widen
+            // the badge past its slot. The pill is filled with the accent and
+            // lettered in the bar's own colour, which is the one pair the theme
+            // guarantees contrasts — see `DesktopTheme::taskbar_accent`.
+            let label = if unread > 9 {
+                "9+".to_owned()
+            } else {
+                unread.to_string()
+            };
+            let badge_size = self.font_size(TextRole::Caption);
+            let badge_w = text::width(&label, badge_size) + self.scale(6.0);
+            let badge_h = badge_size + self.scale(2.0);
+            // Right-aligned inside the slot: a badge that grew leftwards from
+            // the glyph would push the clock, and one that grew rightwards
+            // would sit on top of it.
+            let badge_x = (bell.x + bell.w - badge_w).max(bell.x);
+            let badge_y = bar.y + self.scale(4.0);
+            fill_round(
+                &mut tree,
+                Rect::new(badge_x, badge_y, badge_w, badge_h),
+                self.theme.taskbar_accent,
+                CornerRadii::all(badge_h / 2.0),
+            );
+            tree.text(
+                badge_x + self.scale(3.0),
+                badge_y + self.scale(1.0),
+                &label,
+                self.theme.taskbar_bg,
+                badge_size,
+            );
+        }
+
         // Desktop indicator, at the tray's left edge.
         tree.text(
             tray_x + padding,
@@ -2679,7 +3398,11 @@ impl DesktopShell {
         }
 
         let mut tree = RenderTree::new();
-        let windows = self.taskbar_windows();
+        // The same list `alt_tab_index` counts into — see
+        // [`switcher_windows`](Self::switcher_windows). Drawing the taskbar's
+        // list instead would highlight the wrong entry the moment any window
+        // was in one list and not the other.
+        let windows = self.switcher_windows();
 
         if windows.is_empty() {
             return None;
@@ -3015,10 +3738,30 @@ impl DesktopShell {
     /// since nothing about a clipped clock says which end was cut.
     fn tray_width(&self) -> f32 {
         let padding = self.scale(TRAY_PADDING);
-        let content = self.clock_width() + self.desktop_indicator_width();
-        // Padding at the right edge, between the two items, and at the left of
-        // the tray.
-        (content + padding * 3.0).max(self.scale(TRAY_MIN_WIDTH))
+        let content =
+            self.clock_width() + self.scale(TRAY_BELL_WIDTH) + self.desktop_indicator_width();
+        // Padding at the right edge, between each pair of items, and at the
+        // left of the tray.
+        (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH))
+    }
+
+    /// The notification bell's clickable area, immediately left of the clock.
+    ///
+    /// Placed from the clock rather than from the tray's left edge: the tray's
+    /// contents are laid out right-to-left from the display edge — so that a
+    /// wider clock pushes everything left instead of running off the screen —
+    /// and an item positioned from the *left* edge of a right-aligned strip
+    /// would drift the moment the clock's switches changed its width.
+    ///
+    /// Full bar height, like [`clock_rect`](Self::clock_rect), because a target
+    /// only as tall as the glyph misses most presses aimed at it.
+    #[must_use]
+    pub fn bell_rect(&self) -> Rect {
+        let bar = self.taskbar_rect();
+        let padding = self.scale(TRAY_PADDING);
+        let width = self.scale(TRAY_BELL_WIDTH) + padding;
+        let x = (self.clock_rect().x - width).max(0.0);
+        Rect::new(x, bar.y, width.min((bar.w - x).max(0.0)), bar.h)
     }
 
     // ========================================================================
@@ -3122,6 +3865,7 @@ impl DesktopShell {
         // taskbar at once is a state the user cannot have asked for.
         self.start_menu_open = false;
         self.power_menu_open = false;
+        self.shortcut_card_open = false;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3138,20 +3882,250 @@ impl DesktopShell {
         self.calendar.set_visible(true);
     }
 
+    /// Open the notification pane, or close it if it is already open.
+    ///
+    /// Lands the pane on its destination immediately; a caller with a frame
+    /// clock follows this with [`NotificationPane::begin_slide`] to rewind the
+    /// jump into an animation. See `design-decisions.md` §520 and §562.
+    ///
+    /// [`NotificationPane::begin_slide`]: notif_pane::NotificationPane::begin_slide
+    pub fn toggle_notifications(&mut self) {
+        if self.notifications.pane_state().is_visible() {
+            self.notifications.hide();
+            return;
+        }
+        // Same rule the calendar states: two panels over one taskbar at once is
+        // a state the user cannot have asked for.
+        self.start_menu_open = false;
+        self.power_menu_open = false;
+        self.calendar.set_visible(false);
+        // The pane's scrim dims the whole screen behind it, so a card left open
+        // under it would be a card the user cannot read.
+        self.shortcut_card_open = false;
+        self.notifications.show();
+    }
+
+    /// Open the card listing every shortcut, or close it if it is already open.
+    ///
+    /// Clears the taskbar's own panels for the same reason
+    /// [`toggle_notifications`](Self::toggle_notifications) does — two panels
+    /// over one desktop at once is a state the user cannot have asked for —
+    /// but deliberately leaves the *overview* and the zone overlay alone: those
+    /// are full-screen surfaces driven by their own chords, and a user who
+    /// opens the card to find out what the overview's chord is should not have
+    /// the overview shut in the act of looking it up.
+    pub fn toggle_shortcut_card(&mut self) {
+        if self.shortcut_card_open {
+            self.shortcut_card_open = false;
+            return;
+        }
+        self.start_menu_open = false;
+        self.power_menu_open = false;
+        self.calendar.set_visible(false);
+        self.notifications.hide();
+        self.shortcut_card_open = true;
+    }
+
+    /// Post a notification, opening nothing.
+    ///
+    /// The pane is the *history*; this puts a message into it whether or not
+    /// anyone is looking. A message that could only arrive while the pane was
+    /// open would be a message the user can only read by already knowing it is
+    /// there.
+    ///
+    /// # Focus assist suppresses attention, not the record
+    ///
+    /// If [`focus`](Self::focus) says this app is silenced right now, the
+    /// notification is still stored — it is simply marked
+    /// [`silent`](notif_pane::Notification::silent), which keeps it out of the
+    /// bell's badge and out of [`attention_count`]. Dropping it instead was the
+    /// obvious alternative and is wrong: Do Not Disturb is a request not to be
+    /// interrupted, not a request to be lied to about what happened, and a user
+    /// who turns it off has no way to ask for the missed hour back. `Windows`
+    /// and macOS both keep the record for the same reason.
+    ///
+    /// The suppressed ones are also counted on the manager, so the "you missed
+    /// N things" summary [`FocusAssistManager::show_summary`] promises has a
+    /// number to show.
+    ///
+    /// [`attention_count`]: notif_pane::NotificationPane::attention_count
+    /// [`FocusAssistManager::show_summary`]: focus_assist::FocusAssistManager
+    pub fn notify(&mut self, mut notif: notif_pane::Notification) -> u64 {
+        // Keyed on `app_name` because that is the only app identity a
+        // `Notification` carries, and it is the same key the pane files its
+        // per-app settings under. A separate opaque id would have to be
+        // threaded through every poster to buy nothing the name does not
+        // already buy.
+        if !self.focus.should_show_notification(&notif.app_name) {
+            self.focus.record_suppressed();
+            notif.silent = true;
+        }
+        self.notifications.push_notification(notif)
+    }
+
+    /// Push the focus manager's mode back onto the pane's two switches.
+    ///
+    /// Do Not Disturb and Focus Mode are one four-valued mode spelled as two
+    /// booleans, so the mapping has to be stated in one place or the switches
+    /// drift from what is actually happening:
+    ///
+    /// | mode | Do Not Disturb | Focus Mode |
+    /// |---|---|---|
+    /// | `Off` | off | off |
+    /// | `PriorityOnly` | off | **on** |
+    /// | `AlarmsOnly` | off | **on** |
+    /// | `TotalSilence` | **on** | off |
+    ///
+    /// `AlarmsOnly` reads as "Focus Mode on", which is true — focus assist is
+    /// engaged and it is not total silence — so no switch ever shows a state
+    /// the system is not in. What the pair *cannot* do is tell `AlarmsOnly`
+    /// apart from `PriorityOnly`; that distinction lives on the focus-assist
+    /// settings page, and the tray glyph shows it in the meantime.
+    ///
+    /// Called after every press rather than only when the mode changes,
+    /// because an unchanged mode after a press is precisely the case that
+    /// needs the write-back: the switch has already moved on screen and must
+    /// be moved back.
+    fn sync_quick_settings(&mut self) {
+        use focus_assist::FocusMode;
+        use notif_pane::QuickSetting;
+        let mode = self.focus.effective_mode();
+        self.notifications
+            .set_quick_setting(QuickSetting::DoNotDisturb, mode == FocusMode::TotalSilence);
+        self.notifications.set_quick_setting(
+            QuickSetting::FocusMode,
+            matches!(mode, FocusMode::PriorityOnly | FocusMode::AlarmsOnly),
+        );
+    }
+
+    /// Act on everything the pane reported since the last call, and empty it.
+    ///
+    /// Returns the one thing the shell cannot do itself: the program a clicked
+    /// notification's [`action`](notif_pane::Notification::action) names, for
+    /// the caller to turn into a [`ShellAction::Launch`]. Everything else the
+    /// pane has already done to its own state before reporting it, so the rest
+    /// of the arms are the shell deciding whether anything *outside* the pane
+    /// should follow.
+    ///
+    /// Calling this is mandatory, not housekeeping: the pane's event buffer is
+    /// unbounded and nothing else empties it. Until this existed the shell
+    /// accumulated one entry per click for the life of the session and the
+    /// quick-setting switches moved without changing anything.
+    fn apply_pane_events(&mut self) -> Option<String> {
+        use notif_pane::{NotifPaneEvent, QuickSetting};
+        let mut launch = None;
+        for event in self.notifications.drain_events() {
+            match event {
+                NotifPaneEvent::QuickSettingToggled(qs) => match qs {
+                    QuickSetting::DoNotDisturb | QuickSetting::FocusMode => {
+                        self.apply_focus_toggle(qs);
+                    }
+                    // Wi-Fi, Bluetooth and Night Light have no service in this
+                    // process to talk to: the first two are the network and
+                    // bluetooth daemons' state and the third is the
+                    // compositor's gamma ramp, all of which are reached over
+                    // IPC the shell does not hold yet. The switches move and
+                    // are remembered by the pane, and that is all they do —
+                    // recorded in known-issues.md rather than left to be
+                    // rediscovered by someone wondering why the radio stayed
+                    // on.
+                    QuickSetting::WiFi | QuickSetting::Bluetooth | QuickSetting::NightLight => {}
+                },
+                // The pane marks the card read before reporting the click, so
+                // the only thing left is the part it cannot do: start the
+                // program the notification points at. A card with no action is
+                // a message, and reading it is the whole of the interaction.
+                NotifPaneEvent::NotificationClicked(id) => {
+                    // Last one wins, which is the same rule the mouse path
+                    // already follows: one press produces at most one click
+                    // event, so a second can only come from a drain that was
+                    // skipped, and the newer intent is the right one to honour.
+                    launch = self
+                        .notifications
+                        .notifications()
+                        .iter()
+                        .find(|n| n.id == id)
+                        .and_then(|n| n.action.clone())
+                        .or(launch);
+                }
+                // All four are already done by the time they are reported: the
+                // card is gone, the list is empty, the per-app setting is
+                // stored, the pane is closing. They are drained so the buffer
+                // stays bounded, and matched by name so that adding a variant
+                // is a compile error here rather than a silent no-op.
+                NotifPaneEvent::NotificationDismissed(_)
+                | NotifPaneEvent::ClearAll
+                | NotifPaneEvent::SettingChanged { .. }
+                | NotifPaneEvent::Closed => {}
+            }
+        }
+        launch
+    }
+
+    /// Turn a press on one of the two focus switches into a mode.
+    ///
+    /// Reads the switch the pane just flipped rather than the mode, so "the
+    /// user asked for this to be on" is taken from the thing the user actually
+    /// pressed. The two are mutually exclusive by construction — turning
+    /// either on replaces the mode outright — which is what keeps the
+    /// write-back in [`sync_quick_settings`](Self::sync_quick_settings) from
+    /// having to undo a press.
+    fn apply_focus_toggle(&mut self, qs: notif_pane::QuickSetting) {
+        use focus_assist::FocusMode;
+        use notif_pane::QuickSetting;
+        let wanted = self.notifications.quick_setting_value(qs);
+        let mode = match (qs, wanted) {
+            (QuickSetting::DoNotDisturb, true) => FocusMode::TotalSilence,
+            // Priority Only rather than Alarms Only: a switch labelled just
+            // "Focus Mode" has to pick one of the two, and the milder is the
+            // one a user who wanted *silence* would not have reached for —
+            // they would have pressed Do Not Disturb, which is right beside it.
+            (QuickSetting::FocusMode, true) => FocusMode::PriorityOnly,
+            // Either switch turned off means "stop suppressing", including
+            // when the mode was the *other* switch's. Turning Focus Mode off
+            // while Alarms Only is engaged is the case that makes this right:
+            // the switch was showing that mode, so it is the one it turns off.
+            _ => FocusMode::Off,
+        };
+        self.focus.set_mode(mode);
+        self.sync_quick_settings();
+    }
+
+    /// Whether any of the shell's own surfaces is open over the desktop.
+    ///
+    /// Named separately from [`dismiss_popups`](Self::dismiss_popups), which
+    /// used to compute it inline, because it answers a second question the
+    /// session asks: whether the shell should be holding a grab on Escape. The
+    /// two must agree — an Escape grab held while nothing is open would take the
+    /// key away from every dialog on the desktop, and one *not* held while a
+    /// menu is up means the menu cannot be closed from inside an application.
+    /// One expression, so they cannot drift apart.
+    #[must_use]
+    pub fn any_popup_open(&self) -> bool {
+        self.start_menu_open
+            || self.power_menu_open
+            || self.calendar.visible
+            || self.notifications.pane_state().is_visible()
+            || self.snap.is_overlay_visible()
+            || self.overview.visible
+            || self.run_dialog.is_visible()
+            || self.shortcut_card_open
+    }
+
     /// Close whatever popup is open. Returns whether anything was.
     ///
     /// The return value is what keeps Escape from being swallowed: a press
     /// with nothing open must reach the focused window, whose own dialog may
     /// be what the user meant to dismiss.
     pub fn dismiss_popups(&mut self) -> bool {
-        let any = self.start_menu_open
-            || self.power_menu_open
-            || self.calendar.visible
-            || self.snap.is_overlay_visible()
-            || self.overview.visible;
+        let any = self.any_popup_open();
         self.start_menu_open = false;
         self.power_menu_open = false;
         self.calendar.set_visible(false);
+        // The pane's own Escape handling closes it too; this is the path for a
+        // press that dismissed something else at the same time, and for a
+        // caller dismissing everything without a key at all.
+        self.notifications.hide();
         self.snap.hide_overlay();
         // Escape closes the overview along with everything else. It is a
         // fullscreen overlay that covers the whole desktop, so it is the
@@ -3160,6 +4134,20 @@ impl DesktopShell {
         // opened it, and a user who does not remember what that was is left
         // looking at a screen they cannot dismiss.
         self.overview.hide();
+        self.shortcut_card_open = false;
+        // Guarded, unlike every other line here. `RunDialog::hide` posts a
+        // `Closed` event unconditionally, and this function is called on every
+        // Escape and on every opening of the box itself — so an unguarded call
+        // would push one event per dismissal into a queue that, with the box
+        // shut, nothing drains.
+        if self.run_dialog.is_visible() {
+            self.run_dialog.hide();
+            // Emptied straight away for the same reason. Nothing here can have
+            // produced an `Execute`: the box was closed without being asked to
+            // run anything, so the drained list is discarded rather than
+            // returned, and this function keeps its `bool`.
+            drop(self.drain_run_dialog());
+        }
         any
     }
 
@@ -3182,6 +4170,155 @@ impl DesktopShell {
             self.calendar_scale(),
             now,
             &self.events,
+        ));
+        Some(tree)
+    }
+
+    /// How tall the notification pane — scrim included — is allowed to be.
+    ///
+    /// The taskbar's top edge, not the display's bottom. The pane is opened
+    /// from a button *on* the taskbar, and a panel that covers the button that
+    /// opened it is a panel the user cannot close the way they opened it: the
+    /// second press lands on the pane's own opaque column and does nothing.
+    /// Stopping above the bar leaves the bell reachable, which is what makes it
+    /// a toggle rather than a one-way door.
+    ///
+    /// The same number goes to [`NotificationPane::render`] and to
+    /// [`NotificationPane::handle_mouse_event`] — one source, so the pane is
+    /// hit-tested exactly where it is painted.
+    ///
+    /// [`NotificationPane::render`]: notif_pane::NotificationPane::render
+    /// [`NotificationPane::handle_mouse_event`]: notif_pane::NotificationPane::handle_mouse_event
+    #[must_use]
+    pub fn notification_pane_height(&self) -> f32 {
+        self.taskbar_rect().y
+    }
+
+    /// Put a heads-up overlay on screen, or refresh the one already there.
+    ///
+    /// Takes no clock: it is stamped from
+    /// [`osd_clock_ms`](Self::osd_clock_ms), which is why the volume keys can
+    /// be handled by [`handle_hotkey`](Self::handle_hotkey) — a keystroke
+    /// handler that had to be told the time would have to be told it by all
+    /// forty of its callers.
+    pub fn show_osd(&mut self, kind: osd::OsdKind) {
+        self.sync_osd_screen();
+        self.osd.show(kind, self.osd_clock_ms);
+    }
+
+    /// Advance the overlay clock by one frame's worth of time and expire
+    /// whatever that made due.
+    ///
+    /// Saturating, so the 49-day frame that a debugger produces puts every
+    /// overlay at its end rather than wrapping the clock backwards and pinning
+    /// them on screen for ever.
+    pub fn advance_osd(&mut self, dt_ms: u64) {
+        self.osd_clock_ms = self.osd_clock_ms.saturating_add(dt_ms);
+        self.osd.tick(self.osd_clock_ms);
+    }
+
+    /// Re-seed the overlay manager's idea of how big the display is.
+    ///
+    /// Pull-on-use, exactly as [`sync_snap_area`](Self::sync_snap_area) is and
+    /// for the same reason: `screen_width` and `screen_height` are public
+    /// fields that anything may assign, so a push-on-change scheme would be one
+    /// forgotten call site away from centring an overlay on a screen size that
+    /// no longer exists.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "screen dimensions are far inside f32's exact-integer range"
+    )]
+    fn sync_osd_screen(&mut self) {
+        self.osd.screen_width = self.screen_width as f32;
+        self.osd.screen_height = self.screen_height as f32;
+    }
+
+    /// Render the heads-up overlays, if any are showing.
+    #[must_use]
+    pub fn render_osd(&self) -> Option<RenderTree> {
+        if !self.osd.has_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands
+            .extend(self.osd.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
+    }
+
+    /// Render the Run box, if it is open.
+    ///
+    /// On the popup surface rather than the overlay one, unlike
+    /// [`render_osd`](Self::render_osd): the box exists to be typed into and
+    /// clicked on, and the overlay surface is the one that declines the mouse
+    /// (`design-decisions.md` 566).
+    #[must_use]
+    pub fn render_run_dialog(&self) -> Option<RenderTree> {
+        if !self.run_dialog.is_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(
+            self.run_dialog
+                .render(&Palette::from_settings(&self.appearance)),
+        );
+        Some(tree)
+    }
+
+    /// Render the notification pane, if it is open.
+    #[must_use]
+    pub fn render_notifications(&self) -> Option<RenderTree> {
+        if !self.notifications.pane_state().is_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(self.notifications.render(
+            &Palette::from_settings(&self.appearance),
+            self.screen_width as f32,
+            self.notification_pane_height(),
+        ));
+        Some(tree)
+    }
+
+    /// Render the card listing every shortcut, if it is open.
+    ///
+    /// Centred on the display rather than anchored to the taskbar: it is a
+    /// reference the user reads, not a control they act on, and the taskbar
+    /// corner is a long way from where their eyes are.
+    ///
+    /// The size comes from [`hotkeys::settings_panel_size`] — the same function
+    /// the renderer itself uses, given the same height budget — so the card is
+    /// centred on its real size however many bindings the user has added, and
+    /// folds into a second column rather than off the bottom of the screen.
+    #[must_use]
+    pub fn render_shortcut_card(&self) -> Option<RenderTree> {
+        if !self.shortcut_card_open {
+            return None;
+        }
+        // The screen, less a margin at top and bottom: a card that reaches the
+        // display's edges reads as a mode the desktop has entered rather than as
+        // a sheet laid over it, and the shadow it draws has nowhere to fall.
+        const MARGIN: f32 = 48.0;
+        let screen_w = self.screen_width as f32;
+        let screen_h = self.screen_height as f32;
+        // Bound once and handed to both calls below, because they are only
+        // guaranteed to agree about the column count if they are given the same
+        // budget — the two functions say so in their own docs.
+        let budget = (screen_h - MARGIN * 2.0).max(MARGIN);
+        let (width, height) = hotkeys::settings_panel_size(&self.hotkeys, budget);
+        // Clamped at zero so a display narrower or shorter than the card puts
+        // its top-left corner on screen rather than off it: a card that
+        // overflows is one the user can still read the start of, whereas one
+        // centred at a negative origin is one whose header is gone.
+        let x = ((screen_w - width) / 2.0).max(0.0);
+        let y = ((screen_h - height) / 2.0).max(0.0);
+        let mut tree = RenderTree::new();
+        tree.commands.extend(hotkeys::render_settings_panel(
+            &self.hotkeys,
+            &Palette::from_settings(&self.appearance),
+            x,
+            y,
+            None,
+            budget,
         ));
         Some(tree)
     }
@@ -3620,7 +4757,8 @@ mod window_manager_tests {
 
     use super::{
         DesktopShell, HotkeyOutcome, Key, KeyEvent, ManagedWindow, Modifiers, ShellControlAction,
-        ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState, text,
+        ShellRequest, TextRole, WindowId, WindowInfo, WindowList, WindowState, hotkeys, snap, text,
+        window_rules,
     };
 
     fn shell() -> DesktopShell {
@@ -3637,6 +4775,11 @@ mod window_manager_tests {
         // that dropped it would move every window to desktop 0 on the next
         // list, and the desktop tests below would pass by accident.
         info.workspace = window.desktop;
+        // Round-tripped for the same reason, and with a sharper edge: a helper
+        // that dropped it would leave every window anonymous after the first
+        // list, so a test that opened a named window and then did anything at
+        // all would see the name vanish for reasons nothing in the test says.
+        info.app_id.clone_from(&window.app_id);
         info
     }
 
@@ -3757,6 +4900,206 @@ mod window_manager_tests {
     }
 
     // ==================================================================
+    // The grab list against the binding table
+    // ==================================================================
+
+    /// A claimed chord that means nothing is a key taken from every application
+    /// on the desktop in exchange for nothing at all. The compositor cannot
+    /// notice — a grab is a grab — so it has to be noticed here.
+    #[test]
+    fn every_grabbed_chord_is_a_chord_the_shell_acts_on() {
+        let shell = shell();
+        for (key, modifiers) in shell.global_chords() {
+            let action = shell.hotkeys.lookup(key, &modifiers).unwrap_or_else(|| {
+                panic!("{key:?} with {modifiers:?} is claimed from the compositor and then dropped")
+            });
+            assert!(
+                !action.is_conditional(),
+                "{key:?} with {modifiers:?} is held permanently but only means \
+                 something some of the time, so it is taken from every window for \
+                 nothing the rest of the time"
+            );
+        }
+    }
+
+    /// And the converse, which is the failure that actually happens: somebody
+    /// adds a binding to the table and the shortcut silently never fires,
+    /// because the keystroke goes to whatever window has the keyboard.
+    ///
+    /// Swept over the whole key vocabulary rather than the keys already in the
+    /// list — a binding on a key nobody has bound before is exactly the case a
+    /// narrower sweep would miss.
+    #[test]
+    fn every_chord_the_shell_acts_on_is_a_chord_it_can_hear() {
+        let shell = shell();
+        let claimed: std::collections::HashSet<_> = shell
+            .global_chords()
+            .into_iter()
+            .chain(shell.conditional_chords())
+            .collect();
+        for &key in guiremote::input::ALL_KEYS {
+            for modifiers in hotkeys::ALL_MODIFIER_SETS {
+                if shell.hotkeys.lookup(key, &modifiers).is_some() {
+                    assert!(
+                        claimed.contains(&(key, modifiers)),
+                        "{key:?} with {modifiers:?} is bound but never grabbed, \
+                         so it does nothing unless the desktop itself is focused"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Escape is the one binding that must *not* be held permanently: with no
+    /// popup open the press belongs to the focused window's own dialog. Pinned
+    /// because moving it into the global list would compile, pass every other
+    /// test here, and break the Escape key on the entire desktop.
+    #[test]
+    fn escape_is_not_held_permanently() {
+        let shell = shell();
+        assert!(
+            !shell
+                .global_chords()
+                .contains(&(Key::Escape, Modifiers::NONE)),
+            "a permanent Escape grab takes the key from every dialog on the desktop"
+        );
+        assert!(
+            shell
+                .conditional_chords()
+                .contains(&(Key::Escape, Modifiers::NONE)),
+            "no grab at all means a menu opened with the mouse cannot be closed \
+             with the keyboard"
+        );
+    }
+
+    /// The condition the session reconciles the Escape grab against. It has to
+    /// be true exactly when there is something for Escape to close, or the shell
+    /// either holds the key for nothing or cannot close its own menu.
+    #[test]
+    fn the_escape_condition_tracks_what_escape_would_close() {
+        let mut shell = shell();
+        assert!(
+            !shell.any_popup_open(),
+            "nothing is open on a fresh desktop"
+        );
+        shell.start_menu_open = true;
+        assert!(shell.any_popup_open());
+        assert!(shell.dismiss_popups(), "there was something to dismiss");
+        assert!(
+            !shell.any_popup_open(),
+            "the condition outlived the popups it names"
+        );
+    }
+
+    /// The whole point of the card: a chord opens it, the same chord closes it,
+    /// and it is drawn only while it is open.
+    ///
+    /// Pressed through `handle_hotkey` rather than by setting the flag, because
+    /// the flag was never the part that was missing — `render_settings_panel`
+    /// existed and worked for months with nothing able to reach it.
+    #[test]
+    fn the_shortcut_card_opens_and_closes_on_its_own_chord() {
+        let mut shell = shell();
+        assert!(
+            shell.render_shortcut_card().is_none(),
+            "the card is drawn before anyone asked for it"
+        );
+
+        let chord = press(Key::Slash, super_only());
+        let out = shell.handle_hotkey(&chord);
+        assert!(
+            out.consumed,
+            "Super+/ fell through to the focused window, which will be typed a \
+             slash it did not ask for"
+        );
+        assert!(shell.shortcut_card_open);
+        assert!(
+            shell.render_shortcut_card().is_some(),
+            "the card is open and draws nothing"
+        );
+        assert!(
+            shell.any_popup_open(),
+            "the card is open but Escape would not be grabbed, so it cannot be \
+             closed from inside an application"
+        );
+
+        assert!(shell.handle_hotkey(&chord).consumed);
+        assert!(
+            !shell.shortcut_card_open,
+            "the second press did not close it"
+        );
+        assert!(shell.render_shortcut_card().is_none());
+    }
+
+    /// The card is placed on the screen it is drawn on, not off the edge of it.
+    #[test]
+    fn the_shortcut_card_is_centred_on_the_display() {
+        let shell_wide = {
+            let mut s = shell();
+            s.shortcut_card_open = true;
+            s
+        };
+        let tree = shell_wide.render_shortcut_card().expect("the card is open");
+        let Some(guitk::render::RenderCommand::FillRect {
+            x,
+            y,
+            width,
+            height,
+            ..
+        }) = tree
+            .commands
+            .iter()
+            .find(|c| matches!(c, guitk::render::RenderCommand::FillRect { .. }))
+        else {
+            panic!("the card drew no background");
+        };
+        assert!(*x >= 0.0 && *y >= 0.0, "the card starts off the screen");
+        let (screen_w, screen_h) = (
+            f32::from(u16::try_from(shell_wide.screen_width).unwrap_or(u16::MAX)),
+            f32::from(u16::try_from(shell_wide.screen_height).unwrap_or(u16::MAX)),
+        );
+        // Centred means the two margins match, which is a stronger statement
+        // than "on screen" and the one that actually breaks if the size the
+        // placement used and the size the drawing used ever diverge.
+        assert!(
+            (*x - (screen_w - width) / 2.0).abs() < 0.5,
+            "left margin {x} is not half of the leftover {}",
+            screen_w - width
+        );
+        assert!(
+            (*y - (screen_h - height) / 2.0).abs() < 0.5,
+            "top margin {y} is not half of the leftover {}",
+            screen_h - height
+        );
+    }
+
+    /// Opening the card puts the taskbar's panels away, and opening one of them
+    /// puts the card away. Both directions, because only one of them was
+    /// obvious to write.
+    #[test]
+    fn the_card_and_the_taskbar_panels_are_not_open_at_once() {
+        let mut shell = shell();
+        shell.start_menu_open = true;
+        shell.toggle_shortcut_card();
+        assert!(shell.shortcut_card_open);
+        assert!(!shell.start_menu_open, "the start menu survived the card");
+
+        shell.toggle_start_menu();
+        assert!(shell.start_menu_open);
+        assert!(
+            !shell.shortcut_card_open,
+            "the card survived the start menu"
+        );
+
+        shell.toggle_shortcut_card();
+        shell.toggle_notifications();
+        assert!(
+            !shell.shortcut_card_open,
+            "the card is left under the notification pane's scrim, which dims it"
+        );
+    }
+
+    // ==================================================================
     // Stacking, which is the compositor's order and nothing else
     // ==================================================================
 
@@ -3789,6 +5132,344 @@ mod window_manager_tests {
         assert!(raised > z_of(&shell, top));
         assert_eq!(shell.taskbar_windows().last().map(|w| w.id), Some(bottom));
         assert!(!shell.windows.get(&middle).unwrap().focused);
+    }
+
+    #[test]
+    fn the_program_a_window_belongs_to_arrives_with_the_list() {
+        // The shell never asks a window what it is; it only ever knows what the
+        // last list said. Two windows of one program and one of another,
+        // because telling those apart is the only thing the field is for.
+        let mut shell = shell();
+        let mut notes = WindowInfo::new(1, 40, "notes.md");
+        notes.app_id = "editor".to_string();
+        let mut draft = WindowInfo::new(2, 40, "draft.md");
+        draft.app_id = "editor".to_string();
+        let anon = WindowInfo::new(3, 41, "Some Window");
+        shell.apply_window_list(&WindowList::new(0, vec![notes, draft, anon]));
+
+        let of = |id: u64| {
+            shell
+                .windows
+                .get(&WindowId(id))
+                .expect("known")
+                .app_id
+                .clone()
+        };
+        assert_eq!(of(1), "editor");
+        assert_eq!(of(2), "editor");
+        assert_eq!(
+            of(3),
+            "",
+            "a window that named no program was given one from somewhere"
+        );
+    }
+
+    #[test]
+    fn a_window_is_described_by_the_latest_list_and_not_the_one_before() {
+        // Unlike the taskbar icon, which is shell-local state carried across
+        // lists, this is the compositor's own report. Carrying the previous
+        // value forward would mean a window that had been anonymous stayed
+        // anonymous for the rest of the session even after its program spoke
+        // up -- and the rules that key off it would never fire.
+        let mut shell = shell();
+        shell.apply_window_list(&WindowList::new(
+            0,
+            vec![WindowInfo::new(1, 40, "notes.md")],
+        ));
+        assert_eq!(shell.windows.get(&WindowId(1)).expect("known").app_id, "");
+
+        let mut named = WindowInfo::new(1, 40, "notes.md");
+        named.app_id = "editor".to_string();
+        shell.apply_window_list(&WindowList::new(0, vec![named]));
+        assert_eq!(
+            shell.windows.get(&WindowId(1)).expect("known").app_id,
+            "editor"
+        );
+    }
+
+    // ==================================================================
+    // Window rules
+    //
+    // The rules engine decides; the shell only carries out the five actions
+    // it has a channel for. Every test here goes through `apply_window_list`,
+    // because that is the one place the engine is consulted and the
+    // once-per-arrival contract is the thing most likely to be broken by a
+    // later edit.
+    // ==================================================================
+
+    /// A window arriving, named, with whatever rules are in place.
+    fn arrive(shell: &mut DesktopShell, id: u64, app_id: &str) -> Vec<ShellRequest> {
+        let mut list = as_list(shell);
+        for other in &mut list {
+            other.focused = false;
+        }
+        let mut fresh = WindowInfo::new(id, 1, "A Window");
+        fresh.app_id = app_id.to_string();
+        fresh.focused = true;
+        fresh.workspace = shell.current_desktop;
+        list.push(fresh);
+        shell.apply_window_list(&WindowList::new(shell.current_desktop, list))
+    }
+
+    /// The same windows again, unchanged — the next frame.
+    fn again(shell: &mut DesktopShell) -> Vec<ShellRequest> {
+        let list = as_list(shell);
+        shell.apply_window_list(&WindowList::new(shell.current_desktop, list))
+    }
+
+    /// A rule about `app_id` whose actions `set` fills in.
+    fn rule(shell: &mut DesktopShell, app_id: &str, set: impl Fn(&mut window_rules::RuleActions)) {
+        let mut r = window_rules::WindowRule::new(
+            0,
+            "test rule",
+            window_rules::MatchCriteria::AppId(app_id.to_string()),
+        );
+        set(&mut r.actions);
+        assert!(
+            shell.rules.add_rule(r).is_some(),
+            "the rule should be taken"
+        );
+    }
+
+    #[test]
+    fn hiding_a_window_from_the_taskbar_does_not_hide_it_from_alt_tab() {
+        // The two flags are separate actions, and users mean different things
+        // by them: a chat window kept out of the taskbar is still somewhere
+        // you want to Alt+Tab to. One list serving both would make each flag
+        // silently mean the other.
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| a.skip_taskbar = Some(true));
+        arrive(&mut shell, 1, "chat");
+        arrive(&mut shell, 2, "editor");
+
+        let taskbar: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
+        let switcher: Vec<WindowId> = shell.switcher_windows().iter().map(|w| w.id).collect();
+        assert_eq!(taskbar, vec![WindowId(2)]);
+        assert_eq!(switcher, vec![WindowId(1), WindowId(2)]);
+    }
+
+    #[test]
+    fn hiding_a_window_from_alt_tab_does_not_hide_it_from_the_taskbar() {
+        let mut shell = shell();
+        rule(&mut shell, "monitor", |a| a.skip_alt_tab = Some(true));
+        arrive(&mut shell, 1, "monitor");
+        arrive(&mut shell, 2, "editor");
+
+        let taskbar: Vec<WindowId> = shell.taskbar_windows().iter().map(|w| w.id).collect();
+        let switcher: Vec<WindowId> = shell.switcher_windows().iter().map(|w| w.id).collect();
+        assert_eq!(taskbar, vec![WindowId(1), WindowId(2)]);
+        assert_eq!(switcher, vec![WindowId(2)]);
+    }
+
+    #[test]
+    fn the_switcher_lands_on_the_window_its_index_names() {
+        // `alt_tab_index` counts into `switcher_windows`, so a switcher drawn
+        // from the taskbar's list — which this shell's rule makes a different
+        // list — would activate a window the user was not looking at.
+        let mut shell = shell();
+        rule(&mut shell, "monitor", |a| a.skip_alt_tab = Some(true));
+        arrive(&mut shell, 1, "monitor");
+        arrive(&mut shell, 2, "editor");
+        arrive(&mut shell, 3, "editor");
+
+        shell.start_alt_tab();
+        let request = shell.finish_alt_tab().expect("the switcher was open");
+        assert_eq!(
+            request,
+            ShellRequest::window(WindowId(2), ShellControlAction::Activate),
+            "Alt+Tab should reach the window below the top one, skipping the \
+             one the rule excluded"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_hides_a_window_keeps_hiding_it_on_later_lists() {
+        // Nothing in a window list says "this window is not in the taskbar" —
+        // the rule fired once, on arrival, and the answer is the shell's to
+        // keep. Re-evaluating instead of carrying it would be the other bug:
+        // one-shot rules would be destroyed on the frame after they were
+        // written.
+        let mut shell = shell();
+        rule(&mut shell, "chat", |a| a.skip_taskbar = Some(true));
+        arrive(&mut shell, 1, "chat");
+        again(&mut shell);
+        again(&mut shell);
+        assert!(shell.taskbar_windows().is_empty());
+    }
+
+    #[test]
+    fn a_rule_asking_for_a_maximized_start_asks_once_and_never_again() {
+        // "Initial state" means the state it *starts* in. Asking again on
+        // every list would snap a window the user un-maximised back within
+        // the frame, and there would be no way to un-maximise it at all.
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.initial_state = Some(window_rules::InitialState::Maximized);
+        });
+
+        let first = arrive(&mut shell, 1, "editor");
+        assert_eq!(
+            first,
+            vec![ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::Maximize
+            )]
+        );
+        assert!(again(&mut shell).is_empty(), "asked twice");
+        assert!(again(&mut shell).is_empty(), "asked a third time");
+    }
+
+    #[test]
+    fn a_one_shot_rule_is_spent_by_the_window_it_fired_on_and_not_by_the_frame() {
+        // The trap this guards: `evaluate` deletes one-shot rules, so calling
+        // it per *list* rather than per newly-arrived *window* would spend the
+        // rule on whatever window happened to be open when it was written.
+        let mut shell = shell();
+        let mut r = window_rules::WindowRule::new(
+            0,
+            "once",
+            window_rules::MatchCriteria::AppId("editor".to_string()),
+        );
+        r.one_shot = true;
+        r.actions.initial_state = Some(window_rules::InitialState::Minimized);
+        let id = shell.rules.add_rule(r).expect("the rule should be taken");
+
+        // Some unrelated window is already open, and several frames pass.
+        arrive(&mut shell, 1, "terminal");
+        again(&mut shell);
+        again(&mut shell);
+        assert!(
+            shell.rules.rule_by_id(id).is_some(),
+            "a one-shot rule was spent by a window it does not match"
+        );
+
+        let requests = arrive(&mut shell, 2, "editor");
+        assert_eq!(
+            requests,
+            vec![ShellRequest::window(
+                WindowId(2),
+                ShellControlAction::Minimize
+            )]
+        );
+        assert!(shell.rules.rule_by_id(id).is_none(), "now it is spent");
+        assert!(arrive(&mut shell, 3, "editor").is_empty());
+    }
+
+    #[test]
+    fn a_rule_files_a_window_on_another_desktop_only_when_that_is_a_move() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| a.desktop = Some(2));
+        assert_eq!(
+            arrive(&mut shell, 1, "editor"),
+            vec![ShellRequest::MoveWindowToDesktop {
+                window: WindowId(1),
+                desktop: 2,
+            }]
+        );
+
+        // A window that is already there needs no request. Sending one anyway
+        // would be a recomposite for nothing, every time such a window opened.
+        shell.current_desktop = 2;
+        assert!(
+            arrive(&mut shell, 2, "editor").is_empty(),
+            "asked to move a window to the desktop it is already on"
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_a_desktop_that_does_not_exist_is_dropped() {
+        // The number comes from a config file the user edits by hand. The
+        // compositor would refuse it, but the shell knows how many desktops
+        // there are and there is no reason to ask.
+        let mut shell = shell();
+        let beyond = shell.num_desktops;
+        rule(&mut shell, "editor", |a| a.desktop = Some(beyond));
+        assert!(arrive(&mut shell, 1, "editor").is_empty());
+    }
+
+    #[test]
+    fn a_rule_snaps_a_window_into_a_slot_the_compositor_knows() {
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| a.snap_zone = Some(1));
+        let slot = snap::SnapSlot::from_index(1).expect("1 names a slot");
+        assert_eq!(
+            arrive(&mut shell, 1, "editor"),
+            vec![ShellRequest::window(
+                WindowId(1),
+                ShellControlAction::SnapToZone(slot)
+            )]
+        );
+    }
+
+    #[test]
+    fn a_rule_naming_a_snap_slot_that_does_not_exist_is_dropped() {
+        let mut shell = shell();
+        let beyond = u32::from(snap::SnapSlot::COUNT);
+        rule(&mut shell, "editor", |a| a.snap_zone = Some(beyond));
+        assert!(arrive(&mut shell, 1, "editor").is_empty());
+    }
+
+    #[test]
+    fn a_rule_setting_both_a_state_and_a_zone_lands_in_the_zone() {
+        // Both are sent, in that order, because a snap is the more specific of
+        // the two instructions and the compositor applies whichever it hears
+        // about last.
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.initial_state = Some(window_rules::InitialState::Maximized);
+            a.snap_zone = Some(1);
+        });
+        let slot = snap::SnapSlot::from_index(1).expect("1 names a slot");
+        assert_eq!(
+            arrive(&mut shell, 1, "editor"),
+            vec![
+                ShellRequest::window(WindowId(1), ShellControlAction::Maximize),
+                ShellRequest::window(WindowId(1), ShellControlAction::SnapToZone(slot)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_window_that_names_no_program_is_left_alone_by_every_app_rule() {
+        // An unnamed program is not every program. If it were, one rule about
+        // one application would rearrange every window that declined to
+        // identify itself.
+        let mut shell = shell();
+        rule(&mut shell, "editor", |a| {
+            a.initial_state = Some(window_rules::InitialState::Minimized);
+            a.skip_taskbar = Some(true);
+        });
+        assert!(arrive(&mut shell, 1, "").is_empty());
+        assert_eq!(shell.taskbar_windows().len(), 1);
+    }
+
+    #[test]
+    fn where_a_window_was_last_left_is_remembered_from_the_lists_not_the_arrival() {
+        // "Remember last position" means the position it was last *at*, and a
+        // window moves long after it arrives — so this is the one thing read
+        // off every list rather than only the first.
+        let mut shell = shell();
+        arrive(&mut shell, 1, "editor");
+
+        let mut moved = as_list(&shell);
+        moved[0].x = 400;
+        moved[0].y = 300;
+        moved[0].width = 900;
+        moved[0].height = 700;
+        shell.apply_window_list(&WindowList::new(0, moved));
+
+        // Asked of the engine directly, because `position` is one of the
+        // twelve actions with no channel to the compositor — see
+        // `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
+        // What is under test is that the shell fed the rectangle in, which is
+        // the shell's half of the job.
+        rule(&mut shell, "editor", |a| {
+            a.position = Some(window_rules::PositionSpec::RememberLast);
+        });
+        assert_eq!(
+            shell.rules.evaluate("A Window", "editor").position,
+            Some(window_rules::PositionSpec::Absolute { x: 400, y: 300 })
+        );
     }
 
     // ==================================================================
@@ -4770,7 +6451,7 @@ mod overview_wiring_tests {
     use super::{
         DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
         RenderTree, ShellAction, ShellControlAction, ShellRequest, WindowId, WindowInfo,
-        WindowList, overview,
+        WindowList, focus_assist, notif_pane, overview,
     };
     use guitk::render::RenderCommand;
 
@@ -5081,5 +6762,1203 @@ mod overview_wiring_tests {
         s.overview.show(overview::OverviewMode::AllWindows);
         s.dismiss_popups();
         assert!(!s.overview.visible);
+    }
+
+    // ======================================================================
+    // The notification pane
+    //
+    // `notif_pane.rs` was an island: a full pane with 130 tests and nothing
+    // anywhere that built one, so the shell could notice a failure and had
+    // nowhere to report it. These tests are the ones that would have failed
+    // while it was unreachable.
+    // ======================================================================
+
+    fn super_n() -> KeyEvent {
+        key(
+            Key::N,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn super_n_opens_the_notification_pane_the_whole_way() {
+        let mut s = shell();
+        assert!(!s.notifications.pane_state().is_visible());
+        assert!(s.handle_hotkey(&super_n()).consumed);
+        // Not merely open: *fully* open. A shell with no frame clock — which is
+        // every caller but `ShellSession` — must not be left with a pane at
+        // zero progress, which draws off the right edge of the screen.
+        assert_eq!(
+            s.notifications.pane_state(),
+            notif_pane::PaneState::Visible,
+            "the pane opened but was left waiting for a frame that never comes"
+        );
+    }
+
+    #[test]
+    fn super_n_closes_the_pane_it_opened() {
+        // A toggle you cannot press twice is a trap: while the pane is open it
+        // swallows every key, so without the explicit exception the chord would
+        // be one-way.
+        let mut s = shell();
+        assert!(s.handle_hotkey(&super_n()).consumed);
+        assert!(s.handle_hotkey(&super_n()).consumed);
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
+    }
+
+    #[test]
+    fn an_open_pane_is_drawn_and_a_closed_one_is_not() {
+        let mut s = shell();
+        assert!(s.render_notifications().is_none());
+        s.toggle_notifications();
+        let tree = s
+            .render_notifications()
+            .expect("an open notification pane draws");
+        assert!(!tree.commands.is_empty(), "an open pane drew no commands");
+    }
+
+    #[test]
+    fn a_press_on_the_taskbar_closes_the_pane_and_is_spent_doing_so() {
+        // The pane stops above the bar, so this press is a real press on the
+        // start button rather than one through a scrim. It still must not open
+        // the menu: dismissing is what the user aimed at, and acting as well
+        // would make one click do something they could not see coming — the
+        // rule every other popup in `handle_press` already follows.
+        let mut s = shell();
+        s.toggle_notifications();
+        let action = press(&mut s, 20.0, 1080.0 - 24.0);
+        assert_eq!(action, ShellAction::Consumed);
+        assert!(
+            !s.start_menu_open,
+            "the press that closed the pane also opened a menu"
+        );
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
+    }
+
+    #[test]
+    fn the_pane_swallows_motion_over_what_it_covers() {
+        // Same rule for hover: forwarding motion would light a button under an
+        // opaque overlay, which is the defect the overview arm guards against.
+        let mut s = shell();
+        s.toggle_notifications();
+        let action = s.handle_mouse(&MouseEvent {
+            x: 40.0,
+            y: 40.0,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(action, ShellAction::Consumed);
+    }
+
+    #[test]
+    fn a_key_the_pane_has_no_use_for_does_not_reach_the_desktop() {
+        // Super+D shows the desktop. Pressed into an open pane it must do
+        // nothing at all: a modal surface is modal about keys as well as
+        // clicks.
+        let mut s = shell();
+        s.toggle_notifications();
+        let outcome = s.handle_hotkey(&key(
+            Key::D,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            None,
+        ));
+        assert!(outcome.consumed);
+        assert!(
+            outcome.requests.is_empty(),
+            "a shortcut fired through an open pane"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_pane() {
+        let mut s = shell();
+        s.toggle_notifications();
+        assert!(
+            s.handle_hotkey(&key(Key::Escape, Modifiers::NONE, None))
+                .consumed
+        );
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
+    }
+
+    #[test]
+    fn dismissing_popups_dismisses_the_pane() {
+        let mut s = shell();
+        s.toggle_notifications();
+        assert!(s.dismiss_popups(), "an open pane is something to dismiss");
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
+    }
+
+    #[test]
+    fn opening_the_pane_closes_the_other_panels() {
+        // Two panels over one taskbar at once is a state the user cannot have
+        // asked for.
+        let mut s = shell();
+        s.toggle_start_menu();
+        s.toggle_calendar();
+        s.toggle_notifications();
+        assert!(!s.start_menu_open);
+        assert!(!s.calendar.visible);
+        assert!(s.notifications.pane_state().is_visible());
+    }
+
+    #[test]
+    fn a_notification_arrives_without_the_pane_being_open() {
+        // The pane is the history. A message that could only arrive while
+        // someone was looking is a message nobody ever reads.
+        let mut s = shell();
+        assert_eq!(s.notifications.unread_count(), 0);
+        let _ = s.notify(notif_pane::Notification {
+            id: 0,
+            app_name: "Desktop".to_owned(),
+            title: "Wallpaper could not be shown".to_owned(),
+            body: "/pictures/torn.png: truncated IDAT".to_owned(),
+            timestamp: 0,
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            silent: false,
+        });
+        assert!(!s.notifications.pane_state().is_visible());
+        assert_eq!(s.notifications.unread_count(), 1);
+    }
+
+    // ======================================================================
+    // The tray bell
+    //
+    // `notif_pane`'s module doc has said since it was written that the pane is
+    // opened "from the system tray or Win+N". Only the chord existed, and a
+    // chord is a route nobody discovers. These are the tests that would have
+    // failed while the bell was a sentence in a doc comment.
+    // ======================================================================
+
+    /// Every string the taskbar draws, in order.
+    fn taskbar_text(s: &DesktopShell) -> Vec<String> {
+        s.render_taskbar()
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Post `n` unread notifications from `Desktop`, carrying no action.
+    fn post(s: &mut DesktopShell, n: usize) {
+        for i in 0..n {
+            post_from(s, "Desktop", &format!("Something {i}"), None);
+        }
+    }
+
+    /// Post one notification from `app`, optionally carrying a launch path.
+    ///
+    /// Goes through [`DesktopShell::notify`] rather than the pane directly, so
+    /// focus assist gets its say — which is the whole point in the tests below
+    /// that turn it on first.
+    fn post_from(s: &mut DesktopShell, app: &str, title: &str, action: Option<&str>) -> u64 {
+        s.notify(notif_pane::Notification {
+            id: 0,
+            app_name: app.to_owned(),
+            title: title.to_owned(),
+            body: String::new(),
+            timestamp: 0,
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: action.map(ToOwned::to_owned),
+            silent: false,
+        })
+    }
+
+    /// The middle of the bell's slot.
+    fn bell_centre(s: &DesktopShell) -> (f32, f32) {
+        let r = s.bell_rect();
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    #[test]
+    fn the_tray_draws_a_bell() {
+        let s = shell();
+        assert!(
+            taskbar_text(&s)
+                .iter()
+                .any(|t| t == super::NOTIF_BELL_GLYPH),
+            "the tray drew no bell"
+        );
+    }
+
+    #[test]
+    fn pressing_the_bell_opens_the_pane() {
+        let mut s = shell();
+        let (x, y) = bell_centre(&s);
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert_eq!(
+            s.notifications.pane_state(),
+            notif_pane::PaneState::Visible,
+            "the bell opened the pane but left it waiting for a frame"
+        );
+    }
+
+    #[test]
+    fn pressing_the_bell_again_closes_the_pane() {
+        // The reason the pane stops above the taskbar. A panel that covers the
+        // button that opened it is a one-way door: the second press lands on
+        // the panel's own opaque column and does nothing at all.
+        let mut s = shell();
+        let (x, y) = bell_centre(&s);
+        let _ = press(&mut s, x, y);
+        assert!(s.notifications.pane_state().is_visible());
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
+    }
+
+    #[test]
+    fn the_pane_stops_above_the_taskbar() {
+        let s = shell();
+        assert_eq!(s.notification_pane_height(), s.taskbar_rect().y);
+        assert!(
+            s.notification_pane_height() < s.screen_height as f32,
+            "a pane as tall as the display covers the bell that opens it"
+        );
+    }
+
+    #[test]
+    fn the_bell_and_the_clock_do_not_overlap() {
+        // Both are derived from the display's right edge inwards, so this is a
+        // claim about the derivation and not about one screen size: check it
+        // across the widths the clock's own switches produce.
+        for show_date in [false, true] {
+            let mut s = shell();
+            s.datetime.show_date = show_date;
+            let bell = s.bell_rect();
+            let clock = s.clock_rect();
+            assert!(
+                bell.x + bell.w <= clock.x + 0.5,
+                "bell runs into the clock with show_date={show_date}"
+            );
+            assert!(
+                bell.x >= s.tray_x() - 0.5,
+                "bell sits outside the tray with show_date={show_date}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bell_is_not_hit_tested_as_the_clock() {
+        let s = shell();
+        let (x, y) = bell_centre(&s);
+        assert_eq!(s.hit_test(x, y), super::Hit::NotificationBell);
+        let clock = s.clock_rect();
+        assert_eq!(
+            s.hit_test(clock.x + clock.w / 2.0, clock.y + clock.h / 2.0),
+            super::Hit::Clock,
+            "the bell stole the clock's slot"
+        );
+    }
+
+    #[test]
+    fn the_window_buttons_stop_short_of_the_bell() {
+        // `taskbar_button_width` sizes the buttons from what is left after the
+        // tray. A bell the tray did not account for would be drawn over by the
+        // last button.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            (1..=12)
+                .map(|i| placed(i, "Window", 0, (0, 0, 400, 300)))
+                .collect(),
+        ));
+        let bell = s.bell_rect();
+        for index in 0..s.taskbar_windows().len() {
+            let button = s.taskbar_button_rect(index);
+            assert!(
+                button.x + button.w <= bell.x + 0.5,
+                "window button {index} reaches the bell"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unread_notification_puts_a_count_on_the_bell() {
+        let mut s = shell();
+        assert!(
+            !taskbar_text(&s).iter().any(|t| t == "1"),
+            "an empty history drew a badge"
+        );
+        post(&mut s, 1);
+        assert!(
+            taskbar_text(&s).iter().any(|t| t == "1"),
+            "one unread notification drew no count"
+        );
+    }
+
+    #[test]
+    fn the_badge_stops_counting_at_nine() {
+        let mut s = shell();
+        post(&mut s, 40);
+        let drawn = taskbar_text(&s);
+        assert!(
+            drawn.iter().any(|t| t == "9+"),
+            "a two-digit count would not fit the slot: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_badge_does_not_move_the_tray() {
+        // A count that widened the tray would shuffle every window button
+        // sideways each time something was posted.
+        let mut s = shell();
+        let quiet = (s.tray_x(), s.clock_rect().x, s.bell_rect().x);
+        post(&mut s, 40);
+        assert_eq!(
+            (s.tray_x(), s.clock_rect().x, s.bell_rect().x),
+            quiet,
+            "the badge pushed the tray"
+        );
+    }
+
+    #[test]
+    fn the_bell_changes_colour_when_something_is_waiting() {
+        // A bell that looks the same whether or not it has anything behind it
+        // is a bell nobody presses.
+        fn bell_colour(s: &DesktopShell) -> super::Color {
+            s.render_taskbar()
+                .commands
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Text { text, color, .. } if text == super::NOTIF_BELL_GLYPH => {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("the tray drew no bell")
+        }
+        let mut s = shell();
+        let quiet = bell_colour(&s);
+        post(&mut s, 1);
+        assert_ne!(
+            bell_colour(&s),
+            quiet,
+            "the bell did not react to a message"
+        );
+    }
+
+    // ======================================================================
+    // Focus assist
+    //
+    // `focus_assist.rs` was the second-largest island in the shell: 1,466
+    // lines with a settings page, per-app priorities and automatic rules, and
+    // nothing anywhere that constructed a `FocusAssistManager`. Meanwhile the
+    // pane's Do Not Disturb switch moved on screen and changed nothing at all,
+    // and every click the pane reported piled up in a `Vec` nobody emptied.
+    // These are the tests that would have failed while the two were strangers.
+    // ======================================================================
+
+    /// Where the open pane draws `label`, in screen coordinates.
+    ///
+    /// The translations have to be replayed, not ignored: the pane emits every
+    /// one of its sections in pane-local coordinates under a
+    /// `PushTranslate { dx: pane_x }`, and the scrolling list adds a second one
+    /// of its own. A test that read the raw `x` would get a point 380 pixels
+    /// left of the pane — outside its column, where a press dismisses the pane
+    /// instead of pressing anything in it.
+    ///
+    /// Four pixels past the text's own origin rather than at it: a quick
+    /// setting's whole 36-pixel row is its hit area, and a point on the very
+    /// first line of the label is a point a rounding error could put in the row
+    /// above.
+    fn pane_label_at(s: &DesktopShell, label: &str) -> (f32, f32) {
+        let tree = s
+            .render_notifications()
+            .expect("the pane is not open, so it drew nothing");
+        let mut stack: Vec<(f32, f32)> = Vec::new();
+        let mut here = (0.0_f32, 0.0_f32);
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::PushTranslate { dx, dy } => {
+                    stack.push(here);
+                    here = (here.0 + dx, here.1 + dy);
+                }
+                RenderCommand::PopTranslate => {
+                    here = stack.pop().unwrap_or((0.0, 0.0));
+                }
+                RenderCommand::Text { x, y, text, .. } if text == label => {
+                    return (here.0 + x + 4.0, here.1 + y + 4.0);
+                }
+                _ => {}
+            }
+        }
+        panic!("the pane drew no {label:?}")
+    }
+
+    /// The point on the quick-setting row labelled `label` that toggles it.
+    ///
+    /// The pill at the right end of the row is the control and the label
+    /// deliberately is not, so a test that pressed the words would press
+    /// nothing. Two pixels in from the display's right edge is inside the pill
+    /// whatever width the pill is given, and the pane's right edge *is* the
+    /// display's whenever it is fully out — which is what `show()` makes it.
+    fn quick_setting_switch_at(s: &DesktopShell, label: &str) -> (f32, f32) {
+        let (_, y) = pane_label_at(s, label);
+        (s.taskbar_rect().w - 2.0, y)
+    }
+
+    /// Open the pane, if it is not open, and press the quick setting `label`.
+    fn toggle_quick_setting(s: &mut DesktopShell, label: &str) -> ShellAction {
+        if !s.notifications.pane_state().is_visible() {
+            s.toggle_notifications();
+        }
+        let (x, y) = quick_setting_switch_at(s, label);
+        press(s, x, y)
+    }
+
+    #[test]
+    fn nothing_is_silenced_to_begin_with() {
+        let s = shell();
+        assert_eq!(s.focus.effective_mode(), focus_assist::FocusMode::Off);
+        assert!(
+            taskbar_text(&s)
+                .iter()
+                .any(|t| t == super::NOTIF_BELL_GLYPH),
+            "the tray drew something other than a plain bell with nothing silenced"
+        );
+    }
+
+    #[test]
+    fn pressing_do_not_disturb_in_the_pane_actually_silences_things() {
+        // The defect this fixes: the switch moved and nothing else did. It was
+        // a control with no wire behind it.
+        let mut s = shell();
+        let action = toggle_quick_setting(&mut s, "Do Not Disturb");
+        assert_eq!(action, ShellAction::Consumed);
+        assert_eq!(
+            s.focus.effective_mode(),
+            focus_assist::FocusMode::TotalSilence
+        );
+        assert!(
+            s.notifications
+                .quick_setting_value(notif_pane::QuickSetting::DoNotDisturb)
+        );
+    }
+
+    #[test]
+    fn pressing_do_not_disturb_again_stops_silencing_things() {
+        let mut s = shell();
+        let _ = toggle_quick_setting(&mut s, "Do Not Disturb");
+        let _ = toggle_quick_setting(&mut s, "Do Not Disturb");
+        assert_eq!(s.focus.effective_mode(), focus_assist::FocusMode::Off);
+        assert!(
+            !s.notifications
+                .quick_setting_value(notif_pane::QuickSetting::DoNotDisturb)
+        );
+    }
+
+    #[test]
+    fn the_two_focus_switches_cannot_both_be_on() {
+        // They are one four-valued mode spelled as two booleans. A pair that
+        // could both read on would be claiming a state the manager has no way
+        // to be in.
+        use notif_pane::QuickSetting;
+        let mut s = shell();
+        let _ = toggle_quick_setting(&mut s, "Do Not Disturb");
+        let _ = toggle_quick_setting(&mut s, "Focus Mode");
+        assert_eq!(
+            s.focus.effective_mode(),
+            focus_assist::FocusMode::PriorityOnly
+        );
+        assert!(
+            !s.notifications
+                .quick_setting_value(QuickSetting::DoNotDisturb),
+            "Do Not Disturb stayed on while Priority Only was in force"
+        );
+        assert!(s.notifications.quick_setting_value(QuickSetting::FocusMode));
+    }
+
+    #[test]
+    fn alarms_only_reads_as_focus_mode_on() {
+        // The one mode the pair cannot spell exactly. It must still show as
+        // *something* on, because focus assist is engaged — a switch reading
+        // off while notifications are being silenced is the switch lying.
+        use notif_pane::QuickSetting;
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::AlarmsOnly);
+        s.sync_quick_settings();
+        assert!(s.notifications.quick_setting_value(QuickSetting::FocusMode));
+        assert!(
+            !s.notifications
+                .quick_setting_value(QuickSetting::DoNotDisturb)
+        );
+        // And pressing it turns *that* mode off, rather than swapping it for
+        // the milder one the switch nominally stands for.
+        let _ = toggle_quick_setting(&mut s, "Focus Mode");
+        assert_eq!(s.focus.effective_mode(), focus_assist::FocusMode::Off);
+    }
+
+    #[test]
+    fn the_tray_glyph_says_which_mode_is_in_force() {
+        // One slot carries both "here is your history" and "here is why it has
+        // been quiet". A tray that looked identical in Total Silence would
+        // leave the user with no way to find out why nothing has arrived.
+        let mut s = shell();
+        let quiet = taskbar_text(&s);
+        s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
+        let silenced = taskbar_text(&s);
+        assert_ne!(quiet, silenced, "the tray drew the same thing either way");
+        assert!(
+            silenced
+                .iter()
+                .any(|t| t == focus_assist::FocusMode::TotalSilence.icon()),
+            "the tray drew no mode glyph: {silenced:?}"
+        );
+    }
+
+    #[test]
+    fn a_silenced_notification_still_enters_the_history() {
+        // Suppression governs attention, not the record. A user who turns Do
+        // Not Disturb off has no other way to ask for the missed hour back.
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        assert_eq!(s.notifications.notifications().len(), 1);
+        assert_eq!(s.notifications.unread_count(), 1);
+        assert_eq!(
+            s.notifications.attention_count(),
+            0,
+            "a suppressed notification asked to be looked at"
+        );
+        assert_eq!(s.focus.suppressed_count, 1);
+    }
+
+    #[test]
+    fn a_silenced_notification_does_not_badge_the_bell() {
+        // The whole point of suppressing a notification is that nothing about
+        // it interrupts. A badge is an interruption.
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        let drawn = taskbar_text(&s);
+        assert!(
+            !drawn.iter().any(|t| t == "1"),
+            "Do Not Disturb lit a badge: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_priority_app_comes_through_priority_only() {
+        // Otherwise "Priority Only" would be Total Silence with a longer name.
+        use focus_assist::{AppNotifOverride, NotifPriority};
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::PriorityOnly);
+        s.focus.set_app_override(
+            AppNotifOverride::new("Alarms", "Alarms").with_priority(NotifPriority::Critical),
+        );
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        let _ = post_from(&mut s, "Alarms", "Wake up", None);
+        assert_eq!(
+            s.notifications.attention_count(),
+            1,
+            "the wrong number of notifications got through Priority Only"
+        );
+        assert_eq!(s.focus.suppressed_count, 1);
+    }
+
+    #[test]
+    fn turning_focus_assist_off_forgets_what_it_suppressed() {
+        // The count exists to answer "you missed N things" once, when the mode
+        // ends. Carrying it into the next session of Do Not Disturb would make
+        // that summary a running total of everything ever silenced.
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        assert_eq!(s.focus.suppressed_count, 1);
+        s.focus.set_mode(focus_assist::FocusMode::Off);
+        assert_eq!(s.focus.suppressed_count, 0);
+    }
+
+    // ---- the pane's events reach the shell ----
+
+    #[test]
+    fn the_panes_event_buffer_does_not_grow() {
+        // It is an unbounded `Vec` that only `drain_events` empties, so a
+        // shell that rendered the pane and never drained it grew one entry per
+        // click for the life of the session.
+        //
+        // Driven only through the shell's own mouse path, because that is the
+        // claim: a `hide()` called behind the shell's back would report a
+        // `Closed` the shell never had the chance to drain, and the test would
+        // be about the pane rather than about the wiring.
+        let mut s = shell();
+        for _ in 0..5 {
+            let _ = toggle_quick_setting(&mut s, "Night Light");
+            let (bx, by) = bell_centre(&s);
+            let _ = press(&mut s, bx, by);
+        }
+        assert!(
+            s.notifications.drain_events().is_empty(),
+            "the shell left events in the pane"
+        );
+    }
+
+    #[test]
+    fn closing_the_pane_with_escape_is_drained_too() {
+        // `hide()` reports `Closed`, so a session driven only from the
+        // keyboard would grow one entry per press.
+        let mut s = shell();
+        for _ in 0..5 {
+            s.toggle_notifications();
+            let _ = s.handle_hotkey(&key(Key::Escape, Modifiers::NONE, None));
+        }
+        assert!(
+            s.notifications.drain_events().is_empty(),
+            "the key path left events in the pane"
+        );
+    }
+
+    #[test]
+    fn clicking_a_notification_that_names_a_program_launches_it() {
+        // The `action` field had no reader anywhere in the tree: a card could
+        // say what it was about and clicking it did nothing but mark it read.
+        let mut s = shell();
+        let _ = post_from(&mut s, "Mail", "Three new messages", Some("/apps/mail"));
+        s.toggle_notifications();
+        let (x, y) = pane_label_at(&s, "Three new messages");
+        assert_eq!(
+            press(&mut s, x, y),
+            ShellAction::Launch("/apps/mail".to_owned())
+        );
+    }
+
+    #[test]
+    fn clicking_a_notification_that_names_nothing_is_merely_consumed() {
+        // Most notifications are messages, and reading one is the whole of the
+        // interaction. Launching *something* would be worse than launching
+        // nothing.
+        let mut s = shell();
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        s.toggle_notifications();
+        let (x, y) = pane_label_at(&s, "Three new messages");
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+    }
+}
+
+/// The Run box, wired to the shell.
+///
+/// `run_dialog.rs` was 2,000 lines with its own text field, its own history and
+/// its own autocomplete, and nothing anywhere constructed a `RunDialog`: the
+/// shell had no chord that opened it, no surface that drew it, and no way at
+/// all to hear that a command had been confirmed. These are the tests that
+/// would have failed while the two were strangers.
+///
+/// The box's *own* behaviour — editing, history, resolution, the autocomplete
+/// list — is tested in `run_dialog.rs` beside the code that implements it. What
+/// is tested here is only the seam: that a chord opens it, that while it is up
+/// it owns the keyboard, that a confirmed command comes back out as a launch,
+/// and that dismissing it leaves nothing behind.
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp
+)]
+mod run_box_wiring_tests {
+    use super::{
+        DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+        ShellAction, notif_pane,
+    };
+    use guitk::render::RenderCommand;
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    fn chord(k: Key, modifiers: Modifiers) -> KeyEvent {
+        KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers,
+            text: String::new(),
+        }
+    }
+
+    /// Super+R — the chord that opens and closes the Run box.
+    fn super_r() -> KeyEvent {
+        chord(
+            Key::R,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        )
+    }
+
+    const LETTERS: [Key; 26] = [
+        Key::A,
+        Key::B,
+        Key::C,
+        Key::D,
+        Key::E,
+        Key::F,
+        Key::G,
+        Key::H,
+        Key::I,
+        Key::J,
+        Key::K,
+        Key::L,
+        Key::M,
+        Key::N,
+        Key::O,
+        Key::P,
+        Key::Q,
+        Key::R,
+        Key::S,
+        Key::T,
+        Key::U,
+        Key::V,
+        Key::W,
+        Key::X,
+        Key::Y,
+        Key::Z,
+    ];
+
+    /// The keystroke a real keyboard sends for a lower-case character.
+    ///
+    /// The identity is carried as well as the text, rather than typing
+    /// everything through `Key::Unknown`: the dialog's key handler dispatches on
+    /// `event.key` for eight of its arms, and a test that never sent a real
+    /// letter could not tell a shell that had accidentally bound one from a
+    /// shell that had not.
+    fn typed(ch: char) -> KeyEvent {
+        let index = (ch as u32).wrapping_sub('a' as u32) as usize;
+        let key = match ch {
+            '/' => Key::Slash,
+            _ => *LETTERS
+                .get(index)
+                .unwrap_or_else(|| panic!("no key for {ch:?}; the helper only knows a-z and /")),
+        };
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: ch.to_string(),
+        }
+    }
+
+    /// Type a command into the open box, one keystroke at a time.
+    ///
+    /// Through `handle_hotkey`, never through `run_dialog.handle_key_event`
+    /// directly: the claim under test is that the shell *routes* a printable
+    /// key to the box, and a test that reached past the shell would still pass
+    /// on a shell that routed it to the binding table instead.
+    fn type_command(s: &mut DesktopShell, command: &str) -> Vec<String> {
+        let mut launches = Vec::new();
+        for ch in command.chars() {
+            launches.extend(s.handle_hotkey(&typed(ch)).launches);
+        }
+        launches
+    }
+
+    fn press(s: &mut DesktopShell, x: f32, y: f32) -> ShellAction {
+        s.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// The middle of the box's own background rectangle, in screen coordinates.
+    ///
+    /// Read out of the render rather than computed from the layout constants,
+    /// which are private to `run_dialog` and should stay that way: a test that
+    /// knew the box was 450×180 would be a test that agreed with a stale copy
+    /// of the number rather than with the box that was drawn.
+    fn box_rect(s: &DesktopShell) -> (f32, f32, f32, f32) {
+        let tree = s.render_run_dialog().expect("the box is not open");
+        tree.commands
+            .iter()
+            .find_map(|cmd| match *cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some((x, y, width, height)),
+                _ => None,
+            })
+            .expect("the open box drew no background")
+    }
+
+    /// The middle of the button carrying `label`.
+    ///
+    /// A button is a `FillRect` followed by the `Text` that names it, so the
+    /// label is what identifies the rectangle: the geometry is
+    /// `render_button`'s business, and this finds whichever rectangle it in
+    /// fact drew.
+    fn button_centre(s: &DesktopShell, label: &str) -> (f32, f32) {
+        let tree = s.render_run_dialog().expect("the box is not open");
+        let mut last_rect = None;
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => last_rect = Some((*x, *y, *width, *height)),
+                RenderCommand::Text { text, .. } if text == label => {
+                    let (x, y, w, h) = last_rect.expect("a label with no button under it");
+                    return (x + w / 2.0, y + h / 2.0);
+                }
+                _ => {}
+            }
+        }
+        panic!("the box drew no {label:?} button");
+    }
+
+    // ---- opening and closing ----
+
+    #[test]
+    fn super_r_opens_the_box_and_a_second_press_closes_it() {
+        let mut s = shell();
+        assert!(!s.run_dialog.is_visible(), "the box starts out of the way");
+
+        let outcome = s.handle_hotkey(&super_r());
+        assert!(
+            outcome.consumed,
+            "the chord was passed to the focused window"
+        );
+        assert!(s.run_dialog.is_visible(), "Super+R did not open the box");
+
+        // The second press has to reach the binding table rather than the box,
+        // which is the one-way-toggle exception the overview and the pane also
+        // carry — otherwise the chord that opens it cannot close it.
+        let outcome = s.handle_hotkey(&super_r());
+        assert!(outcome.consumed);
+        assert!(
+            !s.run_dialog.is_visible(),
+            "Super+R would not close the box"
+        );
+        assert!(
+            outcome.launches.is_empty(),
+            "closing the box started a program"
+        );
+    }
+
+    #[test]
+    fn an_open_box_is_drawn_and_a_closed_one_is_not() {
+        let mut s = shell();
+        assert!(s.render_run_dialog().is_none());
+        s.toggle_run_dialog();
+        let tree = s.render_run_dialog().expect("an open box draws");
+        assert!(!tree.commands.is_empty(), "an open box drew no commands");
+    }
+
+    #[test]
+    fn the_box_is_centred_on_the_screen_it_opens_on() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let (x, y, w, h) = box_rect(&s);
+        assert_eq!(
+            (x + w / 2.0, y + h / 2.0),
+            (960.0, 540.0),
+            "the box opened off-centre"
+        );
+    }
+
+    /// A box positioned once at construction would be centred on the display the
+    /// session started with and nowhere near the middle of the one the user is
+    /// looking at after a mode change.
+    #[test]
+    fn the_box_follows_a_display_that_changed_size() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        s.toggle_run_dialog();
+
+        s.screen_width = 1280;
+        s.screen_height = 720;
+        s.toggle_run_dialog();
+        let (x, y, w, h) = box_rect(&s);
+        assert_eq!(
+            (x + w / 2.0, y + h / 2.0),
+            (640.0, 360.0),
+            "the box was centred on the display the shell booted with"
+        );
+    }
+
+    /// A screen smaller than the box is not a real display, but it is a
+    /// plausible transient during a mode change, and the box's *left* edge is
+    /// the half that carries the title — so it must not be the half pushed off.
+    #[test]
+    fn a_screen_narrower_than_the_box_still_shows_its_top_left() {
+        let mut s = shell();
+        s.screen_width = 100;
+        s.screen_height = 40;
+        s.toggle_run_dialog();
+        let (x, y, _, _) = box_rect(&s);
+        assert_eq!((x, y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn opening_the_box_puts_the_other_popups_away() {
+        // Modal about keys, so anything else with a text field in it is a
+        // surface the user can see and cannot type into.
+        let mut s = shell();
+        s.start_menu_open = true;
+        s.toggle_notifications();
+        s.toggle_run_dialog();
+        assert!(
+            !s.start_menu_open,
+            "the start menu stayed open under the box"
+        );
+        assert_eq!(
+            s.notifications.pane_state(),
+            notif_pane::PaneState::Hidden,
+            "the notification pane stayed open under the box"
+        );
+    }
+
+    // ---- modal about keys ----
+
+    #[test]
+    fn a_shortcut_pressed_into_the_box_does_not_act_on_the_desktop() {
+        // Super+D shows the desktop. Pressed into the box it must do nothing at
+        // all: minimising every window to type a command is not what the user
+        // asked for, and the box would be left floating over a bare desktop.
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let outcome = s.handle_hotkey(&chord(
+            Key::D,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+        ));
+        assert!(outcome.consumed);
+        assert!(
+            outcome.requests.is_empty(),
+            "a shortcut fired through the open box"
+        );
+        assert!(s.run_dialog.is_visible(), "a stray chord closed the box");
+    }
+
+    /// The media keys are bound modifier-agnostically — a key with one meaning
+    /// and no other job is not a chord — which makes them the binding most
+    /// likely to fire through a modal surface.
+    #[test]
+    fn a_media_key_pressed_into_the_box_does_not_move_the_volume() {
+        let mut s = shell();
+        let level = s.notifications.volume();
+        s.toggle_run_dialog();
+        let outcome = s.handle_hotkey(&chord(Key::VolumeUp, Modifiers::NONE));
+        assert!(outcome.consumed);
+        assert_eq!(
+            s.notifications.volume(),
+            level,
+            "the volume moved while the user was typing a command"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_box_and_starts_nothing() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        let outcome = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
+        assert!(outcome.consumed);
+        assert!(!s.run_dialog.is_visible(), "Escape left the box up");
+        assert!(
+            outcome.launches.is_empty(),
+            "cancelling started the command anyway"
+        );
+    }
+
+    /// The box empties itself on every opening, so a command abandoned with
+    /// Escape must not be sitting in the field the next time it is opened —
+    /// where the next Enter would start it.
+    #[test]
+    fn an_abandoned_command_is_not_still_there_next_time() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        let _ = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
+
+        s.toggle_run_dialog();
+        let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert!(
+            outcome.launches.is_empty(),
+            "Enter on an empty box started the command typed before it"
+        );
+        assert!(
+            s.run_dialog.is_visible(),
+            "Enter on an empty box closed it, so there is no way to type"
+        );
+    }
+
+    // ---- a confirmed command is a launch ----
+
+    #[test]
+    fn a_command_typed_and_confirmed_comes_back_out_as_a_launch() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        assert!(
+            type_command(&mut s, "terminal").is_empty(),
+            "a keystroke that only typed a letter started a program"
+        );
+
+        let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert_eq!(outcome.launches, ["terminal"]);
+        assert!(
+            !s.run_dialog.is_visible(),
+            "the box stayed up after starting the command"
+        );
+    }
+
+    /// The launch channel carries what the box *resolved*, not whatever was in
+    /// the field: a shell that forwarded the raw text would ask the process
+    /// server to start things that do not exist, and the user would get no
+    /// error at all — the box would simply close.
+    #[test]
+    fn a_command_the_box_cannot_resolve_is_not_a_launch() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "no/such");
+        let outcome = s.handle_hotkey(&chord(Key::Enter, Modifiers::NONE));
+        assert!(
+            outcome.launches.is_empty(),
+            "an unresolvable name was started"
+        );
+        assert!(
+            s.run_dialog.is_visible(),
+            "the box closed on a name it had rejected, so its error is unreadable"
+        );
+    }
+
+    #[test]
+    fn the_ok_button_starts_the_command_the_way_enter_does() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        let (x, y) = button_centre(&s, "OK");
+        assert_eq!(
+            press(&mut s, x, y),
+            ShellAction::Launch("terminal".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_cancel_button_closes_the_box_without_starting_anything() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let _ = type_command(&mut s, "terminal");
+        let (x, y) = button_centre(&s, "Cancel");
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert!(!s.run_dialog.is_visible());
+    }
+
+    /// Browse asks for a file *picker*, and the shell has none — it does no
+    /// filesystem reads at all. What it must not do is answer with something
+    /// else: starting a file manager would give the user a window they did not
+    /// ask for and a command box still empty. See known-issues.md →
+    /// `TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO`.
+    #[test]
+    fn the_browse_button_starts_nothing_and_leaves_the_box_up() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let (x, y) = button_centre(&s, "Browse...");
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert!(
+            s.run_dialog.is_visible(),
+            "a button that does nothing yet also threw the typed command away"
+        );
+    }
+
+    // ---- the mouse ----
+
+    #[test]
+    fn a_press_outside_the_box_closes_it() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        assert_eq!(press(&mut s, 4.0, 4.0), ShellAction::Consumed);
+        assert!(!s.run_dialog.is_visible(), "a click on the desktop missed");
+    }
+
+    /// The one event the box does not claim. Consuming motion as well would
+    /// freeze every hover highlight on the desktop for as long as the box is
+    /// up — including the taskbar's, which is nowhere near it.
+    #[test]
+    fn motion_outside_the_box_is_passed_on() {
+        let mut s = shell();
+        s.toggle_run_dialog();
+        let action = s.handle_mouse(&MouseEvent {
+            x: 4.0,
+            y: 4.0,
+            kind: MouseEventKind::Move,
+        });
+        assert_ne!(
+            action,
+            ShellAction::Consumed,
+            "the box swallowed a move it was nowhere near"
+        );
+        assert!(s.run_dialog.is_visible(), "a hover dismissed the box");
+    }
+
+    // ---- nothing is left behind ----
+
+    #[test]
+    fn the_boxs_event_buffer_does_not_grow() {
+        // It is an unbounded `Vec` that only `drain_events` empties, and
+        // `hide()` posts a `Closed` into it unconditionally — so every one of
+        // the four ways the box can be dismissed has to be drained, not just
+        // the one that produces an `Execute`.
+        let mut s = shell();
+        for _ in 0..5 {
+            let _ = s.handle_hotkey(&super_r());
+            let _ = s.handle_hotkey(&super_r());
+
+            let _ = s.handle_hotkey(&super_r());
+            let _ = s.handle_hotkey(&chord(Key::Escape, Modifiers::NONE));
+
+            let _ = s.handle_hotkey(&super_r());
+            let _ = press(&mut s, 4.0, 4.0);
+
+            let _ = s.handle_hotkey(&super_r());
+            s.dismiss_popups();
+        }
+        assert!(
+            s.run_dialog.drain_events().is_empty(),
+            "the shell left events in the box"
+        );
+    }
+
+    /// `dismiss_popups` runs on the way *into* the box as well as on Escape, so
+    /// an unguarded `hide()` there would post a `Closed` for a box that was
+    /// never open — one per opening, for the life of the session.
+    #[test]
+    fn dismissing_popups_that_are_not_open_reports_nothing() {
+        let mut s = shell();
+        for _ in 0..5 {
+            s.dismiss_popups();
+        }
+        assert!(s.run_dialog.drain_events().is_empty());
+    }
+
+    #[test]
+    fn an_open_box_counts_as_a_popup() {
+        // `any_popup_open` is what decides whether Escape is worth grabbing
+        // from every other window on the desktop. A box missing from it is a
+        // box that cannot be cancelled from the keyboard in a live session.
+        let mut s = shell();
+        assert!(!s.any_popup_open());
+        s.toggle_run_dialog();
+        assert!(s.any_popup_open(), "the open box is not a popup");
     }
 }

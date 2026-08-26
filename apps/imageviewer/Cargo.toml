@@ -11,6 +11,20 @@ guitk = { path = "../../gui/toolkit" }
 # written twenty lines earlier -- see `byteread/src/lib.rs`.
 byteread = { path = "../../byteread" }
 
+# The picture decoder. Without it this viewer had no way to turn a file into
+# pixels, and said so: `display_image` built a grey checkerboard and left a
+# comment reading "in a real implementation, this would decode the image".
+# Every photograph in the tree opened as the same 16-pixel check pattern, and
+# the whole test suite passed over it. See known-issues.md
+# TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING.
+imagecodec = { path = "../../gui/imagecodec" }
+
+# The window and its event loop. `oswindow::app` is the strap every application
+# shares -- connect, open one window, run until it closes -- and it is also the
+# only route by which decoded pixels reach the compositor, since a `RenderTree`
+# carries an image *id* and never the picture behind it.
+oswindow = { path = "../../gui/window" }
+
 # Test fixtures only: a private temp directory per test, removed on drop --
 # named from the process id and a counter, so two tests in one process can
 # never draw the same name the way a clock-tagged name could.

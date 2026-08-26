@@ -1,8 +1,9 @@
 //! Window Rules Engine
 //!
 //! Allows users to define rules that automatically apply window behavior
-//! when windows are created or focused. Rules match by window title, process
-//! name, or window class, and can control:
+//! when a window first appears. Rules match by window title or by the program
+//! the window belongs to (its [`app_id`](crate::ManagedWindow::app_id)), and
+//! can express:
 //!
 //! - Initial position and size
 //! - Virtual desktop assignment
@@ -13,8 +14,26 @@
 //! - Force-assign to specific monitor
 //! - Custom title bar visibility
 //!
-//! Rules are evaluated in priority order; first match wins (unless
-//! `apply_all` is set, in which case all matching rules are merged).
+//! Rules are evaluated in priority order; first match wins (unless the manager
+//! is in [`EvalMode::MergeAll`], in which case all matching rules are merged).
+//!
+//! # What the shell can actually carry out today
+//!
+//! Five of [`RuleActions`]'s seventeen fields reach the compositor:
+//! `skip_taskbar` and `skip_alt_tab` (which are shell-side decisions and need
+//! no protocol at all), `initial_state` when it is `Minimized` or `Maximized`,
+//! `snap_zone`, and `desktop`. The other twelve have **no channel** — the
+//! control protocol's geometry requests (`Move`, `Resize`, `SetOpacity`,
+//! `SetFullscreen`) all resolve against the *sender's own* window, so the shell
+//! cannot use them on a window belonging to someone else, and nothing on the
+//! wire expresses "always on top" or "cannot be closed" at all.
+//!
+//! The unreachable ones are stored, exported, displayed and then ignored rather
+//! than faked. Faking `position` in particular would mean the shell choosing
+//! where a window goes, which is the compositor's job (§506) — and the shell is
+//! never told the display bounds, so it could not choose correctly if it
+//! wanted to. See `known-issues.md`
+//! `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
 
 use appearance::{Palette, readable_on};
 use guitk::color::Color;
@@ -77,23 +96,43 @@ const SUMMARY_INSET: f32 = 86.0;
 // ============================================================================
 
 /// How a rule matches against window properties.
+///
+/// # Why there is one program criterion and not two
+///
+/// This had a `ProcessName` and a `WindowClass`, matched against two separate
+/// strings the caller was expected to supply. Neither existed anywhere: a
+/// window on this desktop carries a title, a pid and — since the app-id work —
+/// an id its program declares, and nothing on the wire has ever carried a
+/// "class". The two variants were X11's duality (`WM_CLASS`'s instance and
+/// class) transplanted into a system that does not have it, and they were the
+/// reason every default rule below was unmatchable.
+///
+/// So both collapse into [`AppId`](Self::AppId), which matches the one
+/// identifier a window actually has. That is the Wayland model, and it is the
+/// honest one here: there is exactly one answer to "which program is this?",
+/// so there is exactly one criterion for it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MatchCriteria {
     /// Match window title exactly.
     TitleExact(String),
     /// Match if window title contains this substring (case-insensitive).
     TitleContains(String),
-    /// Match against process/executable name (case-insensitive).
-    ProcessName(String),
-    /// Match by window class string.
-    WindowClass(String),
+    /// Match the program the window belongs to (case-insensitive).
+    ///
+    /// The window's [`app_id`](crate::ManagedWindow::app_id) — conventionally
+    /// the executable's file stem, lower-cased. A window that named no program
+    /// has an empty id and matches **nothing**: a rule about an unnamed program
+    /// would otherwise be a rule about all of them, which is the one reading no
+    /// user could intend.
+    AppId(String),
     /// Match any window (used for global defaults).
     Any,
 }
 
 impl MatchCriteria {
     /// Test whether a window matches this criterion.
-    pub fn matches(&self, title: &str, process: &str, class: &str) -> bool {
+    #[must_use]
+    pub fn matches(&self, title: &str, app_id: &str) -> bool {
         match self {
             Self::TitleExact(t) => title == t,
             Self::TitleContains(sub) => {
@@ -101,19 +140,24 @@ impl MatchCriteria {
                 let lower_sub = sub.to_lowercase();
                 lower_title.contains(&lower_sub)
             }
-            Self::ProcessName(name) => process.eq_ignore_ascii_case(name),
-            Self::WindowClass(cls) => class.eq_ignore_ascii_case(cls),
+            // The empty check is not redundant with the comparison: a *rule*
+            // written with an empty id would otherwise match every window that
+            // declined to name itself, which is a rule the settings panel lets
+            // you write by pressing Save with the value box untouched.
+            Self::AppId(name) => {
+                !app_id.is_empty() && !name.is_empty() && app_id.eq_ignore_ascii_case(name)
+            }
             Self::Any => true,
         }
     }
 
     /// Human-readable description of this criterion.
+    #[must_use]
     pub fn description(&self) -> String {
         match self {
-            Self::TitleExact(t) => format!("Title = \"{}\"", t),
-            Self::TitleContains(s) => format!("Title contains \"{}\"", s),
-            Self::ProcessName(n) => format!("Process: {}", n),
-            Self::WindowClass(c) => format!("Class: {}", c),
+            Self::TitleExact(t) => format!("Title = \"{t}\""),
+            Self::TitleContains(s) => format!("Title contains \"{s}\""),
+            Self::AppId(n) => format!("App: {n}"),
             Self::Any => "Any window".to_string(),
         }
     }
@@ -241,7 +285,13 @@ rule_actions! {
     prevent_move: bool,
     /// Prevent the window from being resized.
     prevent_resize: bool,
-    /// Custom snap zone override (snap layout preset index).
+    /// Snap the window into a zone on arrival.
+    ///
+    /// The number is a slot index across *all* the presets at once — what
+    /// `guiremote::zones::SnapSlot::index` returns, and what
+    /// `SnapSlot::from_index` reads back — not a zone within a preset, because
+    /// a rule has to name the layout as well as the cell. Anything from
+    /// `SnapSlot::COUNT` up names no slot and is dropped.
     snap_zone: u32,
 }
 
@@ -299,8 +349,9 @@ impl WindowRule {
     }
 
     /// Check if this rule matches a window.
-    pub fn matches(&self, title: &str, process: &str, class: &str) -> bool {
-        self.enabled && self.criteria.matches(title, process, class)
+    #[must_use]
+    pub fn matches(&self, title: &str, app_id: &str) -> bool {
+        self.enabled && self.criteria.matches(title, app_id)
     }
 }
 
@@ -311,7 +362,7 @@ impl WindowRule {
 /// Remembered position/size for "RememberLast" specs.
 #[derive(Clone, Debug)]
 struct RememberedState {
-    /// Key: process name or window class.
+    /// Key: the app id, lower-cased. Never empty — see `remember_state`.
     key: String,
     x: i32,
     y: i32,
@@ -375,7 +426,7 @@ impl WindowRulesManager {
         let mut terminal_rule = WindowRule::new(
             self.alloc_id(),
             "Terminal: remember position",
-            MatchCriteria::ProcessName("terminal".to_string()),
+            MatchCriteria::AppId("terminal".to_string()),
         );
         terminal_rule.actions.position = Some(PositionSpec::RememberLast);
         terminal_rule.actions.size = Some(SizeSpec::RememberLast);
@@ -386,21 +437,36 @@ impl WindowRulesManager {
         let mut settings_rule = WindowRule::new(
             self.alloc_id(),
             "Settings: center on primary",
-            MatchCriteria::ProcessName("settings".to_string()),
+            MatchCriteria::AppId("settings".to_string()),
         );
         settings_rule.actions.position = Some(PositionSpec::CenterOnMonitor(0));
         settings_rule.priority = 10;
         self.rules.push(settings_rule);
 
-        // Dialog windows: prevent resize
-        let mut dialog_rule = WindowRule::new(
+        // The shell's own surfaces are not applications.
+        //
+        // This replaces a "Dialogs: no resize" default keyed on the window
+        // class, which nothing could ever match: there was no class on the
+        // wire, and a dialog is not a program, so there is no app id that
+        // means "a dialog" either. The compositor knows dialogs by `Layer`,
+        // which this engine does not match on.
+        //
+        // What stands here instead is a rule that can both match and be
+        // carried out. `apply_window_list` already drops everything outside
+        // `Layer::Normal`, so today it is belt and braces — but the shell's
+        // four surfaces all say `slateos-shell`, and if any of them ever
+        // moved into the normal layer the taskbar would sprout a button
+        // labelled "Taskbar" and Alt+Tab would offer to switch to the
+        // wallpaper.
+        let mut chrome_rule = WindowRule::new(
             self.alloc_id(),
-            "Dialogs: no resize",
-            MatchCriteria::WindowClass("dialog".to_string()),
+            "Shell chrome: not an application",
+            MatchCriteria::AppId("slateos-shell".to_string()),
         );
-        dialog_rule.actions.prevent_resize = Some(true);
-        dialog_rule.priority = 5;
-        self.rules.push(dialog_rule);
+        chrome_rule.actions.skip_taskbar = Some(true);
+        chrome_rule.actions.skip_alt_tab = Some(true);
+        chrome_rule.priority = 100;
+        self.rules.push(chrome_rule);
     }
 
     /// Allocate the next unique rule ID.
@@ -478,14 +544,24 @@ impl WindowRulesManager {
     /// rules set disjoint fields, so nothing was ever contested; its comment
     /// ("high-priority values override where both set") described the intent
     /// the code did not implement.
-    pub fn evaluate(&mut self, title: &str, process: &str, class: &str) -> RuleActions {
+    ///
+    /// # Call this once per window, when the window arrives
+    ///
+    /// It takes `&mut self` because it is not a pure query: it counts each
+    /// firing on the rule, and it *deletes* one-shot rules. Calling it for
+    /// every window of every window list — the shape the shell's other
+    /// projections have — would destroy every one-shot rule on the first frame
+    /// after it was written, and would re-apply `initial_state` to a window
+    /// each time the compositor said anything about it, so a window the user
+    /// un-maximised would snap back within the frame.
+    pub fn evaluate(&mut self, title: &str, app_id: &str) -> RuleActions {
         // Highest priority first. `sort_by_key` is stable, so rules of equal
         // priority keep the order they were added in — the same tie-break the
         // settings list shows.
         let mut matched: Vec<&WindowRule> = self
             .rules
             .iter()
-            .filter(|r| r.matches(title, process, class))
+            .filter(|r| r.matches(title, app_id))
             .collect();
         matched.sort_by_key(|r| std::cmp::Reverse(r.priority));
         if self.eval_mode == EvalMode::FirstMatch {
@@ -519,18 +595,20 @@ impl WindowRulesManager {
             self.remove_rule(id);
         }
 
-        self.resolve_remembered(&mut result, process, class);
+        self.resolve_remembered(&mut result, app_id);
 
         result
     }
 
     /// Resolve RememberLast position/size from stored state.
-    fn resolve_remembered(&self, actions: &mut RuleActions, process: &str, class: &str) {
-        let key = if !process.is_empty() {
-            process.to_lowercase()
-        } else {
-            class.to_lowercase()
-        };
+    ///
+    /// Keyed on the app id alone. It used to fall back to the window class when
+    /// the process name was empty, which meant an unnamed window inherited the
+    /// remembered geometry of every other unnamed window — one shared entry
+    /// under the empty key. An empty id now resolves to nothing, so a window
+    /// that declines to name itself simply gets no remembered geometry.
+    fn resolve_remembered(&self, actions: &mut RuleActions, app_id: &str) {
+        let key = app_id.to_lowercase();
 
         if let Some(PositionSpec::RememberLast) = actions.position {
             if let Some(state) = self.remembered.iter().find(|s| s.key == key) {
@@ -557,21 +635,12 @@ impl WindowRulesManager {
     }
 
     /// Record a window's current position/size for "RememberLast" rules.
-    pub fn remember_state(
-        &mut self,
-        process: &str,
-        class: &str,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-    ) {
-        let key = if !process.is_empty() {
-            process.to_lowercase()
-        } else {
-            class.to_lowercase()
-        };
+    pub fn remember_state(&mut self, app_id: &str, x: i32, y: i32, width: u32, height: u32) {
+        let key = app_id.to_lowercase();
 
+        // A window that named no program is not remembered at all. The empty
+        // key is not a program — every anonymous window on the desktop would
+        // share one entry and overwrite each other's geometry in turn.
         if key.is_empty() {
             return;
         }
@@ -665,10 +734,9 @@ impl WindowRulesManager {
                 rule.priority,
                 if rule.enabled { "on" } else { "off" },
                 match &rule.criteria {
-                    MatchCriteria::TitleExact(t) => format!("title_exact:{}", t),
-                    MatchCriteria::TitleContains(s) => format!("title_contains:{}", s),
-                    MatchCriteria::ProcessName(n) => format!("process:{}", n),
-                    MatchCriteria::WindowClass(c) => format!("class:{}", c),
+                    MatchCriteria::TitleExact(t) => format!("title_exact:{t}"),
+                    MatchCriteria::TitleContains(s) => format!("title_contains:{s}"),
+                    MatchCriteria::AppId(n) => format!("app:{n}"),
                     MatchCriteria::Any => "any".to_string(),
                 },
             ));
@@ -758,17 +826,27 @@ impl WindowRulesManager {
         let name = parts.next()?.to_string();
         let priority: i32 = parts.next()?.parse().ok()?;
         let enabled = parts.next()? == "on";
-        let criteria_str = parts.next().unwrap_or("any");
-        let criteria = if let Some(rest) = criteria_str.strip_prefix("title_exact:") {
-            MatchCriteria::TitleExact(rest.to_string())
-        } else if let Some(rest) = criteria_str.strip_prefix("title_contains:") {
-            MatchCriteria::TitleContains(rest.to_string())
-        } else if let Some(rest) = criteria_str.strip_prefix("process:") {
-            MatchCriteria::ProcessName(rest.to_string())
-        } else if let Some(rest) = criteria_str.strip_prefix("class:") {
-            MatchCriteria::WindowClass(rest.to_string())
-        } else {
-            MatchCriteria::Any
+        // A *missing* criterion is `Any` — that is the documented shape of a
+        // four-field line. A criterion that is present and unrecognised is a
+        // refusal, not an `Any`: silently widening `app:firefox` (misspelt, or
+        // written by a newer version) into "every window on the desktop" would
+        // apply that rule's actions to everything the user opens, and a rule
+        // that says `prevent_close` would then be a desktop whose windows
+        // cannot be closed.
+        let criteria = match parts.next() {
+            None => MatchCriteria::Any,
+            Some("any") => MatchCriteria::Any,
+            Some(spec) => {
+                if let Some(rest) = spec.strip_prefix("title_exact:") {
+                    MatchCriteria::TitleExact(rest.to_string())
+                } else if let Some(rest) = spec.strip_prefix("title_contains:") {
+                    MatchCriteria::TitleContains(rest.to_string())
+                } else if let Some(rest) = spec.strip_prefix("app:") {
+                    MatchCriteria::AppId(rest.to_string())
+                } else {
+                    return None;
+                }
+            }
         };
 
         let mut rule = WindowRule::new(id, &name, criteria);
@@ -802,7 +880,10 @@ pub struct RulesSettingsUI {
     pub selected_rule_idx: usize,
     pub scroll_offset: usize,
     pub editing_name: String,
-    pub editing_criteria_type: usize, // 0=TitleExact, 1=TitleContains, 2=Process, 3=Class, 4=Any
+    /// Which [`MatchCriteria`] the editor is building: 0=TitleExact,
+    /// 1=TitleContains, 2=AppId, 3=Any. Indices into `criteria_labels` in
+    /// `render`, and the reason the value box is hidden for 3 alone.
+    pub editing_criteria_type: usize,
     pub editing_criteria_value: String,
     pub editing_priority: i32,
     pub visible_rules: usize,
@@ -1234,13 +1315,7 @@ impl RulesSettingsUI {
         cy += 36.0;
 
         // Match type selector.
-        let criteria_labels = [
-            "Title (exact)",
-            "Title (contains)",
-            "Process name",
-            "Window class",
-            "Any",
-        ];
+        let criteria_labels = ["Title (exact)", "Title (contains)", "Application", "Any"];
         cmds.push(RenderCommand::Text {
             x: label_x,
             y: cy + 4.0,
@@ -1283,8 +1358,8 @@ impl RulesSettingsUI {
         }
         cy += 36.0;
 
-        // Match value (unless "Any").
-        if self.editing_criteria_type < 4 {
+        // Match value (unless "Any", which is the last chip and takes none).
+        if self.editing_criteria_type < criteria_labels.len().saturating_sub(1) {
             cmds.push(RenderCommand::Text {
                 x: label_x,
                 y: cy + 4.0,
@@ -1487,42 +1562,73 @@ mod tests {
     #[test]
     fn test_title_exact_match() {
         let c = MatchCriteria::TitleExact("Firefox".to_string());
-        assert!(c.matches("Firefox", "", ""));
-        assert!(!c.matches("firefox", "", ""));
-        assert!(!c.matches("Firefox Browser", "", ""));
+        assert!(c.matches("Firefox", ""));
+        assert!(!c.matches("firefox", ""));
+        assert!(!c.matches("Firefox Browser", ""));
     }
 
     #[test]
     fn test_title_contains_case_insensitive() {
         let c = MatchCriteria::TitleContains("fire".to_string());
-        assert!(c.matches("Firefox", "", ""));
-        assert!(c.matches("FIREFOX", "", ""));
-        assert!(c.matches("On Fire!", "", ""));
-        assert!(!c.matches("Chrome", "", ""));
+        assert!(c.matches("Firefox", ""));
+        assert!(c.matches("FIREFOX", ""));
+        assert!(c.matches("On Fire!", ""));
+        assert!(!c.matches("Chrome", ""));
     }
 
     #[test]
-    fn test_process_name_match() {
-        let c = MatchCriteria::ProcessName("terminal".to_string());
-        assert!(c.matches("", "terminal", ""));
-        assert!(c.matches("", "TERMINAL", ""));
-        assert!(c.matches("", "Terminal", ""));
-        assert!(!c.matches("", "term", ""));
+    fn test_app_id_match() {
+        let c = MatchCriteria::AppId("terminal".to_string());
+        assert!(c.matches("", "terminal"));
+        assert!(c.matches("", "TERMINAL"));
+        assert!(c.matches("", "Terminal"));
+        assert!(!c.matches("", "term"));
     }
 
+    /// A window that declines to name its program matches no app rule, and a
+    /// rule that names no program matches no window.
+    ///
+    /// Both halves are the same mistake seen from opposite ends: an unnamed
+    /// program is not *every* program. The second half is reachable from the
+    /// settings panel — pressing Save with the value box untouched writes a
+    /// rule whose id is the empty string — and if that rule matched every
+    /// anonymous window, one stray click would apply it to half the desktop.
     #[test]
-    fn test_window_class_match() {
-        let c = MatchCriteria::WindowClass("dialog".to_string());
-        assert!(c.matches("", "", "dialog"));
-        assert!(c.matches("", "", "DIALOG"));
-        assert!(!c.matches("", "", "main_window"));
+    fn nothing_is_matched_by_the_absence_of_a_name() {
+        let named = MatchCriteria::AppId("terminal".to_string());
+        assert!(
+            !named.matches("Terminal", ""),
+            "an unnamed window is not every program"
+        );
+
+        let unnamed = MatchCriteria::AppId(String::new());
+        assert!(
+            !unnamed.matches("Terminal", "terminal"),
+            "an unnamed rule names no program"
+        );
+        assert!(
+            !unnamed.matches("", ""),
+            "least of all when neither is named"
+        );
+    }
+
+    /// The title is a different question, and must not answer this one.
+    ///
+    /// A title says *which document*; an app id says *which program*. A rule
+    /// about the program must not fire because the words happened to appear in
+    /// the window's caption.
+    #[test]
+    fn an_app_rule_does_not_read_the_title() {
+        let c = MatchCriteria::AppId("editor".to_string());
+        assert!(!c.matches("editor", "notepad"));
+        assert!(c.matches("editor", "editor"));
     }
 
     #[test]
     fn test_any_matches_everything() {
         let c = MatchCriteria::Any;
-        assert!(c.matches("anything", "any", "thing"));
-        assert!(c.matches("", "", ""));
+        assert!(c.matches("anything", "any"));
+        assert!(c.matches("", ""));
     }
 
     #[test]
@@ -1532,8 +1638,8 @@ mod tests {
             "Title = \"foo\""
         );
         assert_eq!(
-            MatchCriteria::ProcessName("bar".to_string()).description(),
-            "Process: bar"
+            MatchCriteria::AppId("bar".to_string()).description(),
+            "App: bar"
         );
         assert_eq!(MatchCriteria::Any.description(), "Any window");
     }
@@ -1584,15 +1690,15 @@ mod tests {
 
     #[test]
     fn test_rule_matches_when_enabled() {
-        let r = WindowRule::new(1, "test", MatchCriteria::ProcessName("vim".to_string()));
-        assert!(r.matches("", "vim", ""));
+        let r = WindowRule::new(1, "test", MatchCriteria::AppId("vim".to_string()));
+        assert!(r.matches("", "vim"));
     }
 
     #[test]
     fn test_rule_does_not_match_when_disabled() {
-        let mut r = WindowRule::new(1, "test", MatchCriteria::ProcessName("vim".to_string()));
+        let mut r = WindowRule::new(1, "test", MatchCriteria::AppId("vim".to_string()));
         r.enabled = false;
-        assert!(!r.matches("", "vim", ""));
+        assert!(!r.matches("", "vim"));
     }
 
     // --- WindowRulesManager tests ---
@@ -1658,7 +1764,7 @@ mod tests {
         r2.actions.always_on_top = Some(true);
         mgr.add_rule(r2);
 
-        let result = mgr.evaluate("any", "any", "any");
+        let result = mgr.evaluate("any", "any");
         // First match (highest priority) wins.
         assert_eq!(result.opacity, Some(0.5));
         assert_eq!(result.always_on_top, None); // low-priority rule not applied
@@ -1680,7 +1786,7 @@ mod tests {
         r2.actions.always_on_top = Some(true);
         mgr.add_rule(r2);
 
-        let result = mgr.evaluate("any", "any", "any");
+        let result = mgr.evaluate("any", "any");
         // Both rules contribute. The two set disjoint fields, so this says
         // nothing about who wins a contested one — see
         // `the_higher_priority_rule_wins_a_field_both_rules_set` for that.
@@ -1692,15 +1798,11 @@ mod tests {
     fn test_evaluate_no_match() {
         let mut mgr = WindowRulesManager::new();
         mgr.rules.clear();
-        let mut r = WindowRule::new(
-            0,
-            "specific",
-            MatchCriteria::ProcessName("firefox".to_string()),
-        );
+        let mut r = WindowRule::new(0, "specific", MatchCriteria::AppId("firefox".to_string()));
         r.actions.opacity = Some(0.5);
         mgr.add_rule(r);
 
-        let result = mgr.evaluate("", "chrome", "");
+        let result = mgr.evaluate("", "chrome");
         assert_eq!(result.active_count(), 0);
     }
 
@@ -1713,7 +1815,7 @@ mod tests {
         r.actions.always_on_top = Some(true);
         let id = mgr.add_rule(r).unwrap();
 
-        let result = mgr.evaluate("x", "y", "z");
+        let result = mgr.evaluate("x", "y");
         assert_eq!(result.always_on_top, Some(true));
 
         // Rule should be removed after one-shot.
@@ -1728,8 +1830,8 @@ mod tests {
         let r = WindowRule::new(0, "counter", MatchCriteria::Any);
         let id = mgr.add_rule(r).unwrap();
 
-        mgr.evaluate("x", "y", "z");
-        mgr.evaluate("a", "b", "c");
+        mgr.evaluate("x", "y");
+        mgr.evaluate("a", "b");
 
         assert_eq!(mgr.rule_by_id(id).unwrap().match_count, 2);
     }
@@ -1737,20 +1839,16 @@ mod tests {
     #[test]
     fn test_remember_state() {
         let mut mgr = WindowRulesManager::new();
-        mgr.remember_state("terminal", "", 100, 200, 800, 600);
+        mgr.remember_state("terminal", 100, 200, 800, 600);
 
         // Create a rule that uses RememberLast.
         mgr.rules.clear();
-        let mut r = WindowRule::new(
-            0,
-            "term",
-            MatchCriteria::ProcessName("terminal".to_string()),
-        );
+        let mut r = WindowRule::new(0, "term", MatchCriteria::AppId("terminal".to_string()));
         r.actions.position = Some(PositionSpec::RememberLast);
         r.actions.size = Some(SizeSpec::RememberLast);
         mgr.add_rule(r);
 
-        let result = mgr.evaluate("", "terminal", "");
+        let result = mgr.evaluate("", "terminal");
         assert_eq!(
             result.position,
             Some(PositionSpec::Absolute { x: 100, y: 200 })
@@ -1767,15 +1865,15 @@ mod tests {
     #[test]
     fn test_remember_state_updates() {
         let mut mgr = WindowRulesManager::new();
-        mgr.remember_state("vim", "", 10, 20, 100, 100);
-        mgr.remember_state("vim", "", 50, 60, 200, 300);
+        mgr.remember_state("vim", 10, 20, 100, 100);
+        mgr.remember_state("vim", 50, 60, 200, 300);
 
         mgr.rules.clear();
-        let mut r = WindowRule::new(0, "vim", MatchCriteria::ProcessName("vim".to_string()));
+        let mut r = WindowRule::new(0, "vim", MatchCriteria::AppId("vim".to_string()));
         r.actions.position = Some(PositionSpec::RememberLast);
         mgr.add_rule(r);
 
-        let result = mgr.evaluate("", "vim", "");
+        let result = mgr.evaluate("", "vim");
         assert_eq!(
             result.position,
             Some(PositionSpec::Absolute { x: 50, y: 60 })
@@ -1786,15 +1884,11 @@ mod tests {
     fn test_remember_no_state_returns_none() {
         let mut mgr = WindowRulesManager::new();
         mgr.rules.clear();
-        let mut r = WindowRule::new(
-            0,
-            "unknown",
-            MatchCriteria::ProcessName("unknown".to_string()),
-        );
+        let mut r = WindowRule::new(0, "unknown", MatchCriteria::AppId("unknown".to_string()));
         r.actions.position = Some(PositionSpec::RememberLast);
         mgr.add_rule(r);
 
-        let result = mgr.evaluate("", "unknown", "");
+        let result = mgr.evaluate("", "unknown");
         assert_eq!(result.position, None); // No remembered state, cleared to None
     }
 
@@ -1803,10 +1897,10 @@ mod tests {
         let mut mgr = WindowRulesManager::new();
         // Fill to capacity.
         for i in 0..MAX_REMEMBERED {
-            mgr.remember_state(&format!("app{}", i), "", 0, 0, 100, 100);
+            mgr.remember_state(&format!("app{i}"), 0, 0, 100, 100);
         }
         // One more should evict the oldest.
-        mgr.remember_state("newest", "", 999, 999, 999, 999);
+        mgr.remember_state("newest", 999, 999, 999, 999);
         assert!(mgr.remembered.len() <= MAX_REMEMBERED);
     }
 
@@ -1842,7 +1936,7 @@ mod tests {
     fn test_export_config() {
         let mut mgr = WindowRulesManager::new();
         mgr.rules.clear();
-        let mut r = WindowRule::new(1, "test", MatchCriteria::ProcessName("vim".to_string()));
+        let mut r = WindowRule::new(1, "test", MatchCriteria::AppId("vim".to_string()));
         r.priority = 10;
         r.enabled = true;
         r.actions.always_on_top = Some(true);
@@ -1850,22 +1944,73 @@ mod tests {
         mgr.rules.push(r);
 
         let config = mgr.export_config();
-        assert!(config.contains("rule|1|test|10|on|process:vim"));
+        assert!(config.contains("rule|1|test|10|on|app:vim"));
         assert!(config.contains("always_on_top|true"));
     }
 
     #[test]
     fn test_parse_rule_line() {
-        let line = "rule|5|My Rule|20|on|process:firefox";
+        let line = "rule|5|My Rule|20|on|app:firefox";
         let rule = WindowRulesManager::parse_rule_line(line).unwrap();
         assert_eq!(rule.id, 5);
         assert_eq!(rule.name, "My Rule");
         assert_eq!(rule.priority, 20);
         assert!(rule.enabled);
+        assert_eq!(rule.criteria, MatchCriteria::AppId("firefox".to_string()));
+    }
+
+    /// A criterion the parser does not know is a refusal, not a shrug.
+    ///
+    /// It used to fall through to `Any`, which turns a rule the reader wrote
+    /// about *one* program — perhaps written by a newer build, perhaps a typo —
+    /// into a rule about *every* window. A rule that silently widens is worse
+    /// than a rule that does not load: the config file still says `process:vim`
+    /// while every window on the desktop is being made always-on-top.
+    #[test]
+    fn a_criterion_the_parser_does_not_know_is_refused_not_widened() {
+        assert!(WindowRulesManager::parse_rule_line("rule|5|R|20|on|process:vim").is_none());
+        assert!(WindowRulesManager::parse_rule_line("rule|5|R|20|on|class:dialog").is_none());
+        assert!(WindowRulesManager::parse_rule_line("rule|5|R|20|on|nonsense").is_none());
+        // An *absent* criterion is still the documented default, because the
+        // five mandatory fields are the whole of the required line.
         assert_eq!(
-            rule.criteria,
-            MatchCriteria::ProcessName("firefox".to_string())
+            WindowRulesManager::parse_rule_line("rule|5|R|20|on")
+                .unwrap()
+                .criteria,
+            MatchCriteria::Any
         );
+    }
+
+    /// A rule survives the round trip through the config file.
+    ///
+    /// Export and parse are written in two different places, and the only
+    /// thing keeping their spelling of a criterion in step is this test.
+    #[test]
+    fn a_rule_written_out_reads_back_as_itself() {
+        for criteria in [
+            MatchCriteria::TitleExact("Untitled 1".to_string()),
+            MatchCriteria::TitleContains("diff".to_string()),
+            MatchCriteria::AppId("slateos-editor".to_string()),
+            MatchCriteria::Any,
+        ] {
+            let mut mgr = WindowRulesManager::new();
+            mgr.rules.clear();
+            let mut r = WindowRule::new(7, "round trip", criteria.clone());
+            r.priority = 3;
+            r.id = 7;
+            mgr.rules.push(r);
+
+            let config = mgr.export_config();
+            let line = config
+                .lines()
+                .find(|l| l.starts_with("rule|"))
+                .expect("the rule should have been written");
+            let back = WindowRulesManager::parse_rule_line(line)
+                .expect("what we wrote should be what we can read");
+            assert_eq!(back.criteria, criteria, "line was {line}");
+            assert_eq!(back.name, "round trip");
+            assert_eq!(back.priority, 3);
+        }
     }
 
     #[test]
@@ -1909,7 +2054,7 @@ mod tests {
     #[test]
     fn test_remember_empty_key_ignored() {
         let mut mgr = WindowRulesManager::new();
-        mgr.remember_state("", "", 100, 200, 800, 600);
+        mgr.remember_state("", 100, 200, 800, 600);
         assert!(mgr.remembered.is_empty());
     }
 
@@ -2106,7 +2251,7 @@ mod tests {
         high.actions.opacity = Some(0.5);
         mgr.add_rule(high);
 
-        let result = mgr.evaluate("any", "any", "any");
+        let result = mgr.evaluate("any", "any");
         assert_eq!(result.opacity, Some(0.5), "the priority-100 rule must win");
         // A field only the low-priority rule mentions still applies: `None`
         // means "no opinion", not "off".
@@ -2137,7 +2282,7 @@ mod tests {
                 mgr.add_rule(low);
                 mgr.add_rule(high);
             }
-            assert_eq!(mgr.evaluate("a", "b", "c").desktop, Some(100));
+            assert_eq!(mgr.evaluate("a", "b").desktop, Some(100));
         }
     }
 
@@ -2162,7 +2307,7 @@ mod tests {
             mgr.add_rule(second);
 
             assert_eq!(
-                mgr.evaluate("a", "b", "c").desktop,
+                mgr.evaluate("a", "b").desktop,
                 Some(1),
                 "{mode:?} should defer to the earlier-added rule"
             );
@@ -2187,7 +2332,7 @@ mod tests {
         low.priority = 1;
         let low_id = mgr.add_rule(low).unwrap();
 
-        mgr.evaluate("a", "b", "c");
+        mgr.evaluate("a", "b");
         assert_eq!(mgr.rule_by_id(high_id).unwrap().match_count, 1);
         assert_eq!(
             mgr.rule_by_id(low_id).unwrap().match_count,
@@ -2208,7 +2353,7 @@ mod tests {
             .add_rule(WindowRule::new(0, "b", MatchCriteria::Any))
             .unwrap();
 
-        mgr.evaluate("x", "y", "z");
+        mgr.evaluate("x", "y");
         assert_eq!(mgr.rule_by_id(a).unwrap().match_count, 1);
         assert_eq!(mgr.rule_by_id(b).unwrap().match_count, 1);
     }
@@ -2229,7 +2374,7 @@ mod tests {
         once.one_shot = true;
         let once_id = mgr.add_rule(once).unwrap();
 
-        mgr.evaluate("a", "b", "c");
+        mgr.evaluate("a", "b");
         assert!(mgr.rule_by_id(once_id).is_some());
     }
 
@@ -2362,12 +2507,12 @@ mod tests {
         assert!(mgr.add_rule(warm).is_some());
 
         // Low priority: subtext1. No actions: overlay0, and no summary line.
-        let mut cool = WindowRule::new(0, "cool", MatchCriteria::ProcessName("c".to_string()));
+        let mut cool = WindowRule::new(0, "cool", MatchCriteria::AppId("c".to_string()));
         cool.priority = 1;
         assert!(mgr.add_rule(cool).is_some());
 
         // Disabled: an overlay0 name and the red OFF badge.
-        let mut off = WindowRule::new(0, "off", MatchCriteria::WindowClass("d".to_string()));
+        let mut off = WindowRule::new(0, "off", MatchCriteria::AppId("d".to_string()));
         off.enabled = false;
         assert!(mgr.add_rule(off).is_some());
 
@@ -2593,7 +2738,7 @@ mod tests {
                 })
                 .collect()
         };
-        assert_eq!(chips(&blue).len(), 5, "one chip per match type");
+        assert_eq!(chips(&blue).len(), 4, "one chip per match type");
         assert_ne!(
             chips(&blue),
             chips(&mauve),

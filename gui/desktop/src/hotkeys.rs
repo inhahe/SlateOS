@@ -141,7 +141,68 @@ impl fmt::Display for HotkeyError {
 // Hotkey — a key + modifier combination
 // ============================================================================
 
+/// Keys that mean the same thing whatever modifiers are held.
+///
+/// A dedicated key is not a chord. `VolumeUp` has one meaning and no other job,
+/// so requiring a bare press would mean a volume key that stopped working
+/// because Shift happened to be down — a bug the user could feel but never
+/// describe. Keyboards that put these behind an Fn layer are free to report
+/// whatever the layer left set, and several do.
+///
+/// This is enforced by [`Hotkey::normalized`] clearing the modifiers outright,
+/// so the registry holds *one* binding per key rather than sixteen, and a
+/// `Ctrl+VolumeUp` bound to something else is reported as the conflict it is
+/// instead of becoming a binding no press can reach.
+const MODIFIER_AGNOSTIC_KEYS: &[Key] = &[Key::VolumeUp, Key::VolumeDown, Key::VolumeMute];
+
+/// Every distinct [`Modifiers`] value there is.
+///
+/// Sixteen, because there are four flags. Written out rather than counted up in
+/// a loop so that this is a list a reader can check against `Modifiers` by eye,
+/// and so a fifth flag added to that struct leaves this obviously — rather than
+/// silently — short.
+pub(crate) const ALL_MODIFIER_SETS: [Modifiers; 16] = {
+    const fn m(shift: bool, ctrl: bool, alt: bool, super_key: bool) -> Modifiers {
+        Modifiers {
+            shift,
+            ctrl,
+            alt,
+            super_key,
+        }
+    }
+    [
+        m(false, false, false, false),
+        m(true, false, false, false),
+        m(false, true, false, false),
+        m(true, true, false, false),
+        m(false, false, true, false),
+        m(true, false, true, false),
+        m(false, true, true, false),
+        m(true, true, true, false),
+        m(false, false, false, true),
+        m(true, false, false, true),
+        m(false, true, false, true),
+        m(true, true, false, true),
+        m(false, false, true, true),
+        m(true, false, true, true),
+        m(false, true, true, true),
+        m(true, true, true, true),
+    ]
+};
+
 /// A keyboard shortcut: one principal key combined with zero or more modifiers.
+///
+/// Two presses that differ only in a modifier the binding does not name are
+/// *different* hotkeys — matching the whole modifier set is what makes a loose
+/// chord unable to swallow a tighter one. The table used to be a chain of `if`s
+/// each testing only the modifiers it cared about, so `Super+Left` (snap the
+/// window) was tested before `Ctrl+Super+Left` (previous desktop) and matched
+/// with Ctrl held as well: the virtual-desktop shortcuts were unreachable and
+/// had never once fired. A map keyed on the exact set cannot reproduce that.
+///
+/// The two exceptions are in [`normalized`](Self::normalized), which is applied
+/// on the way *in* as well as on the way out, so they are properties of the
+/// stored binding rather than of the lookup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Hotkey {
     pub key: Key,
@@ -184,13 +245,82 @@ impl Hotkey {
         }
     }
 
+    /// The binding a press of `key` with `modifiers` actually names.
+    ///
+    /// Two rules, both applied on registration as well as on lookup so that the
+    /// registry never holds a binding no keystroke can reach:
+    ///
+    /// 1. **A dedicated key ignores modifiers entirely.** See
+    ///    [`MODIFIER_AGNOSTIC_KEYS`].
+    /// 2. **A chord never includes the modifier the key *is*.** Whether the
+    ///    Super bit is already set on the press of the Super key itself is the
+    ///    keyboard driver's business, and neither answer should change what the
+    ///    key does. Without this the start menu would open on one kind of driver
+    ///    and not the other, which is precisely the bug the old table avoided by
+    ///    writing `super_key: _` in that one arm.
+    ///
+    /// Everything else matches exactly.
+    fn normalized(key: Key, modifiers: Modifiers) -> Self {
+        if MODIFIER_AGNOSTIC_KEYS.contains(&key) {
+            return Self::bare(key);
+        }
+        let Modifiers {
+            mut shift,
+            mut ctrl,
+            mut alt,
+            mut super_key,
+        } = modifiers;
+        match key {
+            Key::LeftShift | Key::RightShift => shift = false,
+            Key::LeftCtrl | Key::RightCtrl => ctrl = false,
+            Key::LeftAlt | Key::RightAlt => alt = false,
+            Key::LeftSuper | Key::RightSuper => super_key = false,
+            _ => {}
+        }
+        Self {
+            key,
+            ctrl,
+            alt,
+            shift,
+            super_key,
+        }
+    }
+
+    /// Every exact chord a compositor must deliver for this binding to fire.
+    ///
+    /// One entry for an ordinary chord; sixteen for a
+    /// [modifier-agnostic](MODIFIER_AGNOSTIC_KEYS) key; two for a key that is
+    /// itself a modifier, because [`normalized`](Self::normalized) accepts the
+    /// press with and without its own bit and a grab names one exact chord —
+    /// there is no "any modifier" spelling in the protocol, and inventing one
+    /// for three keys would put a special case in the compositor's keystroke
+    /// path to save forty-eight entries in a hash map.
+    fn chords(&self) -> Vec<(Key, Modifiers)> {
+        if MODIFIER_AGNOSTIC_KEYS.contains(&self.key) {
+            return ALL_MODIFIER_SETS
+                .iter()
+                .map(|&modifiers| (self.key, modifiers))
+                .collect();
+        }
+        let mut with_own_bit = self.modifiers();
+        match self.key {
+            Key::LeftShift | Key::RightShift => with_own_bit.shift = true,
+            Key::LeftCtrl | Key::RightCtrl => with_own_bit.ctrl = true,
+            Key::LeftAlt | Key::RightAlt => with_own_bit.alt = true,
+            Key::LeftSuper | Key::RightSuper => with_own_bit.super_key = true,
+            _ => return vec![(self.key, self.modifiers())],
+        }
+        vec![(self.key, self.modifiers()), (self.key, with_own_bit)]
+    }
+
     /// Test whether a key event matches this hotkey.
+    ///
+    /// Both sides go through [`normalized`](Self::normalized), so this answers
+    /// the same question the registry does. Comparing the raw fields instead
+    /// would let `matches` disagree with [`HotkeyRegistry::lookup`] about the
+    /// two keys that have a rule — which is a difference nobody would look for.
     pub fn matches(&self, key: Key, modifiers: &Modifiers) -> bool {
-        self.key == key
-            && self.ctrl == modifiers.ctrl
-            && self.alt == modifiers.alt
-            && self.shift == modifiers.shift
-            && self.super_key == modifiers.super_key
+        Self::normalized(self.key, self.modifiers()) == Self::normalized(key, *modifiers)
     }
 
     /// Human-readable name for display (e.g., "Ctrl+Alt+Delete").
@@ -235,80 +365,228 @@ impl Ord for Hotkey {
 // ============================================================================
 
 /// Action performed when a hotkey is triggered.
+///
+/// This is the desktop's *whole* shortcut vocabulary — there is no second list
+/// anywhere. It used to have a twin: a private `DesktopAction` in `lib.rs` held
+/// the bindings the shell actually ran, hardcoded in one exhaustive match, while
+/// this enum sat beside it with a registry, conflict detection and a config file
+/// and was reachable from nothing. Neither was a superset of the other, so
+/// "which shortcuts does this desktop have?" had two different answers depending
+/// on which file you opened, and every shortcut named here was a shortcut a user
+/// could read about and never press. See `design-decisions.md` §571.
+///
+/// Not every action can be carried out on a keystroke *from here*: the ones that
+/// start a program report the command through
+/// [`HotkeyOutcome::launches`](crate::HotkeyOutcome::launches) — see
+/// [`command`](Self::command) — because the shell has no connection to the
+/// process server, and the two brightness actions can be carried out at all (see
+/// `known-issues.md` → `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotkeyAction {
-    /// Launch an application by name or path.
-    LaunchApp(String),
+    // ---- the focused window --------------------------------------------
     /// Close the focused window.
     CloseWindow,
     /// Minimize the focused window.
     MinimizeWindow,
-    /// Maximize (or restore) the focused window.
+    /// Maximize the focused window.
     MaximizeWindow,
-    /// Switch to a specific virtual desktop (0-indexed).
+    /// Un-maximize the focused window, or minimize it if it was not maximized.
+    ///
+    /// One key that walks a window down a step at a time, which is what makes it
+    /// worth having beside [`MinimizeWindow`](Self::MinimizeWindow): which of
+    /// the two it does depends on the state the *compositor* last reported, not
+    /// on anything the shell decided.
+    RestoreOrMinimize,
+    /// Snap the focused window to the left half.
+    SnapLeft,
+    /// Snap the focused window to the right half.
+    SnapRight,
+    /// Open (or close) the multi-zone tiling chooser for the focused window.
+    ///
+    /// Distinct from [`SnapLeft`](Self::SnapLeft) and its neighbour, which are
+    /// one keystroke each and place the window immediately. This one opens a
+    /// chooser, because there are twenty-two zones across the six layouts and no
+    /// plausible set of chords for them.
+    ToggleZoneOverlay,
+    /// Minimize every window on the current desktop.
+    ShowDesktop,
+
+    // ---- moving between windows ----------------------------------------
+    /// Step the Alt+Tab switcher forwards, opening it if it is closed.
+    CycleWindows,
+    /// Step the Alt+Tab switcher backwards, opening it if it is closed.
+    CycleWindowsBackwards,
+    /// Open (or close) the Exposé overlay — every window on every desktop.
+    ///
+    /// Distinct from [`CycleWindows`](Self::CycleWindows), which is the same job
+    /// for the common case: Alt+Tab is fast and blind, showing a strip of titles
+    /// you step through without looking. This shows all of them at once, to
+    /// scale, and is what you reach for when you do not remember how many
+    /// presses away the window is — or which desktop it is on, which Alt+Tab
+    /// cannot answer at all.
+    ToggleOverview,
+
+    // ---- virtual desktops ----------------------------------------------
+    /// Show the desktop before the current one.
+    PreviousDesktop,
+    /// Show the desktop after the current one.
+    NextDesktop,
+    /// Show one particular virtual desktop, counting from zero.
+    ///
+    /// No default chord: numbering the desktops onto `Super+1`…`Super+9` would
+    /// take nine keys from every application on the machine, and the two
+    /// relative bindings above already reach every desktop.
     SwitchDesktop(u8),
-    /// Show the task/process manager.
+
+    // ---- the shell's own surfaces --------------------------------------
+    /// Open (or close) the start menu.
+    ToggleStartMenu,
+    /// Open (or close) the Run box.
+    ///
+    /// Distinct from [`ToggleStartMenu`](Self::ToggleStartMenu), which also has
+    /// a search field: the start menu searches a list of *installed* programs
+    /// and can only offer what is in it. The Run box takes a path and arguments,
+    /// which is what you reach for when the thing you want to start is not on
+    /// any menu.
+    ToggleRunDialog,
+    /// Open (or close) the notification pane.
+    ///
+    /// The pane is the only surface that holds a message the user did not ask
+    /// for, so it needs a way in that does not depend on having noticed a tray
+    /// icon change — a notification posted while the user was away is one they
+    /// will never see a transient hint for.
+    ToggleNotifications,
+    /// Open (or close) the card that lists every shortcut.
+    ///
+    /// The card is the only place the bindings are written down at runtime, so
+    /// without a chord of its own it is unreachable — and it is exactly the
+    /// thing a user reaches for when they have forgotten the chords. It is
+    /// listed on itself, which is the point: the card is how you learn the key
+    /// that opens the card.
+    ToggleShortcutCard,
+    /// Close whatever popup is open.
+    ///
+    /// The one action that can decline the press: with nothing open it is not
+    /// consumed and reaches the focused window, whose own dialog may be what the
+    /// user meant to dismiss. That is what [`is_conditional`](Self::is_conditional)
+    /// reports, and why its chord is grabbed only while a popup is up.
+    DismissPopup,
+
+    // ---- sound ----------------------------------------------------------
+    /// Turn the volume up one step.
+    VolumeUp,
+    /// Turn the volume down one step.
+    VolumeDown,
+    /// Silence output, or let it back.
+    VolumeMute,
+
+    // ---- display --------------------------------------------------------
+    /// Increase display brightness.
+    ///
+    /// Nothing carries this out yet; there is no backlight channel out of the
+    /// shell. Kept bindable so the chord survives the channel arriving. See
+    /// `known-issues.md` → `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+    BrightnessUp,
+    /// Decrease display brightness. See [`BrightnessUp`](Self::BrightnessUp).
+    BrightnessDown,
+
+    // ---- starting a program ---------------------------------------------
+    /// Start the program named by this command line.
+    LaunchApp(String),
+    /// Start the process explorer.
     ShowTaskManager,
+    /// Start the settings application.
+    SystemSettings,
     /// Lock the screen.
     ScreenLock,
-    /// Take a full-screen screenshot.
+    /// Capture the whole screen.
     Screenshot,
-    /// Take a region screenshot (interactive selection).
+    /// Capture a region the user draws.
     ScreenshotRegion,
-    /// Increase system volume.
-    VolumeUp,
-    /// Decrease system volume.
-    VolumeDown,
-    /// Toggle volume mute.
-    VolumeMute,
-    /// Increase display brightness.
-    BrightnessUp,
-    /// Decrease display brightness.
-    BrightnessDown,
-    /// Show the search/launcher overlay.
-    ShowSearch,
-    /// Show the Run dialog.
-    ShowRun,
-    /// Show/toggle the desktop (minimize all windows).
-    ShowDesktop,
-    /// Cycle through windows (Alt+Tab style).
-    CycleWindows,
-    /// Snap the focused window to the left half.
-    MoveWindowLeft,
-    /// Snap the focused window to the right half.
-    MoveWindowRight,
-    /// Open the system settings application.
-    SystemSettings,
-    /// A user-defined action identified by a string.
-    Custom(String),
 }
 
+/// The command each fixed launching action starts.
+///
+/// Written here rather than at the six call sites so that the paths appear once,
+/// and pinned against [`crate::launcher::builtin_app_database`] by
+/// `every_command_a_shortcut_names_is_a_program_the_shell_knows_about`: a
+/// shortcut that starts `/usr/bin/procexploder` is a shortcut that silently does
+/// nothing, and the typo is invisible to every other test in this file.
+const TASK_MANAGER_COMMAND: &str = "/usr/bin/procexplorer";
+const SETTINGS_COMMAND: &str = "/usr/bin/settings";
+const LOCK_COMMAND: &str = "/usr/bin/lockscreen";
+/// The flags are the screenshot tool's own; see `apps/screenshot/src/main.rs`,
+/// which parses `--fullscreen`/`-f` and `--region`/`-r` as its first argument.
+/// A flag it does not know would leave it sitting in its interactive menu, which
+/// is not what either shortcut promises.
+const SCREENSHOT_COMMAND: &str = "/usr/bin/screenshot --fullscreen";
+const SCREENSHOT_REGION_COMMAND: &str = "/usr/bin/screenshot --region";
+
 impl HotkeyAction {
+    /// Whether the press is claimed only when the shell has something to do.
+    ///
+    /// True for [`DismissPopup`](Self::DismissPopup) and nothing else. A key the
+    /// shell claims unconditionally is a key no window can ever see, and closing
+    /// a dialog is what Escape does far more often than closing the start menu —
+    /// so the chord for a conditional action is grabbed and released as popups
+    /// open and close rather than held for the session.
+    #[must_use]
+    pub const fn is_conditional(&self) -> bool {
+        matches!(self, Self::DismissPopup)
+    }
+
+    /// The program this action starts, if starting a program is what it does.
+    ///
+    /// `None` for every action that acts on a window or on the shell itself. The
+    /// shell has no connection to the process server, so even the actions that
+    /// *do* answer here are reported rather than performed — see
+    /// [`HotkeyOutcome::launches`](crate::HotkeyOutcome::launches).
+    #[must_use]
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            Self::LaunchApp(command) => Some(command),
+            Self::ShowTaskManager => Some(TASK_MANAGER_COMMAND),
+            Self::SystemSettings => Some(SETTINGS_COMMAND),
+            Self::ScreenLock => Some(LOCK_COMMAND),
+            Self::Screenshot => Some(SCREENSHOT_COMMAND),
+            Self::ScreenshotRegion => Some(SCREENSHOT_REGION_COMMAND),
+            _ => None,
+        }
+    }
+
     /// Serialize the action to a string for configuration persistence.
     fn to_config_value(&self) -> String {
         match self {
-            Self::LaunchApp(app) => format!("launch:{}", app),
             Self::CloseWindow => "close_window".to_string(),
             Self::MinimizeWindow => "minimize_window".to_string(),
             Self::MaximizeWindow => "maximize_window".to_string(),
-            Self::SwitchDesktop(n) => format!("switch_desktop:{}", n),
-            Self::ShowTaskManager => "show_task_manager".to_string(),
-            Self::ScreenLock => "screen_lock".to_string(),
-            Self::Screenshot => "screenshot".to_string(),
-            Self::ScreenshotRegion => "screenshot_region".to_string(),
+            Self::RestoreOrMinimize => "restore_or_minimize".to_string(),
+            Self::SnapLeft => "snap_left".to_string(),
+            Self::SnapRight => "snap_right".to_string(),
+            Self::ToggleZoneOverlay => "toggle_zone_overlay".to_string(),
+            Self::ShowDesktop => "show_desktop".to_string(),
+            Self::CycleWindows => "cycle_windows".to_string(),
+            Self::CycleWindowsBackwards => "cycle_windows_backwards".to_string(),
+            Self::ToggleOverview => "toggle_overview".to_string(),
+            Self::PreviousDesktop => "previous_desktop".to_string(),
+            Self::NextDesktop => "next_desktop".to_string(),
+            Self::SwitchDesktop(n) => format!("switch_desktop:{n}"),
+            Self::ToggleStartMenu => "toggle_start_menu".to_string(),
+            Self::ToggleRunDialog => "toggle_run_dialog".to_string(),
+            Self::ToggleNotifications => "toggle_notifications".to_string(),
+            Self::ToggleShortcutCard => "toggle_shortcut_card".to_string(),
+            Self::DismissPopup => "dismiss_popup".to_string(),
             Self::VolumeUp => "volume_up".to_string(),
             Self::VolumeDown => "volume_down".to_string(),
             Self::VolumeMute => "volume_mute".to_string(),
             Self::BrightnessUp => "brightness_up".to_string(),
             Self::BrightnessDown => "brightness_down".to_string(),
-            Self::ShowSearch => "show_search".to_string(),
-            Self::ShowRun => "show_run".to_string(),
-            Self::ShowDesktop => "show_desktop".to_string(),
-            Self::CycleWindows => "cycle_windows".to_string(),
-            Self::MoveWindowLeft => "move_window_left".to_string(),
-            Self::MoveWindowRight => "move_window_right".to_string(),
+            Self::LaunchApp(app) => format!("launch:{app}"),
+            Self::ShowTaskManager => "show_task_manager".to_string(),
             Self::SystemSettings => "system_settings".to_string(),
-            Self::Custom(name) => format!("custom:{}", name),
+            Self::ScreenLock => "screen_lock".to_string(),
+            Self::Screenshot => "screenshot".to_string(),
+            Self::ScreenshotRegion => "screenshot_region".to_string(),
         }
     }
 
@@ -323,58 +601,78 @@ impl HotkeyAction {
                 .map_err(|_| HotkeyError::UnknownAction(value.to_string()))?;
             return Ok(Self::SwitchDesktop(n));
         }
-        if let Some(name) = value.strip_prefix("custom:") {
-            return Ok(Self::Custom(name.to_string()));
-        }
         match value {
             "close_window" => Ok(Self::CloseWindow),
             "minimize_window" => Ok(Self::MinimizeWindow),
             "maximize_window" => Ok(Self::MaximizeWindow),
-            "show_task_manager" => Ok(Self::ShowTaskManager),
-            "screen_lock" => Ok(Self::ScreenLock),
-            "screenshot" => Ok(Self::Screenshot),
-            "screenshot_region" => Ok(Self::ScreenshotRegion),
+            "restore_or_minimize" => Ok(Self::RestoreOrMinimize),
+            "snap_left" => Ok(Self::SnapLeft),
+            "snap_right" => Ok(Self::SnapRight),
+            "toggle_zone_overlay" => Ok(Self::ToggleZoneOverlay),
+            "show_desktop" => Ok(Self::ShowDesktop),
+            "cycle_windows" => Ok(Self::CycleWindows),
+            "cycle_windows_backwards" => Ok(Self::CycleWindowsBackwards),
+            "toggle_overview" => Ok(Self::ToggleOverview),
+            "previous_desktop" => Ok(Self::PreviousDesktop),
+            "next_desktop" => Ok(Self::NextDesktop),
+            "toggle_start_menu" => Ok(Self::ToggleStartMenu),
+            "toggle_run_dialog" => Ok(Self::ToggleRunDialog),
+            "toggle_notifications" => Ok(Self::ToggleNotifications),
+            "toggle_shortcut_card" => Ok(Self::ToggleShortcutCard),
+            "dismiss_popup" => Ok(Self::DismissPopup),
             "volume_up" => Ok(Self::VolumeUp),
             "volume_down" => Ok(Self::VolumeDown),
             "volume_mute" => Ok(Self::VolumeMute),
             "brightness_up" => Ok(Self::BrightnessUp),
             "brightness_down" => Ok(Self::BrightnessDown),
-            "show_search" => Ok(Self::ShowSearch),
-            "show_run" => Ok(Self::ShowRun),
-            "show_desktop" => Ok(Self::ShowDesktop),
-            "cycle_windows" => Ok(Self::CycleWindows),
-            "move_window_left" => Ok(Self::MoveWindowLeft),
-            "move_window_right" => Ok(Self::MoveWindowRight),
+            "show_task_manager" => Ok(Self::ShowTaskManager),
             "system_settings" => Ok(Self::SystemSettings),
+            "screen_lock" => Ok(Self::ScreenLock),
+            "screenshot" => Ok(Self::Screenshot),
+            "screenshot_region" => Ok(Self::ScreenshotRegion),
             _ => Err(HotkeyError::UnknownAction(value.to_string())),
         }
     }
 
     /// Short human-readable label for display in a settings panel.
+    #[must_use]
     pub fn display_label(&self) -> &str {
         match self {
-            Self::LaunchApp(_) => "Launch App",
             Self::CloseWindow => "Close Window",
             Self::MinimizeWindow => "Minimize Window",
             Self::MaximizeWindow => "Maximize Window",
+            Self::RestoreOrMinimize => "Restore or Minimize",
+            Self::SnapLeft => "Snap Left",
+            Self::SnapRight => "Snap Right",
+            Self::ToggleZoneOverlay => "Tiling Zones",
+            Self::ShowDesktop => "Show Desktop",
+            Self::CycleWindows => "Cycle Windows",
+            Self::CycleWindowsBackwards => "Cycle Windows Backwards",
+            Self::ToggleOverview => "Window Overview",
+            Self::PreviousDesktop => "Previous Desktop",
+            Self::NextDesktop => "Next Desktop",
             Self::SwitchDesktop(_) => "Switch Desktop",
-            Self::ShowTaskManager => "Task Manager",
-            Self::ScreenLock => "Lock Screen",
-            Self::Screenshot => "Screenshot",
-            Self::ScreenshotRegion => "Screenshot Region",
+            Self::ToggleStartMenu => "Start Menu",
+            Self::ToggleRunDialog => "Run Dialog",
+            Self::ToggleNotifications => "Notifications",
+            // Deliberately not "Keyboard Shortcuts", which is what the card's
+            // own header reads: the label appears in a row *on* that card, and
+            // a row that repeats the title verbatim reads as though the heading
+            // had been drawn twice. Phrased as an action, like every other
+            // label here.
+            Self::ToggleShortcutCard => "Show Shortcuts",
+            Self::DismissPopup => "Dismiss Popup",
             Self::VolumeUp => "Volume Up",
             Self::VolumeDown => "Volume Down",
             Self::VolumeMute => "Volume Mute",
             Self::BrightnessUp => "Brightness Up",
             Self::BrightnessDown => "Brightness Down",
-            Self::ShowSearch => "Search",
-            Self::ShowRun => "Run Dialog",
-            Self::ShowDesktop => "Show Desktop",
-            Self::CycleWindows => "Cycle Windows",
-            Self::MoveWindowLeft => "Snap Left",
-            Self::MoveWindowRight => "Snap Right",
+            Self::LaunchApp(_) => "Launch App",
+            Self::ShowTaskManager => "Task Manager",
             Self::SystemSettings => "Settings",
-            Self::Custom(_) => "Custom",
+            Self::ScreenLock => "Lock Screen",
+            Self::Screenshot => "Screenshot",
+            Self::ScreenshotRegion => "Screenshot Region",
         }
     }
 }
@@ -409,6 +707,7 @@ impl HotkeyRegistry {
     /// Register a hotkey binding. Returns an error if the hotkey is already
     /// bound to a different action.
     pub fn register(&mut self, hotkey: Hotkey, action: HotkeyAction) -> Result<(), HotkeyError> {
+        let hotkey = Hotkey::normalized(hotkey.key, hotkey.modifiers());
         if let Some(existing) = self.bindings.get(&hotkey) {
             // Allow re-registering the same action (idempotent).
             if *existing == action {
@@ -425,14 +724,54 @@ impl HotkeyRegistry {
 
     /// Remove a hotkey binding. Returns `true` if something was removed.
     pub fn unregister(&mut self, hotkey: &Hotkey) -> bool {
-        self.bindings.remove(hotkey).is_some()
+        self.bindings
+            .remove(&Hotkey::normalized(hotkey.key, hotkey.modifiers()))
+            .is_some()
     }
 
     /// Look up the action for a given key + modifiers combination.
     pub fn lookup(&self, key: Key, modifiers: &Modifiers) -> Option<&HotkeyAction> {
-        // Construct a temporary Hotkey for the lookup.
-        let probe = Hotkey::new(key, *modifiers);
-        self.bindings.get(&probe)
+        self.bindings.get(&Hotkey::normalized(key, *modifiers))
+    }
+
+    /// Every exact chord the shell must hold for the whole session.
+    ///
+    /// The table says what a chord *means*; this says which chords the shell has
+    /// to be able to hear at all. They are different questions, because the
+    /// compositor delivers a keystroke to whatever holds the keyboard, and that
+    /// is almost never the shell: a shortcut reaches
+    /// [`DesktopShell::handle_hotkey`](crate::DesktopShell::handle_hotkey) only
+    /// for a key that landed on one of the shell's own surfaces. Every shortcut
+    /// would otherwise be dead the moment the user clicked into an application —
+    /// Alt+Tab, whose entire purpose is to be pressed from inside another
+    /// window, most of all.
+    ///
+    /// [Conditional](HotkeyAction::is_conditional) bindings are excluded: a grab
+    /// is not conditional, and holding Escape permanently would break it
+    /// everywhere on the desktop. See [`conditional_chords`](Self::conditional_chords).
+    ///
+    /// Derived from the bindings rather than hand-listed beside them, which is
+    /// what this used to be: a chord in one list and not the other is either a
+    /// shortcut nobody can press or a key taken from every application for
+    /// nothing, and neither shows up as a build failure.
+    #[must_use]
+    pub fn global_chords(&self) -> Vec<(Key, Modifiers)> {
+        self.chords_where(|action| !action.is_conditional())
+    }
+
+    /// The chords to hold only while one of the shell's surfaces is open.
+    #[must_use]
+    pub fn conditional_chords(&self) -> Vec<(Key, Modifiers)> {
+        self.chords_where(HotkeyAction::is_conditional)
+    }
+
+    /// The chords of every binding whose action satisfies `want`.
+    fn chords_where(&self, want: impl Fn(&HotkeyAction) -> bool) -> Vec<(Key, Modifiers)> {
+        self.bindings
+            .iter()
+            .filter(|(_, action)| want(action))
+            .flat_map(|(hotkey, _)| hotkey.chords())
+            .collect()
     }
 
     /// Iterate over all registered bindings in sorted order.
@@ -452,13 +791,15 @@ impl HotkeyRegistry {
 
     /// Check whether a specific hotkey is registered.
     pub fn is_registered(&self, hotkey: &Hotkey) -> bool {
-        self.bindings.contains_key(hotkey)
+        self.bindings
+            .contains_key(&Hotkey::normalized(hotkey.key, hotkey.modifiers()))
     }
 
     /// If the hotkey conflicts with an existing binding, return the existing
     /// action. Returns `None` if the hotkey is free.
     pub fn conflicts_with(&self, hotkey: &Hotkey) -> Option<&HotkeyAction> {
-        self.bindings.get(hotkey)
+        self.bindings
+            .get(&Hotkey::normalized(hotkey.key, hotkey.modifiers()))
     }
 
     /// Remove all bindings.
@@ -484,7 +825,7 @@ impl Default for HotkeyRegistry {
 // ============================================================================
 
 /// Helper: construct a Modifiers with specific flags set.
-fn mods(ctrl: bool, alt: bool, shift: bool, super_key: bool) -> Modifiers {
+const fn mods(ctrl: bool, alt: bool, shift: bool, super_key: bool) -> Modifiers {
     Modifiers {
         ctrl,
         alt,
@@ -493,87 +834,141 @@ fn mods(ctrl: bool, alt: bool, shift: bool, super_key: bool) -> Modifiers {
     }
 }
 
+/// Super alone — by far the most common modifier set in the table below.
+const fn sup() -> Modifiers {
+    mods(false, false, false, true)
+}
+
 /// Populate a registry with the standard default shortcut bindings.
+///
+/// This is the desktop's shipped keyboard, and it is the union of the two tables
+/// that used to disagree: everything the shell already ran, plus everything this
+/// module already promised. See `design-decisions.md` §571 for why the union
+/// rather than either side.
 fn register_defaults(reg: &mut HotkeyRegistry) {
-    // The register calls below cannot fail because the registry starts empty
-    // and each hotkey is unique. We still use if-let to satisfy the no-unwrap
-    // policy.
     let defaults: &[(Hotkey, HotkeyAction)] = &[
-        // Window management
+        // ---- the focused window ------------------------------------------
         (
             Hotkey::new(Key::F4, Modifiers::alt()),
             HotkeyAction::CloseWindow,
         ),
+        (Hotkey::new(Key::D, sup()), HotkeyAction::ShowDesktop),
+        (Hotkey::new(Key::Left, sup()), HotkeyAction::SnapLeft),
+        (Hotkey::new(Key::Right, sup()), HotkeyAction::SnapRight),
+        (Hotkey::new(Key::Up, sup()), HotkeyAction::MaximizeWindow),
         (
-            Hotkey::new(Key::D, mods(false, false, false, true)),
-            HotkeyAction::ShowDesktop,
+            Hotkey::new(Key::Down, sup()),
+            HotkeyAction::RestoreOrMinimize,
         ),
-        (
-            Hotkey::new(Key::Left, mods(false, false, false, true)),
-            HotkeyAction::MoveWindowLeft,
-        ),
-        (
-            Hotkey::new(Key::Right, mods(false, false, false, true)),
-            HotkeyAction::MoveWindowRight,
-        ),
-        // Virtual desktops (Ctrl+Super+Arrow)
-        (
-            Hotkey::new(Key::Left, mods(true, false, false, true)),
-            HotkeyAction::SwitchDesktop(0),
-        ),
-        (
-            Hotkey::new(Key::Right, mods(true, false, false, true)),
-            HotkeyAction::SwitchDesktop(1),
-        ),
-        // Window cycling
+        // Super+Z, as in "zones". Super plus an arrow is already taken by the
+        // four one-press placements above, and the chooser needs a key that is
+        // not one of them.
+        (Hotkey::new(Key::Z, sup()), HotkeyAction::ToggleZoneOverlay),
+        // `HotkeyAction::MinimizeWindow` deliberately has no default chord:
+        // Super+Down already minimizes an unmaximized window, and a second key
+        // for the same job would be spent for nothing.
+
+        // ---- moving between windows --------------------------------------
         (
             Hotkey::new(Key::Tab, Modifiers::alt()),
             HotkeyAction::CycleWindows,
         ),
-        // Search, run, settings
-        (Hotkey::bare(Key::LeftSuper), HotkeyAction::ShowSearch),
         (
-            Hotkey::new(Key::R, mods(false, false, false, true)),
-            HotkeyAction::ShowRun,
+            Hotkey::new(Key::Tab, mods(false, true, true, false)),
+            HotkeyAction::CycleWindowsBackwards,
+        ),
+        // Super+Tab, which is the chord every other desktop uses for this and is
+        // not one of the four above. Alt+Tab is deliberately left alone: the two
+        // are complements, not alternatives.
+        (Hotkey::new(Key::Tab, sup()), HotkeyAction::ToggleOverview),
+        // ---- virtual desktops ---------------------------------------------
+        (
+            Hotkey::new(Key::Left, mods(true, false, false, true)),
+            HotkeyAction::PreviousDesktop,
         ),
         (
-            Hotkey::new(Key::I, mods(false, false, false, true)),
-            HotkeyAction::SystemSettings,
+            Hotkey::new(Key::Right, mods(true, false, false, true)),
+            HotkeyAction::NextDesktop,
         ),
+        // ---- the shell's own surfaces --------------------------------------
+        // The Super key on its own, both of them. `Hotkey::normalized` drops the
+        // Super bit from the press of the Super key itself, so one entry answers
+        // a driver that sets the bit and a driver that does not.
+        (Hotkey::bare(Key::LeftSuper), HotkeyAction::ToggleStartMenu),
+        (Hotkey::bare(Key::RightSuper), HotkeyAction::ToggleStartMenu),
+        // Super+R, as in "run" — the chord Windows uses for the same box, and
+        // free here. The run-dialog module's own doc offers "Ctrl+R or Super+R";
+        // Ctrl+R is not taken by the desktop but *is* taken by roughly every
+        // application that has a reload command, and a global grab on it would
+        // break all of them.
+        (Hotkey::new(Key::R, sup()), HotkeyAction::ToggleRunDialog),
+        // Super+N, as in "notifications" — the chord Windows uses for the same
+        // panel, and free here.
         (
-            Hotkey::new(Key::E, mods(false, false, false, true)),
-            HotkeyAction::LaunchApp("explorer".to_string()),
+            Hotkey::new(Key::N, sup()),
+            HotkeyAction::ToggleNotifications,
         ),
-        // Lock screen
+        // Super+/ — what macOS and most editors use for "show me the
+        // shortcuts", and free here. Written as the `Slash` key rather than as
+        // `Shift+Slash`-for-a-question-mark on purpose: the binding is on a
+        // *key*, not on a character, so it does not move when the user is
+        // typing on a layout where `/` sits somewhere else.
         (
-            Hotkey::new(Key::L, mods(false, false, false, true)),
-            HotkeyAction::ScreenLock,
+            Hotkey::new(Key::Slash, sup()),
+            HotkeyAction::ToggleShortcutCard,
         ),
-        // Task manager
+        // Bare Escape, claimed *conditionally*: with nothing open the press is
+        // not consumed and reaches the focused window. See
+        // `HotkeyAction::is_conditional`, which is what keeps this out of
+        // `global_chords` — a permanent Escape grab would break the key in every
+        // dialog on the desktop.
+        (Hotkey::bare(Key::Escape), HotkeyAction::DismissPopup),
+        // ---- sound -----------------------------------------------------------
+        // Bare: hardware media keys are keys of their own and no modifier is
+        // involved. These were `Key::Unknown(0xAF)` and its neighbours — Windows
+        // virtual key codes, which nothing in this system emits — so the three
+        // volume bindings could never fire. They are named variants now
+        // (`gui/compositor/src/keymap.rs` translates the scan codes that do
+        // arrive), and `Hotkey::normalized` is what makes a press with Shift
+        // held still find them.
+        (Hotkey::bare(Key::VolumeUp), HotkeyAction::VolumeUp),
+        (Hotkey::bare(Key::VolumeDown), HotkeyAction::VolumeDown),
+        (Hotkey::bare(Key::VolumeMute), HotkeyAction::VolumeMute),
+        // `HotkeyAction::BrightnessUp`/`BrightnessDown` deliberately have no
+        // default binding. A laptop's brightness pair sends no scancode at all
+        // — the firmware answers it over ACPI or vendor WMI — so there is no
+        // key to bind, and the two bindings that used to be here bound codes
+        // that never arrive. The actions stay so that a user can put them on a
+        // chord of their own. See known-issues.md →
+        // `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+
+        // ---- starting a program ---------------------------------------------
+        (Hotkey::new(Key::I, sup()), HotkeyAction::SystemSettings),
+        (
+            Hotkey::new(Key::E, sup()),
+            // The path the start menu's "File Explorer" entry uses, not the bare
+            // word "explorer": `HotkeyOutcome::launches` carries command lines,
+            // and whoever executes one is not obliged to search a path.
+            HotkeyAction::LaunchApp("/usr/bin/explorer".to_string()),
+        ),
+        (Hotkey::new(Key::L, sup()), HotkeyAction::ScreenLock),
         (
             Hotkey::new(Key::Delete, mods(true, true, false, false)),
             HotkeyAction::ShowTaskManager,
         ),
-        // Screenshots
         (Hotkey::bare(Key::PrintScreen), HotkeyAction::Screenshot),
         (
             Hotkey::new(Key::S, mods(false, false, true, true)),
             HotkeyAction::ScreenshotRegion,
         ),
-        // Media keys (mapped as bare keys with no modifiers, since hardware
-        // media keys generate dedicated key codes).
-        (Hotkey::bare(Key::Unknown(0xAF)), HotkeyAction::VolumeUp),
-        (Hotkey::bare(Key::Unknown(0xAE)), HotkeyAction::VolumeDown),
-        (Hotkey::bare(Key::Unknown(0xAD)), HotkeyAction::VolumeMute),
-        (Hotkey::bare(Key::Unknown(0xE0)), HotkeyAction::BrightnessUp),
-        (
-            Hotkey::bare(Key::Unknown(0xE1)),
-            HotkeyAction::BrightnessDown,
-        ),
     ];
 
     for (hotkey, action) in defaults {
-        // Ignore errors here — all defaults are unique so this cannot fail.
+        // A failure here is a chord claimed twice in the list above, which is a
+        // bug in this function rather than something a caller can cause. It is
+        // not swallowed: `no_default_binding_collides_with_another` fails on it,
+        // and reporting it at runtime would mean a shell that refuses to start
+        // over a shortcut.
         let _ = reg.register(*hotkey, action.clone());
     }
 }
@@ -589,7 +984,7 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
 /// # Comment lines start with '#'
 /// Alt+F4=close_window
 /// Super+D=show_desktop
-/// Super+E=launch:explorer
+/// Super+E=launch:/usr/bin/explorer
 /// Ctrl+Alt+Delete=show_task_manager
 /// ```
 pub struct HotkeyConfig {
@@ -674,8 +1069,13 @@ impl HotkeyConfig {
     pub fn into_registry(self) -> HotkeyRegistry {
         let mut registry = HotkeyRegistry::new();
         for (hotkey, action) in self.bindings {
-            // Overwrite any previous binding for the same hotkey.
-            registry.bindings.insert(hotkey, action);
+            // Overwrite any previous binding for the same hotkey. Normalised on
+            // the way in like every other entry point, so a config file that
+            // writes `Ctrl+VolumeUp` binds the same thing a press of the volume
+            // key finds rather than an entry nothing can reach.
+            registry
+                .bindings
+                .insert(Hotkey::normalized(hotkey.key, hotkey.modifiers()), action);
         }
         registry
     }
@@ -791,17 +1191,23 @@ fn key_display_name(key: Key) -> &'static str {
         Key::Equals => "Equals",
         Key::Apostrophe => "Apostrophe",
         Key::Grave => "Grave",
-        Key::Unknown(code) => {
-            // Media keys use well-known codes; for others we return a generic label.
-            match code {
-                0xAF => "VolumeUp",
-                0xAE => "VolumeDown",
-                0xAD => "VolumeMute",
-                0xE0 => "BrightnessUp",
-                0xE1 => "BrightnessDown",
-                _ => "Unknown",
-            }
-        }
+        Key::VolumeUp => "VolumeUp",
+        Key::VolumeDown => "VolumeDown",
+        Key::VolumeMute => "VolumeMute",
+        Key::MediaPlayPause => "MediaPlayPause",
+        Key::MediaNextTrack => "MediaNextTrack",
+        Key::MediaPrevTrack => "MediaPrevTrack",
+        Key::MediaStop => "MediaStop",
+        // The media keys used to be named here, by matching `Unknown` against
+        // 0xAF/0xAE/0xAD/0xE0/0xE1 — *Windows virtual key codes*, which nothing
+        // in this system produces. What does arrive is scan code set 1 with the
+        // extended prefix folded into the high byte (0xE030 and friends), so
+        // the arms matched nothing and the names were unreachable for the whole
+        // life of the module. They are real `Key` variants now; see
+        // `gui/compositor/src/keymap.rs`. Brightness has no arm at all, because
+        // it has no scancode to arrive as — see
+        // known-issues.md → `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+        Key::Unknown(_) => "Unknown",
     }
 }
 
@@ -901,11 +1307,19 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         "rightctrl" => Ok(Key::RightCtrl),
         "leftalt" => Ok(Key::LeftAlt),
         "rightalt" => Ok(Key::RightAlt),
-        "volumeup" => Ok(Key::Unknown(0xAF)),
-        "volumedown" => Ok(Key::Unknown(0xAE)),
-        "volumemute" => Ok(Key::Unknown(0xAD)),
-        "brightnessup" => Ok(Key::Unknown(0xE0)),
-        "brightnessdown" => Ok(Key::Unknown(0xE1)),
+        "volumeup" => Ok(Key::VolumeUp),
+        "volumedown" => Ok(Key::VolumeDown),
+        "volumemute" => Ok(Key::VolumeMute),
+        "mediaplaypause" => Ok(Key::MediaPlayPause),
+        "medianexttrack" => Ok(Key::MediaNextTrack),
+        "mediaprevtrack" => Ok(Key::MediaPrevTrack),
+        "mediastop" => Ok(Key::MediaStop),
+        // "brightnessup"/"brightnessdown" are gone rather than remapped: they
+        // parsed to Windows virtual key codes this system never emits, and
+        // there is no scancode to point them at instead. A config file naming
+        // one now fails loudly, which is the honest answer — the binding it
+        // asked for could not have worked. See known-issues.md →
+        // `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
         _ => Err(HotkeyError::UnknownKey(name.to_string())),
     }
 }
@@ -951,12 +1365,107 @@ fn parse_hotkey_string(s: &str) -> Result<Hotkey, HotkeyError> {
 // Settings panel rendering
 // ============================================================================
 
+/// Where every row of the card goes, worked out once.
+///
+/// The card grows *sideways* rather than downwards. One column of one row per
+/// binding is the obvious layout and it does not fit: the twenty-five default
+/// bindings alone come to 1,010 units, and the moment a user adds three of
+/// their own the card is taller than a 1080-line display — at which point the
+/// last rows are drawn off the bottom edge, with nothing on screen to say that
+/// anything is missing. A card whose *end* is invisible is worse than no card,
+/// because the user reads it, does not find the shortcut, and concludes there
+/// isn't one.
+///
+/// Columns rather than scrolling because the card is read, not operated: it has
+/// no input handling at all (`DesktopShell` toggles a `bool` and nothing else),
+/// and a surface with a hidden region and no way to reach it has the same defect
+/// as the overflowing single column. Printed shortcut references are laid out in
+/// columns for the same reason.
+struct PanelLayout {
+    /// How many rows each column holds. At least one.
+    rows_per_column: usize,
+    /// Total width, which is one `PANEL_WIDTH` per column.
+    width: f32,
+    /// Total height: the header, the tallest column, and the bottom padding.
+    height: f32,
+}
+
+/// Work out [`PanelLayout`] for `registry` given the height it has to fit in.
+///
+/// `max_height` is what the *caller* can spare, not what the card wants. A card
+/// that fits gets one column; one that does not gets as many as it needs, each
+/// no taller than `max_height`.
+fn panel_layout(registry: &HotkeyRegistry, max_height: f32) -> PanelLayout {
+    // Floored at one row: a `max_height` smaller than a single row would
+    // otherwise ask for a column per binding and a card wider than any screen.
+    // One row that overflows by a few units is the better failure — the card
+    // still reads top-down.
+    let usable = (max_height - HEADER_HEIGHT - PADDING).max(ROW_HEIGHT);
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "`usable` is at least ROW_HEIGHT so the quotient is at least \
+                  1.0 and never negative, and it is bounded above by a display \
+                  height in the same units — truncation is the floor that is \
+                  wanted here"
+    )]
+    let rows_that_fit = ((usable / ROW_HEIGHT) as usize).max(1);
+    // `max(1)` again on the count: an empty registry still draws its header, and
+    // a zero-column card would be a zero-width rectangle rather than an empty
+    // one with a title on it.
+    let count = registry.len().max(1);
+    let columns = count.div_ceil(rows_that_fit).max(1);
+    // Recomputed from the column count rather than left at `rows_that_fit`, so
+    // that twenty-six bindings over two columns come out thirteen and thirteen
+    // rather than twenty-five and one.
+    let rows_per_column = count.div_ceil(columns);
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a binding count large enough to lose precision in an f32 is \
+                  a card several million rows tall; the cast is not what is \
+                  wrong in that case"
+    )]
+    let (columns_f, rows_f) = (columns as f32, rows_per_column as f32);
+    PanelLayout {
+        rows_per_column,
+        width: PANEL_WIDTH * columns_f,
+        height: HEADER_HEIGHT + rows_f * ROW_HEIGHT + PADDING,
+    }
+}
+
+/// How large the card will be, before it is drawn.
+///
+/// A caller that wants to centre the panel has to know its size, and the size
+/// depends on how many bindings there are and on how much room they have — so
+/// it cannot be a constant, and it must not be a second calculation: a caller
+/// that computed the height itself would centre a rectangle of one size around a
+/// card of another the moment a user added a binding. [`render_settings_panel`]
+/// asks this same function.
+///
+/// `max_height` is the room the caller has; see [`panel_layout`] for what
+/// happens when the bindings need more than that. Pass the caller the *same*
+/// number here and to [`render_settings_panel`], or the two will disagree about
+/// how many columns there are.
+///
+/// Returned as `(width, height)` in the caller's own units, which are the
+/// units the panel is drawn in.
+#[must_use]
+pub fn settings_panel_size(registry: &HotkeyRegistry, max_height: f32) -> (f32, f32) {
+    let layout = panel_layout(registry, max_height);
+    (layout.width, layout.height)
+}
+
 /// Render a hotkey settings panel showing all bindings.
 ///
 /// Produces a self-contained list of `RenderCommand`s that can be composited
 /// on top of the desktop. The panel is positioned at `(panel_x, panel_y)`.
 ///
 /// `selected_index` optionally highlights one row (for keyboard navigation).
+///
+/// `max_height` is how tall the caller can let the card be; past that it grows
+/// into a second column rather than off the bottom of the screen. See
+/// [`panel_layout`]. Whatever is passed here must also be passed to
+/// [`settings_panel_size`], or the placement and the drawing will disagree.
 ///
 /// `p` supplies every colour drawn; see this module's `# Colour` section for
 /// the four judgements that decide which role goes where.
@@ -966,10 +1475,11 @@ pub fn render_settings_panel(
     panel_x: f32,
     panel_y: f32,
     selected_index: Option<usize>,
+    max_height: f32,
 ) -> Vec<RenderCommand> {
     let binding_count = registry.len();
-    let content_height = HEADER_HEIGHT + binding_count as f32 * ROW_HEIGHT + PADDING;
-    let panel_height = content_height;
+    let layout = panel_layout(registry, max_height);
+    let (panel_width, panel_height) = (layout.width, layout.height);
     let radii = CornerRadii::all(PANEL_RADIUS);
 
     let mut cmds: Vec<RenderCommand> =
@@ -979,7 +1489,7 @@ pub fn render_settings_panel(
     cmds.push(RenderCommand::BoxShadow {
         x: panel_x,
         y: panel_y,
-        width: PANEL_WIDTH,
+        width: panel_width,
         height: panel_height,
         offset_x: 0.0,
         offset_y: 4.0,
@@ -995,7 +1505,7 @@ pub fn render_settings_panel(
     cmds.push(RenderCommand::FillRect {
         x: panel_x,
         y: panel_y,
-        width: PANEL_WIDTH,
+        width: panel_width,
         height: panel_height,
         // Judgement 1: the transparency setting, not a baked-in alpha.
         color: p.panel_bg(),
@@ -1006,7 +1516,7 @@ pub fn render_settings_panel(
     cmds.push(RenderCommand::StrokeRect {
         x: panel_x,
         y: panel_y,
-        width: PANEL_WIDTH,
+        width: panel_width,
         height: panel_height,
         color: p.surface2,
         line_width: 1.0,
@@ -1017,7 +1527,7 @@ pub fn render_settings_panel(
     cmds.push(RenderCommand::PushClip {
         x: panel_x,
         y: panel_y,
-        width: PANEL_WIDTH,
+        width: panel_width,
         height: panel_height,
     });
 
@@ -1037,16 +1547,38 @@ pub fn render_settings_panel(
     cmds.push(RenderCommand::Line {
         x1: panel_x + PADDING,
         y1: panel_y + HEADER_HEIGHT,
-        x2: panel_x + PANEL_WIDTH - PADDING,
+        x2: panel_x + panel_width - PADDING,
         y2: panel_y + HEADER_HEIGHT,
         color: p.surface1,
         width: 1.0,
     });
 
-    // Rows.
+    // Rows, filled down each column and then across — the order a reference is
+    // read. `content_width` stays *one column* wide, because every measurement
+    // inside the loop is relative to the column its row is in and not to the
+    // card as a whole; `panel_x` is shadowed below for the same reason.
     let content_width = PANEL_WIDTH - PADDING * 2.0;
+    // Stepped rather than divided out of `i`, so there is no division by a
+    // count a future edit could let reach zero.
+    let mut row_in_column: usize = 0;
+    let mut column_x = panel_x;
     for (i, (hotkey, action)) in registry.all_bindings().enumerate() {
-        let row_y = panel_y + HEADER_HEIGHT + i as f32 * ROW_HEIGHT;
+        if row_in_column == layout.rows_per_column {
+            row_in_column = 0;
+            column_x += PANEL_WIDTH;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a row index within one column is bounded by the rows that \
+                      fit on a display; see `panel_layout`"
+        )]
+        let row_y = panel_y + HEADER_HEIGHT + row_in_column as f32 * ROW_HEIGHT;
+        row_in_column = row_in_column.saturating_add(1);
+        // Shadowing the parameter is deliberate: everything below places itself
+        // against the left edge of *its column*, and a stray `panel_x` reaching
+        // past this point would silently draw a second column's row on top of
+        // the first.
+        let panel_x = column_x;
         let is_selected = selected_index == Some(i);
 
         // Selection highlight.
@@ -1080,17 +1612,14 @@ pub fn render_settings_panel(
             overflow: TextOverflow::Ellipsis,
         });
 
-        // For LaunchApp and Custom, show the parameter after the label.
-        let extra_text = match action {
-            HotkeyAction::LaunchApp(app) => Some(app.as_str()),
-            HotkeyAction::Custom(name) => Some(name.as_str()),
-            HotkeyAction::SwitchDesktop(n) => {
-                // Render inline; handled below instead.
-                let _ = n;
-                None
-            }
-            _ => None,
-        };
+        // Anything that starts a program says which program, beside the label.
+        // Asked of `command` rather than matched on here, so the card cannot
+        // name one thing and the shortcut start another: they read the same
+        // field. `LaunchApp` is the row that needs it — its label is only
+        // "Launch application" — but the fixed-command actions get it too,
+        // because "Task manager" is a name and `/usr/bin/procexplorer` is the
+        // answer to *which* task manager.
+        let extra_text = action.command();
         if let Some(detail) = extra_text {
             let detail_x = panel_x + PADDING + content_width * 0.2;
             cmds.push(RenderCommand::Text {
@@ -1190,6 +1719,106 @@ mod tests {
     use super::*;
     use crate::palette_check::assert_drawn_from;
     use guitk::color::Color;
+
+    /// More room than any card will ever ask for, so the layout stays at one
+    /// column.
+    ///
+    /// Passed by every test that is about something other than columns — the
+    /// colour tests, the badge tests, the selection tests — because those were
+    /// all written against a single column and a single column is still what
+    /// they are asserting about. The tests that *are* about the fold pass a real
+    /// display height instead.
+    const ROOMY: f32 = 100_000.0;
+
+    /// No default binding names a key by its raw code.
+    ///
+    /// The defect this pins is the one the media bindings had for the whole
+    /// life of this module: three of them were `Key::Unknown(0xAF)` and its
+    /// neighbours — *Windows* virtual key codes — and this system's keyboard
+    /// path emits scan code set 1 with the extended prefix in the high byte, so
+    /// the codes never arrived and the bindings never fired. Nothing said so,
+    /// because a binding that matches nothing looks exactly like a binding
+    /// nobody has pressed.
+    ///
+    /// A `Key::Unknown` in the *defaults* is always this mistake. A user is
+    /// welcome to bind a raw code — that is what `Unknown` carries it for, and
+    /// what a remapper wants — but a default has to be a key the system is
+    /// known to produce, and the named variants are the ones the keymap
+    /// promises.
+    #[test]
+    fn no_default_binding_names_a_key_by_its_raw_code() {
+        for (hotkey, action) in HotkeyRegistry::defaults().all_bindings() {
+            assert!(
+                !matches!(hotkey.key, Key::Unknown(_)),
+                "default binding for {action:?} is a raw code: {:?}",
+                hotkey.key
+            );
+        }
+    }
+
+    /// The volume keys are bound bare, and to the named variants the keymap
+    /// actually produces.
+    #[test]
+    fn the_volume_keys_have_working_defaults() {
+        let reg = HotkeyRegistry::defaults();
+        for (key, expected) in [
+            (Key::VolumeUp, HotkeyAction::VolumeUp),
+            (Key::VolumeDown, HotkeyAction::VolumeDown),
+            (Key::VolumeMute, HotkeyAction::VolumeMute),
+        ] {
+            assert_eq!(
+                reg.lookup(key, &Modifiers::NONE),
+                Some(&expected),
+                "{key:?} should be bound bare"
+            );
+        }
+    }
+
+    /// Brightness keeps its *actions* and loses its *bindings*.
+    ///
+    /// There is no scancode for a laptop's brightness pair — the firmware
+    /// answers it over ACPI or vendor WMI — so the two default bindings that
+    /// used to exist could not fire, and a binding that cannot fire is worse
+    /// than none: it tells a settings panel the key is spoken for. The actions
+    /// stay, because a user may put them on a chord of their own.
+    #[test]
+    fn brightness_has_no_default_binding_because_it_has_no_key() {
+        let bound: Vec<_> = HotkeyRegistry::defaults()
+            .all_bindings()
+            .filter(|(_, a)| matches!(a, HotkeyAction::BrightnessUp | HotkeyAction::BrightnessDown))
+            .map(|(h, _)| h.key)
+            .collect();
+        assert!(
+            bound.is_empty(),
+            "brightness should be unbound, got {bound:?}"
+        );
+        // Still nameable, so a config file can ask for it.
+        assert_eq!(
+            HotkeyAction::from_config_value("brightness_up").ok(),
+            Some(HotkeyAction::BrightnessUp)
+        );
+    }
+
+    /// Every key `key_display_name` can name round-trips through the parser.
+    ///
+    /// The two tables are written out by hand and face each other, so the
+    /// failure they invite is a name that displays one way and parses another
+    /// — or, as with the media keys, displays a name the parser then rejects.
+    #[test]
+    fn every_media_key_name_survives_display_and_parse() {
+        for key in [
+            Key::VolumeUp,
+            Key::VolumeDown,
+            Key::VolumeMute,
+            Key::MediaPlayPause,
+            Key::MediaNextTrack,
+            Key::MediaPrevTrack,
+            Key::MediaStop,
+        ] {
+            let name = key_display_name(key);
+            assert_eq!(parse_key_name(name).ok(), Some(key), "name {name:?}");
+        }
+    }
 
     /// The config line splits at its *first* `=`, and the position of that
     /// separator is never carried in a variable that a later expression has to
@@ -1292,6 +1921,230 @@ mod tests {
             ..Modifiers::NONE
         };
         assert!(!hk.matches(Key::F4, &m));
+    }
+
+    /// Rule one: a dedicated key means the same thing whatever is held.
+    ///
+    /// Volume Up with Shift down is Volume Up. The alternative — exact matching
+    /// here too — is a volume key that stops working for a reason the user
+    /// cannot see and could not describe: they were holding a modifier for
+    /// something else at the time.
+    ///
+    /// Applied on the way *in* as well as out, so a registry cannot end up
+    /// holding a `Ctrl+VolumeUp` binding that no press can ever reach. Asking
+    /// for one is reported as the collision it is.
+    #[test]
+    fn a_dedicated_key_ignores_the_modifiers_that_happen_to_be_down() {
+        let reg = HotkeyRegistry::defaults();
+        for modifiers in ALL_MODIFIER_SETS {
+            assert_eq!(
+                reg.lookup(Key::VolumeUp, &modifiers),
+                Some(&HotkeyAction::VolumeUp),
+                "the volume key stopped working with {modifiers:?} held"
+            );
+        }
+
+        let mut reg = HotkeyRegistry::new();
+        reg.register(Hotkey::bare(Key::VolumeUp), HotkeyAction::VolumeUp)
+            .expect("first claim");
+        assert!(
+            reg.register(
+                Hotkey::new(Key::VolumeUp, Modifiers::ctrl()),
+                HotkeyAction::VolumeDown
+            )
+            .is_err(),
+            "Ctrl+VolumeUp was accepted as a separate binding, so it is a \
+             binding no keystroke can reach"
+        );
+        assert_eq!(reg.len(), 1);
+    }
+
+    /// Rule two: a chord never carries the modifier its own key *is*.
+    ///
+    /// Whether the Super bit is set on the press of the Super key itself is the
+    /// keyboard driver's business, and both answers are defensible. Normalising
+    /// it away means the start menu opens either way, rather than depending on
+    /// which driver is loaded.
+    #[test]
+    fn a_modifier_key_pressed_alone_does_not_carry_its_own_bit() {
+        let reg = HotkeyRegistry::defaults();
+        for key in [Key::LeftSuper, Key::RightSuper] {
+            for modifiers in [Modifiers::NONE, sup()] {
+                assert_eq!(
+                    reg.lookup(key, &modifiers),
+                    Some(&HotkeyAction::ToggleStartMenu),
+                    "{key:?} with {modifiers:?} did not open the start menu"
+                );
+            }
+        }
+    }
+
+    /// A grab names one exact chord, so a binding that answers several presses
+    /// has to be claimed several times over.
+    #[test]
+    fn a_binding_is_grabbed_under_every_press_that_reaches_it() {
+        let reg = HotkeyRegistry::defaults();
+        let global = reg.global_chords();
+        for modifiers in ALL_MODIFIER_SETS {
+            assert!(
+                global.contains(&(Key::VolumeUp, modifiers)),
+                "the volume key is not claimed with {modifiers:?} held, so the \
+                 press goes to the focused window instead"
+            );
+        }
+        for modifiers in [Modifiers::NONE, sup()] {
+            assert!(
+                global.contains(&(Key::LeftSuper, modifiers)),
+                "the Super key is not claimed with {modifiers:?}, so a driver \
+                 that reports it that way cannot open the start menu"
+            );
+        }
+        // And the ordinary case stays one chord: a shortcut that claimed the
+        // sixteen near-misses of Alt+F4 would take Ctrl+Alt+F4 from every
+        // application for nothing.
+        assert_eq!(
+            global
+                .iter()
+                .filter(|(key, _)| *key == Key::F4)
+                .collect::<Vec<_>>(),
+            vec![&(Key::F4, Modifiers::alt())]
+        );
+    }
+
+    /// The card that lists the shortcuts is itself reachable by a shortcut, and
+    /// that shortcut is on the card.
+    ///
+    /// Both halves matter. Without a binding the card is a surface nothing can
+    /// open — which is what `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` recorded — and
+    /// without the binding being *in the registry* the card would be the one
+    /// shortcut the card does not mention, which is the shortcut a user who has
+    /// closed it most needs to know.
+    #[test]
+    fn the_card_that_lists_the_shortcuts_lists_the_shortcut_that_opens_it() {
+        let reg = HotkeyRegistry::defaults();
+        assert_eq!(
+            reg.lookup(Key::Slash, &sup()),
+            Some(&HotkeyAction::ToggleShortcutCard),
+            "Super+/ does not open the shortcut card"
+        );
+        assert!(
+            reg.all_bindings()
+                .any(|(_, a)| *a == HotkeyAction::ToggleShortcutCard),
+            "the card does not list its own chord"
+        );
+        assert!(
+            reg.global_chords().contains(&(Key::Slash, sup())),
+            "the card's chord is never grabbed, so the press reaches the \
+             focused window instead"
+        );
+    }
+
+    /// The card never runs off the bottom of the screen it is drawn on.
+    ///
+    /// The defect this pins is the one the single-column layout had the moment
+    /// the shortcut card got a chord: twenty-five bindings at 38 units a row is
+    /// 1,010 units of list, and on a 1080-line display three user bindings put
+    /// the last rows below the edge — silently, with nothing on the card to say
+    /// so. A user reads to the bottom of what they can see, does not find the
+    /// shortcut, and concludes it does not exist.
+    #[test]
+    fn the_card_folds_into_columns_rather_than_running_off_the_screen() {
+        let reg = HotkeyRegistry::defaults();
+        for screen_h in [1080.0_f32, 800.0, 600.0, 480.0] {
+            let (width, height) = settings_panel_size(&reg, screen_h);
+            assert!(
+                height <= screen_h,
+                "on a {screen_h}-line display the card is {height} tall, so its \
+                 last rows are drawn off the edge"
+            );
+            // And it is *drawn* the size it was measured, not merely measured
+            // small: a fold that only the size function knows about would put
+            // every row past the first column back in one long line.
+            let cmds =
+                render_settings_panel(&reg, &Palette::for_mode(false), 0.0, 0.0, None, screen_h);
+            let lowest = cmds
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { y, .. } => Some(*y),
+                    RenderCommand::FillRect { y, height, .. } => Some(y + height),
+                    _ => None,
+                })
+                .fold(0.0_f32, f32::max);
+            assert!(
+                lowest <= height,
+                "something is drawn at {lowest}, below the card's own {height}"
+            );
+            // Every row is still on the card: nothing is dropped to make it fit.
+            let labels = cmds
+                .iter()
+                .filter(|c| matches!(c, RenderCommand::Text { .. }))
+                .count();
+            assert!(
+                labels > reg.len(),
+                "{labels} pieces of text for {} bindings plus a header — rows \
+                 have gone missing",
+                reg.len()
+            );
+            assert!(
+                width >= PANEL_WIDTH,
+                "the card got narrower instead of wider"
+            );
+        }
+    }
+
+    /// A card that fits is left alone: the fold is for the case that needs it.
+    #[test]
+    fn a_card_that_fits_stays_one_column_wide() {
+        let (width, _) = settings_panel_size(&HotkeyRegistry::defaults(), ROOMY);
+        assert_eq!(
+            width, PANEL_WIDTH,
+            "the card grew a second column with the whole screen to itself"
+        );
+    }
+
+    /// The card is measured before it is drawn, and the two answers agree.
+    ///
+    /// `render_shortcut_card` centres the panel using [`settings_panel_size`];
+    /// if that reported a height the drawing did not fill, the card would sit
+    /// off-centre by half the error, and the gap would grow with every binding
+    /// a user added.
+    #[test]
+    fn the_card_is_as_tall_as_it_was_measured_to_be() {
+        let reg = HotkeyRegistry::defaults();
+        let (width, height) = settings_panel_size(&reg, ROOMY);
+        let cmds = render_settings_panel(&reg, &Palette::for_mode(false), 0.0, 0.0, None, ROOMY);
+        let Some(RenderCommand::FillRect {
+            width: bg_width,
+            height: bg_height,
+            ..
+        }) = cmds
+            .iter()
+            .find(|c| matches!(c, RenderCommand::FillRect { .. }))
+        else {
+            panic!("the card has no background, so it has no size to agree about");
+        };
+        assert!(
+            (*bg_width - width).abs() < f32::EPSILON,
+            "measured {width} wide, drawn {bg_width}"
+        );
+        assert!(
+            (*bg_height - height).abs() < f32::EPSILON,
+            "measured {height} tall, drawn {bg_height}"
+        );
+        // And the height tracks the contents rather than being a constant that
+        // happens to match today's defaults.
+        let mut bigger = HotkeyRegistry::defaults();
+        bigger
+            .register(
+                Hotkey::new(Key::F9, mods(true, false, false, false)),
+                HotkeyAction::ShowDesktop,
+            )
+            .expect("Ctrl+F9 is unbound in the defaults");
+        let (_, taller) = settings_panel_size(&bigger, ROOMY);
+        assert!(
+            taller > height,
+            "one more binding did not make the card any taller ({taller} vs {height})"
+        );
     }
 
     #[test]
@@ -1460,10 +2313,13 @@ mod tests {
     #[test]
     fn test_registry_reset_defaults() {
         let mut reg = HotkeyRegistry::new();
-        reg.register(Hotkey::bare(Key::Z), HotkeyAction::Custom("test".into()))
-            .ok();
+        reg.register(
+            Hotkey::bare(Key::Z),
+            HotkeyAction::LaunchApp("/usr/bin/test".into()),
+        )
+        .ok();
         reg.reset_defaults();
-        // Should no longer have the custom binding.
+        // Should no longer have the user's binding.
         assert!(reg.lookup(Key::Z, &Modifiers::NONE).is_none());
         // Should have the standard bindings.
         assert!(reg.lookup(Key::F4, &Modifiers::alt()).is_some());
@@ -1472,6 +2328,75 @@ mod tests {
     // ====================================================================
     // Defaults
     // ====================================================================
+
+    /// No two entries in the default table claim the same chord.
+    ///
+    /// `install_defaults` registers with `let _ =`, because a shell that refused
+    /// to start over a duplicated shortcut would be worse than one that dropped
+    /// the second entry — so a collision is silent at runtime and this is the
+    /// only thing that reports it. What it would look like in use: a shortcut
+    /// listed on the reference card that simply does something else, with
+    /// nothing anywhere saying why.
+    ///
+    /// Counted rather than compared, because `register` refuses the *second*
+    /// claim: the registry ends up one binding short of the list that built it.
+    #[test]
+    fn no_default_binding_collides_with_another() {
+        let mut reg = HotkeyRegistry::new();
+        let mut expected = 0usize;
+        let mut collisions = Vec::new();
+        for (hotkey, action) in HotkeyRegistry::defaults().all_bindings() {
+            expected += 1;
+            if let Err(e) = reg.register(*hotkey, action.clone()) {
+                collisions.push(format!("{e}"));
+            }
+        }
+        assert!(
+            collisions.is_empty(),
+            "the default table claims a chord twice: {collisions:?}"
+        );
+        assert_eq!(reg.len(), expected);
+    }
+
+    /// Every fixed command a shortcut can start names a program the shell knows
+    /// about.
+    ///
+    /// These five paths are string constants, so nothing but this test connects
+    /// them to the programs that exist. A typo in one is a shortcut that grabs
+    /// its chord from the whole desktop and then asks for a binary that is not
+    /// there — and the user sees a key that does nothing, with no error to
+    /// search for. The start menu's own database is the authority, because it is
+    /// what launches these same programs when they are clicked instead of typed.
+    #[test]
+    fn every_command_a_shortcut_names_is_a_program_the_shell_knows_about() {
+        let known: Vec<String> = crate::launcher::builtin_app_database()
+            .iter()
+            .map(|app| app.executable_path.clone())
+            .collect();
+        // The fixed-command actions, plus whatever the *default* table puts on
+        // `LaunchApp` — the one action whose command is not a constant. A
+        // `LaunchApp` the user typed is not checked and cannot be: it is the
+        // variant that exists to name a program this shell has never heard of.
+        let defaults = HotkeyRegistry::defaults();
+        let checked = every_action()
+            .into_iter()
+            .filter(|a| !matches!(a, HotkeyAction::LaunchApp(_)))
+            .chain(defaults.all_bindings().map(|(_, a)| a.clone()));
+        for action in checked {
+            let Some(command) = action.command() else {
+                continue;
+            };
+            // The database stores the program, not the invocation, so a command
+            // with flags is checked on its program word. The flags themselves
+            // are pinned by the constants' own doc against the tool's `main`.
+            let program = command.split_whitespace().next().unwrap_or(command);
+            assert!(
+                known.iter().any(|c| c == program),
+                "{action:?} starts {program:?}, which no start-menu entry names \
+                 — so either the path is a typo or the program does not exist"
+            );
+        }
+    }
 
     #[test]
     fn test_defaults_contains_alt_f4() {
@@ -1506,11 +2431,33 @@ mod tests {
         let reg = HotkeyRegistry::defaults();
         assert_eq!(
             reg.lookup(Key::Left, &mods(false, false, false, true)),
-            Some(&HotkeyAction::MoveWindowLeft)
+            Some(&HotkeyAction::SnapLeft)
         );
         assert_eq!(
             reg.lookup(Key::Right, &mods(false, false, false, true)),
-            Some(&HotkeyAction::MoveWindowRight)
+            Some(&HotkeyAction::SnapRight)
+        );
+    }
+
+    /// The bug that whole-modifier-set matching exists to make impossible.
+    ///
+    /// The live bindings were once a chain of `if`s that each tested only the
+    /// modifiers it cared about, so `Super+Left` — tested first — answered a
+    /// `Ctrl+Super+Left` press too, and the virtual-desktop shortcuts below had
+    /// never once fired. Keyed on the exact modifier set, the near-miss is a
+    /// different key in the map and cannot shadow anything.
+    #[test]
+    fn a_shortcut_does_not_answer_for_a_chord_with_one_more_modifier() {
+        let reg = HotkeyRegistry::defaults();
+        assert_eq!(
+            reg.lookup(Key::Left, &mods(true, false, false, true)),
+            Some(&HotkeyAction::PreviousDesktop),
+            "Ctrl+Super+Left is the previous desktop, not a snap"
+        );
+        assert_eq!(
+            reg.lookup(Key::Right, &mods(true, false, false, true)),
+            Some(&HotkeyAction::NextDesktop),
+            "Ctrl+Super+Right is the next desktop, not a snap"
         );
     }
 
@@ -1546,7 +2493,7 @@ mod tests {
         let reg = HotkeyRegistry::defaults();
         assert_eq!(
             reg.lookup(Key::R, &mods(false, false, false, true)),
-            Some(&HotkeyAction::ShowRun)
+            Some(&HotkeyAction::ToggleRunDialog)
         );
     }
 
@@ -1564,7 +2511,7 @@ mod tests {
         let reg = HotkeyRegistry::defaults();
         assert_eq!(
             reg.lookup(Key::E, &mods(false, false, false, true)),
-            Some(&HotkeyAction::LaunchApp("explorer".to_string()))
+            Some(&HotkeyAction::LaunchApp("/usr/bin/explorer".to_string()))
         );
     }
 
@@ -1694,13 +2641,13 @@ mod tests {
 
     #[test]
     fn test_config_load_launch_action() {
-        let text = "Super+E=launch:explorer\n";
+        let text = "Super+E=launch:/usr/bin/explorer\n";
         let config = HotkeyConfig::load(text).ok();
         assert!(config.is_some());
         let reg = config.unwrap().into_registry();
         assert_eq!(
             reg.lookup(Key::E, &mods(false, false, false, true)),
-            Some(&HotkeyAction::LaunchApp("explorer".to_string()))
+            Some(&HotkeyAction::LaunchApp("/usr/bin/explorer".to_string()))
         );
     }
 
@@ -1716,16 +2663,18 @@ mod tests {
         );
     }
 
+    /// `custom:whatever` used to parse, and named a string nobody read.
+    ///
+    /// A binding on it grabbed the chord from every application on the desktop
+    /// and then did nothing with it — the worst of both, since the key was gone
+    /// *and* the shortcut was dead. Now the line is rejected, which is the
+    /// honest answer: the shell cannot perform an action it has no name for.
     #[test]
-    fn test_config_load_custom_action() {
-        let text = "Ctrl+Shift+X=custom:my_action\n";
-        let config = HotkeyConfig::load(text).ok();
-        assert!(config.is_some());
-        let reg = config.unwrap().into_registry();
-        assert_eq!(
-            reg.lookup(Key::X, &mods(true, false, true, false)),
-            Some(&HotkeyAction::Custom("my_action".to_string()))
-        );
+    fn a_config_line_naming_an_action_the_shell_cannot_perform_is_refused() {
+        assert!(matches!(
+            HotkeyConfig::load("Ctrl+Shift+X=custom:my_action\n"),
+            Err(HotkeyError::ParseError { .. })
+        ));
     }
 
     #[test]
@@ -1743,32 +2692,51 @@ mod tests {
     // Action serialization
     // ====================================================================
 
-    #[test]
-    fn test_action_config_roundtrip() {
-        let actions = vec![
+    /// Every action there is, listed once.
+    ///
+    /// Spelled out rather than derived, because the point of the list is to be
+    /// the *second* opinion about what the enum contains: a `strum`-style
+    /// iterator built from the same enum would agree with a mistake. Adding a
+    /// variant and forgetting this list costs one failing test; adding a variant
+    /// and forgetting `to_config_value` costs a user their settings file.
+    fn every_action() -> Vec<HotkeyAction> {
+        vec![
             HotkeyAction::CloseWindow,
             HotkeyAction::MinimizeWindow,
             HotkeyAction::MaximizeWindow,
-            HotkeyAction::ShowTaskManager,
-            HotkeyAction::ScreenLock,
-            HotkeyAction::Screenshot,
-            HotkeyAction::ScreenshotRegion,
+            HotkeyAction::RestoreOrMinimize,
+            HotkeyAction::SnapLeft,
+            HotkeyAction::SnapRight,
+            HotkeyAction::ToggleZoneOverlay,
+            HotkeyAction::ShowDesktop,
+            HotkeyAction::CycleWindows,
+            HotkeyAction::CycleWindowsBackwards,
+            HotkeyAction::ToggleOverview,
+            HotkeyAction::PreviousDesktop,
+            HotkeyAction::NextDesktop,
+            HotkeyAction::SwitchDesktop(3),
+            HotkeyAction::ToggleStartMenu,
+            HotkeyAction::ToggleRunDialog,
+            HotkeyAction::ToggleNotifications,
+            HotkeyAction::ToggleShortcutCard,
+            HotkeyAction::DismissPopup,
             HotkeyAction::VolumeUp,
             HotkeyAction::VolumeDown,
             HotkeyAction::VolumeMute,
             HotkeyAction::BrightnessUp,
             HotkeyAction::BrightnessDown,
-            HotkeyAction::ShowSearch,
-            HotkeyAction::ShowRun,
-            HotkeyAction::ShowDesktop,
-            HotkeyAction::CycleWindows,
-            HotkeyAction::MoveWindowLeft,
-            HotkeyAction::MoveWindowRight,
+            HotkeyAction::LaunchApp("/usr/bin/my_app".to_string()),
+            HotkeyAction::ShowTaskManager,
             HotkeyAction::SystemSettings,
-            HotkeyAction::LaunchApp("my_app".to_string()),
-            HotkeyAction::SwitchDesktop(3),
-            HotkeyAction::Custom("foo".to_string()),
-        ];
+            HotkeyAction::ScreenLock,
+            HotkeyAction::Screenshot,
+            HotkeyAction::ScreenshotRegion,
+        ]
+    }
+
+    #[test]
+    fn test_action_config_roundtrip() {
+        let actions = every_action();
 
         for action in &actions {
             let serialized = action.to_config_value();
@@ -1795,12 +2763,34 @@ mod tests {
     #[test]
     fn test_action_display_labels() {
         assert_eq!(HotkeyAction::CloseWindow.display_label(), "Close Window");
-        assert_eq!(HotkeyAction::ShowSearch.display_label(), "Search");
+        assert_eq!(
+            HotkeyAction::ToggleOverview.display_label(),
+            "Window Overview"
+        );
         assert_eq!(
             HotkeyAction::LaunchApp("x".into()).display_label(),
             "Launch App"
         );
-        assert_eq!(HotkeyAction::Custom("x".into()).display_label(), "Custom");
+    }
+
+    /// No action shares a label with another.
+    ///
+    /// The reference card is a column of labels, and two rows reading the same
+    /// thing under different chords is a card that cannot be used for what it is
+    /// for. The risk is real because the labels are written by hand next to each
+    /// other and several are near-synonyms — "Snap Left" and "Move Window Left"
+    /// were the same action under two names before these tables were merged.
+    #[test]
+    fn no_two_actions_read_the_same_on_the_reference_card() {
+        let mut seen: std::collections::BTreeMap<String, HotkeyAction> =
+            std::collections::BTreeMap::new();
+        for action in every_action() {
+            let label = action.display_label().to_owned();
+            if let Some(other) = seen.get(&label) {
+                panic!("{action:?} and {other:?} both read {label:?}");
+            }
+            seen.insert(label, action);
+        }
     }
 
     // ====================================================================
@@ -1851,7 +2841,7 @@ mod tests {
     #[test]
     fn test_render_settings_panel_nonempty() {
         let reg = HotkeyRegistry::defaults();
-        let cmds = render_settings_panel(&reg, &accented(false), 100.0, 100.0, None);
+        let cmds = render_settings_panel(&reg, &accented(false), 100.0, 100.0, None, ROOMY);
         // Should produce a non-trivial number of render commands:
         // shadow + bg + border + clip + header text + separator + rows.
         assert!(cmds.len() > 10);
@@ -1860,7 +2850,7 @@ mod tests {
     #[test]
     fn test_render_settings_panel_empty_registry() {
         let reg = HotkeyRegistry::new();
-        let cmds = render_settings_panel(&reg, &accented(false), 0.0, 0.0, None);
+        let cmds = render_settings_panel(&reg, &accented(false), 0.0, 0.0, None, ROOMY);
         // Should still render header (shadow + bg + border + clip + header + sep + popclip).
         assert!(cmds.len() >= 6);
     }
@@ -1868,7 +2858,7 @@ mod tests {
     #[test]
     fn test_render_settings_panel_with_selection() {
         let reg = HotkeyRegistry::defaults();
-        let cmds = render_settings_panel(&reg, &accented(false), 50.0, 50.0, Some(0));
+        let cmds = render_settings_panel(&reg, &accented(false), 50.0, 50.0, Some(0), ROOMY);
         // Should have at least one extra FillRect for the selection highlight.
         let fill_rects = cmds
             .iter()
@@ -1921,6 +2911,22 @@ mod tests {
         }
     }
 
+    /// The command lines the default set draws beside its labels.
+    ///
+    /// Asked of the registry rather than written out, because the badge
+    /// assertions below work by *elimination* — badge ink is the small text
+    /// that is not a detail line — and a list that fell behind the defaults
+    /// would quietly reclassify a command line as a key badge and assert the
+    /// wrong colour on it. There were six of these the day this was written and
+    /// exactly one before the two shortcut tables were merged, so the list
+    /// falling behind is not hypothetical.
+    fn detail_lines() -> Vec<String> {
+        HotkeyRegistry::defaults()
+            .all_bindings()
+            .filter_map(|(_, action)| action.command().map(str::to_owned))
+            .collect()
+    }
+
     /// The colour of the one `Text` command reading exactly `s`.
     fn text_color(cmds: &[RenderCommand], s: &str) -> Color {
         let hits: Vec<Color> = cmds
@@ -1961,14 +2967,14 @@ mod tests {
                 };
                 let last = reg.len().saturating_sub(1);
                 for sel in [None, Some(0), Some(last)] {
-                    let cmds = render_settings_panel(&reg, &p, 40.0, 60.0, sel);
+                    let cmds = render_settings_panel(&reg, &p, 40.0, 60.0, sel, ROOMY);
                     assert_drawn_from(&p, &cmds, &[], "hotkeys settings panel");
                 }
             }
         }
         // A sweep over a panel that drew nothing would pass vacuously.
         let p = accented(true);
-        let cmds = render_settings_panel(&HotkeyRegistry::defaults(), &p, 0.0, 0.0, Some(3));
+        let cmds = render_settings_panel(&HotkeyRegistry::defaults(), &p, 0.0, 0.0, Some(3), ROOMY);
         assert!(cmds.len() > 40, "the fixture rendered almost nothing");
     }
 
@@ -1994,7 +3000,7 @@ mod tests {
         ];
         let p = accented(true);
         let reg = HotkeyRegistry::defaults();
-        let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0));
+        let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0), ROOMY);
         for cmd in &cmds {
             let Some(c) = color_of(cmd) else { continue };
             // `SHADOW` was black, and black stays black in both modes on
@@ -2027,7 +3033,7 @@ mod tests {
         for light in [false, true] {
             let p = accented(light);
             let reg = HotkeyRegistry::defaults();
-            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0));
+            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(0), ROOMY);
 
             // Panel chrome, identified by the panel's own full width.
             let shadow = cmds
@@ -2126,8 +3132,9 @@ mod tests {
                 "badge border"
             );
 
-            // Badge ink: the `KEY_FONT_SIZE` text that is not the one detail
-            // line the default set produces (`explorer`, for `LaunchApp`).
+            // Badge ink: the `KEY_FONT_SIZE` text that is not one of the
+            // command lines the default set draws beside its labels.
+            let details = detail_lines();
             let badge_ink: Vec<Color> = cmds
                 .iter()
                 .filter_map(|c| match c {
@@ -2136,14 +3143,16 @@ mod tests {
                         text,
                         color,
                         ..
-                    } if *font_size == KEY_FONT_SIZE && text != "explorer" => Some(*color),
+                    } if *font_size == KEY_FONT_SIZE && !details.contains(text) => Some(*color),
                     _ => None,
                 })
                 .collect();
             assert_eq!(badge_ink.len(), badge_fills.len(), "badge ink count");
             assert!(badge_ink.iter().all(|c| *c == p.subtext0), "badge ink");
 
-            assert_eq!(text_color(&cmds, "explorer"), p.overlay0, "detail ink");
+            for detail in &details {
+                assert_eq!(text_color(&cmds, detail), p.overlay0, "detail ink");
+            }
 
             // Both branches of the label, in one render: row 0 is selected
             // and every other row is not. A fixture that rendered only one
@@ -2185,7 +3194,7 @@ mod tests {
                 };
                 let last = reg.len().saturating_sub(1);
                 for sel in [None, Some(0), Some(last)] {
-                    let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, sel);
+                    let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, sel, ROOMY);
                     let accented_count = cmds
                         .iter()
                         .filter_map(color_of)
@@ -2219,7 +3228,7 @@ mod tests {
             for alpha in [255_u8, 200, 160] {
                 let mut p = accented(light);
                 p.panel_alpha = alpha;
-                let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None);
+                let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None, ROOMY);
 
                 let bg = cmds
                     .iter()
@@ -2271,7 +3280,7 @@ mod tests {
         let p = accented(true);
 
         // With no selection at all, neither saying appears anywhere.
-        let none = render_settings_panel(&reg, &p, 0.0, 0.0, None);
+        let none = render_settings_panel(&reg, &p, 0.0, 0.0, None, ROOMY);
         assert!(
             !none.iter().any(|c| matches!(
                 c,
@@ -2292,7 +3301,7 @@ mod tests {
         );
 
         for sel in [0, 1, rows / 2, rows - 1] {
-            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(sel));
+            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, Some(sel), ROOMY);
 
             // Saying one: exactly one highlight, at the selected row's y.
             let highlights: Vec<(f32, Color)> = cmds
@@ -2325,7 +3334,7 @@ mod tests {
         }
 
         // An out-of-range selection selects nothing rather than the last row.
-        let over = render_settings_panel(&reg, &p, 0.0, 0.0, Some(rows));
+        let over = render_settings_panel(&reg, &p, 0.0, 0.0, Some(rows), ROOMY);
         assert!(
             !over.iter().any(|c| matches!(
                 c,
@@ -2348,7 +3357,7 @@ mod tests {
         let reg = HotkeyRegistry::defaults();
         for light in [false, true] {
             let p = accented(light);
-            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None);
+            let cmds = render_settings_panel(&reg, &p, 0.0, 0.0, None, ROOMY);
             let mode = if light { "light" } else { "dark" };
 
             let bg = cmds
@@ -2397,6 +3406,7 @@ mod tests {
             );
 
             let header = text_color(&cmds, "Keyboard Shortcuts");
+            let details = detail_lines();
             let ink = cmds
                 .iter()
                 .find_map(|c| match c {
@@ -2405,11 +3415,11 @@ mod tests {
                         text,
                         color,
                         ..
-                    } if *font_size == KEY_FONT_SIZE && text != "explorer" => Some(*color),
+                    } if *font_size == KEY_FONT_SIZE && !details.contains(text) => Some(*color),
                     _ => None,
                 })
                 .expect("no badge ink");
-            let detail = text_color(&cmds, "explorer");
+            let detail = text_color(&cmds, details.first().expect("no detail line"));
             let quieter = |a: Color, b: Color| {
                 // "Quieter" is distance from the panel, not absolute
                 // darkness: in Latte the dimmer ink is the *lighter* one.

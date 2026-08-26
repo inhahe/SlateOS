@@ -21,12 +21,13 @@ mod input;
 mod syntree;
 
 use guitk::color::Color;
+use guitk::event::Event;
 use guitk::render::{FontWeightHint, RenderTree, TextSpan};
 use guitk::tabs::Tabs;
 use guitk::text;
 use highlight::{DEFAULT_THEME, HighlightState, StyledToken, Token};
-use input::{EditorResponse, FindField};
-use oswindow::{EventLoop, EventResponse, WindowBuilder};
+use input::FindField;
+use oswindow::app::Response;
 use syntree::{Pos, SyntaxTree};
 
 use diffcore::{
@@ -38,6 +39,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 // ============================================================================
 // Document buffer
@@ -1800,8 +1802,16 @@ impl EditorState {
     // Rendering
     // ======================================================================
 
-    /// Render the complete editor UI.
-    pub fn render(&self) -> RenderTree {
+    /// Render the complete editor UI at the size the editor currently holds.
+    ///
+    /// Kept separate from the `App::render` that wraps it, and deliberately not
+    /// called `render`: the trait's takes a width and a height, so a same-named
+    /// inherent method would not shadow it silently — it would fail to compile
+    /// at every one of the call sites below, which is a worse way to find out
+    /// than a name that says which one is meant. (The silent version of this
+    /// trap is real: at equal arity the inherent method wins method lookup and
+    /// every existing call keeps compiling while testing the other function.)
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
         let w = self.window_width as f32;
         let h = self.window_height as f32;
@@ -2521,150 +2531,142 @@ impl EditorState {
 // Main
 // ============================================================================
 
-/// Drive the editor on `window` until the user quits or the connection closes.
+/// The editor as something a window can be pointed at.
 ///
-/// Everything the editor decides is in [`EditorState::handle_event`]; this is
-/// only the strap between it and the loop. The one thing it adds is *when to
-/// draw*: a frame is submitted for the initial state and thereafter exactly when
-/// an event reported a visible change. Redrawing unconditionally would repaint
-/// the whole document for every mouse move across the window.
-fn run<T: oswindow::ConnectionTransport>(
-    events: &mut EventLoop<T>,
-    window: u64,
-    editor: &mut EditorState,
-) -> Result<(), oswindow::Error<T>> {
-    // Nothing has happened yet, so no event is going to ask for the first frame.
-    events.submit(window, &editor.render())?;
-
-    // A failed submit has nowhere to be reported from inside the handler — its
-    // return type is the loop's `EventResponse`, not a `Result` — so it is
-    // carried out here and the loop stopped. Swallowing it would leave an
-    // editor that runs on happily while the screen no longer changes.
-    let mut failure = None;
-    events.run(|events, id, event| {
-        if id != window {
-            return EventResponse::Continue;
-        }
-        match editor.handle_event(&event) {
-            EditorResponse::Idle => EventResponse::Continue,
-            EditorResponse::Redraw => {
-                if let Err(e) = events.submit(id, &editor.render()) {
-                    failure = Some(e);
-                    return EventResponse::Exit;
-                }
-                EventResponse::Continue
-            }
-            EditorResponse::Exit => EventResponse::Exit,
-        }
-    })?;
-
-    failure.map_or(Ok(()), Err)
-}
-
-/// The command-line arguments, split into a display address and file names.
-///
-/// `--display ADDR` overrides `SLATE_DISPLAY`, in the same way and for the same
-/// reason a compositor takes an address as its first argument: a second display
-/// on one machine should not require editing the environment of the first.
-/// Everything else is a file to open. A lone `--` ends option parsing, so a file
-/// genuinely named `--display` is still openable.
-fn split_args<I: IntoIterator<Item = String>>(
-    args: I,
-) -> Result<(Option<String>, Vec<String>), String> {
-    let mut display = None;
-    let mut files = Vec::new();
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--" => {
-                files.extend(args);
-                break;
-            }
-            "--display" => {
-                display = Some(args.next().ok_or_else(|| {
-                    "--display needs an address, e.g. --display 127.0.0.1:7373".to_string()
-                })?);
-            }
-            other => match other.strip_prefix("--display=") {
-                Some(addr) => display = Some(addr.to_string()),
-                None => files.push(arg),
-            },
-        }
+/// Everything below is one line long, and that is the point of the trait: the
+/// editor supplies what is genuinely its own — its title, its size, what an
+/// event means, what to draw — and `oswindow::app` supplies the ~120 lines that
+/// used to sit here doing what every other application in the tree would have
+/// had to do identically. See `gui/window/src/app.rs` for what those lines were.
+impl oswindow::app::App for EditorState {
+    fn title(&self) -> String {
+        format!("{} — Editor", self.active_document().name)
     }
-    Ok((display, files))
+
+    fn initial_size(&self) -> (u32, u32) {
+        (self.window_width, self.window_height)
+    }
+
+    // `tick_interval` is deliberately left at its `None` default, and the
+    // absence is the assertion: the editor ages nothing. There is no caret
+    // blink, no autosave timer, no toast that expires — every visible change it
+    // makes is downstream of an event. The day one of those is added, this is
+    // the method that has to come with it, or the feature ships frozen with
+    // passing tests over it (`known-issues.md` lesson 47).
+    fn on_event(&mut self, event: &Event) -> Response {
+        self.handle_event(event)
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The compositor's word on the size rather than the editor's memory of
+        // it. They normally agree, because `handle_event` records every
+        // `Event::Resize` — but the first frame is drawn before any event has
+        // arrived, and a compositor may grant a window a size other than the one
+        // it was asked for without ever calling that a resize.
+        //
+        // The cast is back the way the size came: `oswindow` holds it as `u32`
+        // and widens it because the render vocabulary is `f32` throughout. A
+        // window taller than 16.7 million pixels would lose precision on the way
+        // out; nothing can lose anything on the way back.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "narrowing an f32 that oswindow widened from the u32 it holds"
+        )]
+        self.resize(width.max(0.0) as u32, height.max(0.0) as u32);
+        self.render_tree()
+    }
 }
 
-fn main() {
-    let (display, files) = match split_args(std::env::args().skip(1)) {
-        Ok(split) => split,
+fn main() -> ExitCode {
+    // Parsed here rather than by `oswindow::app::launch`, because the editor has
+    // arguments of its own: `launch` rejects any non-option argument, which is
+    // right for an application that takes none and wrong for this one.
+    let args = match oswindow::app::Args::from_env() {
+        Ok(args) => args,
         Err(e) => {
             eprintln!("editor: {e}");
-            std::process::exit(2);
+            // Distinct from a failure to reach the compositor: the command line
+            // was wrong, which is a different thing for a script to react to.
+            return ExitCode::from(2);
         }
     };
 
     let mut editor = EditorState::new();
-    for path_str in &files {
-        let path = PathBuf::from(path_str);
-        if let Err(e) = editor.open_file(&path) {
-            eprintln!("editor: cannot open {}: {e}", path.display());
-        }
+    for (path, why) in open_all(&mut editor, &args.rest) {
+        eprintln!("editor: cannot open {}: {why}", path.display());
     }
 
     // The editor names `oswindow` and never TCP — see `design-decisions.md`
     // §460 — so the day the transport becomes a SlateOS channel, none of this
     // changes.
-    let dialled = match &display {
-        Some(addr) => oswindow::connect_to(addr.as_str()),
-        None => oswindow::connect(),
-    };
-    let transport = match dialled {
-        Ok(t) => t,
-        Err(e) => {
-            // Almost always "connection refused", which means no compositor is
-            // running. The errno alone reads like a fault in this program, so
-            // say what it actually means and what to do about it.
-            eprintln!("editor: cannot reach the compositor: {e}");
-            eprintln!("  A compositor must be running for the editor to have a window.");
-            eprintln!("  Start one with `compositor`, or point the editor at an existing");
-            eprintln!(
-                "  display with `--display HOST:PORT` or the {} variable.",
-                oswindow::DISPLAY_VAR
-            );
-            std::process::exit(1);
-        }
-    };
+    oswindow::app::launch_with("editor", args.display.as_deref(), &mut editor)
+}
 
-    let title = format!("{} — Editor", editor.active_document().name);
-    let mut events = EventLoop::new(transport);
-    let window = match WindowBuilder::new(title, editor.window_width, editor.window_height)
-        .resizable(true)
-        .build(&mut events)
-    {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("editor: the compositor refused the window: {e:?}");
-            std::process::exit(1);
+/// Open every named file, returning the ones that could not be opened.
+///
+/// A function rather than a loop inside `main` so that the rule it embodies can
+/// be tested: a file that cannot be read is *skipped*, and every file named
+/// after it still opens. `?` here would read more naturally and would mean that
+/// an editor launched on a directory listing containing one unreadable file
+/// showed none of the other twenty — a whole session lost to one bad name.
+///
+/// The messages are returned rather than printed so the caller owns the
+/// diagnostics; a test can then assert the rule without capturing stderr.
+fn open_all(editor: &mut EditorState, files: &[String]) -> Vec<(PathBuf, std::io::Error)> {
+    let mut failures = Vec::new();
+    for name in files {
+        let path = PathBuf::from(name);
+        if let Err(e) = editor.open_file(&path) {
+            failures.push((path, e));
         }
-    };
+    }
+    discard_unused_scratch(editor);
+    failures
+}
 
-    if let Err(e) = run(&mut events, window, &mut editor) {
-        eprintln!("editor: the connection failed: {e:?}");
-        std::process::exit(1);
+/// Drop the blank buffer the editor starts with, if it is still blank.
+///
+/// [`EditorState::new`] opens one untitled document, because an editor with no
+/// tabs at all has nowhere to type. A user who named files on the command line
+/// has somewhere to type, so that tab is one they never asked for, sitting to
+/// the left of every one they did. `editor a.rs b.rs` showed three tabs. Nothing
+/// caught it because nothing tested `main` — which is the whole subject of
+/// `known-issues.md` → `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`.
+///
+/// The blankness is checked rather than assumed, because discarding a buffer
+/// with text in it is not recoverable and nothing structurally guarantees this
+/// runs before the first edit.
+///
+/// The count check is a short-circuit and *not* a safety net, which is worth
+/// saying because it reads like one: `Tabs::close` on the last remaining item
+/// hands back a fresh default rather than leaving nothing open, so an invocation
+/// whose every argument was unreadable would end up with an empty Untitled
+/// buffer either way. Closing a tab in order to have it recreated is a confusing
+/// way to write "do nothing", so it is written as "do nothing".
+fn discard_unused_scratch(editor: &mut EditorState) {
+    if editor.tabs.count() < 2 {
+        return;
+    }
+    let still_scratch = editor.tabs.get(0).is_some_and(|doc| {
+        doc.path.is_none() && !doc.modified && doc.lines.iter().all(String::is_empty)
+    });
+    if still_scratch {
+        editor.tabs.close(0);
     }
 }
 
-/// The editor as a compositor client, driven end to end.
+/// How the editor is invoked: which files, and what happens when one is bad.
 ///
-/// These go through the real protocol — the requests are encoded, decoded by
-/// `oswindow::testing`'s compositor, and answered, and the frames the editor
-/// draws come back as decoded submissions. What they check is the one thing
-/// [`run`] adds over [`EditorState::handle_event`]: *when* a frame is sent.
-/// How the editor is invoked: which display, and which files.
+/// The `--display` half of the command line is no longer tested here, because
+/// it is no longer parsed here: `oswindow::app::Args` does it for every
+/// application, and its own tests cover the spellings, the `--` terminator and
+/// the missing-address error. What is left is the part that is genuinely the
+/// editor's -- what it does with the file names it is handed.
 #[cfg(test)]
 mod arg_tests {
     // A test that indexes out of range should fail loudly and point at the
-    // line that did it — that is the diagnosis. The defensive lints exist to
+    // line that did it -- that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
     #![allow(
         clippy::indexing_slicing,
@@ -2674,67 +2676,137 @@ mod arg_tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::split_args;
+    use std::fs;
 
-    fn split(args: &[&str]) -> Result<(Option<String>, Vec<String>), String> {
-        split_args(args.iter().map(|s| (*s).to_string()))
+    use scratchdir::ScratchDir;
+
+    use super::{EditorState, open_all};
+
+    /// The names of the open tabs, in order.
+    fn tabs(editor: &EditorState) -> Vec<String> {
+        editor.tabs.iter().map(|doc| doc.name.clone()).collect()
     }
 
     #[test]
-    fn with_no_arguments_the_display_comes_from_the_environment() {
-        let (display, files) = split(&[]).unwrap();
-        assert_eq!(display, None, "no override was asked for");
-        assert!(files.is_empty());
+    fn no_arguments_leaves_the_single_untitled_document_alone() {
+        let mut editor = EditorState::new();
+        let failures = open_all(&mut editor, &[]);
+        assert!(failures.is_empty());
+        assert_eq!(tabs(&editor), vec!["Untitled".to_string()]);
     }
 
     #[test]
-    fn files_are_kept_in_the_order_they_were_given() {
-        let (display, files) = split(&["a.rs", "b.rs", "a.rs"]).unwrap();
-        assert_eq!(display, None);
-        // Not deduplicated: opening the same file twice is the user's business,
-        // and the editor's tab list is ordered.
-        assert_eq!(files, vec!["a.rs", "b.rs", "a.rs"]);
-    }
+    fn files_are_opened_in_the_order_they_were_given() {
+        let scratch = ScratchDir::new("slate_editor_args_order");
+        let mut names = Vec::new();
+        for name in ["one.txt", "two.txt", "three.txt"] {
+            let path = scratch.path(name);
+            fs::write(&path, "x").unwrap();
+            names.push(path.to_string_lossy().into_owned());
+        }
 
-    #[test]
-    fn a_display_can_be_given_either_spelling() {
+        let mut editor = EditorState::new();
+        assert!(open_all(&mut editor, &names).is_empty());
+        // The untitled document the editor starts with is not among them: a
+        // blank tab beside the files the user actually named is clutter.
         assert_eq!(
-            split(&["--display", "10.0.0.4:7373", "x.rs"]).unwrap(),
-            (Some("10.0.0.4:7373".to_string()), vec!["x.rs".to_string()])
+            tabs(&editor),
+            vec![
+                "one.txt".to_string(),
+                "two.txt".to_string(),
+                "three.txt".to_string()
+            ]
         );
+    }
+
+    /// One unopenable file must not cost the user the other twenty.
+    ///
+    /// This is the rule `open_all` exists to make testable. Written with `?`
+    /// -- which reads better and is what a careful author reaches for -- an
+    /// editor launched on a directory listing with one unreadable name in it
+    /// would open nothing at all, and the diagnostic would name the one file
+    /// while the nineteen good ones vanished without comment.
+    #[test]
+    fn a_file_that_cannot_be_opened_is_reported_and_the_rest_still_open() {
+        let scratch = ScratchDir::new("slate_editor_args_bad");
+        let good = scratch.path("good.txt");
+        fs::write(&good, "content").unwrap();
+        let missing = scratch.path("no_such_file.txt");
+
+        let mut editor = EditorState::new();
+        let failures = open_all(
+            &mut editor,
+            &[
+                missing.to_string_lossy().into_owned(),
+                good.to_string_lossy().into_owned(),
+            ],
+        );
+
+        assert_eq!(failures.len(), 1, "exactly the one bad name: {failures:?}");
+        assert_eq!(failures[0].0, missing, "and the message names it");
         assert_eq!(
-            split(&["--display=10.0.0.4:7373", "x.rs"]).unwrap(),
-            (Some("10.0.0.4:7373".to_string()), vec!["x.rs".to_string()])
+            tabs(&editor),
+            vec!["good.txt".to_string()],
+            "the file after the failure opened anyway"
         );
     }
 
+    /// Naming one file twice does not open it twice.
+    ///
+    /// `Args` deliberately does not de-duplicate -- what a repeat means is the
+    /// application's call -- and this is the editor making it: a second mention
+    /// selects the tab that is already open, because two tabs over one file
+    /// would be two buffers over one file, and the second save would silently
+    /// discard the first's edits.
+    /// An invocation whose every argument was unreadable still has a buffer.
+    ///
+    /// An editor showing no document at all has nowhere to put the next
+    /// keystroke, so this is a property of the outcome rather than of any one
+    /// line: `discard_unused_scratch` short-circuits, and `Tabs::close` would
+    /// hand back a fresh default even if it did not. The test is written over
+    /// what the user sees precisely so that it keeps holding whichever of those
+    /// two is the one that ends up doing the work.
     #[test]
-    fn a_display_option_with_nothing_after_it_is_an_error_and_not_a_silent_default() {
-        // Silently falling back to the environment here would connect to a
-        // *different* compositor than the one the user named, which is the kind
-        // of failure that looks like the program ignoring them.
-        let e = split(&["--display"]).unwrap_err();
-        assert!(e.contains("--display"), "the message names the option: {e}");
+    fn every_argument_unreadable_still_leaves_somewhere_to_type() {
+        let scratch = ScratchDir::new("slate_editor_args_allbad");
+        let missing = scratch.path("nope.txt").to_string_lossy().into_owned();
+
+        let mut editor = EditorState::new();
+        let failures = open_all(&mut editor, &[missing.clone(), missing]);
+
+        assert_eq!(failures.len(), 2);
+        assert_eq!(tabs(&editor), vec!["Untitled".to_string()]);
+    }
+
+    /// The window is named after the file the user asked for.
+    ///
+    /// The pair to `loop_tests::the_title_names_the_active_document`, which
+    /// covers the same rule for an editor started with no arguments. Both are
+    /// needed because the title is read once, when the window is opened, and
+    /// this is the case where something has already happened by then.
+    #[test]
+    fn the_title_names_the_file_that_was_asked_for() {
+        use oswindow::app::App as _;
+
+        let scratch = ScratchDir::new("slate_editor_args_title");
+        let path = scratch.path("notes.txt");
+        fs::write(&path, "hello").unwrap();
+
+        let mut editor = EditorState::new();
+        assert!(open_all(&mut editor, &[path.to_string_lossy().into_owned()]).is_empty());
+        assert_eq!(editor.title(), "notes.txt — Editor");
     }
 
     #[test]
-    fn the_last_display_wins_so_a_wrapper_script_can_override_one() {
-        let (display, files) = split(&["--display", "a:1", "--display", "b:2"]).unwrap();
-        assert_eq!(display, Some("b:2".to_string()));
-        assert!(files.is_empty());
-    }
+    fn the_same_file_named_twice_opens_one_tab() {
+        let scratch = ScratchDir::new("slate_editor_args_dup");
+        let path = scratch.path("same.txt");
+        fs::write(&path, "x").unwrap();
+        let name = path.to_string_lossy().into_owned();
 
-    #[test]
-    fn a_file_really_named_like_an_option_is_reachable_after_a_bare_dash_dash() {
-        let (display, files) = split(&["--", "--display", "--display=x"]).unwrap();
-        assert_eq!(display, None, "past `--` nothing is an option");
-        assert_eq!(files, vec!["--display", "--display=x"]);
-    }
-
-    #[test]
-    fn a_bare_dash_is_a_file_name_and_not_an_option() {
-        let (_, files) = split(&["-"]).unwrap();
-        assert_eq!(files, vec!["-"]);
+        let mut editor = EditorState::new();
+        assert!(open_all(&mut editor, &[name.clone(), name]).is_empty());
+        assert_eq!(tabs(&editor), vec!["same.txt".to_string()]);
     }
 }
 
@@ -2976,7 +3048,7 @@ mod against_the_real_compositor {
         // The editor's real render tree — every line, the gutter, the status
         // bar — encoded by `oswindow`, carried by TCP, decoded by the
         // compositor's wire front end and rasterised.
-        let tree = editor.render();
+        let tree = editor.render_tree();
         assert!(!tree.commands.is_empty(), "the editor drew nothing to send");
         events.submit(window, &tree).expect("submit");
 
@@ -2997,7 +3069,9 @@ mod against_the_real_compositor {
             .build(&mut events)
             .expect("window");
         desktop.until("the window to exist", |s| s.windows == 1);
-        events.submit(window, &editor.render()).expect("submit");
+        events
+            .submit(window, &editor.render_tree())
+            .expect("submit");
 
         // Scancode 0x1E is `A` on a set-1 keyboard. The compositor is what turns
         // it into a key name and a character (`design-decisions.md` §456), so
@@ -3054,10 +3128,27 @@ mod against_the_real_compositor {
     }
 }
 
+/// The editor as a compositor client, driven end to end.
+///
+/// These go through the real protocol: the requests are encoded, decoded by
+/// `oswindow::testing`'s compositor and answered, and the frames the editor
+/// draws come back as decoded submissions.
+///
+/// What they check is the *seam*, not the loop. The loop is now
+/// `oswindow::app::drive`, which has its own tests over its own rules -- one
+/// frame per batch, a frame for a resize whatever the app says, the clock. What
+/// those tests cannot know is whether **this** application answers `Redraw` at
+/// the right moments, and that is what is asserted here: a mouse move across
+/// the window costs no frame, a keystroke costs one.
+///
+/// That distinction is the reason these survived the conversion rather than
+/// being deleted along with the hand-written `run` they used to drive. A
+/// harness test proves the strap works; only an application test proves this
+/// application is strapped in.
 #[cfg(test)]
 mod loop_tests {
     // A test that indexes out of range should fail loudly and point at the
-    // line that did it — that is the diagnosis. The defensive lints exist to
+    // line that did it -- that is the diagnosis. The defensive lints exist to
     // keep panics out of code that runs on a user's data, which this is not.
     #![allow(
         clippy::indexing_slicing,
@@ -3067,10 +3158,12 @@ mod loop_tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{EditorState, run};
     use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
+    use oswindow::app::{App as _, drive, open};
     use oswindow::testing;
     use oswindow::{InputEvent, WindowBuilder};
+
+    use super::EditorState;
 
     fn typed(ch: char) -> Event {
         Event::Key(KeyEvent {
@@ -3084,10 +3177,10 @@ mod loop_tests {
     #[test]
     fn the_editor_opens_a_window_draws_once_and_then_only_on_change() {
         let (mut events, desktop) = testing::desktop();
-        let window = WindowBuilder::new("Editor", 900, 600)
-            .resizable(true)
-            .build(&mut events)
-            .expect("the compositor should have created the window");
+        let mut editor = EditorState::new();
+        // Through the trait, so what is under test includes the editor's own
+        // `title` and `initial_size` rather than a size this test chose.
+        let window = open(&mut events, &editor).expect("the compositor should have granted it");
 
         // Each batch is delivered on one turn of the loop, so these arrive in
         // order with the editor processing each before the next appears.
@@ -3108,8 +3201,7 @@ mod loop_tests {
                 .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
         }
 
-        let mut editor = EditorState::new();
-        run(&mut events, window, &mut editor).expect("the loopback connection cannot fail");
+        drive(&mut events, window, &mut editor).expect("the loopback connection cannot fail");
 
         assert_eq!(editor.active_document().lines[0], "a", "the key arrived");
 
@@ -3128,9 +3220,8 @@ mod loop_tests {
     #[test]
     fn events_for_another_window_are_ignored_rather_than_applied() {
         let (mut events, desktop) = testing::desktop();
-        let mine = WindowBuilder::new("Editor", 900, 600)
-            .build(&mut events)
-            .unwrap();
+        let mut editor = EditorState::new();
+        let mine = open(&mut events, &editor).unwrap();
         let theirs = WindowBuilder::new("Other", 100, 100)
             .build(&mut events)
             .unwrap();
@@ -3144,8 +3235,7 @@ mod loop_tests {
                 .push_back(vec![InputEvent::new(mine, Event::CloseRequested)]);
         }
 
-        let mut editor = EditorState::new();
-        run(&mut events, mine, &mut editor).unwrap();
+        drive(&mut events, mine, &mut editor).unwrap();
 
         assert_eq!(
             editor.active_document().lines[0],
@@ -3154,6 +3244,38 @@ mod loop_tests {
         );
         let drawn = desktop.borrow_mut().drawn();
         assert_eq!(drawn, vec![(mine, drawn[0].1)], "only the initial frame");
+    }
+
+    /// The window carries the name of the file the user is looking at.
+    ///
+    /// Not decoration: a taskbar and an alt-tab list show this string, and half
+    /// a dozen editor windows all reading "Editor" are indistinguishable there.
+    #[test]
+    fn the_title_names_the_active_document() {
+        let editor = EditorState::new();
+        assert_eq!(editor.title(), "Untitled — Editor");
+    }
+
+    /// A window the compositor sized differently is drawn at the size it gave.
+    ///
+    /// The editor asks for 900x600 and takes what it is given. Before the
+    /// conversion its renderer read `window_width` unconditionally, so a
+    /// compositor that granted something smaller got a first frame laid out for
+    /// a window nobody had -- the gutter and the status bar in the wrong places
+    /// until the user happened to resize. `App::render` reconciles the two now,
+    /// and this is the assertion that it does.
+    #[test]
+    fn the_first_frame_adopts_the_size_the_compositor_actually_granted() {
+        let mut editor = EditorState::new();
+        assert_eq!(editor.initial_size(), (900, 600), "what it asked for");
+
+        let tree = editor.render(640.0, 400.0);
+        assert_eq!(
+            (editor.window_width, editor.window_height),
+            (640, 400),
+            "the editor kept drawing at a size the window does not have"
+        );
+        assert!(!tree.commands.is_empty(), "and it drew something");
     }
 }
 
@@ -3186,7 +3308,7 @@ mod api_tour {
 
         // Rendering an empty editor still produces a frame: the chrome — tab
         // bar, gutter, status bar — is drawn whether or not there is text.
-        let render = editor.render();
+        let render = editor.render_tree();
         assert!(
             render.len() > 3,
             "an empty editor still draws its chrome, got {} commands",
@@ -3290,7 +3412,7 @@ mod caret_tests {
 
     /// The x of the caret in a rendered frame.
     fn caret_x(editor: &EditorState) -> f32 {
-        let tree = editor.render();
+        let tree = editor.render_tree();
         tree.commands
             .iter()
             .find_map(|c| match c {
@@ -3541,7 +3663,7 @@ mod highlight_render_tests {
     /// lands is the renderer's answer, not the caller's).
     fn drawn(editor: &EditorState) -> Vec<(String, Color)> {
         let mut out = Vec::new();
-        for c in &editor.render().commands {
+        for c in &editor.render_tree().commands {
             match c {
                 RenderCommand::Text { text, color, .. } => out.push((text.clone(), *color)),
                 RenderCommand::RichText {
@@ -3775,7 +3897,7 @@ mod highlight_render_tests {
         for i in 0..16 {
             editor.active_document_mut().scroll_px = i as f32 * 7.5;
             editor.active_document_mut().cursor_col = i;
-            drop(editor.render());
+            drop(editor.render_tree());
         }
     }
 

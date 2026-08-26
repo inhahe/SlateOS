@@ -23,6 +23,28 @@
 # as an ordinary failure.  A status a caller cannot know about is a status the
 # caller cannot handle.
 #
+# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 1500 SECONDS:
+#
+#   python scripts/run-timeout.py --poll 30 1500 ./scripts/boot-test.sh
+#
+# This script runs QEMU under its *own* timeout, 900s by default (--timeout).
+# An outer budget also has to cover the pre-build gates and the kernel build,
+# so an outer 900 is strictly the smaller window and the inner timeout can
+# never fire.  That is not a harmless duplication: the inner timeout is the
+# diagnostic one -- it reports SYSTEM HANG, dumps the guest's state, and reads
+# the faulting RIP back over the HMP monitor.  run-timeout's expiry gives exit
+# 124 and a killed process tree: no RIP, no task table, no marker saying where
+# it stopped.  So an outer budget at or below the inner one silently turns
+# every genuine boot hang into an anonymous kill, on exactly the runs where the
+# instrumentation matters most.
+#
+# Measured 2026-08-25: gates + a cold-cache clippy recompile + build took 530s,
+# leaving 370s of a 900s outer budget for a boot that reaches BOOT_OK at
+# 370-405s.  A healthy guest was killed mid-diagnostics.  1500 = 900 inner +
+# 600 headroom.  Being generous costs nothing here: run-timeout's real job is
+# tearing down the whole process tree, grandchildren included, and that is
+# independent of the budget.  See known-issues.md -> Lesson 50.
+#
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
 #   ./scripts/boot-test.sh --no-build   # skip build (still re-stages target/!)
@@ -111,6 +133,23 @@
 #                                       # TCG/no-PMU QEMU this is the only NMI
 #                                       # source that can catch a single-CPU
 #                                       # IF=0 spin.
+#   ./scripts/boot-test.sh --no-monitor
+#                                       # do NOT attach QEMU's HMP monitor on a
+#                                       # TCP socket.  The monitor is ON by
+#                                       # default: it is what lets a timeout or
+#                                       # a serial stall read the wedged guest's
+#                                       # RIP straight out of the emulator, and
+#                                       # it works even when the guest takes no
+#                                       # interrupts at all (IF=0), because the
+#                                       # read is host-side.  Unlike
+#                                       # --hard-lockup-watchdog above it adds no
+#                                       # guest device and changes no PCI
+#                                       # topology, so it is invisible to the
+#                                       # guest — which is why it defaults on and
+#                                       # the watchdog does not.  Use this flag
+#                                       # only if the host TCP listen itself is a
+#                                       # problem (e.g. a sandbox that forbids
+#                                       # binding a port).
 #   ./scripts/boot-test.sh --bootstrap  # if a git-ignored prerequisite is
 #                                       # missing (one of the six ring-3 service
 #                                       # binaries the kernel embeds, or the
@@ -1191,6 +1230,12 @@ STALL_SECS=0
 # default so the shared harness is byte-for-byte unchanged on normal runs;
 # only --hard-lockup-watchdog opts in (see Q20 in open-questions.md).
 HARD_LOCKUP_WATCHDOG=0
+# Attach QEMU's HMP monitor on a TCP socket so a timeout or a serial stall can
+# read the frozen guest's RIP straight out of the emulator?  ON by default;
+# --no-monitor opts out.  Unlike the watchdog above this adds no guest device
+# and is invisible to the guest — see the MONITOR_ARGS block for why the two
+# used to be coupled and why that was wrong.
+MONITOR_ENABLED=1
 # Which serial marker the wait loop treats as "boot finished".  Default is
 # BOOT_OK (the fast path); --bench switches it to BENCH_OK so we wait for the
 # deferred micro-benchmark task to finish and can scrape its numbers.
@@ -1296,6 +1341,7 @@ for arg in "$@"; do
         --timeout=*) TIMEOUT="${arg#*=}"; TIMEOUT_EXPLICIT=1 ;;
         --stall-secs=*) STALL_SECS="${arg#*=}" ;;
         --hard-lockup-watchdog) HARD_LOCKUP_WATCHDOG=1 ;;
+        --no-monitor) MONITOR_ENABLED=0 ;;
         --host-load=*) HOST_LOAD="${arg#*=}" ;;
         --min-free-gb=*) MIN_FREE_GB="${arg#*=}" ;;
         --min-free-temp-gb=*) MIN_FREE_TEMP_GB="${arg#*=}" ;;
@@ -1715,13 +1761,30 @@ fi
 # harness default is byte-for-byte unchanged.
 WATCHDOG_ACTION="${WATCHDOG_ACTION:-inject-nmi}"
 WATCHDOG_ARGS=()
-# Diagnostic HMP monitor for capturing the wedged guest RIP on timeout.  Only
-# attached alongside the hard-lockup watchdog (i.e. deliberate hang-repro runs),
-# so the default harness command line is byte-for-byte unchanged.  On timeout we
-# query `info registers`/`info cpus` over this socket BEFORE killing QEMU, which
-# captures the frozen CPU's RIP directly from the emulator — bypassing in-guest
-# NMI delivery entirely (the silent BSP-dead wedge never takes the injected NMI,
-# so the in-guest handler dump is blind; the emulator's own view is not).
+# Diagnostic HMP monitor for capturing the wedged guest RIP on timeout.  ON BY
+# DEFAULT; --no-monitor opts out.  On timeout we query `info registers`/`info
+# cpus` over this socket BEFORE killing QEMU, which captures the frozen CPU's
+# RIP directly from the emulator — bypassing in-guest NMI delivery entirely (the
+# silent BSP-dead wedge never takes the injected NMI, so the in-guest handler
+# dump is blind; the emulator's own view is not).
+#
+# It used to be attached only alongside --hard-lockup-watchdog, which made both
+# RIP-capture paths (the stall capture and the timeout capture) dead code on
+# every ordinary run.  That cost a real diagnosis on 2026-08-25: a
+# B-FORKEXEC-BOOT-HANG recurrence consumed the full 900 s timeout and produced
+# no RIP, and the immediately-following re-run *with* the flag booted green —
+# which is the normal outcome for a hang that appears once in a few dozen boots.
+# An opt-in detector for an intermittent fault is a detector that is off when
+# the fault happens.
+#
+# Coupling the two was a category error rather than a policy: §61 kept the
+# hard-lockup watchdog opt-in so the *guest* is unperturbed, because
+# `-device i6300esb` changes the guest's PCI topology.  `-monitor tcp:` adds no
+# device and changes nothing the guest can observe — it is a host-side control
+# socket — so §61's rationale never applied to it.  Verified empirically across
+# the 2026-08-25 pair: the run with the monitor attached and the run without
+# produced no difference in harness stdout (no `(qemu)` banner either way,
+# since -serial already goes to a file rather than stdio).
 MONITOR_ARGS=()
 
 # Pick a TCP port for the HMP monitor that QEMU can actually bind.  On Windows,
@@ -1759,17 +1822,28 @@ pick_monitor_port() {
     echo "$base"  # nothing free found; let QEMU try the base and report
 }
 
-if [ -n "${MONITOR_PORT:-}" ]; then
-    MONITOR_PORT_SRC="env override"
-else
-    MONITOR_PORT="$(pick_monitor_port 57000)"
-    MONITOR_PORT_SRC="auto-selected (excluded-range aware)"
+# Port selection is inside the enable test on purpose: pick_monitor_port shells
+# out to netsh and netstat, which cost a second or two on Windows, and a run
+# that will not attach the monitor has no use for the answer.
+if [ "$MONITOR_ENABLED" -eq 1 ]; then
+    if [ -n "${MONITOR_PORT:-}" ]; then
+        MONITOR_PORT_SRC="env override"
+    else
+        MONITOR_PORT="$(pick_monitor_port 57000)"
+        MONITOR_PORT_SRC="auto-selected (excluded-range aware)"
+    fi
+    MONITOR_ARGS=(-monitor "tcp:127.0.0.1:$MONITOR_PORT,server,nowait")
+    echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
 fi
 if [ "$HARD_LOCKUP_WATCHDOG" -eq 1 ]; then
     WATCHDOG_ARGS=(-device i6300esb,id=hwdog0 -action "watchdog=$WATCHDOG_ACTION")
-    MONITOR_ARGS=(-monitor "tcp:127.0.0.1:$MONITOR_PORT,server,nowait")
     echo "=== Hard-lockup watchdog ENABLED (i6300esb -> $WATCHDOG_ACTION) ==="
-    echo "=== Diagnostic HMP monitor ENABLED (tcp:127.0.0.1:$MONITOR_PORT, $MONITOR_PORT_SRC) ==="
+    if [ "$MONITOR_ENABLED" -ne 1 ]; then
+        # The watchdog's whole value is the RIP the monitor reads back, so
+        # --no-monitor alongside it is almost certainly a mistake.  Say so
+        # rather than silently arming a detector whose output is discarded.
+        echo "=== WARNING: --no-monitor disables the RIP capture the watchdog exists to feed ===" >&2
+    fi
 fi
 
 # Capture the guest CPU state over the HMP monitor socket, then resolve RIP to a
@@ -2582,6 +2656,145 @@ check_vfs_permission_gate() {
 
 check_vfs_permission_gate
 
+# Keep the shell's exit statuses honest: a usage message is a failure report.
+#
+# When a kshell command prints `Usage: ...` because it could not do what it was
+# asked, it must also set a non-zero exit status.  Otherwise the diagnostic goes
+# to the screen and a success goes to the caller -- and a script reads the
+# caller's copy, so `cmd && next` runs `next` after a typo and `set -e` does not
+# stop.
+#
+# This is checked rather than reviewed because it has now been got wrong twice.
+# A sweep in August fixed 710 sites by searching for the shape they had (a usage
+# print followed by a bare `return;`) and reported itself complete, having
+# missed 87 that leave by falling off the end of a `match` arm instead.  A sweep
+# keyed on a syntactic pattern defines its own blind spot and cannot report it;
+# the checker is keyed on the property instead, so it does not care what shape
+# the next one is written in.  See design-decisions.md §296.
+check_usage_status() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== usage-status check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that usage messages report failure ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-usage-status.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each site above prints a usage message and" >&2
+    echo "then tells its caller the command succeeded." >&2
+    echo "" >&2
+    echo "Add set_exit(1) after the diagnostic.  If the site is NOT an error --" >&2
+    echo "a bare subcommand printing its current setting is a query, and it" >&2
+    echo "succeeded -- add it to ALLOWED in the script with a reason instead." >&2
+    echo "Get that distinction backwards and you produce the mirror-image bug:" >&2
+    echo "'elog echo' and 'fc algo' answered correctly and reported failure for" >&2
+    echo "a month because the previous sweep patched their query paths." >&2
+    exit 1
+}
+
+check_usage_status
+
+# ... and the mirror of it: answering a question is not reporting a failure.
+#
+# The rule above, applied to a site it does not fit, produces the opposite bug.
+# `elog echo` and `fc algo` print the current setting when given no value and
+# append a usage line as a hint for changing it; the August sweep read the hint
+# as a complaint and gave both a `set_exit(1)`, so for a month they printed the
+# right answer and told the caller they had failed.  `$(fc algo)` under `set -e`
+# killed the script *after* producing the value it asked for.
+#
+# Deliberately a separate script rather than a second rule inside the first: the
+# two point in opposite directions, and a single classifier holding both would
+# resolve a disagreement between them silently.  Apart, each states a property,
+# and a site that trips both is a site whose author has to say which it is.
+check_query_status() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== query-status check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that answering a query reports success ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-query-status.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each block above can only be reached by the" >&2
+    echo "user asking -- no argument was given -- and it answers with the current" >&2
+    echo "state and then reports failure." >&2
+    echo "" >&2
+    echo "Drop the set_exit.  If the block really is an error -- a required" >&2
+    echo "operand is missing, so nothing was answered -- add it to ALLOWED in the" >&2
+    echo "script with a reason instead." >&2
+    exit 1
+}
+
+check_query_status
+
+# Keep every option word either understood or refused (design-decisions.md §600).
+#
+# The two gates above are about what a command *says*.  This one is about what
+# it does with a word it could not read, and the answer must never be "carry on
+# as though it were not there".  A dropped word runs a different command --
+# successfully -- and the difference is nearly always in the direction of doing
+# more, because the word that fell out was a filter or a restriction.
+#
+# It is here rather than in code review because the rule was broken in nine
+# commands at once and nobody saw it: `batch delete --dry-runn a b` deleted `a`
+# and `b` for real, the typo matching no flag and then being filtered out of the
+# file list, so it was neither a dry run nor an error.  Each half of that was
+# individually reasonable; only the pair was a bug, and the pair is invisible
+# from inside either function.
+check_option_refusal() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== option-refusal check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that an option word is refused, not discarded ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-option-refusal.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A command-line word is either understood" >&2
+    echo "or refused; it is never discarded, and a value is never invented for" >&2
+    echo "one that could not be read." >&2
+    echo "" >&2
+    echo "For a parser with no way to say no: give the catch-all arm a" >&2
+    echo "shell_println! naming the word, set_exit(1), and a return -- and add" >&2
+    echo "a '--' end-of-options marker, since refusing dash-leading words is" >&2
+    echo "what makes a file named '-x' otherwise unnameable." >&2
+    echo "" >&2
+    echo "For an invented value: an absent argument may take a default; a" >&2
+    echo "present but unparseable one may not.  Split the two cases." >&2
+    echo "" >&2
+    echo "If a site is genuinely right, add it to ALLOWED in the script with a" >&2
+    echo "written reason.  Do NOT add a function to option-refusal-ledger.txt" >&2
+    echo "to silence new code -- that ledger only ever shrinks." >&2
+    exit 1
+}
+
+check_option_refusal
+
 # Keep self-test skips honest: looked up, and reported.
 #
 # A self-test may legitimately skip -- there is no second CPU to offline on a
@@ -2657,6 +2870,83 @@ check_selftest_skips() {
 }
 
 check_selftest_skips
+
+# A shell self-test asserts on wording, and wording is the thing this tree is
+# busiest changing.
+#
+# `kshell::self_test` runs only inside QEMU -- the kernel binary carries
+# `test = false`, because a bare-metal crate supplies its own panic lang item
+# and cannot link the host test harness -- so an assertion that names text no
+# command can print any more is invisible to `cargo check`, `cargo clippy` and
+# every other gate here, and shows up as a panicked kernel eleven minutes into
+# a boot.
+#
+# It has happened.  On adddc7459 a table of nine commands asserted each one's
+# arity complaint contained `Usage:`; `vd remove` was then converted to
+# `required_id` and began saying `vd: remove: missing desktop id`, which is
+# strictly better, and the rung took the kernel down *for the improvement*.
+# The defect class is not "someone typed Usage:" -- it is an assertion whose
+# expected text no longer belongs to the command under test, in either
+# direction: a `contains` that fails a correct kernel, or a `lacks` that can no
+# longer fire and so guards nothing.  This gate found one of each still live in
+# the tree the day it was written.
+#
+# Before the build, like its siblings: seconds against ten minutes, and exit 2
+# counts as failure so a gate that cannot run never reads as one that passed.
+check_selftest_wording() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Self-test wording check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Grade the gate before letting it grade the tree.  Every way this checker
+    # can break -- a call-graph edge it stops following, a `match` arm it stops
+    # narrowing to, a `self_test` span cut short by a brace inside a comment --
+    # makes findings *disappear*, and it reports that in the same words as a
+    # clean tree.  Its fixture is the `adddc7459` bug in miniature, so a gate
+    # that has lost the ability to catch the one bug it was written for says so
+    # here, instead of nodding a broken tree through to an eleven-minute boot.
+    echo "=== Checking the self-test wording gate against its fixture ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-wording.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The self-test wording gate no longer" >&2
+        echo "agrees with its own fixture, so its verdict on the tree means" >&2
+        echo "nothing -- a gate whose analysis has collapsed reports zero" >&2
+        echo "findings just like a clean tree does." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that self-test assertions name text their command prints ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-selftest-wording.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each report above is an assertion whose" >&2
+    echo "expected text the command under test cannot produce." >&2
+    echo "" >&2
+    echo "For an assert_output_contains: the rung will panic the kernel on a" >&2
+    echo "correct boot.  Re-read what the command says now and assert that --" >&2
+    echo "usually the operand helper's wording, 'cmd: sub: missing <noun>' or" >&2
+    echo "\`word' is not a <noun>." >&2
+    echo "" >&2
+    echo "For an assert_output_lacks: the assertion can never fire, so the" >&2
+    echo "regression it was written to catch is no longer guarded.  Point it at" >&2
+    echo "the sentence a *wrong* run would print today." >&2
+    echo "" >&2
+    echo "If the expected text is genuinely right and merely underivable -- a" >&2
+    echo "value the command rearranged out of the rung's own data -- add it to" >&2
+    echo "ALLOWED in the script with the reason.  Do not widen the analysis to" >&2
+    echo "make a real finding disappear." >&2
+    exit 1
+}
+
+check_selftest_wording
 
 # A hand-written "every variant" list cannot go stale loudly.
 #
@@ -4061,9 +4351,16 @@ if [ -f "$SERIAL_FILE" ]; then
     echo "=== Last 25 serial lines before the wedge (freeze point) ==="
     tail -n 25 "$SERIAL_FILE" || true
     echo "=== (end serial tail) ==="
+    # The RIP for this timeout was already captured above, from the emulator,
+    # over the always-on HMP monitor — look for the "RIP at timeout" block.
+    # The hint below is about the *other* half: an in-guest task-table dump,
+    # which needs an NMI to interrupt an IF=0 wedge and therefore needs the
+    # opt-in device.  Only worth suggesting when the RIP alone was not enough.
     if [ "$HARD_LOCKUP_WATCHDOG" -eq 0 ]; then
-        echo "Hint: re-run with --hard-lockup-watchdog to capture the wedged"
-        echo "      guest RIP via the i6300esb NMI + HMP monitor (see Q20)."
+        echo "Hint: the wedged RIP is above (HMP monitor).  If it is not enough,"
+        echo "      re-run with --hard-lockup-watchdog for an in-guest NMI task-table"
+        echo "      dump as well (see Q20) — note an intermittent hang usually does"
+        echo "      not reproduce on the next boot, so prefer reading the RIP first."
     fi
 fi
 echo "=== Boot test FAILED ==="

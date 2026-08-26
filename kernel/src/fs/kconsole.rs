@@ -211,6 +211,55 @@ pub fn create(name: &str, console_type: ConsoleType, cols: u32, rows: u32) -> Ke
     })
 }
 
+/// Destroy a console, freeing its slot.
+///
+/// This exists because the module had no way to *un*-create one. `create`
+/// pushes and nothing ever removed, while `MAX_CONSOLES` caps the vector at 16
+/// — so a session that allocated consoles for transient work ran out
+/// permanently, with `ResourceExhausted` reported for a table whose entries
+/// were mostly things nobody was using. Linux has had `VT_DISALLOCATE` for the
+/// same reason since virtual terminals existed; a console manager that only
+/// grows is not a manager.
+///
+/// # The active console is refused, not silently vacated
+///
+/// `DeviceBusy` when `id` is the active console, matching `VT_DISALLOCATE`'s
+/// `EBUSY`. The alternative — destroy it and leave `active_id` dangling — puts
+/// the module in a state `init_defaults` can never produce and nothing can
+/// leave: `active()` finds no console and `kconsole active` prints "No active
+/// console.", while `switch` is the only writer of `active_id` and needs a
+/// target that exists. Auto-selecting a survivor was rejected for the reason
+/// that governs this whole burn-down: which console the user wants to be
+/// looking at is not something this function can know, and picking one is a
+/// guess wearing the clothes of a recovery. Switch first, then destroy.
+///
+/// # `next_id` is not rewound
+///
+/// Ids are never re-issued. `kconsole list` and `/proc/kconsole` name consoles
+/// by id, so a re-used number would silently rebind an identifier a user had
+/// already read and written down. That is the opposite of the rule in
+/// `fdtable`, where descriptor numbers *do* restart at 0 after a process exits
+/// — and correctly so, because there the entire table goes away with its
+/// allocator, and the numbers are scoped to a process that no longer exists.
+/// Here the id space outlives every individual console.
+pub fn destroy(id: u32) -> KernelResult<()> {
+    with_state(|state| {
+        let idx = state
+            .consoles
+            .iter()
+            .position(|c| c.id == id)
+            .ok_or(KernelError::NotFound)?;
+        if state.active_id == id {
+            return Err(KernelError::DeviceBusy);
+        }
+        // `remove`, not `swap_remove`: `kconsole list` and `/proc/kconsole`
+        // print the consoles in vector order, and destroying one should not
+        // silently reorder the ones that survive.
+        state.consoles.remove(idx);
+        Ok(())
+    })
+}
+
 /// Resize a console.
 pub fn resize(id: u32, cols: u32, rows: u32) -> KernelResult<()> {
     with_state(|state| {
@@ -296,42 +345,42 @@ fn self_test_inner() {
 
     // 1: Defaults.
     assert_eq!(list().len(), 3);
-    crate::serial_println!("  [1/8] defaults: OK");
+    crate::serial_println!("  [1/9] defaults: OK");
 
     // 2: Active.
     let a = active().expect("active");
     assert_eq!(a.id, 1);
     assert_eq!(a.name, "ttyS0");
-    crate::serial_println!("  [2/8] active: OK");
+    crate::serial_println!("  [2/9] active: OK");
 
     // 3: Switch.
     switch(2).expect("switch");
     let a = active().expect("active2");
     assert_eq!(a.id, 2);
-    crate::serial_println!("  [3/8] switch: OK");
+    crate::serial_println!("  [3/9] switch: OK");
 
     // 4: Write.
     write(2, 1024).expect("write");
     let c = get(2).expect("get");
     assert_eq!(c.bytes_written, 1024);
-    crate::serial_println!("  [4/8] write: OK");
+    crate::serial_println!("  [4/9] write: OK");
 
     // 5: Create.
     let id = create("tty3", ConsoleType::Virtual, 80, 24).expect("create");
     assert!(id >= 4);
     assert!(create("tty3", ConsoleType::Virtual, 80, 24).is_err());
-    crate::serial_println!("  [5/8] create: OK");
+    crate::serial_println!("  [5/9] create: OK");
 
     // 6: Resize.
     resize(id, 132, 50).expect("resize");
     let c = get(id).expect("get2");
     assert_eq!(c.cols, 132);
     assert_eq!(c.rows, 50);
-    crate::serial_println!("  [6/8] resize: OK");
+    crate::serial_println!("  [6/9] resize: OK");
 
     // 7: Switch error.
     assert!(switch(999).is_err());
-    crate::serial_println!("  [7/8] switch error: OK");
+    crate::serial_println!("  [7/9] switch error: OK");
 
     // 8: Stats.
     let (count, active_id, switches, writes, ops) = stats();
@@ -340,7 +389,25 @@ fn self_test_inner() {
     assert!(switches >= 1);
     assert!(writes >= 2);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/9] stats: OK");
 
-    crate::serial_println!("kconsole::self_test() — all 8 tests passed");
+    // 9: Destroy — the slot is freed, the active console is protected, and the
+    // id is not handed out again. Deliberately after test 8 so the exact
+    // `count == 4` that test asserts stays meaningful.
+    assert!(destroy(active_id).is_err()); // the active console is busy.
+    assert_eq!(stats().0, 4); // and the failed destroy freed nothing.
+    destroy(id).expect("destroy");
+    assert_eq!(stats().0, 3);
+    assert!(get(id).is_none());
+    assert!(destroy(id).is_err()); // destroying it twice is an error, not a no-op.
+    assert_eq!(active().expect("active3").id, active_id); // survivors untouched.
+    // The name is free again, but the id is not re-issued: `next_id` only ever
+    // moves forward, so an id a user has read never comes to mean something
+    // else.
+    let reborn = create("tty3", ConsoleType::Virtual, 80, 24).expect("recreate");
+    assert!(reborn > id);
+    destroy(reborn).expect("destroy2");
+    crate::serial_println!("  [9/9] destroy: OK");
+
+    crate::serial_println!("kconsole::self_test() — all 9 tests passed");
 }

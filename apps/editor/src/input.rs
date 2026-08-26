@@ -42,6 +42,15 @@
 
 use crate::{Document, EditorState, ExternalChoice};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+// The verdict every handler below returns. Until the editor was moved onto the
+// shared harness this was `EditorResponse`, declared in this file, with the same
+// three variants and the same meanings -- a second name for a concept the loop
+// that consumes it already had a name for. Two enums for one concept is this
+// tree's most-repeated defect, and it bites hardest at a seam like this one:
+// `main` translated one into the other on every single event, so a variant added
+// to one and not to the other would have been a translation that silently picked
+// a wrong arm.
+use oswindow::app::Response;
 
 /// The visual width of one tab in the tab bar, and the gap after it.
 ///
@@ -52,21 +61,6 @@ pub const TAB_WIDTH: f32 = 160.0;
 pub const TAB_GAP: f32 = 1.0;
 /// Width of the close box at the right end of a tab.
 pub const TAB_CLOSE_WIDTH: f32 = 24.0;
-
-/// What the caller should do about an event.
-///
-/// Deliberately not `bool`: "the editor wants to close" and "the editor wants to
-/// be redrawn" are different answers, and an event loop that could only be told
-/// one of them would have to guess the other.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EditorResponse {
-    /// Nothing changed; do not redraw.
-    Idle,
-    /// Something visible changed; draw a new frame.
-    Redraw,
-    /// The user asked to quit.
-    Exit,
-}
 
 /// Which of the find bar's two text fields the keyboard is typing into.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -84,31 +78,25 @@ impl EditorState {
     // ======================================================================
 
     /// Apply one event and say what the caller should do about it.
-    pub fn handle_event(&mut self, event: &Event) -> EditorResponse {
+    pub fn handle_event(&mut self, event: &Event) -> Response {
         match event {
             Event::Key(key) => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             Event::Resize { width, height } => {
-                if self.window_width == *width && self.window_height == *height {
-                    return EditorResponse::Idle;
+                if self.resize(*width, *height) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
                 }
-                self.window_width = *width;
-                self.window_height = *height;
-                // The viewport just changed size, so the caret may now be
-                // outside it in either direction.
-                let visible = self.visible_lines();
-                self.active_document_mut().ensure_cursor_visible(visible);
-                self.ensure_caret_visible_horizontally();
-                EditorResponse::Redraw
             }
             // Coming back to the window is exactly when another program is
             // likely to have written the file — a build, a formatter, a `git
             // checkout` in the terminal the user just came from.
             Event::FocusIn => {
                 if self.check_external_change() {
-                    EditorResponse::Redraw
+                    Response::Redraw
                 } else {
-                    EditorResponse::Idle
+                    Response::Idle
                 }
             }
             // A drag that ends outside the window never delivers its release,
@@ -117,24 +105,49 @@ impl EditorState {
             // selection.
             Event::FocusOut => {
                 self.dragging = false;
-                EditorResponse::Idle
+                Response::Idle
             }
-            Event::CloseRequested => EditorResponse::Exit,
-            _ => EditorResponse::Idle,
+            Event::CloseRequested => Response::Exit,
+            _ => Response::Idle,
         }
+    }
+
+    /// Adopt a new window size; `true` if it was not the size already held.
+    ///
+    /// Two callers, which is the whole reason it is a method rather than the
+    /// body of the `Event::Resize` arm above: that arm, and the editor's
+    /// `App::render`, which is handed the size the compositor actually granted
+    /// and may be the first thing to learn of it. A compositor is free to give a
+    /// window a different size from the one it was asked for without ever
+    /// calling that a resize, and the first frame is drawn before any event has
+    /// arrived at all — so if the two fix-ups below lived only in the event arm,
+    /// the opening frame of a window the compositor sized down would lay out its
+    /// gutter and status bar for a viewport that is not the one on screen.
+    pub fn resize(&mut self, width: u32, height: u32) -> bool {
+        if self.window_width == width && self.window_height == height {
+            return false;
+        }
+        self.window_width = width;
+        self.window_height = height;
+        // The viewport just changed size, so the caret may now be outside it in
+        // either direction.
+        let visible = self.visible_lines();
+        self.active_document_mut().ensure_cursor_visible(visible);
+        self.ensure_caret_visible_horizontally();
+        true
     }
 
     // ======================================================================
     // Keyboard
     // ======================================================================
 
-    fn handle_key(&mut self, key: &KeyEvent) -> EditorResponse {
+    fn handle_key(&mut self, key: &KeyEvent) -> Response {
         // Modifier state is kept here because mouse events do not carry it:
         // `MouseEvent` has a position and a kind and nothing else, so shift-click
         // can only be recognised from what the keyboard last reported.
         self.modifiers = key.modifiers;
         if !key.pressed {
-            return EditorResponse::Idle;
+            return Response::Idle;
         }
 
         // A status message describes the last thing that happened. The next
@@ -143,14 +156,14 @@ impl EditorState {
         // than being left as whatever the binding returned.
         let had_status = self.status.take().is_some();
         let response = self.dispatch_key(key);
-        if had_status && response == EditorResponse::Idle {
-            EditorResponse::Redraw
+        if had_status && response == Response::Idle {
+            Response::Redraw
         } else {
             response
         }
     }
 
-    fn dispatch_key(&mut self, key: &KeyEvent) -> EditorResponse {
+    fn dispatch_key(&mut self, key: &KeyEvent) -> Response {
         if self.external_prompt.is_some() {
             return self.prompt_key(key);
         }
@@ -170,7 +183,7 @@ impl EditorState {
     /// The prompt is modal on purpose: it is asking which of two versions of the
     /// file the buffer should hold, and every editing key would be applied to an
     /// answer that has not been given yet.
-    fn prompt_key(&mut self, key: &KeyEvent) -> EditorResponse {
+    fn prompt_key(&mut self, key: &KeyEvent) -> Response {
         let reviewing = self
             .external_prompt
             .as_ref()
@@ -179,13 +192,13 @@ impl EditorState {
             return match key.key {
                 Key::Enter => {
                     self.review_accept();
-                    EditorResponse::Redraw
+                    Response::Redraw
                 }
                 Key::Escape => {
                     self.review_cancel();
-                    EditorResponse::Redraw
+                    Response::Redraw
                 }
-                _ => EditorResponse::Idle,
+                _ => Response::Idle,
             };
         }
         let choice = match key.key {
@@ -195,19 +208,19 @@ impl EditorState {
             Key::V => ExternalChoice::Review,
             Key::Escape => {
                 self.dismiss_external();
-                return EditorResponse::Redraw;
+                return Response::Redraw;
             }
-            _ => return EditorResponse::Idle,
+            _ => return Response::Idle,
         };
         self.resolve_external(choice);
-        EditorResponse::Redraw
+        Response::Redraw
     }
 
     /// Keys while the find bar is open.
     ///
     /// Returns `None` for anything the bar does not claim, so it falls through
     /// to the document's bindings — Ctrl+S must still save while searching.
-    fn find_key(&mut self, key: &KeyEvent) -> Option<EditorResponse> {
+    fn find_key(&mut self, key: &KeyEvent) -> Option<Response> {
         if key.modifiers.ctrl {
             return match key.key {
                 Key::R => {
@@ -218,17 +231,17 @@ impl EditorState {
                         self.replace_current_match();
                     }
                     self.after_cursor_move();
-                    Some(EditorResponse::Redraw)
+                    Some(Response::Redraw)
                 }
                 Key::I => {
                     self.find.case_sensitive = !self.find.case_sensitive;
                     self.refresh_matches();
-                    Some(EditorResponse::Redraw)
+                    Some(Response::Redraw)
                 }
                 Key::E => {
                     self.find.use_regex = !self.find.use_regex;
                     self.refresh_matches();
-                    Some(EditorResponse::Redraw)
+                    Some(Response::Redraw)
                 }
                 _ => None,
             };
@@ -236,14 +249,14 @@ impl EditorState {
         match key.key {
             Key::Escape => {
                 self.find_visible = false;
-                Some(EditorResponse::Redraw)
+                Some(Response::Redraw)
             }
             Key::Tab => {
                 self.find_field = match self.find_field {
                     FindField::Query => FindField::Replace,
                     FindField::Replace => FindField::Query,
                 };
-                Some(EditorResponse::Redraw)
+                Some(Response::Redraw)
             }
             Key::Enter => {
                 if key.modifiers.shift {
@@ -252,7 +265,7 @@ impl EditorState {
                     self.goto_match(true);
                 }
                 self.after_cursor_move();
-                Some(EditorResponse::Redraw)
+                Some(Response::Redraw)
             }
             Key::Backspace => {
                 let field = self.find_field;
@@ -261,9 +274,9 @@ impl EditorState {
                     self.refresh_matches();
                 }
                 Some(if changed {
-                    EditorResponse::Redraw
+                    Response::Redraw
                 } else {
-                    EditorResponse::Idle
+                    Response::Idle
                 })
             }
             _ => {
@@ -279,7 +292,7 @@ impl EditorState {
                 if field == FindField::Query {
                     self.refresh_matches();
                 }
-                Some(EditorResponse::Redraw)
+                Some(Response::Redraw)
             }
         }
     }
@@ -326,12 +339,12 @@ impl EditorState {
 
     /// Keys with Ctrl held, in the document.
     #[allow(clippy::too_many_lines)]
-    fn control_key(&mut self, key: &KeyEvent) -> EditorResponse {
+    fn control_key(&mut self, key: &KeyEvent) -> Response {
         let shift = key.modifiers.shift;
         match key.key {
             Key::S => {
                 self.save_active();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Z => {
                 if shift {
@@ -340,12 +353,12 @@ impl EditorState {
                     self.active_document_mut().undo();
                 }
                 self.after_cursor_move();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Y => {
                 self.active_document_mut().redo();
                 self.after_cursor_move();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::F => {
                 self.find_visible = true;
@@ -359,112 +372,112 @@ impl EditorState {
                     self.find.query = selected;
                 }
                 self.refresh_matches();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::H => {
                 self.find_visible = true;
                 self.find_field = FindField::Replace;
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::A => {
                 self.active_document_mut().select_all();
                 self.after_cursor_move();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::C => {
                 self.copy_selection();
-                EditorResponse::Idle
+                Response::Idle
             }
             Key::X => {
                 if self.copy_selection() {
                     self.active_document_mut().delete_selection();
                     self.after_cursor_move();
-                    return EditorResponse::Redraw;
+                    return Response::Redraw;
                 }
-                EditorResponse::Idle
+                Response::Idle
             }
             Key::V => {
                 if self.clipboard.is_empty() {
-                    return EditorResponse::Idle;
+                    return Response::Idle;
                 }
                 let text = self.clipboard.clone();
                 let doc = self.active_document_mut();
                 doc.delete_selection();
                 doc.insert_text(&text);
                 self.after_cursor_move();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::D => {
                 self.active_document_mut().select_word_at_cursor();
                 self.after_cursor_move();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::W => {
                 if self.close_tab() {
-                    EditorResponse::Redraw
+                    Response::Redraw
                 } else {
                     self.status = Some(
                         "Unsaved changes — save with Ctrl+S, or Ctrl+Shift+W to discard"
                             .to_string(),
                     );
-                    EditorResponse::Redraw
+                    Response::Redraw
                 }
             }
             Key::Home => {
                 self.moving(shift, Document::move_to_start);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::End => {
                 self.moving(shift, Document::move_to_end);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Left => {
                 self.moving(shift, Document::move_word_left);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Right => {
                 self.moving(shift, Document::move_word_right);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Tab | Key::PageDown => {
                 self.cycle_tab(!shift);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::PageUp => {
                 self.cycle_tab(false);
-                EditorResponse::Redraw
+                Response::Redraw
             }
-            _ => EditorResponse::Idle,
+            _ => Response::Idle,
         }
     }
 
     /// Keys with no Ctrl, in the document: motion and text.
-    fn editing_key(&mut self, key: &KeyEvent) -> EditorResponse {
+    fn editing_key(&mut self, key: &KeyEvent) -> Response {
         let shift = key.modifiers.shift;
         match key.key {
             Key::Left => {
                 self.moving(shift, Document::move_left);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Right => {
                 self.moving(shift, Document::move_right);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Up => {
                 self.moving(shift, Document::move_up);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Down => {
                 self.moving(shift, Document::move_down);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Home => {
                 self.moving(shift, Document::move_home);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::End => {
                 self.moving(shift, Document::move_end);
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::PageUp => {
                 let page = self.visible_lines();
@@ -472,7 +485,7 @@ impl EditorState {
                     doc.cursor_line = doc.cursor_line.saturating_sub(page);
                     doc.clamp_cursor();
                 });
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::PageDown => {
                 let page = self.visible_lines();
@@ -483,17 +496,17 @@ impl EditorState {
                         .min(doc.lines.len().saturating_sub(1));
                     doc.clamp_cursor();
                 });
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Escape => {
                 // Collapse the selection to the caret. Somewhere for Escape to
                 // go when there is no panel open, and the counterpart of
                 // clicking in the text.
                 if self.active_document().selection_anchor.is_none() {
-                    return EditorResponse::Idle;
+                    return Response::Idle;
                 }
                 self.active_document_mut().selection_anchor = None;
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Backspace => {
                 let doc = self.active_document_mut();
@@ -501,7 +514,7 @@ impl EditorState {
                     doc.backspace();
                 }
                 self.after_cursor_move();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Delete => {
                 let doc = self.active_document_mut();
@@ -509,7 +522,7 @@ impl EditorState {
                     doc.delete_forward();
                 }
                 self.after_cursor_move();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             Key::Enter => self.type_char('\n'),
             Key::Tab => self.type_char('\t'),
@@ -517,7 +530,7 @@ impl EditorState {
                 // Everything else is text or nothing. Control characters are
                 // excluded because the three that have bindings are handled
                 // above, and the rest would be inserted as unprintable bytes.
-                let mut response = EditorResponse::Idle;
+                let mut response = Response::Idle;
                 for ch in key.typed() {
                     response = self.type_char(ch);
                 }
@@ -527,54 +540,54 @@ impl EditorState {
     }
 
     /// Insert one character, replacing the selection if there is one.
-    fn type_char(&mut self, ch: char) -> EditorResponse {
+    fn type_char(&mut self, ch: char) -> Response {
         let doc = self.active_document_mut();
         doc.delete_selection();
         doc.insert_char(ch);
         self.after_cursor_move();
-        EditorResponse::Redraw
+        Response::Redraw
     }
 
     // ======================================================================
     // Mouse
     // ======================================================================
 
-    fn handle_mouse(&mut self, mouse: &MouseEvent) -> EditorResponse {
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> Response {
         match mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => self.mouse_press(mouse.x, mouse.y),
             MouseEventKind::DoubleClick(MouseButton::Left) => {
                 if self.caret_position_at(mouse.x, mouse.y).is_none() {
-                    return EditorResponse::Idle;
+                    return Response::Idle;
                 }
                 self.mouse_press(mouse.x, mouse.y);
                 self.active_document_mut().select_word_at_cursor();
                 self.dragging = false;
                 self.after_cursor_move();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             MouseEventKind::Release(MouseButton::Left) => {
                 if !self.dragging {
-                    return EditorResponse::Idle;
+                    return Response::Idle;
                 }
                 self.dragging = false;
-                EditorResponse::Idle
+                Response::Idle
             }
             MouseEventKind::Move => {
                 if !self.dragging {
-                    return EditorResponse::Idle;
+                    return Response::Idle;
                 }
                 // A drag that leaves the text area does not stop extending: the
                 // caret is clamped to the nearest position rather than the
                 // selection freezing, which is what makes selecting past the
                 // bottom of the screen possible at all.
                 let Some((line, col)) = self.caret_position_at(mouse.x, mouse.y) else {
-                    return EditorResponse::Idle;
+                    return Response::Idle;
                 };
                 let doc = self.active_document_mut();
                 doc.cursor_line = line;
                 doc.cursor_col = col;
                 self.after_cursor_move();
-                EditorResponse::Redraw
+                Response::Redraw
             }
             MouseEventKind::Scroll { dy, .. } => {
                 let doc = self.active_document_mut();
@@ -586,7 +599,7 @@ impl EditorState {
                 // sends, which the old truncation discarded outright.
                 let lines = doc.wheel.rows(dy);
                 if lines == 0 {
-                    return EditorResponse::Idle;
+                    return Response::Idle;
                 }
                 let last = doc.lines.len().saturating_sub(1);
                 let scrolled = if lines > 0 {
@@ -597,30 +610,30 @@ impl EditorState {
                     doc.scroll_line.saturating_sub(lines.unsigned_abs())
                 };
                 if scrolled == doc.scroll_line {
-                    return EditorResponse::Idle;
+                    return Response::Idle;
                 }
                 doc.scroll_line = scrolled;
                 // Deliberately *not* followed by `ensure_cursor_visible`: the
                 // wheel moves the view, not the caret. Scrolling that dragged
                 // the caret along would lose the user's place the moment they
                 // looked somewhere else in the file.
-                EditorResponse::Redraw
+                Response::Redraw
             }
-            _ => EditorResponse::Idle,
+            _ => Response::Idle,
         }
     }
 
     /// A left press: put the caret where the pointer is, or act on the tab bar.
-    fn mouse_press(&mut self, x: f32, y: f32) -> EditorResponse {
+    fn mouse_press(&mut self, x: f32, y: f32) -> Response {
         if let Some((index, on_close)) = self.tab_at(x, y) {
             self.tabs.set_active(index);
             if on_close && !self.close_tab() {
                 self.status = Some("Unsaved changes — save with Ctrl+S first".to_string());
             }
-            return EditorResponse::Redraw;
+            return Response::Redraw;
         }
         let Some((line, col)) = self.caret_position_at(x, y) else {
-            return EditorResponse::Idle;
+            return Response::Idle;
         };
         // Shift-click extends from wherever the selection already starts, so
         // shift-clicking twice grows one selection rather than starting two.
@@ -641,7 +654,7 @@ impl EditorState {
         doc.cursor_col = col;
         self.dragging = true;
         self.after_cursor_move();
-        EditorResponse::Redraw
+        Response::Redraw
     }
 
     /// Which tab the point is over, and whether it is over that tab's close box.
@@ -813,7 +826,7 @@ mod tests {
         doc.selection_anchor = Some((0, 0));
         doc.cursor_col = 5;
 
-        assert_eq!(editor.handle_event(&typed('x')), EditorResponse::Redraw);
+        assert_eq!(editor.handle_event(&typed('x')), Response::Redraw);
         assert_eq!(editor.active_document().lines[0], "x world");
         assert!(!editor.active_document().has_selection());
     }
@@ -1048,7 +1061,7 @@ mod tests {
             modifiers: Modifiers::shift(),
             text: "a".to_string(),
         });
-        assert_eq!(editor.handle_event(&event), EditorResponse::Idle);
+        assert_eq!(editor.handle_event(&event), Response::Idle);
         assert_eq!(editor.active_document().lines[0], "abc");
         assert!(editor.modifiers.shift, "shift-click needs this");
     }
@@ -1064,7 +1077,7 @@ mod tests {
             y,
             kind: MouseEventKind::Press(MouseButton::Left),
         });
-        assert_eq!(editor.handle_event(&press_at), EditorResponse::Redraw);
+        assert_eq!(editor.handle_event(&press_at), Response::Redraw);
         assert_eq!(editor.active_document().cursor_col, 0);
         assert!(editor.dragging);
         assert!(
@@ -1114,7 +1127,7 @@ mod tests {
             y: crate::TAB_BAR_HEIGHT + 1.0,
             kind: MouseEventKind::DoubleClick(MouseButton::Left),
         });
-        assert_eq!(editor.handle_event(&event), EditorResponse::Redraw);
+        assert_eq!(editor.handle_event(&event), Response::Redraw);
         assert_eq!(editor.active_document().selected_text(), "alpha");
         assert!(!editor.dragging, "a double click does not start a drag");
     }
@@ -1136,7 +1149,7 @@ mod tests {
     #[test]
     fn the_wheel_moves_the_view_and_leaves_the_caret_alone() {
         let mut editor = editor_with(&"line\n".repeat(200));
-        assert_eq!(editor.handle_event(&wheel(-4.0)), EditorResponse::Redraw);
+        assert_eq!(editor.handle_event(&wheel(-4.0)), Response::Redraw);
         assert!(editor.active_document().scroll_line > 0);
         assert_eq!(
             editor.active_document().cursor_line,
@@ -1156,7 +1169,7 @@ mod tests {
     #[test]
     fn a_single_notch_scrolls_the_view() {
         let mut editor = editor_with(&"line\n".repeat(200));
-        assert_eq!(editor.handle_event(&wheel(-1.0)), EditorResponse::Redraw);
+        assert_eq!(editor.handle_event(&wheel(-1.0)), Response::Redraw);
         assert_eq!(
             editor.active_document().scroll_line,
             3,
@@ -1306,9 +1319,9 @@ mod tests {
         // A key with no binding at all still clears it, and says so, because the
         // message vanishing is itself a visible change.
         let response = editor.handle_event(&plain(Key::F5));
-        assert_eq!(response, EditorResponse::Redraw);
+        assert_eq!(response, Response::Redraw);
         assert!(editor.status.is_none());
-        assert_eq!(editor.handle_event(&plain(Key::F5)), EditorResponse::Idle);
+        assert_eq!(editor.handle_event(&plain(Key::F5)), Response::Idle);
     }
 
     #[test]
@@ -1321,7 +1334,7 @@ mod tests {
             width: 400,
             height: 200,
         };
-        assert_eq!(editor.handle_event(&event), EditorResponse::Redraw);
+        assert_eq!(editor.handle_event(&event), Response::Redraw);
         assert_eq!(editor.window_height, 200);
         let page = editor.visible_lines();
         let doc = editor.active_document();
@@ -1329,7 +1342,7 @@ mod tests {
 
         assert_eq!(
             editor.handle_event(&event),
-            EditorResponse::Idle,
+            Response::Idle,
             "a resize to the size it already is changes nothing"
         );
     }
@@ -1337,10 +1350,7 @@ mod tests {
     #[test]
     fn close_requested_asks_the_caller_to_exit() {
         let mut editor = editor_with("text");
-        assert_eq!(
-            editor.handle_event(&Event::CloseRequested),
-            EditorResponse::Exit
-        );
+        assert_eq!(editor.handle_event(&Event::CloseRequested), Response::Exit);
     }
 
     #[test]

@@ -44,6 +44,32 @@ const TEXT_PREVIEW_MAX_LINES: usize = 20;
 /// Maximum bytes to read when sniffing a text file for preview.
 const TEXT_PREVIEW_MAX_BYTES: usize = 4096;
 
+/// Most pixels a source picture may have before the thumbnailer declines to
+/// decode it and falls back to the aspect-ratio swatch.
+///
+/// Deliberately well below `imagecodec::Limits::DEFAULT_MAX_PIXELS` (7680×4320,
+/// the compositor's own buffer ceiling), because the two are bounding different
+/// things. That ceiling asks "could this be a wallpaper?" — one picture, chosen
+/// by the user, decoded when they choose it. This one asks "should a directory
+/// listing decode this?", and a directory listing decodes whatever is in the
+/// directory, without being asked, while the user waits for the folder to open.
+///
+/// 24 megapixels is a 6000×4000 full-frame photograph, which is what the
+/// overwhelming majority of picture files on a desktop actually are. The cost
+/// of the ones above it is a swatch — exactly what *every* PNG got before this
+/// crate could decode at all — so nothing regresses at the boundary.
+///
+/// **Why a cap is needed at all**, and what would remove it: `imagecodec` has
+/// no scaled or partial decode, so producing a 128×128 thumbnail costs a
+/// full-size decode. At this cap the transient peak is roughly 190 MB (the
+/// inflate output and the pixel buffer are both live inside `decode`), held for
+/// the milliseconds between decoding one picture and downscaling it, and one at
+/// a time because generation is sequential. A decoder that box-filtered *during*
+/// scanline reconstruction would never materialise the full picture and this
+/// constant could go away. See known-issues.md
+/// `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE`.
+const DEFAULT_MAX_SOURCE_PIXELS: u64 = 24_000_000;
+
 /// Number of child items to show in a folder thumbnail grid (2x2).
 const FOLDER_PREVIEW_ITEMS: usize = 4;
 
@@ -90,6 +116,29 @@ impl Thumbnail {
     fn is_valid(&self) -> bool {
         self.pixels.len() == self.pixel_count().saturating_mul(4)
     }
+
+    /// The pixels in the byte order an upload to the compositor must carry, or
+    /// `None` if `pixels` does not match `width` × `height`.
+    ///
+    /// **This is a real conversion, not a formality.** `pixels` is `A, R, G, B`
+    /// — the order [`Canvas::to_argb`] writes and the disk cache stores —
+    /// whereas `BufferFormat::Argb8888` is `B, G, R, A`, a little-endian `u32`
+    /// of `0xAARRGGBB`. Both are called "ARGB". Handing the compositor the
+    /// stored bytes unconverted is neither a compile error nor a panic: every
+    /// thumbnail would come back with red and blue exchanged and its alpha read
+    /// from the blue channel, which for an opaque photograph means a picture
+    /// that is mostly transparent and wrongly coloured.
+    ///
+    /// Routed through `Canvas` rather than reversing each four bytes in place,
+    /// even though that is what the answer amounts to. The two byte orders are
+    /// facts about a disk format and a wire format respectively, and `Canvas`
+    /// is the one place either is written down; a hand-rolled reverse here
+    /// would be a third statement of the same fact, free to drift from both.
+    /// It also gets the length check for nothing.
+    #[must_use]
+    pub fn to_wire_bytes(&self) -> Option<Vec<u8>> {
+        Canvas::from_argb(self.width, self.height, &self.pixels).map(|c| c.to_argb8888())
+    }
 }
 
 /// Build a `Thumbnail` from a finished canvas.
@@ -120,20 +169,33 @@ fn into_thumbnail(canvas: Canvas, source_path: &Path, source_mtime: u64) -> Thum
 ///
 /// If any component changes the old entry will not match, giving automatic
 /// invalidation when a file is modified.
+///
+/// The path is a `PathBuf`, not a `String`, for the same reason
+/// [`Thumbnail::source_path`] is: a caller holding a `Path` can only reach a
+/// `String` through `to_string_lossy`, and two names differing only in bytes
+/// that are not UTF-8 collapse to one key — so one file is shown the other's
+/// thumbnail. The disk cache was fixed for this; the in-memory cache sitting
+/// in front of it had the identical hole, and a caller passing a lossy string
+/// to both would have hit the memory one first.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CacheKey {
-    path: String,
+    path: PathBuf,
     mtime: u64,
     size: u64,
 }
 
 impl CacheKey {
-    fn new(path: &str, mtime: u64, size: u64) -> Self {
+    fn new(path: impl AsRef<Path>, mtime: u64, size: u64) -> Self {
         Self {
-            path: path.to_owned(),
+            path: path.as_ref().to_path_buf(),
             mtime,
             size,
         }
+    }
+
+    /// The compositor image id for the thumbnail this key holds.
+    fn image_id(&self) -> u64 {
+        image_id(&self.path, self.mtime, self.size)
     }
 }
 
@@ -153,6 +215,12 @@ pub struct ThumbnailCache {
     map: HashMap<CacheKey, Thumbnail>,
     /// Usage order: most-recently-used at the back, LRU at the front.
     order: VecDeque<CacheKey>,
+    /// Image ids of thumbnails that have left the cache since last asked.
+    ///
+    /// See [`Self::take_evicted_image_ids`]. Recorded rather than acted on
+    /// because this type holds no compositor connection and should not: it is
+    /// a cache, and the connection belongs to whatever is hosting the window.
+    evicted: Vec<u64>,
 }
 
 impl ThumbnailCache {
@@ -162,6 +230,7 @@ impl ThumbnailCache {
             capacity: capacity.max(1),
             map: HashMap::with_capacity(capacity),
             order: VecDeque::with_capacity(capacity),
+            evicted: Vec::new(),
         }
     }
 
@@ -182,7 +251,7 @@ impl ThumbnailCache {
 
     /// Look up a thumbnail.  Returns `None` on miss.  On hit the entry is
     /// promoted to most-recently-used.
-    pub fn get(&mut self, path: &str, mtime: u64, size: u64) -> Option<&Thumbnail> {
+    pub fn get(&mut self, path: impl AsRef<Path>, mtime: u64, size: u64) -> Option<&Thumbnail> {
         let key = CacheKey::new(path, mtime, size);
         if self.map.contains_key(&key) {
             self.promote(&key);
@@ -192,8 +261,19 @@ impl ThumbnailCache {
         }
     }
 
+    /// Look up a thumbnail **without** promoting it.
+    ///
+    /// This is what a renderer wants. Drawing a frame must not be able to
+    /// change which entries survive eviction: with [`Self::get`], scrolling a
+    /// folder of ten thousand files past a five-hundred-entry cache would make
+    /// eviction order follow the last frame drawn rather than the user's
+    /// actual attention, and a renderer holding `&self` cannot call it anyway.
+    pub fn peek(&self, path: impl AsRef<Path>, mtime: u64, size: u64) -> Option<&Thumbnail> {
+        self.map.get(&CacheKey::new(path, mtime, size))
+    }
+
     /// Insert (or replace) a thumbnail.  Evicts the LRU entry when full.
-    pub fn insert(&mut self, path: &str, mtime: u64, size: u64, thumb: Thumbnail) {
+    pub fn insert(&mut self, path: impl AsRef<Path>, mtime: u64, size: u64, thumb: Thumbnail) {
         let key = CacheKey::new(path, mtime, size);
 
         // If updating an existing entry, remove the old order position.
@@ -208,7 +288,8 @@ impl ThumbnailCache {
     }
 
     /// Remove all entries whose path matches `path` (regardless of mtime/size).
-    pub fn invalidate(&mut self, path: &str) {
+    pub fn invalidate(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
         let keys_to_remove: Vec<CacheKey> = self
             .map
             .keys()
@@ -217,15 +298,54 @@ impl ThumbnailCache {
             .collect();
 
         for key in &keys_to_remove {
-            self.map.remove(key);
+            self.note_removed(key);
             self.remove_from_order(key);
         }
     }
 
     /// Remove all entries.
     pub fn clear(&mut self) {
+        for key in self.map.keys() {
+            self.evicted.push(key.image_id());
+        }
         self.map.clear();
         self.order.clear();
+    }
+
+    /// The image ids of thumbnails that have left this cache since the last
+    /// call, and clear the record.
+    ///
+    /// **This is what keeps the compositor's memory bounded.** Nothing evicts
+    /// on the compositor's side — it holds what a client gives it until the
+    /// client gives it back (design-decisions.md §556) — so a file manager that
+    /// uploaded a thumbnail per file and never dropped one would grow its
+    /// held-image total for as long as the user kept browsing, and would
+    /// eventually be refused an upload with no way to make room.
+    ///
+    /// Mirroring *this* cache is the policy rather than inventing a second one:
+    /// the cache is already bounded, already has an eviction order, and is
+    /// already what the renderer reads — so an entry that has left it cannot be
+    /// drawn anyway, and its pixels on the compositor are dead weight by
+    /// definition. Two eviction policies for one set of pictures would be two
+    /// things to keep in agreement, and the disagreement would show up as
+    /// either a leak or a blank cell.
+    ///
+    /// Draining, not peeking, on the same terms as `App::take_images`: the
+    /// caller sends what comes back, so a record that is not cleared re-sends
+    /// the same drop every frame.
+    pub fn take_evicted_image_ids(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.evicted)
+    }
+
+    /// Drop `key` from the map, recording the image id it took with it.
+    ///
+    /// Only records when something was actually removed: a drop for an id the
+    /// compositor never held is not harmless, it is an id that may since have
+    /// been re-uploaded by a later insert of the same file.
+    fn note_removed(&mut self, key: &CacheKey) {
+        if self.map.remove(key).is_some() {
+            self.evicted.push(key.image_id());
+        }
     }
 
     // -- internal helpers ---------------------------------------------------
@@ -246,7 +366,7 @@ impl ThumbnailCache {
     /// Evict the least-recently-used entry (front of the deque).
     fn evict_lru(&mut self) {
         if let Some(lru_key) = self.order.pop_front() {
-            self.map.remove(&lru_key);
+            self.note_removed(&lru_key);
         }
     }
 }
@@ -286,18 +406,20 @@ fn parse_bmp_dimensions(data: &[u8]) -> Option<ImageDimensions> {
 
 /// Parse PNG header to extract dimensions.
 ///
-/// PNG files start with the 8-byte magic `\x89PNG\r\n\x1A\n`, followed by the
-/// IHDR chunk whose data starts at offset 16 (width BE u32, height BE u32).
+/// Delegated to the decoder rather than read here. This used to be two
+/// `u32_be_at` calls at offsets 16 and 20 — the right offsets for a *valid*
+/// PNG, and unchecked for everything else, so a file that began with the eight
+/// magic bytes and then went wrong reported whatever integers happened to sit
+/// there. `imagecodec::png::dimensions` reads the IHDR as a chunk: it checks
+/// the length field, the chunk type, the CRC's presence, and the bit
+/// depth/colour-type combination, so a size it returns is one the picture
+/// actually has.
+///
+/// It also means the icon view cannot disagree with the image viewer about how
+/// big a picture is, which is the same argument that put the decoder in one
+/// crate rather than one per caller (design-decisions.md §555).
 fn parse_png_dimensions(data: &[u8]) -> Option<ImageDimensions> {
-    if data.len() < 24 {
-        return None;
-    }
-    let magic: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    if data.get(0..8)? != magic {
-        return None;
-    }
-    let width = byteread::u32_be_at(data, 16)?;
-    let height = byteread::u32_be_at(data, 20)?;
+    let (width, height) = imagecodec::png::dimensions(data).ok()?;
     if width == 0 || height == 0 {
         return None;
     }
@@ -434,6 +556,15 @@ pub struct ThumbConfig {
     pub bg_color: Color,
     /// Text color for previews and labels.
     pub text_color: Color,
+    /// Most pixels a source picture may have before it is declined rather than
+    /// decoded. See [`DEFAULT_MAX_SOURCE_PIXELS`] for why this is not simply
+    /// the decoder's own default.
+    ///
+    /// Configurable rather than a constant because the right answer depends on
+    /// the machine: a workstation opening a photographer's directory can afford
+    /// what a low-memory device cannot, and the failure mode of guessing high
+    /// is an out-of-memory kill of the file manager.
+    pub max_source_pixels: u64,
 }
 
 impl Default for ThumbConfig {
@@ -442,6 +573,7 @@ impl Default for ThumbConfig {
             size: DEFAULT_THUMB_SIZE,
             bg_color: Color::rgb(245, 245, 245),
             text_color: Color::rgb(100, 100, 100),
+            max_source_pixels: DEFAULT_MAX_SOURCE_PIXELS,
         }
     }
 }
@@ -538,11 +670,15 @@ pub fn generate_thumbnail(path: &Path, config: &ThumbConfig) -> Thumbnail {
 
 /// Generate a thumbnail from an image file (BMP/PNG/GIF/JPEG).
 ///
-/// Reads enough of the file header to determine dimensions, then generates a
-/// filled rectangle of the image's accent color scaled to the thumbnail size.
-/// Full decode + downscale is used when the raw pixel data is available (BMP);
-/// for compressed formats (PNG/JPEG/GIF) we produce a placeholder with the
-/// correct aspect ratio since we lack a full decoder in this crate.
+/// Three outcomes, in preference order: the picture itself, downscaled; an
+/// aspect-ratio-correct colour swatch, for a format no decoder here reads; and
+/// the category placeholder, for a file whose header says nothing at all.
+///
+/// The middle one used to be the outcome for *every* compressed format,
+/// including PNG, which is what `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE
+/// -ID-NAMES-NOTHING` was about: only uncompressed BMP had a real thumbnail,
+/// and a directory of photographs was a grid of identical green rectangles
+/// differing only in shape.
 fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thumbnail {
     let header = match read_file_header(path, 1024) {
         Some(h) => h,
@@ -554,15 +690,25 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
         None => return generate_default_thumbnail(path, ThumbCategory::Image, config, mtime),
     };
 
-    // For BMP we can attempt to read raw pixel data (uncompressed 32-bit).
-    if header.starts_with(b"BM")
-        && let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime)
-    {
+    // Dispatched on the signature rather than tried in turn, because either
+    // branch reads the whole file: offering the file to a decoder that will
+    // reject it on its first eight bytes still costs the read that got those
+    // eight bytes there.
+    if header.starts_with(b"BM") {
+        // BMP is the one format `imagecodec` does not read, and the one this
+        // module already decoded: uncompressed 24/32-bit, straight out of the
+        // file with no decompressor in the way.
+        if let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime) {
+            return thumb;
+        }
+    } else if let Some(thumb) = try_decoded_thumbnail(path, dims, config, mtime) {
         return thumb;
     }
 
-    // For other formats: create an aspect-ratio-correct color swatch since we
-    // don't have a full decoder.  The swatch color is derived from the format.
+    // Nothing decoded it: an aspect-ratio-correct colour swatch, which is at
+    // least honest about the shape of the picture. Today this is GIF, JPEG,
+    // SVG, WebP and ICO — and any PNG above `max_source_pixels`, or one that is
+    // corrupt.
     let (tw, th) = fit_dimensions(dims.width, dims.height, config.size);
     let size = config.size;
     let mut canvas = Canvas::transparent(size, size);
@@ -576,6 +722,84 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
     canvas.fill_rect(off_x, off_y, tw, th, ThumbCategory::Image.accent_color());
 
     into_thumbnail(canvas, path, mtime)
+}
+
+/// Decode the picture properly and downscale it, for the formats `imagecodec`
+/// reads (today: PNG).
+///
+/// `None` — never an error — for a picture too large, a file that is not a
+/// format the decoder claims, or one that is corrupt. All three are the same
+/// thing from a directory listing's point of view: this entry does not get a
+/// picture, and the caller's swatch is what it gets instead. A file manager
+/// that reported a decode failure per file would produce a wall of dialogs for
+/// one bad download.
+///
+/// `dims` is the header's answer and is used only to decline early; the
+/// decoder's own answer is what the canvas is built from. They agree for
+/// anything that decodes, since `imagecodec` sizes its buffers from the same
+/// header — but the check has to happen before the decode, which is the whole
+/// point of having it.
+fn try_decoded_thumbnail(
+    path: &Path,
+    dims: ImageDimensions,
+    config: &ThumbConfig,
+    mtime: u64,
+) -> Option<Thumbnail> {
+    // Checked against the header we already have, before the file is read at
+    // all. `imagecodec` would refuse the same picture from its own header a
+    // moment later, but that moment costs a full read of a file that may be
+    // hundreds of megabytes.
+    let source_pixels = u64::from(dims.width).checked_mul(u64::from(dims.height))?;
+    if source_pixels > config.max_source_pixels {
+        return None;
+    }
+
+    let data = fs::read(path).ok()?;
+    let limits = imagecodec::Limits {
+        max_pixels: config.max_source_pixels,
+        // The decompressed *byte* ceiling, kept in the same proportion the
+        // crate's own default uses (16 bytes per pixel), which is what a
+        // 16-bit-per-sample RGBA image costs before it is reduced to the
+        // 4-bytes-per-pixel output. Deriving it from `max_pixels` rather than
+        // repeating a number keeps the two from drifting apart.
+        max_decompressed_bytes: usize::try_from(config.max_source_pixels.saturating_mul(16))
+            .unwrap_or(usize::MAX),
+    };
+    let image = imagecodec::decode(&data, limits).ok()?;
+    // Dropped before the pixel buffer is converted: for a 24-megapixel PNG this
+    // is tens of megabytes of compressed data with no further reader, and the
+    // conversion below is the peak of this function.
+    drop(data);
+
+    let (width, height) = (image.width, image.height);
+    // Consuming the decoded pixels rather than borrowing them, so the picture
+    // exists in one buffer and not two. `Image::to_argb_bytes` would have made
+    // a third: a `Vec<u8>` between the `Vec<u32>` the decoder produced and the
+    // `Vec<Color>` a canvas holds, all three full-size and all three alive at
+    // once.
+    let pixels: Vec<Color> = image.pixels.into_iter().map(argb_to_color).collect();
+    let canvas = Canvas::from_pixels(width, height, pixels)?;
+
+    Some(into_thumbnail(
+        box_filter_downscale(&canvas, config.size),
+        path,
+        mtime,
+    ))
+}
+
+/// One `0xAARRGGBB` word, as the toolkit's colour.
+///
+/// The decoder's output format is the compositor's storage format, which is a
+/// packed word; the toolkit's is four fields. Neither is wrong and the
+/// conversion is a shift, but it is written once here rather than inline so
+/// that a future channel-order question has one place to be asked.
+const fn argb_to_color(px: u32) -> Color {
+    Color::rgba(
+        ((px >> 16) & 0xFF) as u8,
+        ((px >> 8) & 0xFF) as u8,
+        (px & 0xFF) as u8,
+        ((px >> 24) & 0xFF) as u8,
+    )
 }
 
 /// Attempt to create a real thumbnail from an uncompressed 32-bit BMP.
@@ -955,11 +1179,27 @@ pub struct ThumbnailRequest {
 /// [`take_completed`].
 ///
 /// When the directory changes, call [`cancel_all`] to clear the pending queue.
+///
+/// # The disk cache belongs here
+///
+/// A generator built with [`with_disk_cache`](Self::with_disk_cache) reads the
+/// cache before generating and writes it after. That layering lives inside the
+/// generator rather than at the call site because "how a thumbnail comes into
+/// being" is the one thing this type is for: a caller that had to remember to
+/// probe the disk first would be a caller that could forget, and the cost of
+/// forgetting is re-decoding every file in the folder on every restart —
+/// silently, since the result is correct either way.
 pub struct ThumbnailGenerator {
     /// Pending requests (FIFO).
     pending: VecDeque<ThumbnailRequest>,
     /// Completed thumbnails ready for the caller.
     completed: Vec<(ThumbnailRequest, Thumbnail)>,
+    /// Where a generated thumbnail is kept across restarts, if anywhere.
+    ///
+    /// `None` is a working configuration, not a degraded one: a session with no
+    /// home directory, or a test that must not touch the user's cache,
+    /// generates every time and is otherwise identical.
+    disk: Option<DiskCache>,
 }
 
 impl ThumbnailGenerator {
@@ -967,7 +1207,31 @@ impl ThumbnailGenerator {
         Self {
             pending: VecDeque::new(),
             completed: Vec::new(),
+            disk: None,
         }
+    }
+
+    /// A generator that persists what it makes, and reuses what it finds.
+    #[must_use]
+    pub fn with_disk_cache(disk: DiskCache) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            completed: Vec::new(),
+            disk: Some(disk),
+        }
+    }
+
+    /// A generator backed by the default cache directory, or an unbacked one
+    /// if there is no home directory to put it in.
+    #[must_use]
+    pub fn with_default_disk_cache() -> Self {
+        DiskCache::default_location().map_or_else(Self::new, Self::with_disk_cache)
+    }
+
+    /// The disk cache this generator reads and writes, if it has one.
+    #[must_use]
+    pub const fn disk_cache(&self) -> Option<&DiskCache> {
+        self.disk.as_ref()
     }
 
     /// Queue a thumbnail generation request.
@@ -987,7 +1251,18 @@ impl ThumbnailGenerator {
 
     /// Process up to `batch_size` pending requests synchronously.
     ///
-    /// Returns the number of thumbnails generated this call.
+    /// Returns the number of requests retired this call — whether each one was
+    /// read from the disk cache or generated afresh, since to the caller
+    /// budgeting a frame the two are the same unit of work retired, and it is
+    /// the *queue* draining that the number is used to watch.
+    ///
+    /// The disk lookup is keyed on the request's [`ThumbConfig::size`] as well
+    /// as its path and mtime, so a user who changes the thumbnail size gets
+    /// regeneration rather than yesterday's smaller picture scaled up.
+    ///
+    /// A failed save is ignored deliberately. The thumbnail is in hand and the
+    /// view is about to draw it; a full or read-only cache directory is a
+    /// reason to regenerate next time, not a reason to fail now.
     pub fn process_batch(&mut self, batch_size: usize) -> usize {
         let mut processed = 0;
         for _ in 0..batch_size {
@@ -995,7 +1270,21 @@ impl ThumbnailGenerator {
                 Some(r) => r,
                 None => break,
             };
-            let thumb = generate_thumbnail(&req.path, &req.config);
+            let cap = req.config.size;
+            let cached = self
+                .disk
+                .as_ref()
+                .and_then(|d| d.load(&req.path, req.mtime, cap));
+            let thumb = match cached {
+                Some(t) => t,
+                None => {
+                    let t = generate_thumbnail(&req.path, &req.config);
+                    if let Some(disk) = self.disk.as_ref() {
+                        let _ = disk.save(&t, cap);
+                    }
+                    t
+                }
+            };
             self.completed.push((req, thumb));
             processed += 1;
         }
@@ -1048,15 +1337,23 @@ impl DiskCache {
         fs::create_dir_all(&self.cache_dir)
     }
 
-    /// Compute the cache filename for a given path and mtime.
-    fn cache_filename(&self, path: &Path, mtime: u64) -> PathBuf {
+    /// Compute the cache filename for a given path, mtime and size cap.
+    ///
+    /// The cap is part of the name, not merely of the contents, because
+    /// [`fit_dimensions`] does not upscale: a 20x20 source yields a 20x20
+    /// thumbnail at *every* cap, so the stored dimensions cannot be compared
+    /// against the cap in force to tell a valid entry from a stale one. Keyed
+    /// on the cap, a size change simply misses and regenerates, and entries at
+    /// the old cap are collected by [`Self::purge_stale`] rather than served.
+    fn cache_filename(&self, path: &Path, mtime: u64, cap: u32) -> PathBuf {
         let hash = simple_hash(path, mtime);
-        self.cache_dir.join(format!("{hash:016x}.thumb"))
+        self.cache_dir.join(format!("{hash:016x}-{cap}.thumb"))
     }
 
-    /// Try to load a cached thumbnail from disk.
-    pub fn load(&self, path: &Path, mtime: u64) -> Option<Thumbnail> {
-        let file_path = self.cache_filename(path, mtime);
+    /// Try to load a cached thumbnail from disk, made at the `cap` now in
+    /// force.
+    pub fn load(&self, path: &Path, mtime: u64, cap: u32) -> Option<Thumbnail> {
+        let file_path = self.cache_filename(path, mtime, cap);
         let data = fs::read(&file_path).ok()?;
 
         // Format: [width: 4 LE][height: 4 LE][ARGB pixel data...]
@@ -1076,10 +1373,11 @@ impl DiskCache {
         ))
     }
 
-    /// Save a thumbnail to the disk cache.
-    pub fn save(&self, thumb: &Thumbnail) -> std::io::Result<()> {
+    /// Save a thumbnail to the disk cache, recorded as having been made at
+    /// `cap`.
+    pub fn save(&self, thumb: &Thumbnail, cap: u32) -> std::io::Result<()> {
         self.ensure_dir()?;
-        let file_path = self.cache_filename(&thumb.source_path, thumb.source_mtime);
+        let file_path = self.cache_filename(&thumb.source_path, thumb.source_mtime, cap);
 
         let mut data = Vec::with_capacity(8 + thumb.pixels.len());
         data.extend_from_slice(&thumb.width.to_le_bytes());
@@ -1088,9 +1386,9 @@ impl DiskCache {
         fs::write(file_path, &data)
     }
 
-    /// Remove the cached thumbnail for a specific path/mtime.
-    pub fn remove(&self, path: &Path, mtime: u64) {
-        let file_path = self.cache_filename(path, mtime);
+    /// Remove the cached thumbnail for a specific path/mtime/cap.
+    pub fn remove(&self, path: &Path, mtime: u64, cap: u32) {
+        let file_path = self.cache_filename(path, mtime, cap);
         let _ = fs::remove_file(file_path); // Intentionally ignoring error: file may not exist.
     }
 
@@ -1108,32 +1406,49 @@ impl DiskCache {
         Ok(())
     }
 
-    /// Purge entries whose source file no longer exists.
+    /// Purge entries whose source file no longer exists at the recorded mtime.
     ///
     /// Since the cache filename is a hash (not the original path), this method
     /// requires scanning the in-memory cache for paths.  Pass the set of
     /// known-valid source paths; anything in the cache directory that doesn't
     /// correspond to a valid entry is removed.
+    ///
+    /// Matching is on the *hash* part of the name, not the whole of it, so a
+    /// live file's entries are kept at every size cap they were made at rather
+    /// than only at the one currently in force. A cap change should cost a
+    /// regeneration, not a purge of every other size a second window might
+    /// still be drawing from.
     pub fn purge_stale(&self, valid_entries: &HashMap<PathBuf, u64>) -> std::io::Result<()> {
         if !self.cache_dir.is_dir() {
             return Ok(());
         }
 
-        let valid_filenames: std::collections::HashSet<String> = valid_entries
+        let valid_prefixes: std::collections::HashSet<String> = valid_entries
             .iter()
-            .map(|(path, mtime)| format!("{:016x}.thumb", simple_hash(path, *mtime)))
+            .map(|(path, mtime)| format!("{:016x}", simple_hash(path, *mtime)))
             .collect();
 
         for entry in fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
-            // Compared as bytes. Every name we write is `{hash:016x}.thumb`, so
-            // a name that is not UTF-8 is not one of ours; rendering it lossily
-            // first could make it *look* like one of ours and get it deleted.
+            // Compared as bytes. Every name we write is
+            // `{hash:016x}-{cap}.thumb`, so a name that is not UTF-8 is not one
+            // of ours; rendering it lossily first could make it *look* like one
+            // of ours and get it deleted.
             let raw = entry.file_name();
             let name = raw.as_encoded_bytes();
-            if name.ends_with(b".thumb")
-                && !valid_filenames.iter().any(|valid| valid.as_bytes() == name)
-            {
+            if !name.ends_with(b".thumb") {
+                continue;
+            }
+            // The hash is the fixed-width run before the first `-`. A name of
+            // ours always has one; a `.thumb` file that does not is not ours
+            // and is left alone, for the same reason the UTF-8 case is.
+            let Some(sep) = name.iter().position(|&b| b == b'-') else {
+                continue;
+            };
+            let Some(prefix) = name.get(..sep) else {
+                continue;
+            };
+            if !valid_prefixes.iter().any(|v| v.as_bytes() == prefix) {
                 let _ = fs::remove_file(entry.path()); // Best-effort removal.
             }
         }
@@ -1151,8 +1466,15 @@ impl DiskCache {
 /// The thumbnail is scaled to fit within the display box while maintaining its
 /// aspect ratio.  A thin border and optional shadow are added for image-type
 /// thumbnails.
+///
+/// `image_id` is passed in rather than derived from `thumb`, because the id
+/// identifies the *file* the pixels came from — path, mtime and length — and a
+/// [`Thumbnail`] knows none of those. Deriving it here from what the thumbnail
+/// does know would give two different files with the same dimensions the same
+/// id. Use [`image_id`] with the same three facts the cache was keyed on.
 pub fn render_thumbnail(
     thumb: &Thumbnail,
+    image_id: u64,
     x: f32,
     y: f32,
     display_size: f32,
@@ -1198,11 +1520,9 @@ pub fn render_thumbnail(
         corner_radii: CornerRadii::all(2.0),
     });
 
-    // The actual thumbnail image.  We emit an Image command with a synthesized
-    // image_id derived from the source path hash, since the compositor
-    // maintains an image asset store.  The caller is responsible for
-    // registering the pixel data with the compositor under this ID.
-    let image_id = thumbnail_image_id(thumb);
+    // The actual thumbnail image. Drawing an id the compositor holds no pixels
+    // for renders nothing, silently and by design, so the caller must only ask
+    // for this once it has uploaded them (see `ExplorerState::drawable_thumb`).
     cmds.push(RenderCommand::Image {
         x: rx,
         y: ry,
@@ -1273,10 +1593,29 @@ pub fn render_placeholder(
     cmds
 }
 
-/// Compute a stable image ID for a thumbnail, usable as a key in the
-/// compositor's image asset store.
-pub fn thumbnail_image_id(thumb: &Thumbnail) -> u64 {
-    simple_hash(&thumb.source_path, thumb.source_mtime)
+/// The compositor image id for the thumbnail of `path` as it was at `mtime`
+/// and `size`.
+///
+/// **The same three facts the in-memory cache is keyed on, and deliberately
+/// so.** This took only the path and the mtime once, which is one fact short:
+/// a file rewritten twice inside the same second keeps its modification time
+/// and changes its length, so the two versions were two distinct cache entries
+/// sharing one image id. Evicting either dropped the pixels the other was
+/// drawing with, and uploading either replaced the other's picture — one file
+/// showing a stale version of itself, which is the same shape of bug as the
+/// lossy-path-string collision `Thumbnail::source_path` documents.
+///
+/// Not the same hash the *disk* cache names its files with
+/// ([`simple_hash`]), which is a filename and not an identity; that one is
+/// left alone so an existing on-disk cache is not silently orphaned.
+#[must_use]
+pub fn image_id(path: &Path, mtime: u64, size: u64) -> u64 {
+    let mut hash = simple_hash(path, mtime);
+    for byte in size.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3); // FNV prime
+    }
+    hash
 }
 
 // ============================================================================
@@ -1418,6 +1757,77 @@ mod tests {
         assert!(cache.get("b", 2, 20).is_none()); // evicted
     }
 
+    /// The renderer reads the cache on every frame, so if reading promoted, the
+    /// eviction order would be "whatever was last on screen" rather than
+    /// "whatever was last *wanted*" — and a file scrolled past would outlive
+    /// one the user actually opened. `peek` exists to make that impossible;
+    /// `render` taking `&self` is the same fact enforced by the compiler.
+    #[test]
+    fn peeking_does_not_promote_so_drawing_cannot_reorder_the_cache() {
+        let mut cache = ThumbnailCache::new(3);
+        cache.insert("a", 1, 10, make_test_thumb("a", 10));
+        cache.insert("b", 2, 20, make_test_thumb("b", 10));
+        cache.insert("c", 3, 30, make_test_thumb("c", 10));
+
+        // The one difference from `cache_promotes_on_get`.
+        assert!(cache.peek("a", 1, 10).is_some());
+        cache.insert("d", 4, 40, make_test_thumb("d", 10));
+
+        assert!(
+            cache.peek("a", 1, 10).is_none(),
+            "still the LRU, so evicted"
+        );
+        assert!(cache.peek("b", 2, 20).is_some());
+    }
+
+    /// `to_string_lossy` maps every undecodable unit to the same replacement
+    /// character, so two distinct filenames that differ only in such units
+    /// would share one cache key — and one file would be shown the other's
+    /// picture. The key is a `PathBuf` for exactly this reason.
+    ///
+    /// The sibling
+    /// `two_names_differing_only_in_undecodable_units_do_not_share_a_cache_filename`
+    /// asserts the same property of the *disk* cache, which keys on
+    /// [`simple_hash`] rather than on `PathBuf`'s own `Hash`; neither implies
+    /// the other.
+    #[test]
+    fn two_names_that_lossy_conversion_would_merge_stay_distinct_in_memory() {
+        let (one, two) = undecodable_pair();
+        assert_eq!(
+            one.to_string_lossy(),
+            two.to_string_lossy(),
+            "the premise: these collapse to the same string"
+        );
+        assert_ne!(one, two, "but they are different paths");
+
+        let mut cache = ThumbnailCache::new(4);
+        cache.insert(&one, 7, 70, make_test_thumb("one", 10));
+        cache.insert(&two, 7, 70, make_test_thumb("two", 12));
+
+        assert_eq!(cache.len(), 2, "two files, two entries");
+        assert_eq!(cache.peek(&one, 7, 70).expect("one").width, 10);
+        assert_eq!(cache.peek(&two, 7, 70).expect("two").width, 12);
+    }
+
+    /// Two paths that are different byte-for-byte but identical after a lossy
+    /// UTF-8 conversion. Built in memory, never created on disk: the cache is a
+    /// pure map, and the filesystems this must be correct on are not all
+    /// willing to create such a name.
+    #[cfg(unix)]
+    fn undecodable_pair() -> (PathBuf, PathBuf) {
+        use std::os::unix::ffi::OsStrExt;
+        let make = |b: u8| PathBuf::from(std::ffi::OsStr::from_bytes(&[b'x', b]));
+        (make(0xE9), make(0xEA))
+    }
+
+    #[cfg(windows)]
+    fn undecodable_pair() -> (PathBuf, PathBuf) {
+        use std::os::windows::ffi::OsStringExt;
+        // Unpaired surrogates: valid UTF-16 code units, no UTF-8 spelling.
+        let make = |u: u16| PathBuf::from(std::ffi::OsString::from_wide(&[u16::from(b'x'), u]));
+        (make(0xD800), make(0xD801))
+    }
+
     #[test]
     fn cache_invalidate_removes_all_matching_path() {
         let mut cache = ThumbnailCache::new(10);
@@ -1441,6 +1851,95 @@ mod tests {
         cache.clear();
         assert!(cache.is_empty());
         assert_eq!(cache.len(), 0);
+    }
+
+    // -- What leaves the cache must leave the compositor --------------------
+
+    /// The eviction bookkeeping the compositor's memory bound rests on: every
+    /// route out of the cache records the id that went with it, because the
+    /// compositor never evicts on its own and a route that forgot would leak
+    /// that thumbnail's pixels for the life of the window.
+    #[test]
+    fn every_way_out_of_the_cache_records_the_id_that_left_with_it() {
+        let evicted_by = |f: &dyn Fn(&mut ThumbnailCache)| {
+            let mut cache = ThumbnailCache::new(2);
+            cache.insert("a", 1, 10, make_test_thumb("a", 8));
+            cache.insert("b", 2, 20, make_test_thumb("b", 8));
+            f(&mut cache);
+            cache.take_evicted_image_ids()
+        };
+
+        let id_a = image_id(Path::new("a"), 1, 10);
+        let id_b = image_id(Path::new("b"), 2, 20);
+
+        // Falling off the end of the LRU order.
+        assert_eq!(
+            evicted_by(&|c| c.insert("c", 3, 30, make_test_thumb("c", 8))),
+            vec![id_a]
+        );
+        // Named explicitly, whatever its mtime and size.
+        assert_eq!(evicted_by(&|c| c.invalidate("b")), vec![id_b]);
+        // Cleared wholesale — order within one clear is unspecified, so sort.
+        let mut all = evicted_by(&ThumbnailCache::clear);
+        all.sort_unstable();
+        let mut want = vec![id_a, id_b];
+        want.sort_unstable();
+        assert_eq!(all, want);
+    }
+
+    /// Draining, not peeking: `App::take_images` sends whatever comes back, so
+    /// a record that survived the call would re-send the same drop every frame
+    /// — and a drop re-sent after the file was thumbnailed again would take the
+    /// *new* pixels down with it.
+    #[test]
+    fn taking_the_evicted_ids_clears_them() {
+        let mut cache = ThumbnailCache::new(1);
+        cache.insert("a", 1, 10, make_test_thumb("a", 8));
+        cache.insert("b", 2, 20, make_test_thumb("b", 8));
+        assert_eq!(cache.take_evicted_image_ids().len(), 1);
+        assert!(cache.take_evicted_image_ids().is_empty());
+    }
+
+    /// Removing something that was never there records nothing. `invalidate`
+    /// takes a path and removes every version of it, so it is routinely called
+    /// for files the cache never held; emitting a drop for each would be a
+    /// stream of ids the compositor has no pixels for — and one of them could
+    /// later name a picture that *had* since been uploaded.
+    #[test]
+    fn removing_an_absent_entry_records_no_eviction() {
+        let mut cache = ThumbnailCache::new(4);
+        cache.insert("a", 1, 10, make_test_thumb("a", 8));
+        cache.invalidate("never-cached");
+        assert!(cache.take_evicted_image_ids().is_empty());
+    }
+
+    /// The reason the id carries the file's *length* as well as its path and
+    /// modification time. A file rewritten twice inside one second keeps its
+    /// mtime, so path+mtime alone gave two genuinely distinct cache entries one
+    /// id: evicting either dropped the pixels the other was drawing with, and
+    /// uploading either replaced the other's picture.
+    #[test]
+    fn two_versions_of_a_file_written_in_the_same_second_get_different_ids() {
+        let short = image_id(Path::new("/notes.png"), 1_700_000_000, 4_096);
+        let long = image_id(Path::new("/notes.png"), 1_700_000_000, 8_192);
+        assert_ne!(short, long);
+
+        // And the three facts still each move it on their own.
+        assert_ne!(
+            short,
+            image_id(Path::new("/other.png"), 1_700_000_000, 4_096)
+        );
+        assert_ne!(
+            short,
+            image_id(Path::new("/notes.png"), 1_700_000_001, 4_096)
+        );
+
+        // Same three facts, same id — the cache key and the renderer derive it
+        // separately and must agree.
+        assert_eq!(
+            short,
+            image_id(Path::new("/notes.png"), 1_700_000_000, 4_096)
+        );
     }
 
     // -- Cache key tests ----------------------------------------------------
@@ -1682,15 +2181,192 @@ mod tests {
 
     #[test]
     fn parse_png_valid() {
+        // A genuine PNG rather than a 24-byte stub with the size poked into
+        // it. The size now comes back through `imagecodec::png::dimensions`,
+        // which reads the IHDR *as a chunk* -- its length, its type, its CRC,
+        // and the bit depth and colour type after the size -- so a stub whose
+        // remaining fields are zero is not a picture and reports nothing. That
+        // is the decoder being right, not the test being unlucky: a file the
+        // decoder would refuse should not be listed with a size.
+        let dims = parse_png_dimensions(&imagecodec::testing::png_gradient(640, 480)).unwrap();
+        assert_eq!(dims.width, 640);
+        assert_eq!(dims.height, 480);
+    }
+
+    /// A file that begins with the PNG signature but is not a PNG has no
+    /// dimensions to report. Before the decoder went in, the eight-byte
+    /// signature plus two big-endian numbers at a fixed offset were the whole
+    /// check, so any 24 bytes starting `\x89PNG` claimed to be a picture of
+    /// whatever size those bytes happened to spell.
+    #[test]
+    fn a_png_signature_over_rubbish_has_no_dimensions() {
         let mut header = vec![0u8; 24];
         header[0..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
-        // Width at offset 16, height at offset 20 (BE u32).
         header[16..20].copy_from_slice(&640u32.to_be_bytes());
         header[20..24].copy_from_slice(&480u32.to_be_bytes());
 
-        let dims = parse_png_dimensions(&header).unwrap();
-        assert_eq!(dims.width, 640);
-        assert_eq!(dims.height, 480);
+        assert!(parse_png_dimensions(&header).is_none());
+    }
+
+    // -- Decoding a real picture --------------------------------------------
+
+    /// One pixel of a finished thumbnail.
+    ///
+    /// Goes back through `Canvas` rather than indexing `Thumbnail::pixels`
+    /// directly, so the test reads the byte order out of the same function
+    /// [`into_thumbnail`] wrote it with. A test that restated `[a, r, g, b]`
+    /// in its own words would keep passing if both ends were swapped together.
+    fn thumb_pixel(thumb: &Thumbnail, x: u32, y: u32) -> Color {
+        Canvas::from_argb(thumb.width, thumb.height, &thumb.pixels)
+            .expect("a thumbnail's buffer always matches its dimensions")
+            .get(x, y)
+            .expect("coordinate inside the thumbnail")
+    }
+
+    /// A picture whose left half is red and whose right half is blue, so that
+    /// "was this decoded?" and "was it decoded the right way round?" are
+    /// separate answers. A gradient would show the first and hide the second.
+    fn write_two_tone_png(path: &Path, width: u32, height: u32) {
+        let bytes = imagecodec::testing::png_rgba(width, height, |x, _| {
+            if x < width / 2 {
+                [0xFF, 0x00, 0x00, 0xFF]
+            } else {
+                [0x00, 0x00, 0xFF, 0xFF]
+            }
+        });
+        fs::write(path, bytes).unwrap();
+    }
+
+    /// The debt this whole change is about: a `.png` used to thumbnail as a
+    /// flat green rectangle of the right shape and nothing else, because
+    /// nothing in the tree decoded a compressed picture. A directory of
+    /// photographs was a grid of identical rectangles.
+    ///
+    /// Three things are asserted, and the first two are the ones a wrong
+    /// decode would still satisfy on its own: the thumbnail has the *source's*
+    /// aspect ratio rather than the swatch's square canvas, the halves are the
+    /// colours the file has and are on the sides the file put them, and the
+    /// placeholder green appears nowhere at all.
+    #[test]
+    fn a_png_thumbnails_to_the_picture_and_not_a_coloured_rectangle() {
+        let scratch = ScratchDir::new("thumbs_test_png_decode");
+        let path = scratch.path("two-tone.png");
+        write_two_tone_png(&path, 200, 100);
+
+        let config = ThumbConfig::default();
+        let thumb = generate_thumbnail(&path, &config);
+
+        // 200x100 into a 128 box is 128x64. The swatch path would have
+        // produced a 128x128 canvas with a rectangle centred in it, so the
+        // height alone separates the two outcomes.
+        assert_eq!((thumb.width, thumb.height), (128, 64));
+
+        let left = thumb_pixel(&thumb, 20, 32);
+        let right = thumb_pixel(&thumb, 108, 32);
+        assert_eq!((left.r, left.g, left.b), (0xFF, 0x00, 0x00), "left half");
+        assert_eq!(
+            (right.r, right.g, right.b),
+            (0x00, 0x00, 0xFF),
+            "right half"
+        );
+
+        let accent = ThumbCategory::Image.accent_color();
+        let canvas = Canvas::from_argb(thumb.width, thumb.height, &thumb.pixels).unwrap();
+        for y in 0..thumb.height {
+            for x in 0..thumb.width {
+                assert_ne!(
+                    canvas.get(x, y).unwrap(),
+                    accent,
+                    "placeholder green at ({x}, {y}) — this is still a swatch"
+                );
+            }
+        }
+    }
+
+    /// Alpha comes through as the file wrote it. The decoder emits straight
+    /// (non-premultiplied) alpha and the toolkit's `Color` stores it in its own
+    /// field; a conversion that folded alpha into the colour channels would
+    /// leave a translucent red looking like a dark opaque red, which is exactly
+    /// the mistake that is invisible on the fully-opaque pictures every other
+    /// test here uses.
+    #[test]
+    fn a_translucent_picture_keeps_its_alpha_through_the_thumbnail() {
+        let scratch = ScratchDir::new("thumbs_test_png_alpha");
+        let path = scratch.path("translucent.png");
+        fs::write(
+            &path,
+            imagecodec::testing::png_rgba(64, 64, |_, _| [0xFF, 0x00, 0x00, 0x80]),
+        )
+        .unwrap();
+
+        let thumb = generate_thumbnail(&path, &ThumbConfig::default());
+        let px = thumb_pixel(&thumb, 32, 32);
+        assert_eq!((px.r, px.g, px.b, px.a), (0xFF, 0x00, 0x00, 0x80));
+    }
+
+    /// A picture bigger than the cap is declined *from its header*, without the
+    /// file being read — a directory listing decodes whatever is in it while
+    /// the user waits, so the cost of one absurd file is paid by everything
+    /// after it. The entry keeps the swatch it always had, which is why raising
+    /// or lowering the cap cannot regress anything.
+    #[test]
+    fn a_picture_over_the_source_cap_keeps_the_swatch() {
+        let scratch = ScratchDir::new("thumbs_test_png_too_big");
+        let path = scratch.path("huge.png");
+        write_two_tone_png(&path, 200, 100);
+
+        let config = ThumbConfig {
+            max_source_pixels: 10_000, // 200x100 is twice this.
+            ..ThumbConfig::default()
+        };
+        let thumb = generate_thumbnail(&path, &config);
+
+        // The swatch is drawn on a full square canvas, whatever the picture's
+        // shape; the rectangle inside it is what carries the aspect ratio.
+        assert_eq!((thumb.width, thumb.height), (config.size, config.size));
+        assert_eq!(
+            thumb_pixel(&thumb, config.size / 2, config.size / 2),
+            ThumbCategory::Image.accent_color()
+        );
+    }
+
+    /// A truncated download still has a readable IHDR, so it still reports a
+    /// size — and then fails halfway through its pixel data. A file manager
+    /// walking a directory must survive that quietly: the entry gets the swatch
+    /// and the listing carries on. Reporting it would mean a dialog per bad
+    /// file, and panicking would mean one bad file closing the file manager.
+    #[test]
+    fn a_truncated_png_is_a_swatch_and_not_a_panic() {
+        let scratch = ScratchDir::new("thumbs_test_png_truncated");
+        let path = scratch.path("half.png");
+        let full = imagecodec::testing::png_gradient(200, 100);
+        fs::write(&path, &full[..full.len() / 2]).unwrap();
+
+        let config = ThumbConfig::default();
+        let thumb = generate_thumbnail(&path, &config);
+
+        assert_eq!((thumb.width, thumb.height), (config.size, config.size));
+        assert_eq!(
+            thumb_pixel(&thumb, config.size / 2, config.size / 2),
+            ThumbCategory::Image.accent_color()
+        );
+    }
+
+    /// A file whose bytes are not a picture at all, under a name that says it
+    /// is. `parse_image_dimensions` finds no header it recognises, so this
+    /// never reaches the decoder — it is the third outcome, the category
+    /// placeholder, and the test exists to pin the boundary between it and the
+    /// swatch.
+    #[test]
+    fn a_png_extension_over_arbitrary_bytes_falls_all_the_way_to_the_placeholder() {
+        let scratch = ScratchDir::new("thumbs_test_png_not_a_picture");
+        let path = scratch.path("lies.png");
+        fs::write(&path, b"this is a text file wearing a hat").unwrap();
+
+        let config = ThumbConfig::default();
+        let thumb = generate_thumbnail(&path, &config);
+        assert_eq!((thumb.width, thumb.height), (config.size, config.size));
+        assert!(thumb.is_valid());
     }
 
     #[test]
@@ -1745,14 +2421,20 @@ mod tests {
     #[test]
     fn render_thumbnail_produces_commands() {
         let thumb = make_test_thumb("test.png", 64);
-        let cmds = render_thumbnail(&thumb, 10.0, 20.0, 100.0);
+        let cmds = render_thumbnail(&thumb, 0xABCD, 10.0, 20.0, 100.0);
 
         // Should produce: BoxShadow, FillRect, Image, StrokeRect
         assert_eq!(cmds.len(), 4);
         assert!(matches!(cmds[0], RenderCommand::BoxShadow { .. }));
         assert!(matches!(cmds[1], RenderCommand::FillRect { .. }));
-        assert!(matches!(cmds[2], RenderCommand::Image { .. }));
         assert!(matches!(cmds[3], RenderCommand::StrokeRect { .. }));
+
+        // The id the caller asked for is the id the compositor is told to
+        // draw. Anything else draws nothing, silently.
+        let RenderCommand::Image { image_id, .. } = cmds[2] else {
+            panic!("third command should be the picture itself");
+        };
+        assert_eq!(image_id, 0xABCD);
     }
 
     #[test]
@@ -1764,7 +2446,7 @@ mod tests {
             source_path: PathBuf::new(),
             source_mtime: 0,
         };
-        let cmds = render_thumbnail(&thumb, 0.0, 0.0, 64.0);
+        let cmds = render_thumbnail(&thumb, 1, 0.0, 0.0, 64.0);
         assert!(cmds.is_empty());
     }
 
@@ -1802,32 +2484,13 @@ mod tests {
     /// two distinct files hashed to one cache filename and the explorer showed
     /// one of them the other's thumbnail.
     ///
-    /// Unix-only: a Windows `OsString` cannot hold either of these paths, and
-    /// our target is `target-family = ["unix"]`.
-    #[cfg(unix)]
+    /// The pair itself is built per-family by [`undecodable_pair`], so this
+    /// runs on the Windows test host as well as on the real target — a
+    /// regression asserted only on a platform we cannot execute is not
+    /// asserted.
     #[test]
-    fn two_names_differing_only_in_undecodable_bytes_do_not_share_a_cache_entry() {
-        use std::os::unix::ffi::OsStrExt;
-        let a = Path::new(std::ffi::OsStr::from_bytes(b"/foo/x\xE9.png"));
-        let b = Path::new(std::ffi::OsStr::from_bytes(b"/foo/x\xFF.png"));
-        assert_ne!(a, b, "the two paths are genuinely different files");
-        assert_ne!(
-            simple_hash(a, 100),
-            simple_hash(b, 100),
-            "and must not share a cache filename"
-        );
-    }
-
-    /// The same property, expressed in the one form the Windows test host can
-    /// represent: an unpaired surrogate is a legal `OsString` that
-    /// `to_string_lossy` maps to U+FFFD. Without this the regression above is
-    /// asserted only on a target we cannot execute here.
-    #[cfg(windows)]
-    #[test]
-    fn two_names_differing_only_in_undecodable_units_do_not_share_a_cache_entry() {
-        use std::os::windows::ffi::OsStringExt;
-        let a = PathBuf::from(std::ffi::OsString::from_wide(&[0x2F, 0xD800]));
-        let b = PathBuf::from(std::ffi::OsString::from_wide(&[0x2F, 0xD801]));
+    fn two_names_differing_only_in_undecodable_units_do_not_share_a_cache_filename() {
+        let (a, b) = undecodable_pair();
         assert_ne!(a, b, "the two paths are genuinely different files");
         assert_eq!(
             a.to_string_lossy(),
@@ -1937,10 +2600,10 @@ mod tests {
         cache.ensure_dir().unwrap();
 
         let thumb = make_test_thumb("test_disk.png", 4);
-        cache.save(&thumb).unwrap();
+        cache.save(&thumb, 128).unwrap();
 
         let loaded = cache
-            .load(Path::new("test_disk.png"), thumb.source_mtime)
+            .load(Path::new("test_disk.png"), thumb.source_mtime, 128)
             .unwrap();
         assert_eq!(loaded.width, thumb.width);
         assert_eq!(loaded.height, thumb.height);
@@ -1954,26 +2617,149 @@ mod tests {
         cache.ensure_dir().unwrap();
 
         let thumb = make_test_thumb("miss.png", 4);
-        cache.save(&thumb).unwrap();
+        cache.save(&thumb, 128).unwrap();
 
         // Different mtime => cache miss.
         assert!(
             cache
-                .load(Path::new("miss.png"), thumb.source_mtime + 1)
+                .load(Path::new("miss.png"), thumb.source_mtime + 1, 128)
                 .is_none()
         );
+    }
+
+    /// The cap is part of the key because [`fit_dimensions`] does not upscale:
+    /// a source smaller than the cap yields a thumbnail of the *source's* size
+    /// at every cap, so the stored dimensions cannot say which cap it was made
+    /// at. Keyed only on path and mtime, raising the thumbnail size would serve
+    /// the old small picture for as long as the file went unmodified.
+    #[test]
+    fn a_cached_thumbnail_is_not_served_at_a_size_it_was_not_made_at() {
+        let scratch = ScratchDir::new("thumbs_test_disk_cap");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+
+        // A 4x4 thumbnail: smaller than either cap, so its dimensions are the
+        // same whichever cap made it. This is the case the old key got wrong.
+        let thumb = make_test_thumb("cap.png", 4);
+        cache.save(&thumb, 64).unwrap();
+
+        assert!(
+            cache
+                .load(Path::new("cap.png"), thumb.source_mtime, 64)
+                .is_some(),
+            "the cap it was made at hits"
+        );
+        assert!(
+            cache
+                .load(Path::new("cap.png"), thumb.source_mtime, 256)
+                .is_none(),
+            "a different cap must miss and regenerate"
+        );
+    }
+
+    /// Purging is keyed on the hash alone, so a live file keeps its entries at
+    /// every cap. A purge that matched whole filenames would delete the sizes
+    /// the caller did not happen to name.
+    #[test]
+    fn purging_keeps_a_live_files_other_sizes() {
+        let scratch = ScratchDir::new("thumbs_test_purge_caps");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+
+        let live = make_test_thumb("live.png", 4);
+        cache.save(&live, 64).unwrap();
+        cache.save(&live, 256).unwrap();
+        let dead = make_test_thumb("dead.png", 4);
+        cache.save(&dead, 64).unwrap();
+
+        let mut valid = HashMap::new();
+        valid.insert(live.source_path.clone(), live.source_mtime);
+        cache.purge_stale(&valid).unwrap();
+
+        assert!(
+            cache
+                .load(Path::new("live.png"), live.source_mtime, 64)
+                .is_some()
+        );
+        assert!(
+            cache
+                .load(Path::new("live.png"), live.source_mtime, 256)
+                .is_some()
+        );
+        assert!(
+            cache
+                .load(Path::new("dead.png"), dead.source_mtime, 64)
+                .is_none(),
+            "a file no longer in the listing is collected"
+        );
+    }
+
+    /// A generator with a disk cache reuses what it wrote instead of decoding
+    /// the file again. Asserted through the cache directory rather than through
+    /// a timing measurement: the *observable* difference is that a file appears
+    /// there, and that a second run of the same request produces the same
+    /// pixels without the source having to still exist.
+    #[test]
+    fn a_generator_with_a_disk_cache_reuses_what_it_wrote() {
+        let scratch = ScratchDir::new("thumbs_test_gen_disk");
+        let source = scratch.dir().join("note.txt");
+        fs::write(&source, b"hello").unwrap();
+        let mtime = file_mtime(&source).unwrap_or(0);
+
+        let cache_dir = scratch.dir().join("cache");
+        let mut tg = ThumbnailGenerator::with_disk_cache(DiskCache::new(cache_dir.clone()));
+        assert!(tg.disk_cache().is_some());
+
+        let req = ThumbnailRequest {
+            path: source.clone(),
+            mtime,
+            size: 5,
+            config: ThumbConfig::default(),
+        };
+        tg.push(req.clone());
+        assert_eq!(tg.process_batch(4), 1);
+        let first = tg.take_completed().pop().expect("one result").1;
+
+        let written: Vec<_> = fs::read_dir(&cache_dir).unwrap().flatten().collect();
+        assert_eq!(written.len(), 1, "generating wrote exactly one cache file");
+
+        // Delete the source. A second request can now only be satisfied from
+        // the cache, so identical pixels prove the cache was the one consulted.
+        fs::remove_file(&source).unwrap();
+        tg.push(req);
+        assert_eq!(tg.process_batch(4), 1);
+        let second = tg.take_completed().pop().expect("one result").1;
+        assert_eq!(second.width, first.width);
+        assert_eq!(second.height, first.height);
+        assert_eq!(second.pixels, first.pixels);
+    }
+
+    /// The unbacked generator is a working configuration, not a broken one.
+    #[test]
+    fn a_generator_without_a_disk_cache_still_generates() {
+        let mut tg = ThumbnailGenerator::new();
+        assert!(tg.disk_cache().is_none());
+        tg.push(ThumbnailRequest {
+            path: PathBuf::from("/nonexistent/x.txt"),
+            mtime: 0,
+            size: 0,
+            config: ThumbConfig::default(),
+        });
+        assert_eq!(tg.process_batch(1), 1);
+        assert_eq!(tg.take_completed().len(), 1);
     }
 
     // -- Helper -------------------------------------------------------------
 
     /// Create a minimal test thumbnail with solid-colored pixels.
+    ///
+    /// Built through a `Canvas` and [`into_thumbnail`], the way production
+    /// code makes one, so the buffer is in the byte order the rest of the
+    /// module assumes and its length agrees with the dimensions by
+    /// construction — a hand-filled `vec![]` here would let a test pass that
+    /// the real path could not.
     fn make_test_thumb(name: &str, size: u32) -> Thumbnail {
-        Thumbnail {
-            width: size,
-            height: size,
-            pixels: vec![128u8; (size * size * 4) as usize],
-            source_path: PathBuf::from(name),
-            source_mtime: 42,
-        }
+        let canvas = Canvas::filled(size, size, Color::rgba(128, 128, 128, 128));
+        into_thumbnail(canvas, Path::new(name), 42)
     }
 }

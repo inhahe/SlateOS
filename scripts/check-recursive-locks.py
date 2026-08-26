@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 # A lock acquisition on a static receiver: STATE.lock(), TABLE.lock_irqsave().
@@ -111,7 +112,7 @@ def _char_literal_end(src: str, i: int) -> int | None:
     return None
 
 
-def strip_noise(src: str) -> str:
+def strip_noise(src: str, keep_literals: bool = False) -> str:
     """Blank out comments and string/char literals, preserving byte offsets.
 
     Offsets must be preserved because every later step reports and slices by
@@ -125,9 +126,31 @@ def strip_noise(src: str) -> str:
     exactly like a gate that found nothing wrong. That is not hypothetical: it
     hid a real lock-order inversion in `kshell.rs`, where this function saw 43
     of the file's 984 function bodies.
+
+    With `keep_literals=True`, literals are still *scanned* -- which is the part
+    that matters, since a `//` inside `"https://x"` opens no comment and a `"`
+    inside a comment opens no string -- but their characters are passed through
+    instead of blanked. Comments go either way.
+
+    That mode exists because the sibling gates that match *on* literal text
+    (`check-option-refusal.py`, `check-usage-status.py`, `check-query-status.py`
+    look for `"Usage: ..."`, `"-x"`, `shell_println!`) each grew their own
+    line-local comment stripper that understood only `//` to end of line. There
+    were five hand-rolled Rust lexers in `scripts/` and only this one handled
+    nested `/* */`, raw strings and char literals or had a self-test. One
+    parameter here is cheaper than five parsers, and far cheaper than five
+    parsers that disagree: the two `check-{usage,query}-status.py` mirrors had
+    already drifted apart on exactly this point without either being able to
+    report it.
     """
     out = list(src)
     i, n = 0, len(src)
+
+    def blank(k: int) -> None:
+        """Blank one literal character unless the caller asked to keep it."""
+        if not keep_literals and src[k] != "\n":
+            out[k] = " "
+
     while i < n:
         c = src[i]
         if c == "'":
@@ -136,8 +159,7 @@ def strip_noise(src: str) -> str:
                 i += 1  # a lifetime or a loop label, not a literal
                 continue
             while i < min(end, n):
-                if src[i] != "\n":
-                    out[i] = " "
+                blank(i)
                 i += 1
             continue
         if (
@@ -147,14 +169,13 @@ def strip_noise(src: str) -> str:
         ):
             hashes, quote = raw
             for k in range(i, quote + 1):
-                out[k] = " "
+                blank(k)
             i = quote + 1
             close = '"' + "#" * hashes
             end = src.find(close, i)
             stop = n if end == -1 else min(end + len(close), n)
             while i < stop:
-                if src[i] != "\n":
-                    out[i] = " "
+                blank(i)
                 i += 1
             continue
         if c == "/" and i + 1 < n and src[i + 1] == "/":
@@ -180,35 +201,37 @@ def strip_noise(src: str) -> str:
                     out[i] = " "
                 i += 1
         elif c == '"':
-            out[i] = " "
+            blank(i)
             i += 1
             while i < n:
                 if src[i] == "\\":
-                    out[i] = " "
-                    if i + 1 < n and src[i + 1] != "\n":
-                        out[i + 1] = " "
+                    blank(i)
+                    if i + 1 < n:
+                        blank(i + 1)
                     i += 2
                     continue
                 if src[i] == '"':
-                    out[i] = " "
+                    blank(i)
                     i += 1
                     break
-                if src[i] != "\n":
-                    out[i] = " "
+                blank(i)
                 i += 1
         else:
             i += 1
     return "".join(out)
 
 
-def find_bodies(src: str) -> dict[str, tuple[int, int]]:
-    """Map each function name in the file to its body's [start, end) offsets.
+def find_all_bodies(src: str) -> dict[str, list[tuple[int, int]]]:
+    """Map each function name to the [start, end) offsets of *every* definition.
 
-    Nested functions and same-named methods in different impl blocks both occur
-    here; a later definition simply wins, which is acceptable for a heuristic
-    whose output is hand-checked.
+    A name is not unique in a Rust file: `fn report` may be a method on four
+    different enums, and a nested `fn piped` may be redeclared in a dozen
+    sibling blocks. A caller that wants to know "what can a call to this name
+    reach" must consider all of them, because it cannot resolve the receiver's
+    type -- so it unions their bodies and over-approximates. `find_bodies`
+    exists for callers that only need one span and are hand-checked.
     """
-    bodies: dict[str, tuple[int, int]] = {}
+    bodies: dict[str, list[tuple[int, int]]] = {}
     for m in FN_DEF.finditer(src):
         name = m.group(1)
         # Walk forward to the body's opening brace, skipping the parameter list,
@@ -243,10 +266,21 @@ def find_bodies(src: str) -> dict[str, tuple[int, int]]:
             elif src[j] == "}":
                 depth -= 1
                 if depth == 0:
-                    bodies[name] = (start + 1, j)
+                    bodies.setdefault(name, []).append((start + 1, j))
                     break
             j += 1
     return bodies
+
+
+def find_bodies(src: str) -> dict[str, tuple[int, int]]:
+    """Map each function name in the file to its body's [start, end) offsets.
+
+    Nested functions and same-named methods in different impl blocks both occur
+    here; a later definition simply wins, which is acceptable for a heuristic
+    whose output is hand-checked. Use `find_all_bodies` when every definition
+    matters.
+    """
+    return {name: spans[-1] for name, spans in find_all_bodies(src).items()}
 
 
 def direct_locks(body: str) -> set[str]:
@@ -292,6 +326,146 @@ def block_end(src: str, pos: int, limit: int) -> int:
             depth -= 1
         i += 1
     return limit
+
+
+def walk_block(
+    struct: list[str], start: int, start_col: int = 0, limit: int = 300
+) -> Iterator[tuple[int, int, int]]:
+    """Walk forward from a point until control leaves the block containing it.
+
+    Yields `(index, from_col, to_col)` for each line, where the slice
+    `line[from_col:to_col]` is the part of that line that belongs to the block
+    the walk started in.  A caller must match only that slice: text outside it
+    belongs to a *sibling* block, and attributing it to this one is the entire
+    bug this helper exists to prevent.
+
+    `struct` must have comments *and* literals blanked -- `strip_noise(text)`,
+    split on newlines.  A brace inside a comment or a string is not structure,
+    and counting one shifts every boundary after it.
+
+    Braces are counted a character at a time, never a line at a time.  The line
+    `} else {` closes one block and opens another, so a line-granular sum nets
+    to zero: the walk never sees depth go negative, sails straight past the
+    brace that ends the block, and carries on into the `else` branch.  Anything
+    it finds there gets credited to the `if`.  That is not hypothetical --
+    `check-usage-status.py` counted by the line and so reported *zero* findings
+    while hiding 195 real ones across 50 shell commands, for months, with no
+    symptom other than looking clean.
+
+    The distinction worth keeping in mind, because three other counters in this
+    directory are line-granular and *correct*: a walk over a **balanced** block
+    (start on its `{`, stop when depth returns to 0) is safe at line
+    granularity, because `} else {` nets to zero truthfully -- the block really
+    does end at depth 0.  Only a walk like this one, which must notice depth
+    going **negative** -- leaving a block it never entered -- is broken by it,
+    because that dip happens *within* the line and a line-sum cannot see it.
+
+    `start_col` matters for the same reason.  A caller that found its match
+    mid-line must pass the match's column, or a one-liner such as
+    `if n < 2 { a(); } else { b(); }` walks from column zero, counts the `{` it
+    was already inside, and reads the `else` branch as its own.
+    """
+    depth = 0
+    for k in range(start, min(start + limit, len(struct))):
+        line = struct[k]
+        col = start_col if k == start else 0
+        for j in range(col, len(line)):
+            ch = line[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth < 0:
+                    yield k, col, j
+                    return
+        yield k, col, len(line)
+
+
+def statements(code: list[str], struct: list[str]) -> Iterator[tuple[int, str]]:
+    """Yield `(start_index, text)` for each statement-sized span of a file.
+
+    `text` is the span's source with its newlines collapsed to single spaces,
+    so a regex that spans method calls can be matched against it.  Match
+    against *this*, never against a line.
+
+    Why: **the author does not decide where the newlines go -- `cargo fmt`
+    does.**  These two are the same code, and a line-granular regex sees only
+    the first::
+
+        let n = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);
+
+        let n = parts
+            .get(2)
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(20);
+
+    Which form a given site takes is decided by how long the surrounding names
+    happen to be.  `check-option-refusal.py` matched by the line and so
+    published 240 findings while hiding 466 more of the identical shape -- and,
+    like the `} else {` bug that `walk_block` exists for, a gate that is wrong
+    in the *clean* direction produces no symptom at all.
+
+    Two views are required, and they must be the two that `strip_noise`
+    produces from one text, because it blanks in place and so leaves every line
+    at its original length and number:
+
+    * `struct` -- comments *and* literals blanked.  Terminators and nesting are
+      counted over this only.  A `(` inside a string literal is not a bracket;
+      counting one makes the depth drift upward and never come back, after
+      which no terminator fires again and the rest of the file glues into a
+      single span.  (Measured: doing it over the literals-kept view collapsed
+      this file's 100698 spans into 1068.)
+    * `code` -- comments blanked, literals kept.  The text is taken from here,
+      because the detectors look for literal option spellings.
+
+    A span ends at `;`, `{`, `}` or `,` appearing at bracket depth zero.  The
+    comma is not decoration: at depth zero it separates match arms, and without
+    it a `.parse()` in one arm and an `.unwrap_or()` in the next would glue
+    into a single span and match a chain that does not exist.  `{` and `}` end
+    a span only outside brackets, so a closure body -- `unwrap_or_else(|| {
+    ... })` -- stays with the chain that owns it.
+
+    A statement's start index is the line its *first* text sits on, which is
+    the line a reader would call it.  Two consequences worth knowing: a site
+    can be reported against an earlier line than the one it is written on (a
+    wrapped chain is credited to its `let`), and the enclosing function is
+    looked up at that line -- always the same function, since a statement
+    cannot straddle two.
+    """
+    depth = 0
+    buf: list[str] = []
+    start: int | None = None
+    for i, sline in enumerate(struct):
+        cline = code[i]
+        seg = 0
+        for j, ch in enumerate(sline):
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                # Clamped at zero rather than allowed to go negative: a file
+                # this walk cannot balance (a macro with unmatched brackets,
+                # say) would otherwise drift permanently and silence every
+                # terminator after it.  Clamping localises the damage.
+                depth = max(depth - 1, 0)
+            elif depth == 0 and ch in ";{},":
+                if start is None:
+                    start = i
+                buf.append(cline[seg : j + 1])
+                text = " ".join(part.strip() for part in buf).strip()
+                if text:
+                    yield start, text
+                buf = []
+                start = None
+                seg = j + 1
+        rest = cline[seg:]
+        if rest.strip():
+            if start is None:
+                start = i
+            buf.append(rest)
+    if buf and start is not None:
+        text = " ".join(part.strip() for part in buf).strip()
+        if text:
+            yield start, text
 
 
 def analyse(path: Path) -> list[str]:
@@ -363,6 +537,196 @@ _PARSER_CASES: tuple[tuple[str, str, list[str]], ...] = (
 )
 
 
+# `keep_literals=True` cases, as (name, source, expected output). These assert
+# the *exact* result rather than a body list, because the whole point of the
+# mode is which characters survive -- a body list would not notice a literal
+# being blanked. Each is a shape that defeated one of the line-local strippers
+# this mode replaces.
+_KEEP_LITERAL_CASES: tuple[tuple[str, str, str], ...] = (
+    # The case that started it: a comment saying a thing is absent satisfied a
+    # grep for that thing.
+    (
+        "line comment goes, string stays",
+        'p("Usage: x"); // no set_exit(1) here\n',
+        'p("Usage: x");                       \n',
+    ),
+    # `//` inside a string opens no comment. A stripper that cuts at the first
+    # `//` would eat the rest of the line, including a real trailing `set_exit`.
+    (
+        "slashes inside a string are not a comment",
+        'p("https://x"); set_exit(1);\n',
+        'p("https://x"); set_exit(1);\n',
+    ),
+    # A quote inside a comment opens no string -- the failure that makes a
+    # naive stripper swallow to the next quote anywhere in the file.
+    (
+        "quote inside a comment",
+        'let a = 1; // it\'s "quoted\np("real");\n',
+        'let a = 1;                \np("real");\n',
+    ),
+    # Neither of the two ad-hoc copies understood block comments at all.
+    (
+        "block comment goes, spanning lines",
+        'a(); /* set_exit(1)\n more */ b("keep");\n',
+        'a();               \n         b("keep");\n',
+    ),
+    # Nested block comments are legal in Rust and end at the *matching* `*/`.
+    (
+        "nested block comment",
+        'a(); /* x /* y */ z */ b();\n',
+        'a();                   b();\n',
+    ),
+    # A raw string keeps its backslashes and may contain `//` and `/*`.
+    (
+        "raw string is not a comment",
+        'p(r"C:\\dir // *"); c();\n',
+        'p(r"C:\\dir // *"); c();\n',
+    ),
+    # A `'"'` must not open a string, or every brace to the next quote is lost.
+    (
+        "char literal holding a quote",
+        'if c == \'"\' { /* gone */ }\n',
+        'if c == \'"\' {            }\n',
+    ),
+)
+
+
+# `walk_block` cases, as (name, source, start line, start column, expected).
+# The expected value is the text the walk says belongs to the starting block,
+# lines joined by newline -- written out in full so a boundary that moves by one
+# character is visible in the failure message rather than inferred from a count.
+#
+# Every case below is answered *wrongly* by a line-granular count, which is what
+# all of this checker's callers used before the walk was shared. They are
+# regression tests for a bug that hid 195 findings while the gate printed a
+# clean line.
+_BLOCK_WALK_CASES: tuple[tuple[str, str, int, int, str], ...] = (
+    # The shipped bug, at its smallest: `} else {` nets to zero by the line, so
+    # a line-granular walk reads `b()` -- which is the else branch -- as part of
+    # the `if`.
+    (
+        "} else { ends the block",
+        "if n < 2 {\n    a();\n} else {\n    b();\n}\n",
+        1,
+        0,
+        "    a();\n",
+    ),
+    # The same shape spelled as match arms: a sibling arm must not be read as a
+    # continuation of this one. Starts mid-line, as a real caller does.
+    (
+        "a sibling match arm is not entered",
+        "match x {\n    A => { a(); }\n    B => { b(); }\n}\n",
+        1,
+        11,
+        "a(); ",
+    ),
+    # The converse, and the reason this cannot simply stop at the first `}`:
+    # a block *opened after* the start closes back to depth 0 and the walk must
+    # continue through it.
+    (
+        "a balanced nested block does not end the walk",
+        "a();\nif q { b(); }\nc();\n}\n",
+        0,
+        0,
+        "a();\nif q { b(); }\nc();\n",
+    ),
+    # `start_col` earning its place: from column zero this walk counts the `{`
+    # it is already inside and hands back the else branch as well.
+    (
+        "start_col keeps a one-liner honest",
+        "if n < 2 { a(); } else { b(); }\n",
+        0,
+        11,
+        "a(); ",
+    ),
+    # Braces in comments and literals are not structure. Passing raw lines here
+    # instead of `strip_noise` output would end the walk at the `}` in the
+    # comment, one line early.
+    (
+        "a brace in a comment is not structure",
+        "a();\nb(); // closes with }\nc();\n}\n",
+        0,
+        0,
+        "a();\nb();                 \nc();\n",
+    ),
+)
+
+# Cases for `statements`. Each is `(name, src, expected)` where `expected` is
+# the list of `(start_index, text)` pairs the span walk must produce. Every one
+# of them is answered wrongly by matching a line: the first is the bug itself,
+# and the rest are the ways a naive splitter gets the *opposite* answer -- too
+# few spans, or too many -- once real Rust is fed to it.
+_STATEMENT_CASES: tuple[tuple[str, str, list[tuple[int, str]]], ...] = (
+    # The shipped bug. `cargo fmt` chose these newlines, and a per-line regex
+    # for `.parse()…​.unwrap_or(` sees four fragments and matches none of them.
+    (
+        "a chain rustfmt wrapped is one span",
+        "let n = parts\n    .get(2)\n"
+        "    .and_then(|s| s.parse::<u32>().ok())\n    .unwrap_or(20);\n",
+        [(0, "let n = parts .get(2) .and_then(|s| s.parse::<u32>().ok()) .unwrap_or(20);")],
+    ),
+    # The unwrapped spelling of the identical code must give the identical
+    # span, or the walk has merely moved the blind spot rather than closed it.
+    (
+        "the same chain on one line is the same span",
+        "let n = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);\n",
+        [(0, "let n = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);")],
+    ),
+    # Why the depth count must run over the literals-blanked view. With
+    # literals kept, this `(` is never closed, the depth drifts up by one, and
+    # no terminator fires for the rest of the file -- which is how the first
+    # draft of this walk turned 100698 spans into 1068 and found 2 sites.
+    (
+        "a bracket inside a string literal is not a bracket",
+        'shell_println!("(");\nlet n = x.parse::<u32>().unwrap_or(0);\n',
+        [(0, 'shell_println!("(");'), (1, "let n = x.parse::<u32>().unwrap_or(0);")],
+    ),
+    # A `;` inside a literal does not end a span either, for the same reason.
+    (
+        "a semicolon inside a string literal does not end a span",
+        'let s = "a;b".len();\n',
+        [(0, 'let s = "a;b".len();')],
+    ),
+    # The comma is a terminator at depth zero because match arms are separated
+    # by one. Without it these two arms glue, and a `.parse()` in the first
+    # would pair with an `.unwrap_or()` in the second to match a chain that is
+    # not in the source -- a false finding, which costs a gate its credibility
+    # just as surely as a missed one.
+    (
+        "sibling match arms do not glue",
+        "match x {\n    A => a.parse::<u32>(),\n    B => b.unwrap_or(0),\n}\n",
+        [
+            (0, "match x {"),
+            (1, "A => a.parse::<u32>(),"),
+            (2, "B => b.unwrap_or(0),"),
+            (3, "}"),
+        ],
+    ),
+    # ...but a comma *inside* brackets is an argument separator and must not
+    # split, or every multi-argument call becomes several spans.
+    (
+        "a comma inside brackets is not a terminator",
+        "let n = cmp::min(a, b).parse::<u32>().unwrap_or(0);\n",
+        [(0, "let n = cmp::min(a, b).parse::<u32>().unwrap_or(0);")],
+    ),
+    # A closure body's braces sit inside the call's parens, so they do not end
+    # the span: the fallback stays attached to the chain it belongs to.
+    (
+        "a closure body stays with its chain",
+        "let n = s.parse::<u32>().unwrap_or_else(|_| { 0 });\n",
+        [(0, "let n = s.parse::<u32>().unwrap_or_else(|_| { 0 });")],
+    ),
+    # A span is credited to the line its first text is on, not the line the
+    # terminator is on. This is what lets the caller look up the enclosing
+    # function and the production/test classification at a sane line.
+    (
+        "a span is credited to its first line",
+        "let n =\n    read();\n",
+        [(0, "let n = read();")],
+    ),
+)
+
+
 def self_test() -> int:
     """Check the source scanner against the literal forms that have broken it.
 
@@ -385,7 +749,45 @@ def self_test() -> int:
         if stripped.count("\n") != src.count("\n"):
             failures += 1
             print(f"FAIL {name}: line count not preserved")
-    total = len(_PARSER_CASES)
+        # The scanning is shared between the two modes, so every case above is
+        # also an offset test for `keep_literals=True`. Its body list is not
+        # checked: braces inside literals survive in that mode by design, so
+        # `find_bodies` is not meaningful on its output.
+        kept = strip_noise(src, keep_literals=True)
+        if len(kept) != len(src) or kept.count("\n") != src.count("\n"):
+            failures += 1
+            print(f"FAIL {name}: offsets not preserved with keep_literals")
+
+    for name, src, want in _KEEP_LITERAL_CASES:
+        got = strip_noise(src, keep_literals=True)
+        if got != want:
+            failures += 1
+            print(f"FAIL keep_literals/{name}:\n  expected {want!r}\n  got      {got!r}")
+        if len(got) != len(src):
+            failures += 1
+            print(f"FAIL keep_literals/{name}: offsets not preserved")
+
+    for name, src, start, col, want in _BLOCK_WALK_CASES:
+        struct = strip_noise(src).split("\n")
+        got = "\n".join(struct[k][a:b] for k, a, b in walk_block(struct, start, col))
+        if got != want:
+            failures += 1
+            print(f"FAIL walk_block/{name}:\n  expected {want!r}\n  got      {got!r}")
+
+    for name, src, want_spans in _STATEMENT_CASES:
+        code = strip_noise(src, keep_literals=True).split("\n")
+        struct = strip_noise(src).split("\n")
+        got_spans = list(statements(code, struct))
+        if got_spans != want_spans:
+            failures += 1
+            print(f"FAIL statements/{name}:\n  expected {want_spans!r}\n  got      {got_spans!r}")
+
+    total = (
+        len(_PARSER_CASES)
+        + len(_KEEP_LITERAL_CASES)
+        + len(_BLOCK_WALK_CASES)
+        + len(_STATEMENT_CASES)
+    )
     if failures:
         print(f"\n[parser self-test] {failures} failure(s) across {total} case(s)", file=sys.stderr)
         return 1

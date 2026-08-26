@@ -56,10 +56,13 @@
 //! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
 //! naming what was wrong.
 
+use guitk::event::{Key, Modifiers};
+
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
 use crate::{
-    DecodeError, Reader, capacity_hint, write_f32, write_i32, write_string, write_u32, write_u64,
+    DecodeError, Reader, capacity_hint, write_bytes, write_f32, write_i32, write_string, write_u32,
+    write_u64,
 };
 
 /// Request-frame magic: `b"CREQ"` (client → compositor).
@@ -70,7 +73,30 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 
 /// Control protocol version. Bump on any incompatible layout change; never
 /// reuse a number.
-pub const CONTROL_VERSION: u8 = 1;
+///
+/// **2** — the request vocabulary gained [`RequestBody::GrabKey`] and
+/// [`RequestBody::UngrabKey`] (tags `0x17`/`0x18`). No existing message moved a
+/// byte, but an unrecognised tag is [`DecodeError::BadTag`] and the decoder
+/// stops there, so a version-1 compositor handed a grab fails the frame rather
+/// than skipping one message in it. As with
+/// [`INPUT_VERSION`](crate::input::INPUT_VERSION) 2, "incompatible" is about
+/// what the other end can read, not only about where the bytes sit.
+///
+/// **3** — [`WindowSpec`] gained
+/// [`input_transparent`](WindowSpec::input_transparent), one byte written
+/// directly after `transparent`. Unlike 2, this one *does* move bytes: every
+/// field after it in a `CreateWindow` message shifts by one, so a version-2
+/// decoder reads the min-size presence flag out of the new byte and
+/// desynchronises for the rest of the message. There is no way to add it that
+/// an older peer could skip — the encoding carries no per-field lengths — which
+/// is what the version number is for.
+///
+/// **4** — [`WindowSpec`] gained [`app_id`](WindowSpec::app_id), a
+/// length-prefixed string written directly after `title`. Moves bytes for the
+/// same reason 3 did, and worse: the new field's own length prefix would be
+/// read by a version-3 decoder as the window's *width*, so the failure is not a
+/// wrong flag but a window several hundred million pixels across.
+pub const CONTROL_VERSION: u8 = 4;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -159,6 +185,66 @@ impl CursorShape {
             0x0B => Self::Crosshair,
             0x0C => Self::NotAllowed,
             0x0D => Self::Hidden,
+            _ => return None,
+        })
+    }
+}
+
+// ============================================================================
+// Pixel formats
+// ============================================================================
+
+/// Pixel layout of a block of client-supplied pixels.
+///
+/// This is the one the *wire* uses, and — by the same rule that left
+/// [`CursorShape`] the only cursor enum — deliberately the only one. The
+/// compositor previously declared its own `BufferFormat`, which was fine while
+/// pixels could only be handed over in-process; the moment
+/// [`RequestBody::UploadImage`] let them arrive from another process, two enums
+/// meant two orderings for the byte-per-variant mapping, and nothing to make
+/// them agree beyond a reviewer noticing. Byte `0x01` means `Argb8888` here
+/// because it is written down here, and the compositor imports this type rather
+/// than translating into a copy of it.
+///
+/// Both variants are 32 bits per pixel and little-endian. The compositor works
+/// internally in `0xAARRGGBB`, so an import converts to that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BufferFormat {
+    /// 32 bits per pixel with an alpha channel. Memory bytes (low→high) are
+    /// `[B, G, R, A]`, i.e. a little-endian `u32` of `0xAARRGGBB`.
+    #[default]
+    Argb8888,
+    /// Same byte order as [`Argb8888`](BufferFormat::Argb8888) but the high
+    /// byte is ignored and the pixel is treated as fully opaque.
+    Xrgb8888,
+}
+
+impl BufferFormat {
+    /// Bytes occupied by a single pixel in this format.
+    #[must_use]
+    pub const fn bytes_per_pixel(self) -> u32 {
+        match self {
+            Self::Argb8888 | Self::Xrgb8888 => 4,
+        }
+    }
+
+    /// Whether this format carries per-pixel alpha. `Xrgb8888` does not.
+    #[must_use]
+    pub const fn has_alpha(self) -> bool {
+        matches!(self, Self::Argb8888)
+    }
+
+    const fn to_byte(self) -> u8 {
+        match self {
+            Self::Argb8888 => 0x01,
+            Self::Xrgb8888 => 0x02,
+        }
+    }
+
+    const fn from_byte(b: u8) -> Option<Self> {
+        Some(match b {
+            0x01 => Self::Argb8888,
+            0x02 => Self::Xrgb8888,
             _ => return None,
         })
     }
@@ -402,6 +488,35 @@ impl ShellControlAction {
 pub struct WindowSpec {
     /// Title for the decoration bar and the taskbar.
     pub title: String,
+    /// Which *program* this window belongs to, as the program itself says.
+    ///
+    /// Next to the title because the two are the same kind of thing — text a
+    /// window is identified by — and different in exactly one way that matters:
+    /// the title is what this *document* is called and changes as the user
+    /// works, while this is what the *application* is called and never changes
+    /// for the life of the window. Anything that wants to say "all of Firefox's
+    /// windows" has to key on something that does not move, and before this
+    /// field the only candidate was the pid, which is a number no user can
+    /// type into a rule.
+    ///
+    /// Conventionally the executable's file stem, lower-cased —
+    /// [`oswindow`'s `App::app_id`] defaults to exactly that, so a program gets
+    /// a usable id without writing a line. An empty string is allowed and means
+    /// "this window declines to identify itself"; it matches no rule rather
+    /// than matching every one, since a rule about an unnamed program is a rule
+    /// about all of them.
+    ///
+    /// **Advisory, and never a security claim.** The client sends it, so a
+    /// client may send anything — the compositor cannot tell `terminal` that
+    /// really is the terminal from `terminal` that is not. That is acceptable
+    /// for what it is for (window rules, grouping taskbar buttons, an icon
+    /// lookup), all of which are cosmetic, and it is why the pid is still
+    /// carried separately: [`WindowInfo::pid`] comes from the connection and
+    /// cannot be forged. Never gate a capability on this string.
+    ///
+    /// [`oswindow`'s `App::app_id`]: https://docs.rs/oswindow
+    /// [`WindowInfo::pid`]: crate::window_list::WindowInfo::pid
+    pub app_id: String,
     /// Requested client-area width in pixels.
     pub width: u32,
     /// Requested client-area height in pixels.
@@ -418,6 +533,22 @@ pub struct WindowSpec {
     pub decorations: bool,
     /// Whether the window's background may be transparent.
     pub transparent: bool,
+    /// Whether pointer input passes straight through the window to whatever is
+    /// behind it.
+    ///
+    /// Distinct from [`transparent`](Self::transparent), which is about pixels:
+    /// a window can be see-through and still clickable (a frosted panel), and
+    /// opaque yet click-through (a debug overlay). This flag is about the
+    /// hit test alone — the compositor behaves as though the window were not
+    /// there when deciding where a click, a hover or a scroll lands.
+    ///
+    /// The window can therefore never be focused by clicking it, and gets no
+    /// pointer events at all. It can still be raised, moved and painted by its
+    /// owner, and still receives keyboard input if something else focuses it.
+    ///
+    /// This is what a heads-up overlay needs — a volume OSD covering the middle
+    /// of the screen must not eat the click aimed at the window underneath it.
+    pub input_transparent: bool,
     /// Smallest client area the window can usefully be shown at.
     pub min_size: Option<(u32, u32)>,
     /// Largest client area the window wants to be shown at.
@@ -433,17 +564,26 @@ pub struct WindowSpec {
 
 impl WindowSpec {
     /// A titled window of the given size, with the ordinary defaults:
-    /// resizable, decorated, opaque, placed by the compositor.
+    /// resizable, decorated, opaque, clickable, placed by the compositor, and
+    /// declining to name the program it belongs to.
+    ///
+    /// [`app_id`](Self::app_id) is empty rather than derived from the title,
+    /// because a title is a document name and reusing it would give every
+    /// window of the same program a different id — the exact opposite of what
+    /// the field is for. Callers that want one should set it, or go through
+    /// [`oswindow::app`], whose default reads the executable's name.
     #[must_use]
     pub fn new(title: impl Into<String>, width: u32, height: u32) -> Self {
         Self {
             title: title.into(),
+            app_id: String::new(),
             width,
             height,
             position: None,
             resizable: true,
             decorations: true,
             transparent: false,
+            input_transparent: false,
             min_size: None,
             max_size: None,
             layer: Layer::Normal,
@@ -696,6 +836,124 @@ pub enum RequestBody {
     /// Answered with [`ResponseBody::Ok`], including when the file turns out
     /// not to have changed, exactly as for appearance.
     ReloadInput,
+    /// Hand the compositor a block of pixels and give it a name, so that this
+    /// window's [`RenderCommand::Image`](guitk::render::RenderCommand::Image)
+    /// commands naming that name have something to draw.
+    ///
+    /// **Uploading is a separate request from drawing** because the two have
+    /// opposite frequencies: a file manager's thumbnail is produced once and
+    /// drawn on every frame the folder is on screen, and a protocol that
+    /// carried the pixels alongside the draw would re-send a megabyte sixty
+    /// times a second to show a still picture. It is the same split as a texture
+    /// upload and a textured quad, and for the same reason.
+    ///
+    /// `image_id` is the **client's** to choose and is scoped to this window.
+    /// Two clients may both use id 1 without either seeing the other's pixels,
+    /// and a client with two windows must upload to each separately — an id
+    /// resolved against the window is what makes the previous sentence true.
+    /// Re-uploading an existing id **replaces** it, which is how a picture is
+    /// updated in place (a video frame, a re-rendered chart) without the
+    /// intervening frame where the id names nothing and the image blinks out.
+    ///
+    /// The pixels travel **inline**, not as a shared mapping. That is a real
+    /// cost for a full-resolution photograph and it is what this protocol can
+    /// honestly offer: the transport is a TCP connection
+    /// (`design-decisions.md` §460) whose far end need not be on this machine,
+    /// and a mapping that only works over loopback would be a fast path that
+    /// silently is not there.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error — the window is not
+    /// yours, the geometry does not describe the bytes, or you have more pixels
+    /// resident with this compositor than it is willing to hold for one
+    /// connection. A refused upload changes nothing: whatever `image_id` named
+    /// before is still there.
+    UploadImage {
+        window: u64,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        /// Bytes from the start of one row to the start of the next. May exceed
+        /// `width * bytes_per_pixel` — a client cropping a larger picture
+        /// uploads the sub-rectangle's width with the original's stride rather
+        /// than repacking it.
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    },
+    /// Forget one of this window's uploaded images and release its memory.
+    ///
+    /// Commands still naming the id afterwards draw nothing, which is the same
+    /// thing an id that was never uploaded does, and is not an error: a frame
+    /// already in flight when the drop was sent must not be able to fault the
+    /// window that sent it.
+    ///
+    /// Answered with [`ResponseBody::Ok`] whether or not an image was there.
+    /// Reporting "there was nothing to drop" would tell a client something it
+    /// cannot act on and would make the ordinary tidy-up-everything loop noisy.
+    DropImage { window: u64, image_id: u64 },
+    /// Claim one key combination for a window, so that it arrives there
+    /// whatever else has the keyboard.
+    ///
+    /// **This is the only way a desktop-wide shortcut can work.** Without it a
+    /// key event goes to the focused window and nowhere else, which means the
+    /// taskbar's Alt+Tab fires only while the taskbar itself is focused — never,
+    /// in practice, because Alt+Tab exists to be pressed from inside some other
+    /// window. The compositor consults its grab table *before* it looks up the
+    /// focused window, and a grabbed chord is delivered to the grabber **instead
+    /// of**, not as well as, the window the user is typing in.
+    ///
+    /// The window named is the sender's own and is resolved in the ordinary way:
+    /// it is where the [`crate::input::InputEvent`] will be addressed, and it is
+    /// also the grab's *lifetime*. Grabs die when the window is destroyed and
+    /// when the connection hangs up, which is what stops a crashed shell
+    /// swallowing Alt+Tab for the rest of the session with nothing left on
+    /// screen to release it. This is the same lifetime argument as
+    /// [`ReserveEdge`](Self::ReserveEdge).
+    ///
+    /// **First grabber wins.** A second client asking for a chord somebody else
+    /// holds is refused with an error rather than quietly shadowing or replacing
+    /// the first: a grab that silently does nothing is indistinguishable from a
+    /// shortcut nobody has pressed, which is precisely the bug this whole
+    /// mechanism exists to end. Re-grabbing a chord *you already hold* is not an
+    /// error — it is what a shell does when it re-reads its config.
+    ///
+    /// **Both the press and the release** of a grabbed key go to the grabber,
+    /// and the release follows the press even if the modifiers were let go
+    /// first: Alt+Tab held open is a chord whose release is `Tab` with Alt
+    /// already up, and a release delivered to somebody else is a key the grabber
+    /// never sees go up.
+    ///
+    /// A grabbed chord produces **no text**. The dead-key composer is not run
+    /// for it and no character is attached, because a shortcut is not typing.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`: a program that could
+    /// claim Super+L could show a convincing fake lock screen and collect the
+    /// password. See that function for why the gate does not yet answer.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error naming the conflict.
+    GrabKey {
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    },
+    /// Release a claim made by [`GrabKey`](Self::GrabKey).
+    ///
+    /// Releasing a chord this window does not hold is **not** an error, for the
+    /// same reason [`DropImage`](Self::DropImage) is not: a client tidying up
+    /// should not have to remember precisely what it took, and the ordinary
+    /// release-everything loop would otherwise be noisy. Releasing one that
+    /// *another* window holds is refused — otherwise any client could strip the
+    /// shell of Alt+Tab without ever holding it.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`, so that the refusal
+    /// above cannot be used as a way to probe which chords are taken.
+    ///
+    /// Answered with [`ResponseBody::Ok`].
+    UngrabKey {
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -721,6 +979,10 @@ enum RequestTag {
     SwitchWorkspace = 0x12,
     SetWindowWorkspace = 0x13,
     ReloadInput = 0x14,
+    UploadImage = 0x15,
+    DropImage = 0x16,
+    GrabKey = 0x17,
+    UngrabKey = 0x18,
 }
 
 impl RequestTag {
@@ -746,6 +1008,10 @@ impl RequestTag {
             0x12 => Self::SwitchWorkspace,
             0x13 => Self::SetWindowWorkspace,
             0x14 => Self::ReloadInput,
+            0x15 => Self::UploadImage,
+            0x16 => Self::DropImage,
+            0x17 => Self::GrabKey,
+            0x18 => Self::UngrabKey,
             _ => return None,
         })
     }
@@ -909,12 +1175,14 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
         RequestBody::CreateWindow(spec) => {
             out.push(RequestTag::CreateWindow as u8);
             write_string(out, &spec.title);
+            write_string(out, &spec.app_id);
             write_u32(out, spec.width);
             write_u32(out, spec.height);
             write_optional_point(out, spec.position);
             out.push(u8::from(spec.resizable));
             out.push(u8::from(spec.decorations));
             out.push(u8::from(spec.transparent));
+            out.push(u8::from(spec.input_transparent));
             write_optional_size(out, spec.min_size);
             write_optional_size(out, spec.max_size);
             out.push(spec.layer.as_byte());
@@ -1002,6 +1270,56 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::SetWindowWorkspace as u8);
             write_u64(out, *window);
             write_u32(out, *workspace);
+        }
+        RequestBody::UploadImage {
+            window,
+            image_id,
+            width,
+            height,
+            stride,
+            format,
+            bytes,
+        } => {
+            out.push(RequestTag::UploadImage as u8);
+            write_u64(out, *window);
+            write_u64(out, *image_id);
+            write_u32(out, *width);
+            write_u32(out, *height);
+            write_u32(out, *stride);
+            out.push(format.to_byte());
+            // Bytes last, so that everything the receiver needs to decide
+            // whether it wants them has already been read by the time the
+            // length prefix arrives.
+            write_bytes(out, bytes);
+        }
+        RequestBody::DropImage { window, image_id } => {
+            out.push(RequestTag::DropImage as u8);
+            write_u64(out, *window);
+            write_u64(out, *image_id);
+        }
+        // Both grab verbs carry the same three fields in the same order, and
+        // deliberately share the input protocol's key and modifier codecs rather
+        // than spelling a chord out here: one table for the whole crate is what
+        // stops a chord grabbed as `Home` being matched as `End`.
+        RequestBody::GrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            out.push(RequestTag::GrabKey as u8);
+            write_u64(out, *window);
+            crate::input::encode_key(out, *key);
+            out.push(crate::input::encode_modifiers(*modifiers));
+        }
+        RequestBody::UngrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            out.push(RequestTag::UngrabKey as u8);
+            write_u64(out, *window);
+            crate::input::encode_key(out, *key);
+            out.push(crate::input::encode_modifiers(*modifiers));
         }
     }
 }
@@ -1142,24 +1460,28 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
     Ok(match tag {
         RequestTag::CreateWindow => {
             let title = r.read_string()?;
+            let app_id = r.read_string()?;
             let width = r.read_u32()?;
             let height = r.read_u32()?;
             let position = read_optional_point(r)?;
             let resizable = read_bool(r)?;
             let decorations = read_bool(r)?;
             let transparent = read_bool(r)?;
+            let input_transparent = read_bool(r)?;
             let min_size = read_optional_size(r)?;
             let max_size = read_optional_size(r)?;
             let layer_byte = r.read_u8()?;
             let layer = Layer::from_byte(layer_byte).ok_or(DecodeError::BadTag(layer_byte))?;
             RequestBody::CreateWindow(WindowSpec {
                 title,
+                app_id,
                 width,
                 height,
                 position,
                 resizable,
                 decorations,
                 transparent,
+                input_transparent,
                 min_size,
                 max_size,
                 layer,
@@ -1263,6 +1585,63 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 workspace: r.read_u32()?,
             }
         }
+        RequestTag::UploadImage => {
+            let window = r.read_u64()?;
+            let image_id = r.read_u64()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            let stride = r.read_u32()?;
+            let b = r.read_u8()?;
+            let format = BufferFormat::from_byte(b).ok_or(DecodeError::BadBufferFormat(b))?;
+            // Nothing is validated against anything else here: whether the
+            // stride covers the width, and whether the bytes cover the rows, is
+            // the compositor's import check, which is where the answer has to
+            // be right anyway. A second copy in the decoder would be a second
+            // place for the arithmetic to be wrong, and only one of them would
+            // be the one a hostile client actually has to get past.
+            let bytes = r.read_bytes()?;
+            RequestBody::UploadImage {
+                window,
+                image_id,
+                width,
+                height,
+                stride,
+                format,
+                bytes,
+            }
+        }
+        RequestTag::DropImage => {
+            let window = r.read_u64()?;
+            RequestBody::DropImage {
+                window,
+                image_id: r.read_u64()?,
+            }
+        }
+        // Read field by field into locals rather than inline in the struct
+        // literal, because the order the fields are *read* is the wire order and
+        // the order they are *written* in the literal is not; a struct literal
+        // that happened to list them differently would decode a chord out of
+        // alignment with what the encoder wrote.
+        RequestTag::GrabKey => {
+            let window = r.read_u64()?;
+            let key = crate::input::decode_key(r)?;
+            let modifiers = crate::input::decode_modifiers(r.read_u8()?)?;
+            RequestBody::GrabKey {
+                window,
+                key,
+                modifiers,
+            }
+        }
+        RequestTag::UngrabKey => {
+            let window = r.read_u64()?;
+            let key = crate::input::decode_key(r)?;
+            let modifiers = crate::input::decode_modifiers(r.read_u8()?)?;
+            RequestBody::UngrabKey {
+                window,
+                key,
+                modifiers,
+            }
+        }
     })
 }
 
@@ -1324,12 +1703,21 @@ mod tests {
     fn spec() -> WindowSpec {
         WindowSpec {
             title: "Text Editor — notes.md".to_string(),
+            // Deliberately unlike the title, and not a prefix of it: the two are
+            // adjacent length-prefixed strings, so a codec that wrote one twice
+            // or read them back swapped would still round-trip if they shared
+            // any text.
+            app_id: "notepad".to_string(),
             width: 900,
             height: 600,
             position: Some((-40, 17)),
             resizable: true,
             decorations: false,
             transparent: true,
+            // Opposite to `transparent`, so a codec that confused the two —
+            // wrote one twice, or read the pair back in the wrong order —
+            // fails the round trip instead of passing by coincidence.
+            input_transparent: false,
             min_size: Some((320, 240)),
             max_size: Some((3840, 2160)),
             layer: Layer::Overlay,
@@ -1426,8 +1814,233 @@ mod tests {
             Request::new(15, RequestBody::SubscribeWindowList { subscribe: false }),
             Request::new(16, RequestBody::ReloadAppearance),
             Request::new(17, RequestBody::ReloadInput),
+            // Both formats, for the same reason both polarities of the flag
+            // above: the format is one byte and a codec that wrote a constant
+            // would round-trip whichever one a sample happened to pick.
+            Request::new(
+                18,
+                RequestBody::UploadImage {
+                    window: 7,
+                    image_id: u64::MAX,
+                    width: 2,
+                    height: 1,
+                    stride: 8,
+                    format: BufferFormat::Argb8888,
+                    bytes: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                },
+            ),
+            Request::new(
+                19,
+                RequestBody::UploadImage {
+                    window: 7,
+                    image_id: 0,
+                    width: 1,
+                    height: 1,
+                    stride: 4,
+                    format: BufferFormat::Xrgb8888,
+                    bytes: vec![9, 9, 9, 9],
+                },
+            ),
+            // An empty payload: the length prefix is what distinguishes "no
+            // bytes" from "the frame ended here", and a codec that omitted the
+            // prefix for an empty slice would decode the next message's tag as
+            // this one's first pixel.
+            Request::new(
+                20,
+                RequestBody::UploadImage {
+                    window: 7,
+                    image_id: 1,
+                    width: 0,
+                    height: 0,
+                    stride: 0,
+                    format: BufferFormat::Argb8888,
+                    bytes: Vec::new(),
+                },
+            ),
+            Request::new(
+                21,
+                RequestBody::DropImage {
+                    window: 7,
+                    image_id: 1,
+                },
+            ),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn an_image_payload_over_the_cap_is_refused_before_it_is_read() {
+        // Hand-built: the encoder cannot produce this, which is the point — the
+        // frame comes from another process and the decoder is what stands
+        // between a four-gigabyte length prefix and a four-gigabyte allocation.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&REQUEST_MAGIC);
+        bytes.push(CONTROL_VERSION);
+        bytes.push(0);
+        write_u32(&mut bytes, 1); // one message
+        write_u32(&mut bytes, 1); // seq
+        bytes.push(RequestTag::UploadImage as u8);
+        write_u64(&mut bytes, 7); // window
+        write_u64(&mut bytes, 1); // image_id
+        write_u32(&mut bytes, 1); // width
+        write_u32(&mut bytes, 1); // height
+        write_u32(&mut bytes, 4); // stride
+        bytes.push(BufferFormat::Argb8888.to_byte());
+        write_u32(&mut bytes, crate::MAX_IMAGE_BYTES.saturating_add(1));
+        // …and nothing behind it. Reporting `UnexpectedEof` here would be the
+        // wrong answer twice over: it is not a truncated frame, and a caller
+        // told so would sit waiting for bytes the sender never intends to send.
+        assert!(matches!(
+            decode_requests(&bytes),
+            Err(DecodeError::ImageTooLarge(_))
+        ));
+    }
+
+    /// A chord has to survive the wire exactly, in both directions, for every
+    /// key and every modifier combination. Encoding `Home` and decoding `End`
+    /// would give the shell a shortcut that fires on the wrong key — and unlike
+    /// most protocol bugs it would look like a *configuration* mistake, which is
+    /// the sort of thing that gets chased for a day in the wrong file.
+    #[test]
+    fn a_grabbed_chord_survives_the_round_trip() {
+        let mut reqs = Vec::new();
+        let mut seq = 0;
+        for key in [
+            Key::Tab,
+            Key::D,
+            Key::VolumeUp,
+            Key::MediaPlayPause,
+            Key::F1,
+            Key::Unknown(0xE0FF),
+        ] {
+            for bits in 0u8..16 {
+                let modifiers = Modifiers {
+                    shift: bits & 1 != 0,
+                    ctrl: bits & 2 != 0,
+                    alt: bits & 4 != 0,
+                    super_key: bits & 8 != 0,
+                };
+                seq += 1;
+                reqs.push(Request::new(
+                    seq,
+                    RequestBody::GrabKey {
+                        window: 3,
+                        key,
+                        modifiers,
+                    },
+                ));
+                seq += 1;
+                reqs.push(Request::new(
+                    seq,
+                    RequestBody::UngrabKey {
+                        window: 3,
+                        key,
+                        modifiers,
+                    },
+                ));
+            }
+        }
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// The two verbs carry identical payloads, so a decoder that read one tag
+    /// for the other would round-trip a *grab* into an *ungrab* with every field
+    /// intact — the shortcut would register and then immediately release itself,
+    /// and the shape of the bug would be "the hotkey does nothing", which is
+    /// indistinguishable from having no mechanism at all. Asserted by tag byte
+    /// rather than by round trip, because a round trip cannot see it.
+    #[test]
+    fn grab_and_ungrab_are_not_the_same_tag() {
+        assert_ne!(RequestTag::GrabKey as u8, RequestTag::UngrabKey as u8);
+        let grab = encode_requests(&[Request::new(
+            1,
+            RequestBody::GrabKey {
+                window: 1,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+        )]);
+        let ungrab = encode_requests(&[Request::new(
+            1,
+            RequestBody::UngrabKey {
+                window: 1,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+        )]);
+        assert_ne!(grab, ungrab, "the two verbs encode to the same bytes");
+    }
+
+    /// Growing the request vocabulary is a version change even though no
+    /// existing message moved a byte: an unknown tag stops the decoder, so a
+    /// version-1 compositor handed a grab fails the whole frame rather than
+    /// ignoring one message in it. Pinned as "not 1" rather than "at least 2" so
+    /// that a later unrelated bump does not fail this test.
+    #[test]
+    fn the_grab_verbs_moved_the_protocol_version() {
+        assert_ne!(
+            CONTROL_VERSION, 1,
+            "GrabKey/UngrabKey were added in control version 2"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x19),
+            None,
+            "0x19 is the next free tag"
+        );
+    }
+
+    #[test]
+    fn an_unknown_buffer_format_names_itself() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&REQUEST_MAGIC);
+        bytes.push(CONTROL_VERSION);
+        bytes.push(0);
+        write_u32(&mut bytes, 1);
+        write_u32(&mut bytes, 1);
+        bytes.push(RequestTag::UploadImage as u8);
+        write_u64(&mut bytes, 7);
+        write_u64(&mut bytes, 1);
+        write_u32(&mut bytes, 1);
+        write_u32(&mut bytes, 1);
+        write_u32(&mut bytes, 4);
+        bytes.push(0x77); // no such format
+        write_u32(&mut bytes, 0);
+        assert_eq!(
+            decode_requests(&bytes),
+            Err(DecodeError::BadBufferFormat(0x77))
+        );
+    }
+
+    #[test]
+    fn every_byte_of_an_upload_frame_can_be_corrupted_without_a_panic() {
+        // The same sweep `INPT` gets, and for the same reason: this frame
+        // carries a length prefix and a format byte chosen by another process,
+        // and the decoder's whole contract is that it answers a wrong one with
+        // an error rather than a crash. Flipping every bit of every byte in
+        // turn is cheap on a frame this size and covers the lengths, the tag,
+        // the format and the payload alike.
+        let frame = encode_requests(&[Request::new(
+            1,
+            RequestBody::UploadImage {
+                window: 3,
+                image_id: 4,
+                width: 2,
+                height: 2,
+                stride: 8,
+                format: BufferFormat::Argb8888,
+                bytes: vec![0xAB; 16],
+            },
+        )]);
+        for i in 0..frame.len() {
+            for bit in 0..8u32 {
+                let mut corrupt = frame.clone();
+                corrupt[i] ^= 1u8 << bit;
+                // Whatever it decodes to, it must not panic and must not read
+                // past the buffer. Both outcomes are acceptable: a flipped bit
+                // in a payload byte is still a valid frame.
+                let _ = decode_requests(&corrupt);
+            }
+        }
     }
 
     /// Every action there is: the seven that name no zone, and one per
@@ -1670,6 +2283,91 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), ALL.len());
+    }
+
+    #[test]
+    fn see_through_and_click_through_are_two_different_things() {
+        // All four combinations are meaningful and must survive the wire
+        // independently: a frosted panel is transparent and clickable, a debug
+        // overlay is opaque and click-through. If the codec ever wrote one flag
+        // for both, two of these four would come back wrong.
+        for (transparent, input_transparent) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let mut s = spec();
+            s.transparent = transparent;
+            s.input_transparent = input_transparent;
+            let req = Request::new(1, RequestBody::CreateWindow(s));
+            let back = round_trip_requests(std::slice::from_ref(&req));
+            let RequestBody::CreateWindow(got) = &back[0].body else {
+                panic!("wrong variant back")
+            };
+            assert_eq!(got.transparent, transparent);
+            assert_eq!(got.input_transparent, input_transparent);
+            // The fields written after the new byte must still line up; a
+            // desynchronised reader shows up here first.
+            assert_eq!(got.min_size, Some((320, 240)));
+            assert_eq!(got.layer, Layer::Overlay);
+        }
+    }
+
+    #[test]
+    fn the_program_a_window_belongs_to_survives_the_wire_separately_from_its_title() {
+        // Two length-prefixed strings side by side is the one place this codec
+        // can go wrong invisibly: write either one twice, or read them back
+        // swapped, and every field after them still decodes — the frame is
+        // self-consistent and merely describes the wrong windows. Both cases
+        // are only caught by a pair that disagrees, so the pair below is chosen
+        // to disagree in length as well as in content.
+        for (title, app_id) in [
+            ("Text Editor — notes.md", "notepad"),
+            // Named but untitled, and titled but unnamed. A codec that dropped
+            // one string and duplicated the other passes on two non-empty
+            // strings and fails on these.
+            ("", "notepad"),
+            ("Text Editor — notes.md", ""),
+            ("", ""),
+        ] {
+            let mut s = spec();
+            s.title = title.to_string();
+            s.app_id = app_id.to_string();
+            let req = Request::new(1, RequestBody::CreateWindow(s));
+            let back = round_trip_requests(std::slice::from_ref(&req));
+            let RequestBody::CreateWindow(got) = &back[0].body else {
+                panic!("wrong variant back")
+            };
+            assert_eq!(got.title, title);
+            assert_eq!(got.app_id, app_id);
+            // The fields written after the new string must still line up. A
+            // reader that lost its place in a variable-length field reads the
+            // *next* one as garbage rather than reporting an error, so this is
+            // the assertion that catches a desynchronised decoder — and it has
+            // to be a field whose value is distinctive, not a boolean.
+            assert_eq!(got.width, 900);
+            assert_eq!(got.height, 600);
+            assert_eq!(got.min_size, Some((320, 240)));
+            assert_eq!(got.layer, Layer::Overlay);
+        }
+    }
+
+    #[test]
+    fn a_window_names_no_program_until_it_says_one() {
+        // Empty rather than borrowed from the title. A title is a document
+        // name — it changes when the user saves under another name, and two
+        // windows of the same program have different ones — so deriving the id
+        // from it would give the field the one property it exists not to have.
+        assert!(
+            WindowSpec::new("notes.md — Text Editor", 640, 480)
+                .app_id
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_new_window_is_clickable_until_it_says_otherwise() {
+        // The default matters more than most: a window that silently ignored
+        // every click would look broken in a way that gives no clue why.
+        assert!(!WindowSpec::new("Untitled", 640, 480).input_transparent);
     }
 
     #[test]

@@ -10,10 +10,19 @@
 //! [`DropZoneManager::register_file_row`] and
 //! [`DropZoneManager::register_sidebar_item`] to describe the current on-screen
 //! layout. When the user drags files over the explorer, [`DropZoneManager::find_zone`]
-//! hit-tests registered zones and [`determine_operation`] computes the correct
-//! Copy/Move/Link based on source/target drives and modifier keys.
-
-#![allow(dead_code)]
+//! hit-tests registered zones and [`DropZoneManager::determine_operation`]
+//! computes the correct Copy/Move/Link based on source/target drives and
+//! modifier keys.
+//!
+//! The caller is `ExplorerState`: `render` rebuilds the zones as it draws,
+//! `drag_over` moves the hover, and `drop_at` turns the verdict into a
+//! `fileops` plan. This paragraph is not decoration — the module carried the
+//! architecture note above while nothing at all called it, and the note read
+//! exactly the same either way.
+//!
+//! Note there is no `#![allow(dead_code)]` here. There was, and it hid the
+//! fact that *every* item in the file was unused; the module now has a caller
+//! for each one, and the absence of the blanket is what keeps that true.
 
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -62,9 +71,9 @@ pub enum DropZone {
     /// Over empty space in the file list -- drop into the current directory.
     CurrentDirectory,
     /// Over a folder row in the file list.
-    Folder { path: String, rect: Rect },
+    Folder { path: PathBuf, rect: Rect },
     /// Over a sidebar entry.
-    Sidebar { path: String, rect: Rect },
+    Sidebar { path: PathBuf, rect: Rect },
     /// Not over any valid drop zone.
     None,
 }
@@ -137,7 +146,7 @@ pub enum DropZoneEvent {
     /// Files were dropped.
     Drop {
         zone: DropZone,
-        sources: Vec<String>,
+        sources: Vec<PathBuf>,
         operation: DropOperation,
     },
 }
@@ -149,10 +158,20 @@ pub enum DropZoneEvent {
 /// A single registered zone -- either a file row or a sidebar item.
 #[derive(Clone, Debug)]
 struct RegisteredZone {
-    path: String,
+    path: PathBuf,
     rect: Rect,
     is_dir: bool,
     kind: ZoneKind,
+    /// For a [`ZoneKind::FileRow`], its index in the listing; `None` for a
+    /// sidebar item, which is a place rather than a row.
+    ///
+    /// Kept so that [`DropZoneManager::find_file_row`] can answer "which entry
+    /// did the user click?" from the rectangles the renderer actually emitted.
+    /// The alternative is a second copy of the icon-grid and list-row layout
+    /// arithmetic living in the click handler, which is two computations of one
+    /// rectangle to keep in agreement — and when they disagree the user clicks
+    /// one file and opens another.
+    index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,28 +242,44 @@ impl DropZoneManager {
         self.list_area = Some(rect);
     }
 
+    /// The file-list area registered for this frame, if one has been.
+    ///
+    /// [`render_drop_feedback`] needs it to tint the pane for a
+    /// [`DropZone::CurrentDirectory`] hover, and it should read the rectangle
+    /// the renderer actually registered rather than recompute the layout —
+    /// two computations of the same rectangle are two rectangles to keep in
+    /// agreement.
+    pub fn list_area(&self) -> Option<Rect> {
+        self.list_area
+    }
+
     /// Register a visible file row.
     ///
-    /// * `_index` -- row index in the file list (reserved for future use).
+    /// * `index` -- row index in the file list, as [`find_file_row`] reports it
+    ///   back.
     /// * `path` -- absolute path of the file/folder.
     /// * `rect` -- bounding rectangle of the row.
     /// * `is_dir` -- whether the entry is a directory.
-    pub fn register_file_row(&mut self, _index: usize, path: &str, rect: Rect, is_dir: bool) {
+    ///
+    /// [`find_file_row`]: Self::find_file_row
+    pub fn register_file_row(&mut self, index: usize, path: &Path, rect: Rect, is_dir: bool) {
         self.zones.push(RegisteredZone {
-            path: path.to_string(),
+            path: path.to_path_buf(),
             rect,
             is_dir,
             kind: ZoneKind::FileRow,
+            index: Some(index),
         });
     }
 
     /// Register a sidebar item.
-    pub fn register_sidebar_item(&mut self, path: &str, rect: Rect) {
+    pub fn register_sidebar_item(&mut self, path: &Path, rect: Rect) {
         self.zones.push(RegisteredZone {
-            path: path.to_string(),
+            path: path.to_path_buf(),
             rect,
             is_dir: true, // sidebar items are always directories
             kind: ZoneKind::SidebarItem,
+            index: None,
         });
     }
 
@@ -293,6 +328,45 @@ impl DropZoneManager {
         DropZone::None
     }
 
+    /// Which listing row the pointer at `(x, y)` is over, if any.
+    ///
+    /// **This is how a click finds the file it landed on.** The rectangles were
+    /// put here by the same code that drew the rows, so the row the user sees
+    /// under the pointer is the row this returns — including in the icon view,
+    /// whose cells are a grid whose column count depends on the pane width, and
+    /// after a scroll or a resize that moved every row. Recomputing the layout
+    /// in the click handler instead would be a second copy of that arithmetic,
+    /// and the first time the two disagreed the user would click one file and
+    /// open another.
+    ///
+    /// Reverse order, matching [`Self::find_zone`]: whatever was registered
+    /// last was drawn last and so is on top.
+    ///
+    /// Unlike `find_zone` this does *not* fall through to the list area — a
+    /// click on empty space is a click on no file, which is what clears a
+    /// selection rather than what extends one.
+    #[must_use]
+    pub fn find_file_row(&self, x: f32, y: f32) -> Option<usize> {
+        self.zones
+            .iter()
+            .rev()
+            .find(|z| z.kind == ZoneKind::FileRow && z.rect.contains(x, y))
+            .and_then(|z| z.index)
+    }
+
+    /// Which sidebar place the pointer at `(x, y)` is over, if any.
+    ///
+    /// The navigation counterpart of [`Self::find_file_row`], and registered by
+    /// the same renderer for the same reason.
+    #[must_use]
+    pub fn find_sidebar_item(&self, x: f32, y: f32) -> Option<&Path> {
+        self.zones
+            .iter()
+            .rev()
+            .find(|z| z.kind == ZoneKind::SidebarItem && z.rect.contains(x, y))
+            .map(|z| z.path.as_path())
+    }
+
     // ------------------------------------------------------------------
     // Hover tracking
     // ------------------------------------------------------------------
@@ -304,7 +378,7 @@ impl DropZoneManager {
         x: f32,
         y: f32,
         modifiers: DragModifiers,
-        sources: &[String],
+        sources: &[PathBuf],
     ) -> Option<DropZoneEvent> {
         let new_zone = self.find_zone(x, y);
         let operation = self.determine_operation(sources, &new_zone, modifiers);
@@ -354,7 +428,7 @@ impl DropZoneManager {
     /// * Otherwise: same root component -> Move, different -> Copy.
     pub fn determine_operation(
         &self,
-        sources: &[String],
+        sources: &[PathBuf],
         zone: &DropZone,
         modifiers: DragModifiers,
     ) -> DropOperation {
@@ -369,16 +443,15 @@ impl DropZoneManager {
             return DropOperation::Link;
         }
 
-        let target_path = match zone {
-            DropZone::CurrentDirectory => self.current_dir.to_string_lossy().to_string(),
-            DropZone::Folder { path, .. } | DropZone::Sidebar { path, .. } => path.clone(),
+        let target: &Path = match zone {
+            DropZone::CurrentDirectory => &self.current_dir,
+            DropZone::Folder { path, .. } | DropZone::Sidebar { path, .. } => path,
             DropZone::None => return DropOperation::None,
         };
 
         // Default: same device -> Move, different device -> Copy.
-        let target = Path::new(&target_path);
         if let Some(first_source) = sources.first() {
-            if same_device(Path::new(first_source), target) {
+            if same_device(first_source, target) {
                 DropOperation::Move
             } else {
                 DropOperation::Copy
@@ -401,7 +474,7 @@ impl DropZoneManager {
         &self,
         x: f32,
         y: f32,
-        sources: &[String],
+        sources: &[PathBuf],
         modifiers: DragModifiers,
     ) -> DropResult {
         let zone = self.find_zone(x, y);
@@ -422,7 +495,7 @@ impl DropZoneManager {
             }
         };
 
-        let source_paths: Vec<PathBuf> = sources.iter().map(PathBuf::from).collect();
+        let source_paths: Vec<PathBuf> = sources.to_vec();
 
         // Nested-drop check: can't drop a folder into itself or a descendant.
         if let Some(reason) = check_nested_drop(&source_paths, &target_dir) {
@@ -553,11 +626,14 @@ fn operation_label(operation: DropOperation, zone: &DropZone) -> String {
     let target = match zone {
         DropZone::CurrentDirectory => "current folder".to_string(),
         DropZone::Folder { path, .. } | DropZone::Sidebar { path, .. } => {
-            // Show just the last component for brevity.
-            Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone())
+            // Show just the last component for brevity. This is the one place
+            // a lossy rendering is right rather than wrong: the string is drawn
+            // for a human and never used to reach the file, so an undecodable
+            // byte should become U+FFFD on screen instead of hiding the label.
+            path.file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy()
+                .to_string()
         }
         DropZone::None => return String::new(),
     };
@@ -742,7 +818,7 @@ mod tests {
         mgr.set_list_area(Rect::new(200.0, 64.0, 700.0, 500.0));
         mgr.register_file_row(
             0,
-            "/home/user/Documents",
+            Path::new("/home/user/Documents"),
             Rect::new(200.0, 86.0, 700.0, 22.0),
             true,
         );
@@ -760,7 +836,7 @@ mod tests {
         // Register a file (not a directory).
         mgr.register_file_row(
             0,
-            "/home/user/readme.txt",
+            Path::new("/home/user/readme.txt"),
             Rect::new(200.0, 86.0, 700.0, 22.0),
             false,
         );
@@ -772,7 +848,7 @@ mod tests {
     #[test]
     fn find_zone_sidebar() {
         let mut mgr = DropZoneManager::new(PathBuf::from("/home/user"));
-        mgr.register_sidebar_item("/tmp", Rect::new(0.0, 120.0, 200.0, 24.0));
+        mgr.register_sidebar_item(Path::new("/tmp"), Rect::new(0.0, 120.0, 200.0, 24.0));
 
         let zone = mgr.find_zone(100.0, 130.0);
         assert!(matches!(zone, DropZone::Sidebar { ref path, .. } if path == "/tmp"));
@@ -789,8 +865,8 @@ mod tests {
     fn find_zone_later_registration_wins() {
         let mut mgr = DropZoneManager::new(PathBuf::from("/home/user"));
         // Two overlapping zones -- second one should win.
-        mgr.register_sidebar_item("/var", Rect::new(0.0, 100.0, 200.0, 30.0));
-        mgr.register_sidebar_item("/tmp", Rect::new(0.0, 100.0, 200.0, 30.0));
+        mgr.register_sidebar_item(Path::new("/var"), Rect::new(0.0, 100.0, 200.0, 30.0));
+        mgr.register_sidebar_item(Path::new("/tmp"), Rect::new(0.0, 100.0, 200.0, 30.0));
 
         let zone = mgr.find_zone(100.0, 115.0);
         assert!(matches!(zone, DropZone::Sidebar { ref path, .. } if path == "/tmp"));
@@ -804,7 +880,7 @@ mod tests {
     fn operation_same_drive_default_is_move() {
         let mgr = DropZoneManager::new(PathBuf::from("/home/user"));
         let op = mgr.determine_operation(
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
             &DropZone::CurrentDirectory,
             DragModifiers::default(),
         );
@@ -815,7 +891,7 @@ mod tests {
     fn operation_ctrl_forces_copy() {
         let mgr = DropZoneManager::new(PathBuf::from("/home/user"));
         let op = mgr.determine_operation(
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
             &DropZone::CurrentDirectory,
             DragModifiers {
                 ctrl: true,
@@ -830,7 +906,7 @@ mod tests {
         let mgr = DropZoneManager::new(PathBuf::from("/mnt/usb"));
         // Different device -- default would be Copy, but Shift overrides.
         let op = mgr.determine_operation(
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
             &DropZone::CurrentDirectory,
             DragModifiers {
                 shift: true,
@@ -844,7 +920,7 @@ mod tests {
     fn operation_alt_forces_link() {
         let mgr = DropZoneManager::new(PathBuf::from("/home/user"));
         let op = mgr.determine_operation(
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
             &DropZone::CurrentDirectory,
             DragModifiers {
                 alt: true,
@@ -858,7 +934,7 @@ mod tests {
     fn operation_none_zone_returns_none() {
         let mgr = DropZoneManager::new(PathBuf::from("/home/user"));
         let op = mgr.determine_operation(
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
             &DropZone::None,
             DragModifiers::default(),
         );
@@ -877,9 +953,9 @@ mod tests {
     fn operation_folder_target() {
         let mgr = DropZoneManager::new(PathBuf::from("/home/user"));
         let op = mgr.determine_operation(
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
             &DropZone::Folder {
-                path: "/home/user/Documents".to_string(),
+                path: PathBuf::from("/home/user/Documents"),
                 rect: Rect::new(0.0, 0.0, 100.0, 22.0),
             },
             DragModifiers::default(),
@@ -964,8 +1040,13 @@ mod tests {
     fn clear_zones_removes_all() {
         let mut mgr = DropZoneManager::new(PathBuf::from("/home/user"));
         mgr.set_list_area(Rect::new(200.0, 64.0, 700.0, 500.0));
-        mgr.register_file_row(0, "/home/user/a", Rect::new(200.0, 86.0, 700.0, 22.0), true);
-        mgr.register_sidebar_item("/tmp", Rect::new(0.0, 100.0, 200.0, 24.0));
+        mgr.register_file_row(
+            0,
+            Path::new("/home/user/a"),
+            Rect::new(200.0, 86.0, 700.0, 22.0),
+            true,
+        );
+        mgr.register_sidebar_item(Path::new("/tmp"), Rect::new(0.0, 100.0, 200.0, 24.0));
 
         mgr.clear_zones();
 
@@ -982,7 +1063,7 @@ mod tests {
         mgr.set_list_area(Rect::new(200.0, 64.0, 700.0, 500.0));
         mgr.register_file_row(
             0,
-            "/home/user/old",
+            Path::new("/home/user/old"),
             Rect::new(200.0, 86.0, 700.0, 22.0),
             true,
         );
@@ -995,7 +1076,7 @@ mod tests {
         mgr.set_list_area(Rect::new(200.0, 64.0, 700.0, 500.0));
         mgr.register_file_row(
             0,
-            "/home/user/new",
+            Path::new("/home/user/new"),
             Rect::new(200.0, 86.0, 700.0, 22.0),
             true,
         );
@@ -1016,7 +1097,7 @@ mod tests {
         let result = mgr.handle_drop(
             400.0,
             200.0,
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
             DragModifiers::default(),
         );
 
@@ -1031,7 +1112,7 @@ mod tests {
         mgr.set_list_area(Rect::new(200.0, 64.0, 700.0, 500.0));
         mgr.register_file_row(
             0,
-            "/home/user/Documents",
+            Path::new("/home/user/Documents"),
             Rect::new(200.0, 86.0, 700.0, 22.0),
             true,
         );
@@ -1040,7 +1121,7 @@ mod tests {
         let result = mgr.handle_drop(
             400.0,
             90.0,
-            &["/home/user/Documents".to_string()],
+            &[PathBuf::from("/home/user/Documents")],
             DragModifiers::default(),
         );
 
@@ -1055,7 +1136,7 @@ mod tests {
         let result = mgr.handle_drop(
             500.0,
             500.0,
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
             DragModifiers::default(),
         );
         assert!(!result.valid);
@@ -1072,7 +1153,7 @@ mod tests {
         mgr.set_list_area(Rect::new(200.0, 64.0, 700.0, 500.0));
         mgr.register_file_row(
             0,
-            "/home/user/Documents",
+            Path::new("/home/user/Documents"),
             Rect::new(200.0, 86.0, 700.0, 22.0),
             true,
         );
@@ -1082,7 +1163,7 @@ mod tests {
             400.0,
             90.0,
             DragModifiers::default(),
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
         );
         assert!(matches!(event, Some(DropZoneEvent::DragEnter { .. })));
 
@@ -1091,7 +1172,7 @@ mod tests {
             500.0,
             95.0,
             DragModifiers::default(),
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
         );
         assert!(matches!(event, Some(DropZoneEvent::DragOver { .. })));
 
@@ -1100,7 +1181,7 @@ mod tests {
             50.0,
             50.0,
             DragModifiers::default(),
-            &["/home/user/file.txt".to_string()],
+            &[PathBuf::from("/home/user/file.txt")],
         );
         assert!(matches!(event, Some(DropZoneEvent::DragLeave)));
     }
@@ -1138,7 +1219,7 @@ mod tests {
         let rect = Rect::new(200.0, 86.0, 700.0, 22.0);
         let cmds = render_drop_feedback(
             &DropZone::Folder {
-                path: "/home/user/Documents".to_string(),
+                path: PathBuf::from("/home/user/Documents"),
                 rect,
             },
             DropOperation::Copy,
@@ -1156,7 +1237,7 @@ mod tests {
         let rect = Rect::new(200.0, 86.0, 700.0, 22.0);
         let cmds = render_drop_feedback(
             &DropZone::Folder {
-                path: "/home/user/Documents".to_string(),
+                path: PathBuf::from("/home/user/Documents"),
                 rect,
             },
             DropOperation::None,
@@ -1186,7 +1267,7 @@ mod tests {
         let rect = Rect::new(0.0, 120.0, 200.0, 24.0);
         let cmds = render_drop_feedback(
             &DropZone::Sidebar {
-                path: "/tmp".to_string(),
+                path: PathBuf::from("/tmp"),
                 rect,
             },
             DropOperation::Copy,
@@ -1208,7 +1289,7 @@ mod tests {
         let label = operation_label(
             DropOperation::Copy,
             &DropZone::Folder {
-                path: "/home/user/Documents".to_string(),
+                path: PathBuf::from("/home/user/Documents"),
                 rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             },
         );
@@ -1226,7 +1307,7 @@ mod tests {
         let label = operation_label(
             DropOperation::Link,
             &DropZone::Sidebar {
-                path: "/tmp".to_string(),
+                path: PathBuf::from("/tmp"),
                 rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             },
         );

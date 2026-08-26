@@ -1,88 +1,59 @@
-//! The client half of the display protocol: one event loop, written once.
+//! The client half of the display protocol: one multiplexed connection.
 //!
-//! There are 142 application crates in this tree and, before this module, not
-//! one of them was connected to anything. Each was a model plus a renderer with
-//! no driver — see `known-issues.md` →
-//! `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`. The obvious repair is to give each
-//! app an event loop, and that is the wrong repair: 142 hand-written loops are
-//! 142 chances to get the seam subtly different, and the differences would be
-//! exactly the sort nobody notices until two apps behave unlike each other for
-//! no reason a user can name. So the loop lives here, once, and an application
-//! supplies only the part that is actually its own: what to do with an event,
-//! and what to draw.
+//! [`Connection`] owns the socket and is the only thing that reads it. Two
+//! kinds of frame arrive down the same pipe — input events pushed by the
+//! compositor, and replies to requests this client made — so something has to
+//! demultiplex them. That is the whole job here: read bytes, reassemble frames
+//! across read boundaries, file each one under *input* or *reply to request
+//! `seq`*, and encode outbound requests and submissions.
 //!
-//! ## Why here rather than in `guitk`
-//!
-//! `guiremote` depends on `guitk`; the reverse would be a cycle. The loop needs
-//! both the event vocabulary (`guitk::event`) and the wire codec (this crate),
-//! so this crate is the only place both are already in scope. It is also the
-//! honest home: a loop whose job is "decode frames, dispatch, encode frames" is
-//! protocol-shaped.
+//! A naive client reads the socket looking for its own reply and drops the
+//! input frames that arrive first. [`Connection::round_trip`] queues them
+//! instead, which is why `next_event`/`drain_events` exist alongside the
+//! request API.
 //!
 //! ## Shape
 //!
 //! ```text
-//!   compositor ──INPT frame──▶ Transport::read ──▶ decode ──▶ App::on_event
-//!                                                                   │
-//!                                                              Response
-//!                                                                   │
-//!   compositor ◀──ORDR frame── Transport::write ◀── encode ◀── App::render
+//!   compositor ──INPT frame──▶ Transport::read ──▶ decode ──┬─▶ event queue
+//!                                                           └─▶ reply slot
+//!
+//!   compositor ◀──ORDR/CTRL─── Transport::write ◀── encode ◀── submit/request
 //! ```
 //!
-//! [`Client::tick`] drains everything currently readable, dispatches each
-//! event, and redraws **at most once** afterwards. That coalescing is the point:
-//! a mouse drag arrives as a burst of moves, and an app that emitted a frame per
-//! move would spend a desktop's entire frame budget redrawing one window.
+//! ## Where the event loop went
+//!
+//! This module used to carry one too — a `Client` wrapping a `Connection`, with
+//! an `App` trait and a `Response` verdict. It was retired in favour of
+//! `oswindow::app`, and the reason is worth keeping: `Client` had no wake-up
+//! list. It parked in [`Transport::wait`] until the compositor said something,
+//! so an application built on it could never receive a timer tick it had asked
+//! for. A harness that cannot deliver `Event::Tick` reproduces `known-issues.md`
+//! lesson 47 — *an app that keeps time but never receives the clock* — for every
+//! app built on it, and the frozen stopwatch would have been the harness's fault
+//! rather than the app's.
+//!
+//! `oswindow::EventLoop` already had the frame clock, so the loop with the clock
+//! survived and the vocabulary (`App`, `Response`) moved to it unchanged. The
+//! coalescing rule `Client::tick` enforced — drain everything readable, dispatch
+//! each event, redraw **at most once** afterwards — moved with it as
+//! `EventLoop::run_batched` and its `Dispatch::Settled`.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
-use guitk::event::Event;
+use guitk::event::{Key, Modifiers};
 use guitk::render::RenderTree;
 
 use crate::DecodeError;
 use crate::control::{
-    Request, RequestBody, ResponseBody, ShellControlAction, encode_requests_into,
+    BufferFormat, Request, RequestBody, ResponseBody, ShellControlAction, encode_requests_into,
 };
 use crate::frame::{Frame, try_decode_any};
 use crate::input::InputEvent;
 use crate::submit::encode_submit_into;
 use crate::window_list::{WindowInfo, WindowList};
-
-/// What the loop should do after handing an event to an application.
-///
-/// Deliberately *not* [`guitk::event::EventResult`], whose `Consumed`/`Ignored`
-/// answers a different question — whether an event should keep propagating up a
-/// widget tree. An event can be consumed without changing anything visible (a
-/// click on an already-selected item) and can change something visible without
-/// being consumed. Reusing that enum here would be a pun that reads fine and
-/// redraws at the wrong times.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Response {
-    /// Nothing the user can see changed. No frame is sent.
-    Idle,
-    /// Something changed; redraw before waiting again.
-    Redraw,
-    /// Close down: the loop finishes after this tick.
-    Exit,
-}
-
-/// The part of an application the toolkit cannot write for it.
-pub trait App {
-    /// React to one event.
-    ///
-    /// Return [`Response::Redraw`] only when something visible actually
-    /// changed. Returning it unconditionally is the easy mistake and costs a
-    /// full frame per mouse move.
-    fn on_event(&mut self, event: &Event) -> Response;
-
-    /// Draw the current state at the current window size.
-    ///
-    /// Called at most once per tick, after every pending event has been seen,
-    /// so it always draws the *settled* state rather than an intermediate one.
-    fn render(&mut self, width: f32, height: f32) -> RenderTree;
-}
 
 /// A duplex byte pipe to the compositor.
 ///
@@ -522,6 +493,65 @@ impl<T: Transport> Connection<T> {
         self.confirm(RequestBody::SetWindowWorkspace { window, workspace })
     }
 
+    /// Claim a keyboard chord for `window`, wherever the keyboard focus is.
+    ///
+    /// A shell's, on the same terms as [`shell_control`](Self::shell_control)
+    /// and for a sharper reason: a shortcut that only fires while the desktop
+    /// itself holds the keyboard is not a shortcut. Alt+Tab exists to be pressed
+    /// *from inside another window*, and without a grab the compositor routes it
+    /// to that window and the switcher never hears it.
+    ///
+    /// The claim is on the chord, not the key: grabbing `Tab` with Alt held
+    /// leaves a bare `Tab` reaching the text field the user is typing in. Both
+    /// the press and the matching release are delivered, so a switcher can hold
+    /// its strip up until the modifier is let go.
+    ///
+    /// `window` must be one of this client's own. It is what the events are
+    /// addressed to and it is the grab's lifetime: closing it releases every
+    /// chord it held, which is also what happens when the client dies.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the exchange fails, and
+    /// [`ClientError::Refused`] if the compositor declined — which for a grab
+    /// means either the window is not this client's or another window already
+    /// holds the chord. First grabber wins, and it wins until it lets go.
+    pub fn grab_key(
+        &mut self,
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::GrabKey {
+            window,
+            key,
+            modifiers,
+        })
+    }
+
+    /// Give a chord back, so that it reaches the focused window again.
+    ///
+    /// Releasing a chord this window never held is not an error — a shell
+    /// tearing down does not have to remember precisely what it took. Releasing
+    /// one *another* window holds is refused, since that is the same theft
+    /// [`grab_key`](Self::grab_key) refuses in the other direction.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_key`](Self::grab_key).
+    pub fn ungrab_key(
+        &mut self,
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::UngrabKey {
+            window,
+            key,
+            modifiers,
+        })
+    }
+
     /// Take the oldest queued input event, if any.
     pub fn next_event(&mut self) -> Option<InputEvent> {
         self.events.pop_front()
@@ -667,6 +697,68 @@ impl<T: Transport> Connection<T> {
         }
     }
 
+    /// Give the compositor a picture to keep, under an id this window's draw
+    /// commands can name later.
+    ///
+    /// Uploading is separate from drawing because the two have wildly different
+    /// rates: a render tree is re-sent whenever anything about the window
+    /// changes, and a protocol that carried the pixels along with it would
+    /// re-send a megabyte sixty times a second to keep a still picture on
+    /// screen. Upload once, then name the id in every frame that shows it.
+    ///
+    /// `image_id` is the caller's to choose and is scoped to `window`, so two
+    /// windows may both use id 1 without colliding. Uploading an id that is
+    /// already registered *replaces* it, which is how a client repaints a
+    /// thumbnail without having to invent a fresh id and drop the old one.
+    ///
+    /// `stride` is the distance in bytes from the start of one row to the start
+    /// of the next, and may exceed `width * format.bytes_per_pixel()` — a caller
+    /// uploading a sub-rectangle of a larger picture passes the sub-rectangle's
+    /// width with the original's stride rather than repacking the rows.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::round_trip`], plus [`ClientError::Refused`] if the compositor
+    /// declined. A refusal means the window is not this connection's, or the
+    /// geometry does not describe the bytes, or the upload would put the
+    /// connection over its image budget. In every one of those cases nothing
+    /// changed: an id that was registered before is still registered, with the
+    /// pixels it had.
+    pub fn upload_image(
+        &mut self,
+        window: u64,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::UploadImage {
+            window,
+            image_id,
+            width,
+            height,
+            stride,
+            format,
+            bytes,
+        })
+    }
+
+    /// Forget one of this window's uploaded images and release its memory.
+    ///
+    /// Succeeds whether or not anything was registered under `image_id`, so a
+    /// client tidying up every id it ever used need not track which ones it has
+    /// already dropped. Draw commands naming a dropped id render nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::round_trip`], plus [`ClientError::Refused`] if `window` is not
+    /// this connection's.
+    pub fn drop_image(&mut self, window: u64, image_id: u64) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::DropImage { window, image_id })
+    }
+
     /// Send one window's picture.
     ///
     /// # Errors
@@ -682,196 +774,6 @@ impl<T: Transport> Connection<T> {
     }
 }
 
-/// Drives one window: reads events, dispatches them, sends frames.
-pub struct Client<T: Transport> {
-    conn: Connection<T>,
-    window: u64,
-    width: u32,
-    height: u32,
-    /// Set until the first frame has been sent. A window that has never been
-    /// drawn is blank, and nothing else would ever ask for that first paint —
-    /// the app has had no event to respond to yet.
-    needs_first_paint: bool,
-    focused: bool,
-    exiting: bool,
-    /// Events addressed to some other window.
-    ///
-    /// Counted rather than silently dropped. A nonzero value here means either
-    /// this client owns windows it did not tell the loop about, or the
-    /// compositor is mis-routing — both worth being able to see, and neither
-    /// discoverable if the events simply vanish.
-    stray_events: u64,
-}
-
-impl<T: Transport> Client<T> {
-    /// Bind a transport to a window that already exists.
-    pub fn new(transport: T, window: u64, width: u32, height: u32) -> Self {
-        Self::over(Connection::new(transport), window, width, height)
-    }
-
-    /// Bind an existing connection to a window that already exists.
-    ///
-    /// Useful when the connection has been used for something else first —
-    /// asking for the display size before choosing how big to be, say.
-    pub const fn over(conn: Connection<T>, window: u64, width: u32, height: u32) -> Self {
-        Self {
-            conn,
-            window,
-            width,
-            height,
-            needs_first_paint: true,
-            focused: false,
-            exiting: false,
-            stray_events: 0,
-        }
-    }
-
-    /// Ask the compositor for a window, then drive it.
-    ///
-    /// The size comes from the spec rather than being passed separately,
-    /// because the two must agree: a client that asked for 800×600 and then
-    /// told itself it was 1024×768 would draw its first frame at a size the
-    /// window does not have.
-    ///
-    /// # Errors
-    ///
-    /// As [`Connection::create_window`].
-    pub fn open(
-        transport: T,
-        spec: crate::control::WindowSpec,
-    ) -> Result<Self, ClientError<T::Error>> {
-        let (width, height) = (spec.width, spec.height);
-        let mut conn = Connection::new(transport);
-        let window = conn.create_window(spec)?;
-        Ok(Self::over(conn, window, width, height))
-    }
-
-    /// The connection underneath, for requests this loop does not wrap.
-    pub const fn connection(&mut self) -> &mut Connection<T> {
-        &mut self.conn
-    }
-
-    /// The underlying transport.
-    pub const fn transport(&self) -> &T {
-        self.conn.transport()
-    }
-
-    /// The window this client is driving.
-    #[must_use]
-    pub const fn window(&self) -> u64 {
-        self.window
-    }
-
-    /// The current window size, kept up to date from `Resize` events.
-    #[must_use]
-    pub const fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
-    /// Whether this window currently has keyboard focus.
-    #[must_use]
-    pub const fn is_focused(&self) -> bool {
-        self.focused
-    }
-
-    /// How many events arrived addressed to a different window.
-    #[must_use]
-    pub const fn stray_events(&self) -> u64 {
-        self.stray_events
-    }
-
-    /// Whether the loop has been asked to stop.
-    #[must_use]
-    pub const fn is_exiting(&self) -> bool {
-        self.exiting
-    }
-
-    /// Run one iteration: drain readable input, dispatch it, redraw if needed.
-    ///
-    /// Returns `false` once the application is finished.
-    pub fn tick(&mut self, app: &mut dyn App) -> Result<bool, ClientError<T::Error>> {
-        let events = self.receive()?;
-
-        let mut redraw = self.needs_first_paint;
-        for ev in events {
-            if ev.window != self.window {
-                self.stray_events = self.stray_events.saturating_add(1);
-                continue;
-            }
-            // Applied before the app sees the event, so an app handling
-            // `Resize` can already read the new size from the client, and so
-            // that the render below uses the new size rather than the previous
-            // one — a frame drawn at the old size is a visibly stretched or
-            // clipped window for one refresh.
-            self.apply(&ev.event);
-
-            match app.on_event(&ev.event) {
-                Response::Idle => {}
-                Response::Redraw => redraw = true,
-                Response::Exit => {
-                    self.exiting = true;
-                    // Keep dispatching the rest of the batch: they arrived
-                    // before the decision to exit and an app may need them to
-                    // save its state. The loop ends after this tick either way.
-                }
-            }
-            // A close request the app did not act on still closes the window.
-            // The alternative is a window with a close button that does
-            // nothing, which is worse than closing an app that wanted to stay.
-            if matches!(ev.event, Event::CloseRequested) {
-                self.exiting = true;
-            }
-        }
-
-        if redraw && !self.exiting {
-            self.draw(app)?;
-        }
-        Ok(!self.exiting)
-    }
-
-    /// Tick until the application exits or the transport closes.
-    pub fn run(&mut self, app: &mut dyn App) -> Result<(), ClientError<T::Error>> {
-        while self.conn.is_open() {
-            if !self.tick(app)? {
-                break;
-            }
-            self.conn.wait()?;
-        }
-        Ok(())
-    }
-
-    /// Draw and send one frame, whether or not anything asked for it.
-    ///
-    /// Public because a redraw is not always event-driven: an animation or a
-    /// completed background load needs a frame with no input behind it.
-    pub fn draw(&mut self, app: &mut dyn App) -> Result<(), ClientError<T::Error>> {
-        #[allow(clippy::cast_precision_loss)]
-        let tree = app.render(self.width as f32, self.height as f32);
-        self.conn.submit(self.window, &tree)?;
-        self.needs_first_paint = false;
-        Ok(())
-    }
-
-    /// Read whatever is available and take the events out of it.
-    fn receive(&mut self) -> Result<Vec<InputEvent>, ClientError<T::Error>> {
-        self.conn.pump()?;
-        Ok(self.conn.drain_events())
-    }
-
-    /// Fold an event into the client's own view of the window.
-    fn apply(&mut self, event: &Event) {
-        match *event {
-            Event::Resize { width, height } => {
-                self.width = width;
-                self.height = height;
-            }
-            Event::FocusIn => self.focused = true,
-            Event::FocusOut => self.focused = false,
-            _ => {}
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -883,9 +785,11 @@ mod tests {
     )]
 
     use guitk::color::Color;
-    use guitk::event::{Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind};
+    use guitk::event::Event;
 
     use super::*;
+    use crate::WindowSpec;
+    use crate::control::encode_responses;
     use crate::input::encode_input_frame;
 
     /// A transport whose input is scripted and whose output is kept for
@@ -941,337 +845,6 @@ mod tests {
             Ok(())
         }
     }
-
-    /// Records what it was told and how often it was asked to draw.
-    #[derive(Default)]
-    struct RecordingApp {
-        seen: Vec<Event>,
-        renders: Vec<(f32, f32)>,
-        response: Option<Response>,
-    }
-
-    impl App for RecordingApp {
-        fn on_event(&mut self, event: &Event) -> Response {
-            self.seen.push(event.clone());
-            self.response.unwrap_or(Response::Idle)
-        }
-
-        fn render(&mut self, width: f32, height: f32) -> RenderTree {
-            self.renders.push((width, height));
-            let mut tree = RenderTree::new();
-            tree.fill_rect(0.0, 0.0, width, height, Color::from_hex(0x11_11_11));
-            tree
-        }
-    }
-
-    fn key_frame(window: u64, k: Key) -> Vec<u8> {
-        encode_input_frame(&[InputEvent::key(
-            window,
-            KeyEvent {
-                key: k,
-                pressed: true,
-                modifiers: Modifiers::NONE,
-                text: String::new(),
-            },
-            0x1E,
-        )])
-    }
-
-    fn client(chunks: Vec<Vec<u8>>) -> Client<FakeTransport> {
-        Client::new(FakeTransport::new(chunks), 1, 800, 600)
-    }
-
-    /// A client whose first read returns nothing, so the first tick is a bare
-    /// first paint and the scripted frames land on the ticks after it.
-    ///
-    /// This is what connecting actually looks like: the app maps a window and
-    /// paints it before the compositor has anything to say. Tests that want to
-    /// observe the first paint *separately* have to ask for that read, because
-    /// a tick that finds input waiting deliberately folds the two together —
-    /// see `the_first_paint_folds_into_the_first_batch`.
-    fn quiet_then(chunks: Vec<Vec<u8>>) -> Client<FakeTransport> {
-        let mut all = vec![Vec::new()];
-        all.extend(chunks);
-        client(all)
-    }
-
-    #[test]
-    fn the_first_paint_folds_into_the_first_batch() {
-        // If input is already waiting when the app first ticks, painting before
-        // reading it would put a frame on screen that the very next frame
-        // corrects — and if that input is the opening `Resize`, the first frame
-        // is drawn at a size the window does not have.
-        let frame = encode_input_frame(&[InputEvent::new(
-            1,
-            Event::Resize {
-                width: 1024,
-                height: 768,
-            },
-        )]);
-        let mut c = client(vec![frame]);
-        let mut app = RecordingApp::default();
-        c.tick(&mut app).unwrap();
-        assert_eq!(
-            app.renders,
-            vec![(1024.0, 768.0)],
-            "one frame, at the size the resize just established"
-        );
-    }
-
-    #[test]
-    fn the_first_tick_paints_even_with_no_events() {
-        // A window nothing has drawn is blank, and no event will ever ask for
-        // that first frame — the app has had nothing to respond to.
-        let mut c = client(vec![]);
-        let mut app = RecordingApp::default();
-        assert!(c.tick(&mut app).unwrap());
-        assert_eq!(app.renders, vec![(800.0, 600.0)]);
-        assert_eq!(c.transport().sent.len(), 1);
-    }
-
-    #[test]
-    fn a_quiet_tick_after_the_first_paint_sends_nothing() {
-        let mut c = client(vec![]);
-        let mut app = RecordingApp::default();
-        c.tick(&mut app).unwrap();
-        c.tick(&mut app).unwrap();
-        assert_eq!(app.renders.len(), 1, "an idle app must not redraw");
-        assert_eq!(c.transport().sent.len(), 1);
-    }
-
-    #[test]
-    fn an_event_that_changes_nothing_visible_does_not_redraw() {
-        let mut c = quiet_then(vec![key_frame(1, Key::A)]);
-        let mut app = RecordingApp {
-            response: Some(Response::Idle),
-            ..RecordingApp::default()
-        };
-        c.tick(&mut app).unwrap(); // first paint, no input consumed yet
-        c.tick(&mut app).unwrap();
-        assert_eq!(app.seen.len(), 1, "the event must still be delivered");
-        assert_eq!(app.renders.len(), 1, "but must not have caused a frame");
-    }
-
-    #[test]
-    fn a_burst_of_events_coalesces_into_one_frame() {
-        // The reason the loop redraws after the batch rather than per event.
-        // Ten mouse moves producing ten frames would spend a desktop's whole
-        // budget on one window.
-        let moves: Vec<InputEvent> = (0u8..10)
-            .map(|i| {
-                InputEvent::new(
-                    1,
-                    Event::Mouse(MouseEvent {
-                        x: f32::from(i),
-                        y: 0.0,
-                        kind: MouseEventKind::Move,
-                    }),
-                )
-            })
-            .collect();
-        let mut c = quiet_then(vec![encode_input_frame(&moves)]);
-        let mut app = RecordingApp {
-            response: Some(Response::Redraw),
-            ..RecordingApp::default()
-        };
-        c.tick(&mut app).unwrap(); // first paint
-        c.tick(&mut app).unwrap();
-        assert_eq!(app.seen.len(), 10, "every event must be delivered");
-        assert_eq!(
-            app.renders.len(),
-            2,
-            "one first paint, one coalesced redraw"
-        );
-    }
-
-    #[test]
-    fn a_frame_split_across_reads_is_not_lost() {
-        // Exactly what a socket does. The half-frame has to wait in the buffer
-        // rather than being decoded as garbage or dropped.
-        let frame = key_frame(1, Key::Z);
-        let mid = frame.len() / 2;
-        let mut c = client(vec![frame[..mid].to_vec(), frame[mid..].to_vec()]);
-        let mut app = RecordingApp::default();
-
-        c.tick(&mut app).unwrap(); // reads the first half
-        assert!(app.seen.is_empty(), "half a frame is not an event");
-        c.tick(&mut app).unwrap(); // reads the rest
-        assert_eq!(app.seen.len(), 1);
-        assert!(matches!(app.seen[0], Event::Key(_)));
-    }
-
-    #[test]
-    fn several_frames_in_one_read_are_all_processed() {
-        let mut buf = key_frame(1, Key::A);
-        buf.extend_from_slice(&key_frame(1, Key::B));
-        buf.extend_from_slice(&key_frame(1, Key::C));
-        let mut c = client(vec![buf]);
-        let mut app = RecordingApp::default();
-        c.tick(&mut app).unwrap();
-        assert_eq!(app.seen.len(), 3);
-    }
-
-    #[test]
-    fn a_resize_is_applied_before_the_frame_that_answers_it() {
-        // Drawing the answering frame at the old size is a visibly stretched
-        // window for one refresh.
-        let frame = encode_input_frame(&[InputEvent::new(
-            1,
-            Event::Resize {
-                width: 1024,
-                height: 768,
-            },
-        )]);
-        let mut c = quiet_then(vec![frame]);
-        let mut app = RecordingApp {
-            response: Some(Response::Redraw),
-            ..RecordingApp::default()
-        };
-        c.tick(&mut app).unwrap(); // first paint at 800x600
-        c.tick(&mut app).unwrap();
-        assert_eq!(c.size(), (1024, 768));
-        assert_eq!(app.renders, vec![(800.0, 600.0), (1024.0, 768.0)]);
-    }
-
-    #[test]
-    fn focus_is_tracked_from_the_events_that_report_it() {
-        let frame = encode_input_frame(&[
-            InputEvent::new(1, Event::FocusIn),
-            InputEvent::new(1, Event::FocusOut),
-            InputEvent::new(1, Event::FocusIn),
-        ]);
-        let mut c = client(vec![frame]);
-        let mut app = RecordingApp::default();
-        assert!(!c.is_focused());
-        c.tick(&mut app).unwrap();
-        assert!(c.is_focused());
-    }
-
-    #[test]
-    fn an_event_for_another_window_is_counted_not_acted_on() {
-        // Silently dropping it would make a routing bug invisible.
-        let mut c = client(vec![key_frame(99, Key::A)]);
-        let mut app = RecordingApp::default();
-        c.tick(&mut app).unwrap();
-        assert!(app.seen.is_empty(), "must not be dispatched");
-        assert_eq!(c.stray_events(), 1, "but must be visible to a debugger");
-    }
-
-    #[test]
-    fn a_close_request_ends_the_loop_even_if_the_app_ignores_it() {
-        // A close button that does nothing is worse than an app that closes
-        // when it would rather not have.
-        let frame = encode_input_frame(&[InputEvent::new(1, Event::CloseRequested)]);
-        let mut c = client(vec![frame]);
-        let mut app = RecordingApp {
-            response: Some(Response::Idle),
-            ..RecordingApp::default()
-        };
-        c.tick(&mut app).unwrap(); // first paint
-        assert!(!c.tick(&mut app).unwrap(), "loop must report it is done");
-        assert!(c.is_exiting());
-    }
-
-    #[test]
-    fn an_app_asking_to_exit_still_sees_the_rest_of_the_batch() {
-        // Those events arrived before the decision; an app may need them to
-        // save its state.
-        let mut buf = key_frame(1, Key::A);
-        buf.extend_from_slice(&key_frame(1, Key::B));
-        buf.extend_from_slice(&key_frame(1, Key::C));
-        let mut c = client(vec![buf]);
-        let mut app = RecordingApp {
-            response: Some(Response::Exit),
-            ..RecordingApp::default()
-        };
-        assert!(!c.tick(&mut app).unwrap());
-        assert_eq!(app.seen.len(), 3);
-    }
-
-    #[test]
-    fn an_exiting_tick_does_not_paint() {
-        // A frame drawn for a window that is closing is work nobody sees.
-        let frame = encode_input_frame(&[InputEvent::new(1, Event::CloseRequested)]);
-        let mut c = client(vec![frame]);
-        let mut app = RecordingApp {
-            response: Some(Response::Redraw),
-            ..RecordingApp::default()
-        };
-        c.tick(&mut app).unwrap(); // first paint
-        let before = app.renders.len();
-        c.tick(&mut app).unwrap();
-        assert_eq!(app.renders.len(), before);
-    }
-
-    #[test]
-    fn what_is_sent_is_an_addressed_decodable_draw_frame() {
-        // The other half of the loop: a client's output must be exactly what a
-        // compositor's decoder accepts — and must say which window it is for,
-        // since the compositor cannot infer that from a connection that may
-        // carry several.
-        let mut c = client(vec![]);
-        let mut app = RecordingApp::default();
-        c.tick(&mut app).unwrap();
-        let sent = &c.transport().sent[0];
-        let (sub, used) = crate::submit::decode_submit(sent).unwrap();
-        assert_eq!(used, sent.len());
-        assert_eq!(sub.window, 1, "addressed to the window this client drives");
-        assert_eq!(sub.commands.commands.len(), 1);
-    }
-
-    #[test]
-    fn a_corrupt_input_frame_is_a_fatal_protocol_error() {
-        // A stream is a sequence: a frame that will not decode leaves no way to
-        // find where the next one begins, so carrying on would be guessing.
-        let mut frame = key_frame(1, Key::A);
-        frame[0] = b'X'; // break the magic
-        let mut c = client(vec![frame]);
-        let mut app = RecordingApp::default();
-        assert_eq!(
-            c.tick(&mut app),
-            Err(ClientError::Protocol(DecodeError::BadMagic))
-        );
-    }
-
-    #[test]
-    fn run_stops_when_the_transport_closes() {
-        let mut c = client(vec![key_frame(1, Key::A)]);
-        let mut app = RecordingApp::default();
-        c.run(&mut app).unwrap();
-        assert!(!c.transport().is_open());
-        assert_eq!(app.seen.len(), 1);
-    }
-
-    #[test]
-    fn run_stops_when_the_app_exits_without_waiting_again() {
-        let frame = encode_input_frame(&[InputEvent::new(1, Event::CloseRequested)]);
-        let mut c = quiet_then(vec![frame]);
-        let mut app = RecordingApp::default();
-        c.run(&mut app).unwrap();
-        assert!(c.is_exiting());
-        assert_eq!(
-            c.transport().waits,
-            1,
-            "must not wait again after deciding to exit"
-        );
-    }
-
-    #[test]
-    fn an_explicit_draw_needs_no_event_behind_it() {
-        // Animations and completed background work redraw with no input.
-        let mut c = client(vec![]);
-        let mut app = RecordingApp::default();
-        c.tick(&mut app).unwrap();
-        c.draw(&mut app).unwrap();
-        assert_eq!(app.renders.len(), 2);
-        assert_eq!(c.transport().sent.len(), 2);
-    }
-
-    // ------------------------------------------------------------------
-    // Connection — the demultiplexing layer underneath
-    // ------------------------------------------------------------------
-
-    use crate::control::{RequestBody, ResponseBody, WindowSpec, encode_responses};
 
     fn conn(chunks: Vec<Vec<u8>>) -> Connection<FakeTransport> {
         Connection::new(FakeTransport::new(chunks))
@@ -1431,6 +1004,67 @@ mod tests {
         assert_eq!(
             c.create_window(WindowSpec::new("Test", 320, 240)),
             Err(ClientError::Closed)
+        );
+    }
+
+    #[test]
+    fn an_uploaded_image_reaches_the_wire_with_its_pixels_intact() {
+        // The point of the convenience method is that a caller does not have to
+        // build the request by hand; the point of this test is that it builds
+        // the same one they would have. Pixels are checked byte for byte
+        // because a stride or format field silently swapped for another would
+        // still decode.
+        let mut c = conn(vec![reply(1, ResponseBody::Ok)]);
+        let pixels: Vec<u8> = (0u8..64).collect();
+        c.upload_image(7, 9, 4, 4, 16, BufferFormat::Xrgb8888, pixels.clone())
+            .unwrap();
+
+        let sent = &c.transport().sent[0];
+        let (reqs, _) = crate::control::decode_requests(sent).unwrap();
+        assert_eq!(
+            reqs[0].body,
+            RequestBody::UploadImage {
+                window: 7,
+                image_id: 9,
+                width: 4,
+                height: 4,
+                stride: 16,
+                format: BufferFormat::Xrgb8888,
+                bytes: pixels,
+            }
+        );
+    }
+
+    #[test]
+    fn a_refused_upload_is_an_error_the_caller_can_read() {
+        // Over budget, bad geometry and not-your-window all arrive this way,
+        // and all of them mean nothing changed. A method that swallowed the
+        // refusal would leave the caller drawing an id with no pixels behind
+        // it, which renders nothing and reports nothing.
+        let mut c = conn(vec![reply(
+            1,
+            ResponseBody::Error {
+                message: "over the 512-byte limit".to_string(),
+            },
+        )]);
+        assert_eq!(
+            c.upload_image(7, 9, 4, 4, 16, BufferFormat::Argb8888, vec![0; 64]),
+            Err(ClientError::Refused("over the 512-byte limit".to_string()))
+        );
+    }
+
+    #[test]
+    fn dropping_an_image_asks_for_that_and_nothing_else() {
+        let mut c = conn(vec![reply(1, ResponseBody::Ok)]);
+        c.drop_image(7, 9).unwrap();
+        let sent = &c.transport().sent[0];
+        let (reqs, _) = crate::control::decode_requests(sent).unwrap();
+        assert_eq!(
+            reqs[0].body,
+            RequestBody::DropImage {
+                window: 7,
+                image_id: 9,
+            }
         );
     }
 

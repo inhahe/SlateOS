@@ -2792,6 +2792,7 @@ dependencies = [
  "appearance",
  "guiremote",
  "guitk",
+ "imagecodec",
  "inputsettings",
  "keylayout",
  "oswindow",
@@ -3672,6 +3673,8 @@ version = "0.1.0"
 dependencies = [
  "byteread",
  "guitk",
+ "imagecodec",
+ "oswindow",
  "scratchdir",
  "textfind",
 ]
@@ -3833,6 +3836,7 @@ dependencies = [
 name = "filesearch"
 version = "0.1.0"
 dependencies = [
+ "globmatch",
  "guitk",
 ]
 
@@ -4637,6 +4641,10 @@ version = "0.1.0"
 
 [[package]]
 name = "glide-cli"
+version = "0.1.0"
+
+[[package]]
+name = "globmatch"
 version = "0.1.0"
 
 [[package]]
@@ -5465,6 +5473,10 @@ name = "illustrator-cli"
 version = "0.1.0"
 
 [[package]]
+name = "imagecodec"
+version = "0.1.0"
+
+[[package]]
 name = "imagemagick"
 version = "0.1.0"
 
@@ -5478,6 +5490,8 @@ version = "0.1.0"
 dependencies = [
  "byteread",
  "guitk",
+ "imagecodec",
+ "oswindow",
  "scratchdir",
 ]
 
@@ -5501,6 +5515,7 @@ version = "0.1.0"
 name = "indexer-app"
 version = "0.1.0"
 dependencies = [
+ "globmatch",
  "scratchdir",
  "textfmt",
 ]
@@ -7551,6 +7566,7 @@ name = "metronome"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

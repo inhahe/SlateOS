@@ -27,7 +27,8 @@ use guitk::style::{CornerRadii, Edges};
 use guitk::text;
 use guitk::wheel;
 use inputsettings::{InputFile, MAX_DOUBLE_CLICK_MS, MIN_DOUBLE_CLICK_MS};
-use oswindow::{EventLoop, EventResponse, WindowBuilder};
+use oswindow::app::{Reloads, Response};
+use std::process::ExitCode;
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -2406,8 +2407,16 @@ fn build_permission_list<S: PageSink>(s: &mut S, kind: PermissionKind, apps: &[A
 // ============================================================================
 
 impl SettingsState {
-    /// Render the complete settings UI frame.
-    pub fn render(&self) -> RenderTree {
+    /// Render the complete settings UI at the size Settings currently holds.
+    ///
+    /// Kept separate from the `App::render` that wraps it, and deliberately not
+    /// called `render`: the trait's takes a width and a height, so a same-named
+    /// inherent method would not shadow it silently — it would fail to compile
+    /// at every one of the twenty call sites below, which is a worse way to find
+    /// out than a name that says which one is meant. (The silent version of this
+    /// trap is real: at equal arity the inherent method wins method lookup and
+    /// every existing call keeps compiling while testing the other function.)
+    pub fn render_tree(&self) -> RenderTree {
         let mut tree = RenderTree::new();
 
         // Background
@@ -4679,122 +4688,93 @@ impl SettingsState {
 // Application entry point
 // ============================================================================
 
-/// Drive Settings on `window` until the user closes it or the connection ends.
+/// Settings as something a window can be pointed at.
 ///
-/// Everything Settings *decides* is in [`SettingsState::handle_event`]; this is
-/// only the strap between it and the loop. It adds two things.
-///
-/// **When to draw.** A frame is submitted for the initial state and thereafter
-/// exactly when an event reported a visible change. Redrawing unconditionally
-/// would repaint the whole window for every mouse move across it, and this UI
-/// is a sidebar plus a scrolling page — one of the more expensive trees in the
-/// tree to rebuild.
-///
-/// **Telling the compositor.** Settings is the one application that edits
-/// `appearance.yaml`, and window corners, drop shadows and title-bar colours are
-/// drawn by the *compositor* from that file. Without the notification the user
-/// would change the corner radius, watch the preview in this window update, and
-/// see every real window keep its old corners until the next login — a setting
-/// that appears to work and does not, which is worse than one that plainly does
-/// nothing. The notification carries no settings: see
-/// [`EventLoop::appearance_changed`].
-///
-/// The same holds for the Mouse page and `input.yaml`, through
-/// [`EventLoop::input_changed`] — the compositor is what decides whether two
-/// title-bar clicks are one double click, so a new interval that only this
-/// process knew about would be a slider that moved and changed nothing.
-fn run<T: oswindow::ConnectionTransport>(
-    events: &mut EventLoop<T>,
-    window: u64,
-    state: &mut SettingsState,
-) -> Result<(), oswindow::Error<T>> {
-    // Nothing has happened yet, so no event is going to ask for the first frame.
-    events.submit(window, &state.render())?;
+/// Everything below is a handful of lines, and that is the point of the trait:
+/// Settings supplies what is genuinely its own — its title, its size, what an
+/// event means, what to draw, which files it has rewritten — and
+/// `oswindow::app` supplies the ~130 lines that used to sit here doing what
+/// every other application in the tree would have had to do identically. See
+/// `gui/window/src/app.rs` for what those lines were.
+impl oswindow::app::App for SettingsState {
+    fn title(&self) -> String {
+        "Settings".to_string()
+    }
 
-    // A failed submit or notify has nowhere to be reported from inside the
-    // handler — its return type is the loop's `EventResponse`, not a `Result` —
-    // so it is carried out here and the loop stopped. Swallowing it would leave
-    // a Settings window that runs on happily while the screen no longer
-    // changes.
-    let mut failure = None;
-    events.run(|events, id, event| {
-        if id != window {
-            return EventResponse::Continue;
-        }
-        let result = state.handle_event(&event);
-        // Asked whatever the event did, and *before* the redraw check: a change
-        // is saved by `handle_event` itself, so a control that reported
-        // `Ignored` having still written the file — there is none today, and a
-        // future one is exactly what this ordering protects — must not lose its
-        // notification to an early return.
-        if state.take_appearance_change()
-            && let Err(e) = events.appearance_changed()
-        {
-            failure = Some(e);
-            return EventResponse::Exit;
-        }
-        // The input settings separately, and with its own request: a
-        // double-click change must not repaint the desktop, and a colour change
-        // must not have the compositor re-read the pointer configuration. Both
-        // are drained on every event, so an event that somehow changed both
-        // files sends both notifications rather than losing one.
-        if state.take_input_change()
-            && let Err(e) = events.input_changed()
-        {
-            failure = Some(e);
-            return EventResponse::Exit;
-        }
-        if result == EventResult::Consumed {
-            if let Err(e) = events.submit(id, &state.render()) {
-                failure = Some(e);
-                return EventResponse::Exit;
-            }
-        }
-        EventResponse::Continue
-    })?;
+    fn initial_size(&self) -> (u32, u32) {
+        // Cast from the state's own `f32`, which is what the layout arithmetic
+        // wants, to the protocol's pixels. Exact rather than approximately so:
+        // every value this field ever holds arrives as an integer pixel count —
+        // `new()`'s 1200x800, an `Event::Resize`, or the size `App::render` is
+        // handed — so there is nothing here for the truncation to lose.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the layout keeps its size as f32; the protocol counts pixels"
+        )]
+        (self.window_width as u32, self.window_height as u32)
+    }
 
-    failure.map_or(Ok(()), Err)
-}
-
-/// The command-line arguments: a display address, and nothing else.
-///
-/// `--display ADDR` overrides `SLATE_DISPLAY`, in the same way and for the same
-/// reason a compositor takes an address as its first argument — a second display
-/// on one machine should not require editing the environment of the first.
-///
-/// Anything else is rejected rather than ignored. Settings takes no file and no
-/// page name, so an unrecognised argument is a user who expected something to
-/// happen; silently starting on the Display page would be a wrong answer
-/// delivered confidently.
-fn split_args<I: IntoIterator<Item = String>>(args: I) -> Result<Option<String>, String> {
-    let mut display = None;
-    let mut args = args.into_iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--display" => {
-                display = Some(args.next().ok_or_else(|| {
-                    "--display needs an address, e.g. --display 127.0.0.1:7373".to_string()
-                })?);
-            }
-            other => match other.strip_prefix("--display=") {
-                Some(addr) => display = Some(addr.to_string()),
-                None => return Err(format!("unrecognised argument: {other}")),
-            },
+    // `tick_interval` is deliberately left at its `None` default, and the
+    // absence is the assertion: Settings ages nothing. Every visible change it
+    // makes is downstream of an event — there is no animation, no toast that
+    // expires, no periodic re-read of the files it owns. The day one of those is
+    // added, this is the method that has to come with it, or the feature ships
+    // frozen with passing tests over it (`known-issues.md` lesson 47).
+    fn on_event(&mut self, event: &Event) -> Response {
+        // The one translation this seam performs, and the one place in Settings
+        // where the two enums meet. `EventResult` answers a different question —
+        // whether an event should keep propagating up a widget tree — and
+        // Settings' internal handlers use it for exactly that, which is why they
+        // keep it. Mapping it here rather than converting every handler keeps
+        // the pun confined to four lines instead of spreading `Redraw` through a
+        // widget hierarchy that has no business deciding when to repaint.
+        //
+        // The mapping is the same one the hand-written loop made: `Consumed`
+        // draws. It is imprecise in the harmless direction — a click on an
+        // already-selected item repaints a frame that looks identical — and
+        // never in the harmful one, where a change goes unpainted.
+        //
+        // `CloseRequested` is not answered with `Exit` because it does not need
+        // to be: `EventLoop::run_batched` closes on it whatever the application
+        // says, so that a title-bar X cannot be a button that does nothing.
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
         }
     }
-    Ok(display)
+
+    /// The files Settings has rewritten since the loop last asked.
+    ///
+    /// Settings is the only application in the tree that implements this, and
+    /// the reason it exists: window corners, drop shadows and the double-click
+    /// interval are read by the *compositor*, so a change written to disk and
+    /// not announced is a setting the user watches take effect in this window's
+    /// preview and nowhere else until the next login.
+    ///
+    /// Both flags are drained on every ask, so an event that somehow changed
+    /// both files sends both notifications rather than losing one.
+    fn take_reloads(&mut self) -> Reloads {
+        Reloads {
+            appearance: self.take_appearance_change(),
+            input: self.take_input_change(),
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The compositor's word on the size rather than Settings' memory of it.
+        // They normally agree, because `handle_event` records every
+        // `Event::Resize` — but the first frame is drawn before any event has
+        // arrived, and a compositor may grant a window a size other than the one
+        // it was asked for without ever calling that a resize. A sidebar laid
+        // out for a window that is not the one on screen is the visible cost.
+        self.window_width = width.max(0.0);
+        self.window_height = height.max(0.0);
+        self.render_tree()
+    }
 }
 
-fn main() {
-    let display = match split_args(std::env::args().skip(1)) {
-        Ok(display) => display,
-        Err(e) => {
-            eprintln!("settings: {e}");
-            eprintln!("usage: settings [--display HOST:PORT]");
-            std::process::exit(2);
-        }
-    };
-
+fn main() -> ExitCode {
     let mut state = SettingsState::new();
     // The Personalization pages open on what the user actually has, which is
     // the same file the desktop shell paints from.
@@ -4803,51 +4783,15 @@ fn main() {
     // the same file the compositor times two clicks against.
     state.load_input();
 
-    // Settings names `oswindow` and never TCP — see `design-decisions.md` §460
-    // — so the day the transport becomes a SlateOS channel, none of this
-    // changes.
-    let dialled = match &display {
-        Some(addr) => oswindow::connect_to(addr.as_str()),
-        None => oswindow::connect(),
-    };
-    let transport = match dialled {
-        Ok(t) => t,
-        Err(e) => {
-            // Almost always "connection refused", which means no compositor is
-            // running. The errno alone reads like a fault in this program, so
-            // say what it actually means and what to do about it.
-            eprintln!("settings: cannot reach the compositor: {e}");
-            eprintln!("  A compositor must be running for Settings to have a window.");
-            eprintln!("  Start one with `compositor`, or point Settings at an existing");
-            eprintln!(
-                "  display with `--display HOST:PORT` or the {} variable.",
-                oswindow::DISPLAY_VAR
-            );
-            std::process::exit(1);
-        }
-    };
-
-    // Cast from the state's own `f32`, which is what the layout arithmetic
-    // wants, to the protocol's pixels. `new()` sets 1200x800 and nothing has
-    // resized it yet, so the values are exact.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let (w, h) = (state.window_width as u32, state.window_height as u32);
-    let mut events = EventLoop::new(transport);
-    let window = match WindowBuilder::new("Settings".to_string(), w, h)
-        .resizable(true)
-        .build(&mut events)
-    {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("settings: the compositor refused the window: {e:?}");
-            std::process::exit(1);
-        }
-    };
-
-    if let Err(e) = run(&mut events, window, &mut state) {
-        eprintln!("settings: the connection failed: {e:?}");
-        std::process::exit(1);
-    }
+    // `launch` rather than `launch_with`: Settings takes no file and no page
+    // name, so it wants exactly the shared command line and nothing more —
+    // including the rejection of an unrecognised argument, which was previously
+    // Settings' own `split_args`. Silently starting on the Display page would be
+    // a wrong answer delivered confidently.
+    //
+    // Settings names `oswindow` and never TCP — see `design-decisions.md` §460 —
+    // so the day the transport becomes a SlateOS channel, none of this changes.
+    oswindow::app::launch("settings", &mut state)
 }
 
 // ============================================================================
@@ -4937,7 +4881,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let state = SettingsState::new();
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty());
         // Should have at minimum: background rect + sidebar + header + content
         assert!(tree.len() > 20);
@@ -5005,7 +4949,7 @@ mod tests {
         state.night_light_enabled = true;
 
         // Render with night light on should show temperature slider
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5014,7 +4958,7 @@ mod tests {
         let mut state = SettingsState::new();
         assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Dark);
         state.appearance.settings.theme_mode = ThemeMode::Light;
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5098,7 +5042,7 @@ mod tests {
     /// the content area starts at `SIDEBAR_WIDTH`.
     fn category_highlights(state: &SettingsState) -> Vec<(f32, f32)> {
         state
-            .render()
+            .render_tree()
             .commands
             .iter()
             .filter_map(|cmd| match cmd {
@@ -5288,7 +5232,7 @@ mod tests {
             state.current_category = *category;
             for page in category.pages() {
                 state.current_page = *page;
-                let tree = state.render();
+                let tree = state.render_tree();
                 assert!(!tree.is_empty(), "Page {:?} must render", page);
             }
         }
@@ -5300,7 +5244,7 @@ mod tests {
         assert_eq!(state.selected_adapter, 0);
         state.selected_adapter = 1;
         state.current_page = SettingsPage::NetworkStatus;
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5310,7 +5254,7 @@ mod tests {
         assert!(!state.proxy_enabled);
         state.proxy_enabled = true;
         state.current_page = SettingsPage::Proxy;
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5320,7 +5264,7 @@ mod tests {
         assert_eq!(state.appearance.settings.accent_color, AccentColor::Blue);
         state.appearance.settings.accent_color = AccentColor::Green;
         state.current_page = SettingsPage::Colors;
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.is_empty());
     }
 
@@ -5371,7 +5315,7 @@ mod tests {
     fn test_open_dropdown_renders() {
         let mut state = SettingsState::new();
         state.open_dropdown = Some(DropdownId::Resolution);
-        let tree = state.render();
+        let tree = state.render_tree();
         // Should have more commands when dropdown is open (shadow + background + items)
         assert!(tree.len() > 30);
     }
@@ -5520,7 +5464,7 @@ mod tests {
         const LABEL_DY: f32 = 8.0;
         const LABEL_SIZE: f32 = 13.0;
 
-        let tree = state.render();
+        let tree = state.render_tree();
         let mut out = Vec::new();
         for pair in tree.commands.windows(2) {
             let (
@@ -5688,10 +5632,10 @@ mod tests {
                 let mut after = SettingsState::new();
                 after.current_page = page;
                 after.selected_account = state.selected_account;
-                let before = after.render().commands.len();
+                let before = after.render_tree().commands.len();
                 after.handle_click(cx, cy);
                 assert_eq!(
-                    after.render().commands.len(),
+                    after.render_tree().commands.len(),
                     before,
                     "pressing the dimmed \"{label}\" on {} changed the page",
                     page.label()
@@ -5717,7 +5661,7 @@ mod tests {
     /// instead of being silently credited to the right one.
     fn painted_picture_tiles(state: &SettingsState) -> Vec<(String, f32, f32, bool)> {
         let close = |a: f32, b: f32| (a - b).abs() < 0.01;
-        let tree = state.render();
+        let tree = state.render_tree();
 
         let mut rings: Vec<(f32, f32)> = Vec::new();
         for cmd in &tree.commands {
@@ -5788,7 +5732,7 @@ mod tests {
     /// scan that swept the whole window would count it as a fourth account.
     fn account_list_avatars(state: &SettingsState) -> Vec<String> {
         state
-            .render()
+            .render_tree()
             .commands
             .iter()
             .filter_map(|cmd| match cmd {
@@ -6521,9 +6465,9 @@ mod tests {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Colors;
         state.appearance.settings.theme_mode = ThemeMode::Light;
-        let light = state.render();
+        let light = state.render_tree();
         state.appearance.settings.theme_mode = ThemeMode::Dark;
-        let dark = state.render();
+        let dark = state.render_tree();
         assert_ne!(light.len(), 0);
         assert_ne!(
             format!("{light:?}"),
@@ -6797,7 +6741,7 @@ mod tests {
     /// catch. This one caught nothing when `row_top` was shifted three pixels,
     /// which is how the flaw was found.
     fn drawn_dropdown_rows(state: &SettingsState) -> Vec<(String, f32)> {
-        let tree = state.render();
+        let tree = state.render_tree();
         let start = tree
             .commands
             .iter()
@@ -6820,7 +6764,7 @@ mod tests {
 
     /// The "N more" line the popup draws when it is hiding items, if any.
     fn dropdown_more_line(state: &SettingsState) -> Option<String> {
-        let tree = state.render();
+        let tree = state.render_tree();
         let start = tree
             .commands
             .iter()
@@ -6949,7 +6893,7 @@ mod tests {
             .nth(row_on_screen)
             .expect("the chosen row was drawn");
 
-        let tree = state.render();
+        let tree = state.render_tree();
         let shadow = tree
             .commands
             .iter()
@@ -7368,11 +7312,10 @@ mod loop_tests {
     use oswindow::testing;
     use oswindow::{InputEvent, WindowBuilder};
 
+    use oswindow::app::{App as _, drive, open};
+
     use super::tests::center_of;
-    use super::{
-        EventResult, RowHit, SelectId, SettingsPage, SettingsState, SliderId, ThemeMode, run,
-        split_args,
-    };
+    use super::{EventResult, RowHit, SelectId, SettingsPage, SettingsState, SliderId, ThemeMode};
 
     /// A left click at a point, as the compositor would deliver it.
     fn click_at(x: f32, y: f32) -> Event {
@@ -7415,15 +7358,17 @@ mod loop_tests {
     #[test]
     fn settings_draws_once_at_startup_and_then_only_when_something_changed() {
         let (mut events, desktop) = testing::desktop();
-        let window = WindowBuilder::new("Settings", 1200, 800)
-            .resizable(true)
-            .build(&mut events)
-            .expect("the compositor should have created the window");
-
         let (mut state, at) = control_on(
             SettingsPage::NetworkStatus,
             RowHit::Select(SelectId::Adapter, 1),
         );
+        // Opened through the harness rather than by hand, so this one test
+        // covers the whole path Settings actually ships: `open` asks on the
+        // application's own terms, and `drive` runs it. The tests below build
+        // the window directly, because what they are about is the loop and a
+        // second copy of the window request would only be a second thing to
+        // keep in step.
+        let window = open(&mut events, &state).expect("the compositor should have created it");
 
         {
             let mut desk = desktop.borrow_mut();
@@ -7437,7 +7382,7 @@ mod loop_tests {
                 .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
         }
 
-        run(&mut events, window, &mut state).expect("the loopback connection cannot fail");
+        drive(&mut events, window, &mut state).expect("the loopback connection cannot fail");
 
         assert_eq!(state.selected_adapter, 1, "the click reached the control");
         let drawn = desktop.borrow_mut().drawn();
@@ -7477,7 +7422,7 @@ mod loop_tests {
                 .push_back(vec![InputEvent::new(mine, Event::CloseRequested)]);
         }
 
-        run(&mut events, mine, &mut state).unwrap();
+        drive(&mut events, mine, &mut state).unwrap();
 
         assert_eq!(
             state.selected_adapter, 0,
@@ -7512,7 +7457,7 @@ mod loop_tests {
                 .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
         }
 
-        run(&mut events, window, &mut state).unwrap();
+        drive(&mut events, window, &mut state).unwrap();
 
         assert_eq!(
             state.selected_adapter, 0,
@@ -7544,7 +7489,7 @@ mod loop_tests {
                 .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
         }
 
-        run(&mut events, window, &mut state).unwrap();
+        drive(&mut events, window, &mut state).unwrap();
 
         assert_eq!((state.window_width, state.window_height), (900.0, 640.0));
         let drawn = desktop.borrow_mut().drawn();
@@ -7575,7 +7520,7 @@ mod loop_tests {
                     .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
             }
 
-            run(&mut events, window, &mut state).unwrap();
+            drive(&mut events, window, &mut state).unwrap();
 
             assert_eq!(
                 state.appearance.settings.theme_mode,
@@ -7619,7 +7564,7 @@ mod loop_tests {
                     .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
             }
 
-            run(&mut events, window, &mut state).unwrap();
+            drive(&mut events, window, &mut state).unwrap();
 
             assert_eq!(state.selected_adapter, 1, "the click was consumed");
             let asked = desktop.borrow_mut().asked();
@@ -7656,7 +7601,7 @@ mod loop_tests {
                     .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
             }
 
-            run(&mut events, window, &mut state).unwrap();
+            drive(&mut events, window, &mut state).unwrap();
 
             let asked = desktop.borrow_mut().asked();
             assert_eq!(
@@ -7742,7 +7687,7 @@ mod loop_tests {
                     .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
             }
 
-            run(&mut events, window, &mut state).unwrap();
+            drive(&mut events, window, &mut state).unwrap();
 
             assert_ne!(
                 state.input.settings.mouse.double_click_ms, before,
@@ -7783,7 +7728,7 @@ mod loop_tests {
                     .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
             }
 
-            run(&mut events, window, &mut state).unwrap();
+            drive(&mut events, window, &mut state).unwrap();
 
             assert_eq!(state.appearance.settings.theme_mode, ThemeMode::Light);
             let asked = desktop.borrow_mut().asked();
@@ -7833,34 +7778,87 @@ mod loop_tests {
         });
     }
 
+    // The two argument tests that used to sit here went with `split_args`. What
+    // they asserted is now `oswindow::app`'s: the two `--display` spellings are
+    // pinned by `Args::parse`'s own tests, and "an argument Settings does not
+    // understand is refused rather than ignored" is pinned by `launch`'s. Both
+    // properties still hold for Settings; what changed is that they hold for
+    // every application at once instead of for whichever ones remembered.
+
+    /// Settings as the harness sees it, before a single event.
+    ///
+    /// The counterpart of the tests above, which drive the loop: these pin the
+    /// answers Settings gives *to* the loop. A harness test proves the strap
+    /// works; only an application test proves this application is strapped in.
     #[test]
-    fn the_display_address_can_come_from_either_spelling() {
-        assert_eq!(split_args(Vec::<String>::new()), Ok(None));
+    fn the_window_is_asked_for_on_settings_own_terms() {
+        let state = SettingsState::new();
+        assert_eq!(state.title(), "Settings");
         assert_eq!(
-            split_args(vec!["--display".to_string(), "1.2.3.4:9".to_string()]),
-            Ok(Some("1.2.3.4:9".to_string()))
-        );
-        assert_eq!(
-            split_args(vec!["--display=1.2.3.4:9".to_string()]),
-            Ok(Some("1.2.3.4:9".to_string()))
+            state.initial_size(),
+            (1200, 800),
+            "the size the layout was written for"
         );
     }
 
+    /// Settings ages nothing, and the `None` is the assertion rather than an
+    /// omission. See the comment on the trait impl: the day an animation or an
+    /// expiring toast arrives, this test is what fails.
     #[test]
-    fn an_argument_settings_does_not_understand_is_refused_rather_than_ignored() {
-        // Settings takes no file and no page name, so an unrecognised argument
-        // is a user who expected something to happen. Starting anyway on the
-        // Display page would be a wrong answer delivered confidently.
-        let err = split_args(vec!["notes.txt".to_string()]).unwrap_err();
-        assert!(
-            err.contains("notes.txt"),
-            "the message names the argument: {err}"
-        );
+    fn settings_asks_for_no_clock_because_it_measures_no_time() {
+        assert_eq!(SettingsState::new().tick_interval(), None);
+    }
 
-        let err = split_args(vec!["--display".to_string()]).unwrap_err();
-        assert!(
-            err.contains("--display"),
-            "a flag with its value missing says which flag: {err}"
+    /// The first frame is drawn before any event has arrived, so a compositor
+    /// that granted a size other than the one asked for would otherwise have
+    /// Settings lay out its sidebar for a window that is not on screen.
+    #[test]
+    fn the_first_frame_adopts_the_size_the_compositor_actually_granted() {
+        let mut state = SettingsState::new();
+        let tree = state.render(640.0, 400.0);
+        assert_eq!(
+            (state.window_width, state.window_height),
+            (640.0, 400.0),
+            "Settings kept drawing at a size the window does not have"
+        );
+        assert!(!tree.commands.is_empty(), "and it drew something");
+    }
+
+    /// A verdict that means "nothing visible changed" must not cost a frame:
+    /// this UI is a sidebar plus a scrolling page, one of the more expensive
+    /// trees here to rebuild, and a mouse crossing the window is a burst of
+    /// events that change nothing.
+    #[test]
+    fn an_event_settings_does_nothing_with_does_not_ask_for_a_frame() {
+        let mut state = SettingsState::new();
+        assert_eq!(state.on_event(&ignored()), oswindow::app::Response::Idle);
+    }
+
+    /// And the other direction, so the mapping above is pinned at both ends: a
+    /// click that moves a control is a frame.
+    #[test]
+    fn an_event_that_changes_a_control_asks_for_a_frame() {
+        let (mut state, at) = control_on(
+            SettingsPage::NetworkStatus,
+            RowHit::Select(SelectId::Adapter, 1),
+        );
+        assert_eq!(
+            state.on_event(&click_at(at.0, at.1)),
+            oswindow::app::Response::Redraw
+        );
+    }
+
+    /// `CloseRequested` is answered `Idle`, and that is deliberate rather than
+    /// an oversight: `EventLoop::run_batched` closes on it whatever the
+    /// application says, so a title-bar X cannot be a button that does nothing.
+    /// Settings returning `Exit` here would be a second mechanism for one rule.
+    /// The loop test above is what pins that the window actually closes.
+    #[test]
+    fn a_close_request_is_left_to_the_loop() {
+        let mut state = SettingsState::new();
+        assert_eq!(
+            state.on_event(&Event::CloseRequested),
+            oswindow::app::Response::Idle
         );
     }
 }
@@ -7907,7 +7905,9 @@ mod against_the_real_compositor {
     use oswindow::{EventLoop, WindowBuilder};
 
     use super::tests::center_of;
-    use super::{RowHit, SelectId, SettingsPage, SettingsState, ThemeMode, run};
+    use oswindow::app::drive;
+
+    use super::{RowHit, SelectId, SettingsPage, SettingsState, ThemeMode};
 
     /// How long a step may take before the test calls it a failure.
     ///
@@ -8140,7 +8140,7 @@ mod against_the_real_compositor {
         // Settings' real render tree — the sidebar, the category rows, the whole
         // current page — encoded by `oswindow`, carried by TCP, decoded by the
         // compositor's wire front end and rasterised.
-        let tree = state.render();
+        let tree = state.render_tree();
         assert!(!tree.commands.is_empty(), "Settings drew nothing to send");
         events.submit(window, &tree).expect("submit");
 
@@ -8175,7 +8175,7 @@ mod against_the_real_compositor {
                 // the socket closes under it and this returns an error, which is
                 // the intended way out — there is no window frame to close and
                 // no keyboard shortcut that quits.
-                let _ = run(&mut events, window, &mut state);
+                let _ = drive(&mut events, window, &mut state);
                 state
             });
 

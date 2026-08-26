@@ -10594,7 +10594,7 @@ is the worst possible place to discover that your code can fault, and only a
 boot test finds it — this would have shipped clean under a "it compiles and
 clippy is quiet" standard.
 
-### [RESOLVED 2026-08-22] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — a freed PML4 was still live in CR3; fixed in `0ecd5ff03`, WATCH cleared after three consecutive clean boots — 2026-07-15
+### [REOPENED as WATCH 2026-08-25 — the PML4 cause is fixed and stays fixed; the *signature* recurred on a different rung] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang after the last thread of a just-reaped process exits — one cause (a freed PML4 still live in CR3) found and fixed in `0ecd5ff03`; a second, still-unidentified cause produced the same silence on 2026-08-25 — 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During
 `self_test_linux_real_glibc_forkexec` (`spawn-test-glibc-forkexec`,
@@ -10847,6 +10847,142 @@ rather than something the caller is trusted to have arranged, and treating
 "the state that publishes an object as reclaimable" and "the last instant that
 object is in use" as one atomic step. Here they were separated by two serial
 prints.
+
+**[A] RECURRENCE 2026-08-25 — same silence, different rung, and the PML4 fix
+is definitely in the tree.** A boot went silent with the signature this entry
+was closed on, three days after it was closed.
+
+*In short:* the machine stopped dead, printing nothing further, immediately
+after a test program finished and the kernel started cleaning it up. It is the
+same *symptom* as the bug fixed on 2026-08-22, but not the same *cause* — the
+2026-08-22 fix is present and working. Something else in the few instructions
+after a process is reaped can still wedge the machine, roughly once in a few
+dozen boots. The very next boot of the identical tree was green.
+
+| | 2026-07-15 / 2026-08-22 | 2026-08-25 |
+|---|---|---|
+| Rung | `self_test_linux_real_glibc_forkexec` | Path-Z hosted-cc `inline-asm` (`spawn-test-tcc-hosted`, pid 420 / task 387) |
+| Last line printed | `[sched] Task 130 exiting` | `[sched] Task 387 exiting` |
+| Line that never came | the forkexec verdict | `hosted cc (inline-asm) — /hosted-prog is a 4026-byte dynamic ELF` |
+| Serial position | — | line 38 775 of an expected ~46 860 |
+| Diagnostics | none | none: 0 `!!` lines, no panic, no `#PF`, no stall report |
+| Timeout | 480 s | QEMU's 900 s fired; harness ran 1174 s |
+
+**The fixed path is present and is not the explanation.**
+`sched::detach_address_space` exists at `sched/mod.rs:1789` with both call
+sites live — `proc/thread.rs:708` (immediately after `on_thread_exit_hook`)
+and `sched/mod.rs:1837` (the idempotent backstop in `task_exit`). Per this
+entry's own instruction, the page-table path was *not* re-derived. This is a
+second cause wearing the first one's symptom.
+
+**What the new rung narrows.** `spawn_hosted_cc` (`proc/spawn.rs:28525`) has a
+different, shorter tail than the forkexec harness, and the missing line places
+the wedge inside it precisely. After the bounded poll loop breaks with
+`reaped = true`, the surviving steps are, in order:
+
+1. `pcb::state(pid)` / `pcb::exit_code(pid)`
+2. `thread::on_thread_exit(cc_result.task_id)`
+3. `pcb::destroy(cc_result.pid)`
+4. — return Ok — then the caller's `Vfs::read_file("/hosted-prog")`
+5. `assert_dynamic_elf`, whose **first statement prints the missing line**
+
+Step 5 printing nothing means the wedge is in steps 1–4. Steps 1 and 5 are
+cheap and lock-light; the weight is in 2–4. That is exactly where this entry
+said to start ("the remaining post-loop suspects … are `Vfs::read_file`/
+`Vfs::remove` on the capture file"), and the new rung sharpens it: **the file
+being read is the compiler's own output**, a ~4 KiB file that tcc created and
+wrote through the VFS and that was closed by the exiting process's fd
+teardown, read back on the very next line after that process was destroyed.
+"Read a file the dying process just wrote, immediately after destroying it" is
+the shape shared by both occurrences — the forkexec harness read a capture
+file with the same timing.
+
+**A lead that looked good and is RULED OUT — do not re-derive it.**
+Step 2 calls `thread::on_thread_exit(task_id)` on a task that has *already* run
+`on_thread_exit` itself: the log proves it, because `[thread] Process 420 has
+no threads left — now zombie` is printed from inside that very function and
+appears two lines before the freeze. So the function does run twice per
+hosted-cc rung, the second time against an address space the first pass
+detached — which looks exactly like a double-teardown bug. It is not. Reading
+the second pass end to end:
+
+- `thread_clone::on_thread_exit_hook` opens with an **AS-active guard**
+  (`thread_clone.rs:287`) computed from `thread::owner_process(task_id)`. The
+  first pass already removed the `THREAD_OWNERS` entry, so the second gets
+  `None` → `as_active = false` → every user-memory pass (the PI-futex handoff,
+  the robust-list walk, the ctid zero-write, the ctid futex wake) is skipped.
+  The three table removals that do run — `ROBUST_LIST`, `RSEQ`,
+  `CLEAR_CHILD_TID` — are `BTreeMap::remove`, idempotent by construction, and
+  the `CLEAR_CHILD_TID` miss returns early.
+- `sched::detach_address_space` documents and implements idempotence
+  (`sched/mod.rs:1789`): it only acts on `pml4_phys != 0`, and rewrites CR3
+  only when `task_id == load_current_task()` — which the harness's own task
+  is not.
+- `on_thread_exit` then hits `THREAD_OWNERS.lock().remove(&task_id)?` and
+  returns `None` on the missing entry, so `release_irqs_for_task`,
+  `pcb::remove_thread`, `exit_close_fds` and everything below never run twice.
+
+The second pass is a clean no-op. Cross it off.
+
+**[A] The decisive narrowing: the BSP stopped taking timer interrupts.**
+`sched::liveness_boot_deadline_check` (`sched/mod.rs:3049`) runs on **every BSP
+tick** — deliberately not on the 500-tick cadence — and prints a
+`[liveness] boot-window breadcrumb: Ns armed (…)` line each time armed-elapsed
+crosses a 30 s boundary. The healthy re-run emitted 11 of them, the last at
+`330s armed`. The hung boot sat for roughly 600 s past its freeze point and
+emitted **none**.
+
+Nothing between the interrupt entry and that breadcrumb can block: the tick
+path is `rcu::quiescent_state`, `PER_CPU_SCHED.tick`, some relaxed atomic
+counters, `hardlockup::kick` (a no-op unless armed), and a **`SCHED.try_lock()`**
+— explicitly non-blocking, with the comment saying a missed tick is fine. And
+`watchdog_diagnostic` is unconditional; it only counts the bytes the closure
+emits. So a breadcrumb is emitted unless the tick itself never happens.
+
+That rules out the whole family of hypotheses this entry has accumulated
+around *lock* wedges. A `crate::sync::Mutex`, a `PreemptSpinMutex` and a raw
+`spin::Mutex` all spin with **IF still set**; the timer keeps firing, and the
+breadcrumb keeps printing, whatever they are doing. Twenty missed breadcrumbs
+means the CPU was not taking interrupts at all — the "BSP-dead total-silence
+hang the timer-driven watchdogs cannot see" that `hardlockup::kick`'s own
+comment describes.
+
+**Where that points.** Look for an `IF=0` region on the post-reap path, not a
+lock. `pcb::destroy` → `destroy_user_address_space` frees every frame of the
+address space, and `kernel/src/mm/frame.rs` wraps its allocator critical
+sections in `cpu::without_interrupts` in fifteen places (plus six more in
+`mm/quarantine.rs`). A free-list walk that loops — a corrupted or cyclic list,
+which is history-dependent and therefore intermittent — inside one of those is
+silent by construction, cannot be preempted, cannot report itself, and freezes
+exactly where both occurrences froze. Neither `blkdev.rs` nor `virtio/` uses
+`without_interrupts` at all, so the `Vfs::read_file` suspect from the older
+narrowing is the *less* likely half of step 4; the frame-freeing half is the
+more likely.
+
+**The next occurrence must produce a RIP, and today's could not.** The only
+detectors that can see an `IF=0` wedge are host-side or NMI-driven, and both
+are opt-in: `--hard-lockup-watchdog` (§61, kept opt-in by operator decision so
+the guest's PCI topology is unchanged on shared runs) and `--stall-secs=N`
+(host-side `info registers` via the QEMU monitor, which changes nothing in the
+guest at all). Neither was on, because nobody knows in advance which boot will
+be the one in a few dozen that hangs.
+
+**Repro status: intermittent, ~1 in a few dozen.** The immediately-following
+boot of the *identical* tree, run with `--hard-lockup-watchdog` specifically to
+capture the wedged guest RIP, reached `BOOT_OK` in 395 s with the `inline-asm`
+
+**Repro status: intermittent, ~1 in a few dozen.** The immediately-following
+boot of the *identical* tree, run with `--hard-lockup-watchdog` specifically to
+capture the wedged guest RIP, reached `BOOT_OK` in 395 s with the `inline-asm`
+rung green — so **no RIP was captured** and the watchdog hint remains the right
+first move on the next occurrence. `bench/boot-history.jsonl` now records 425
+boots, 110 not clean.
+
+**Not caused by the change it surfaced under.** The tree under test was the
+kshell option-refusal sweep (`68d5483e6`), which touches only shell command
+parsers and a self-test rung that runs at serial line ~40 940 — some 2 000
+lines *after* the freeze point, and in a subsystem with no relationship to
+process teardown. As in 2026-07-15, the change only perturbed timing.
 
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 
@@ -32972,6 +33108,123 @@ with no stand-in on either side.
 Settings was the application this entry singled out because it had something
 specific it could not call. That is closed. The entry stays open for the other
 136 unwired applications.
+
+**Update 2026-08-25 — the strap is written once, and the recipe below is the
+whole of what converting an app now costs.**
+
+Three applications had by then been wired — editor, Settings, and (as of this
+update) metronome — and each had its own hand-written `run`. That is the failure
+step (d) named at the top of this entry, arriving from the other direction: the
+loop was written once *for the tree* and then written again, per app, because
+nothing had extracted the parts that are identical in all of them. Three copies
+is where the divergence starts being cheap to fix; 136 is where it is not.
+
+`gui/window/src/app.rs` (`oswindow::app`) now holds it: an `App` trait
+(`title`, `initial_size`, `resizable`, `tick_interval`, `on_event`, `render`,
+the first three and the fourth defaulted), `open`, `drive`, `Args`, and
+`launch`/`launch_with`. Editor and metronome are on it; Settings is not yet.
+
+**The recipe.** For an ordinary single-window application:
+
+1. Add `oswindow = { path = "../../gui/window" }` to its `Cargo.toml`. An app
+   names `oswindow` and never `guiremote`, for the reason a Unix program does
+   not name the socket layer.
+2. Delete `#![allow(dead_code)]` if it has one. It is almost always there
+   because the app was never wired, and it is what hides the fact — see
+   `lesson 46`. Expect to delete genuinely dead code once the lint works again,
+   and expect some of it to be *test-only* dead code, which is lesson 45 exactly
+   and is invisible unless you compare `cargo build` against `cargo test`.
+3. `impl oswindow::app::App` for the app's state type.
+   - If it has an inherent `render`, **rename it** (`render_commands`,
+     `render_tree`). At equal arity an inherent method silently wins method
+     lookup over the trait's and every existing call keeps compiling while
+     testing the other function.
+   - **`tick_interval` is the one to get right.** Anything the app ages — a
+     beat, a blink, a countdown, a toast — needs it, and the default `None`
+     ships the feature frozen with its tests still passing (`lesson 47`).
+     Return `None` only when the app genuinely ages nothing, and gate it on
+     what is actually moving so an idle desktop can park.
+   - Do **not** answer `Redraw` to `Event::Resize`/`ScaleChanged`; `drive` takes
+     that decision for every app, because 137 apps each remembering to is 137
+     chances to forget.
+   - If the app's renderer reads its own stored window size, have `App::render`
+     reconcile it with the size it is *handed* — a compositor may grant a size
+     that was never requested, and the first frame is drawn before any event.
+4. `fn main() -> ExitCode` becomes one line, `app::launch("name", &mut state)`
+   — or, for an app with arguments of its own, `Args::from_env()` +
+   `launch_with(name, args.display.as_deref(), &mut state)`, because `launch`
+   rejects unexpected arguments with exit 2.
+5. Delete the app's own display parsing, dialer, diagnostic and window build.
+   All four are in `oswindow::app` and were identical in every copy.
+6. Run `python scripts/check-tick-wiring.py` and
+   `python scripts/scan-unwired.py`. The second reports reach per binary; a
+   conversion should raise it, and if it *falls*, suspect the scanner's
+   `ENTRY_POINTS` list before suspecting the app (that list has already lagged
+   the code once).
+
+**What the extraction cost, which is the argument for having done it before app
+four rather than after app forty.** `guiremote::client::Client` — step (d)'s
+original home for the loop — was retired in the same work. It had been
+superseded by `oswindow::EventLoop` within a week of being written and had sat
+since with **no production caller of its own**, which is this entry's own defect
+arriving inside its own cure. It also structurally could not tick: no wake-up
+list, so it parked in `Transport::wait` until the compositor spoke, and any app
+built on it would have reproduced lesson 47 through no fault of its own.
+
+Two live defects surfaced in the two conversions, both of them in `main` and
+both invisible until `main` had something in it worth testing: `apps/metronome`
+never advanced (its `Event::Tick` fell into a `_ => {}` arm), and
+`apps/editor` showed a stray blank tab beside every file named on its command
+line. That is the yield to expect per app, and it is the reason the conversions
+are worth doing individually rather than by a mechanical sweep.
+
+**Update 2026-08-25 (later) — Settings converted; the harness grew the one thing
+an application can need that a loop cannot guess.**
+
+Settings was the third and last hand-written strap, and it is the reason step 3
+of the recipe now has a fifth bullet. It edits `appearance.yaml` and
+`input.yaml`, which the *compositor* reads — window corners, drop shadows,
+whether two clicks are one double click — so it must tell the compositor when it
+has rewritten one. Its own loop did that; `drive` had no way to express it, and
+converting Settings without adding one would have been a silent downgrade
+producing exactly the defect this entry is about: a setting that appears to work
+and does not, its own preview updating while every real window keeps its old
+corners until the next login.
+
+`App::take_reloads` is the hook, drained after every event and turned into the
+`ReloadAppearance`/`ReloadInput` requests `EventLoop` already had. Two flags,
+because they become two requests. **Per event and not once per batch**, which is
+the one placement decision here with a wrong answer: a batch ending in
+`CloseRequested` never reaches `Dispatch::Settled`, so news held for the boundary
+is lost exactly when a user makes their last change and closes the window.
+
+Add to step 3 of the recipe:
+
+  - If the app writes a file another process reads, implement `take_reloads` —
+    and make it *drain*, not peek, or the compositor re-reads the file on every
+    event for the rest of the session.
+
+Two further notes from this conversion, both worth having before the next app:
+
+- **An app whose handlers speak `guitk::EventResult` should map at the seam, not
+  convert the handlers.** Settings' internal handlers use `Consumed`/`Ignored`
+  for what it genuinely means — whether an event keeps propagating up a widget
+  tree — so the four-line mapping in `on_event` is right and pushing `Response`
+  down into the hierarchy would be wrong. The mapping is imprecise in the
+  harmless direction only (a click on an already-selected item repaints an
+  identical frame) and never in the harmful one.
+- **A claim in a commit message is a claim to falsify like any other.** This
+  conversion deleted Settings' `split_args` tests on the grounds that `launch`
+  now carried the rule. It did not — `launch` needs a socket, so nothing in it
+  had ever been executed by a test. Fixed by extracting `leftover_complaint`,
+  which is the only part of `launch` that can be tested without a compositor.
+
+**Count: 135 to go.** All three applications that open a window — editor,
+Settings, metronome — are now on `oswindow::app`, so there is no fourth copy of
+the strap to retire and the remaining work is the placeholder `main`s. The next
+one is a judgement call rather than a forced move: pick an app whose state type
+already exists and already has a `handle_event`, since that is most of the work,
+and expect roughly one live defect per app (three conversions, three defects).
 
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
@@ -67805,6 +68058,427 @@ the day they discover what it assumed. Nothing breaks in the meantime, which is
 exactly why it has gone unnoticed for so long — a module nobody draws also
 never looks wrong.
 
+### Measured 2026-08-25 — `scripts/scan-orphan-modules.py`, and what it found
+
+The paragraphs above counted `pub fn render` by hand. There is now an
+instrument: for every library module in lane C's tree, it asks whether any
+other file in the *repository* names one of its top-level public items or its
+module path, outside tests and bare re-exports. A `pub` item must be named to
+be used, so a "no" is sound — which is what makes this answerable at module
+scale when the function-level question (`scan-unwired.py`) is not.
+
+**57 island modules, 113,132 lines, out of 200 library modules scanned** — and
+**39 of the 57 are in `gui/desktop`, a crate whose `lib.rs` declares 59.**
+
+*(Corrected the same day. The first run of the instrument said 21 / 39,060,
+and that was wrong three separate times over: an associated `fn` sharing a
+free item's spelling, an item name matched against a same-named type in a lane
+that has never heard of this crate, and an identifier inside a string literal
+each alibi'd a slice of the list. All three were found by disbelieving a
+clearance and checking the module by hand; see commit `26f8eecd5`. The
+lesson generalises past this script: **a scan of this kind is not finished
+when it runs, it is finished when its clearances survive being disbelieved.**
+Do not cite the 21.)*
+
+The 39-of-59 figure is worth pausing on. The paragraphs above reached "four of
+its fifty-seven modules are drawn" by hand-counting `pub fn render` call
+sites — a completely different method, asking a narrower question. The two
+agree: four modules drawn, thirty-nine with no caller of any kind. That
+agreement is the best evidence either number is right.
+
+The largest islands:
+
+| Module | Lines | What is in it |
+|---|---|---|
+| `gui/toolkit/src/modal.rs` | 4,630 | modal dialog / sheet infrastructure |
+| `gui/desktop/src/network_settings.rs` | 4,172 | the whole network settings page |
+| `gui/desktop/src/osd.rs` | 3,457 | volume/brightness/lock on-screen display |
+| `gui/toolkit/src/svg.rs` | 3,393 | an SVG path/transform/colour parser |
+| `gui/desktop/src/notif_pane.rs` | 3,374 | the notification pane and quick settings — **reached 2026-08-26, see the repayment log** |
+| `gui/toolkit/src/menubar.rs` | 3,337 | the menu bar widget |
+| `gui/desktop/src/touchpad.rs` | 2,841 | touchpad gestures and settings |
+| `gui/desktop/src/window_rules.rs` | 2,605 | per-application window placement rules |
+| `gui/desktop/src/backup_settings.rs` | 2,591 | backup settings page |
+| `gui/desktop/src/notification_settings.rs` | 2,539 | notification settings page |
+| `apps/procexplorer/src/features.rs` | 2,517 | process-explorer feature set |
+| `apps/imageviewer/src/video.rs` | 2,436 | video playback in the image viewer |
+| `gui/desktop/src/hotkeys.rs` | 2,431 | global hotkey binding |
+| `gui/desktop/src/login_screen.rs` | 2,417 | the login screen |
+
+Two smaller entries are worth naming because they are a *different* failure
+from "written but not yet wired":
+
+- `apps/explorer/src/main.rs` writes `mod columns; mod dropzone; mod thumbs;`
+  and then never mentions any of the three again — 5,611 lines compiled into
+  the binary by an explicit declaration and reachable from nothing.
+  (`columns.rs`, 2,372 of those lines, was wired up on 2026-08-25 — see
+  "Repayment log" at the end of this entry.)
+- `gui/compositor/src/server.rs` (1,334) reaches `lib.rs` only through
+  `pub use server::{Disconnect, Server, ServerStats};`, and no file in the
+  tree consumes any of the three names. A re-export is plumbing, not a
+  caller; it is exactly the shape that makes an island look connected.
+
+**Three of these are duplication, not merely absence** — and that is the part
+that bears on the decision in `open-questions.md` → C-Q6:
+
+- `gui/desktop/src/a11y.rs` and `gui/desktop/src/accessibility_settings.rs`
+  are two accessibility models **in the same crate**, sharing six type names
+  (`ColorFilter`, `MagnifierConfig`, `StickyKeys`, `FilterKeys`, `MouseKeys`,
+  `Magnifier`). `a11y.rs` is the unreached one.
+- `gui/desktop/src/default_apps.rs` (2,314) and
+  `apps/settings/src/associations.rs` (1,748) both model file-type
+  associations, and **neither is reachable**. Deleting one does not fix this.
+- `gui/toolkit/src/context_ext.rs` (1,605) and `gui/desktop/src/context_ext.rs`
+  (2,043) are two files of the same name in two crates sharing four names
+  (`ContextMenuExtension`, `ExtensionId`, `build_context_menu`,
+  `render_context_menu`), and **neither is reachable** — the desktop copy was
+  the module whose false clearance exposed the `member_names` hole. They are
+  not even the same design: the toolkit's `ExtensionId` is a newtype
+  `pub struct ExtensionId(u64)`, the desktop's is `pub type ExtensionId = u64`.
+  The toolkit copy has the lazy-loading and timeout machinery
+  (`TimeoutPolicy`, `LoadingEntry`, `check_timeouts`, `loading_placeholder`)
+  the desktop copy lacks entirely; the desktop copy has the rendering and
+  targeting machinery (`render_context_menu`, `TargetKind`, `ContextTarget`,
+  `MenuPosition`, `ExtensionSettingsUI`) the toolkit copy lacks. Between them
+  they are one feature, and there is a **third** implementation of the same
+  subject in lane A's `kernel/src/fs/contextmenu.rs`.
+
+**And a sub-finding the module scan does not itself report:** six shell
+modules serialise settings that nothing ever stores.
+
+| Module | Writer | Reader | Emits |
+|---|---|---|---|
+| `a11y.rs` | `:1067 to_config_string` | `:1117 from_config_string` | `key=value` text |
+| `power.rs` | `:263 to_config_string` | `:313 from_config_string` | `key=value` text |
+| `user_accounts.rs` | `:744 to_config_text` | `:758 from_config_text` | pipe records, `USER\|…` |
+| `tray_dnd.rs` | `:410 to_config` | `:427 from_config` | a `TrayArrangementConfig` struct |
+| `display_settings.rs` | `:746 to_config_text` | **none** | `key=value` text |
+| `input_method.rs` | `:426 to_config_text` | **none** | `key=value` text |
+
+Every caller of all ten functions is inside a `#[cfg(test)]` module, and each
+has a passing round-trip test — except the last two, which have no reader to
+round-trip against and so serialise to a format nothing in the tree can parse.
+Three further problems:
+
+1. **`gui/desktop` performs no file I/O at all.** `fs::write`, `fs::read`,
+   `File::open` and `File::create` return nothing across the whole crate. It
+   reads `appearance.yaml` via `config::load` at `lib.rs:1148` and never
+   writes anything, so there is no path by which any of this text could reach
+   a disk.
+2. **The text formats are not YAML**, which `design.txt` requires for
+   configuration. `power.rs` emits `profile=performance\ndim_timeout=…`;
+   `user_accounts.rs` emits `USER|` followed by pipe-delimited fields.
+3. **`gui/settingsfile` already exists** and does this correctly — atomic
+   temp-file-and-rename, comment- and order-preserving splices into the user's
+   own file — and `apps/settings` already uses it for two families.
+
+Note `power.rs` is *not* in the island table: `lib.rs` draws its power menu, so
+the module is reached. `PowerManager`, `PowerConfig`, `ScreenSaver` and the
+config pair inside it still have no caller. A module absent from the table is
+not a clean bill of health for its contents.
+
+**Do not wire these up before C-Q6 is answered.** Adding `load()`/`save()` to
+six models that may be deleted is lesson 45 at a larger size — a bigger unused
+feature, with the same round-trip tests making it look covered.
+
+### Repayment log
+
+The ledger is a ratchet, not a monument: `scripts/orphan-modules-baseline.txt`
+shrinks as entries are paid off, and `--check` prints "reached now, drop from
+the baseline" when one is. Entries C-Q6 does not gate are being paid down while
+it sits.
+
+- **2026-08-25 — `apps/explorer/src/columns.rs` (2,372 lines) is reached.**
+  The detail view's three hardcoded x-offsets are gone; it now draws through
+  `render_column_header` / `render_column_values_from`, so a folder of images
+  grows a Dimensions column and a folder of source grows Language and Lines.
+  Two defects had to be fixed to make the wiring safe rather than merely
+  possible, and both are the same shape as lesson 45 one level down — *a
+  provider written for a caller that never arrived is never found out*:
+  - `StandardColumns::value` returned `ColumnValue::Empty` for **Size, Date
+    Modified, Date Created and Attributes**, with the comment "In a real
+    implementation this would stat the file. Return empty as a stub; the
+    explorer already has size info." Routing the view through it as-written
+    would have silently deleted the two columns the explorer already showed.
+    They stat now.
+  - `ColumnManager` had only `sort_by`, a three-state header-click toggle
+    (asc → desc → **none**). The explorer's own sort is two-state, so no
+    number of toggles reliably lands on the state it wants. Added
+    `set_sort(id, order)`, with `sort_by` rewritten in terms of it — the
+    toggle for a header click, the setter for a caller that already owns the
+    sort.
+
+  A third hazard was designed around rather than fixed: every `columns.rs`
+  lookup takes a `&str` path, which a name that is not valid UTF-8 cannot
+  become without loss. `ExplorerState::row_values` therefore builds the
+  standard cells from the `FileEntry` it already has — which also takes a
+  per-cell `stat` off the per-frame path — and only falls back to the path for
+  columns a *provider* owns. A non-UTF-8 name costs a blank Dimensions cell,
+  never a wrong one and never a dropped row.
+
+  Still pinned from this app: `dropzone.rs` (1,259) and `thumbs.rs` (1,980).
+  `thumbs.rs` has an obvious home — `ViewMode::Icons` currently renders an
+  empty pane, because `render_file_list` only ever drew the `Details` case.
+
+- **2026-08-25 — `apps/explorer/src/thumbs.rs` (1,980 lines) is reached.**
+  `render_file_list` is now a three-arm match: `ViewMode::Icons` draws a
+  wrapping grid of captioned cells and `ViewMode::List` a single column of
+  rows, both through one `push_thumb` so the two cannot drift apart in the one
+  decision that matters. Queueing follows the view — switching into a picture
+  view fills the queue, switching out empties it — so a folder of ten thousand
+  files stops decoding the moment the user stops looking at the pictures.
+
+  Wiring it turned up the same shape of defect one level deeper, and this time
+  in the *compositor*: `RenderCommand::Image` had three emitters and a backend
+  arm that was a bare `// stub for now`. That is fixed separately (§554,
+  `ImageAsset`), and its consequence shapes the explorer's design here — an
+  `Image` naming an id the compositor does not hold draws nothing and reports
+  nothing, so a thumbnail must be both **generated** and **registered** before
+  a command may name it. `ExplorerState` therefore tracks the two states
+  separately: `pump_thumbnails` files a result into the cache *and* a pending-
+  upload list, `take_pending_uploads` hands them to the host, and only
+  `mark_uploaded` makes an entry drawable. An upload that fails, or an image
+  the host later drops, falls back to the primitive-only placeholder rather
+  than to an empty white frame nobody can diagnose.
+
+  Two defects in `thumbs.rs` itself had to be fixed first:
+  - **The generator never touched the disk cache.** `DiskCache` was complete
+    and unreachable: `process_batch` called `generate_thumbnail` and nothing
+    else, so a restart re-decoded every file. `ThumbnailGenerator` now owns an
+    optional `DiskCache` and consults it before generating, populates it after.
+  - **The disk cache could not tell two sizes apart.** Its filename was
+    `{hash(path, mtime)}.thumb`, with no record of the size cap the entry was
+    made at, so a 256px view was served a 64px entry. Fixing it by comparing
+    the *stored dimensions* against the cap does not work — `fit_dimensions`
+    does not upscale, so a source smaller than the cap yields the same
+    dimensions at every cap and every small thumbnail would look stale
+    forever. The cap is part of the key instead: `{hash:016x}-{cap}.thumb`,
+    with `purge_stale` matching on the hash prefix so a live file keeps its
+    entries at *every* cap.
+
+  The in-memory cache gained `peek(&self, …)` beside the promoting
+  `get(&mut self, …)`. A renderer reading the cache on every frame must not
+  reorder it, or eviction becomes "whatever was last on screen" rather than
+  "whatever was last wanted"; `render` taking `&self` is the same guarantee
+  spelled by the compiler.
+
+  Still pinned from this app: `dropzone.rs` (1,259).
+
+- **2026-08-25 — `apps/explorer/src/dropzone.rs` (1,259 lines) is reached, and
+  `apps/explorer` is off the ledger entirely.** All three of the app's pinned
+  islands — `columns.rs` (2,372), `thumbs.rs` (1,980), `dropzone.rs` (1,259),
+  5,611 lines — are now called by the app that `mod`-declared them. 54 remain
+  repo-wide, from 57.
+
+  A drop zone is a claim about *where something is on screen*, so registration
+  belongs to the pass that decides where things go and to no other. `render`
+  therefore took `&mut self` and now rebuilds the zone list as it draws: each
+  row registers its own rectangle, the sidebar registers its five quick-access
+  strips, and the pane registers itself as the fallback. A second pass
+  computing the same layout would be a second layout to keep in agreement with
+  the first, and it is exactly that kind of shadow layout that goes stale
+  without anyone finding out.
+
+  The borrow this needs does not exist: the per-view helpers read
+  `self.entries` while writing `self.dropzone`, and a `&self` borrow will not
+  split that way. The manager is `mem::replace`d out for the frame and put
+  back. That is not only a borrow trick — a *fresh* manager per frame would
+  reset `current_hover`, so every frame of a stationary hover would re-fire
+  `DragEnter` for a zone the pointer had never left.
+
+  Three defects the wiring exposed:
+  - **The module keyed everything by `String`.** Paths, sources, targets: all
+    `String`, reached from `PathBuf` by `to_string_lossy`, which maps every
+    undecodable unit to U+FFFD and so merges two distinct filenames into one
+    target. The same trust-boundary defect class as `columns.rs`'s `&str`
+    lookups, and fixed the same way — `Path`/`PathBuf` throughout. The one
+    surviving lossy conversion is in `operation_label`, which is drawn for a
+    human and never used to reach a file; there, U+FFFD on screen is right and
+    hiding the label would be wrong.
+  - **The sidebar's rows were their own labels.** They were five strings,
+    `"/ (Root)"` among them — harmless while a label was only ever drawn, and
+    a drop into a directory literally named `/ (Root)` the moment it was not.
+    Label and path are now separate fields of `SIDEBAR_ITEMS`.
+  - **A move into the folder the file is already in would have conjured a
+    duplicate.** The manager's verdict cannot see this, because it is a fact
+    about the *executor*: `fileops`' conflict policy here is `Rename`, so
+    moving `notes.txt` into its own directory produces `notes (2).txt` from a
+    drag the user meant as a no-op. `ExplorerState::evaluate_drop` wraps
+    `handle_drop` and refuses it. A *copy* into the same folder is not the
+    same case and still duplicates — people do that on purpose.
+
+  The drop itself runs through `OperationPlan` + `OperationExecutor`, the same
+  engine as paste, so a drag-and-drop is undoable, journalled and reports
+  per-file errors. A second copy engine behind a drag would have had none of
+  those, which is the state paste itself was rescued from.
+
+  **Known limitation, deliberately not fixed here:** `fileops` has no link
+  operation, so Alt-drag is *refused* — red feedback and "Links are not
+  supported yet" — rather than reported as `Link` and then quietly not
+  performed. The proper fix is a `FileOperation::Link` with its own plan,
+  journal entry and undo (`unlink` the created link), which is a `fileops`
+  feature rather than a wiring one. Until it exists, the refusal is at least
+  visible before the user releases the button. See
+  `TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE` below.
+
+- **2026-08-26 — `gui/desktop/src/notif_pane.rs` (3,374 lines) is reached, and
+  with it the desktop gets its first place to say something the user did not
+  ask about.** 53 remain repo-wide, from 54.
+
+  The pane lives on `DesktopShell` and is opened by Super+N, on the pattern
+  §493 set for the calendar: the pane's own `PaneState::is_visible` **is** the
+  open flag, and there is no second `notifications_open: bool` anywhere. It
+  joins `dismiss_popups`, the session's `popups_open`, `anything_moving` and
+  `step_frame`, and it is drawn last of the popup parts — its scrim dims what
+  is behind it, so drawn earlier it would be the thing dimmed, by its own
+  scrim, under a switcher it is meant to be in front of.
+
+  **This was not merely unwired; it was unwireable as written.** `show()` set
+  the state to `SlideIn(0.0)`, and both `render` and `handle_mouse_event`
+  place the pane's left edge at `screen_width - PANE_WIDTH * visibility`. At a
+  visibility of zero that is the right-hand edge of the screen: the pane draws
+  nothing, its dimming layer is fully transparent, and a click anywhere is
+  judged to have landed *outside* the pane — which the pane treats as "close
+  me". Wiring it as-written would have produced a Super+N that appeared to do
+  nothing at all. This is the identical defect §520 found in the Exposé
+  overlay, and it is now fixed the identical way (§562): the plain verbs land
+  on their destination, and a caller that owns a frame clock calls
+  `begin_slide()` to rewind the jump into an animation.
+
+  **What the wiring was for.** `ShellSession::wallpaper_error` had four writers
+  and exactly one reader — a `pub fn` nothing in the tree called — so a
+  wallpaper that failed to decode left the user looking at a plain colour with
+  no way whatever to find out why. `set_wallpaper_error` is now the single
+  writer and posts a notification when the message is new. The three conditions
+  are each load-bearing:
+  - *When the message is **new**, not when it is `Some`.* `paint_background`
+    runs on every repaint, so an unconditional post files one complaint per
+    mouse click for as long as a broken file stays selected.
+  - *New **message**, not "is there already an error".* Deduplicating on the
+    latter silences every failure after the first, so a user who fixes one path
+    and mistypes the next hears nothing about the second.
+  - *Posted without **opening** the pane.* A wallpaper that did not load is a
+    thing to explain, not an emergency to interrupt with; a panel that shoved
+    itself over the screen at login because of a missing file would be worse
+    than the missing file.
+
+  Two smaller gaps closed on the way: `PaneState::visibility`/`is_visible` were
+  private on a public enum (so no external caller could ask whether the pane
+  was open), and the pane had no reader for its own history at all —
+  `unread_count` was the whole of its readable state, which is the same reason
+  nothing could ask it to draw.
+
+  **Follow-up the same day — the pane now has the mouse route its own doc
+  promised.** `notif_pane`'s module comment has said since it was written that
+  the pane is toggled "on system tray click or Win+N", and only the chord
+  existed. A chord is a route nobody discovers, so the wallpaper message above
+  had somewhere to appear and no way to be found. The tray grew a bell in its
+  own fixed 24-px slot left of the clock (`bell_rect`,
+  `Hit::NotificationBell`), accent-coloured with an unread count when the
+  history is not empty.
+
+  Making the bell a *toggle* rather than a one-way door forced a second change,
+  recorded as §563: the pane used to be as tall as the display, so it covered
+  the bell that opened it and the second press landed on its own opaque column
+  and did nothing. `DesktopShell::notification_pane_height()` now returns the
+  taskbar's top edge and is the single source for the number given to both
+  `render` and `handle_mouse_event`. The bar stays visible and live while the
+  pane is open; a press on it that is not the bell closes the pane and is spent
+  doing so, exactly as the start menu, the power menu and the calendar already
+  behave.
+
+  **Repaid the same day — the events are drained and focus assist is no longer
+  an island.** `DesktopShell::apply_pane_events` drains
+  `NotificationPane::drain_events` from *wrappers* around `handle_mouse` and
+  `handle_hotkey`, not from the branch that forwards to the pane: every path
+  out of those functions can have closed the pane — the bell, a press
+  elsewhere on the bar, `dismiss_popups` — and each reports a `Closed`, so a
+  drain on the forwarding branch alone still leaked one entry per click that
+  closed it. `gui/desktop/src/focus_assist.rs` (1,466 lines, the second-largest
+  island after `osd.rs`) is now constructed as `DesktopShell::focus`:
+  `QuickSetting::DoNotDisturb` and `QuickSetting::FocusMode` are views of its
+  four-valued mode via `sync_quick_settings`, `notify` marks an arriving
+  notification `silent` when the mode suppresses its app (it still enters the
+  history — suppression governs attention, not the record) and counts it on
+  the manager, the bell's badge counts `attention_count` rather than
+  `unread_count`, and the tray glyph is `effective_mode().icon()`.
+  `Notification::action` gained its first reader in the tree: a click on a card
+  that names a program now returns `ShellAction::Launch`. See
+  `design-decisions.md` §564; 14 new tests.
+
+  **Still open from this thread — three toggles with nothing behind them.**
+  `QuickSetting::WiFi`, `QuickSetting::Bluetooth` and `QuickSetting::NightLight`
+  still move under the cursor and change nothing outside the pane. They are
+  matched explicitly in `apply_pane_events` with an empty arm, so adding a
+  variant is a compile error rather than a silent no-op, but there is nothing
+  in this process for them to talk to: the first two are the network and
+  bluetooth daemons' state and the third is the compositor's gamma ramp, all
+  reached over IPC the shell does not hold. The proper fix is a shell-side
+  client for each, which is blocked on those services existing; until then a
+  case could be made for hiding the three rather than showing dead controls,
+  which is a user-visible call and so belongs in `open-questions.md` if it is
+  ever pressing. Neither the volume nor the brightness slider in the same block
+  is wired either, for the same reason.
+
+  **Still open from this thread — focus assist's automatic half.**
+  `FocusAssistManager::evaluate_auto_rules` is never called, so
+  `effective_mode()` is today exactly `manual_mode`: the schedule rules
+  (`AutoRule::Schedule`), and the ones keyed on the machine being fullscreen,
+  presenting, gaming or on battery, do nothing. It needs a wall clock — the
+  shell reads one for the taskbar clock, so that half is available — and a
+  "the foreground window went fullscreen" signal from the compositor, which is
+  not. Wiring only the clock half would make a manager that switches modes on
+  schedule but never on a game, which is a worse state than neither, so both
+  wait together. Note also that `set_mode(Off)` clears `manual_override`, so
+  once auto rules *are* live, turning a switch off while an auto rule is
+  asserting a mode will re-assert it on the next evaluation — the manual "off"
+  needs to become a distinct suppress-the-rule state at that point, not the
+  absence of an override.
+
+  **Still an island next door:** `gui/desktop/src/osd.rs` (3,457 lines), the
+  volume/brightness/lock on-screen display, remains uncalled. It was the other
+  candidate for the wallpaper message and lost on the merits — an OSD
+  auto-dismisses, so a user away from the machine at login would miss the text
+  for ever, while a notification persists in a history they can come back to.
+  It still needs a caller of its own, for the transient messages an OSD is
+  actually right for.
+
+## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25)
+
+**In short:** Holding Alt while dragging a file is the standard way to ask for
+a *symbolic link* — a small stand-in file that points at the real one, so the
+same file appears in two places without being copied. The explorer understands
+the request and the file-operation engine cannot carry it out, so the explorer
+refuses it to the user's face instead of pretending. Nothing is broken; a
+feature is missing and says so.
+
+**Where it lives.** `apps/explorer/src/dropzone.rs` computes
+`DropOperation::Link` from the Alt modifier, correctly — that part is done.
+`apps/explorer/src/fileops.rs`'s `FileOperation` enum has `Copy`, `Move`,
+`Delete`, `Recycle` and `Restore`, and no `Link`; there is no `plan_link`.
+`ExplorerState::evaluate_drop` (`apps/explorer/src/main.rs`) closes the gap by
+marking a `Link` drop invalid with the reason `"Links are not supported yet"`,
+which the hover feedback shows in red and the status bar repeats on release.
+Covered by `an_alt_drag_is_refused_rather_than_silently_doing_nothing`.
+
+**Why it is refused rather than downgraded.** Silently doing a Copy instead
+would be worse than doing nothing: the user asked for a stand-in and would get
+a second independent file, which then drifts out of step with the original with
+no sign that it ever was one.
+
+**The proper fix.** Add `FileOperation::Link` to `fileops` with the same
+apparatus every other operation has: an `OperationPlan::plan_link`, a journal
+entry so a crash mid-batch is recoverable, per-file error collection, and an
+undo entry whose reverse is `remove_file` on the link (never on its target).
+Then delete the special case in `evaluate_drop`. The one real design question
+is what to do on a filesystem that refuses symlinks — Windows needs a
+privilege for them, so the host test suite cannot assume they work — which
+argues for `ErrorPolicy::SkipAndContinue` reporting a per-file failure rather
+than a plan that refuses up front.
+
+**Cost of leaving it.** One gesture is unavailable and says so. It does not
+get worse with time and blocks nothing.
+
 ## TD-B-FIVE-COPIES-OF-THE-FILE-TYPE-HALF-OF-A-MODE-WORD (lane B, 2026-08-22) — RESOLVED 2026-08-22
 
 **In short:** A file's *mode* is one integer holding two unrelated things: what
@@ -73684,12 +74358,484 @@ per-command tests to catch getting one wrong.
   `A=x" "y cmd` keeps its interior quotes where bash would remove them. That is
   a different, rarer defect in a different function, shared with
   `parse_bare_assignment`, and it does not run the wrong command.
-- **`grep` with no arguments prints its usage and exits 0.** Its usage arm is a
-  `console_println!` followed by a bare `return`, never reaching `set_exit(1)`.
-  This is the same silent-success class as
-  `A-KSHELL-CAPTURE-DID-NOT-NEST` and the exit-status fixes before it, and is
-  very likely not unique to `grep` — the usage arms of the other ~750 commands
-  have not been audited.
+- ~~**`grep` with no arguments prints its usage and exits 0.**~~ — ✅ **the
+  claim was already stale when it was written, and the audit it asked for has
+  now been done (2026-08-25).** `cmd_grep`'s two usage arms both call
+  `set_exit(2)` — deliberately 2 rather than 1, with a comment saying why:
+  within `grep`, exit 1 is the reserved meaningful answer "searched, found
+  nothing", so a usage error must not be spelled the same way as a successful
+  empty search.
+
+  The second half of the bullet — "very likely not unique to `grep`, the usage
+  arms of the other ~750 commands have not been audited" — was correct, and
+  the audit found **87 more sites**. They are a different shape from the 710
+  fixed in `A-KSHELL-A-MISTYPED-COMMAND-REPORTED-SUCCESS` below, which is why
+  that sweep did not catch them: those ended in a bare `return;`, whereas
+  these simply *fall out of a `match` arm*, so a search for the earlier
+  pattern could not see them. See
+  `A-KSHELL-A-USAGE-ARM-THAT-FALLS-OUT-OF-A-MATCH-REPORTED-SUCCESS`.
+
+---
+
+## A-KSHELL-A-USAGE-ARM-THAT-FALLS-OUT-OF-A-MATCH-REPORTED-SUCCESS — ✅ FIXED 2026-08-25 (lane A)
+
+**In short:** the same lie as
+`A-KSHELL-A-MISTYPED-COMMAND-REPORTED-SUCCESS` below, in the 87 places that
+one could not see. Give a kernel-shell *subcommand* a bad value or leave off
+its argument — `speech tts banana`, `dynlock grace`, `wallpaper bgcolor` — and
+it printed `Usage: …`, did nothing, and reported success. The diagnostic was
+on the screen the whole time; it was the exit status that lied, which is the
+worse half, because a script reads the status and not the screen. `cmd &&
+next` ran `next` after a typo; `set -e` did not stop.
+
+**Why the earlier sweep missed them.** That sweep matched a `Usage:` print
+followed by a bare `return;`. These have no `return` — they are the whole body
+of a `match` arm, so control leaves by falling off the end of the arm:
+
+```rust
+_ => shell_println!("Usage: dynlock autounlock <on|off>"),
+```
+
+A search for the fixed shape cannot see the broken one. The two are the same
+defect wearing different syntax, which is the general lesson: a sweep keyed on
+a *syntactic* pattern silently defines its own blind spot, and the way to find
+the blind spot is to re-derive the site list from the *semantic* property —
+here "a `Usage:` print that can be reached and left without a non-zero
+`set_exit`" — rather than from the shape that was fixed last time. That is
+what `scripts/check-usage-status.py` now does.
+
+**Where:** `kernel/src/kshell.rs`, 87 sites in three shapes:
+
+| Shape | Count | Example |
+|---|---|---|
+| `_ => println!("Usage: …"),` — unrecognised value | 37 | `dynlock autounlock` |
+| `None => println!("Usage: …"),` — argument omitted | 27 | `dynlock grace` |
+| the print inside a braced block, not the whole arm | 23 | `wallpaper bgcolor` |
+
+**Fix:** `set_exit(1)` after the diagnostic, in every one. The message is kept
+— the point was never that the shell said too little, it is that it then
+claimed to have succeeded.
+
+**The mirror-image defect — `A-KSHELL-A-QUERY-THAT-ANSWERED-CORRECTLY-REPORTED-FAILURE`,
+✅ FIXED 2026-08-25 alongside this one.** Searching the
+*patched* tree for "an inserted status sitting in a block that prints something
+before the usage line" turned up two sites where the **August sweep had already
+made this mistake and shipped it**:
+
+```rust
+"echo" => {
+    if parts.len() < 2 {
+        shell_println!("Serial echo level: {} (and above)", level.as_str());
+        shell_println!("Usage: elog echo <level>  to change");
+        set_exit(1);          // <- a query, answered correctly, reported failed
+        return;
+```
+
+`elog echo` and `fc algo` are not conflations at all: the branch is guarded by
+`parts.len() < 2`, so it is reached *only* with no argument — purely the query
+path. The usage line there is a hint appended to a correct answer, not a
+diagnostic; `elog echo`'s own text says "to change". Both have reported failure
+for a successful query since August. **Fixed** by deleting the `set_exit(1)` —
+the command did what was asked — and both are pinned by rung 58, which asserts
+the query prints its answer *and* exits 0. They are listed in the checker's
+`ALLOWED` rather than left to trip it, because the next person sweeping usage
+lines will find them again and that list is where the answer needs to be
+waiting.
+
+**The unmechanised half — ✅ MECHANISED 2026-08-25 as `scripts/check-query-status.py`.**
+`scripts/check-usage-status.py` checks one direction: a diagnostic that claims
+success. The other — a correct answer that claims failure — went unchecked, and
+was the direction that had produced both shipped bugs. It now has its own gate,
+run from `boot-test.sh` next to the first, and the gate found a third instance
+on its first run. See `A-KSHELL-A-BARE-QUOTA-ANSWERED-AND-REPORTED-FAILURE`
+below.
+
+**One case the mechanical pass had to be pulled back from,** because it is the
+shape where the obvious patch is a *regression*:
+
+```rust
+} else {
+    shell_println!("Current mode: {}", notifgroup::get_mode().label());
+    shell_println!("Usage: notifgroup mode <app|category|conversation|none>");
+}
+```
+
+That `else` is reached two ways: with no argument at all (a bare query — "what
+is the mode?" — correctly answered, and a success), and with an argument that
+did not parse (an error). Stapling `set_exit(1)` on would make the successful
+query report failure. Five sites have this shape — `notifgroup mode`,
+`faceunlock security`, `datausage metered`, `wallpaper offset`, `fhist
+autoversion` — and they are folded into the still-open item below rather than
+patched, since splitting query from error is the same decision.
+
+The last two of those were **patched by the mechanical pass and then
+reverted**, caught only by reading the diff line by line rather than skimming
+it. The script's guard was "only patch a print that ends its block", which is
+syntactic, and it passed all five. What distinguishes them is not visible in
+the shape of the arm at all — it is in the enclosing conditional, which decides
+whether "no argument" reaches this branch.
+
+**Tested by:** `kshell::self_test` rung 58, which pins one site per shape *and*
+the good path of a patched command — the way a mechanical insertion goes wrong
+is by landing in the sibling arm that succeeded, so the control is the part
+that actually earns its place.
+
+**The help-vs-unrecognised conflation (33 sites) — ✅ FIXED 2026-08-25**, see
+`A-KSHELL-A-HELP-ARM-AND-A-TYPO-REPORTED-THE-SAME-THING` below. These were the
+residue this sweep could not touch: a status could be added to them, but no
+*correct* status existed until the arm was split.
+
+**Deliberately excluded, and why** — these match a `Usage:` search but are not
+this defect: `cmd_usagetime`'s `"Usage time subsystem initialised."` and
+`cmd_memcg`'s `"  Usage:        {}"` report field (neither is a usage message
+at all); `cmd_scrollback`'s `""` arm and `cmd_ksyms` (bare invocation printing
+its own synopsis *is* the command's output, the documented `ksyms` precedent).
+
+---
+
+## A-KSHELL-A-RUNG-THAT-SPELLS-A-DIAGNOSTIC-FAILS-THE-KERNEL-FOR-IMPROVING-IT — ✅ FIXED 2026-08-26 (lane A)
+
+**In short:** the boot test panicked and the kernel died — not because the
+kernel was wrong, but because a self-test had written the *exact wording* of an
+error message into its assertion, and the burn-down then improved that wording.
+`vd remove` with no operand used to print `Usage: vd remove <id>`; after being
+converted to the shared operand helper it prints `vd: remove: missing desktop
+id`, which names what is missing instead of reprinting a synopsis. That is the
+outcome the whole burn-down exists to produce. The rung failed it anyway,
+because it asserted the six characters `Usage:`.
+
+**Symptom.** `scripts/boot-test.sh` on `adddc7459`:
+
+```
+!! `a missing operand is reported`: output lacked text it must contain
+   expected somewhere in the output:  Usage:
+   actual output (31 bytes):          vd: remove: missing desktop id
+!!! KERNEL PANIC !!!  panicked at kernel\src\kshell.rs:446:5
+```
+
+**Where.** Two tables in `kshell::self_test`, both written during the
+`} else {` blind-spot repair:
+
+| Table | Rung | Cases affected |
+|---|---|---|
+| `arity_cases` | 67 | `vd remove`, `tile add` — converted to `required_id`/`required_num` |
+| `refusal_cases` | 67 | `wsnap snap 999 zznosuch` — converted to name the word |
+
+Both looped `assert_output_contains(…, b"Usage:")` over every row.
+
+**Fix.** Each table gained a third column: the fragment the complaint must
+contain, per case. The loop asserts that fragment for the failing invocation
+and its *absence* for the paired control, so the control half keeps working
+too. Nothing about the rungs' coverage changed; what changed is that they now
+pin the rule — *a missing or unusable operand is reported, and the status
+reaches the caller* — rather than one wording of it.
+
+**Why it is worth an entry.** This is a trap the burn-down manufactures at a
+steady rate. Every batch converts more commands from "print a synopsis" to
+"name the word", and there are now eight rungs' worth of assertions written
+against the old wording. Two rules follow, and they are the reason this is
+written down rather than just fixed:
+
+1. **Assert the fragment that carries the rule, not the sentence.** `is not a
+   layout` and `missing window id` are rules; `Usage:` and the full synopsis
+   text are formatting. A rung should fail when a command stops refusing, not
+   when it starts refusing more clearly.
+2. **A table-driven rung needs a per-row expectation.** The two tables here
+   were uniform when written and stopped being uniform the moment one row's
+   command was improved. A shared literal in a loop is a coupling between rows
+   that have nothing to do with each other.
+
+**Severity.** Low as a defect — the kernel was correct throughout and the boot
+test is exactly the thing that caught it, at the first opportunity, before the
+lane merged to `main`. Notable as a process finding: the gates (`cargo check`,
+all eight kshell scanners) were green on the broken tree, because none of them
+runs the shell. Only the QEMU boot does. That is the argument for booting every
+burn-down batch rather than batching several and booting once.
+
+**Follow-up 2026-08-26 — the class is now caught statically, and it was not the
+only instance.** The two rules above were written for a human to remember, which
+is the weakest possible enforcement for a defect whose only detector is an
+eleven-minute boot. `scripts/check-selftest-wording.py` now enforces them: for
+every `assert_output_contains`/`_lacks` in `self_test` it resolves the captured
+command through the dispatch table to its `cmd_*` function, narrows to the
+`match` arm the subcommand selects, and requires the fragment to be producible
+from a literal that arm — or anything it calls in `kshell.rs` — passes to a
+print macro. `boot-test.sh` runs it, and runs its `--self-test` fixture first.
+Rationale and the over-approximation argument: design-decisions §604.
+
+Running it on the current tree found **two more dead guards of the same class**,
+both in the `lacks` direction — the half of the defect this entry named but did
+not go looking for:
+
+| Rung | Asserted the absence of | Why it could never fire |
+|---|---|---|
+| 74, `wsnap` | `Left half` | `cmd_winsnap` names the position through `SnapPosition::label()`, which spells it `left`. No code in the tree produces `Left half`. |
+| 67, `bright` | `Usage:` | The `set` arm was converted to `required_num` and says `missing percentage` instead. The guard died in the same kind of conversion that caused this entry's bug. |
+
+These are the *mirror image* of what happened here: a `contains` on stale
+wording fails a correct kernel and is loud, while a `lacks` on stale wording
+passes forever and is silent. The silent one is the worse of the two — the rung
+still reads as a guarantee, and the regression it was written to catch has been
+unguarded ever since. Fixed in `c87e74627`; each now names a sentence the
+command still owns.
+
+---
+
+## A-KSHELL-A-HELP-ARM-AND-A-TYPO-REPORTED-THE-SAME-THING — ✅ FIXED 2026-08-25 (lane A)
+
+**In short:** `nat help` and `nat banana` produced identical output and an
+identical "it worked" answer. The first is a request that was granted; the
+second is a typo that did nothing. Because the shell said "success" for both,
+a script could not tell them apart — `nat banana && deploy` deployed. The fix
+gives the typo an extra line saying which word was not understood, and a
+failure status; the help request keeps its exit 0, because printing the help
+*is* what it asked for.
+
+**Why this could not be fixed by the previous sweep.** These 33 sites were
+found by `A-KSHELL-A-USAGE-ARM-THAT-FALLS-OUT-OF-A-MATCH-REPORTED-SUCCESS`
+(above) and deliberately left alone by it. That sweep's whole operation was
+"add `set_exit(1)` to a usage arm", and here there is no single value that is
+right: the arm serves two callers who deserve opposite answers. Adding a
+status would have converted a defect that under-reports failure into one that
+over-reports it, which is what happened *twice* to that sweep on sites it did
+patch. The arm had to be split before any status could be attached, which is
+why the debt was carried explicitly in the checker rather than fixed in place.
+
+**Where:** `kernel/src/kshell.rs`, 33 sites in three shapes.
+
+| Shape | Count | Treatment |
+|---|---|---|
+| Catch-all `_ => { …help… }` under a uniform `match sub {` | 25 | Bind the subcommand (`other => {`) and close the arm with `end_help_arm(cmd, other)` |
+| A subcommand branch whose `else`/`_` served both a no-argument *query* and a bad argument | 5 | Split into two branches, so the query answers and the bad argument fails |
+| Individually shaped — `cmd_lockdep` (a chain of `if`s, no catch-all), `cmd_tsession` (query arm already correct; its `_` arm already failed), `fsck` (a missing operand, never a query) | 3 | By hand |
+
+**The helper, and why the diagnostic goes last.** `end_help_arm(cmd, sub)`
+prints `cmd: unknown subcommand 'sub'` and sets the status, but only when
+`sub` is not one of `""`, `help`, `-h`, `--help`, `?`. The empty string counts
+as a request because a bare `swapcfg` reaches the arm through
+`parts.first().copied().unwrap_or("")` — fourteen commands do that and ten map
+the bare form to `"help"` instead, so both spellings must be treated as asking.
+The line prints *after* the help text, not before, because it is the line that
+stays next to the prompt when the help scrolls past, and it carries the one
+piece of information the help text cannot: that what you typed is not in it.
+
+**A command whose bare form is not the help arm.** `cmd_nat` maps no-argument
+to `"status"`, which its `"status" | "stats"` arm intercepts, so bare `nat`
+never reaches the catch-all and is never called a typo. This was checked per
+command rather than assumed; rung 59 pins it, because it is precisely the
+regression a shared predicate would introduce if the interception were absent.
+
+**Found while reading, not by the checker:** `cmd_tsession` returned without a
+status when the terminal-session subsystem was uninitialised — a command that
+did nothing, reporting success. It prints no `Usage:` line, so it is invisible
+to a search keyed on that word. The rule is "a command that did not do what it
+was asked says so"; `Usage:` is only its commonest phrasing. Fixed in the same
+change.
+
+**How the sites were located.** `scripts/_split_help_arms.py` (scratch, since
+deleted) *imported* `scripts/check-usage-status.py` and reused its `USAGE`
+regex, its `ALLOWED` table and its forward-walk verbatim, rather than
+restating the same rule a second time. The first draft did restate it — keyed
+on "the first `Usage:` line in the function whose governing arm is `_ => {`" —
+and in `cmd_wakesensor` it selected an inner `_ => { …; set_exit(1); return; }`
+that was already correct. Two rules meant to describe the same set, written
+out twice, differ silently. The transformer also refused any arm whose
+governing `match` was not the uniform `match sub {`, which is what separated
+`cmd_datausage` (an `Option<&str>` scrutinee whose `_` covered both the query
+and the error) from the 25 it could safely rewrite.
+
+**Verification.** All 25 arm bodies were confirmed to be pure help printing —
+no `return` that would strand the appended call, no existing `set_exit`, no
+side effects — before applying, and the whole 254-line diff was read line by
+line afterwards. The checker now reports `21 allowed, 0 known help/error
+conflations`; run against the pre-sweep revision it reports 131 raw sites,
+which reconciles exactly as 87 fall-out-of-a-match arms + 33 conflations + 11
+allowlisted sites, and its 21 allowlist entries exempt 21 sites one-for-one,
+so no entry is dead or double-counting.
+
+**Tested by:** `kshell::self_test` rung 59 — the pair of assertions the old arm
+could not have satisfied at once (`nat help` → exit 0 with no scolding;
+`nat zz_not_a_subcommand` → exit 1 *and* the naming line), plus the bare-form
+control (`swapcfg`), the not-a-typo control (`nat`), both halves of the
+`fhist autoversion` and `wallpaper offset` splits, and both halves of
+`lockdep`, whose unrecognised subcommand previously produced byte-identical
+output and status to the query.
+
+---
+
+## A-KSHELL-A-BARE-QUOTA-ANSWERED-AND-REPORTED-FAILURE — ✅ FIXED 2026-08-25 (lane A)
+
+**In short:** typing `quota` on its own printed "Quotas are currently enabled."
+— the correct answer to the question — and then told the shell the command had
+failed. A script that runs `quota && something` never ran `something`, even
+though nothing went wrong. Found by a new checker written for exactly this
+shape, which is the third instance of it after `elog echo` and `fc algo`.
+While fixing it, a second, opposite bug turned up one screen further down in
+the same command: `quota banana` scolded the user and reported *success*.
+
+**Where:** `kernel/src/kshell.rs`, `cmd_quota`.
+
+**The gate.** `scripts/check-usage-status.py` has since August guarded one
+direction — a diagnostic that reports success. Nothing guarded the other, and
+`A-KSHELL-A-QUERY-THAT-ANSWERED-CORRECTLY-REPORTED-FAILURE` recorded that gap
+explicitly, because it is the direction the August sweep itself got wrong twice.
+`scripts/check-query-status.py` closes it. Its rule:
+
+> A block that can only be reached by the user *asking* — no argument was given
+> — and that answers by printing program state must not set a failure status.
+
+Three questions per non-zero `set_exit`: is the enclosing block guarded on "no
+argument given"; does at least one print *directly* in that block interpolate
+program state (a `foo::bar()` call, not just literal text or the user's own
+words echoed back); does it then fail. All three, and the site is reported.
+Run from `boot-test.sh` immediately after the usage-status gate.
+
+**Deliberately a second script, not a second rule inside the first.** The two
+rules point in opposite directions — "this needs a status", "this must not have
+one" — and a single classifier holding both would resolve a disagreement between
+them silently. Kept apart, each states a property, and a site that trips both is
+a site whose author has to say which it is. `quota` is exactly that site: taking
+the status off for the query direction made it trip the usage-status gate, which
+is how its `ALLOWED` entry came to be written with a reason attached.
+
+**Verified in both directions before being trusted.** Run against the revision
+before the August fix (`git show 9251e5a3d^:kernel/src/kshell.rs`) it reports
+`cmd_fcompress` and `cmd_elog` — the two sites that actually shipped the bug —
+and `cmd_quota`. Run against the tree today it reports `cmd_quota` alone, which
+is how the bug was found. A checker nobody has watched fail is a checker nobody
+knows works, so the invocation is written into the script's docstring.
+
+**Fix, half one — the query.** Bare `quota` is a question and this is its
+answer, the same reading as `elog echo` and `fc algo`. The `set_exit(1)` is
+gone, and the two lines swapped: the state line leads and the synopsis follows
+it as a hint ending "to change". The order is part of the fix, not tidying —
+printed the other way round the output *reads* as a complaint, and the next
+person sweeping usage lines will put the status back.
+
+**Fix, half two — the typo, and a blind spot it exposes.** `cmd_quota`'s
+catch-all arm printed
+
+```rust
+shell_println!("Unknown subcommand '{}'. Use: on, off, set, …", parts[0]);
+```
+
+with no status at all: `quota banana` reported success. The usage-status gate
+never saw it because the gate keys on the *word* `Usage:`, and this arm says
+`Use:`. The arm now sets `set_exit(1)` and is worded `Usage:` so the gate can
+see it.
+
+**That blind spot is general** — and was closed the same day, one commit later.
+Re-running the usage-status
+walk with its trigger widened from `Usage:` to `Unknown…`/`Unrecognised…`/
+`Invalid…`/`Use: ` reports **49 further sites** in `kshell.rs` that print a
+diagnostic and report success — `cmd_container`'s seven `Invalid container ID`
+paths, `cmd_wakesensor`'s five `Unknown sensor` arms, `cmd_theme`, `cmd_progmgr`,
+`cmd_secpolicy`, and more. (Two of the 51 raw matches are report lines rather
+than diagnostics: `thumbcache`'s "Invalidated {} entries" and `vlan`'s "Unknown
+drops:" counter.) This is the same lesson a third time — a gate keyed on the
+shape of the last bug defines its own blind spot. All 49 are fixed and the
+trigger is widened; see
+`A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE` below and
+design-decisions.md §299.
+
+**Tested by:** `kshell::self_test` rung 60 — `quota` prints the state line and
+exits 0, the synopsis survives as a hint, and `quota zz_not_a_subcommand` names
+the word and exits 1.
+
+---
+
+## A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE — ✅ FIXED 2026-08-25 (lane A)
+
+**In short:** the shell has a build-time check that stops a command from
+printing an error message and then telling the caller it succeeded. The check
+found the message by looking for the word "Usage:". Messages that start
+"Unknown subcommand…", "Invalid port", "Unknown sensor" and so on say exactly
+the same thing in different words, and the check did not look for them — so 49
+of them scolded the user and then reported success. The check now fires on the
+*kind* of message rather than one word of it, and all 49 are fixed.
+
+**Where:** `kernel/src/kshell.rs`; the gate is
+`scripts/check-usage-status.py`, whose trigger was
+
+```python
+USAGE = re.compile(r'(?:console_println!|shell_println!)\s*\(\s*"\s*[Uu]sage\b')
+```
+
+and is now
+
+```python
+USAGE = re.compile(
+    r'(?:console_println!|shell_println!)\s*\(\s*"'
+    r'(?:\s*[Uu]sage\b|Unknown\b|Unrecogni[sz]ed\b|Invalid\b|Use:)'
+)
+```
+
+**How the 49 were counted, and where they were.** The checker's own forward
+walk, with only that regex widened, reported 51 sites. Two are report lines
+that merely begin with one of those words — `thumbcache`'s "Invalidated {}
+entries for: …" (a *success* line) and `vlan stats`' "  Unknown drops:    {}"
+(a field label). Both are excluded **structurally rather than by allowlist**:
+the new words must *start* the string (a field label is indented inside its
+report) and are matched with `\b` (so "Invalidated" is not an "Invalid"
+anything). `Usage` keeps its leading-whitespace tolerance because `cmd_memcg`
+has an indented one already sitting in `ALLOWED`, and removing the tolerance
+would have silently dropped a site the gate was watching.
+
+The remaining 49, in 29 functions: seven `Invalid container ID '{}'` paths in
+`cmd_container`, six `Unknown sensor`/`Unknown level`/`Invalid hours` arms in
+`cmd_wakesensor`, three `Invalid port` (`telnetd`, `sshd`, `netsyslog`),
+`cmd_theme` ×3, `cmd_progmgr` ×3, `cmd_swapcfg` ×2, `cmd_useracct` ×2,
+`cmd_sysdiag` ×2, `cmd_secpolicy` ×2, `cmd_kernelbuild` ×2, and singles in
+`cmd_colorscheme`, `cmd_overlay`, `cmd_fcompress`, `cmd_fspolicy`, `cmd_atime`,
+`cmd_fstrim`, `cmd_appregistry`, `cmd_hotkey`, `cmd_scriptlang`,
+`cmd_netsettings`, `cmd_parental`, `cmd_elog`, `cmd_logpersist`, `cmd_vmguest`,
+`cmd_taskbar`, `cmd_startmenu`, `cmd_container_network`.
+
+**Why this is the interesting part and not a footnote.** It is the third time
+the same methodological failure has produced shipped bugs in this one file. The
+710-site sweep keyed on "a `Usage:` print followed by `return;`" and missed 87
+that fall off the end of a `match` arm. The checker written to replace it keyed
+on the *semantic* property but kept the *lexical* trigger, so it inherited the
+blind spot one level down: it was complete over messages containing the word
+"Usage", which is not the set it is trying to guard. A gate's trigger is part
+of its rule, and a trigger derived from the wording of the last bug is a
+syntactic sweep wearing a semantic hat. Recorded as design-decisions.md §299.
+
+**How the fix was applied.** By a scratch script that **imported the checker
+and took its site list from the checker's own output**, rather than
+re-implementing "find the diagnostics" a second time — §297's rule, that two
+descriptions of one set maintained separately differ silently. Here the
+divergence would have been invisible in both directions: a site the sweep
+missed would look like a new bug, and one it fixed that the gate did not care
+about would look like nothing at all. The script also **refused shapes it did
+not recognise and printed the refusals** instead of trying its best; exactly one
+site came out as `MANUAL` — `cmd_fstrim`'s `Unknown mode`, whose print is the
+block's tail expression with no trailing `;` — and was fixed by hand. The
+script was deleted after use; the gate is what persists.
+
+**Verified in both directions.** After the sweep both gates are green
+(`check-usage-status.py`: 22 allowed, 0 conflations; `check-query-status.py`:
+2 allowed). Run against the *pre-sweep* tree the widened checker reports all 49,
+which is the positive control for the widened trigger — a checker nobody has
+watched fail is a checker nobody knows works. The original historical control
+still holds too: on `9251e5a3d^` it still reports `cmd_fcompress` and `cmd_elog`.
+
+**What is still not covered, stated rather than implied.** A diagnostic opening
+with none of the five words — `"no such mode: …"`, `"cannot parse …"`,
+`"expected a number"` — is not nominated and will pass. That residue is real.
+If a fourth instance of this defect appears, the question is not "which word do
+we add" but whether the trigger should become a property of the *block* (does
+this branch correspond to input the command rejected?) rather than of the
+string. §299 records the estimate of what that costs.
+
+**Tested by:** kshell self-test rung 61, which pins four of the 49 chosen for
+the four *shapes* the sweep had to handle rather than for the commands they
+live in — a `None =>` arm whose whole body was the print, the tail-expression
+variant that the mechanical pass refused, a `let … else { print; continue; }`
+inside a loop over arguments, and a catch-all `other =>`. Each is paired with
+the query reading next door (`fstrim mode`, `theme accent` with no argument)
+that must keep exit 0, because the failure mode of fixing this class is
+over-applying it.
 
 ---
 
@@ -79055,7 +80201,18 @@ indistinguishable from the diagnostic alone.
 
 ---
 
-## `A-KSHELL-CUT-AND-FOLD-HAVE-NO-END-OF-OPTIONS-MARKER` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-CUT-AND-FOLD-HAVE-NO-END-OF-OPTIONS-MARKER` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+> **Fixed, and wider than filed.** `cut` and `fold` are the two this entry
+> named, but the fix was preceded by a survey of *every* option parser in
+> `kshell.rs`, because a bug filed under the shape of where it was noticed
+> describes its own blind spot. The survey found the same missing `--` in
+> `grep`, `comm`, `zip`, `find`, `locate`, `dedup`, `undelete`, `batch` and
+> `mapfile` — and, in seven of those, a strictly worse defect that this entry
+> did not suspect: an option the command did not recognise was *discarded*
+> rather than refused. That half is written up separately as
+> `A-KSHELL-SEVEN-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE` below.
+> Both halves landed together, tested by self-test rung 63.
 
 **Where.** `kernel/src/kshell.rs` — `parse_cut_args`, `parse_fold_args`.
 
@@ -79255,7 +80412,14 @@ reuse the helper that fix introduced:
   correct byte-level line diff of a binary file is correct but unreadable, and
   floods a serial console. GNU's rule is a NUL in the first buffer. This is a
   separate judgement from the correctness fix and should not be smuggled into
-  it.
+  it. ✅ **DONE 2026-08-25**, in its own commit as this note asked. Two
+  departures from GNU, both argued at the function: the test is a NUL
+  *anywhere* in the file (GNU's first-buffer rule is an artefact of streaming;
+  we already hold the whole file, so the answer becomes a property of the files
+  rather than of a buffer size), and the check runs *after* the byte-equality
+  early return, so two identical binary files stay silent with status 0 —
+  they do not differ, and saying they do would be a false positive no flag
+  could switch off. `-a`/`--text` restores GNU's line diff exactly.
 
 **`comm` has the identical defect** (~119460): `from_utf8_lossy` on both files,
 then `lines()`, then equality on the decoded lines. Two lines differing only in
@@ -79340,11 +80504,13 @@ one of the two files, and none is invented by a decoder.
   see, and it is the one that misfiles a line. Rationale in
   **design-decisions.md §295**; pinned by self-test rung 56, whose third case
   exists to fail if the check is ever widened to whole files.
-- `diff` has no `Binary files X and Y differ`. A byte-exact line diff of a
-  binary file is now *correct*, but it is unreadable and floods a serial
-  console. GNU's rule is a NUL in the first buffer. That is a judgement about
-  output policy rather than about correctness, which is why it was not smuggled
-  into a correctness fix.
+- ~~`diff` has no `Binary files X and Y differ`.~~ ✅ **FIXED 2026-08-25.** A
+  byte-exact line diff of a binary file was *correct* but unreadable and
+  flooded a serial console. `diff` now reports `Binary files X and Y differ`
+  with status 1 when either file contains a NUL, and gained `-a`/`--text` to
+  force the line diff back on. Our test is a NUL anywhere in the file rather
+  than GNU's first-buffer rule, and it runs after the byte-equality early
+  return so identical binaries stay silent — see the two bullets above.
 - `column` still decodes lossily (~14868, ~14908). It is a display formatter
   writing only to stdout, so a mangled character is visible as mangled rather
   than mistaken for data — the lowest severity of the four and the last to do.
@@ -79494,6 +80660,105 @@ Python startup and reading 372 files.
   what the author thought to write down. Comparing old and new `inspect()` on
   all 372 `.rs` files under the gate's roots — full per-file results, not the
   summary line — says it did not break what they did not.
+
+---
+
+### Lesson 49: a filter that names one severity cannot see the other (lane A, 2026-08-25)
+
+**In short:** the kernel carries ~18k pedantic-level clippy warnings as known
+debt, so "did my change add any?" cannot be answered by the exit code — a clean
+change and a dirty one both leave the count in the eighteen-thousands. The
+established method is to `git stash`, re-measure, and compare. The pipeline used
+to do that was
+
+```bash
+cargo clippy -p kernel --message-format short 2>&1 | grep -E "^kernel" | grep warning
+```
+
+and that last `grep warning` is the whole lesson. **`clippy::all` is
+deny-level in this workspace, so a violation of it is emitted as `error:`, not
+as `warning:`.** The filter that made the comparison tractable was precisely
+the filter that made it blind to the only class of diagnostic that actually
+stops the build. The comparison came back "identical multiset — zero new
+warnings", which was *true* and useless: the change had introduced a deny-level
+`clippy::type_complexity` error, and the boot test refused to build 203 seconds
+later, before QEMU ever started.
+
+**The second half of the trap.** `scripts/boot-test.sh` runs its gates *before*
+booting, so a gate failure leaves `build/serial-test.txt` untouched — still
+holding the previous run's output, ending in `kshell::self_test PASSED`. The
+standing verification recipe (zero `!! ` lines, self-test passed, no unexpected
+faults) therefore reported **green on a run that never booted**. The recipe is
+not wrong; it just has no way to notice it is reading a file from an hour ago.
+
+**What to take from it.**
+
+- **Check the gate's own exit code before starting a run that will check it for
+  you.** `cargo clippy -p kernel; echo $?` costs one command and answers the
+  deny-level question exactly, with no filtering at all. Do that first; use the
+  stash-and-compare only for the warning-level delta it is actually for.
+- **When comparing diagnostics, filter by *file*, never by severity.** `grep -E
+  "^kernel"` alone is the right filter — it keeps errors and warnings both, and
+  the severity word is part of the text being compared rather than a
+  precondition for being compared.
+- **`rm` the artifact you are about to verify.** A verification that reads a
+  file the run may not have written is a verification that can pass without the
+  run happening. Deleting `build/serial-test.txt` first turns "stale pass" into
+  "file not found", which is unmistakable.
+- **Always read the tail of the harness log, not only the greps.** Every fact
+  needed to catch this was in `/tmp/bt-*.log`: no `BOOT_OK`, no
+  `=== Boot test PASSED ===`, and an explicit `ERROR: refusing to build`. Two
+  of those were already in the recipe as *positive* checks — their absence is
+  what carried the signal, and absence is easy to skim past when the other four
+  greps look right.
+
+---
+
+### Lesson 50: an outer timeout equal to the inner one can never let the inner one fire (lane A, 2026-08-25)
+
+**In short:** the standing recipe for a boot test was
+
+```bash
+python scripts/run-timeout.py --poll 30 900 ./scripts/boot-test.sh
+```
+
+and `scripts/boot-test.sh` runs QEMU under **its own 900 s timeout**. The outer
+budget has to cover the pre-build gates and the kernel build as well, so it is
+strictly the smaller of the two windows — the outer kill always wins. On
+2026-08-25 the gates plus build took 530 s (a full clippy recompile, because
+several `git stash` comparisons had invalidated the cache), leaving 370 s for a
+boot that reaches `BOOT_OK` at 370–405 s. `run-timeout` killed the tree at 900 s
+while the guest was running post-self-test diagnostics, perfectly healthy.
+
+**Why this is worse than one wasted cycle.** The inner timeout is not a
+duplicate of the outer one — it is the *diagnostic* one. When `boot-test.sh`'s
+own QEMU timeout expires it reports `SYSTEM HANG`, dumps the guest state, and
+(since `49496d935` made the HMP monitor on by default) reads back the faulting
+RIP. `run-timeout`'s expiry produces exit 124 and a killed process tree: no RIP,
+no task table, no serial marker saying where it stopped. So an outer budget at
+or below the inner one silently converts every genuine boot hang — the
+`B-FORKEXEC-BOOT-HANG` class, which is intermittent and expensive to catch —
+from a diagnosed fault into an anonymous kill. The one run where the
+instrumentation matters most is the run where it is guaranteed not to speak.
+
+**The rule.** The outer budget must be **inner QEMU timeout + worst-case gates
+and build**, not the inner timeout itself. Gates plus a cold-cache build have
+been observed at 530 s here, so:
+
+```bash
+python scripts/run-timeout.py --poll 30 1500 ./scripts/boot-test.sh
+```
+
+1500 s = 900 s inner + 600 s headroom. This does not weaken the hang protection
+`run-timeout` exists to provide: `boot-test.sh` bounds the guest itself, and the
+outer wrapper's real job is the one only it can do — killing the *whole process
+tree*, grandchildren included, if the harness or QEMU orphans something. That
+job is unaffected by the budget being generous.
+
+**Generalisation.** Whenever two timeouts nest, the outer one must exceed the
+inner one by the cost of everything the outer covers and the inner does not. Two
+equal timeouts are not belt-and-braces; they are one timeout, and it is the one
+with the less useful failure message.
 
 ---
 
@@ -79685,3 +80950,4637 @@ the one the old code could never have matched), and a nonexistent package
 0 differed.
 
 ---
+
+## `A-KSHELL-COLUMN-PADS-TO-BYTES-AND-REWRITES-WHAT-IT-CANNOT-DECODE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+**In short:** `column -t` exists to make columns line up. It measured each
+field's width by counting **bytes**, so any field holding an accented letter
+was counted as wider than it is drawn and the next column started early — the
+one command whose entire job is alignment got the alignment wrong on any input
+that was not pure ASCII. Separately, it decoded its input as text with
+`from_utf8_lossy`, so a file or pipe that was not valid UTF-8 came back out
+with every undecodable byte replaced by `EF BF BD`, and a CRLF file came back
+with Unix line endings. All three are fixed: widths are console cells, and the
+data is never decoded at all.
+
+**Where.** `kernel/src/kshell.rs` — `cmd_column`, `cmd_column_input`,
+`column_format`, and the `"column"` arm of `dispatch_with_input`.
+
+**What.** Three defects, one root and two branches of it.
+
+```rust
+let text = alloc::string::String::from_utf8_lossy(&data);   // ×2
+let lines: Vec<&str> = text.lines().collect();
+if field.len() > widths[i] { widths[i] = field.len(); }
+```
+
+1. **The visible one — padding measured in bytes.** `field.len()` is a byte
+   count; the padding it drives is spaces on a console measured in cells. `é`
+   is two bytes and one cell, so a field holding it was padded one short and
+   the following column began a cell early. Worked example, the fixture rung 62
+   now uses:
+
+   | input row | old `widths[0]` | where column 2 started |
+   |---|---|---|
+   | `é x` | 2 (bytes of `é`) | cell 3 |
+   | `ab y` | 2 | cell 4 |
+
+   Two rows, two different column positions, from the command that is supposed
+   to produce one. A CJK ideograph fails the other way — three bytes, two
+   cells — so the error is not even consistently in one direction.
+
+2. **`from_utf8_lossy` on both the file and the pipe path.** `column` is a
+   *formatter*: it re-spaces its input and hands back every other byte of it.
+   A lossy decode therefore rewrites the exact thing it was asked to preserve.
+   This is the last live `from_utf8_lossy` in `kshell.rs` and a direct
+   violation of `CLAUDE.md`'s rule 7 ("No `from_utf8_lossy` — that's silent
+   data corruption").
+
+3. **`str::lines` strips a trailing `\r`.** The same half of the bug `sed`,
+   `diff` and `comm` each turned out to hold. A CRLF file run through `column`
+   came back with Unix endings, matched or not.
+
+**Why it survived.** Every `column` test in the suite used ASCII text with LF
+endings — the one shape in which all three defects are invisible. The identical
+sentence appears in the `sed` entry above, which is the point: this was the
+fourth command found holding the *same two* bugs behind the same
+`from_utf8_lossy(…).lines()` idiom, and it was found by grepping for the idiom
+rather than by any test noticing.
+
+### Fixed
+
+`column_format` takes `&[u8]`, uses the shared `split_lines` (the splitter the
+`sed` fix introduced and `diff`/`comm` then reused), and writes through
+`shell_write_bytes`. `dispatch_with_input` moves `column` out of the
+"still text-only" group into the byte-clean one.
+
+| | was | is |
+|---|---|---|
+| `column -t` on `é x` / `ab y` | second column at cell 3 vs. 4 | both at cell 4 |
+| `column -t photo.jpg` | every undecodable byte becomes `EF BF BD` | bytes pass through unchanged |
+| `column dos.txt` | `\r\n` becomes `\n` | endings survive |
+| `column -t` on `Mr.<NBSP>Smith x` | torn into three columns | two, as GNU gives |
+| `column -t -s →` | worked by luck (`str::split` on a `char`) | splits on the character's bytes |
+
+**The width function is the interesting part.** `display_width(&[u8])` is a
+deliberate mirror of the console's own byte→cell rule
+(`console::putchar_normal` plus its UTF-8 accumulator): a lead byte with
+`utf8_seq_len >= 2` consumes that many bytes and draws one codepoint at
+`unicode::char_width`; an invalid lead byte or an aborted sequence draws U+FFFD
+in one cell, with the aborting byte reconsidered rather than swallowed. It has
+to mirror it exactly, because a width that disagrees with what is drawn
+produces a table that disagrees with the screen — which is the bug this fixes,
+in a new place. The one honest gap is stated in its doc comment rather than
+hidden: `\t`, `\r`, `\x08` and `ESC` are cursor *motion*, not glyphs, so they
+have no width at all; they count 0, and a field containing one misaligns
+whatever the function returns. glibc's `wcwidth` returns −1 for these and
+util-linux's `column` skips them, so GNU is in the same position and answers
+the same way.
+
+**One deliberate behaviour change, and why it is a fix.** The default field
+split was `str::split_whitespace`, whose rule is Unicode `White_Space` and
+therefore includes U+00A0 NO-BREAK SPACE — the character whose entire purpose
+is *not* to be a break. `Mr.\u{a0}Smith` was silently torn into two columns.
+glibc's `iswspace(U+00A0)` is false and util-linux tokenises on `" \t"`, so GNU
+keeps it whole. `split_ascii_blanks` now splits on space and tab only, which is
+both byte-safe and more GNU-faithful — and has the second benefit of leaving a
+CRLF line's trailing `\r` attached to the last field, which is never padded, so
+the row comes back out `\r\n`.
+
+**Tested by:** `kshell::self_test` rung 62 — nine assertions covering cell
+alignment with a two-byte character, an undecodable byte surviving and counting
+as its one drawn cell, CRLF round-tripping in both modes, NBSP not splitting, a
+multi-byte `-s`, empty fields between two explicit separators, the file path as
+well as the pipe, and the supplied final newline.
+
+---
+
+## `A-KSHELL-COLUMN-S-TAKES-ONE-CHARACTER-WHERE-GNU-TAKES-A-SET` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (both halves); one cosmetic gap below remains open
+
+**In short:** `column -s` was documented and implemented as "use this one
+character as the delimiter". GNU treats the argument as a *set* — any one of
+the characters in it separates — so `column -t -s ',;'` split on a comma or a
+semicolon under GNU and on a comma only here. A user who typed the GNU form got
+a plausible-looking table built on the wrong split, with no diagnostic.
+
+**Where.** `kernel/src/kshell.rs` — `column_parse_args`, which did
+`s.chars().next()`.
+
+**What the proper fix looked like.** Carry the whole argument as a set of
+characters (as bytes, one entry per character, since a multi-byte one must
+still match as a unit) and split on any member. `split_on_bytes` becomes
+`split_on_any_of`. The empty-field rule is unchanged: an explicit separator
+keeps them.
+
+**How it was fixed** (`7cfbd2ac8`, in its own commit as this note asked). Exactly
+that. Three things worth carrying forward:
+
+- **It is a set of characters, not of bytes.** Each member is the bytes of one
+  character, matched as a unit, so `-s '→,'` splits on the whole `→`. Expanding
+  the argument byte-wise would make `E2`, `86` and `92` each a separator, so one
+  `→` would produce three breaks and two empty fields. Pinned by an assertion.
+- **Longest match wins** where two members could both match. For a set built
+  from characters that cannot happen — no character's UTF-8 encoding is a prefix
+  of another's — but "first member in the order the user typed them" would make
+  the output depend on argument order for no reason a user could predict, and
+  longest-match is the rule that stays right if this ever takes multi-character
+  separators.
+- **A second `-s` replaces the set rather than extending it**, matching
+  util-linux, where the option's argument *is* the set. Unioning would be just
+  as implementable, so there is an assertion on input where the two readings
+  differ visibly, to keep it a decision.
+
+The return type became a named `ColumnArgs` struct on the way: with the
+separator an `Option<Vec<Vec<u8>>>`, the old three-tuple tripped
+`clippy::type_complexity`, which is deny-level here and right — see Lesson 49
+for how that error nearly shipped past a delta check that filtered on
+`grep warning`.
+
+**Why it was filed rather than done at the time.** It is a behaviour change, not
+a correctness fix, and it was found while fixing
+`A-KSHELL-COLUMN-PADS-TO-BYTES-AND-REWRITES-WHAT-IT-CANNOT-DECODE` above.
+Smuggling it into that commit would have made a bug fix and a semantic change
+indistinguishable in the history — the same reason `diff`'s missing
+`Binary files X and Y differ` was kept out of the `diff` byte fix (and was
+then landed on its own, 2026-08-25).
+
+**A second, smaller gap in the same place — ✅ FIXED 2026-08-25** (`e4444e980`, its
+own commit). The flag walk was `args.split_whitespace()`, so a separator that
+*is* whitespace could not be expressed at all: `column -t -s ' '` lost the
+argument to the splitter and fell back to the default. Harmless in that one case
+because space is the default, but `column -t -s '<TAB>'` — meaning tab and *not*
+space, which is how one lines up a TSV whose fields contain spaces — was
+unreachable. Pre-existing; not introduced by the byte conversion or by the set
+fix.
+
+> **The fix was available and the earlier note was wrong to imply otherwise.**
+> This was previously written up as needing a quote-aware splitter that
+> `kshell.rs` did not have. It has one: `split_words`, and the mechanism for
+> reaching it is `command_parses_own_quotes`, the list of commands that receive
+> their arguments with the quoting still in place. `column -s` is *precisely* the
+> shape of `cut -d`, which was already on that list for the identical reason —
+> `cut -d' ' -f1` is how you say "split on spaces", and dequoted it became
+> `-d  -f1`, so the delimiter turned into the string `-f1`. `tr` is there for the
+> same reason and failed silently rather than loudly.
+
+**How the second half was fixed.** Exactly as that note said: `"column"` joined
+`command_parses_own_quotes`; `column_parse_args` moved from
+`args.split_whitespace()` to `split_words(args)` with an index-based loop
+modelled on `parse_cut_args`, since an option that takes a value has to look at
+the *next* word; `ColumnArgs::file_path` became a `String` (the words are owned
+now), which dropped the struct's lifetime parameter. Three things worth carrying
+forward:
+
+- **A control assertion is what proves the separator arrived**, not the
+  separator assertion. `column -t -s ' '` and `column -t` produce *different*
+  output on `zz_a  zz_b` — the explicit space separator keeps the empty field
+  between the two spaces, the default collapses runs of blanks — so the pair,
+  asserted together, distinguishes "the tab/space reached `-s`" from "`-s` was
+  lost and the default did the work". Asserting only the former would have
+  passed before this change too.
+- **`-s ''` is now refused, not silently defaulted**, because `split_words`
+  drops an empty word so `-s` arrives with nothing after it. That is the better
+  answer — a separator you asked for and did not get should say so — and the
+  paragraph in `column_parse_args`'s doc comment that described the old fallback
+  was rewritten in the same commit rather than left to contradict the code.
+- **The quoted *operand* comes free and was pinned anyway.** Once the line
+  arrives quoted, `column -t '/tmp/a file.txt'` names one file instead of
+  producing an "extra operand" error. It is a consequence of the same change,
+  not a separate feature, and an assertion holds it in place so a later revert
+  to `split_whitespace` cannot take it back quietly.
+
+Kept in its own commit, separate from the set fix, because they are different
+changes: one is what the separator *means*, the other is whether the separator
+*arrives*.
+
+**A third, smaller one, noted while reading `parse_cut_args` — STILL OPEN.**
+`column` takes `-s` only as two words. getopt also accepts the attached form,
+`column -s,;`, which `cut` supports via `cut_opt_value` (`cut -d:` and
+`cut -d :` are both legal). Not a wrong answer — `column -s,;` is refused as an
+unrecognised option, loudly — but it is a legal invocation this shell rejects.
+The fix is to route the `-s` branch of `column_parse_args` through
+`cut_opt_value` the way `parse_cut_args` does, which also picks up `--separator=`
+if that is ever wanted.
+
+**Severity.** Low, and lower again. Both halves that could produce a *wrong or
+unreachable* answer are fixed. What remains is one option *form* that is
+rejected rather than misread — the failure mode is a diagnostic, not a bad
+table.
+
+---
+
+## `A-KSHELL-SEVEN-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+**In short:** seven shell commands used to *throw away* any word starting with
+`-` that they did not recognise, and then carry on as if it had never been
+typed. So a misspelled flag did not produce an error — it produced a
+*different command*, run successfully. `batch delete --dry-runn a b` deleted
+`a` and `b` for real, because the typo matched no flag (so it was not a dry
+run) and was then filtered out of the file list (so it was not an error
+either). `find . -mtime -1` walked the whole tree with no filter at all and
+printed every file, exit 0. Every one of them now stops and says which word it
+did not understand.
+
+**Where.** All in `kernel/src/kshell.rs`:
+
+| Command | The discard | What it silently became |
+|---|---|---|
+| `find` | the `if`/`else if` predicate chain simply ended, with no `else` | an **unfiltered** walk: `find . -mtime -1` printed every file under `.`, exit 0 |
+| `find -size` | `num_str.parse::<i64>().unwrap_or(0)` in `parse_size_predicate` | `-size +abc` ≡ `-size +0` — matches nearly every file |
+| `locate` | `s => if !s.starts_with('-') { pattern = Some(s) }` | unknown option dropped; `--ext` with no value ≡ *every* extension; `--size abc` ≡ **no size filter** |
+| `dedup` | same catch-all; `parse_size_value(v).unwrap_or(default)` | `--min-size 1O` (letter O) ≡ the default bound — on a command whose other half is `--delete` |
+| `backup` | each flag tested independently with `contains` / `any` | `--dry-runn` ≡ not a dry run **and** not an error: the backup ran |
+| `undelete scan` | catch-all + `if i + 1 < parts.len()` on every value | any filter that failed to parse was simply not applied: the listing silently widened |
+| `batch` | whole-line flag scan **plus** `.filter(\|f\| !f.starts_with('-'))` in each operand list | the typo fell between the two and vanished: **files were deleted** |
+| `mapfile` | prefix loop `break`s on an unknown word | the word fell through into the *array name* slot: `mapfile -u 0 ARR` read a file called `0 ARR` |
+| `oci run` | `tok if tok.starts_with('-') => { i += 1 }`, deliberately | flag dropped **and its value became the container's command**: `oci run img --menory 512m` ran `512m` |
+
+**Why this is the worse half.** The `--` gap this sweep also closed is a
+*refusal*: the command fails loudly and nothing is misread. This one is a
+*silent guess*, and the guess is almost always in the direction of doing
+**more**: the dropped word was nearly always a filter or a restriction, so
+dropping it widens the search, enlarges the deletion set, or removes the
+containment the operator asked for. A wrong answer reported as success is
+strictly worse than a missing one, and here the wrong answer is the one that
+touches the disk.
+
+**On `oci run`'s comment, because it was not an oversight.** It read: *"Unknown
+option: skip it (and don't consume a value, since we don't know its arity)."*
+The reasoning is correct about the arity and wrong about the conclusion.
+Skipping is not the neutral act it looks like — every flag in that parser
+exists to *narrow* what the container may do (`--read-only`, `--memory`,
+`--user`, `--tmpfs`), so dropping one runs the container with more authority
+than was asked for, and prints a container ID as though the request had been
+honoured in full. And not knowing the arity is precisely the reason to stop:
+we cannot even say how much of the rest of the line we have misread. Its
+`parse` is now `-> Option<Self>` and the caller abandons the run.
+
+**How it was found.** Not by looking for it. The entry above named `cut` and
+`fold` because that is the shape of *where it was noticed*; §299 of
+`design-decisions.md` says a gate keyed on the shape of the last bug defines
+its own blind spot, so the fix began with a survey of every option parser in
+the file rather than with those two functions. The survey turned up the missing
+`--` in seven more commands — and this, which nothing in the original report
+suggested was there.
+
+**And the twin next door.** `find`'s `-maxdepth` `.unwrap_or(16)` had already
+been fixed, with a three-paragraph comment about why guessing at a search's
+bounds is unsafe. `parse_size_predicate`, three lines below it, still carried
+the identical `.unwrap_or(0)`. The fix had been applied to the *site* and not
+to the *category*, which is exactly how a twin survives its sibling's fix.
+
+**Tested by.** Self-test rung 63, which probes each command with a bogus
+option and asserts a non-zero exit *and*, for the two that write to the disk,
+that nothing was written: `batch delete --dry-runn` leaves its file in place
+and `backup create … --dry-runn` creates no backup directory. It also checks
+that `--` makes a file literally named `-empty` findable, and that a valid
+`-size` still selects — so the refusals cannot pass by having broken the
+options altogether.
+
+**Not a regression.** True of each command since it was written.
+
+**Sequel.** Nine was not the count. A checker written for the rule the next
+day found **fourteen more** — see
+`A-KSHELL-FOURTEEN-MORE-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE`.
+
+---
+
+## `A-KSHELL-FOURTEEN-MORE-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+**In short:** The sweep above fixed nine commands that threw away a word they
+did not understand. A checker written straight afterwards — asking not "does
+this look like the nine?" but "does this loop dispatch on option spellings and
+have no way to say no?" — found fourteen more, including two that erase disks.
+`mkfs.fat --labl NAME /dev/sda` formatted the device with no label and said
+nothing. All fourteen now refuse.
+
+**Where.** `kernel/src/kshell.rs`. Found by `scripts/check-option-refusal.py`,
+detector D3.
+
+| Command | The discard | What it silently became |
+|---|---|---|
+| `dmesg` | catch-all arm dropped the word; `-l` fell to `_ => 0` | every option *narrows* the log, so a typo printed the whole ring buffer |
+| `du` | `-d N` (separated) was never implemented | depth 0, then `N` became the path, then the real path overwrote it — three misreadings of one line |
+| `touch` | unknown option became the path | `touch -x f` created `f`; `touch a b` created `b` and never mentioned `a` |
+| `column` | unknown option, and a second operand, became the file | `column a b` formatted `b` |
+| `lsplus` | `--sort`/`--type` fell back to their defaults | `--type fil` listed directories too; the default *is* "everything" |
+| `recent` | `--type` fell back to `None` | `None` is not "no type given", it is "every type" |
+| `fswalk` | the trailing max-depth operand took 64 | `fswalk count / two` walked the whole filesystem |
+| `fileops` | operands were "everything that is not a flag" | `fileops copy a b --overwite` copied to a directory named `--overwite` |
+| `toolbar` | catch-all dropped the flag | every flag turns a button *on*, so the toolbar lacked exactly the button asked for |
+| `traceroute`/`traceroute6` | `-m`/`-q` `.ok()` on failure | `-m 5x` traced 30 hops and printed "max 30 hops" as if that were the request |
+| `mount` | `-t`/`-o` at end-of-line fell into the positional arm | `mount -t` tried to mount a device named `-t` |
+| `container ls` | printed "Ignoring filter …" and continued | `ls -q --filter status=stoped` inside `rm $(…)` would have listed every *running* container's id |
+| `container info` | second id dropped | `info 3 4` answered about 3 alone |
+| `oci build` | warned and continued for `-t`/`--target`/`--build-arg` | no `--target` builds the *last* stage instead of the named one — a different image, under the right name |
+| `mkfs.fat` | unknown option became the device, then the real device overwrote it | formatted the right device with the wrong options; the only evidence was a missing label |
+| `fsck.fat` | unknown option became the device | `--repar` looked like a repair and was a check |
+| `flock` | catch-all dropped the mode | the default is `query`, which takes no lock — a dropped `-x` declined to lock and printed a status line |
+| `od` | `-N` unreadable → `usize::MAX`; `-A`/`-t` unknown letter → octal | `usize::MAX` is the *absence* of a limit, the opposite of what `-N` is for |
+
+**Why this is the interesting half.** The nine in the entry above were found by
+a human reading code adjacent to a bug. These fourteen were found by asking the
+*category* question, which is what §299 says a gate's trigger must do. Had the
+checker been keyed on the nine's spellings — `.filter(|w| !w.starts_with('-'))`,
+`parse().unwrap_or(…)` — it would have caught two of these fourteen. Keyed on
+"a loop that dispatches on option spellings and contains no refusal", it caught
+all of them, plus `container ls` and `oci build`, which do not look like the
+original nine at all: they *print a message* and then carry on anyway, which is
+§600's explicitly-rejected middle option and reads as diligence in review.
+
+**Two false positives, and what they taught the checker.** `parse_tr_args` and
+`classify_sed_args` refuse properly — via `return Err(…)`, because their
+contract is a `Result`, not `set_exit`. The detector learned the shape rather
+than being given an allowlist entry: an allowlist entry would have exempted
+those two functions forever, including any *future* mute loop inside them.
+
+**Tested by.** Self-test rung 64, deliberately separate from rung 63 so that
+the checker-found set and the bug-found set can diverge visibly. It asserts a
+non-zero exit for each refusal, and for the two commands with an observable
+effect it asserts the effect did not happen: `touch -x path` leaves no file,
+and `fileops copy … --overwite` creates nothing named `--overwite`. It also
+asserts the *positive* direction — `du -d 1`, `od -A x -N 4`, `lsplus --type
+file` all still work — so the rung cannot pass by having broken the options.
+
+**Not a regression.** True of each command since it was written.
+
+---
+
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **469 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-seventh batch): `cmd_kconsole` (6, plus
+> one uncounted) cleared — 475 → 469 across 216 → 215 functions. Pinned by
+> `kshell::self_test` rung 95.
+>
+> **In short:** `kconsole` manages virtual consoles — the text screens you
+> switch between. When it could not read a number you typed it made one up, and
+> the number it made up was **80 columns by 25 rows**. That is not an arbitrary
+> default; it is what a console *is* to almost everyone who has seen one. So
+> `kconsole resize 2 l32 43` — a lowercase L where a 1 belonged — quietly shrank
+> a 120-column console to 80 and printed `Resized console 2 to 80x43.`, a
+> sentence that no amount of knowing the subsystem lets you recognise as wrong.
+>
+> **The new row is about where the guessed value comes from, not what it does.**
+> Every previous row in this table asked what the guess *is* — a length, a
+> ceiling, a selector, an accumulator — and derived the severity from that. This
+> one is about the guess's *provenance*. `0` is recognisable as a placeholder
+> because nothing means zero on purpose; `80x25` is recognisable as nothing at
+> all, because it is the answer the reader would have given.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **canonical value of its own domain** (`cmd_kconsole resize`) | the wrong size is applied and reported in a sentence that is internally consistent and idiomatic | you don't — the only witness is `kconsole list`, and only if you already knew the old size |
+>
+> This sharpens the `cputhr` thesis rather than adding to it. That thesis was
+> that the guessed default is always the *reassuring* value — the one that says
+> nothing is wrong. Here the reassuring value and the *textbook* value coincide,
+> which removes the last defence a reader has. Against a guessed `0` you can at
+> least ask "why would anything be zero?"; against a guessed `80x25` there is no
+> question to ask. A corollary worth carrying forward: **the more plausible a
+> default is as documentation, the more dangerous it is as a guess.**
+>
+> **It is also the cleanest illustration of §607 found so far, and it needs only
+> one command to be it.** `create <name> [cols] [rows]` and `resize <id> <cols>
+> <rows>` take the *same two operands*, bracketed in the subcommand that merely
+> needs somewhere to start and angled in the one that exists for no other purpose
+> than to set them. Previous batches had to put two commands side by side to show
+> that the usage line, not the operand's type, decides required-versus-optional.
+> Here the contrast is four lines apart in the same `match`: `create rung95` with
+> no size still means 80x25, `resize 2 132` with no row count is refused, and
+> `create rung95 l20` — present and unreadable — is refused just like `resize`.
+>
+> **The id guess is the misdiagnosis row again** (`cmd_cgmem`, batch 25):
+> `init_defaults` seeds ids 1/2/3 with `next_id: 4`, so id `0` is unreachable and
+> `kconsole switch l` answered `Error: NotFound`. Safe, but pointed at the wrong
+> remedy — "that console does not exist" says *create one*, when the truth says
+> *fix the typo*.
+>
+> **The uncounted one** is `create`'s name, `unwrap_or("ttyN")` — not a
+> placeholder the module expands, a console literally named with the letter N.
+> It is self-limiting in the way that hides it: `create` rejects duplicate names,
+> so the *first* omission succeeds and every one after it fails with
+> `AlreadyExists`, which reads as a collision with something the user never
+> created. It now says `kconsole: create: missing console name`.
+>
+> **Rung 95 owns its fixture, and doing so required the module to gain a destroy
+> path** — the same discovery as batch 26, in a module that had the same gap for
+> the same reason. `kconsole::create` only ever pushed, `MAX_CONSOLES` caps the
+> vector at 16, and nothing removed. See
+> `A-KCONSOLE-CAN-CREATE-A-CONSOLE-AND-HAS-NO-WAY-TO-DESTROY-ONE`. That this is
+> now the second consecutive batch to uncover a missing teardown is itself a
+> finding: *a module whose shell command has no destructive subcommand is worth
+> checking for a missing destructor*, because nothing else in the system was
+> ever the caller that would have needed one.
+>
+> The rung establishes its premise before relying on it (`2: tty1 type=fb
+> 120x40`), pins severity with a before/after equality on both `kconsole list`
+> and `kconsole stats` across nine refusals, then proves §607's positive half by
+> creating `rung95` with no size operands and asserting the list shows
+> `80x25` — and destroys it again, so `/proc/kconsole` does not carry a console
+> the boot battery invented.
+
+> **Burn-down log.** 2026-08-26 (twenty-sixth batch): `cmd_fdtable` (6, plus
+> one uncounted) cleared — 481 → 475 across 217 → 216 functions. Pinned by
+> `kshell::self_test` rung 94.
+>
+> **In short:** `fdtable` shows and edits the table of open files a process
+> holds. Every one of its operands was guessed as `0` when it could not be read.
+> The process-id guesses were then caught by a guard and turned into a
+> complaint about the command's *shape*; the file-descriptor guesses were not
+> caught at all, and `0` is the first descriptor a process ever opens — so
+> `fdtable close 42 1O` closed it and said "Closed fd=0 for PID 42".
+>
+> **This is the first command in the burn-down that had already noticed the
+> problem and protected the wrong operand.** Both pid sites read
+>
+> ```rust
+> let pid = pid_str.parse::<u32>().unwrap_or(0);
+> if pid == 0 { shell_println!("Usage: fdtable close <pid> <fd>"); set_exit(1); return; }
+> ```
+>
+> which is the **conflation** row (`cmd_shmem`, `cmd_blkread`): one sentinel
+> serves as both the guess and the invalidity marker, so the shell reports that
+> the *form* of the command was wrong when the form was right and only the word
+> was unreadable. The reader's obvious response is to re-type the same shape and
+> get the same complaint. Note that the guard was not useless — `open`
+> auto-creates a table for whatever pid it is handed, so without it a mistyped
+> pid would have built a real fd table for process 0 — it was simply spent on
+> the operand that was not doing the damage.
+>
+> **The new row is the descriptor, and it turns on how the id space is
+> allocated.** Batch 25 established that a guessed `0` in `cgmem` was *safe but
+> dishonest*, because `next_id` starts at 1 and so cgroup 0 is unreachable. The
+> fd table inverts exactly that property: `next_fd` starts at **0**, so the
+> guess names the first descriptor the process ever opened — the entry most
+> likely to exist and the oldest one in the table. Reachability is not a
+> property of the number `0`; it is a property of where the allocator starts.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **selector in an allocation-ordered id space that starts at 0** (`cmd_fdtable close`) | destroys the process's first and oldest descriptor, reports success | you don't — and no later call can re-issue the number |
+>
+> **And it is not undoable at the number.** `open` and `dup` both allocate from
+> the monotonic `next_fd`, which never goes backwards and never reuses a freed
+> value. Re-opening the same path after a mistaken close returns *some later
+> fd*. In a table where the number is the interface — 0 being stdin by universal
+> convention — that is a permanent renumbering, not a recoverable deletion. This
+> is a stronger form of irreversibility than the `ipcns` accumulator row: there
+> the *count* could not be repaired, here the *identity* cannot.
+>
+> **`dup` is the additive twin.** The same guessed `0` there does not remove an
+> entry, it manufactures a second alias for the wrong descriptor, consumes a
+> number from `next_fd`, and bumps `total_dups` — which has no decrement. So
+> closing the surplus alias afterwards still leaves `dups=1` where the truth was
+> `dups=0`, the same laundered-audit-trail problem batch 25 found in `cgmem
+> charge`. One mistyped word thus reaches both the destructive and the
+> accumulating failure modes depending only on which subcommand it lands in.
+>
+> **The uncounted one** is `open`'s path, `parts.get(2).copied().unwrap_or("")`,
+> whose emptiness was folded into the *same* usage line as the pid — so an
+> omitted path and an unreadable pid produced byte-identical output. It now says
+> `fdtable: open: missing path`.
+>
+> **Rung 94 owns its fixture, and the first draft did not.** The rung needs a
+> descriptor to exist so it can prove the refused `close` did not destroy it.
+> The first attempt borrowed the tables `fdtable::self_test` builds earlier in
+> the boot battery — and panicked on `FDs for PID 100 (0):`, because that
+> self-test *ends* with `*STATE.lock() = None`, precisely so its fixtures cannot
+> masquerade as live processes in `/proc/fdtable`. The assertion that caught it
+> was the one written to make exactly that assumption fail loudly rather than
+> silently test an empty table, so the gate worked as designed; the lesson is
+> that a rung must build what it acts on.
+>
+> Doing that properly required the module to gain a process-exit path, which it
+> did not have — see
+> `A-FDTABLE-HAS-NO-PROCESS-EXIT-PATH-AND-THE-TABLE-VECTOR-ONLY-GROWS`, a
+> genuine leak (256-slot cap, nothing ever freed a slot) that stayed invisible
+> until a caller finally needed the operation. The rung now opens one descriptor
+> for pid 424242, pins severity with a before/after equality on both `fdtable
+> show 424242` and `fdtable stats` — the first proves the descriptor is still
+> listed, the second that no dup was tallied — and releases the fixture with
+> `fdtable exit 424242`, asserting the released count is exactly 1, which would
+> read 0 or 2 if any of the seven refusals had actually run. Neither reader
+> takes the `with_state` path, so neither perturbs `ops` and the captures are
+> comparable.
+
+> **Burn-down log.** 2026-08-26 (twenty-fifth batch): `cmd_cgmem` (6, plus
+> three uncounted) cleared — 487 → 481 across 218 → 217 functions. Pinned by
+> `kshell::self_test` rung 93.
+>
+> **In short:** `cgmem` tracks how much memory each cgroup (a named group of
+> processes with a memory ceiling) is using. Bare `cgmem create` invented a
+> cgroup called `cg0` with a ceiling nobody chose; a mistyped page count was
+> read as 1; a mistyped `rss`/`cache` was read as `rss`; and a mistyped cgroup
+> id was answered "no such cgroup".
+>
+> **Three shapes in one command, each a refinement of an earlier row rather
+> than a repeat of it.**
+>
+> **1. The ids are the familiar misdiagnosis.** `init_defaults` sets `next_id:
+> 1` and seeds no cgroups, and `create` only ever hands out `next_id`, so
+> cgroup 0 is unreachable. The guessed `0` was therefore *safe* — it removed
+> nothing, charged nothing — and dishonest in the same breath: `cgmem remove
+> 1O` answered `remove error: NotFound`, which says the cgroup does not exist.
+> It does. The word naming it could not be read, and the reader is sent to
+> check `list` instead of at what they typed.
+>
+> **2. The `create` limit is a *policy ceiling*, and this is the new row.**
+> Every earlier guessed number was a selector, a measurement, an address, or a
+> quantity. This one is the *threshold everything else is compared against*:
+> `record_charge` tests `usage_pages > limit_pages` on every call. `cgmem
+> create web 5OOOO` built a cgroup limited to 100000 pages — double the
+> intended 50000 — and echoed it back as though chosen.
+>
+> What makes it worth its own row is *why it does not currently hurt*. The
+> comparison's only output is `high_events`, which no command prints and no
+> accessor exposes (`A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`).
+> So today a guessed ceiling has no observable consequence at all — it is not
+> merely undetected but **unfalsifiable**, masked by a second defect. And
+> fixing that second defect, which is the right thing to do, is precisely what
+> would make this guess bite. That is a trap worth naming: *a burn-down that
+> looks harmless because something else is broken is not harmless, it is
+> queued.*
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **policy ceiling masked by a second defect** (`cmd_cgmem create`) | nothing, until the thing that reads the ceiling is fixed | you don't — and fixing an unrelated bug is what makes it start |
+>
+> **3. The page counts refine the `ipcns` accumulator row to *partially*
+> reversible.** The previous batch established that a guess `+=`'d into a total
+> with no inverse is uncorrectable in place. `cgmem` has an inverse —
+> `record_uncharge` puts `usage_pages` back — so at first glance it is the mild
+> version. It is not. `c.charges` and `state.total_charges` are `+= 1` with
+> nothing that ever decrements them, so **the correction is itself recorded**.
+> Un-charging a guessed 1 leaves `charges=1 uncharges=1` where the truth was
+> `charges=1 uncharges=0`. The quantity can be repaired; the record of what
+> happened to it cannot. That is arguably worse than `ipcns`, where at least
+> the wrongness stays in one number instead of being laundered into a
+> plausible-looking history.
+>
+> **The uncounted third operand is the one that hides best.** `[rss|cache]` was
+> read as `parts.get(3).copied().unwrap_or("rss") == "cache"` — `toggle_word`'s
+> `matches!` defect in a two-word alphabet. The expression has no way to say "I
+> did not understand you", so every spelling that was not exactly `cache`
+> evaluated to `rss`, and `cgmem charge 1 500 cach` charged 500 pages to the
+> wrong bucket and reported success. Two things make that worse than a mis-set
+> flag:
+>
+> * **It is invisible in the aggregate.** `record_charge` adds the pages to
+>   `usage_pages` either way, so `cgmem list`'s headline number is correct and
+>   only the breakdown beside it is wrong — and the breakdown is exactly what
+>   distinguishes memory that can be reclaimed under pressure (`cache`) from
+>   memory that cannot (`rss`). Nothing in the output looks off.
+> * **On the un-charge side it breaks an invariant.** `record_uncharge` floors
+>   the aggregate and the bucket with two independent `saturating_sub` calls,
+>   so un-charging `cache` from a cgroup holding none deflates `usage_pages`
+>   and nothing else. See
+>   `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` —
+>   an independent defect, reachable by typing `cache` correctly, and not
+>   cleared by fixing the parse.
+>
+> The refusal lives in a new `memory_kind_arg` helper next to `cmd_cgmem`
+> rather than in the generic operand family, because it is specific to this
+> command's alphabet and grouping it with `toggle_arg`/`required_num` would
+> imply otherwise.
+>
+> **Rung 93 also pins the other half of §607.** The kind is bracketed
+> `[rss|cache]` in the usage line, so an *absent* word keeps its documented
+> default: `cgmem charge 1 7` still charges rss, and the rung asserts it lands
+> in `rss=7 cache=0`. Only an unreadable word is refused. Two uncounted guesses
+> in one command that differ in exactly this way — `create`'s `<name>` is
+> refused when absent, `charge`'s `[rss|cache]` is not — is the clearest
+> illustration so far of why §607 keys on the brackets rather than on whether a
+> default exists in the code.
+>
+> **Found while reading for evidence:** two independent `cgmem` defects, both
+> logged separately and both **since fixed** —
+> `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` and
+> `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`. Fixing the
+> second is what armed this batch's ceiling guess: `high_events` is now printed,
+> so a wrong ceiling is finally falsifiable. The trap named above was not
+> hypothetical — it was resolved within the hour, and the refusal had to be in
+> place first.
+
+> **Burn-down log.** 2026-08-26 (twenty-fourth batch): `cmd_colortemp` (7,
+> plus two uncounted) cleared — 494 → 487 across 219 → 218 functions. Pinned
+> by `kshell::self_test` rung 92.
+>
+> **In short:** every operand of `colortemp` is written `<required>` in the
+> command's own synopsis, and every one of them was implemented optional. The
+> shell did not merely guess at words it could not read — it also guessed at
+> words that were never typed, so bare `colortemp set` meant "profile 1, 4000
+> Kelvin" and did it.
+>
+> **The half that is new: the guess for an *absent* word, not an unreadable
+> one.** Twenty-three batches of this burn-down have been about the second
+> prohibited shape in §600 — a word read, not parsed, replaced. `cmd_colortemp`
+> has those too, but its `set` arm had already been refusing unreadable ids
+> before this batch. What it had not been refusing was an id that was not
+> there: `parts.get(1).unwrap_or(&"1")`. §607 says a bracketed `[operand]`
+> keeps its documented default and only an *unreadable* one is refused. The
+> converse is what applies here — an operand written `<id>` has no documented
+> default, so inventing one is the same defect wearing the other shape. Every
+> operand in this function is angle-bracketed.
+>
+> **The refusal it did have was anonymous.** `set 1 4O00` printed `Invalid
+> profile ID`, which never says which word could not be read, and in a
+> two-operand command names the wrong one. That is the §604 wording rule: a
+> refusal must name the word it could not read.
+>
+> **The mode guess points the wrong way.** `mode` matched four names and had
+> `_ => TempMode::Off` — an uncounted guess, because the checker matches numeric
+> parses and this one is an enum. `off` is not a neutral reading of a typo. It
+> is the one value of the four that stops the profile doing anything: three of
+> the four modes are ways of being *on*, and every misspelling collapsed onto
+> the fourth. `colortemp mode 1 sunsynk` turned the night-light off and printed
+> `Mode: Off` as though that had been the request. The `cputhr` thesis — the
+> guessed default is always the *reassuring* value — inverts here: the guess is
+> the value that quietly disables the feature, and it still reads as a success.
+>
+> **The severity row this batch adds: *delayed manifestation*.** Every earlier
+> row is about what the guess did at the moment it was typed. Here most of the
+> values are *stored, not applied*. `set_day_night` writes a pair and returns.
+> `set_schedule_times` writes three numbers and returns. Nothing recomputes
+> until the next `update_for_time`, which in real use is a clock tick hours
+> away. So the guess produces no wrong output at all when the command is typed
+> — it produces a wrong *colour on the screen* at 20:00, with nothing on screen
+> connecting it to a line typed at lunchtime.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **stored, not applied** (`cmd_colortemp` `daynight`, `schedule`) | nothing, until the next transition | the screen is the wrong colour hours later, with no line to blame |
+>
+> **`schedule` is the sharpest case, because its operands are *times*.** The
+> guessed sunset was `1200`, and the success line does not echo the digits
+> typed — it formats them back as `20:00`. So `colortemp schedule 1 12OO 420
+> 30` answered a typo with a plausible-looking schedule, in a shape that made
+> it look deliberate, to take effect at an hour when whoever typed it would be
+> long past connecting the two.
+>
+> **`update` reads like a query and is not one.** `update_for_time` *writes*
+> `p.current_kelvin` and bumps `total_adjustments`. A guessed `720` did not
+> merely answer a question about noon that nobody asked; it set the profile's
+> current temperature to whatever noon implies. This is the one honest
+> mitigation in the function: the success line is `Temperature at {:02}:{:02}`,
+> so it does echo the time it used, and a reader who looked would see `12:00`
+> where they meant something else. That makes it the most discoverable guess
+> here, which is not the same as discovered.
+>
+> **`create` was the second uncounted one**, and matters because the table is
+> small: `MAX_PROFILES` is 8, and bare `colortemp create` built a real profile
+> named `Profile`. A handful of them exhausts the table with entries nothing
+> can tell apart — the same shape as `ipcns create`'s `unnamed` in the previous
+> batch, in a namespace an eighth the size.
+>
+> **A note on the pin.** Rung 92's severity assertion is an *equality* between
+> two `colortemp list` captures, not a needle, and that is forced rather than
+> chosen. `list` prints the current temperature as `{} {}K [{}]`, whose longest
+> run of fixed text is the three bytes `K [` — below `check-selftest-wording.py`'s
+> four-byte `MIN_FIXED_RUN`, and rightly so, since three bytes cannot anchor an
+> alignment. `current_kelvin` is exactly the value `set` and `update` write, so
+> the only way to assert it went unchanged is to compare the whole capture. The
+> needle that remains is the schedule line, which `list` prints *only* when the
+> mode is `Scheduled` or `SunSync` — so its presence is itself the proof that
+> the mistyped `sunsynk` did not fall through to `Off`. (Neither `list_profiles`
+> nor `stats` takes the `with_state` path, so neither perturbs the `ops`
+> counter and the before/after captures are comparable.)
+>
+> **Found while reading for evidence:** an inverted day/night pair panicked the
+> kernel from the shell. Fixed separately —
+> `A-COLORTEMP-AN-INVERTED-DAY-NIGHT-PAIR-PANICS-THE-KERNEL`.
+
+> **Burn-down log.** 2026-08-26 (twenty-third batch): `cmd_ipcns` (7) cleared —
+> 501 → 494 across 220 → 219 functions. Pinned by `kshell::self_test` rung 91.
+>
+> **A new row for the taxonomy, and the first one about *recovery* rather than
+> about what the guess did.** In every earlier batch the question was what the
+> guessed value meant. Here the question is what happens *after* you notice.
+>
+> `ipcns shm` takes two guessed operands, and before this batch they answered
+> the same class of typo in opposite ways — which one you got depended only on
+> which word you fumbled:
+>
+> | Typed | What the guess did | What you saw |
+> |---|---|---|
+> | `ipcns shm 1O 1024` | id → `0` | `error: NotFound` — an error, but the *wrong* error |
+> | `ipcns shm 10 1O24` | size → `4096` | `ipcns: shm ns=10 4096B` — a success line |
+>
+> One character apart. The first was **safe only by accident**: `init_defaults`
+> sets `next_id: 1` and seeds no namespaces, and `create_ns` only ever hands out
+> `next_id`, so namespace 0 is unreachable and `destroy_ns(0)` / `record_*(0, …)`
+> could only return `NotFound`. Nothing was destroyed — but the message says the
+> namespace is missing when in fact the *word naming it* was unreadable, so the
+> reader goes to `ipcns list` looking for a namespace that was never in doubt.
+> That is the **misdiagnosis** row, already known from `cmd_aiostat`.
+>
+> **The second is the new one.** `record_shm` is `shm_segments += 1; shm_bytes
+> += bytes`, and the subsystem publishes no inverse — the whole public surface
+> is `init_defaults`, `create_ns`, `destroy_ns`, `record_shm`, `record_sem`,
+> `record_msg`, `ns_list`, `ns_info`, `stats`. There is no `unrecord`, no
+> setter, nothing between "add to the total" and "destroy the namespace."
+>
+> So the guess is not merely wrong; **it is wrong in a way that the obvious
+> correction compounds.** Notice the typo, re-run the line with `1024`, and you
+> do not replace the guessed 4096 — you add the right number underneath it, and
+> the namespace now reports two segments totalling 5120 where one of 1024 was
+> meant. Getting back to the truth means destroying the namespace and rebuilding
+> every other record in it.
+>
+> **`sem`'s guess of `1` is worse than `shm`'s 4096 in one specific way**: 4096
+> is at least a conspicuous round number, whereas `1` is also the *likeliest
+> true value*. A `sem_total` inflated by a guessed 1 is indistinguishable from a
+> `sem_total` that was correctly told 1, so nothing in the output ever invites
+> the second look that would catch it. This is the `cputhr` thesis again — the
+> guess is the reassuring value — sharpened: here the reassuring value is
+> reassuring precisely because it is usually *right*.
+>
+> **Scope, stated honestly:** these are bookkeeping counters. Nothing in the
+> kernel allocates against `shm_bytes` or refuses on `sem_total`; the damage is
+> to a report, not to an allocation. It belongs with `cmd_taskio` and
+> `cmd_aiostat` in the **measurement** row — a number nobody measured, filed as
+> though somebody had — and what this batch adds to that row is that when the
+> measurement is an accumulator, the error is not just undetected but
+> *uncorrectable in place*.
+>
+> **One non-numeric guess in the same function, which the ledger does not
+> count**, was fixed alongside: `create`'s name defaulted to `"unnamed"`, so a
+> bare `ipcns create` built a real namespace called `unnamed` and consumed an
+> id. Names are not unique and ids auto-increment, so a second bare `create`
+> gave a second `unnamed`, distinguishable only by id.
+>
+> The `[bytes]` and `[count]` operands stay **optional** per §607 — they are
+> bracketed in the synopsis, so an omitted word still means 4096 / 1 / 256. Only
+> an unreadable one is refused. Rung 91 asserts both halves, and pins the
+> severity with a single `ipcns list` line reading `shm=1(7777 B) sem=0(0)
+> msg=1(256 B)` after a refused size and a corrected one — which before the fix
+> would have read `shm=2(11873 B)`.
+
+> **Burn-down log.** 2026-08-26 (twenty-second batch): `cmd_groupmgr` (7)
+> cleared — 508 → 501 across 221 → 220 functions. Pinned by
+> `kshell::self_test` rung 90.
+>
+> **The severity that every earlier batch was one step away from: in an id space
+> of *security principals*, `0` is not an arbitrary member — it is the
+> superuser.** The selector batches (1–13) could fairly say "acts on the wrong
+> object, and you notice, because the object you meant is still there." That
+> reading depended on the id space being CPUs, shared-memory regions, quota
+> names — spaces where zero is just the first element. `groupmgr`'s ids are
+> users and groups, `init_defaults` seeds GID 0 as `root`, and **every one of
+> this function's guesses named root on whichever axis it sat.**
+>
+> | Typed | Asked for | Actually asked for |
+> |---|---|---|
+> | `groupmgr delete 1O` | delete group 10 | **delete the `root` group** |
+> | `groupmgr adduser 1O 500` | add UID 500 to group 10 | add UID 500 to the **root group** |
+> | `groupmgr adduser 100 5O0` | add UID 500 to group 100 | add **root** to group 100 |
+> | `groupmgr rmuser 1O 500` | remove UID 500 from group 10 | remove UID 500 from the **root group** |
+> | `groupmgr user 5O0` | which groups is 500 in? | which groups is **root** in? |
+>
+> **`delete` is the sharpest site in the entire burn-down**, because it is
+> destructive and unguarded: `delete_group` is a bare
+> `state.groups.retain(|g| g.gid != gid)` that consults neither `group_type` nor
+> membership. So `groupmgr delete 1O` — one mistyped character — destroyed the
+> root group and printed `Deleted group 0.` as a success.
+>
+> **Refusing the word does not make the operation safe, and this entry should
+> not be read as claiming it does.** A correctly typed `groupmgr delete 0` still
+> destroys `root`. That is a separate defect with a separate fix, filed as
+> `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING`. The
+> two compound; clearing the guess only removes the path that reached the
+> unguarded operation *by accident*.
+>
+> **Two non-numeric guesses in the same arm were fixed too, though the ledger
+> counts neither.** Leaving them would have been patching around the same defect
+> in the same twelve lines:
+>
+> - `create`'s **name** defaulted to `"newgroup"`, so `groupmgr create 1000`
+>   produced a real group indistinguishable from one somebody meant to call
+>   that. A guessed name is not a milder guessed number.
+> - `create`'s **type** ran through `parse_groupmgr_type`, whose `_ =>
+>   GroupType::User` fallback meant `groupmgr create 1000 devs sistem` created a
+>   plain user group while the operator believed they had asked for a system
+>   one. **This guess points the wrong way in the opposite sense from `delete`:**
+>   a request for *more* privilege quietly answered with *less*. Both directions
+>   from one function is the same lesson `diskquota` taught one batch earlier —
+>   the guess is not biased toward safety, because it was never reasoning about
+>   safety.
+>
+> `parse_groupmgr_type` now returns `Option`, and the caller decides separately
+> what an *absent* word means (`User`, the documented default, §607) from what an
+> unreadable one means (a refusal). Those are different questions and the
+> fallback answered both with one value.
+>
+> Rung 90 pins all seven refusals, both `create` controls, and — the assertion
+> that pins the *severity* rather than the wording — that `groupmgr get 0` still
+> finds `root` after a refused `delete`.
+
+> **Burn-down log.** 2026-08-26 (twenty-first batch): `cmd_diskquota` (7)
+> cleared — 515 → 508 across 222 → 221 functions. Pinned by
+> `kshell::self_test` rung 89.
+>
+> **The first batch where the same guessed constant is wrong in two opposite
+> directions inside one function.** Every previous entry could state a single
+> bias: `cputhr` always guessed the *reassuring* value, `cgiostat` always
+> guessed the *inverting* one. `diskquota` substituted `0` for any unreadable
+> number, and `0` is an extreme of this operand's range at **both** ends — as a
+> *limit* it is the strictest value there is, as a *request* it is the emptiest.
+>
+> | Typed | `0` stood in for | What it means there | Result |
+> |---|---|---|---|
+> | `diskquota set alice user 100 2O0` | the **hard limit** | the strictest possible | alice cannot write one byte |
+> | `diskquota check alice user 5OO` | the **size asked about** | the emptiest possible | `ALLOWED` — to a question nobody asked |
+> | `diskquota update alice user 1O` | the **byte delta** | the identity | usage silently stops tracking reality |
+>
+> So the guess is not biased toward safety, and not biased toward permissiveness
+> either. It is biased toward **whatever the surrounding code happens to make
+> `0` mean** — which the shell never considered, because it was not choosing a
+> value at all, only filling a hole.
+>
+> **Why the `set` case is a lockout and not merely a wrong number.**
+> `QuotaEntry::status` asks `bytes_used >= hard_limit_bytes`, so a hard limit of
+> zero reports `HardExceeded` on an entry storing *nothing* — zero is not less
+> than zero. `check_quota` asks `new_usage > hard_limit_bytes`, so every write
+> of a single byte is denied. What completes it is the state being replaced:
+> `check_quota` returns `Ok(true)` for a name with **no entry at all**. One
+> mistyped character therefore moved a user from *unrestricted* to *cannot write
+> one byte*, and reported it as a quota successfully set. Rung 89 pins this
+> directly — after a refused `set`, `diskquota check` must still answer for an
+> unquotaed name, proving the refusal left nothing half-configured.
+>
+> **The honest mitigation, recorded because the last three entries earned the
+> habit.** Unlike `cputhr temp` — where the guess wrote back the value already
+> in the field, leaving the state byte-for-byte unchanged — `diskquota set`
+> echoes the guess in its success line: `soft=100 hard=0`. A reader who checks
+> the numbers can see it. The defect is that nothing *makes* them look, and the
+> line's grammar asserts success.
+>
+> **`update`'s deltas are `i64`, deliberately, not by default.** Freeing space
+> is a negative delta, so reaching for `u64` here would refuse exactly the
+> arguments that are correct — the point made in `required_num`'s own doc
+> comment. Rung 89 asserts `diskquota update … -50` still succeeds, so a later
+> "tightening" that swallows the minus sign fails the build.
+>
+> **§607 holds:** `update`'s synopsis brackets `[file_delta]`, so an omitted
+> file delta still means zero; only a word that is present and unreadable is
+> refused.
+>
+> **Scope note.** The `files` arm's two sites are fixed on the same terms, but
+> their damage is *latent*: nothing in the tree reads `soft_limit_files` or
+> `hard_limit_files`, so a guessed file limit of zero locks nobody out today. It
+> becomes the same lockout as `set` the moment that enforcement is written,
+> which is the argument for refusing the word now rather than when it bites. See
+> `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.
+
+> **Burn-down log.** 2026-08-26 (twentieth batch): `cmd_shmem` (7) cleared —
+> 522 → 515 across 223 → 222 functions. Pinned by `kshell::self_test` rung 88.
+>
+> **The mildest severity in the burn-down, and the one that shows what the
+> counted ledger is actually counting.** Every other batch has been able to name
+> damage: a wrong object acted on, a number nobody measured filed as fact, a
+> guess that meant the negation of what was typed. `shmem` has none of that.
+> All seven sites guessed `0` and then, on the very next line, tested for `0`
+> and bailed — so **the guessed value never reached the subsystem**. No state
+> was written, nothing was corrupted, nothing was invented.
+>
+> What was destroyed is only the diagnosis, and all of it. `0` was doing two
+> jobs: it was the guess *and* it was the marker for "invalid". That collapses
+> three different mistakes onto one answer:
+>
+> | Typed | The mistake | What the shell said |
+> |---|---|---|
+> | `shmem create foo` | the size is **missing** | `Usage: shmem create <name> <size>` |
+> | `shmem create foo 1O24` | the size is **mistyped** (letter O) | `Usage: shmem create <name> <size>` |
+> | `shmem create foo 0` | the size is **readable and invalid** | `Usage: shmem create <name> <size>` |
+>
+> A synopsis is a specific claim: *you got the form wrong*. In rows two and
+> three the form was right. The operator is told to re-read a syntax line that
+> already matches what they typed, while the actual fault — one character, or a
+> value the subsystem will not accept — goes unmentioned. That is the sixth
+> severity row, **conflation**: not a wrong action, but one answer standing in
+> for three questions, and it is the answer to none of them.
+>
+> `shmem attach` is the same defect with a second edge. It takes two numbers,
+> and `shmem attach 1O 3` and `shmem attach 3 1O` printed the *identical* line —
+> so the message did not even narrow which of the two words was the problem.
+> They are now `` `1O' is not a region id `` and `` `1O' is not a process id ``.
+>
+> **The `delete 0` sentinel was dropped, not reworded.** Region ids are
+> allocated from 1 (`init_defaults` seeds `next_id: 1` in
+> `kernel/src/fs/shmem.rs`), so `delete 0` finds nothing
+> and `shmem::delete` answers `NotFound` — which is true, and is the same answer
+> `delete 999` gets. A shell-side rule singling out zero would invent a
+> distinction the id space does not have. Zero was only ever special *because it
+> was the guess*; once the guess is gone the special case has no reason to
+> exist. This is the general shape to look for in the remaining batches: a
+> sentinel test that looks like validation is often just the guess's shadow.
+>
+> **Why the checker could not have found this by shape.** `cmd_blkread`
+> (rung 86, eighteenth batch) had a structurally identical guess-then-test-the-
+> guess pair, and D1 did not flag it, because there the parse sat behind a
+> function boundary the statement-level regex cannot cross. The two batches
+> together are the argument for the ledger being keyed by *function* rather than
+> by pattern: the checker finds the sites it can see, and the count is what
+> keeps the ones it cannot from being forgotten.
+>
+> Rung 88 pins all three answers as distinct, both `attach` orders as distinct,
+> and carries a control — `shmem create zzrung88 1024` still succeeds — so the
+> three refusals cannot be passing by having simply broken `create`.
+>
+> **§604 note.** Two assertions in the first draft of rung 88 were
+> `assert_output_lacks(.., b"Usage: shmem create")` and the same for `delete`.
+> The wording gate rejected both as unfireable, and was right: after the fix
+> that text exists nowhere in `cmd_shmem`, so the needle matched no format
+> string and a misspelling of it would have passed forever. Both were replaced
+> rather than weakened — one by a comment (the guarantee is structural: the arm
+> cannot print a synopsis it no longer contains, which is stronger than a
+> runtime check), one by a positive `contains b"Error:"`, which is fixed text in
+> the arm's own `shell_println!` and asserts something the absence could not —
+> that the word reached `shmem::delete` and the *subsystem* answered.
+
+> **Burn-down log.** 2026-08-26 (nineteenth batch): `cmd_cputhr` (7) cleared —
+> 529 → 522 across 224 → 223 functions. Pinned by `kshell::self_test` rung 87.
+>
+> **The guessed number is never a random wrong number. It is the reassuring
+> one.** Every batch so far has asked *what the guess broke*; this one is the
+> first where the answer is that the guess is indistinguishable from good news.
+> All three of `cputhr`'s numeric operands defaulted to a value that means
+> "nothing is wrong":
+>
+> | Typed | Meant | Recorded | What the recorded value says |
+> |---|---|---|---|
+> | `cputhr temp 0 9O000` | 90.0 °C | **65.0 °C** | a normal load temperature |
+> | `cputhr cap 0 8OO` | 800 MHz | **2000 MHz** | a cap so loose it is barely one |
+> | `cputhr throttle 0 1O00` | 1000 ms | **100 ms** | the shortest stall worth recording |
+>
+> A selector guess (batches 1–13) acts on the wrong object and you notice,
+> because the object you meant is still sitting there untouched. A *measurement*
+> guess files a number nobody measured. This is that, plus a bias: the invented
+> number is always the one that makes the machine look healthier than the
+> operator was trying to say it was. `temp` is the case that matters — someone
+> types a temperature only when they are recording something abnormal, and the
+> guess replaces the abnormal reading with a normal one, then prints a success
+> line and repeats the invented figure to everyone who later runs `cputhr cpus`.
+>
+> **And for `temp` the guess was literally a no-op, which took reading the
+> subsystem to see.** `cputhr::init_defaults` starts CPU 0 at `temp_mc:
+> 65_000` — the same 65 000 the shell guessed. So on a freshly-initialised
+> machine `cputhr temp 0 9O000` wrote back the value already in the state: the
+> command changed nothing at all, and said it had set a temperature. A command
+> that reports success, makes no change, and cannot be told apart from one that
+> worked is the end state this whole entry exists to remove. It is also a
+> reminder that the severity of a guessed default cannot be judged from the
+> shell alone — 65 000 looks like an arbitrary plausible number until you open
+> `kernel/src/fs/cputhr.rs`.
+>
+> `clear` is the fourth arm and a different shape again: it takes a CPU number
+> and erases that CPU's throttle state. Guessing `0` there never failed into a
+> diagnostic the way `aiostat`'s id guesses did, because **CPU 0 exists on every
+> machine** — so `cputhr clear` with the operand omitted or mistyped silently
+> cleared core 0 and reported it. `clear` was also the one arm the usage block
+> never documented, which was survivable while omission meant "CPU 0" and is not
+> survivable now that omission is refused; a `clear <cpu>` line was added in the
+> same change, per §299 — a gate whose rule is undocumented is just a wall.
+>
+> §607 keeps the bracketed operands: `throttle <cpu> [ms]`, `cap <cpu> [mhz]`
+> and `temp <cpu> [millicelsius]` all still work with the operand omitted, and
+> rung 87 asserts `cputhr cap 0` still applies the documented 2000 MHz. Only the
+> unreadable word is refused. Unlike batch 18 there is no compounding here —
+> every bracketed operand is *last*, so no guess can eat the word another
+> operand needed.
+>
+> **A note on the wording gate, in the direction of the corrections above rather
+> than against them.** Rung 87 asserts ` cap=800MHz` against the `cpus` arm,
+> whose cap string is built at run time (`alloc::format!("{}MHz", …)` /
+> `String::from("none")`) — the same construction that was restructured in
+> `cmd_cgiostat`. The gate **accepted** it, because the leading space makes
+> ` cap=` a four-byte fixed run and `MIN_FIXED_RUN` is 4. That is the behaviour
+> predicted when the sixteenth entry was corrected, now observed rather than
+> reasoned about. The `cpus` arm was therefore left alone in this commit: it has
+> the same discoverability weakness `cgiostat` had, but saying so is an argument
+> to be made on its own, not a claim that a gate demanded it.
+>
+> **Burn-down log.** 2026-08-26 (eighteenth batch): `cmd_brightness` (7) cleared
+> — 536 → 529 across 225 → 224 functions. Pinned by `kshell::self_test` rung 85.
+>
+> **The guess and the arity guard compound, and the result is a message that is
+> false in both halves.** `cmd_brightness`'s `set` arm was fixed for this in an
+> earlier batch and is quoted at the top of this entry; what was missed then is
+> that `mode [id] <type>` has the identical shape — the *optional* operand
+> first, so only the operand count says which word is which.
+>
+> `bright mode auto` is the form the command's own help text documents. It did
+> this:
+>
+> 1. `parts[1]` is read as the display id unconditionally, so `auto` is parsed
+>    as a number. It fails. `unwrap_or(1)` makes it display 1 — **and the word
+>    is now consumed.**
+> 2. The mode operand is looked for at `parts[2]`, which is absent, so it
+>    becomes `""`.
+> 3. The command answers ``brightness: mode: `' is not a mode``.
+>
+> Neither half of that sentence is true. The mode *was* supplied. The thing that
+> could not be read was a word the command had already decided was a display id.
+> And it quotes the empty string back at someone who typed exactly what the help
+> text told them to. This is the first site in the entry where the guess does not
+> merely cause a wrong action or a wrong explanation but **manufactures the
+> evidence for its own wrong explanation** — the emptiness the message complains
+> about was created two lines earlier by the guess.
+>
+> The lesson generalises to the rest of the ledger and is worth carrying into
+> triage: **wherever a synopsis brackets its *first* operand, the guess is
+> load-bearing for the arity check below it, and fixing the guess alone is not
+> enough** — the index has to be chosen by operand count first. Grep the
+> remaining functions for `[` appearing before `<` in their usage lines.
+>
+> The same batch removes three `.ok()`-then-report-success sites under
+> `mode`/`dim`/`undim`. `bright mode 9 auto` discarded the `NotFound` that said
+> nothing had been set and printed `Mode → Automatic` anyway. That is the
+> discarded-`Result` defect rather than the guessed-operand one, but it is the
+> same failure viewed from the other end of the statement — the guess invents an
+> input nobody supplied, and `.ok()` invents an outcome nobody got — so it is
+> fixed here rather than filed for later.
+>
+> `up`/`down` keep their documented defaults per §607 and the rung asserts they
+> still work. Before this, `bright up 1O` raised display **1** instead of display
+> 10 and printed a percentage that was perfectly true of a screen the user was
+> not looking at.
+>
+> **Burn-down log.** 2026-08-26 (seventeenth batch): `cmd_aiostat` (8) cleared —
+> 544 → 536 across 226 → 225 functions. Pinned by `kshell::self_test` rung 84.
+>
+> **A fifth row, and it is about what the command *says* rather than what it
+> does.** Every batch so far has been about a command acting wrongly and
+> reporting success. `cmd_aiostat` allocates its ring ids from 1, so the guessed
+> `0` never collided with a live ring — `aiostat destroy 1O` genuinely failed.
+> It failed like this:
+>
+> ```
+> aiostat: error: NotFound
+> ```
+>
+> which says that the ring the user named does not exist. The ring exists. The
+> word `1O` is what could not be read. **A confident wrong diagnosis is not a
+> milder version of no diagnosis** — a bare failure sends the reader back to
+> what they typed; this sends them into the subsystem to hunt for a ring that
+> was sitting there the whole time. The cost of a defect is measured in where it
+> makes someone look next, and this is the worst answer available.
+>
+> That generalises, and it is the reason this batch gets a write-up rather than
+> a line. A large share of the remaining ledger sits behind a `NotFound`-style
+> lookup, and wherever the guessed sentinel happens *not* to name a live object,
+> the D1 defect stops producing a wrong **action** and starts producing a wrong
+> **explanation**. Those sites look harmless when skimmed — the command errors,
+> the status is 1, the shape looks like a refusal — and they are not. When
+> triaging the rest of the ledger, do not treat "it already fails" as evidence
+> that a site is low priority.
+>
+> The rest of the command is shapes already catalogued. `create`'s pid is the
+> fact the ring is keyed on, so `unwrap_or(0)` produced a ring owned by a
+> process that does not exist and reported it created, after which every
+> submission against it looked legitimate. The `submit`/`complete` counts are
+> the rung-82 measurement shape: `aiostat submit 3 1O24` recorded **one**
+> submission where 1024 were meant, and left a counter with nothing anywhere to
+> contradict it.
+>
+> Per §607 the bracketed operands keep their defaults — `create <pid> [sq_size]
+> [cq_size]`, `submit <ring_id> [count]` — and rung 84 asserts they still work.
+>
+> **The wording gate fired again**, in the opposite direction from the last
+> batch. Rung 84's closing assertion was written
+> `assert_output_lacks(.., b"NotFound")`; the gate reported it as *an assertion
+> that can never fire*, because `NotFound` reaches the screen only through a
+> `{:?}` and appears in no format string in the shell. Rewritten against the
+> `aiostat: error:` prefix, which is fixed text, it says the same thing in a
+> form the gate can check.
+>
+> **Be precise about what the gate did and did not establish** — the first
+> version of this paragraph said the old assertion "would have passed against an
+> unfixed kernel", and that is simply false. Checked: an unfixed `aiostat
+> destroy 1O` prints `aiostat: error: NotFound`, so `lacks b"NotFound"` would
+> have **failed**. The assertion discriminated correctly at run time. What the
+> gate objects to is narrower and still worth objecting to: it cannot verify
+> that `NotFound` is text this command can produce, so it cannot tell a working
+> `lacks` from one whose needle is misspelled — and a misspelled `lacks` passes
+> forever, silently, against every kernel. The assertion was right by luck of
+> spelling, and depending on that luck is the thing the gate exists to stop.
+>
+> Two corrections in two consecutive entries, both in the same direction —
+> crediting the gate with more than it found — is itself the finding. The gate
+> is a spelling check on assertions with a four-byte fixed-run rule. It is not
+> an oracle, it does not know what a command *should* print, and every claim
+> here that it "caught a bug" should be read back against what it actually
+> reported before being believed.
+>
+> **Burn-down log.** 2026-08-26 (sixteenth batch): `cmd_cgiostat` (8) cleared —
+> 552 → 544 across 227 → 226 functions. Pinned by `kshell::self_test` rung 83.
+>
+> **A fourth row for the table below, and it is the worst one.** In the first
+> thirteen batches the guessed number selected the wrong object; in `cmd_splice`
+> it wrote to the wrong address; in `cmd_taskio` it invented a measurement. In
+> all three the command did *less* than, or *other* than, what was asked. Here
+> it does the **opposite** of what was asked, and the guessed value is a
+> perfectly legal one:
+>
+> | The guessed number is a… | What the command does | How you find out |
+> |---|---|---|
+> | **inversion** — `cmd_cgiostat` | the guessed `0` is the subsystem's word for *unlimited*, so the request is negated | you don't — the cgroup exists, `create` reported success, and the cap it was created to enforce simply isn't one |
+>
+> `cgiostat create web 100O000` — a capital O where a zero belongs — asked for a
+> 100 MB/s bandwidth cap and created a cgroup with **no cap at all**, printing
+> `cgiostat: created 'web' → id 3 (bw=0 iops=0)`. Every other shape in this entry
+> fails toward doing less than was asked. This one fails toward doing the exact
+> reverse, in a subsystem whose entire purpose is to say no. A throttle that
+> silently becomes no throttle is the one failure a throttle must not have.
+>
+> Note what makes it invisible in a way the other three are not. A guessed
+> selector leaves the object you meant untouched, so you notice. A guessed write
+> address destroys something, so eventually you notice. A guessed measurement is
+> at least *anomalous* if you look hard. But an uncapped cgroup looks exactly
+> like a cgroup that is not being asked for much — it is only ever discovered by
+> the load that the cap was supposed to prevent.
+>
+> Per §607 the limits stay **optional**: `create <name> [bw_limit] [iops_limit]`
+> brackets them, so omitting them to mean unlimited is a documented request that
+> must keep working, and rung 83 asserts it still does. The fix removes the
+> *guess*, not the *default*. Same for the bracketed byte counts in `read`/
+> `write`; the cgroup id, written `<cg_id>`, becomes `required_num`.
+>
+> **The `list` arm changed too, and that part is not incidental.** It built the
+> limit string separately — `alloc::format!("{}B/s", …)` or
+> `String::from("unlimited")` — and interpolated the result through a trailing
+> `bw={}`. So the unit and the word `unlimited` existed nowhere a reader of
+> `cmd_cgiostat` could see them, and nothing short of booting a kernel could
+> establish that a zero limit prints as `unlimited` rather than as `0`. That is
+> the same inversion the `create` arm was being fixed for, hiding one layer
+> down, in the one line whose job is to *reveal* it. Both spellings are now
+> branches of the format string.
+>
+> `check-selftest-wording.py` is what surfaced it: it rejected the rung's
+> `bw=100000000B/s` and `bw=unlimited` assertions as text the command cannot
+> print, and pointed at the interpolated `bw={}` that made them underivable.
+>
+> **Correction, made the same day, because the first version of this paragraph
+> overstated the gate's role and this file is only useful if it is trustworthy.**
+> The gate did *not* force the code change. Its rule is a run of four consecutive
+> bytes of fixed text, and the rejected needles fell one byte short — `bw=` is
+> three. Measured directly against the checker's own `producible()`, ` bw=unlimited`
+> with a single leading space is accepted against the **old** format string:
+>
+> | needle | against old `… throttle={} bw={}` |
+> |---|---|
+> | `bw=unlimited` | rejected (fixed run `bw=`, 3 bytes) |
+> | ` bw=unlimited` | **accepted** (fixed run ` bw=`, 4 bytes) |
+>
+> So widening the needle by one character would have satisfied the gate and left
+> the `alloc::format!` in place. The code change stands on the argument above it
+> — that a zero limit rendering as `unlimited` should be visible in the function
+> that renders it — and not on any demand from the checker. What the gate
+> actually did was smaller and still worth having: it drew attention to a line
+> whose two spellings were invented outside its own format string. Claiming it
+> had "found a defect the fix was forced to address" would make the gate sound
+> stronger than it is, and would teach the next reader to stop investigating at
+> the first plausible story.
+>
+> **Burn-down log.** 2026-08-26 (fifteenth batch): `cmd_taskio` (8) cleared —
+> 560 → 552 across 228 → 227 functions. Pinned by `kshell::self_test` rung 82.
+>
+> Taken with the batch before it, this one completes a three-way split that is
+> worth stating explicitly, because it changes how severe a given site is:
+>
+> | The guessed number is a… | What the command does | How you find out |
+> |---|---|---|
+> | **selector** (id, mode, switch) — batches 1–13 | acts on the wrong object, or on none, and reports success | the thing you meant is still there, unchanged; you notice when you look at it |
+> | **address to write to** — `cmd_splice`, §607 | overwrites bytes that existed before the command ran | you don't; the old bytes are gone and the only record is a success line |
+> | **measurement** — `cmd_taskio` | files a number nobody measured into a counter | you don't, and neither does anyone reading the counter afterwards |
+>
+> `taskio read 5 8l92` (letter L) recorded **4096 bytes** of reads against pid 5
+> and printed `taskio: read 4096 bytes for pid 5`. Nothing was damaged and
+> nothing acted on the wrong object. A counter simply acquired a value that no
+> measurement produced — and from that moment it is indistinguishable from one
+> that did. This is the failure mode with the longest half-life in the entry:
+> a missing statistic announces itself, a fabricated one is read later, by
+> someone who was not there when the command was typed and has nothing but the
+> number to go on.
+>
+> `taskio register 1O` was sharper still, because unlike almost every other site
+> in this entry it had **no sentinel guard at all** — not even the useless
+> `if id == 0` — so it registered **pid 0**, printed `registered pid 0`, and
+> created a task record for a process that does not exist. That record then
+> became the destination for every subsequent mistyped measurement, which is how
+> two independent instances of this bug compound into a plausible-looking table
+> of numbers about a process that was never running.
+>
+> Note the helper differs from the batch before it and the difference is
+> principled, not stylistic: none of `taskio`'s defaults were ever documented —
+> the synopsis has always read `read <pid> <bytes>`, both required — so
+> `required_num` removes nothing a user could have been relying on. `splice`'s
+> were documented, so it took `optional_num`. §607 is the rule that decides
+> which.
+>
+> **Burn-down log.** 2026-08-26 (fourteenth batch): `cmd_splice` (9) cleared —
+> 569 → 560 across 229 → 228 functions. Pinned by `kshell::self_test` rung 81.
+>
+> **This is the batch that changes what the entry is about.** Every one of the
+> thirteen before it guessed a *selector* — an id, a mode, a switch. The command
+> then acted on the wrong object, or on no object, and reported success. That is
+> bad, and it is recoverable: the thing the user meant is still sitting there
+> untouched, and the wrong thing can usually be put back.
+>
+> `cmd_splice` is the first place in this family where the guessed number is an
+> **address in a file the command is about to write to**.
+> `splice copy src dst 0 1O24 4096` — one mistyped character in the destination
+> offset, a capital O for a zero — fell to `unwrap_or(0)` and wrote four
+> kilobytes over the *beginning* of `dst`, then printed
+> `Copied 4096 bytes: src -> dst`. There is no id to re-look-up and no setting
+> to restore. The bytes that were at offset 0 are gone, and the only record of
+> the mistake is a success line.
+>
+> The four length operands are the same defect one step quieter.
+> `unwrap_or(1024 * 1024)` means an unreadable length asks for a megabyte, so
+> `splice copy a b 0 0 4O96` moved 256× what was asked for and reported the
+> megabyte back as the byte count — a number that is *accurate*, describing an
+> operation nobody requested.
+>
+> All nine are genuine optional operands with genuine documented defaults
+> (`[src_offset]`, `[len]`), so the fix is `optional_num` and not
+> `required_num`; making them required would fix the guess by breaking the
+> documented short form. See §607 for why that tradeoff was resolved the way it
+> was even here, where the guess is the destructive one.
+>
+> One uncounted defect went with them: all four transfers shared a single
+> `if parts.len() < 3 { "Usage: …" }` covering both paths, so the refusal knew
+> something was absent and had already discarded which. `splice_paths` now names
+> whichever of source and destination is the missing one.
+>
+> **Burn-down log.** 2026-08-26 (thirteenth batch): `cmd_focusassist` (9)
+> cleared — 578 → 569 across 230 → 229 functions. Pinned by
+> `kshell::self_test` rung 80.
+>
+> Eight of the nine were the familiar `unwrap_or(0)` sentinel, but `mode`,
+> `addapp`, `rmapp` and `addsched` each ran *one* `if a == 0 || b.is_empty()`
+> guard over two-to-four operands and answered it with one synopsis. That is a
+> distinct defect from the sentinel and worth naming separately: even when the
+> guard correctly decides that something is wrong, it has thrown away which
+> operand it was, so the user is handed the syntax of a line they already typed
+> correctly. Split into per-operand `missing …` lines.
+>
+> The ninth is the reason the batch got a rung. `focusassist on [id]` is
+> *documented* to default to profile 1, so `…parse().ok().unwrap_or(1)` read
+> like the documentation rather than like a guess — this is the shape most
+> likely to survive review. It does not survive use: `focusassist on 2o`
+> silenced every notification under profile 1 and then printed profile 1's
+> name back, which a reader takes as confirmation of what they asked for. Every
+> earlier batch tested `optional_num` against a default that was a *sentinel*
+> (`0` for unlimited, absence for query), where the wrongness is visible in the
+> output. This is the first assertion that the distinction also holds when the
+> default is a value the user could plausibly have meant.
+>
+> Three uncounted defects rode along, all of them §600's *other* prohibited
+> shape — a word read and silently dropped, which the ledger does not count:
+>
+> * **`focusassist addsched … 1,Tue,9`** built a Monday-only schedule. The day
+>   list was `if let Ok(n) = part.parse() { if n < 7 { … } }` — two conditions,
+>   no `else` on either — so an unreadable day and an out-of-range one were both
+>   discarded in silence and the command reported success. Two thirds of the
+>   request vanished without a word.
+> * **`focusassist addsched zznap 25:70 26:00 1`** was accepted and stored. The
+>   time parser checked that both halves were integers and not that either was a
+>   time, so it produced a schedule that could never fire — a silent no-op with a
+>   success line, discoverable only by waiting for it not to happen.
+> * **`autofs` / `autogame` / `autopres`** did three wrong things in eight lines
+>   each: they accepted a narrower vocabulary than the rest of the shell (`true`,
+>   `enable`, `1` all refused here and accepted elsewhere), answered both an
+>   omitted operand and a misspelt one with the same synopsis, and discarded
+>   `set_auto_*`'s `Result` under an unconditional success line — so a failed
+>   write still printed `Auto fullscreen: ON`.
+>
+> **Burn-down log.** 2026-08-26 (twelfth batch): the boolean sweep — 21 sites
+> across 16 commands, of which 3 were counted (`cmd_battery`, `cmd_fileshare`,
+> `cmd_swapcfg`) — 581 → 578 across 231 → 230 functions. Pinned by
+> `kshell::self_test` rung 79.
+>
+> This batch was organised by *shape* rather than by command, because the shape
+> had been copied faster than any per-command sweep could catch it:
+> `matches!(word, "on" | "true" | …)`. `matches!` has exactly two outputs and
+> both of them are answers, so it cannot express "I did not understand you" —
+> every unreadable word became `false`.
+>
+> That is not a neutral failure. `false` is the permissive side of most of these
+> settings, so the shell failed *consistently toward less protection*:
+> `reslimit enforce` stopped enforcing, `datausage limit block` stopped
+> blocking, `kernelbuild auto` stopped rebuilding — each reporting the setting
+> as applied and exiting 0.
+>
+> Drift made it reachable. Five different vocabularies had grown across the 21
+> sites, the sharpest split being `1`: seven sites accepted it and six others,
+> printing the *identical* `Usage: … <on|off>` line, did not. So a user who
+> learned from `bootcfg activity 1` that `1` means on got, from
+> `datausage limit block home 1`, a data cap silently switched off — taught the
+> wrong lesson by documentation that was word-for-word the same in both places.
+>
+> The fix is `toggle_word`, the single place that decides which words mean what,
+> reached through `required_toggle` (no query form; absence is an error) or
+> `toggle_arg` (§605, has one). `batt ac` keeps its own diagnostic because it
+> accepts two words the shared vocabulary does not, and a refusal naming a
+> narrower vocabulary than the command accepts would teach a reader to stop
+> using a word that works.
+>
+> **Burn-down log.** 2026-08-26 (eleventh batch): `cmd_a11y` (10) cleared —
+> 591 → 581 across 232 → 231 functions. Pinned by `kshell::self_test` rung 78.
+>
+> Six of the ten were the set/query conflation, which makes this the third
+> consecutive settings command dominated by it — it is now clearly the default
+> failure of the shape rather than a quirk of any one command. So this batch
+> stopped fixing instances and built the helper: `toggle_arg` returns
+> `Option<Toggle>` where `Toggle` is `Query` or `Set(bool)`, so absence — and
+> only absence — selects the query. See §605; the reason it needs three
+> outcomes rather than two is that "no word" and "a word I could not read" are
+> the two situations the bug consists of confusing, and an `Option<bool>`
+> return has nowhere to put the difference.
+>
+> Four sites the ledger cannot count, and they are a good sample of why the
+> counted number is a floor rather than a total:
+>
+> * **`a11y regelem 1 buton Save`** registered a *generic* element and said so.
+>   An unknown role fell through a `_ =>` to a default role, so the element
+>   existed, was announced, and had the wrong semantics — the screen reader
+>   would describe a button as a plain element for the life of the process.
+> * **`a11y announce alrt`** did two wrong things at once: it downgraded the
+>   priority to `normal` and it ate the word, so the *message* announced was
+>   whatever followed. Now refused, and the refusal enumerates
+>   `Priorities: low, normal, high, alert`.
+> * **`a11y inject key F1`** injected scancode 0. There is no sentinel to key
+>   on here, which is the general lesson: `required_num` is needed even where a
+>   zero-check would appear to work, because 0 is a legitimate scancode.
+> * **Seven `.ok()` / `let _ =` discards** across `inject`, `set_font_scale` and
+>   the toggles, each reporting success for an operation that had failed.
+>
+> **Burn-down log.** 2026-08-26 (tenth batch): `cmd_filepicker` (10) cleared —
+> 601 → 591 across 233 → 232 functions. Pinned by `kshell::self_test` rung 77.
+>
+> The least interesting batch so far, and worth logging for exactly that
+> reason: all ten sites were the *same* line — a dialog id read with
+> `unwrap_or(0)` — repeated across ten arms, and dialog 0 is never a live
+> dialog, so every one of them acted on nothing and reported success. Ten
+> hand-edits of an identical line is how a transcription error gets in, so the
+> conversion was done by a one-shot script that asserted its own arity (exactly
+> ten matches, or abort) and was then deleted. Keeping such a script would
+> imply it is a tool; it is a proof that a mechanical edit was mechanical.
+>
+> The one judgement call: `nav`, `select` and `filename` take a path after the
+> id, and the path guard was previously fused with the id guard, so a missing
+> path was reported as a missing id. They are now split, because the two
+> mistakes need different messages to be actionable.
+>
+> **Burn-down log.** 2026-08-26 (ninth batch): `cmd_peninput` (10) cleared —
+> 611 → 601 across 234 → 233 functions. Pinned by `kshell::self_test` rung 76.
+>
+> Contains one instance of each of the four failure modes the family has
+> turned up, which makes it the best single worked example in this entry:
+>
+> * **Silence.** `pen rm abc` — inner `if let Ok(id)` with no `else` — printed
+>   nothing and exited 0.
+> * **A sentinel that cannot do the job.** `sim` used `unwrap_or(0)` guarded by
+>   `if pen_id == 0 { synopsis }`. That looks like validation and is not: it
+>   cannot tell an *omitted* operand from a *mistyped* one, and the synopsis it
+>   prints never names the offending word, so the user is told the syntax of a
+>   command they typed correctly.
+> * **No sentinel available.** `pen map 3 x click` bound button **0**, and 0 is
+>   a real button, so no guard of that shape could have caught it.
+> * **A guessed enum.** `register` accepted any word as a pen type.
+>
+> This batch also produced the article bug behind §606. The rung asserted
+> `` `4o96' is not an x coordinate `` and the wording gate refused it, because
+> `optional_num` hard-coded `a` and the kernel could only say `a x coordinate`.
+> Fixed here by renaming the noun to "horizontal coordinate" — a fix that is
+> better English but does not generalise, which is what motivated `article_for`
+> two batches later.
+>
+> **Burn-down log.** 2026-08-26 (eighth batch): `cmd_screenshot` (10) cleared —
+> 621 → 611 across 235 → 234 functions. Pinned by `kshell::self_test` rung 75.
+>
+> Region and window captures read their geometry with `unwrap_or`, so
+> `scap region 0 0 8oo 600` captured an 0×600 region and reported a successful
+> capture. Same shape as `wsnap addzone` in the sixth batch: a geometry operand
+> is a field in a set, and one bad field yields a degenerate result that the
+> command has no reason to think is wrong.
+>
+> Two `ALLOWED` entries were added to the wording gate in this batch
+> (`("scap", b"(1920x1080)")` and `("scap", b"(800x600)")`): the resolution is
+> assembled with `{}x{}` from values the gate cannot constant-fold, so it
+> cannot see that the literal is producible. Recorded because an allow-list
+> entry is a small hole in a gate and should never be added silently.
+>
+> **Burn-down log.** 2026-08-26 (seventh batch): `cmd_wintiling` (11) cleared —
+> 632 → 621 across 236 → 235 functions. Pinned by `kshell::self_test` rung 74.
+>
+> This batch names the fourth and last failure mode in the family, and it is
+> the worst of them: **saying nothing at all.** Three arms — `rmws`, `rm` and
+> `float` — were spelled
+>
+> ```rust
+> if let Some(w) = parts.get(1) {
+>     if let Ok(id) = w.parse::<u32>() { … }   // no `else`
+> } else { <synopsis>; set_exit(1); }
+> ```
+>
+> The *outer* `if let` had an `else`, so an omitted operand was reported. The
+> *inner* one did not, so `tile rmws abc` produced no output whatsoever and
+> exited 0. Set against the other three modes the ledger has turned up —
+> guess a value, answer a query, report a clamp — silence is the hardest to
+> notice, because there is no sentence to disbelieve. A user who typed
+> `tile rm 1O` (letter O) and saw nothing would reasonably conclude the window
+> was gone.
+>
+> Three more sites the ledger cannot count, all of a different shape again:
+>
+> * **A guessed enum, from two copies of one parser that had drifted.** The
+>   layout `match` existed twice — in `create` and in `layout`. `layout`
+>   refused an unknown word; `create` fell through `_ => MasterStack` and
+>   reported the workspace as created, so `tile create work grd` silently
+>   built the wrong layout. Fixed by moving the parser onto the enum as
+>   `TilingLayout::from_str`, which makes the divergence impossible to
+>   reintroduce rather than merely fixing this instance of it.
+> * **Two errors discarded with `.ok()`** (`gap`, `ratio`), against the
+>   explicit rule in `CLAUDE.md` §9. `tile gap 999 5` for a workspace that
+>   does not exist printed `Gap → 5px` and exited 0 — a setting reported as
+>   applied to nothing.
+> * **A clamp the caller could not see.** `set_master_ratio` stores
+>   `ratio.clamp(10, 90)`, but the shell echoed the number it was *given*, so
+>   `tile ratio 1 200` printed `Master ratio → 200%` while the workspace held
+>   90. This is worth separating from the guessed-value family because the
+>   value is not guessed — it is *known* and then misreported. The fix refuses
+>   out-of-range rather than echoing the clamp: a clamp the caller cannot see
+>   is a guess by another name, and one the ledger's regex will never find.
+>
+> Of the eleven counted sites, the interesting ones are `add`'s destination
+> workspace (no guard at all, so a typo put the window on workspace 1 and said
+> so) and `retile`/`windows`, where the default — workspace 1, and the "all
+> workspaces" sentinel 0 — is documented and correct for an *absent* operand
+> and had simply been extended to an unreadable one. Those two took
+> `optional_num`; the rest took `required_num`.
+>
+> **Burn-down log.** 2026-08-26 (sixth batch): `cmd_winsnap` (12) cleared —
+> 644 → 632 across 237 → 236 functions. Pinned by `kshell::self_test` rung 73.
+>
+> Half of this function was the set/query conflation the fifth batch named, now
+> confirmed as the dominant shape in the settings commands rather than a
+> `cmd_vdesktop` quirk: **six** of the twelve sites — `enabled`, `preview`,
+> `corner`, `thirds`, `edge`, `animation` — reported the current value in
+> response to a word the user meant as a set. `wsnap enabled of` (one `f`)
+> printed `Snapping: true` and exited 0. Note that it printed the value the
+> user was trying to *change away from*, so the output reads as confirmation
+> of the opposite of the request. Two spellings produced it: a `_ =>` catch-all
+> after the `on`/`off` arms, and `if let Some(x) = …parse() … else { query }`.
+> Both are now `match parts.get(1) { None => query, Some(word) => … }`, so
+> absence still queries and a present word is either understood or refused.
+>
+> The shape unique to this command is **geometry**. `addzone` takes four
+> percentages and each defaulted to 0, so one mistyped field
+> (`addzone lay z 0 0 5oo 500`) built a zone of zero area and reported
+> `Zone 'z' added to 'lay'` — indistinguishable from a correct run, and
+> invisible until the layout is applied and a window disappears into a 0×0
+> rectangle. A guessed *dimension* is worse than a guessed *id* in one
+> specific way: an id usually names something that does not exist, and the
+> command then says so; a zero dimension is always valid input to the layer
+> below, so nothing downstream can object.
+>
+> Two sites worth separating from the other ten:
+>
+> * `wsnap remove abc` — **no guard at all**, the same shape as `vd unpin` in
+>   the fifth batch. It dropped window 0's tracking state and announced
+>   `Removed tracking for window 0`, exit 0. This is the third batch in a row
+>   to turn one up, so the "ledger is a lower bound" note below is not a
+>   one-off caveat: the missing-guard shape has no `unwrap_or` for the gate's
+>   regex to match, and only reading finds it.
+> * `wsnap screen` already had a `w > 0 && h > 0` guard and already exited 1 —
+>   the *status* was right. What it could not do is name the word: a mistyped
+>   width, an omitted one, and an honest `screen 0 0` all printed the same
+>   synopsis. It now names the unreadable word, and answers `screen 0 0`
+>   separately with `a screen must be at least 1x1`. A correct exit status is
+>   not the same as a usable diagnostic, and the gate cannot tell them apart.
+>
+> `snap`'s position operand was likewise already refused, but anonymously
+> (`Usage: wsnap snap <wid> <left|right|…>`); it now says which word it could
+> not read, with the alternatives on a second line.
+>
+> **Burn-down log.** 2026-08-26 (fifth batch): `cmd_vdesktop` (18) cleared —
+> 662 → 644 across 238 → 237 functions. Pinned by `kshell::self_test` rung 72.
+>
+> The guessed *id* here is the shape the earlier batches already covered. What
+> is new is three arms where the guess turned a **set into a query**, so a
+> mistyped operand produced a reply that was true, useful, and about something
+> else:
+>
+> * `vd visible abc` — `unwrap_or(vdesktop::current())` listed the *current*
+>   desktop's windows, under its own heading. Nothing in the reply suggested
+>   the operand had been discarded.
+> * `vd anim slid` — set nothing and printed `Animation: slide
+>   (none/slide/fade/overview)`, which is verbatim the answer to `vd anim`. The
+>   typo and the query were the same output.
+> * `vd wrap zzz` — the catch-all `_ =>` arm answered `Wrap: false`.
+>
+> All three keep their absent-operand behaviour, which is documented and
+> intended; only the present-but-unreadable case is now refused. That is the
+> distinction `optional_num` exists for, and `visible` is its first use outside
+> the numeric cases.
+>
+> Two further sites the *ledger cannot count*, found by reading rather than by
+> the gate — the second such pair in two batches, which is now a pattern worth
+> stating: **the ledger's figure is a lower bound.** `vd unpin abc` had no
+> guard at all, so it unpinned window 0 and announced `Unpinned window 0` with
+> status 0 while the window the user meant stayed pinned. And `vd wp <id>` for
+> a desktop that does not exist fell out of an `if let` chain with no `else`,
+> printing *nothing* and exiting 0 — which reads as "this desktop has no
+> wallpaper".
+>
+> **Burn-down log.** 2026-08-25 (fourth batch): `cmd_partmgr` (21) cleared —
+> the largest remaining entry — 683 → 662 across 239 → 238 functions. Pinned
+> by `kshell::self_test` rung 71.
+>
+> This one matters for *what it names*: disks and partitions, the one place in
+> the shell where acting on the wrong object is not undone by retyping the
+> command. Three shapes turned up that the earlier batches had not:
+>
+> * **A guess that was reported as a completed operation.** `pmgr create 1 abc
+>   100` read the start offset as 0 and put the partition on top of the
+>   partition table, then printed `Partition #3 created (100MB unformatted)` —
+>   which is exactly what a correct run prints.
+> * **A guess that answered a query successfully and wrongly.** `pmgr parts
+>   abc` guessed disk 0 and printed `No partitions on disk #0` with status 0.
+>   A missing disk and a mistyped disk gave the same answer, and both looked
+>   like an empty one.
+> * **A boolean read as "anything that is not `off`".** `let v =
+>   parts.get(4).copied() != Some("off");` made `OFF`, `0`, `false` and every
+>   typo of `off` mean **on** — so a user clearing a boot flag set it, and the
+>   shell reported `Flag boot = true`. This is the 22nd site in the function
+>   and the one the ledger could not count, because it is not a `parse()` call
+>   at all. It is the same shape as the 21 `matches!(…, "on" | "true" | "yes" |
+>   "1")` sites still outstanding (see the boolean sweep below), and the first
+>   evidence that the ledger's count is a *lower* bound on this class.
+>
+> Two operands were deliberately **not** made required. `pmgr label <d> <p>`
+> and `pmgr mount <d> <p>` with the trailing word absent clear the label and
+> the mount point — a real operation, and the only way to express it, because
+> `split_whitespace` cannot yield an empty word. §600 is about words that could
+> not be *read*, not words that were not typed. Both now report `Label cleared`
+> / `Mount point cleared` rather than `Label: ` with nothing after it, so the
+> two outcomes cannot be confused in a transcript.
+>
+> **Burn-down log.** 2026-08-25 (third batch): `cmd_colorpicker` (23) cleared —
+> the single largest entry in the ledger — 706 → 683 across 240 → 239
+> functions. Pinned by `kshell::self_test` rung 69.
+>
+> This one is worth recording for *what* was being guessed. `cpick open
+> #gggggg` did not refuse the colour: `Color::from_hex` returned `None`, the
+> `unwrap_or` substituted black, and the shell answered `Picker #3 opened
+> (#000000)`. That reply is indistinguishable from the reply to `cpick open`
+> with no colour at all, which documents black as its default — so the one
+> case the user could not tell apart from success was the failure. The fix
+> keeps the *absent* default (it is documented and intended) and refuses only
+> the *unreadable* word, which is the distinction the whole §600 rule turns on.
+>
+> Two further shapes went with it. `cpick palrm <pal> 1o` deleted swatch **0**
+> — a real swatch, the first one — and said `Removed color`; a mistyped index
+> destroyed a colour the user could see, and told them it had done what they
+> asked. And `cpick model <id>` was conflated with `cpick model <id> rbg`: one
+> `else` served both the question *what are the models?* and the answer
+> *`rbg` is not one of them*, printing the list and exiting **0** either way,
+> so a transposition was reported as a successful answer to a question that
+> had not been asked. Split, as the 33 other conflated arms were.
+>
+> The six per-width helpers this backlog had accumulated (`required_u32`,
+> `required_u64`, `required_i32`, `optional_u32`, `optional_u64`) were
+> collapsed into generic `required_num<T>` / `optional_num<T>` immediately
+> before this batch; see `design-decisions.md` §603 for why, and for the
+> survey of the remaining backlog that settled it.
+
+> **The denominator moved, and not because anything regressed.** 2026-08-25:
+> the gate was matching its regex against a *line*, and `cargo fmt` — not the
+> author — decides whether one of these chains fits on one. Matching against a
+> statement instead found **466 more sites of the identical shape**, all of
+> which were in the shell the whole time. Every figure in the log below was
+> measured under the old, line-granular gate and is therefore an undercount of
+> what those batches actually left behind; they are kept verbatim because the
+> *work* they describe was real and is still done. The running total is
+> restated above against the true denominator: **706 remained across 240
+> functions** at the moment the gate was corrected (the header carries the
+> live figure), and the 94 sites the log below records as fixed bring the known
+> total to 800 — not 334. (Whether those 94 batches also swept up wrapped-form
+> siblings that the old gate never listed is unknowable, so 800 is stated as
+> the floor it is.) No function's count went down when the gate was corrected,
+> which is the check that this is the gate seeing more rather than a
+> re-attribution of what it already saw. See
+> `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`.
+>
+> **Burn-down log.** 2026-08-25 (second batch): `cmd_monitors` (13),
+> `cmd_userns` (10), `cmd_reslimit` (10) and `cmd_splitview` (9) cleared —
+> 42 sites, four more ledger lines deleted, 282 → 240 across 114 → 110
+> functions. Pinned by `kshell::self_test` rung 66, each refusal paired with a
+> control running the same command with a readable operand.
+>
+> These four were picked for one property the first batch did not have: their
+> defaults are not merely wrong, they are **inverted**.
+>
+> * `reslimit` documents `0` as *unlimited*, so `.unwrap_or(0)` answered a
+>   mistyped memory/CPU/IO/process limit by removing the limit entirely.
+>   `reslimit setmem 5 abc` asked for a cap and got none, and said `Memory
+>   limits set for group 5`.
+> * `userns uidmap <ns> <inner> <outer> <count>` mapped a mistyped `outer` to
+>   `0` — which is **root's UID in the parent namespace**. The one mapping that
+>   must never be produced by accident was the one an unreadable word produced,
+>   and it printed `Added UID mapping`.
+> * `monitors add` defaulted to `1920x1080@60`: a guess plausible enough that
+>   the wrong monitor looked like the right one.
+> * `splitview orient <id> <h|v>` was `if parts[2] == "v" { V } else { H }`, so
+>   the spelled-out `vertical` — the form a reader would expect to work —
+>   silently meant *horizontal*.
+>
+> Three defects outside the counted shape were found in the same read and fixed
+> with it, because each is the same rule in a different disguise:
+> `reslimit setio … lwo` tested `== "low"` and so made every other spelling
+> mean "not low priority"; `splitview add <id> <win>` used
+> `and_then(parse().ok())`, collapsing *no window named* and *unreadable
+> window* into one `None`, so a typo added an empty pane; and `monitors add`
+> with too few words printed its usage and exited **0**.
+>
+> One helper was added: `required_i32`, for `monitors pos`. A monitor position
+> is signed — the desktop origin is the primary display, so a screen to its
+> left has negative `x` — and reusing `required_u32` would have refused exactly
+> the coordinates that are correct. Rung 66 asserts the negative case.
+
+> **Burn-down log.** 2026-08-25: `cmd_installer` (18), `cmd_fstune` (17),
+> `cmd_certmgr` (10), `cmd_fontmgr` (6) and one stray `<top>` site cleared
+> together — 52 sites, five ledger lines deleted, 334 → 282 across 119 → 114
+> functions. They went as one change because they were one *idiom*: 42 of the
+> 52 were the character-for-character identical line
+> `let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);`,
+> now a shared `required_id` helper. The rest split into numeric operands
+> (`required_u32` / `optional_u32` — which is where the omitted-vs-mistyped
+> distinction described below finally lives in code rather than in this
+> paragraph) and fourteen `match … { _ => Default }` arms over user-typed
+> *names*, where the default variant is the guess.
+>
+> Worst instance found: `installer remove abc` did not refuse. The id became 0,
+> so it removed whatever session 0 was, printed `Removed`, and exited 0.
+> `remove` is the subcommand where "guess which object they meant" is least
+> defensible, and it had the same one-line idiom as `info`.
+>
+> See the sibling entry `A-KSHELL-TWO-CHECKERS-READ-COMMENTS-AS-CODE` for what
+> this sweep turned up inside the gates themselves.
+
+**In short:** 334 places in the shell read a word the user typed, fail to make
+sense of it, and quietly substitute a default. `theme set 300 0 0` sets the red
+channel to 0 rather than complaining that 300 is not a byte. This is the same
+defect as the two entries above — a wrong answer reported as a success — but it
+predates the rule by most of the shell's history, so it is being *pinned* and
+burned down rather than fixed in one commit. (`colorpicker rgb 300 0 0` is the
+concrete one: the red channel becomes 0, so asking for an out-of-range red
+gives you black.)
+
+**Where.** `kernel/src/kshell.rs`, in 119 functions. The exact per-function
+counts are in `scripts/option-refusal-ledger.txt`; the shape is
+`s.parse::<T>().unwrap_or(D)` or `parts.get(n).and_then(|s| s.parse().ok())
+.unwrap_or(D)`.
+
+**Why it is a defect and not a style.** `None` from `parts.get(n)` means the
+argument was *omitted*, and a default is then exactly right. `Err` from
+`parse` means it was *supplied and unreadable*, and a default is then a guess.
+Collapsing the two — which is what `and_then(…).unwrap_or(…)` does in one
+expression — makes the wrong case indistinguishable from the right one at
+every call site at once.
+
+Sampled instances, to show the range:
+
+| Site | The guess | Consequence |
+|---|---|---|
+| `cmd_colorpicker` RGB components (7 sites) | `.and_then(parse).unwrap_or(0)` | `colorpicker rgb 300 0 0` yields black, silently |
+| `cmd_namespace`, a mount-namespace id | `.unwrap_or(mount_ns::ROOT_NAMESPACE)` | an unreadable id operates on the *root* namespace |
+| `cmd_pidns`, a pid argument | `.unwrap_or(0)` | pid 0 is the idle task |
+| ~~`cmd_installer` (18 sites)~~ | ~~assorted~~ | fixed 2026-08-25; `installer remove abc` removed session 0 |
+| ~~`cmd_fstune` (17 sites)~~ | ~~assorted~~ | fixed 2026-08-25; tuning knobs that silently took 0 |
+
+**Why it is pinned rather than fixed now.** 334 edits across 119 functions is a
+sweep in its own right, and leaving the gate unwired while it is done would let
+*new* instances land ungated in the meantime. The ledger inverts that: the
+number is frozen today, a 335th site fails the build immediately, and the
+backlog can only shrink. §296 established this pattern; this is its second use.
+
+**How to burn it down.** Pick a function, split the two cases (`match
+parts.get(i) { None => default, Some(v) => v.parse().map_err(refuse)? }`),
+lower its count in `scripts/option-refusal-ledger.txt` — or delete the line
+when it reaches zero. The checker reports an entry that claims *more* sites
+than exist, so a fix that forgets to lower the count fails the build too; the
+ledger cannot silently rot into a rubber stamp.
+
+**Not a regression.** True since each site was written.
+
+---
+
+## `A-KSHELL-TWO-CHECKERS-READ-COMMENTS-AS-CODE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+**In short:** two of the build's own gate scripts searched the source with
+plain text matching and never skipped comments — so an English sentence
+*about* code counted as the code. One shell command had an option loop with no
+way to refuse an unknown flag, and the gate that exists to catch exactly that
+had been quietly passing it for as long as it existed, because a comment next
+to it contained the words it was grepping for.
+
+**Where.** `scripts/check-option-refusal.py` and `scripts/check-usage-status.py`.
+Both read `lines[i]` raw and ran a regex over it.
+
+**How it hid.** The comment in `cmd_fsck_ext4` read, in full:
+
+```rust
+// No `set_exit(1)`: `--help` succeeded at what it was asked.
+```
+
+`check-usage-status.py` looks for `set_exit(` near a usage message to decide
+the command reports failure. `check-option-refusal.py`'s D3 detector looks for
+the same token to decide an option loop can refuse. **A comment stating that
+there is deliberately no `set_exit(1)` here satisfied both greps for
+`set_exit(1)`.** The clearer the note, the more completely it defeated the
+check — and "explain why this arm deliberately does *not* do X" is exactly
+what a careful author writes.
+
+The same shape ran the other way in `check-option-refusal.py`'s `ALLOWED`
+table, which carried two exemptions whose stated reason was *"prose in the doc
+comment describing the bug that was removed, not code"*. Two hand-granted
+exemptions for the same root cause is the signal that it is a defect in the
+detector, not a series of special cases — and the workaround it was pushing
+toward (stop writing down what the bug was) would have deleted the single most
+valuable line in each of those fixes.
+
+**What it was hiding.** With comments stripped, the option-refusal checker
+immediately reported `cmd_fsck_ext4`'s flag loop, which had no refusal at all:
+
+| Invocation | What happened |
+|---|---|
+| `fsck.ext4 /dev/sda --verbse` | the typo fell through to `device = w`, so it checked a device *named* `--verbse` |
+| `fsck.ext4 --verbse /dev/sda` | worse — the real device overwrote the typo, so the check ran, verbosely-not-verbose, with nothing to say a flag had been ignored |
+| `fsck.ext4 /dev/sda /dev/sdb` | the second device silently replaced the first |
+
+All three now refuse. Pinned by rung 65.
+
+**The fix.** Both checkers strip comments before matching, blanking string
+literals first so the `//` inside a `"https://…"` is not mistaken for one.
+The two prose exemptions were deleted, since the detector no longer needs
+them: 3 allowed → 1.
+
+**One further consequence worth keeping.** Once the `--help` arm was correctly
+seen as a usage message that returns 0, it needed a real exemption — and it
+could not have one, because `check-usage-status.py`'s `ALLOWED` is keyed by
+enclosing function plus a fragment of the line, and the help arm and the
+missing-device arm printed *character-for-character the same* synopsis. One
+entry would have exempted both, so removing the `set_exit(1)` from the error
+arm later would have gone unnoticed. The text moved into an
+`fsck_ext4_usage()` formatter — the precedent six other entries in that table
+already follow — so the exemption names only the formatter, and the two
+callers differ in the one way that matters and that duplicated text cannot
+show: their exit status.
+
+**Residual.** Both checkers now strip comments with a *line-local* scanner,
+which does not understand `/* … */` block comments or raw strings. A block
+comment containing `set_exit(1)` would still fool them. `scripts/rust_scopes.py`
+already has a correct lexer (`_strip`) that tracks block-comment nesting and
+raw-string hash counts across lines — but it discards string literals too, and
+these detectors need those (`USAGE` matches `"Usage: …"`, `OPTION_LITERAL`
+matches `"-x"`, D2 matches `.starts_with('-')`). The proper fix is a
+`keep_strings` mode on `_strip` and a shared `code_only(lines)` helper that all
+the detector-style checkers use, replacing both ad-hoc copies. Filed as
+`TD-A-CHECKERS-STRIP-COMMENTS-WITH-A-LINE-LOCAL-SCANNER` below.
+
+**Not a regression.** Both checkers were blind from the day they were written.
+
+---
+
+## `TD-A-CHECKERS-STRIP-COMMENTS-WITH-A-LINE-LOCAL-SCANNER` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (both findings); two lower-risk copies remain, below
+
+> **Resolution.** `strip_noise` in `check-recursive-locks.py` gained a
+> `keep_literals=True` mode — literals are still *scanned*, so a `//` inside
+> `"https://x"` opens no comment and a `"` inside a comment opens no string,
+> but their characters pass through instead of being blanked. Seven new
+> self-test cases assert the exact output (22 cases total), because the mode is
+> about *which characters survive* and a body list would not notice a literal
+> being blanked.
+>
+> `check-option-refusal.py`, `check-usage-status.py` and `check-query-status.py`
+> now use it, each taking three identically-numbered views of one file:
+> verbatim for reporting, comments-gone/literals-kept for matching, both-gone
+> for brace counting. Four of the five hand-rolled scanners are retired.
+>
+> **Verified by replay rather than by assertion**, which is this family's own
+> stated test convention. Against a 130 000-line revision from before the fix,
+> with the exemption tables emptied, `check-usage-status.py` reports the same
+> **24** findings and `check-option-refusal.py` the same **53**, byte for byte,
+> under both the old and new scanners. Finding 2 was demonstrated the other
+> way: on a synthetic block ending `return;  // deliberately no set_exit(1)
+> here`, the old `check-query-status.py` reports a false positive and the new
+> one is clean, while both still report an unmodified true positive
+> identically.
+>
+> **A third defect surfaced while testing Finding 2.** `check-query-status.py`
+> shipped with two `ALLOWED` exemptions that never exempted anything: replaying
+> the introducing commit (`425d37b27`) with `ALLOWED` emptied reports zero
+> findings, so the detector had never reached those two blocks. Both sites
+> still exist and both stated reasons are still correct — the entries were
+> written against a shape the checker does not match. They are now prose in the
+> file (to paste back if the guard rule is ever widened) and the table is
+> empty, with a staleness guard added mirroring the one its sibling has carried
+> from the start. An exemption that exempts nothing is exactly the "rubber
+> stamp" that file's own comment warns about, and nothing was looking for it.
+>
+> **Still open, deliberately.** `check-variant-lists.py` and
+> `check-tick-wiring.py` keep their own `strip_comments`. Both already blank
+> comments *before* counting braces — they are the two that documented the
+> hazard in the first place — so neither has the defect this entry is about.
+> They are worth folding in for the raw-string and char-literal cases, but that
+> is tidying, not a fix.
+
+**In short:** the fix above taught two gate scripts to ignore comments, but
+each got its own small comment-stripper that only understands `// …` to
+end-of-line. Rust also has `/* … */` (which nests) and raw strings
+(`r#"…"#`). A `set_exit(1)` inside a block comment would still be read as
+code, which is the same bug in a rarer shape. A survey of the other twelve
+`scripts/check-*.py` (done 2026-08-25, read-only, while the boot test ran)
+found the problem is both **wider** and **worse** than that, in two ways
+recorded below.
+
+**Where.** `strip_comments` in `scripts/check-option-refusal.py` and in
+`scripts/check-usage-status.py` — two near-identical copies, which is itself
+the smell.
+
+### Finding 1 — there are five hand-rolled Rust lexers, not two
+
+| Script | Blanks | Preserves offsets | Raw strings | Char literals | Self-test |
+|---|---|---|---|---|---|
+| `check-recursive-locks.py::strip_noise` | comments **+ literals** | ✅ | ✅ | ✅ | ✅ |
+| `check-tick-wiring.py::strip_comments` | comments **+ literals** | ✅ | ❌ | ✅ | ❌ |
+| `check-variant-lists.py::strip_comments` | comments only | ❌ | ❌ | ❌ | ❌ |
+| `check-option-refusal.py::strip_comments` | comments only | ✅ | ❌ | ❌ | ❌ |
+| `check-usage-status.py::strip_comments` | comments only | ✅ | ❌ | ❌ | ❌ |
+
+So the shared implementation to converge on is **not**
+`scripts/rust_scopes.py::_strip` as this entry first proposed — it is
+`check-recursive-locks.py::strip_noise`, which is already the most complete of
+the five (nested block comments, raw strings, char literals, offsets exact,
+and a self-test that includes `apostrophe in block comment`). Three checkers —
+`check-selftest-skips.py`, `check-vfs-permission-gate.py`,
+`check-vfs-under-lock.py` — already import it by `importlib` (the filename's
+hyphens make it un-`import`able normally), so the borrowing convention exists
+and works.
+
+It cannot be used *as-is* by the two detectors above for the same reason
+`rust_scopes._strip` could not: it blanks string literals too, and these
+detectors match *on* string literals (`"Usage: …"`, `"-x"`,
+`.starts_with('-')`). The fix is one parameter — `strip_noise(src,
+keep_literals=False)` — plus a self-test case for the new mode, then delete
+the other four copies.
+
+### Finding 2 — the brace counters read comments as code, which fails silently
+
+This is the more serious half, and it is not the same shape as the bug fixed
+above. `check-query-status.py` — which its own docstring calls the mirror of
+`check-usage-status.py` — locates a block's start and end by **counting
+braces** over lines that have had *strings* removed but **not comments**:
+`strip_strings` there is one line (`"".join(s.split('"')[::2])`) and is applied
+to raw `lines[k]` at `:134`, `:149` and `:196`, scanning a ±400-line window.
+Two further reads on the same loop are not filtered at all — `PRINT.search(
+lines[k])` at `:198` will collect a `shell_println!` written *inside a comment*
+as one of the block's answers, and the hit guard at `:178`
+(`ln.lstrip().startswith("//")`) only recognises a comment that occupies the
+whole line, not a trailing one.
+
+`check-usage-status.py` had the identical defect and **no longer does** — its
+depth line reads `strip_strings(s)` where `s` is already
+`strip_comments(lines[k])`, so the fix recorded above closed its brace counter
+too, as a side effect rather than by intent. That is worth stating plainly:
+the mirror pair was written to stay in step, one of the two drifted out of it
+silently, and nothing in either script would have reported that.
+
+`kernel/src/kshell.rs` currently contains **26 comments holding an unbalanced
+brace**, which is precisely the thing a comment is allowed to contain:
+
+```rust
+i = i.saturating_add(1);  // skip `{`
+i = i.saturating_add(1);  // skip `}`
+/// Brace nesting depth.  Starts at 1 (the opening `{`).
+// Don't include the final `}` line in the body.
+```
+
+Any one of these falling inside a scan window shifts the computed block
+boundary, so the checker then examines *the wrong range of lines* — which can
+both miss a real finding and manufacture a false one, with no diagnostic
+either way. Two of the five lexers above already wrote this hazard down
+independently, in almost the same words — `check-variant-lists.py`: *"Done
+before any brace counting, because a comment is exactly the place an
+unbalanced brace or bracket is allowed to appear"*; `check-tick-wiring.py`:
+*"a `'{'` … in the source would otherwise throw the match off and swallow the
+rest of the file"*. The two checkers that most need the warning are the two
+that never received it.
+
+**Not yet proven to be biting.** The 26 comments are real and the scan is
+real, but no current finding has been traced to a window that contains one.
+That is a reason to fix it, not a reason to wait: the failure mode is a gate
+silently reading the wrong lines.
+
+**Why none of it was done in the same change.** A boot test was running
+against `scripts/` at the time, and editing a gate script mid-run invalidates
+it. The line-local version closes the case that actually occurred; this closes
+the class.
+
+**Severity.** Low-to-moderate. Finding 1 narrows a gate, and a gate that is
+too narrow fails open. Finding 2 lets a gate answer about lines it was not
+asked about, which is worse than failing open because the answer still looks
+authoritative.
+
+---
+
+## `A-KSHELL-THE-USAGE-GATE-WALKS-STRAIGHT-THROUGH-} else {` (lane A, 2026-08-25) — **FIXED** 2026-08-25, all 195 sites resolved
+
+> **Resolution.** The walk is now `walk_block` in `check-recursive-locks.py`,
+> the directory's shared self-tested scanner, counting braces a character at a
+> time and handing each caller a per-line *column range* rather than a line —
+> text outside the range belongs to a sibling block, which is the whole bug.
+> It also takes the match's column, so a one-liner is not walked from column
+> zero and does not count the `{` its usage print is already inside. Five
+> regression cases, all of which a line-granular count answers wrongly.
+>
+> Rewiring `check-usage-status.py` onto it took the gate from 0 findings to
+> 195 — the number this entry predicted from an in-process probe, reproduced
+> independently by the real fix. Of the 195: **192** were the mechanical
+> "print a synopsis, exit 0" and got their `set_exit(1)`; **3** would have
+> been made worse by one and are handled in their own commit —
+>
+> * `bright set [display_id] <level>`, the one synopsis here whose *optional*
+>   operand comes first. Reading `parts[1]` as the display made the documented
+>   one-word form print its own usage line, and under that sat the guess:
+>   `bright set 1 abc` parsed to 0, turned the backlight off, said
+>   `Brightness → 0%` and exited 0. Both operands now go through
+>   `required_u32`.
+> * bare `cred autofill`, which claimed in a comment to list every autofill
+>   rule and did not — it called `list_all()` (the *credential* list), dropped
+>   it with `let _ = all`, and printed two hint lines alone. Now lists, via a
+>   new `credentials::list_all_autofill()`.
+> * bare `lockdep`, which prints its synopsis *as* its output, like `ksyms`.
+>   Correct as it stood; now in `ALLOWED` with the reason.
+>
+> Pinned by `kshell::self_test` rung 67: one command per guard shape, each
+> paired with a control naming an operand that does not exist, which must not
+> print a synopsis — so the rung cannot pass by having broken the command.
+>
+> **The rule this produced, which is the part worth keeping:** a walk over a
+> *balanced* block (start on its `{`, stop when depth returns to 0) is safe at
+> line granularity, because `} else {` nets to zero truthfully. Only a walk
+> that must notice depth going *negative* — leaving a block it never entered —
+> is broken by it. That rule cleared the other three line-granular counters in
+> `scripts/`, and it is what the shared helper's docstring now states. **It
+> did not clear `check-option-refusal.py`, whose problem is a different
+> granularity bug in the same family** — see
+> `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR` below.
+
+**In short:** the gate that exists to catch "the shell printed a complaint and
+then told the caller it succeeded" counts curly braces one *line* at a time.
+The line `} else {` closes one block and opens another, so a line-at-a-time
+count nets to zero and the walk never notices it left the block it was asked
+about. It carries on into the `else` branch, finds the `set_exit(1)` that lives
+there, and marks the site as accounted for. **195 real sites across 50 shell
+commands are invisible to it for this reason** — and the gate reports itself
+clean.
+
+**Where.** `scripts/check-usage-status.py`, the forward walk in `main`:
+
+```python
+depth += struct[k].count("{") - struct[k].count("}")
+if depth < 0:
+    break
+```
+
+**The shape it cannot see.** Every one of the 195 is this, give or take the
+condition:
+
+```rust
+"enable" => {
+    if parts.len() < 2 {
+        shell_println!("Usage: scriptlang enable <engine_id>");
+        //             ^ no set_exit: falls out of the `if` and off the arm
+    } else {
+        match parts[1].parse::<u64>() {
+            Ok(id) => match scriptlang::set_enabled(id, true) {
+                Ok(()) => shell_println!("Enabled engine {}", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);      // <-- what the walk finds instead
+                }
+```
+
+`scriptlang enable` with no operand prints its synopsis and exits **0**. So
+does `bootcfg params`, `wallpaper animated`, `ime reg`, `tmon priority`,
+`appnotify critical`, and 189 others.
+
+**How it was found.** Not by the gate, and not by reading it — by reading the
+*code* it guards. `cmd_appnotify`'s `critical` arm was obviously missing a
+status, and the gate said the file was clean, so one of the two had to be
+wrong.
+
+**This is the third time this mirror pair has been out of step, and the second
+time on exactly this axis.** `check-query-status.py` — the mirror of this
+script, guarding the opposite rule — counts braces *character* by character,
+and its `block_start` docstring says why, in as many words:
+
+> Braces are counted a character at a time, not a line at a time. `} else {`
+> closes and opens on one line, so a line-granular count nets to zero and the
+> walk sails straight past the brace that actually delimits the block.
+
+One script of the pair wrote the hazard down and defended against it. The other
+had the same hazard, in the same file, in the forward direction, and neither
+script can see the other. (The previous instance was comment-blindness, fixed
+2026-08-25 in `A-KSHELL-TWO-CHECKERS-READ-COMMENTS-AS-CODE`; the entry above
+notes that the mirror pair had silently drifted apart there too.)
+
+**Measured impact.** Re-running the checker with the walk made
+character-granular, changing nothing else:
+
+| | sites reported |
+|---|---|
+| as shipped | 0 |
+| character-granular | 195 (50 functions) |
+
+Worst-affected: `cmd_useracct` 15, `cmd_progmgr` 14, `cmd_appnotify` 14,
+`cmd_netsettings` 11, `cmd_kernelbuild` 11, `cmd_scriptlang` 11,
+`cmd_bootcfg` 10, `cmd_vdesktop` 9, `cmd_osreset` 8, `cmd_soundmixer` 8.
+Five drawn at random were checked by hand and all five are true positives.
+
+**Why it matters.** The same reason the 710-site sweep mattered, quoted from
+this checker's own docstring: *the diagnostic is on the screen either way; it
+is the status that lies.* `cmd && next` runs `next` after a typo, `set -e`
+does not stop, an `ERR` trap does not fire.
+
+**The fix.** Two parts, and the second is the work:
+
+1. Make the walk character-granular, the way its mirror already is. Better
+   still, lift the brace walk into the shared, self-tested scanner both
+   scripts now import (`check-recursive-locks.py`), so the pair cannot drift
+   on this axis a fourth time — the hazard has now been discovered
+   independently three times and written down twice, which is the signal that
+   it belongs in one place rather than in two docstrings.
+
+   A sweep of every brace counter in `scripts/` found three more written at
+   line granularity — `check-option-refusal.py`'s `loop_bodies`,
+   `check-self-tests-wired.py`'s nesting stack, and `scan-unwired.py`. **None
+   of those three is wrong today**, and the reason is worth recording because
+   it is the rule for the shared helper: they scan *balanced* blocks — start
+   at the opening brace, walk to where the depth returns to zero — and
+   `} else {` is balanced, so it nets to zero correctly. Only a walk that must
+   detect the depth going **negative**, i.e. leaving a block it did not enter,
+   is broken by line granularity, because the dip happens *within* the line
+   and a line-sum never sees it. `check-usage-status.py` is the one script of
+   the four doing that, which is why it is the one that is wrong.
+2. Triage the 195. Most want a plain `set_exit(1);`. A few are the documented
+   exception — a bare invocation printing its own synopsis *is* the command's
+   output, the `ksyms`/`scrollback` precedent — and those belong in `ALLOWED`
+   with a reason, not silently.
+
+   Classified by the guard directly above each diagnostic, the population is
+   narrower than "195 assorted sites" suggests:
+
+   | Guard | Count |
+   |---|---|
+   | `if parts.len() < N {` | 111 |
+   | an emptiness test on the operand (`.is_empty()`) | 68 |
+   | `if <id> == 0 {` after a `parse().unwrap_or(0)` | 15 |
+   | one-offs | 1 |
+
+   Every one of those guards means *the operand the subcommand needs is not
+   there*, so essentially all 195 are complaints and want a status; the
+   `ksyms` exception does not appear in this population at all. Note the third
+   row: those fifteen are the D1 guess (`parse().unwrap_or(0)`) and this
+   defect stacked — the parse invents `0`, the `== 0` test then treats an
+   unreadable id as a missing one, and the resulting complaint exits 0.
+
+   The single "one-off" is `cmd_brightness`'s `set` arm, and it is worth
+   reading because all three defects are visible in six lines:
+
+   ```rust
+   "set" => {
+       let id    = parts.get(1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+       let level = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+       if level == 0 && parts.get(2).is_none() {
+           shell_println!("Usage: bright set [display_id] <level>");
+       } else {
+           match brightness::set_brightness(id, level) { … }
+   ```
+
+   - `bright set 50` — the documented `[display_id]` form. `50` is read as the
+     *display id*, the level is absent, and the command prints its usage
+     instead of setting anything. **The optional-argument form does not work
+     at all.**
+   - `bright set 1 abc` — the level becomes `0`, `parts.get(2)` is `Some`, so
+     the guard is skipped and the screen is set to **0% brightness**, reported
+     as `Brightness → 0%` with status 0.
+   - `bright set 1` — prints the usage line and exits **0** (this defect).
+
+**Not a regression.** True since the checker was written; every site it hides
+predates it.
+
+---
+
+## `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR` (lane A, 2026-08-25) — **FIXED** 2026-08-25 (the gate); the 706-site backlog it revealed is now carried honestly
+
+> **Resolution.** The blind spot is closed. `check-recursive-locks.py` — the
+> directory's one self-tested Rust scanner — gained `statements(code, struct)`,
+> which yields each statement-sized span with its newlines collapsed, so a
+> regex spanning method calls matches the wrapped and unwrapped spellings
+> alike. `check-option-refusal.py` now runs D1 and D2 over that instead of over
+> `lines`.
+>
+> The predicted figure held: **240 → 706**, i.e. 466 sites that had been in the
+> shell all along and were invisible because rustfmt had wrapped their chain.
+> The estimate above said "about 712"; it was made by gluing a statement
+> starting at *every* line, which double-counts a wrapped chain once per line
+> it occupies. 706 is the measured number.
+>
+> **No function's count went down**, which is the check that this is purely
+> additive — the gate is seeing more, not re-attributing what it already saw.
+> `scripts/option-refusal-ledger.txt` was regenerated wholesale: 110 functions
+> → 240, and its header now records why its known-issues key names a figure a
+> third of the truth (renaming the key would break every reference to it).
+>
+> Eight self-test cases guard the span walk, each one answered wrongly by a
+> line-granular splitter: the wrapped chain; the unwrapped chain, which must
+> produce the *same* span or the blind spot has only moved; a `(` inside a
+> string literal (counting it makes the depth drift up and never return — that
+> mistake, made in the first draft, collapsed 100698 spans into 1068 and 706
+> findings into 2); a `;` inside a literal; sibling match arms, which must not
+> glue, or a `.parse()` in one and an `.unwrap_or()` in the next would match a
+> chain that is not in the source; an argument comma, which must not split; a
+> closure body, which must stay with its chain; and the crediting of a span to
+> its first line.
+>
+> **The burn-down itself is not done** — 706 sites across 240 functions are
+> carried in the ledger, where they can only shrink. That work continues under
+> `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+> What is fixed here is the measurement: the number in the ledger is now the
+> number in the shell.
+>
+> **The lesson, which is the same one as the entry above it, one granularity
+> up.** That one counted braces by the line and hid 195 findings; this one
+> counted statements by the line and hid 466. Both were *silent*, because a
+> gate that undercounts prints a smaller number and reads as progress. Three
+> counters in `scripts/` remain line-granular and are correct — the rule that
+> separates them is now written into `walk_block`'s and `statements`'
+> docstrings: a walk over a *balanced* region is safe by the line; a walk that
+> must see depth go *negative*, or a regex that spans a construct **rustfmt is
+> free to wrap**, is not.
+
+**In short:** the shell has a known, deliberately-counted backlog of places
+where it invents a value for a word it could not read — `bright set 1 abc`
+reading `abc` as 0 and turning the backlight off, that family. A gate counts
+that backlog so it can only shrink. The gate reads the source **one line at a
+time**, and the code formatter splits exactly these expressions across four
+lines. So the count it publishes — 240 — is not the backlog. The backlog is
+**about 712**. Two thirds of a debt that exists specifically to be honest
+about its size are missing from it.
+
+**Where.** `scripts/check-option-refusal.py`, the `D1` scan in `main`:
+
+```python
+for i, ln in enumerate(lines):
+    ...
+    if D1.search(code) and not allowed(fn, shown):
+```
+
+`D1` is `\.parse(?:::<[^>]*>)?\(\)[^;]*?\.unwrap_or(?:_default|_else)?\b` — a
+single-line regex, and `[^;]` cannot cross a newline anyway. It sees
+
+```rust
+let level = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+```
+
+and misses the *identical expression* after `cargo fmt` decides the chain is
+too long:
+
+```rust
+let level = parts
+    .get(2)
+    .and_then(|s| s.parse::<u32>().ok())
+    .unwrap_or(0);
+```
+
+Which form a site is in has nothing to do with whether it is a defect. It is
+decided by the length of the variable name and the depth of the indentation.
+
+**The measurement.** Walking statements instead of lines — glue each line to
+its continuations up to the `;`, then match once per statement, so a wrapped
+chain is one unit and cannot be counted once per line it spans:
+
+| | statements matching `D1` |
+|---|---|
+| seen by the gate as shipped (per line) | 236 |
+| **hidden by line granularity** | **472** in 148 functions |
+| total | 708 |
+
+(236 rather than the ledger's 240 because a statement holding two `D1` chains
+counts once here and twice there. The ledger is per line.)
+
+Worst affected: `cmd_partmgr` 21, `cmd_vdesktop` 18, `cmd_colorpicker` 16,
+`cmd_winsnap` 12, `cmd_wintiling` 11, `cmd_screenshot` 10, `cmd_a11y` 10,
+`cmd_filepicker` 10, `cmd_focusassist` 9, `cmd_peninput` 9, `cmd_aiostat` 8,
+`cmd_cgiostat` 8.
+
+A random sample of eight hidden sites was read by hand; all eight are genuine,
+and one is the defect twice in one statement:
+
+```rust
+let pid = parts
+    .get(1)
+    .copied()
+    .unwrap_or("0")      // no pid given  -> "0"
+    .parse::<u32>()
+    .unwrap_or(0);       // pid unreadable -> 0, the same value
+```
+
+**Why this is the same family as the `} else {` bug and not the same bug.**
+Both are a scanner reading Rust a line at a time when Rust is not written a
+line at a time. But the rule that cleared the other three counters — *a walk
+over a balanced block is safe at line granularity; only one that must see
+depth go negative is not* — is about **brace counting**, and this is not brace
+counting. It is **pattern matching across a statement**, and there the rule is
+simpler and admits no exceptions: a regex spanning method calls must be
+matched against the statement, because the formatter, not the author, chooses
+where the newlines go. `check-usage-status.py` was fixed by sharing a walk;
+this needs a shared *statement view* — a list of `(start_line, end_line, text)`
+built once from `strip_noise` output — which `check-variant-lists.py` and
+`check-tick-wiring.py` would also be able to use.
+
+**The fix.**
+
+1. Add a statement view to the shared scanner in `check-recursive-locks.py`,
+   with self-test cases covering the wrapped-chain form specifically (it is
+   the form that hid 472 sites, so it is the form a regression must fail on).
+2. Match `D1` and `D2` against statements rather than lines.
+3. Regenerate `scripts/option-refusal-ledger.txt`. The published debt goes
+   from 240 across 110 functions to roughly 712 across ~200. **That number
+   going up is the point** — a counted ledger (§296) is worth having only if
+   the count is the real one, and this one has been understating it since the
+   day it was written.
+4. Continue the burn-down against the true figure.
+
+**What it costs to leave.** Nothing gets worse on its own, but every burn-down
+report so far has quoted a denominator that is wrong by 3×, and the ledger's
+one job is to be believed. The sites themselves are ordinary D1: a mistyped
+number silently becomes a default, and the command reports success.
+
+**Not a regression.** True since the checker was written. Found while fixing
+the `} else {` bug, from a single site — `cmd_brightness` had an obvious
+`.unwrap_or(1)` on an unreadable operand and was not in the ledger.
+
+---
+
+## `A-KSHELL-A-TOGGLE-WORD-IT-DOES-NOT-RECOGNISE-MEANS-OFF` (lane A, 2026-08-25) — **open**, 21 sites in 16 commands
+
+**In short:** 21 shell settings are switched with a word — `on`, `off`, `yes`,
+`no`. Each tests the word against a short list of "true" spellings and treats
+**everything else** as *off*. So a spelling the list happens to omit does not
+produce a complaint; it silently turns the setting off and reports success.
+The lists are also inconsistent between commands, so `1` means *on* in nine of
+them and *off* in the other twelve.
+
+**Where.** `kernel/src/kshell.rs`, 21 instances of
+
+```rust
+let on = matches!(parts[1], "on" | "true" | "yes" | "1");
+```
+
+in `cmd_progmgr` (3), `cmd_wakesensor` (2), `cmd_battery` (2),
+`cmd_appnotify` (2), and one each in `cmd_useracct`, `cmd_tasksched`,
+`cmd_swapcfg`, `cmd_restorepoint`, `cmd_reslimit`, `cmd_osreset`,
+`cmd_nightlight`, `cmd_kernelbuild`, `cmd_fileshare`, `cmd_datausage`,
+`cmd_crashreport`, `cmd_bootcfg`.
+
+**The vocabularies actually in use**, which is the part that makes this more
+than a missing `else`:
+
+| Accepted as true | Commands |
+|---|---|
+| `on` `true` `yes` `1` | 9 |
+| `on` `yes` `true` | 8 |
+| `on` `yes` `true` `enable` | 2 |
+| `on` `true` `connected` | 1 |
+| `on` `true` `yes` `1` (nested) | 1 |
+
+Nothing anywhere accepts `off`/`no`/`0` *explicitly* — they are simply the
+absence of a true word, which is also what a typo is.
+
+**Why it is a defect and not a style.** It is the same rule as
+`A-KSHELL-…-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`, in boolean clothing:
+a word the command could not make sense of is answered with a value of its own
+rather than a refusal. The difference is that a boolean has only two values, so
+the guess is *always* the opposite of one of the two things the user might have
+meant, and there is no unreadable-looking output to hint that anything went
+wrong.
+
+**The direction is sometimes the unsafe one.** Most of these fail towards
+"off", which is usually the conservative answer. Not all:
+
+- `datausage limit block <name> 1` — `1` is not in that command's list, so
+  `block` becomes `false`. The operator asked for traffic over the cap to be
+  **blocked** and got no block, with `Block-on-exceed for 'x': false` printed
+  as confirmation.
+- `kernelbuild auto <id> 1` — same list, so automatic rebuilds are silently
+  left off for a component the operator just turned them on for.
+
+**The fix.** One shared helper in the `required_u32` / `optional_u32` family —
+`required_bool(parts, idx, cmd, sub)` — accepting one agreed vocabulary in both
+directions (`on`/`true`/`yes`/`1`/`enable` and `off`/`false`/`no`/`0`/`disable`)
+and refusing anything else with `is not on or off`. That fixes the silent-guess
+half and the inconsistent-vocabulary half in the same edit, which is the reason
+to do it as one helper rather than 21 local `match`es.
+
+**Found while** clearing the `cmd_reslimit` D1 sites; `reslimit enforce <gid>
+<on|off>` is one of the 21 and was deliberately left for this entry rather than
+folded into a numeric-operand commit.
+
+**Not a regression.** True since each site was written.
+
+---
+
+## `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS` (lane A, 2026-08-25) — **open**
+
+**In short:** `find . -size 100` means "100 bytes" here and "100 512-byte
+blocks" (i.e. up to 51 200 bytes) in GNU `find`. A command line copied from
+anywhere else therefore selects a completely different set of files, and says
+nothing about it. Nobody has been bitten by this yet because `-size` is young
+here, which is exactly why it is worth settling before scripts depend on it.
+
+**Where.** `kernel/src/kshell.rs` — `parse_size_predicate`, the final `else`
+arm: `(rest, 1i64) // default: bytes`.
+
+**What GNU does.** A bare number is 512-byte blocks, **rounded up**; `c` is
+bytes; `k`, `M`, `G` are the obvious binary multiples; `b` is 512-byte blocks
+explicitly; `w` is two-byte words. We implement `c`, `k`/`K`, `M`/`m`, `G`/`g`
+and treat a bare number as `c`. We have no `b` and no `w`.
+
+**Why it is not simply a bug.** The GNU default is a genuine historical wart —
+it surprises everyone once — and "bytes" is the reading a person actually
+expects. But a `find` that quietly disagrees with every other `find` about what
+a number means is worse than one that is merely surprising, because the
+disagreement is invisible: both produce a plausible list of files.
+
+**Three ways out, and the tradeoff.**
+
+| | *What changes* |
+|---|---|
+| Match GNU | `find . -size 100` selects files of ~50 KiB rather than 100 bytes. Portable; surprising; silently changes what existing local scripts select. |
+| Keep bytes, add `b` and `w` | Nothing changes today; `-size 100b` becomes available for people who want blocks. Still disagrees with GNU on the bare number. |
+| Keep bytes, **require** a suffix | `find . -size 100` becomes an error telling you to write `100c` or `100b`. Nobody is ever silently wrong; every existing bare-number use must be edited. |
+
+**Recommendation.** The third. This is the same principle the sweep above
+applied everywhere else: where two readings are both plausible and the
+difference is invisible in the output, refuse rather than pick. `-size` is new
+enough that the cost of requiring a suffix is close to zero.
+
+**If never answered.** Current behaviour is safe in itself — it is documented
+in the function's doc comment — and the risk grows only as scripts accumulate
+bare-number `-size` uses.
+
+---
+
+### A-SERIAL-REENTRANCY-FLAG-IS-CLEARED-ONE-STATEMENT-TOO-EARLY. `with_serial` drops its "this CPU is printing" flag *before* releasing the console lock, opening a window in which a nested exception would deadlock — for a cross-CPU reason that cannot exist — 2026-08-25 — ✅ **FIXED** 2026-08-25
+
+**In short:** The kernel's serial-print path has a safety net: if a CPU is
+already halfway through printing and something interrupts it and tries to print
+again, the second print must *not* wait for the first one's lock — it would wait
+forever, because the first one cannot finish until the second returns. The net
+is a per-CPU "I am printing" flag. The flag is currently cleared one statement
+*before* the lock is released, so for those few instructions the net is down
+while the trap it protects against is still armed. The comment justifying that
+order appeals to another CPU reading the flag, and no other CPU ever does — the
+flag is per-CPU by construction and the code says so ten lines below.
+
+**Where.** `kernel/src/serial.rs`, `fn with_serial`:
+
+```rust
+busy.store(true, Ordering::Relaxed);
+{
+    let mut guard = SERIAL.lock();
+    emit(&mut guard);
+    // Clear before the guard drops, so the flag is never observably
+    // stale while another CPU could already hold the lock.
+    busy.store(false, Ordering::Relaxed);
+    drop(guard);
+}
+```
+
+**Why the stated reason does not hold.** `IN_PRINT` is
+`[AtomicBool; MAX_CPUS]`, indexed only by `crate::smp::current_cpu_index()`, and
+its own doc comment says: *"Only ever read and written by the CPU that owns the
+slot (under `cli`), so `Relaxed` ordering suffices — there is no cross-CPU
+handoff to order against."* A flag no other CPU reads cannot be "observably
+stale" to another CPU. The ordering therefore buys nothing and costs a window.
+
+**What the window is.** Between `busy.store(false)` and `drop(guard)` this CPU
+holds `SERIAL` with the escape flag down. A nested `_print` from an exception
+taken in that window would see `busy == false`, take the normal path, and spin
+on a lock only the frame below it can release — the exact wedge
+`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` documented and
+the exact wedge the flag was added to prevent.
+
+**How likely.** Low but not zero. The window spans `emit`'s return and a
+`MutexGuard` destructor (one atomic store); neither dereferences user memory,
+so a `#PF` is implausible. An NMI or a `#MC` is not scheduled by anything we
+control, and the injected-NMI path from `--hard-lockup-watchdog` lands wherever
+it lands. The point is that the window is free to close.
+
+**The fix.** Swap the two statements — `drop(guard); busy.store(false);` — and
+replace the comment with why *that* order is right: the flag must outlive the
+lock, because the condition it encodes is "this CPU is inside the critical
+section", and the CPU is still inside it until the guard is gone.
+
+**Fixed.** The two statements are swapped and the comment now states the rule
+(*the flag must outlive the guard, never the other way round*) together with
+why the old justification was unreachable. Boot-tested green: `BOOT_OK` after
+370 s, zero `!! ` lines, `kshell::self_test PASSED`. The existing
+`reentrancy_self_test` covers this path and still passes.
+
+**How it was found.** A survey (not a report) for the class of bug behind
+`B-FORKEXEC-BOOT-HANG`: a lock that is acquired inside
+`crate::cpu::without_interrupts` at some sites and bare at others in the same
+file, which is a file contradicting its own IRQ-safety declaration. Across all
+802 kernel sources exactly three (file, lock) pairs qualify, and the survey's
+value was in the reading rather than the count:
+
+| Pair | Verdict |
+|---|---|
+| `mm/frame.rs` : `ALLOCATOR` — 14 guarded, 2 bare | **Contract, unchecked.** The two bare sites are `pcpu_refill`/`pcpu_drain`, whose doc comments say "Called with interrupts disabled". True today; nothing enforces it. See the entry below. |
+| `sched/mod.rs` : `SCHED` — 3 guarded, 75 bare | Not a contradiction. `SCHED` is deliberately bare at task level and reached from the tick only via `try_lock`; the three guarded sites guard a *sequence*, not the lock. |
+| `serial.rs` : `SERIAL` — 1 guarded, 1 bare | The bare one is `init()`, once, in early boot before interrupts are on. Benign — but reading the guarded one turned up the flag-ordering defect above. |
+
+**What the survey does not cover, and why no checker was wired.** The rule it
+tests is *intra-file*: it can only see a lock whose own module already declared
+it IRQ-unsafe. The class that actually bites is a lock acquired bare in module X
+that an interrupt handler reaches through module Y, and finding that needs a
+call-graph closure with real path resolution (`crate::sched::schedule()` is a
+call this survey's regex does not even see). A first attempt at that closure
+resolved 31 functions out of 12814 — an under-approximation large enough that a
+clean result would have meant nothing. Per §299, a gate whose trigger cannot
+support its claim is worse than no gate: it would report "IRQ-safety OK" on a
+tree it barely looked at. Wiring one is deferred until the resolver exists.
+
+---
+
+### TD-A-PCPU-REFILL-AND-DRAIN-REQUIRE-INTERRUPTS-OFF-BUT-NOTHING-CHECKS-IT — 2026-08-25 — ✅ **FIXED** 2026-08-25
+
+**In short:** Two functions in the page allocator only work if the caller has
+already turned interrupts off. That requirement is written in a comment and
+nowhere else, so a future caller that forgets it introduces a hang that leaves
+no trace — the machine simply stops, with nothing on the serial line.
+
+**Where.** `kernel/src/mm/frame.rs`, `fn pcpu_refill` (~line 1184) and
+`fn pcpu_drain` (~line 1215). Both open with *"Called with interrupts disabled
+and the global lock NOT held"*, then take `allocator.lock()` bare — the only two
+of the sixteen `ALLOCATOR` acquisitions in the file that are not wrapped in
+`crate::cpu::without_interrupts`. They also index `PCPU_CACHES[cpu]` through
+`unsafe`, whose `// SAFETY:` comment cites the same unenforced premise
+("interrupts are disabled so no preemption").
+
+**Why it matters.** `frame::stats`'s doc comment records that this exact
+class already froze a boot once: *"the frag_history self-test hang in
+known-issues.md (observed 2026-06-07 during the post-F1/F2/F3 soak,
+`build/soak-hang-run18.txt`)"*. A same-CPU interrupt that re-enters the
+allocator while the lock is held spins with `IF=0` and never returns — no panic,
+no stall report, no serial output at all. Every other site in the file was fixed
+by wrapping; these two were fixed by documenting.
+
+**The fix.** `debug_assert!(!crate::cpu::interrupts_enabled())` at the top of
+both, and extend the `unsafe` block's `// SAFETY:` comment to cite the assertion
+rather than the caller's good intentions. `crate::cpu::interrupts_enabled()`
+already exists (`kernel/src/cpu.rs:164`) and is a single `pushfq`. This turns a
+comment into a check that fires on the first wrong call in a debug build, which
+is the build the boot test runs.
+
+**Why not `without_interrupts` like the other fourteen.** It would be correct
+but wasteful: these are the allocator's batch fast path, called from code that
+has *already* disabled interrupts, and `without_interrupts` costs a
+`pushfq`/`cli`/`popfq` per call on a path whose reason for existing is to avoid
+per-frame overhead. The assertion keeps the fast path and still makes the
+premise false-able.
+
+**Fixed.** Both functions now open with
+`debug_assert!(!crate::cpu::interrupts_enabled(), ...)`, each `// SAFETY:`
+comment cites the assertion rather than the caller's good intentions, and
+`pcpu_refill`'s doc comment records why the wrap is omitted so the omission
+stays a decision. Boot-tested green (`BOOT_OK` after 370 s) with **neither
+assertion firing** — which is the useful half of the result: the precondition
+was not merely documented-and-hoped-for, it holds at every call the boot path
+makes, and now a future call that breaks it says so instead of hanging.
+
+---
+
+## TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR — twelve test fixtures in three of lane B's files name a fixed temp path, so two concurrent runs delete each other's (filed by lane C, 2026-08-25) — **open**
+
+**Not lane C's to fix** — `userspace/coreutils/src/bin/sed.rs`,
+`userspace/firejail/src/main.rs` and `userspace/useradd/src/main.rs` are lane
+B's. Filed as
+`requests/c-b-twelve-test-fixtures-skip-scratchdir-and-collide-between-runs.md`;
+recorded here because it fails the *workspace* gate, which
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING` makes mandatory for
+every lane, so the next lane to hit it should find this rather than re-derive
+it.
+
+**Symptom.** Two `cargo test --workspace --no-fail-fast` runs on one commit,
+each failing a *different* single test and passing the other:
+
+```
+thread 'tests::capital_r_takes_one_line_per_cycle_from_a_shared_position'
+panicked at userspace\coreutils\src\bin\sed.rs:4728:9:
+  left: "1\n2\n"   right: "1\nA\n2\nB\n"
+```
+```
+thread 'tests::test_file_roundtrip_passwd'
+panicked at userspace\useradd\src\main.rs:2775:73: failed to rename
+  ...\useradd_test_7\passwd.tmp -> ...\useradd_test_7\passwd (os error 2)
+```
+
+**Observed, not inferred.** Two `cargo test --workspace` processes were alive
+at once on the same worktree. One exited **0**; the other failed. Two processes,
+one commit, one fixture directory, opposite results.
+
+**Mechanism.** `userspace/scratchdir` exists precisely for this and states the
+rule: uniqueness needs the pid **and** a process-wide counter, because they
+cover two different axes — concurrent *runs* and concurrent *threads*. Twelve
+sites cover one axis or neither: `sed.rs` 4696/4721/4822 and `firejail`
+3050/3082/3094/3122/3134/3143/3159/3171 vary nothing at all, and `useradd`'s
+`TestEnv::new` (1615) varies an `AtomicU32` but not the pid — so two runs both
+produce `useradd_test_7`, and `TestEnv::new` opens with `remove_dir_all`, which
+is why the loser sees a vanished directory rather than a wrong value.
+
+**Three lessons, all general.**
+
+1. **A fixture path with no per-process component is a shared mutable global.**
+   It looks local because it is written inside the test. `cargo test`'s own
+   thread scheduling never exposes it, so the usual "tests run in parallel"
+   reasoning does not reach the case; it only appears when the suite runs twice
+   at once — which on this project is normal, with three lanes and an operator
+   sharing one machine.
+2. **A per-process counter is the *right* fix to the *other* axis.** `useradd`'s
+   comment ("Each test uses a unique temp directory to avoid interference") is
+   true and still insufficient. Half a uniqueness scheme reads exactly like a
+   whole one.
+3. **A silent-by-design no-op in the code under test erases the evidence its own
+   tests need.** `sed`'s `R` is right to say nothing about a short file — but
+   that makes "the fixture was destroyed" and "the feature is broken"
+   byte-identical, so the failure points at the innocent file. Where a test
+   feeds a file to code that treats an empty read as a legitimate answer, assert
+   the fixture immediately after writing it.
+
+**A grep for `pid` will not audit this.** `firejail_test_nopid` is a fixed name
+that contains the letters.
+
+**Suggested fix** (lane B's call; spelled out in the request): convert all
+twelve to `scratchdir::ScratchDir`, which also gets cleanup on the *failing*
+path — `Drop` runs during unwind where a trailing `remove_dir_all` does not.
+
+---
+
+## `TD-C-AN-IMAGE-CAN-ONLY-BE-UPLOADED-IN-PROCESS` (lane C, 2026-08-25) — **FIXED** 2026-08-26
+
+**In short:** the compositor could draw pictures, but the only way to hand it
+one was to be *inside* the compositor program. Every real application is a
+separate program, so none of them could show a picture at all — the file
+manager's icons would simply not appear, with no error to say why. There is now
+a request on the wire (`UploadImage`, and `DropImage` to take it back again), a
+`Connection::upload_image` / `Connection::drop_image` pair for applications to
+call, and a per-connection memory limit so that a program which uploads without
+end is refused rather than allowed to exhaust the machine.
+
+**What was built.**
+
+| Piece | Where |
+|---|---|
+| `RequestBody::UploadImage` / `DropImage` (tags `0x15`/`0x16`) | `gui/remote/src/control.rs` |
+| `MAX_IMAGE_BYTES`, `write_bytes`, `Reader::read_bytes`, `DecodeError::{ImageTooLarge, BadBufferFormat}` | `gui/remote/src/{lib.rs, reader.rs}` |
+| `BufferFormat` moved to `guiremote::control` and re-exported by the compositor | `gui/remote/src/control.rs`, `gui/compositor/src/buffer.rs` |
+| `CompositorRequest::{RegisterImage, UnregisterImage}` and the two byte-count accessors the budget needs | `gui/compositor/src/lib.rs` |
+| `ClientLink::image_budget` / `set_image_budget`, `MAX_IMAGE_BYTES_PER_LINK`, the refusal gate | `gui/compositor/src/wire.rs` |
+| `Connection::upload_image` / `drop_image` | `gui/remote/src/client.rs` |
+
+**How the two open questions were answered** — see design-decisions.md → 556.
+The budget is **per connection, not per window** (a per-window one is bypassed
+by opening a second window) and an upload over it is **refused, not evicted**
+(eviction "succeeds": a draw naming an id with no pixels behind it renders
+nothing, silently and by design, so an evicted thumbnail is a picture that stops
+appearing with no error anywhere). The bytes travel **inline**.
+
+**The entry's own premise about mapping was wrong.** It said "the surface path
+already maps rather than copies", and offered that as a reason an image might
+too. It does not: `SharedBuffer` and `attach_buffer` appear nowhere in
+`gui/remote/` — there is no surface-attach request on the wire at all, and
+`buffer.rs`'s own module doc says the IPC layer is "currently stubbed" and
+`SharedBuffer::import` takes bytes already mapped by someone else. In-process,
+"mapping" is a `&[u8]` that was never copied. Over a TCP connection
+(design-decisions.md → 460) whose far end need not be on this machine, there is
+nothing to map, and a fast path that only exists over loopback would be a fast
+path that silently is not there.
+
+**Original entry follows.**
+
+**What it is.** The compositor now has an image store and paints
+`RenderCommand::Image` for real (design-decisions.md → 554). But the only way to
+get pixels *into* that store is `Compositor::register_image`, a Rust method — so
+only code linked into the compositor process can upload one. A GUI program in a
+separate process, which is every real GUI program, still cannot.
+
+**Why it did not block the fix.** The compositor is the thing that draws, and it
+could not draw an image at all before this; the in-process path is what the
+rasteriser and the store are tested through, and it is what the desktop shell
+(which *is* in-process today) can use immediately. The wire request is a
+separate, smaller piece of work with its own trust-boundary questions.
+
+**Where it lives.** `gui/remote/src/control.rs` → `RequestBody` is the client
+request enum; the compositor's handler dispatches on it. An
+`UploadImage { window, image_id, width, height, stride, format, bytes }` variant
+and a `DropImage { window, image_id }` beside it are what is missing.
+`ImageAsset::import` already performs the whole validation the untrusted path
+needs, so the handler is a decode and a call.
+
+**What the proper fix must decide, and does not yet.**
+
+1. **A per-window byte budget.** `Compositor::image_bytes()` exists and reports
+   the total, but nothing enforces a ceiling. Over a wire request, a client can
+   upload until the compositor is out of memory — the per-image
+   `MAX_BUFFER_PIXELS` cap bounds one asset, not their number. A budget, and a
+   defined behaviour on exceeding it (refuse the upload, versus evict the
+   window's least-recently-drawn asset), is required before the request is
+   exposed.
+2. **Whether the bytes travel inline or by shared mapping.** The surface path
+   already maps rather than copies. A thumbnail is small enough that inline is
+   tolerable; a full-resolution photo in an image viewer is not.
+
+**How you would notice.** `apps/explorer`'s icon view will draw correctly under
+the in-process compositor and draw nothing under a remote one, with no error
+either way — the unresolved-id case is silent by design.
+
+---
+
+## `A-KSHELL-THE-USAGE-GATE-CANNOT-SEE-A-SYNOPSIS-RUSTFMT-PUT-ON-ITS-OWN-LINE` (lane A, 2026-08-25) — **FIXED** 2026-08-25, all 95 defects resolved
+
+**In short:** the gate that checks "if a command prints its usage line because
+you typed something wrong, it must also report failure" could not see 192 of
+those usage lines at all. Its pattern required the quoted synopsis to sit on
+the *same source line* as the `shell_println!(` that prints it — and `cargo
+fmt`, not the author, decides that. A long synopsis gets wrapped onto its own
+line, at which point the pattern matches neither line. 95 of the 192 it hid
+were real defects: the command complained and then reported success, so a
+script could not tell a typo from a completed request.
+
+**Third instance of one bug.** This is the same mistake as
+`A-KSHELL-THE-USAGE-GATE-WALKS-STRAIGHT-THROUGH-} else {` (braces counted by
+the line) and `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`
+(a method chain matched by the line), in a third place:
+
+| # | What was counted by the line | What it should have been | Hidden |
+|---|---|---|---|
+| 1 | `{`/`}` depth, where `} else {` nets to zero | a character-column walk (`walk_block`) | 195 |
+| 2 | a regex spanning `.parse().ok().unwrap_or(…)` | a statement (`statements`) | 466 |
+| 3 | a regex spanning `shell_println!(` and its first argument | a statement | 192 |
+
+**Why it was found third and not first.** Each of the three is invisible in the
+same way: a gate that undercounts prints a *smaller* number, and a smaller
+number reads as progress. Nothing failed, nothing warned; the gate said
+"clean" and meant "clean, of the subset I can see." What broke the pattern was
+an anomaly, not an audit — `pmgr create` visibly lacked a `set_exit(1)` while
+the gate was green, and following that one discrepancy back through the regex
+found the class.
+
+**The bias is the worst part.** These are not a random 192. The longer a
+synopsis, the likelier rustfmt wraps it, and the longest synopses belong to the
+commands with the most subcommands — `container` (28 of them), `fw` (20),
+`overlay` (12). So the gate's blind spot was concentrated on exactly the
+commands where getting a subcommand wrong is easiest.
+
+**The rule, now recorded in both docstrings.** A walk over a *balanced* region
+is safe to do by the line. A walk that must see depth go **negative**, or a
+regex spanning a construct **rustfmt is free to wrap**, is not — in the second
+case the source you are matching against was laid out by a formatter, and its
+newlines carry no meaning you may rely on.
+
+**Fix.**
+
+* `scripts/check-usage-status.py` matches `USAGE` against a statement from
+  `_rl.statements(...)` rather than a line. Because a statement's text has had
+  its newlines collapsed, the match column within it says nothing about any
+  line, so a second regex `CALL` locates the macro call on the statement's
+  *first* line to give `walk_block` a real starting column. Without that the
+  walk starts at column zero and counts the `{` the print is nested inside.
+* The 95 defects were repaired in four shapes:
+  * **38** catch-all `_ => { help }` arms that fell out of their match with no
+    status, now ending in `end_help_arm(cmd, sub)` — which sets 1 only for a
+    subcommand that was *not* a request for help, so the one arm can serve both
+    callers correctly.
+  * **50** guard branches (`if parts.len() < N`, `if let Some(..) = .. else`)
+    that printed a synopsis and exited 0, now ending in `set_exit(1)`.
+  * **2** arms where the status was set *above* the message rather than below
+    it (`cmd_overlay`, `cmd_container_network`) — harmless at run time and
+    invisible to a reader, caught only by the forward walk. Reordered.
+  * **5** genuinely correct sites added to `ALLOWED` with reasons: two explicit
+    `--help` arms (`cmd_dedup`, `cmd_journal`), `cut`'s error formatter whose
+    fifteen callers all set a status, and the two catch-alls whose help text
+    lives in a nested `#[inline(never)] fn case()` the walk cannot follow
+    (`cmd_firewall`, `cmd_container`) — the same exemption `cmd_netsettings`
+    and `cmd_tasksched` already carried.
+* `kshell::self_test` rung 68 covers one command per repair shape, each
+  refusal paired with a control that runs the same command with a usable
+  operand, so the rung cannot pass by having broken the command outright.
+
+**Severity.** Moderate. No memory-safety or correctness consequence inside the
+kernel; the damage is to scripting. A command that complains and exits 0 tells
+`&&` and `set -e` that it worked, so a script built on 95 of these silently
+continues past its own errors — and the gate that existed to prevent exactly
+that reported clean the whole time.
+
+---
+
+## `A-KSHELL-THE-USAGE-GATE-KNEW-FIVE-WORDS-AND-A-SYNOPSIS-NEED-USE-NONE-OF-THEM` (lane A, 2026-08-25) — **FIXED** 2026-08-25, all 57 sites resolved
+
+**In short:** the gate that checks "if a command complains about what you typed,
+it must also report failure" decided what counted as a complaint by looking for
+five words — `Usage:`, `Unknown`, `Unrecognised`, `Invalid`, `Use:`. A message
+that says the same thing without any of them was invisible to it. Typing
+`pmgr zznosuchsub` printed the list of real subcommands and then exited 0;
+`cam privacy 1 zzmode` printed `Modes: open, prompt, disabled` and exited 0.
+57 sites hid there. To a user those read exactly like refusals. To a script
+they read as success.
+
+**Fourth instance of one bug, and the first that is not about line
+granularity.** The three before it were all "counted by the line what should
+have been counted by a statement or a column walk." This one is the same
+*shape* of error one level up: the gate was complete over the thing it could
+name, and the thing it could name was not the thing it was for.
+
+| # | What the gate was actually complete over | What it was for | Hidden |
+|---|---|---|---|
+| 1 | `{`/`}` depth counted per line, where `} else {` nets to zero | a character-column walk (`walk_block`) | 195 |
+| 2 | a regex spanning `.parse().ok().unwrap_or(…)` on one line | a statement (`statements`) | 466 |
+| 3 | a regex spanning `shell_println!(` and its first argument on one line | a statement | 192 |
+| 4 | **messages containing one of five words** | **diagnostics** | **57** |
+
+**How it was found.** Not by an audit — by reading `cmd_partmgr` to start the
+*next* guessed-value burn-down and noticing that its catch-all arm prints
+`partmgr: disks/adddisk/rmdisk/table/…` and falls out with no status, while the
+usage gate was reporting clean. Instance 3 was found the same way, from the same
+command. An anomaly noticed in passing has now beaten a deliberate audit twice,
+which is worth remembering: the gates are read far more often than they are
+re-derived, and a green gate is not evidence about what it does not look at.
+
+**The 15 slash-form commands are one author-batch.** `power`, `display`,
+`vdesktop`, `keylayout`, `screenshot`, `a11y`, `ime`, `netindicator`, `winsnap`,
+`colorpicker`, `cursorsettings`, `kbsettings`, `detailcols`, `partmgr`,
+`locale` — dispatched from *consecutive* lines 7369–7383. They share a
+convention nothing else in the file uses: one line naming every subcommand
+separated by slashes, no `Usage:` prefix. That is why the miss is clustered
+rather than scattered, and why widening the trigger by one shape recovered all
+fifteen at once.
+
+**Fix.**
+
+* `scripts/check-usage-status.py`'s `USAGE` gained a second alternative for the
+  enumeration shape: `Label: a/b/c` or `Label: a, b, c` with at least three
+  members. Two structural rules keep help *bodies* out, both established by
+  measurement rather than by taste — a naive version of this trigger fired on
+  65 ordinary help lines:
+  * the list must begin the message after at most a **single-word label**, so
+    an indented `"  arrange <sort>   Auto-arrange (name/size/type/date)"` is
+    not a match;
+  * the label is **one word**, so `"cut -d/-f/-c  Extract columns"` is read as
+    the flag list it is, not as a label.
+* The 57 were triaged by hand into five shapes, not fixed mechanically:
+  * **15** slash-synopsis catch-alls, now ending in `end_help_arm(cmd, sub)` —
+    which sets 1 only for a subcommand that was not itself a request for help.
+  * **6** help-body catch-alls whose only enumerations are trailing
+    `Foo: a, b, c` lines (`autostart`, `schedtune`, `mmtune`, `vpn`, `dyndns`,
+    `loginscreen`), same fix.
+  * **18** value-list refusals that knew the word was unusable, printed the
+    alternatives, and returned success. Each now names the unusable word —
+    ``cam: privacy: `zzmode' is not a mode`` — and sets 1. Naming it matters:
+    the list alone does not say *which* of several operands was rejected.
+  * **2** `cmd_sysdiag` arms that already failed but set the status between the
+    complaint and the list explaining it. Reordered, as `cmd_overlay` and
+    `cmd_container_network` were in instance 3.
+  * **2** genuinely correct sites added to `ALLOWED` with reasons: `cmd_profile`
+    (bare `profile` reports the current profiles and then names the ones that
+    exist — a query, guarded by `arg.is_empty()`) and `cmd_colorpicker model`
+    (the `parts.get(2)` else-branch is asking what the models are; its sibling
+    branch prints the same list under a refusal and does set 1).
+* `cmd_schedtune` and `cmd_mmtune` were fixed **structurally rather than
+  allowlisted.** Their help bodies live in a nested `#[inline(never)] fn case()`
+  whose block the walk cannot leave, so the `end_help_arm` sitting outside it
+  was invisible — the same situation `cmd_firewall` and `cmd_container` carry as
+  exemptions. Passing `sub` into `case` and making `end_help_arm` its last
+  statement removes ten findings without adding ten `ALLOWED` entries. Removing
+  an exemption beats documenting one; the two older ones should be converted the
+  same way when they are next touched.
+* `kshell::self_test` rung 70 covers one command per shape, each refusal paired
+  with a control that runs the same command with a usable operand — because the
+  failure mode of *this* fix is to make a correct invocation start reporting
+  failure. The rung also re-checks that bare `pmgr`, bare `stune` and bare
+  `deskicons arrange` still succeed, since three of the five shapes work by
+  adding a status to an arm that also serves the no-argument case.
+
+**What is still not covered (Stage 2).** The trigger is now complete over
+messages that *enumerate*, but a catch-all arm can print a help body with no
+enumeration at all and still fall out with no status. A survey of all 163
+catch-all arms that print without setting a status found roughly 88 such
+help-body arms, plus a third shape that must not be treated like the others:
+*default-action* arms (`cmd_alloc_trace`, `cmd_irqstorm`, `cmd_filepicker`,
+`cmd_startmenu`, `cmd_ipc_stat`) where the catch-all does the command's default
+work rather than complaining, and where `end_help_arm` would be wrong. A
+structural trigger — "a catch-all containing ≥3 prints" — was tried and
+rejected for conflating exactly those two. The remaining work needs the
+scrutinee and command name determined by hand for the 10 arms with no detectable
+`match` scrutinee and the 41 with no `"<name> — …"` first help line.
+
+**Severity.** Moderate, and the same as instance 3: no correctness consequence
+inside the kernel, but a command that complains and exits 0 tells `&&` and
+`set -e` that it worked. 57 more of those, on commands including a partition
+manager whose subcommands create and delete partitions.
+
+---
+## `C-BACKUP-AN-EXCLUDE-PATTERN-CAN-HANG-THE-BACKUP` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26
+
+**In short:** `backup create --exclude '**a'` never finished. It did not fail
+with a message, it did not skip the pattern — it recursed until the stack ran
+out and the process died, part-way through a backup. Any exclude pattern
+containing `**` that was not a whole path segment did this: `**.tmp`,
+`**cache`, `***`. The fix makes such a pattern behave as a plain `*`, which is
+what bash's `globstar` and gitignore already do.
+
+**Where it lived:** `apps/backup/src/main.rs`, `glob_match_recursive` and
+`glob_match_simple`.
+
+**The defect.** The two functions disagreed about which `**` was a globstar.
+`glob_match_simple` delegated to `glob_match_recursive` on *any* `**`;
+`glob_match_recursive` accepted only a `**` that was a whole path segment
+(`**` at the end, or `**/`) and handed anything else straight back to
+`glob_match_simple`. Neither consumed a byte before delegating, so the two
+bounced the identical `(pattern, text)` pair back and forth forever:
+
+    glob_match_simple("**a", "b")  -> glob_match_recursive("**a", "b")
+    glob_match_recursive("**a", "b") -> glob_match_simple("**a", "b")   // no progress
+
+Each side was locally reasonable. The bug lived in the gap between them, which
+is why reading either function alone did not show it.
+
+**Why it went unseen.** The five existing glob tests all used well-formed
+patterns (`*.txt`, `**/*.rs`, `a?c`). A malformed one was never tried, and the
+failure mode is a hang rather than a wrong answer, so no assertion could have
+caught it in passing.
+
+**How it was found and verified.** Not by reading — by differential fuzzing.
+The rewrite that removed this file's `indexing_slicing` warnings was checked
+against the previous implementation over an exhaustive space of patterns and
+texts up to four bytes (alphabets `*?/ab` and `/ab`). The old implementation
+was depth-limited so non-termination could be *counted* rather than hang the
+harness. Result over 94,501 pairs:
+
+| | count |
+|---|---|
+| agree exactly | 90,841 |
+| differ | **0** |
+| old code did not terminate | **3,660** (3.9%) |
+
+So the rewrite is behaviour-preserving everywhere the old code produced an
+answer at all, and the 3.9% is the bug's true reach — this was not an exotic
+corner.
+
+**The fix.** `glob_match_simple` now delegates only when the `**` is a whole
+path segment — exactly the condition `glob_match_recursive` accepts. The two
+agree, so the loop cannot form. A `**` that is not a whole segment falls
+through to the ordinary single-`*` arm, which always advances `pi`, so progress
+is structural rather than argued. Regression tests
+`a_double_star_that_is_not_a_path_segment_terminates` and
+`a_double_star_that_is_a_path_segment_still_spans_directories` pin both halves;
+the first hangs the suite rather than failing it if the bug returns, which is
+the loudest signal this shape of defect allows.
+
+**Lesson worth keeping.** Two functions that delegate to each other must agree
+on the condition that decides *which* of them handles a case, and the agreement
+has to be written down in both places or it will drift. Mutual recursion with
+no argument shrinking on some path is a hang waiting for the right input.
+
+## `C-INDEXER-A-BRACKET-EXPRESSION-ENDING-IN-A-DASH-MATCHED-NOTHING` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26
+
+**In short:** `indexer search` lets you use shell-style wildcards, including
+`[abc]` to mean "any one of these characters". If you ended that bracket with a
+dash — `[a-]`, meaning "an `a` or a dash" — it silently matched no files at
+all, rather than the files it should have. You would see an empty result list
+and no error, and conclude the files were not indexed. Fixed; the pattern now
+behaves the way it does in every shell.
+
+**Where it lived.** `apps/indexer/src/main.rs` → `match_char_class`.
+
+**The defect.** The range arm was guarded by:
+
+```rust
+if i + 2 < pattern.len() && pattern[i + 1] == '-' {
+```
+
+That asks whether a third character *exists*, not whether it is a range end.
+For `[a-]` the third character is the closing `]`. So the parser took the range
+arm, read `]` as the upper bound of the range `a..=]` (empty, since `]` is 0x5D
+and `a` is 0x61), advanced past it, and then ran to the end of the pattern
+looking for a closing bracket it had already consumed. Falling out of the loop
+with no `]` in hand, it returned `None` — "malformed class" — and a malformed
+class never matches. `[a-]`, `[b-]` and `[--]` therefore matched nothing.
+
+**Why it went unseen.** The five existing glob tests all used well-formed,
+conventional patterns: `[abc]`, `[a-z]`, `[!abc]`. Every one of those has a
+character after the `-`, or no `-` at all, so none of them enters the arm the
+bug lives in. This is the same reason `apps/backup`'s `**` hang went unseen —
+see `C-BACKUP-AN-EXCLUDE-PATTERN-CAN-HANG-THE-BACKUP`, found the same day. A
+test suite written from the documentation exercises the shapes the
+documentation describes, which are exactly the shapes that work.
+
+**The oracle.** POSIX and `fnmatch(3)` make a `-` in final position of a bracket
+expression an ordinary character, because there is nothing after it for it to
+be a range to. Confirmed against bash directly rather than from memory:
+
+```
+case a in [a-]) ;; esac   # matches
+case - in [a-]) ;; esac   # matches
+case - in [--]) ;; esac   # matches
+case - in [a-z]) ;; esac  # does NOT match
+```
+
+**The fix.** The range arm now requires the character after the `-` to exist
+*and not be the closing bracket*, and the whole class parser reads through
+`get` rather than indexing, so each access carries its own bound instead of
+borrowing one from a comparison two lines up.
+
+**Evidence the rewrite changed nothing else.** The old and new implementations
+were run against each other over an exhaustive product of 4,681 patterns × 85
+texts = 397,885 pairs, from an alphabet chosen to reach every arm (`*`, `?`,
+`[`, `]`, `!`, `-`, `a`, `b`):
+
+| Result | Count |
+|---|---|
+| agree | 397,877 |
+| differ | 8 |
+
+All eight differences are the trailing-dash case (`[a-]`, `[b-]`, `[--]`,
+`[*-]`, `[?-]`, `[[-]`), and in all eight bash agrees with the new behaviour.
+Pinned by `a_trailing_dash_in_a_class_is_a_literal_dash`.
+
+**Lesson worth keeping.** A bounds check that asks "does an element exist here?"
+is not the same question as "is the element here the one I need?", and the two
+diverge exactly at the end of the input. `i + 2 < len` was true; `pattern[i+2]`
+was still the wrong character. Reading through `get` does not by itself fix
+that — but it forces the second question to be written down, because there is
+no index to silently answer the first one instead.
+
+---
+
+## C-FILESEARCH-COMPARED-A-BRACKET-LITERALLY-BEFORE-PARSING-IT-AS-A-CLASS (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**In short:** The desktop had two file-search tools — the background indexer and
+the Search application — and each contained its own, separately written code for
+interpreting search patterns like `*.txt` or `[a-z]`. They did not agree. Typing
+the same pattern into the two tools could give you two different sets of files,
+and in the worst cases one of them silently found nothing at all and said so as
+"no results" rather than as an error. Both tools now use one shared piece of
+code, checked against Python's and bash's implementations on 1.9 million
+patterns.
+
+**Where it lived.** `apps/filesearch/src/main.rs` → `glob_match_impl` and
+`char_class_matches`; `apps/indexer/src/main.rs` → `glob_match_chars` and
+`match_char_class`. Both are now `apps/globmatch`.
+
+**How it was measured.** Each matcher was extracted verbatim into a scratch
+binary, run over an exhaustive product of every pattern of length ≤ 4 and every
+text of length ≤ 3 drawn from the metacharacter alphabet (`* ? [ ] ! - a b` for
+patterns, `[ ] - a b` for texts) — 4,681 × 156 = **730,236 pairs** — and every
+verdict compared against CPython's `fnmatch`, which implements POSIX 2.13.1.
+
+| Matcher | Disagreements with `fnmatch` |
+|---|---|
+| `apps/indexer`, after `698afd7cd` | **0** |
+| `apps/filesearch` | **646** |
+
+**The three defects in `filesearch`.**
+
+1. **Literal comparison ran before the class parse** (338 of the 646). The
+   `if`/`else if` chain tested `pattern[pi] == text[ti]` *first*, so whenever
+   the text happened to contain a `[`, the pattern's `[` matched it as an
+   ordinary character and the bracket expression was never parsed. `[*]` — the
+   only way to search for a literal asterisk — matched `[]`, `[a]` and `[b]`,
+   and did not match `*`. The same ordering bug applies to `*`: `*a` failed
+   against `*ba`, because the pattern's star was spent matching the text's.
+
+2. **A `]` in the first member position terminated the class.** `class_end` was
+   `position(|&b| b == ']')` from the `[`, which for `[]]` finds the `]` at
+   offset 1 and yields an *empty* class. POSIX carves out that one position as
+   a literal member precisely because a bracket expression has no escape
+   character — without the rule there is no way to write a pattern matching a
+   `]` at all. So the pattern that means "a bracket" matched nothing.
+
+3. **…and therefore `[!]` was a negated empty class**, which matches every
+   character. A user typing `[!]` got every file in the index.
+
+**Why it went unseen.** Same reason as the two sibling bugs found the same day
+(`C-INDEXER-A-BRACKET-EXPRESSION-ENDING-IN-A-DASH-MATCHED-NOTHING`,
+`C-BACKUP-AN-EXCLUDE-PATTERN-CAN-HANG-THE-BACKUP`): every test used a
+well-formed, conventional pattern — `[abc]`, `[a-z]`, `[!a-z]`, `src/*.rs` — and
+none of those reaches the arms the bugs live in. A metacharacter never appeared
+in a *text*, so defect 1 could not fire; no pattern contained a `]` as a member,
+so defects 2 and 3 could not fire.
+
+**The deeper finding, which is why the fix was a new crate rather than a patch.**
+Lane C had **four** glob matchers with four different definitions of a glob:
+
+| Location | `*` | `?` | classes | negation | element |
+|---|---|---|---|---|---|
+| `apps/indexer` | any run | one char | yes | `!` only | `char` |
+| `apps/filesearch` | any run | one char | yes (buggy) | `!` and `^` | `char` |
+| `apps/backup` | stops at `/`, `**` spans | one char, not `/` | **none** | — | `u8` |
+| `gui/toolkit` `context_ext` | any run | — | none | — | `char` |
+
+The first two are both user-facing search tools in the same desktop, both
+document `*`, `?` and `[a-z]`, and disagreed — including on whether `[^abc]`
+negates, which worked in one and was a literal `^` in the other. That is not a
+duplication smell; it is a user-visible inconsistency.
+
+**The fix.** `apps/globmatch`: POSIX `fnmatch` without `FNM_PATHNAME`, over
+`&[char]`, with `^` negation carried over from `filesearch` as the single
+deliberate extension. Both search tools now depend on it and their private
+copies are deleted (−4,498 and −6,205 bytes).
+
+**Evidence.** Over an alphabet extended with `^` — 7,381 patterns × 259 texts =
+**1,911,679 pairs** — every verdict is adjudicated by an independent
+implementation, and the two disagreement families are disjoint and explained:
+
+| Oracle | Agrees | Differs | The differences |
+|---|---|---|---|
+| CPython `fnmatch` | 1,911,520 | 159 | all `^`-negation, which `fnmatch` does not implement; all 159 confirmed correct by bash |
+| bash 5.2 | 730,167 of 730,236 (no-`^` alphabet) | 69 | all unterminated-`[` at a range-end position; all 69 confirmed correct by `fnmatch` |
+
+The bash divergence is worth recording so nobody "fixes" it: bash falls back to
+a literal `[` only when its scanner runs out of pattern at a *member* position,
+and hard-fails when it runs out at a *range-end* position — so `[-` and `[a-b-`
+match themselves but `[a-` and `[ab-` do not. POSIX 2.13.1 is explicit
+("Otherwise, the open bracket shall be treated as an ordinary character") and
+CPython agrees with us, not with bash.
+
+**Lesson worth keeping.** Two implementations of the same user-facing concept
+are not redundant — they are a *disagreement waiting to be discovered by a
+user*, and neither one's test suite can see it, because each is tested only
+against itself. The differential is what makes the disagreement visible, and it
+needs a third-party oracle: had the two been compared only to each other, all
+646 differences would have looked like a coin-flip over which was right.
+
+---
+
+## `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING` (lane C, 2026-08-26) — **mostly fixed 2026-08-26: the decoder exists and the wallpaper, the image viewer and the file manager use it; the viewer's own filmstrip does not yet**
+
+**In short (update):** there is a PNG decoder now — `gui/imagecodec`, a
+dependency-free `no_std` crate that turns a `.png` on disk into the exact
+`0xAARRGGBB` pixels the compositor stores. The missing link in the table below
+is therefore no longer missing. Three of the callers are wired to it: a
+wallpaper the user picks appears, the image viewer shows the photograph you
+opened instead of a grey checkerboard, and the file manager's icon view shows
+the picture in each file instead of a flat green rectangle. What remains is the
+image viewer's own filmstrip, which can now reuse the file manager's generator
+and eviction rule rather than inventing a second one. The entry stays open until
+it does.
+
+**What was built.**
+
+| | |
+|---|---|
+| Crate | `gui/imagecodec` — `no_std` + `alloc`, zero dependencies |
+| Coverage | PNG (RFC 2083) in full: all five colour types, bit depths 1/2/4/8/16, `PLTE`, `tRNS`, all five scanline filters, Adam7 interlacing |
+| Also written | `imagecodec::inflate` — DEFLATE (RFC 1951) and zlib (RFC 1950) from scratch, because PNG pixel data is a zlib stream. See `requests/c-a-two-inflates.md` for why this is a *second* copy and what it would take to have one |
+| Not covered | JPEG (the next thing this crate should grow); colour management (`gAMA`/`cHRM`/`iCCP`/`sRGB` are parsed past, not applied); APNG animation (decodes to the first frame, as the APNG spec requires of a decoder that does not animate) |
+| Output contract | densely packed `0xAARRGGBB`, **straight** alpha — matching `BufferFormat::Argb8888` and the compositor's `blend_pixel`, so no conversion pass stands between a file and a screen |
+| Safety | nothing panics for any input; nothing is allocated on the strength of a header field — `Limits` is checked against the header *before* the pixel buffer exists, and the decompressor is given the exact output size the header implies |
+
+**How it is known to be right, and not merely self-consistent.** 51 unit tests
+plus a 6-test conformance suite over **15 real PNG files this repository did not
+write** (`gui/imagecodec/tests/data/`, regenerated by `generate.py`). Pillow —
+libpng underneath, the reference implementation — wrote eleven of them and
+ImageMagick wrote the four Adam7 ones, because Pillow silently ignores its own
+`interlace=True`. The expected pixels beside each file are Pillow's *decoder's*
+answer, so no single library both writes a fixture and grades it. Those files
+carry things our own test helpers cannot produce: a filter chosen per row,
+dynamic Huffman tables, and `gAMA`/`cHRM`/`bKGD`/`tIME`/`tEXt` chunks that must
+be skipped. Fourteen of the fifteen matched on the first run; the fifteenth was
+Pillow's `convert()` clipping 16-bit samples rather than reducing their depth —
+a quirk of that API, not a disagreement about PNG, and its raw sample values
+agreed with ours exactly. The suite also truncates every real file at every
+length and flips a bit in every byte of every one, asserting only that nothing
+unwinds.
+
+**What is left.** Wire the remaining caller below to it — the image viewer's
+filmstrip.
+
+**Wired so far — the wallpaper (2026-08-26).**
+`ShellSession::refresh_wallpaper_image` (`gui/desktop/src/session.rs`) runs at
+the top of every `paint_background`, reads the file `WallpaperManager` names,
+decodes it and uploads it under the id the render tree is about to draw. The
+manager itself is untouched and still performs no I/O — that is what keeps its
+two thousand lines of tests runnable with no filesystem — and the session is the
+layer that owns the connection, so that is where the read belongs. Behaviour
+worth knowing:
+
+- It does nothing on all but the first paint after a change: it remembers the
+  `(image id, path)` pair it last acted on, and the id is freshly allocated by
+  every `set_image` and every slideshow step, which is exactly the signal
+  needed. Without that, a full-screen `.png` would be re-read and re-inflated on
+  every mouse click that caused a repaint.
+- A slideshow step **drops the old id before uploading the new one**, so the
+  link's per-connection image budget is never charged for two full-screen
+  pictures at once. Uploading first would make a budget that fits one wallpaper
+  refuse every slide after the first.
+- A file that cannot be read, cannot be decoded, or is refused by the compositor
+  sets `ShellSession::wallpaper_error()` and **does not fail the repaint**: the
+  wallpaper's colour underlay still paints and so does the taskbar. A shell that
+  refused to draw its chrome because a `.png` was corrupt would be strictly
+  worse than a plain background. Every *other* connection error still propagates
+  — a dead socket is not a wallpaper problem.
+- The failed pair is remembered too, so a corrupt wallpaper is attempted once
+  rather than on every repaint.
+- Eight tests in `gui/desktop/src/session/tests.rs` cover it, driven against the
+  offline `oswindow::testing` compositor and reading the sibling crate's real
+  libpng-written fixtures rather than a copy of them.
+
+Nothing yet reads `wallpaper_error()` — no surface shows it to the user. That is
+the next small piece: a notification, or a line in the wallpaper settings panel.
+
+**Wired so far — the image viewer (2026-08-26).**
+`apps/imageviewer` opened every photograph as the same 16-pixel grey
+checkerboard, with a comment in `display_image` reading "in a real
+implementation, this would decode the image". It now decodes the file and
+uploads the pixels. Getting there needed a piece that did not exist for *any*
+application, so this half of the fix is reusable by all ~140 of them:
+
+- **`App::take_images()`** (`gui/window/src/app.rs`) is the route an application
+  now has to the compositor's image store. `App::render` returns a `RenderTree`,
+  and a `RenderTree`'s `RenderCommand::Image` carries an image *id* and never
+  the pixels — so before this, an app implementing `App` had no way to upload at
+  any price, because it never sees a `WindowHandle`. The new method returns an
+  ordered `Vec<ImageChange>` (`Upload { id, width, height, stride, format,
+  bytes }` / `Drop(id)`) which the loop applies **after `render` and before the
+  frame is submitted**, so a picture queued while drawing reaches the compositor
+  ahead of the frame that names it. One ordered list rather than two methods
+  because drop-before-upload ordering is load-bearing (design-decisions.md
+  §557 — a slideshow that uploads first is charged for two full-screen pictures
+  at once). Drained per *frame*, not per event, unlike `take_reloads`; the
+  reasoning for the difference is at both methods and in §558.
+- **The viewer uses one image id for every file it opens** (`VIEWER_IMAGE_ID`),
+  replacing an id hashed from the path. Nothing evicts — the compositor holds
+  what it is given until the id is dropped — so per-path ids meant a session
+  paging through a directory accumulated every picture it had ever shown and was
+  eventually refused. Re-registering an id is a *replacement* in
+  `image_budget_refusal`'s arithmetic, so one id gives the never-hold-two
+  property for free.
+- **Failures are shown, not fatal.** A file that cannot be read or decoded drops
+  the picture, records the reason, and paints the existing "Cannot display this
+  image" state; `main` no longer exits when the file on the command line is
+  broken, so the window opens and the arrow keys carry the user off it.
+  `decode_failure` distinguishes "these bytes are not a picture" from "this is a
+  JPEG and no decoder claims it yet", using the viewer's own signature sniffing.
+- **`parse_png_dimensions` no longer reads two integers out of raw offsets 16
+  and 20** — a truncated download used to report whatever bytes sat there. It
+  delegates to `imagecodec::dimensions`, which validates the IHDR as a chunk.
+- Eight tests under "Getting the picture to the compositor", plus five in
+  `gui/window/src/app.rs` for the strap itself. The viewer's `png_bytes` test
+  fixture was upgraded from a bare 13-byte header to a real encoder (stored
+  deflate blocks, CRC-32, Adler-32), so the tests that already existed now run
+  against a genuine picture instead of a stub.
+
+**Still placeholder inside the viewer.** The filmstrip along the bottom
+(`render_thumbnail_strip`, ~line 1631) still draws a grey `FillRect` per entry
+under a comment reading "would use actual thumbnails". Decoding every file in a
+directory to fill it needs a bounded, off-the-draw-path scheduler and a
+per-thumbnail image id with an eviction rule — **all three of which now exist**,
+in `apps/explorer/src/thumbs.rs` (`ThumbnailGenerator`, `ThumbnailCache`,
+`take_evicted_image_ids`). The filmstrip should be wired by lifting that module
+somewhere both apps can depend on it, not by writing a second one; two
+thumbnailers is the glob-matcher mistake (design-decisions.md → 555) again.
+The **video** path in `apps/imageviewer/src/video.rs` is also still frameless:
+`imagecodec` decodes stills only, and no MP4/Matroska video decoder exists.
+
+**Wired so far — the file manager (2026-08-26).** `apps/explorer` decodes a
+`.png` into its thumbnail (`try_decoded_thumbnail`) *and* now has somewhere to
+put the result: the crate gained an `oswindow` dependency and an `App`
+implementation, so it is a real window rather than a print-only demo. The three
+pieces that had to exist:
+
+- **An eviction rule, which nothing else in the tree had needed.** The
+  compositor never evicts — it holds what a client gives it until the client
+  drops it — so a file manager walking a photograph library would accumulate
+  every preview it had ever made and eventually be refused by the per-link image
+  budget. `ThumbnailCache` now records the image id of every entry that leaves
+  it, by any route (LRU fall-off, `invalidate`, `clear`), and
+  `take_evicted_image_ids()` drains that list into `Drop` messages. The bounded
+  LRU cache the renderer already reads *is* the policy; a second policy beside it
+  would be a second thing to keep in agreement. See design-decisions.md §559.
+- **An image id keyed on the same three facts as the cache.** It was hashed from
+  (path, mtime) while the cache is keyed on (path, mtime, length), so a file
+  rewritten twice inside one second produced two cache entries sharing one id —
+  the second upload would silently replace the first and one of the two entries
+  would draw the other's picture. `thumbs::image_id(path, mtime, size)` now takes
+  all three. See design-decisions.md §560.
+- **A byte-order conversion, because "ARGB" names two opposite layouts here.**
+  The stored thumbnail is `A, R, G, B` low-to-high; the compositor's
+  `BufferFormat::Argb8888` is `B, G, R, A`. `Canvas` gained
+  `from_argb8888`/`to_argb8888` named after the *wire enum*, and
+  `Thumbnail::to_wire_bytes` routes through it. See
+  `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` below and design-decisions.md
+  §561.
+
+Drops are emitted before uploads in the same `take_images()` list, for the same
+budget reason the wallpaper has. `+19` tests, including one that decodes an
+upload's bytes back through `Canvas::from_argb8888` and asserts they are *not*
+the stored bytes — a test that passes trivially if you forget the conversion is
+a test that does nothing.
+
+**Still unwired.** Nothing outside the viewer's filmstrip.
+`gui/toolkit/src/grid.rs` takes the caller's id and is correct as it stands.
+
+**Original entry follows.**
+
+**In short:** the desktop can now draw a picture and, as of today, a program in
+another process can send one. Nothing in the tree can turn a `.png` or `.jpg`
+file into the pixels either of those needs. Five places already ask for a
+picture to be drawn and every one of them names an id that no pixels were ever
+stored under — and drawing an unknown id renders *nothing, silently, by design*,
+so a wallpaper the user chose simply does not appear and no error is produced
+anywhere. This is the last missing link in the chain, not a corner case in it.
+
+**The chain, and where it breaks.**
+
+| Link | State |
+|---|---|
+| A file on disk → pixels | **missing — there is no image decoder in the tree** |
+| Pixels → the compositor's store, in-process | `Compositor::register_image` ✅ |
+| Pixels → the compositor's store, from another process | `RequestBody::UploadImage` ✅ (today) |
+| An id → pixels on screen | `RenderCommand::Image`, rasterised ✅ (design-decisions.md → 554) |
+
+**The five callers that already draw one.**
+
+| Site | Where its id comes from |
+|---|---|
+| `gui/desktop/src/wallpaper.rs:993` | `alloc_image_id()` — a counter bumped by `set_image`; the file at `config.image_path` is never opened |
+| `apps/explorer/src/thumbs.rs:1317` | `thumbnail_image_id(thumb)`, a hash of the source path. Its own comment says *"The caller is responsible for registering the pixel data with the compositor under this ID"* — and no caller does |
+| `apps/imageviewer/src/main.rs:1225` | the decoded image — except `Image::load` synthesises a grey checkerboard (`main.rs:194–208`) rather than reading the file |
+| `apps/imageviewer/src/video.rs:1242` | a frame id from the video path, which is likewise not decoded |
+| `gui/toolkit/src/grid.rs:1483,1516` | the caller's, passed through |
+
+**Why it is not simply a bug in each of them.** All five are correct code
+waiting on a dependency that does not exist. Writing five ad-hoc PNG readers
+would be the glob-matcher mistake (design-decisions.md → 555) made five times
+over: one user-facing concept, five implementations, each tested only against
+itself.
+
+**What the proper fix is.** A decoder crate under `gui/` — PNG first, since it
+is the format the icons, the cursors and most wallpapers are in, it is lossless,
+and its spec is small and completely specified (RFC 2083; the compression is
+DEFLATE, RFC 1951). JPEG second, for photographs. Then each of the five call
+sites gains an upload: in-process for the desktop shell, and
+`Connection::upload_image` for the applications once they are converted to
+`oswindow::app`.
+
+**Two things that must be true of it, because the input is untrusted.** A
+wallpaper or a thumbnail is a file the user was handed by someone else, so the
+decoder is an attack surface in the same way the wire decoder is:
+
+1. **It must not panic on malformed input**, on any byte sequence, the way
+   `guiremote`'s `Reader` must not — a corrupt icon in a directory listing must
+   not take down the file manager, let alone the shell.
+2. **It must bound what it will allocate before allocating it.** A PNG header
+   declaring 65535×65535 is 17 GB, and the declaration costs the attacker eight
+   bytes. The compositor's `MAX_BUFFER_PIXELS` bounds what may be *stored*;
+   nothing yet bounds what may be *decoded*.
+
+**How you would notice.** Set a wallpaper in Settings: the desktop stays the
+background colour. Open a folder of photographs in the file manager: every icon
+is the generic file glyph. Neither reports an error.
+
+---
+
+## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26)
+
+**In short:** to draw a 128×128 preview of a photograph, the file manager
+decodes the photograph at full size first and then shrinks it. A 24-megapixel
+picture is about 190 MB of memory for a fraction of a second, to produce 64 KB
+of preview. It works, and it is bounded — there is a cap, above which the entry
+simply keeps the plain coloured rectangle it always had — but the cap exists
+only because the decode is wasteful, and a picture *above* the cap gets no
+preview even though nothing about it is wrong.
+
+**Where it lives.** `apps/explorer/src/thumbs.rs` →
+`try_decoded_thumbnail`, which calls `imagecodec::decode` and then
+`box_filter_downscale`. The cap is `DEFAULT_MAX_SOURCE_PIXELS` (24 million —
+a 6000×4000 full-frame photograph), surfaced as `ThumbConfig::max_source_pixels`
+so a low-memory machine can lower it.
+
+**Why it costs what it does.** `imagecodec::decode` has no scaled or partial
+mode: it holds the compressed `IDAT` copy, the inflated scanline buffer
+(`w × h × bytes-per-pixel + h`) and the finished `Vec<u32>` at once, and returns
+the last of those at the file's own size. The thumbnailer then converts that
+into a `Canvas` and box-filters it down. The conversion is written to consume
+the decoder's buffer rather than borrow it (`into_iter().map(...).collect()`
+instead of `to_argb_bytes()`), and the compressed data is dropped before it, so
+the thumbnailer's own overhead is about as low as it can be *given a full-size
+decode*. The full-size decode is the cost.
+
+**Not urgent, and why.** Thumbnail generation is sequential — one file at a
+time — so the peak is one picture's worth, not a directory's. The cap keeps
+that peak bounded by a number the machine's owner can choose. Nothing crashes
+and nothing regresses at the boundary.
+
+**What the proper fix is.** A scaled decode in `imagecodec`: box-filter *during*
+scanline reconstruction, accumulating into a destination-sized buffer as rows
+come out of the inflater, so peak memory is the row buffer plus the thumbnail
+rather than the whole picture. PNG makes this easy in the non-interlaced case
+because rows arrive in order; Adam7 needs the full-size buffer anyway, since its
+passes are scattered, so that path would keep the current behaviour. With it,
+`max_source_pixels` can go away entirely and every picture gets a preview.
+
+**How you would notice.** Open a directory of 100-megapixel scans in the icon
+view: they show the plain green rectangle rather than a preview, while the
+6000×4000 photographs beside them show properly. Nothing reports why.
+
+---
+
+## `TD-C-EXPLORER-DOES-ARITHMETIC-ON-UNCHECKED-VALUES` (lane C, 2026-08-26)
+
+**In short:** the file manager has 33 places where it adds, multiplies or
+subtracts without checking for overflow, and the project's own lint
+(`clippy::arithmetic_side_effects`) warns about every one of them on every
+build. Most are on values the program itself controls and are fine in practice;
+some are on numbers that came out of a file's header, which is where this kind
+of thing becomes a way to make a program misbehave with a crafted file. Nobody
+has been through them to sort the two groups.
+
+**Where it lives.** `apps/explorer/src/` — `thumbs.rs` (16 sites), `fileops.rs`
+(11), `columns.rs` (6). `cargo clippy -p explorer --all-targets` lists them all.
+The ones inside `parse_jpeg_dimensions` (`thumbs.rs` ~389–427) are the ones that
+matter most: `pos += seg_len` and the `pos + 7 > data.len()` bounds checks walk
+a JPEG's marker chain using lengths the *file* supplies, so an overflow there
+turns a bounds check into a check that passes.
+
+**Why it has not been fixed.** It predates this lane's current work and is not
+caused by it; the decoder wiring added no new sites. Fixing it well means
+deciding per site whether the right answer is `checked_*` and an early return,
+`saturating_*`, or a comment explaining why the value cannot overflow — which is
+33 small judgements, not one sweep.
+
+**What the proper fix is.** Work the list, site by site. For the JPEG parser,
+prefer `byteread`'s bounded accessors (already a dependency, already used by the
+BMP path) over hand-rolled offset arithmetic; for the layout code in
+`columns.rs`, `saturating_*` is almost always right because a widget position
+that saturates draws wrong and a widget position that wraps draws somewhere
+absurd. Where a value genuinely cannot overflow, say so in a comment rather than
+allowing the lint file-wide — a blanket `#![allow]` is what turns 33 known sites
+into an unknown number.
+
+**How you would notice.** You would not, as a user, until a malformed JPEG in a
+directory made the file manager read the wrong bytes. As a developer, every
+`cargo clippy -p explorer` prints 33 warnings, which is enough noise to hide the
+34th when someone adds it.
+
+---
+
+## `TD-C-EXPLORER-HAS-NO-EDITING-KEYS` (lane C, 2026-08-26)
+
+**In short:** the file manager is now a real window you can click and type in,
+but only the keys that *look* at files work — arrows, Home/End, Enter,
+Backspace, Ctrl+A, F5. The keys everyone expects to *change* a file do nothing
+at all: Delete does not delete, F2 does not rename, Ctrl+C/Ctrl+V do not copy or
+paste. Pressing them is silent — no beep, no message, no greyed-out menu item —
+so the window looks broken rather than incomplete.
+
+**Where it lives.** `apps/explorer/src/main.rs` → `handle_key`, the `match` on
+`Key`. Everything the file manager needs underneath already exists and is
+tested: `fileops.rs` has copy, move, rename and recycle, and `ExplorerState`
+already tracks a selection.
+
+**Why it was left out rather than added.** The three editing keys each need a
+piece of *window* that does not exist yet, and wiring the key without the piece
+is worse than leaving the key dead:
+
+| Key | What is missing |
+|---|---|
+| `Delete` | A confirmation, and a visible undo. A Delete key that recycled the selection with no prompt and no way back is a key that destroys a user's files on a mis-keypress. |
+| `F2` | An in-place rename field. `fileops::rename` is ready; there is no text entry in the listing to drive it. |
+| `Ctrl+C` / `Ctrl+V` | A clipboard the file manager can put a *file reference* on, and a paste target. `gui/toolkit` has a clipboard for text. |
+
+**What the proper fix is.** Build the three missing widgets, then wire the keys
+to them — not the reverse. A modal confirmation and an inline edit field are
+both generally useful in `gui/toolkit`, so neither belongs in this app.
+Meanwhile, add a *visible* refusal: a status-line message on a dead editing key
+beats silence, because silence is indistinguishable from a bug.
+
+**How you would notice.** Select a file, press Delete. Nothing happens, and
+nothing says why.
+
+---
+
+## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26)
+
+**In short:** the file manager draws as many entries as fit in the window and
+then stops. There is no scrollbar, no mouse wheel, no Page Up/Page Down — so in
+a directory with more files than fit on screen, the ones past the bottom edge
+**cannot be reached at all**. The arrow keys will move the selection onto them
+(the selection is an index into the full listing, not into the visible part), at
+which point the highlighted row is off-screen and the window appears to have
+lost the selection.
+
+**Where it lives.** `apps/explorer/src/main.rs` — the renderer walks
+`self.entries` and emits rows until it runs out of vertical space; nothing holds
+a scroll offset. `dropzone.rs` registers hit rectangles only for the rows that
+were actually drawn, which is correct and means clicking is consistent with what
+is visible — the gap is purely that nothing changes *which* rows those are.
+
+**Why it is separate from the input work.** Scrolling is a viewport, not a key
+binding: it needs a first-visible-row offset threaded through all three view
+layouts, a scroll-into-view rule so keyboard movement drags the viewport with
+it, wheel handling in `handle_mouse` (`MouseEventKind::Scroll` is delivered and
+falls into the `_ => false` arm), and a scrollbar. That is a layout change, and
+folding it into the commit that made the window clickable would have made both
+harder to review.
+
+**What the proper fix is — and it is mostly *use what is already there*.**
+`gui/toolkit` has this solved, because a dozen settings panels hit it first:
+
+| Piece | Where it already lives |
+|---|---|
+| Offset + selection kept in agreement, so the picked row is never off screen | `guitk::listview::ListViewport` — `select_prev`/`select_next`/`page_up`/`page_down`/`set_height`/`visible_range`, all clamped against a `len` passed per call |
+| Which rows fit, for a renderer that only has `&self` | `guitk::scroll_window::visible_count` / `Rows` — truncates rather than drawing a row across the bottom edge, and clamps a stale offset to the last page instead of going blank |
+| Wheel notches → row steps, accumulating fractions so a trackpad is not dead | `guitk::wheel::Accumulator::rows` |
+
+So the work is to hold a `ListViewport` on `ExplorerState`, drive the three
+layout paths from `visible_range`, and route `Scroll { dy }` through an
+`Accumulator`. **Explorer's own `move_selection` should go away in the process**
+— it is a hand-rolled `select_prev`/`select_next` with its own first-press rule,
+written before this entry noticed the toolkit had one, and two implementations
+of "move a selection down a list, clamped" is the glob-matcher mistake
+(design-decisions.md → 555) in miniature.
+
+**The one genuine mismatch.** `ListViewport::selected` is `Option<usize>` — one
+picked row — while explorer holds a multi-selection (`Ctrl+A` selects
+everything). The viewport half applies unchanged; what needs deciding is whether
+`ListViewport` grows an anchor/extend notion or whether explorer keeps its
+`Vec<usize>` and uses the viewport purely for scrolling, syncing the "cursor"
+row into it. The second is smaller and probably right, since a multi-select
+anchor is a file-manager concern rather than a settings-panel one. The icon and
+column views also need the offset expressed in their own units (rows of icons,
+not rows of files).
+
+**How you would notice.** Open a directory with a hundred files. You can see
+about twenty. Press Down thirty times: the selection highlight vanishes off the
+bottom and the listing never moves.
+
+---
+
+## `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` (lane C, 2026-08-26)
+
+**In short:** "ARGB" names two *opposite* arrangements of the same four bytes in
+this tree, and both are spelled the same way in code. `Canvas::to_argb` writes
+alpha first (`A, R, G, B`); the compositor's wire format
+`BufferFormat::Argb8888` expects alpha last (`B, G, R, A`). Handing one to
+something expecting the other is not a compile error and does not panic — the
+picture simply appears with red and blue swapped and its transparency read out
+of the blue channel. The file manager was written with exactly that bug and it
+was caught by reading the two definitions side by side, not by any test.
+
+**Where it lives.** `gui/toolkit/src/canvas.rs` (`from_argb`/`to_argb` versus
+`from_argb8888`/`to_argb8888`) and `gui/remote/src/control.rs:186` (the wire
+enum's definition). Every caller that hands pixels to the compositor —
+`Thumbnail::to_wire_bytes`, the wallpaper upload, the image viewer — must use
+the `8888` pair; every caller reading or writing explorer's on-disk thumbnail
+cache must use the other.
+
+**What has been done about it.** The `8888` pair is named after the *wire enum*
+rather than after its byte order, so the two cannot be chosen between by reading
+the name and guessing; each of the four functions carries a table saying which
+is which and cross-references the other; the module doc opens with a "beware"
+paragraph; and a test (`the_compositors_argb_is_the_byte_reverse_of_the_other_argb`)
+asserts the reversal explicitly, so a change to either definition breaks loudly.
+See design-decisions.md §561.
+
+**Why that is not enough.** It is still two `Vec<u8>` types with identical
+signatures. Nothing stops a future caller from writing
+`canvas.to_argb()` into an `ImageChange::Upload`, which is precisely the mistake
+that was made once already.
+
+**What the proper fix is.** Make the byte order part of the *type*, not the
+function name: a `WireBytes(Vec<u8>)` newtype that only `to_argb8888` can
+produce and that `ImageChange::Upload`/`upload_image` require, so the wrong
+buffer cannot be passed at all. The same treatment would suit the disk-cache
+order. Cheap to do; it was not done in the same change because it touches every
+upload site in `gui/**` and `apps/**` at once.
+
+**How you would notice.** A thumbnail, wallpaper or photograph draws with red
+and blue exchanged — a blue sky above orange grass — and semi-transparent
+pixels come out wrong. Nothing reports an error.
+
+### A-FASTPY-FORKEXEC-PARENT-MISSES-THE-4000-YIELD-POLL-BUDGET. `self_test_fastpy_forkexec` failed once in 15 boots: the guest printed its success line, but the parent task had still not exited when the harness gave up polling — 2026-08-26 — **Status: OPEN (one occurrence, cause not established)**
+
+**In short:** the kernel runs a start-up self-test that launches a small Python
+program, has it start a second program, and waits for the first one to finish.
+On one boot the program did its whole job and said so, but the kernel gave up
+waiting a moment too soon and declared the test failed. The boot was otherwise
+completely clean. It has happened once and has not been reproduced, so it is
+recorded rather than diagnosed — and this entry exists mainly so the *next*
+occurrence is recognised as the second one rather than investigated from
+scratch.
+
+**Where.** `kernel/src/proc/spawn.rs`, `self_test_fastpy_forkexec` — the poll
+loop at ~9261 and the verdict at ~9277:
+
+```rust
+let mut became_zombie = false;
+for _ in 0..4000 {
+    if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) { became_zombie = true; break; }
+    crate::sched::yield_now();
+}
+let state = pcb::state(result.pid);
+…
+thread::on_thread_exit(result.task_id);   // ← this force-reaps the parent
+pcb::destroy(result.pid);
+if !became_zombie || state != Some(pcb::ProcessState::Zombie) { … FAIL … }
+```
+
+**The observation.** Boot `497f31a17` (debug, QEMU TCG, 430 s to `BOOT_OK`),
+`build/serial-test.txt` lines 3300–3382:
+
+```
+[spawn] Created process 192 ("fastpy-forkexec")
+[sched] Spawned task 155 …                    ← the parent
+[sched] Spawned task 156 … in process 193     ← the fork child
+[exec] Process 193 exec complete …            ← the child execs `cat`
+fastpy fork+exec+wait OK                      ← the CHILD: `cat` echoing the staged file
+[thread] Process 193 has no threads left — now zombie
+[sched] Task 156 exiting
+[thread] Process 192 has no threads left — now zombie
+[spawn]   FAIL: fastpy-forkexec (ring 3) — expected Zombie, got Some(Running)
+```
+
+**Read the last two lines in the right order or the diagnosis inverts.** It
+looks as though process 192 became a zombie and the harness then failed it
+anyway, i.e. a stale read. It is not that. `[thread] Process N has no threads
+left — now zombie` is printed by `thread::on_thread_exit`
+(`kernel/src/proc/thread.rs:767`), and the *harness itself* calls
+`on_thread_exit(result.task_id)` at spawn.rs:9273 — after capturing `state` at
+9270 and before printing the verdict at 9278. So that zombie line is the
+harness force-reaping the parent, not the parent exiting on its own. The read
+was not stale; task 155 really had not exited.
+
+**What is not the cause.** The commit under test changed only
+`parse_blkread_args` in `kshell.rs` and added self-test rung 86. The spawn
+self-tests run at serial line ~3300; `kshell::self_test 86` runs at line 40962.
+The changed code executes roughly 37,000 serial lines *after* the failure, so it
+cannot have contributed. The 14 boots immediately preceding this one were all
+`PASS`, and the boot in question was clean everywhere else — 0 `!! ` lines,
+`kshell::self_test PASSED`, `BOOT_OK detected`.
+
+**Two candidate causes, not distinguished.**
+
+1. *Budget too tight.* 4000 `yield_now()` calls is a fixed count, not a
+   deadline, so what it is worth in real time depends on how much else is
+   runnable. This boot took 430 s to `BOOT_OK` against a recent median of ~400 s
+   and was competing with a concurrent `cargo`/gate run on the host. A
+   fastpy parent has an interpreter to tear down after its last `print`, and
+   that teardown is not free.
+2. *Same family as `B-FORKEXEC-BOOT-HANG`.* That entry documents the exit path
+   of a just-reaped process wedging, with a suspected raw-spin
+   holder-preemption deadlock (Q24). The signature there is a **silent** stop
+   with no further output; here output continued and the boot completed, so it
+   is not the same event — but "the last thread of a fork/exec parent is slow
+   or stuck leaving" is the same neighbourhood, and this may be a survivable
+   instance of it.
+
+**Correction, made the same day, before this entry had been acted on — and it
+changes which cause is likely.** The first version of this entry read
+`fastpy fork+exec+wait OK` as the *parent's* success line and built a
+hypothesis on it: that the line appears before the child's zombie line, which
+would mean `waitpid` returned before the child was reaped. That is wrong twice
+over. The runner program (`services/fastpy-forkexec/build.py`, the embedded
+source at lines 78–96) **prints nothing at all** — it ends
+`sys.exit(os.WEXITSTATUS(status))`. And `FE_CONTENT` in spawn.rs:9208 is
+literally `b"fastpy fork+exec+wait OK\n"`: the harness stages that text in
+`/tmp/forkexec-input.txt`, and the line on serial is `cat` — *the child* —
+echoing the file it was handed. There is no ordering anomaly and no early
+`waitpid`.
+
+**The corrected reading is worse for cause 1, not better.** With the line
+attributed to the child, the log says the child had printed its output, exited,
+zombified *and* had its task torn down — and the parent still had not left
+`waitpid` when the budget expired. The parent had produced no output of its own
+and had no interpreter teardown left to blame, because it never got past the
+wait. So "the fastpy parent needed a few more yields to finish exiting" is not
+supported by anything in the log; what the log shows is a parent still blocked
+in `wait4` after the event it was waiting for had fully completed.
+
+That makes **a lost wakeup on the guest's `wait4` the leading hypothesis**, and
+it is worth being explicit that this is *not* excluded by the static audit under
+`B-FORKEXEC-BOOT-HANG`. That audit ruled out a lost wakeup on the ground that
+"the kernel harness … does not block — it *polls*", which is true and remains
+true. It says nothing about the **guest parent**, which genuinely does block in
+`waitpid`. The two are different waiters and only one of them was cleared.
+
+**Deliberately not "fixed" by raising the budget.** Changing `4000` to a bigger
+number would make the symptom rarer without establishing which of the two
+causes is real, and if it is cause 2 the loop would be papering over a kernel
+bug with a longer wait. Note also that the harness reports a *poll timeout*
+with the words "faulted on the fork / execv / waitpid path", which is a
+misdiagnosis of exactly the kind §600 is about: nothing faulted.
+
+**Next step on recurrence.** Print the parent's `pcb::state` *and its scheduler
+state* at the moment the budget expires — the distinction that matters is
+`Ready` (merely starved: cause 1) versus `Blocked` (parked in `wait4` with the
+child already reaped: a lost wakeup). The harness currently records only
+`pcb::state`, which reports `Running` for both and so cannot tell them apart;
+that is the single cheapest instrumentation change and should be made whether
+or not this recurs. Then re-run with `--hard-lockup-watchdog` to capture the
+guest RIP.
+
+If it is cause 1, the fix is a *deadline* (a tick-based timeout) rather than a
+yield count, plus a verdict line that says "still Running after N ms" instead of
+blaming the fork/exec path. If it is the lost wakeup, the place to look is the
+wait/reap side: whether the child's zombification wakes a parent already parked
+in `wait4`, and whether the `pending_wake` flag in `sched/mod.rs` (which closes
+the register→park window for the core protocol) is actually on the path
+`wait4` uses.
+
+**Note on the evidence.** `build/serial-test.txt` is overwritten by the next
+boot, so the log quoted above no longer exists on disk. The excerpt in this
+entry is the whole of the surviving record — which is the argument for quoting
+generously here rather than referring to a file.
+
+---
+
+## `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS` (lane C, 2026-08-26)
+
+**In short:** the desktop has actions named "brightness up" and "brightness
+down", but nothing in this system can ever trigger them, and nothing in this
+system can change a screen's brightness even if they were triggered. A laptop's
+brightness pair is not a key: pressing Fn+F5 does not send a scancode (the
+number a keyboard sends when a key goes down) at all. The firmware handles it
+itself and talks to the panel over ACPI (the firmware's power-management
+interface) or a vendor-specific WMI channel. So there is no key event for a
+keyboard table to translate, and the two actions sit in the hotkey table
+unbound.
+
+**Where it lives.**
+
+| File | What is there |
+|---|---|
+| `gui/desktop/src/hotkeys.rs` | `HotkeyAction::BrightnessUp` / `BrightnessDown` exist and are parseable from a config file, but `install_defaults` gives them no binding, and `parse_key_name` *rejects* `"brightnessup"` / `"brightnessdown"` |
+| `gui/toolkit/src/event.rs` | deliberately has no `Key::BrightnessUp` / `Key::BrightnessDown` variant |
+| `gui/compositor/src/keymap.rs` | `key_for_scancode` has arms for the seven media keys and deliberately none for brightness |
+
+**Why it was left this way rather than "fixed" by adding the variants.** A
+`Key` variant no producer can ever emit is exactly the bug this change was
+undoing. Before it, the shell bound the volume keys to `Key::Unknown(0xAF)` and
+its neighbours — Windows virtual key codes, which this system never emits — so
+the bindings matched nothing for the whole life of the module, and a binding
+that matches nothing looks exactly like a binding nobody has pressed. Adding
+`Key::BrightnessUp` would recreate that: a name that parses, a binding that
+registers, and silence when pressed. Rejecting the name in `parse_key_name`
+means a config file that asks for it fails loudly instead, which is the honest
+answer.
+
+**What the proper fix is** — two independent halves, in this order:
+
+1. **A backlight service.** Something has to be able to *set* brightness before
+   an event to change it means anything. On real hardware that is an ACPI
+   `_BCM` call or a vendor WMI method; the natural home is a userspace service
+   exposing a "set backlight to N%" request, with the compositor as its client
+   (it already owns the display). Until this exists, both halves of the feature
+   are decoration.
+2. **A source of brightness events.** Firmware that handles the keys itself
+   often *also* reports them as ACPI notify events on the video device rather
+   than as keystrokes, so the source is the ACPI subsystem, not the keyboard
+   driver — it must not be plumbed through `key_for_scancode`. Some external
+   USB keyboards do send HID consumer-page brightness usages, which would come
+   in through the HID path instead. Whichever arrives, it should reach the shell
+   as a *system event*, not as a `Key`.
+
+Once (1) exists, `HotkeyAction::BrightnessUp` becomes bindable to a chord of
+the user's choosing (Super+F5, say) and is immediately useful without (2).
+
+**What happens if nothing is done.** Nothing gets worse. The actions are inert,
+the config parser rejects the key names loudly, and no user-visible feature
+silently misbehaves. This is a missing feature with an honest failure mode, not
+a bug.
+
+---
+
+## `TD-C-A-SHORTCUT-ONLY-WORKS-WHEN-THE-DESKTOP-IS-FOCUSED` (lane C, 2026-08-26)
+
+**In short:** every keyboard shortcut the desktop defines — Super+N, Alt+Tab,
+Super+D, and now the volume keys — only fires while the taskbar itself has
+keyboard focus, which for a taskbar is almost never. The moment the user clicks
+into any application window, the entire shortcut table goes dead. Alt+Tab, the
+one shortcut whose entire purpose is to be pressed *while you are in another
+window*, cannot work at all. This is not a bug in the shortcut table; the
+shortcuts are registered correctly and would fire. It is that key events never
+reach the shell.
+
+**The mechanism.** `Compositor::handle_key` (`gui/compositor/src/lib.rs`, ~line
+6640) opens with:
+
+```rust
+let Some(window_id) = self.focused_window else { return; };
+```
+
+and then delivers the event to that window and no other. There is no
+global-hotkey path, no key-grab table, and no "system keys" list anywhere in the
+tree — a client can only ever see keys pressed while it is focused. The desktop
+shell is just another client.
+
+**What this costs, concretely.**
+
+| Shortcut | Works when the desktop is focused | Works when an app is focused |
+|---|---|---|
+| Alt+Tab (window switcher) | yes | no |
+| Super+D (show desktop) | yes | no |
+| Super+N (notification pane) | yes | no |
+| Volume up/down/mute | yes | no |
+| Anything a user binds in their config | yes | no |
+
+**What the proper fix is.** A key-grab table in the compositor, checked *before*
+the focus lookup above:
+
+- Two new requests on the existing client protocol, `GrabKey { key, modifiers }`
+  and `UngrabKey { .. }`, held in a compositor-owned map from chord to client.
+- `handle_key` consults that map first. A grabbed chord is delivered to the
+  grabbing client and **not** to the focused window; everything else falls
+  through to the code that exists today, unchanged.
+- First grabber wins, and a second client asking for the same chord gets an
+  error rather than silently shadowing the first — a grab that quietly does
+  nothing is the failure mode this whole entry is about.
+- Grabs die with the client's connection, so a crashed shell does not
+  permanently swallow Alt+Tab.
+
+This is the X11 / `RegisterHotKey` shape, and it is the reason those systems'
+shortcuts work from inside applications.
+
+**Who is allowed to grab, and why that needed no new decision.** A grab is
+plainly privileged — a program that claims Super+L can put up a fake lock screen
+and collect the password, and one that claims Alt+Tab breaks window switching for
+the whole session. That question was briefly filed for the operator and then
+withdrawn, because the compositor had already answered it:
+`ClientLink::require_shell` (`gui/compositor/src/wire.rs`) is the single seam
+every privileged request goes through, it refuses nobody today, and it says so at
+length — the honest gate needs a capability the kernel attests at connection
+accept, which kernel channel IPC does not yet carry to the compositor
+(`design-decisions.md` §495, tracked as
+`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`). Key grabs go behind that same
+seam rather than growing a policy of their own, so the day the capability arrives
+they are gated along with reading the window list, acting on other people's
+windows and reserving a panel edge.
+
+**What happens if nothing is done.** It does not get worse with time, but it
+gets more expensive to notice: every shortcut added from here on is written,
+tested at the unit level, and appears to work, while being unreachable in
+practice. Two have already been added in this state (the media keys, and the
+notification-pane toggle). Anything gated behind a keystroke — an on-screen
+volume overlay, for instance — cannot be finished until this is.
+
+**Resolved (2026-08-26).** Built as described above, in two commits: the
+mechanism, then the shell wiring that uses it. `Compositor::handle_key` now
+consults a chord-keyed grab table after resolving the keystroke into a chord and
+before the focused-window lookup, `GrabKey`/`UngrabKey` ride the client protocol
+behind `require_shell` (`CONTROL_VERSION` 1 to 2), grabs die with the window that
+took them — including via `Server::reclaim`, so a *crashed* shell gives Alt+Tab
+back — and `ShellSession::start` claims all seventeen of the desktop's chords
+against the panel window, with Escape grabbed and ungrabbed as popups open and
+close. Two details the plan above did not anticipate, both now in
+`design-decisions.md` 565:
+
+- A grabbed chord's **release** does not match the grab (Alt+Tab held while Tab
+  is let go sends a bare `Tab` up), so the target is remembered per *scancode*,
+  the only thing identical between a press and its release.
+- Alt+Tab commits on the **Alt release**, which nobody grabs. The modifier keys
+  that formed a grabbed chord now owe their release to the grabber as well —
+  *in addition to* the focused window, never instead of it, since that window saw
+  the press and must not be left with a stuck Alt.
+
+The shell's grab list is checked against `DesktopAction::for_chord` in both
+directions by test, sweeping the entire key vocabulary, so a binding added
+without a grab — a shortcut silently dead in every window but one — fails the
+build rather than shipping.
+
+---
+
+## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **open**, tech debt
+
+**In short:** `diskquota` can limit two things: how many *bytes* a user may
+store, and how many *files*. The byte half works. The file half is a prop —
+`diskquota files alice user 100 200` accepts the numbers, stores them, prints a
+confirmation, and nothing anywhere ever looks at them again. A user given a
+200-file limit can create any number of files.
+
+**Where.** `kernel/src/fs/diskquota.rs`. The fields exist
+(`QuotaEntry::soft_limit_files`, `hard_limit_files`, lines ~83–84) and are
+written in exactly two places — the `u64::MAX` seed for a newly created entry
+(~195–196) and `set_file_limits` (~218–219). A tree-wide grep for
+`limit_files` returns no reader outside this file, and inside it there is none
+either: `QuotaEntry::status()` compares `bytes_used` against the byte limits
+only, and `check_quota` likewise tests `new_usage > entry.hard_limit_bytes`.
+
+The usage side is *also* live and equally unconsulted: `update_usage` maintains
+`entry.file_count` (~272–274), so the kernel dutifully tracks a running file
+count and dutifully stores a ceiling for it, and never once compares the two.
+
+**Why it is worth an entry rather than a shrug.** This is not a stub that
+announces itself. `set_file_limits` returns `KernelResult<()>` and reports
+`NotFound` when there is no such quota entry, so it fails in exactly the
+situation a real implementation would, which makes it look implemented. The
+shell prints `File limits for user 'alice': soft=100 hard=200` — a success line
+naming the numbers. Everything about the interface says the limit took effect.
+
+**The proper fix** is to enforce it, not to remove it: extend `status()` to
+return the worse of the byte and file verdicts, and give `check_quota` a
+file-count counterpart (or a `files: u64` parameter) so a write that would
+create a file is tested against `hard_limit_files` the way its bytes are tested
+against `hard_limit_bytes`. The grace-period machinery already keyed off the
+soft byte limit should apply to the soft file limit on the same terms.
+
+**Until then, do not let the D1 burn-down overstate the damage in this arm.**
+When `cmd_diskquota`'s guessed-value sites are fixed, the `files` subcommand's
+guessed `0` is a *latent* fault, not an active one: it records a limit that is
+wrong and that nothing currently enforces. It becomes an active lockout the
+moment the enforcement above is written. The `set` arm's guessed `0` is a live
+lockout today, because the byte path is real.
+
+**Not a regression.** True since `set_file_limits` was written.
+
+---
+
+## `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING` (lane A, 2026-08-26) — **open**, tech debt
+
+**In short:** `groupmgr delete 0` destroys the `root` group and prints
+`Deleted group 0.` as a success. There is no confirmation, no privilege check,
+and no protection for system groups — even though the code carries a
+`GroupType::System` label that looks like exactly that protection. The label is
+never read by anything.
+
+**Where.** `kernel/src/fs/groupmgr.rs`.
+
+- `init_defaults` seeds GID 0 as `root` and GID 1 as `wheel`, both
+  `group_type: GroupType::System` (~124–134).
+- `delete_group` is four lines: `state.groups.retain(|g| g.gid != gid)`, then
+  `NotFound` if nothing was removed, else `Ok(())`. It does not look at
+  `group_type`, at membership, or at the caller.
+- A tree-wide grep for `GroupType::System` returns **three** hits: the two
+  constructions above and one assertion inside the module's own self-test.
+  Nothing anywhere *branches* on it. The variant is a display label
+  (`group_type.label()` in the shell listing) wearing the name of a policy.
+
+**Why this is worth an entry.** The danger is not that a destructive operation
+exists — it is that the codebase reads as though the case were already handled.
+A reviewer who greps for `System` finds the variant, sees it set on `root`, and
+reasonably concludes that system groups are distinguished from user groups for
+a reason. They are not. The same is true of the shell: `groupmgr` lists a
+`[System]` tag beside `root`, which tells the operator the system knows this
+group is special, at a prompt where deleting it is one word.
+
+**The proper fix.** Decide what `GroupType::System` is *for* and then make it
+load-bearing, rather than adding a special case for GID 0 specifically. The
+narrow version is `delete_group` returning `KernelError::PermissionDenied` (or
+`InvalidArgument`) for any `GroupType::System` group; the fuller version also
+refuses to remove the last member of a system group and refuses `remove_member`
+on `root`. Deleting by GID-0-literal is the wrong shape of guard — it protects
+one id rather than the property that made that id worth protecting, and `wheel`
+at GID 1 is just as load-bearing.
+
+**Relationship to the D1 burn-down.** These are two different bugs that
+compound, and fixing one does not fix the other. Before the twenty-first batch,
+`cmd_groupmgr`'s `delete` arm guessed GID **0** for any word it could not parse
+— so `groupmgr delete 1O` deleted the root group. That guess is now refused, so
+reaching this operation requires *typing* `0`. The operation itself is still
+unguarded, and a correctly-typed `groupmgr delete 0` still destroys `root`. See
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+
+**Not a regression.** True since `delete_group` was written.
+
+---
+
+### TD-C-THE-RUN-BOX-BROWSE-BUTTON-HAS-NOWHERE-TO-GO — 2026-08-26 — OPEN
+
+**In short:** The Run box (Super+R — type a program's name, press Enter, it
+starts) has three buttons: OK, Cancel and **Browse...**. Browse is supposed to
+open a file chooser so you can *point* at the program instead of typing its
+name, and put the path you picked into the box. Pressing it currently does
+nothing at all. The box stays open with whatever you had typed still in it, and
+no chooser appears.
+
+**Where:** `gui/desktop/src/run_dialog.rs` posts `RunDialogEvent::Browse` when
+the button is pressed; `gui/desktop/src/lib.rs` `DesktopShell::drain_run_dialog`
+drops it on the floor. The dropping is deliberate and is commented as such at
+the match arm, and `run_box_wiring_tests::the_browse_button_starts_nothing_and_
+leaves_the_box_up` pins the current behaviour so it cannot change by accident.
+
+**Why it is dropped rather than answered.** The obvious answer is wrong. There
+is a file manager in the tree (`/usr/bin/explorer`), and starting it is one
+line — but Browse does not ask for a file manager. It asks for a *file picker*:
+a modal chooser whose answer comes **back into the command box**. Starting the
+file manager would give the user a window they did not ask for, in front of the
+Run box, and leave the command box exactly as empty as before. That is worse
+than the button doing nothing, because it looks like it worked.
+
+**What is actually missing.** `guitk::dialog::FileDialog` exists, is tested, and
+would serve — but it does not read the filesystem itself. It has to be *fed* a
+`Vec<DirEntry>` by whoever embeds it, and `gui/desktop` performs no filesystem
+reads anywhere: the shell reads its own YAML config through `appearance` and
+nothing else. So wiring Browse means giving the desktop shell a directory-listing
+path it does not currently have, which is a larger change than the button.
+
+**The proper fix.**
+
+1. Give the shell a directory read — one function returning
+   `Vec<guitk::dialog::DirEntry>` for a path, propagating the I/O error rather
+   than swallowing it, with paths handled as bytes (see
+   `TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`,
+   which this would be the second caller to hit).
+2. Host a `FileDialog` on the popup surface, above the Run box, the way the Run
+   box is itself hosted above the other popups (`paint_chrome`'s parts array).
+   It is modal about keys for the same reason and by the same mechanism.
+3. On `DialogAction::Selected`, put the chosen path into the Run box's text
+   field — which needs a `set_text`/`replace_text` on `RunDialog`; today the
+   field can only be written by keystroke.
+4. On cancel, return to the Run box with its text untouched. The text surviving
+   the round trip is the whole point: a Browse that cleared the box would be a
+   Browse nobody uses twice.
+
+**Severity while open:** low, and visible rather than silent. The button is one
+of three ways to do a thing the other two do; a user who presses it sees nothing
+happen and types the path instead. Nothing is lost or corrupted.
+
+**Not a regression.** `run_dialog.rs` had no caller of any kind until 2026-08-26
+— the button has never worked, because until this commit the box had no way to
+be opened.
+
+---
+
+## `A-IPCNS-RECORDS-ONLY-ACCUMULATE-AND-NOTHING-EVER-RELEASES` (lane A, 2026-08-26) — **open**
+
+**In short:** the IPC-namespace accounting can be told that a shared-memory
+segment, a semaphore set or a message queue was *created*, but there is no way
+to tell it that one was *destroyed*. Every counter only ever goes up. A machine
+that creates and tears down IPC objects normally will, over time, report a
+namespace holding far more than it holds — and the numbers can never come back
+down short of destroying the namespace.
+
+Found while clearing `cmd_ipcns` for
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`;
+filed separately because it is not a parsing defect and refusing an unreadable
+word does not touch it.
+
+**Where.** `kernel/src/fs/ipcns.rs`. The public surface is `init_defaults`,
+`create_ns`, `destroy_ns`, `record_shm`, `record_sem`, `record_msg`, `ns_list`,
+`ns_info`, `stats`, `self_test`. Each `record_*` is a pair of `+=`:
+
+```rust
+ns.shm_segments += 1;
+ns.shm_bytes += bytes;
+state.total_shm += 1;
+```
+
+There is no `release_shm`, no setter, and nothing that ever decrements. The
+only operation that reduces a count is `destroy_ns`, which removes the whole
+namespace — and note it does not subtract that namespace's contribution from
+the global `total_shm` / `total_sem` / `total_msg` either, so the *global*
+totals survive even that.
+
+**Two consequences, both live:**
+
+1. **Per-namespace counts drift upward forever.** Whatever real IPC objects
+   these are meant to track, they have lifetimes; the accounting does not model
+   the end of one.
+2. **The global totals in `stats()` are monotonic across namespace destruction.**
+   `destroy_ns` removes the namespace from `state.namespaces` but leaves
+   `total_shm` and friends where they were, so `stats()` can report more
+   segments than the sum of every namespace it can still list. Those two
+   numbers are supposed to describe the same thing.
+
+**Reproduce** (kernel shell):
+
+```
+ipcns init
+ipcns create demo          → id N
+ipcns shm N 1024
+ipcns stats                → SHM: 1
+ipcns destroy N
+ipcns list                 → demo is gone
+ipcns stats                → SHM: 1   ← still counted, nothing holds it
+```
+
+**Proper fix.** Give the subsystem the other half of each lifetime —
+`release_shm(ns_id, bytes)`, `release_sem(ns_id, count)`,
+`release_msg(ns_id, bytes)` — decrementing with `saturating_sub` (an
+underflowing counter is a worse lie than a stale one) and returning
+`KernelError::NotFound` for an unknown namespace, as the `record_*` pair
+already does. Have `destroy_ns` subtract the departing namespace's
+contribution from the global totals rather than orphaning it. Then expose them
+as `ipcns unshm|unsem|unmsg <ns_id> [n]` — or, better, rename the pair to
+`ipcns shm add|del`, since two verbs on one noun read better than two commands.
+
+Worth deciding at the same time whether `record_*` should take an object
+*identity* rather than a bare size, because `release_shm(ns, 1024)` requires
+the caller to remember the size it passed in, and a caller that misremembers
+silently corrupts the total in the other direction. That is the same class of
+mistake this subsystem's parsing has just been cleaned of, so it should not be
+reintroduced in the API.
+
+**Not a regression.** True since the subsystem was written; the `record_*`
+functions have never had counterparts.
+
+---
+
+## `A-COLORTEMP-AN-INVERTED-DAY-NIGHT-PAIR-PANICS-THE-KERNEL` (lane A, 2026-08-26) — **fixed 2026-08-26**
+
+**In short:** the night-light feature let you say "during the day make the
+screen 3000K, at night make it 6500K" — the two numbers the wrong way round
+from how people normally use it, but a setting it accepted without complaint.
+The next time it recalculated the colour during the twilight fade, the
+arithmetic subtracted the larger number from the smaller one on a type that
+cannot go below zero, and **the whole kernel panicked.** Any user of the shell
+could reach it with two ordinary commands.
+
+**Where.** `kernel/src/fs/colortemp.rs`, `update_for_time`, the two transition
+arms. The code read:
+
+```rust
+// Evening transition: day → night.
+day_k - ((day_k - night_k) * elapsed / total.max(1))
+// Morning transition: night → day.
+night_k + ((day_k - night_k) * elapsed / total.max(1))
+```
+
+Both compute `day_k - night_k` on `u32`. Nothing establishes that `day_k >=
+night_k`: `set_day_night` clamps its two arguments into `1000..=10000`
+*independently* and never compares them, and the shell surface
+(`colortemp daynight <id> <d> <n>`) passes whatever it is given. The kernel
+builds under `[profile.dev]`, which does not turn `overflow-checks` off, so the
+underflow is a panic rather than a wrapped value.
+
+That distinction matters for severity: this is not "the screen goes the wrong
+colour." It is an unprivileged shell command halting the kernel.
+
+**Reproduce** (kernel shell), before the fix:
+
+```
+colortemp init
+colortemp daynight 1 3000 6500     ← accepted; day cooler than night
+colortemp mode 1 scheduled
+colortemp schedule 1 1200 420 30   ← sunset 20:00, sunrise 07:00, 30m fade
+colortemp update 1 1215            ← 15 min into the evening fade → PANIC
+```
+
+The window is narrow but not obscure: any `current_min` inside
+`[sunset, sunset + trans)` or the morning equivalent lands in a transition arm.
+Outside those windows the function returns `day_k` or `night_k` whole and never
+subtracts, which is why the existing tests 4 and 5 — noon and 01:40 — never
+touched it.
+
+**Fix.** Replaced both arms with a shared `lerp_kelvin(from, to, elapsed,
+total)` that subtracts only in the direction the values actually run:
+
+```rust
+if to >= from { from + (to - from) * elapsed / total }
+else          { from - (from - to) * elapsed / total }
+```
+
+This removes the assumption rather than documenting it — the alternative,
+making `set_day_night` reject or swap an inverted pair, would impose a policy
+the feature does not otherwise have (there is no rule that a "day" temperature
+must be cooler; a user working nights may genuinely want the inversion) and
+would still leave the raw subtraction one careless caller away from the same
+panic. `elapsed` is clamped to `total` so a caller cannot extrapolate past
+`to`, and `total` is floored at 1 so a zero-length transition divides safely.
+
+**Regression test.** `colortemp::self_test` test 9 sets day 3000 / night 6500
+and asserts both transition directions return 4750K — the exact midpoint, 15
+minutes into a 30-minute fade. The evening call is the one that used to panic.
+
+**How it was found.** Reading the subsystem for severity evidence while
+clearing `cmd_colortemp` for
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+Unrelated to the parsing defect, and not reachable through it — the guessed
+values are all in range; it is the *stored* pair that has to be inverted.
+
+**Not a regression.** True since `update_for_time` was written.
+
+---
+
+## `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` (lane A, 2026-08-26) — **fixed** the same day
+
+**In short:** `cgmem` tracks a cgroup's memory as one total (`usage`) plus a
+breakdown of that same memory into two buckets (`rss` for a program's own
+pages, `cache` for cached file data). Charging always keeps the two in step.
+Un-charging does not: it subtracts from the total and from one bucket
+*separately*, and each subtraction stops at zero on its own. Two shell commands
+are enough to leave a cgroup reporting a total smaller than one of its own
+parts.
+
+**Where.** `kernel/src/fs/cgmem.rs`, `record_uncharge` (~line 176):
+
+```rust
+c.usage_pages = c.usage_pages.saturating_sub(pages);
+if is_cache {
+    c.cache_pages = c.cache_pages.saturating_sub(pages);
+} else {
+    c.rss_pages = c.rss_pages.saturating_sub(pages);
+}
+```
+
+`record_charge` maintains the invariant `usage_pages == rss_pages +
+cache_pages`: it adds `pages` to `usage_pages` and to exactly one of the two
+buckets, and `swap_pages` is never written by either function. `record_uncharge`
+subtracts from `usage_pages` and from one bucket, but the two `saturating_sub`
+calls floor independently, so whenever the named bucket holds fewer pages than
+are being un-charged the total drops by more than the breakdown does.
+
+**Reproduce.**
+
+```
+cgmem init
+cgmem create demo 1000
+cgmem charge 1 100 rss      → usage=100 rss=100 cache=0
+cgmem uncharge 1 50 cache   → usage=50  rss=100 cache=0
+cgmem list                  →   [1] demo  usage=50/1000 rss=100 cache=0 swap=0 oom=0
+```
+
+The cgroup now reports 50 pages of memory of which 100 are resident.
+
+**Why it matters beyond the arithmetic.** `usage_pages` is the number
+`record_charge` compares against `limit_pages` to decide whether the cgroup has
+exceeded its ceiling. An un-charge that deflates the total without deflating
+the breakdown therefore buys the cgroup headroom it does not have: after the
+sequence above the cgroup may charge another 950 pages before it trips its
+limit, while genuinely holding 100. The error is in the permissive direction,
+which is the direction that does not announce itself.
+
+**Not reachable only through a typo.** This was noticed while surveying
+`cmd_cgmem` for the guessed-value burn-down, where the `[rss|cache]` operand
+was read with `unwrap_or("rss") == "cache"` and so turned any misspelling into
+`rss`. But the sequence above types `cache` correctly; the defect is in the
+subsystem, not in the parse, and clearing the parse does not clear it.
+
+**Fixed.** Un-charge no more from the aggregate than actually left the bucket,
+so the two can never diverge:
+
+```rust
+let actual = if is_cache {
+    let n = pages.min(c.cache_pages);
+    c.cache_pages -= n;
+    n
+} else {
+    let n = pages.min(c.rss_pages);
+    c.rss_pages -= n;
+    n
+};
+c.usage_pages -= actual;   // == rss + cache still holds
+```
+
+`actual <= the bucket <= usage_pages` by the invariant, so the aggregate cannot
+underflow and the invariant holds afterwards.
+
+**The alternative that was rejected**, and it is a real trade-off rather than
+an obvious call: refuse an un-charge larger than the bucket with
+`KernelError::InvalidArgument`. That has a genuine argument behind it —
+silently un-charging less than asked is itself a quiet substitution of a number
+the caller did not supply, which is the very shape §600 exists to stamp out.
+The clamp wins because `record_uncharge` has exactly one honest job, keeping
+the two views of the same memory consistent, and a caller who over-un-charges
+has *already* lost track of what it charged; refusing leaves that caller's
+accounting wrong with no way to resynchronise, whereas clamping repairs the
+invariant on the spot. The §600 objection does not really apply either: the
+substituted number is not a guess about what the user meant, it is the
+arithmetic truth about how many pages were actually there.
+
+**Regression test.** `cgmem::self_test` test 9 covers both halves — un-charging
+a bucket that is empty (which used to deflate the aggregate and nothing else)
+and un-charging more than the right bucket holds — and asserts `usage_pages ==
+rss_pages + cache_pages` directly.
+
+**Not a regression.** True since `record_uncharge` was written.
+
+---
+
+## `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN` (lane A, 2026-08-26) — **fixed 2026-08-26**
+
+**In short:** `cgmem create` takes a memory ceiling, and every charge checks
+whether the cgroup has gone over it. The result of that check is written to a
+counter that no command prints. So the shell asks you for a limit, watches it
+being exceeded, and has no way to tell you that it was.
+
+**Where.** `kernel/src/fs/cgmem.rs`. `record_charge` (~line 167) does:
+
+```rust
+if c.usage_pages > c.limit_pages {
+    c.high_events += 1;
+}
+```
+
+`high_events` is declared at line 49 with the comment `// Times usage exceeded
+high watermark`, incremented there, asserted once inside `cgmem::self_test`
+(test 6), and read nowhere else. It is absent from `stats()`, which returns
+`(cgroup_count, total_charges, total_uncharges, total_oom_kills, ops)`, and
+absent from `cmd_cgmem`'s `list`, which prints `usage`, `rss`, `cache`, `swap`
+and `oom`. There is no accessor for it.
+
+**The same section has a second dead field.** `swap_pages` is initialised to 0
+in `create` and is never assigned again by any function in the module —
+`record_charge` and `record_uncharge` touch `rss_pages` and `cache_pages` only.
+`cmd_cgmem list` prints it as `swap={}`, so every cgroup the shell has ever
+displayed reports `swap=0`, not because no pages were swapped but because
+nothing can ever make it say otherwise. A statistic that is structurally
+constant is worse than an absent one: it reads as evidence.
+
+**Why these two are one entry.** They are the same failure at the two ends of
+the pipe. `high_events` is measured and not reported; `swap_pages` is reported
+and not measured. Between them, `cgmem list`'s eight columns include one that
+cannot be wrong and one that cannot be right, and the limit the user was asked
+for at `create` time influences neither.
+
+**Relation to `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.**
+That entry is the stricter version of this one — there the limit is stored and
+never compared at all. Here the comparison happens; only its output is
+unreachable. The two share a cause worth naming: a limit operand is easy to
+accept and store, and the work of *acting* on it is a separate change that the
+shape of the code does not force anyone to make.
+
+**Proper fix.** Add `high_events` to the `list` line and to `stats()`, so the
+comparison that already happens is visible. `swap_pages` needs the opposite
+decision made first — either give the module a `record_swap` (which is what the
+field's presence implies was intended) or delete the field and its column,
+since a column that is always zero misinforms. Do not leave it printed and
+unwritten.
+
+**Not a regression.** True since the module was written.
+
+**Fixed.** Both ends, in one change.
+
+*The reported-and-not-measured end.* `record_swap(cg_id, pages, swap_in)` now
+exists: `swap_in` false adds to `swap_pages` (pages left memory for swap),
+`swap_in` true subtracts, saturating at zero so a swap-in larger than the
+recorded swap-out clamps rather than wrapping to `u64::MAX`. It is reachable
+from the shell as `cgmem swap <cg_id> <pages> [out|in]`, with `out` as the
+bracketed default — that being the only direction that can be first, since pages
+cannot come back in before they went out. It deliberately does *not* move the
+pages out of `rss_pages`/`cache_pages`, because only the caller knows which
+bucket they came from and inferring one would be §600's guessed-value shape; the
+caller pairs it with `record_uncharge`.
+
+*The measured-and-not-reported end.* `high_events` is now printed by
+`cgmem list` as `high={}` between `swap=` and `oom=`, and a new
+`total_high_events` aggregate is carried in `State`, bumped alongside the
+per-cgroup counter in `record_charge`, and returned by `stats()` — which widened
+from a 5-tuple to `(cgroups, charges, uncharges, ooms, high, ops)`. Both
+`cmd_cgmem stats` and `/proc/cgmem` print it as `High events:`.
+
+*Why this ordering matters beyond tidiness.* Surfacing `high_events` is what
+makes the twenty-fifth burn-down batch's `cmd_cgmem create` limit-guess
+falsifiable. Before this change a guessed policy ceiling had no observable
+consequence anywhere in the system, so the burn-down entry looked harmless — it
+was not harmless, it was *queued*, waiting for this fix to arm it. Both were
+therefore done together.
+
+*Tests.* `cgmem::self_test` grew from 9 to 10 tests. Test 1 now destructures the
+6-tuple and asserts `high == 0` at init; test 8 asserts `high == 1` after test
+6's deliberate over-limit charge; new test 10 (`swap_cg`) asserts `swap_pages ==
+25` after out-40/in-15, asserts the clamp to 0 after an over-large swap-in, and
+asserts `record_swap` on a nonexistent cgroup is an `Err`. Shell rung 93 asserts
+the `high=0` column is present in `cgmem list` output.
+
+*Design decision.* The delete-the-field alternative and why completing it won
+are recorded as `design-decisions.md` §608.
+
+---
+
+## `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO` (lane C, 2026-08-26) — **open**, tech debt
+
+**In short:** The Settings panel has a "Window rules" page where you can say
+things like *"the editor should always open maximised on desktop 2"* or *"chat
+windows should be 80% transparent and always on top"*. As of today five of the
+seventeen things you can ask for actually happen. The other twelve are accepted
+by the panel, saved to the config file, shown in the rule list — and then
+nothing. There is no error and no greyed-out control: the rule simply has no
+effect, and the only way to find out is to write one and watch nothing happen.
+
+**Where:** `gui/desktop/src/window_rules.rs` (the `rule_actions!` field list,
+~line 255) declares the seventeen. `gui/desktop/src/lib.rs`
+`DesktopShell::rule_requests` turns the five that work into `ShellRequest`s.
+`gui/remote/src/control.rs` is the protocol that would have to grow for the
+rest.
+
+**What works today**
+
+| Field | How it is carried out |
+|---|---|
+| `skip_taskbar` | shell-local: `ManagedWindow::skip_taskbar`, filtered out of `taskbar_windows` |
+| `skip_alt_tab` | shell-local: filtered out of `switcher_windows` |
+| `initial_state` | `ShellControlAction::Minimize` / `Maximize` (but not `Fullscreen` — see below) |
+| `snap_zone` | `ShellControlAction::SnapToZone(SnapSlot)` |
+| `desktop` | `ShellRequest::MoveWindowToDesktop` |
+
+**What does not, and why.** The shell may only ask the compositor for things
+`ShellControlAction` names — eight verbs about *another client's* window
+(`Activate`, `Minimize`, `Restore`, `Maximize`, `Close`, `SnapLeft`,
+`SnapRight`, `SnapToZone`). Every other request in the protocol —
+`Move`, `Resize`, `SetOpacity`, `SetFullscreen`, `SetVisible` — resolves
+against **the sender's own window**, so a shell cannot use them on someone
+else's. That is a deliberate property of the protocol, not an oversight: it is
+what stops any client that can talk to the compositor from moving every other
+client's windows around.
+
+| Field | What it would need |
+|---|---|
+| `position` (incl. `RememberLast`, `CenterOnMonitor`) | a `ShellMove { window, x, y }` request |
+| `size` (incl. `RememberLast`) | a `ShellResize { window, w, h }` request |
+| `min_size`, `max_size` | a size-constraint request; the compositor has no per-window constraint store at all |
+| `opacity` | a `ShellSetOpacity { window, alpha }` request |
+| `always_on_top`, `always_on_bottom` | a per-window layer override; today `Layer` is fixed at creation by the client |
+| `target_monitor` | multi-monitor placement, which the compositor does not model yet |
+| `no_decorations` | decorations are the client's own; there is no request to strip them |
+| `prevent_close`, `prevent_move`, `prevent_resize` | a per-window policy the *compositor* enforces — these cannot be shell-side, because the shell is not in the path when the user drags a title bar |
+| `initial_state: Fullscreen` | `SetFullscreen` is self-only; needs a `ShellControlAction::Fullscreen` verb |
+
+**The proper fix**, and why it is not one commit: the eight-verb
+`ShellControlAction` is a lane-C-owned enum in `gui/remote`, so adding verbs is
+cheap — but `CONTROL_VERSION` is a wire version and each addition costs a bump
+plus a compositor-side implementation, and three of the twelve (`prevent_*`)
+need a policy store the compositor does not have. The honest increments are:
+
+1. `ShellMove` + `ShellResize` (unblocks `position`, `size`, and the
+   already-working `remember_state` bookkeeping that currently feeds nothing).
+2. `ShellSetOpacity` and a `Fullscreen` verb — both are one-line compositor
+   changes on top of state that already exists.
+3. A per-window layer override for `always_on_top` / `always_on_bottom`.
+4. A compositor-side policy store for `prevent_close` / `prevent_move` /
+   `prevent_resize`, and constraints for `min_size` / `max_size`.
+5. `target_monitor` last, behind multi-monitor support.
+
+**Severity while open:** low but *dishonest*, which is the part that matters.
+Nothing breaks; the user is shown a control that does nothing. If the fix is
+going to be deferred past the next Settings pass, the panel should grey out or
+mark the twelve rather than let them be written — a rule that is saved and
+ignored is worse than a control that says it is not available yet.
+
+**Not a regression.** Until 2026-08-26 the rules engine had no caller at all, so
+*seventeen* of seventeen did nothing. This is the state after wiring five of
+them up.
+
+---
+
+## `A-FDTABLE-HAS-NO-PROCESS-EXIT-PATH-AND-THE-TABLE-VECTOR-ONLY-GROWS` (lane A, 2026-08-26) — **fixed 2026-08-26**
+
+**In short:** The module that tracks which files each process has open had no
+way to represent a process *exiting*. Tables were created on first use and never
+removed, and the list of them is capped at 256 — so once 256 different processes
+had ever opened a single file, every later open failed permanently, whether or
+not any of those processes still existed.
+
+**Where.** `kernel/src/fs/fdtable.rs`. `open` (~line 187) pushes a fresh
+`ProcessFdTable` for any pid it has not seen:
+
+```rust
+if state.tables.len() >= MAX_PROCESSES {
+    return Err(KernelError::ResourceExhausted);
+}
+state.tables.push(ProcessFdTable { pid, entries: Vec::new(), next_fd: 0, max_fds: DEFAULT_MAX_FDS });
+```
+
+`MAX_PROCESSES` is 256 (line 124). The module's public surface was
+`init_defaults`, `open`, `close`, `dup`, `list`, `get`, `set_max_fds`,
+`list_tables`, `stats`, `self_test` — every one of which either adds a table or
+reads one. **Nothing removed a table.** `close` removes a single *entry* and
+leaves the table in place, so a process that opened one file and closed it still
+occupied one of the 256 slots forever.
+
+**Why this is worse than an ordinary leak.** Process exit is not an edge case in
+an fd table — it is the single most frequent event in its life, and the one the
+data structure exists to survive. A module that can model open, close and dup
+but not exit is not leaking by oversight in a corner; it is missing the main
+lifecycle transition. The symptom, moreover, is delayed and unattributable: the
+256th distinct pid works fine, the 257th gets `ResourceExhausted`, and nothing
+in the error names *exhausted by long-dead processes* as the cause. A reader
+would look for a process holding too many descriptors, which is exactly what is
+not happening.
+
+**Found by.** Writing `kshell::self_test` rung 94 for the twenty-sixth
+option-refusal burn-down batch. The rung needed a descriptor to exist so it
+could prove that a refused `close` had not destroyed it, and needed to leave no
+fixture behind afterwards — and there was no operation that could do the second
+thing. The absence was visible only because something finally asked for it.
+
+**Fixed.** `close_all(pid) -> KernelResult<usize>` removes the process's whole
+table, returns how many descriptors were still open, and adds them to
+`total_closes` (they *were* closed; an aggregate that disagreed with the
+per-process history for no discoverable reason would be its own bug). It uses
+`Vec::remove` rather than `swap_remove` so that a process exiting does not
+silently reorder the `/proc/fdtable` listing of the ones that did not. A second
+exit for the same pid is `NotFound` rather than a silent success — the caller
+has lost track of the process either way, and saying so is more useful than
+pretending. Reachable from the shell as `fdtable exit <pid>`.
+
+`fdtable::self_test` grew from 8 to 9 tests; test 9 asserts the table
+disappears, the surviving tables are untouched, the close tally moves by exactly
+the number of descriptors released, a repeat exit errors, and the pid is
+genuinely reusable afterwards — `open` re-creates the table and fd numbering
+restarts at 0, because `next_fd` went away with it. It is deliberately placed
+*after* test 8 so the exact totals that test asserts stay meaningful.
+
+**Not a regression.** True since the module was written.
+
+---
+
+## `A-KCONSOLE-CAN-CREATE-A-CONSOLE-AND-HAS-NO-WAY-TO-DESTROY-ONE` (lane A, 2026-08-26) — **fixed 2026-08-26**
+
+**In short:** The module that manages virtual consoles — the text screens you
+switch between with a hotkey — could make new ones and had no operation for
+getting rid of one. The list of them is capped at sixteen, so a session that
+opened consoles for temporary work eventually could not open any more, and
+there was nothing the user could do about it: the only way back was a reboot.
+
+**Where.** `kernel/src/fs/kconsole.rs`. `create` (~line 188) was the only writer
+of the `consoles` vector, and the cap it checks is the whole of the pressure:
+
+```rust
+const MAX_CONSOLES: usize = 16;
+
+pub fn create(name: &str, console_type: ConsoleType, cols: u32, rows: u32) -> KernelResult<u32> {
+    with_state(|state| {
+        if state.consoles.len() >= MAX_CONSOLES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        ...
+        state.consoles.push(Console { ... });
+```
+
+`init_defaults` seeds three, so a user got thirteen creations per boot, ever.
+There was no `destroy`, no `remove`, no `close` — the module's entire public
+surface was `init_defaults`, `switch`, `write`, `create`, `resize`, `active`,
+`list`, `get`, `stats`, `self_test`. The shell command matched it exactly.
+
+**Why it stayed invisible.** Nothing in the kernel calls `kconsole::create`.
+The only caller is `cmd_kconsole`, i.e. a human typing at the shell, and the
+gap does not bite until the fourteenth creation in one boot — which nothing had
+ever done, because until this batch the boot battery did not create consoles
+either. It surfaced only when `kshell::self_test` rung 95 needed to create one
+to prove that omitting a bracketed operand still yields the documented default,
+and then needed to put the table back the way it found it. This is the second
+consecutive batch in which writing a rung that owns its fixture exposed a
+missing teardown path in the module under test (see
+`A-FDTABLE-HAS-NO-PROCESS-EXIT-PATH-AND-THE-TABLE-VECTOR-ONLY-GROWS`), which is
+worth generalising: **a module whose only caller is an interactive command
+tends to be missing precisely the operations no test ever needed.**
+
+**Fixed.** `kconsole::destroy(id)` and a `kconsole destroy <id>` subcommand.
+Two decisions inside it were not obvious and are recorded in the function's own
+doc comment:
+
+*The active console is refused, not silently vacated.* `destroy` returns
+`DeviceBusy` when `id` is the active console, matching what Linux's
+`VT_DISALLOCATE` has done with `EBUSY` for as long as virtual terminals have
+existed. Destroying it instead would leave `active_id` pointing at nothing — a
+state `init_defaults` can never produce and nothing can leave, since `active()`
+would find no console and `switch` is the only writer of `active_id` and needs a
+target that exists. Auto-selecting a survivor was rejected for the reason that
+governs this whole burn-down: which console the user wants to be looking at is
+not something the function can know, so picking one is a guess wearing the
+clothes of a recovery. Switch first, then destroy.
+
+*`next_id` is not rewound.* Ids are never re-issued, because `kconsole list` and
+`/proc/kconsole` name consoles by id and a re-used number would silently rebind
+an identifier the user had already read. That is deliberately the *opposite* of
+the rule in `fdtable`, where descriptor numbers do restart at 0 after a process
+exits — and correctly so, because there the whole table goes away with its
+allocator and the numbers were scoped to a process that no longer exists. Here
+the id space outlives every individual console.
+
+`remove`, not `swap_remove`, so destroying one console does not silently
+reorder the ones that survive in `kconsole list` and `/proc/kconsole`.
+
+`kconsole::self_test` grew from 8 to 9 tests; test 9 asserts the active console
+is refused, that the refused destroy freed nothing, that a destroyed console is
+gone from both the count and `get`, that destroying it twice is an error rather
+than a silent no-op, that the survivors are untouched, and that re-creating a
+console under the freed *name* gets a strictly greater id. It is deliberately
+placed after test 8 so the exact `count == 4` that test asserts stays meaningful.
+
+**Not a regression.** True since the module was written.
+
+---
+
+## `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` (lane C, 2026-08-26) — **RESOLVED 2026-08-26**
+
+**Resolution.** Piece 1 below is done. `HotkeyAction::ToggleShortcutCard` exists,
+`Super+/` is its default binding (and is listed on the card, so the card teaches
+its own chord), `DesktopShell::shortcut_card_open` holds the state,
+`render_shortcut_card()` centres the panel on the display, and
+`SessionRunner::paint_chrome` draws it — over the overview and the zone overlay,
+which dim what is behind them, and under Alt-Tab, which is modal. It joins
+`any_popup_open`/`dismiss_popups`, so Escape closes it and the Escape grab is
+reconciled for it like every other popup.
+
+Fixing the door exposed a second defect the card had all along, fixed in the same
+change: **the card did not fit on the screen.** Twenty-five bindings at 38 units
+a row came to 1,010 units of list plus chrome — 1,086 tall on a 1,080-line
+display — so the last rows were drawn past the bottom edge with nothing on the
+card to say they existed. `hotkeys::panel_layout` now folds the list into as many
+columns as it takes to fit the height the caller can spare; a card that fits is
+left at one column. See `design-decisions.md` §572.
+
+Piece 2 — **rebinding from the card** — is *not* done and is now tracked on its
+own as `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` below.
+
+---
+
+**In short:** the desktop can draw a "Keyboard Shortcuts" card — a list of every
+chord and what it does, styled, scrollable-height, with the selected row
+highlighted — and there is no way for a user to make it appear. Nothing on the
+desktop opens it: not a chord, not a start-menu entry, not a right-click. So a
+user who wants to know what Super+Z does has to read the source.
+
+This got sharper, not softer, when the two shortcut tables were merged (see
+`design-decisions.md` §571): the shortcuts are now *editable*, and a user who
+can change a binding has a much stronger claim on being able to see what the
+bindings are.
+
+**Where it lives.** `gui/desktop/src/hotkeys.rs` —
+`render_settings_panel(registry, palette, x, y, selected_index)` returns a
+self-contained `Vec<RenderCommand>` and is called from nothing outside its own
+tests. It is fully exercised by them (colour roles in both themes, badge
+geometry, empty and default registries), so this is a wiring gap, not an
+unfinished renderer.
+
+**What the proper fix is.** Two pieces, and the first is the whole of the
+minimum:
+
+1. **Something that opens it.** The natural home is the shell's own popup
+   surface, alongside the start menu and the notification pane — it is the same
+   kind of thing: a sheet the shell draws over the desktop and dismisses with
+   Escape. That means a `HotkeyAction::ToggleShortcutCard`, a default chord, and
+   a branch in `DesktopShell::run_desktop_action` that flips a `bool` the way
+   `ToggleNotifications` does. The chord wants to be one the card itself would
+   list; Super+/ (i.e. Super+Slash) is what macOS and most editors use for
+   "show me the shortcuts" and is unclaimed here.
+2. **Rebinding from the card.** `selected_index` and the registry's conflict
+   detection are already there, which is most of what an editor needs; what is
+   missing is a "press the new chord now" capture mode and a call to
+   `HotkeyConfig::from_registry(...).save()` to persist it. This is the larger
+   half and is not required for the card to be worth opening — a read-only
+   reference card is already the thing users ask for.
+
+Until then the renderer is dead code that passes its tests, which is the state
+this project has repeatedly found to be worse than absent code: it looks done.
+
+## `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` (lane C, 2026-08-26)
+
+**In short:** you can now open the card that lists every keyboard shortcut
+(`Super+/`), but you cannot change a shortcut from it. The shortcuts *are*
+changeable — there is a text configuration file format for them, and the code
+that reads and writes it works — so the only way to move a shortcut is to edit
+that file by hand, which no desktop user is going to do. Every other desktop lets
+you click a shortcut and press the new keys.
+
+**Where it lives.** `gui/desktop/src/hotkeys.rs`. Almost all the parts exist:
+
+| Part | State |
+|---|---|
+| `render_settings_panel`'s `selected_index` — draws one row highlighted | done, and drawn with `None` by `DesktopShell::render_shortcut_card` |
+| `HotkeyRegistry::conflicts_with` — "that chord already does X" | done, tested |
+| `HotkeyConfig::from_registry(...).save()` / `load` — the file format | done, tested, round-trips every action |
+| Moving the selection with the arrow keys | missing |
+| A *capture mode* — "press the chord you want now", where the next keystroke is read as data rather than run as a shortcut | missing, and is the real work |
+| Anywhere on disk to save to | missing — nothing in the shell reads or writes a settings file yet |
+
+**What the proper fix looks like.** The capture mode is the part that needs
+thought, because it inverts the shell's whole input rule: while it is on, the
+shell must *not* run the chord the user presses, and must not let the compositor
+run it either — including chords the shell has grabbed globally, and including
+Escape, which has to mean "cancel" rather than "close the card". A
+`shortcut_capture: Option<usize>` on `DesktopShell` naming the row being rebound,
+checked at the top of `handle_hotkey` before `bound_action`, is the shape; the
+new binding then goes in via `HotkeyRegistry::register`, whose `Err(Conflict)` is
+what the card shows instead of applying it.
+
+The grabs also have to be re-reconciled after any change: the set of chords the
+shell holds is derived from the registry (`global_chords`), so a rebind must
+ungrab the old chord and grab the new one, exactly as
+`SessionRunner::reconcile_escape_grab` already does for the conditional ones.
+That is the piece most likely to be forgotten, and forgetting it means the
+rebound shortcut works until the session restarts.
+
+**If it is never fixed:** the shortcuts stay at their defaults for every user in
+practice. Nothing breaks; the card is still worth having as a reference. This is
+a feature gap, not a bug.
+

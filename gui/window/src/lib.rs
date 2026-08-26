@@ -73,12 +73,17 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+pub mod app;
+
 use guiremote::client::{ClientError, Connection, Transport};
-use guiremote::control::{CursorShape, DisplayInfo, RequestBody, ResponseBody, WindowSpec};
+use guiremote::control::{
+    BufferFormat, CursorShape, DisplayInfo, RequestBody, ResponseBody, WindowSpec,
+};
 
 pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
 pub use guiremote::control::{
-    CursorShape as Cursor, DisplayInfo as Display, Layer, ShellControlAction, WindowSpec as Spec,
+    BufferFormat as PixelFormat, CursorShape as Cursor, DisplayInfo as Display, Layer,
+    ShellControlAction, WindowSpec as Spec,
 };
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
@@ -165,6 +170,26 @@ pub enum EventResponse {
     Exit,
 }
 
+/// What [`EventLoop::run_batched`] is handing over.
+///
+/// Two things rather than one because drawing and reacting happen at different
+/// rates: an application reacts to every event and should draw only once the
+/// events have run out. See [`EventLoop::run_batched`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dispatch {
+    /// One event, and the window it is addressed to.
+    Event {
+        /// The window the compositor sent it to.
+        window: u64,
+        /// What happened.
+        event: Event,
+    },
+    /// Everything readable has now been dispatched, so the application's state
+    /// has settled. This is the moment to draw it, and the loop is about to
+    /// park.
+    Settled,
+}
+
 // ---------------------------------------------------------------------------
 // Window
 // ---------------------------------------------------------------------------
@@ -186,6 +211,12 @@ pub struct WindowAttributes {
     pub decorations: bool,
     /// Whether its client area may be see-through.
     pub transparent: bool,
+    /// Whether the pointer passes through it to whatever is behind.
+    ///
+    /// See-through is about pixels; click-through is about the hit test, and
+    /// the two are independent — a frosted panel is the first without the
+    /// second, a heads-up overlay the second without necessarily the first.
+    pub input_transparent: bool,
     /// The smallest size the user may resize it to, if constrained.
     pub min_size: Option<(u32, u32)>,
     /// The largest size the user may resize it to, if constrained.
@@ -204,6 +235,15 @@ pub struct WindowAttributes {
 pub struct Window {
     id: u64,
     title: String,
+    /// Which program this window belongs to; see [`Window::app_id`].
+    ///
+    /// A creation term rather than a report — nothing ever changes it — so by
+    /// rights it belongs in [`WindowAttributes`] beside `resizable`. It is here
+    /// instead because that struct is `Copy`, which is what lets
+    /// [`Window::attributes`] hand out a whole copy for the price of a move,
+    /// and a `String` would cost every caller of that accessor an allocation to
+    /// buy one field a tidier home.
+    app_id: String,
     width: u32,
     height: u32,
     x: i32,
@@ -224,6 +264,24 @@ impl Window {
     #[must_use]
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// Which *program* this window belongs to, as this program declared it.
+    ///
+    /// Unlike [`title`](Self::title), which answers "which document?" and
+    /// changes as the user works, this answers "which program?" and is the same
+    /// for every window the program opens, for as long as it runs. Empty when
+    /// the window declined to name one — which is what
+    /// [`WindowBuilder`] produces unless [`app_id`](WindowBuilder::app_id) was
+    /// called, and never what a title falls back to.
+    ///
+    /// Reading it back here is reading what *we* sent, not what the compositor
+    /// believes: the value is recorded at creation from the spec and there is no
+    /// event that revises it, by design — a program that could rename itself
+    /// mid-session could walk out from under a rule the user wrote about it.
+    #[must_use]
+    pub fn app_id(&self) -> &str {
+        &self.app_id
     }
 
     /// Client-area size in pixels.
@@ -287,6 +345,12 @@ impl Window {
     #[must_use]
     pub const fn is_transparent(&self) -> bool {
         self.attributes.transparent
+    }
+
+    /// Whether the pointer passes through it to whatever is behind.
+    #[must_use]
+    pub const fn is_input_transparent(&self) -> bool {
+        self.attributes.input_transparent
     }
 
     /// The smallest size the user may resize it to, if constrained.
@@ -470,6 +534,70 @@ impl<T: Transport> WindowHandle<'_, T> {
             shape,
         })
     }
+
+    /// Give the compositor pixels, to be drawn later by
+    /// [`RenderCommand::Image`] naming `image_id`.
+    ///
+    /// Uploading is separate from drawing because a protocol that carried the
+    /// pixels along with the draw would re-send a megabyte sixty times a second
+    /// to keep a still picture on screen. Upload once, draw every frame; a
+    /// wallpaper is uploaded when the user picks it and never again.
+    ///
+    /// `image_id` is the *caller's* number, not the compositor's, and it is
+    /// scoped to this window: two windows may both use id 1 for different
+    /// pictures. Uploading over an id that already exists replaces it, which is
+    /// what makes a slideshow one upload per slide rather than an id leak.
+    ///
+    /// `bytes` is `stride`-per-row, which may exceed `width * 4` — a caller
+    /// cropping a region out of a larger buffer passes the larger stride rather
+    /// than repacking. [`imagecodec`] never pads, so a decoded picture passes
+    /// `width * 4`.
+    ///
+    /// [`imagecodec`]: https://docs.rs/imagecodec
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A refusal means the geometry does not
+    /// describe the bytes, or this link has reached the compositor's per-link
+    /// image budget — and in either case *nothing changed*: no partial image is
+    /// stored, and any previous image under this id is still the one that
+    /// draws.
+    pub fn upload_image(
+        &mut self,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    ) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::UploadImage {
+            window: self.id,
+            image_id,
+            width,
+            height,
+            stride,
+            format,
+            bytes,
+        })
+    }
+
+    /// Release an uploaded image, giving its bytes back to this link's budget.
+    ///
+    /// Dropping an id that was never uploaded succeeds: "there is no such
+    /// image" and "there is no longer such an image" are the same state, and a
+    /// caller cleaning up should not have to remember which of the two it is
+    /// in.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn drop_image(&mut self, image_id: u64) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::DropImage {
+            window: self.id,
+            image_id,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +629,27 @@ impl WindowBuilder {
         Self {
             spec: WindowSpec::new(title, width, height),
         }
+    }
+
+    /// Name the program this window belongs to.
+    ///
+    /// Not the title. The title says which *document* is open and changes as
+    /// the user works; this says which *application* is running and must not
+    /// change, because it is what anything grouping or configuring "all of this
+    /// program's windows" keys on — window rules, taskbar grouping, the icon
+    /// lookup. Conventionally the executable's file stem, lower-cased.
+    ///
+    /// Applications built on [`app::run`](crate::app::run) do not call this:
+    /// [`App::app_id`](crate::app::App::app_id) supplies the executable's name
+    /// for them, and overriding *that* is the place to disagree.
+    ///
+    /// Advisory only — the compositor has no way to check it, so nothing may
+    /// grant a permission on the strength of it. See
+    /// [`WindowSpec::app_id`](guiremote::control::WindowSpec::app_id).
+    #[must_use]
+    pub fn app_id(mut self, app_id: impl Into<String>) -> Self {
+        self.spec.app_id = app_id.into();
+        self
     }
 
     /// Ask for a specific screen position. Left unset, the compositor places
@@ -544,6 +693,23 @@ impl WindowBuilder {
     #[must_use]
     pub const fn transparent(mut self, transparent: bool) -> Self {
         self.spec.transparent = transparent;
+        self
+    }
+
+    /// Whether the pointer passes through the window to whatever is behind it.
+    ///
+    /// A click-through window is invisible to the hit test: it can never be
+    /// focused by clicking, receives no pointer events, and does not shield the
+    /// windows it covers. Painting, stacking and keyboard delivery are
+    /// unaffected.
+    ///
+    /// This is for heads-up overlays — a volume indicator that appears over the
+    /// middle of the screen for two seconds and must not swallow the click
+    /// aimed at what is underneath it. An ordinary window must not set it: a
+    /// window that silently ignores every click looks broken with no clue why.
+    #[must_use]
+    pub const fn input_transparent(mut self, input_transparent: bool) -> Self {
+        self.spec.input_transparent = input_transparent;
         self
     }
 
@@ -692,6 +858,7 @@ impl<T: Transport> EventLoop<T> {
         self.windows.push(Window {
             id,
             title: spec.title,
+            app_id: spec.app_id,
             width: spec.width,
             height: spec.height,
             // The compositor places an unpositioned window and reports where
@@ -705,6 +872,7 @@ impl<T: Transport> EventLoop<T> {
                 resizable: spec.resizable,
                 decorations: spec.decorations,
                 transparent: spec.transparent,
+                input_transparent: spec.input_transparent,
                 min_size: spec.min_size,
                 max_size: spec.max_size,
             },
@@ -803,6 +971,48 @@ impl<T: Transport> EventLoop<T> {
     /// As [`Connection::confirm`].
     pub fn move_window_to_desktop(&mut self, window: u64, desktop: u32) -> Result<(), Error<T>> {
         self.conn.set_window_workspace(window, desktop)
+    }
+
+    /// Claim a keyboard chord, so that it arrives here wherever the focus is.
+    ///
+    /// The third of the shell privileges, with
+    /// [`watch_desktop`](Self::watch_desktop) and
+    /// [`control_window`](Self::control_window), and the one that makes the
+    /// other two reachable: a switcher you can only summon while the switcher
+    /// already has the keyboard is a switcher nobody can summon.
+    ///
+    /// `window` is one of this loop's own — the grabbed presses arrive as
+    /// [`Event::Key`] against it, exactly as if it were focused, and closing it
+    /// releases the chord. What is claimed is the whole chord: Alt+Tab is not
+    /// Tab, and grabbing the one leaves the other alone.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A refusal means the window is not this
+    /// loop's, or some other window already holds the chord — grabs are first
+    /// come, first served, and there is no way to take one from its holder.
+    pub fn grab_key(
+        &mut self,
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> Result<(), Error<T>> {
+        self.conn.grab_key(window, key, modifiers)
+    }
+
+    /// Give a claimed chord back to the focused window.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_key`](Self::grab_key). Releasing a chord this window did not
+    /// hold is not one: only releasing another window's is.
+    pub fn ungrab_key(
+        &mut self,
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> Result<(), Error<T>> {
+        self.conn.ungrab_key(window, key, modifiers)
     }
 
     /// Tell the compositor the user's appearance settings have changed on disk.
@@ -1146,6 +1356,37 @@ impl<T: Transport> EventLoop<T> {
     where
         F: FnMut(&mut Self, u64, Event) -> EventResponse,
     {
+        self.run_batched(|events, dispatch| match dispatch {
+            Dispatch::Event { window, event } => handler(events, window, event),
+            Dispatch::Settled => EventResponse::Continue,
+        })
+    }
+
+    /// [`Self::run`], with the end of each batch of events handed over too.
+    ///
+    /// The batch boundary is the loop's to know and nobody else's: [`Self::poll`]
+    /// drains everything the connection has made readable, and only the code
+    /// around that drain can tell where one run of events ends and the parking
+    /// begins. A handler with no way to see it must draw from inside itself,
+    /// which costs one frame per event — and a mouse drag arrives as a burst of
+    /// thirty moves, of which the first twenty-nine are stale before they are
+    /// sent. [`Dispatch::Settled`] is where the one frame that is not stale
+    /// belongs.
+    ///
+    /// One handler rather than two closures, because the second would need the
+    /// same `&mut` state as the first and could not have it.
+    ///
+    /// `Settled` arrives only after a batch that actually dispatched something,
+    /// and never after one that ended in [`EventResponse::Exit`] — an
+    /// application on its way out has nothing to show.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::pump`] and [`Connection::wait`].
+    pub fn run_batched<F>(&mut self, mut handler: F) -> Result<(), Error<T>>
+    where
+        F: FnMut(&mut Self, Dispatch) -> EventResponse,
+    {
         self.running = true;
         while self.running && self.conn.is_open() {
             let mut dispatched = false;
@@ -1155,10 +1396,15 @@ impl<T: Transport> EventLoop<T> {
                 // window. A title-bar X that does nothing is worse than an
                 // application that quits when it would rather not have.
                 let requested_close = matches!(event, Event::CloseRequested);
-                if handler(self, window, event) == EventResponse::Exit || requested_close {
+                let verdict = handler(self, Dispatch::Event { window, event });
+                if verdict == EventResponse::Exit || requested_close {
                     self.running = false;
                     break;
                 }
+            }
+            if dispatched && self.running && handler(self, Dispatch::Settled) == EventResponse::Exit
+            {
+                self.running = false;
             }
             // Only block when there was nothing to do. Waiting after a burst
             // would add a frame of latency to the next one for no benefit.
@@ -1539,6 +1785,10 @@ pub mod testing {
                 RequestBody::ReserveEdge { .. } => "ReserveEdge",
                 RequestBody::SwitchWorkspace { .. } => "SwitchWorkspace",
                 RequestBody::SetWindowWorkspace { .. } => "SetWindowWorkspace",
+                RequestBody::UploadImage { .. } => "UploadImage",
+                RequestBody::DropImage { .. } => "DropImage",
+                RequestBody::GrabKey { .. } => "GrabKey",
+                RequestBody::UngrabKey { .. } => "UngrabKey",
             }
         }
     }
@@ -1662,10 +1912,12 @@ mod tests {
     fn building_a_window_sends_the_spec_the_builder_describes() {
         let (mut events, server) = wired();
         let id = WindowBuilder::new("Settings", 640, 480)
+            .app_id("settings")
             .position(10, -20)
             .resizable(false)
             .decorations(false)
             .transparent(true)
+            .input_transparent(true)
             .min_size(320, 240)
             .max_size(1280, 960)
             .build(&mut events)
@@ -1677,10 +1929,15 @@ mod tests {
                 panic!("expected a create");
             };
             assert_eq!(sent.title, "Settings");
+            // Distinct from the title in case, so a builder that assigned the
+            // title to both fields would fail here rather than pass by looking
+            // close enough.
+            assert_eq!(sent.app_id, "settings");
             assert_eq!(sent.position, Some((10, -20)));
             assert!(!sent.resizable);
             assert!(!sent.decorations);
             assert!(sent.transparent);
+            assert!(sent.input_transparent);
             assert_eq!(sent.min_size, Some((320, 240)));
             assert_eq!(sent.max_size, Some((1280, 960)));
         }
@@ -1692,6 +1949,7 @@ mod tests {
         assert!(!w.is_resizable());
         assert!(!w.has_decorations());
         assert!(w.is_transparent());
+        assert!(w.is_input_transparent());
         assert_eq!(w.min_size(), Some((320, 240)));
         assert_eq!(w.max_size(), Some((1280, 960)));
         assert_eq!(
@@ -1700,6 +1958,7 @@ mod tests {
                 resizable: false,
                 decorations: false,
                 transparent: true,
+                input_transparent: true,
                 min_size: Some((320, 240)),
                 max_size: Some((1280, 960)),
             }
@@ -1766,6 +2025,25 @@ mod tests {
             .send_input(&[InputEvent::new(id, Event::Moved { x: 1900, y: 0 })]);
         events.poll().unwrap();
         assert_eq!(events.window(id).unwrap().position(), (1900, 0));
+    }
+
+    #[test]
+    fn a_window_that_names_no_program_sends_an_empty_id_rather_than_its_title() {
+        // The builder must not "helpfully" fall back to the title. A window
+        // that declines to identify its program has to say so, because the
+        // alternative — every window of a program carrying a *different* id,
+        // one per document — is worse than no id at all: it makes rules look
+        // like they work and then stop working when the user saves the file.
+        let (mut events, server) = wired();
+        let _ = WindowBuilder::new("notes.md — Editor", 640, 480)
+            .build(&mut events)
+            .unwrap();
+        let borrowed = server.borrow();
+        let RequestBody::CreateWindow(sent) = &borrowed.seen[0].body else {
+            panic!("expected a create");
+        };
+        assert_eq!(sent.title, "notes.md — Editor");
+        assert_eq!(sent.app_id, "");
     }
 
     #[test]
@@ -2081,6 +2359,7 @@ mod tests {
                 pid: 1234,
                 layer: Layer::Background,
                 title: "Wallpaper".to_owned(),
+                app_id: "wallpaper".to_owned(),
                 visible: true,
                 minimized: false,
                 maximized: false,
@@ -2102,6 +2381,10 @@ mod tests {
                 pid: 5678,
                 layer: Layer::Normal,
                 title: "Editor".to_owned(),
+                // Not "editor": the fixture's contract is that no field matches
+                // the other window's, and a lower-cased title would be exactly
+                // the value a store that reused the title for the id produced.
+                app_id: "notepad".to_owned(),
                 visible: false,
                 minimized: true,
                 maximized: true,

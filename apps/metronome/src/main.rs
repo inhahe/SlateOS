@@ -2,8 +2,18 @@
 //!
 //! A musical metronome with BPM control, time signature selection,
 //! visual beat indicator, tap tempo, accent patterns, and subdivisions.
+//!
+//! The window, the connection and the event loop are `oswindow::app`'s; this
+//! file supplies only what is actually a metronome's own — what to do with an
+//! event, what to draw, and how often it needs the clock. See
+//! `known-issues.md` → `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` for why that
+//! division exists rather than a hand-written strap per app.
+//!
+//! There is deliberately no crate-wide `#![allow(dead_code)]` here. This file
+//! carried one, and it is the lint that would have said the whole application
+//! was unreachable from `main` — lesson 46 in `known-issues.md`: a blanket
+//! allow disarms the one check that finds lesson 45.
 
-#![allow(dead_code)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -14,11 +24,14 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::fn_params_excessive_bools)]
 
+use std::process::ExitCode;
+use std::time::Duration;
+
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{Event, Key, KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, Key, KeyEvent};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use oswindow::app::{App, Response};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -28,14 +41,11 @@ const COL_BASE: u32 = 0x1E1E2E;
 const COL_MANTLE: u32 = 0x181825;
 const COL_SURFACE0: u32 = 0x313244;
 const COL_SURFACE1: u32 = 0x45475A;
-const COL_SURFACE2: u32 = 0x585B70;
 const COL_TEXT: u32 = 0xCDD6F4;
 const COL_SUBTEXT0: u32 = 0xA6ADC8;
-const COL_BLUE: u32 = 0x89B4FA;
 const COL_GREEN: u32 = 0xA6E3A1;
 const COL_RED: u32 = 0xF38BA8;
 const COL_YELLOW: u32 = 0xF9E2AF;
-const COL_PEACH: u32 = 0xFAB387;
 const COL_LAVENDER: u32 = 0xB4BEFE;
 const COL_OVERLAY0: u32 = 0x6C7086;
 const COL_TEAL: u32 = 0x94E2D5;
@@ -44,6 +54,20 @@ const COL_MAUVE: u32 = 0xCBA6F7;
 const MIN_BPM: u32 = 20;
 const MAX_BPM: u32 = 300;
 const TAP_HISTORY_SIZE: usize = 8;
+/// How long a tap stays part of the current measurement.
+///
+/// Two seconds is 30 BPM, below `MIN_BPM`, so a gap this long is not a slow
+/// tempo — it is somebody starting again. Without the rule, a tap made minutes
+/// after the last one averages a 600-second "interval" into the tempo and pins
+/// it to the floor.
+///
+/// It has a second job. The frame clock is only armed while something needs
+/// advancing (see `MetronomeApp::tick_interval`), and a tap history that never
+/// emptied would keep it armed for the life of the process — one tap, and a
+/// stopped metronome holds the desktop awake for ever. Expiring the history is
+/// what lets the clock stop, so the two properties are one rule rather than
+/// two that must be kept in step.
+const TAP_STALE_MS: u64 = 2_000;
 /// How long the beat indicator stays lit, in milliseconds.
 ///
 /// Named rather than written twice: `toggle_play` lights beat one and `tick`
@@ -62,13 +86,6 @@ struct TimeSignature {
 }
 
 impl TimeSignature {
-    fn new(num: u32, den: u32) -> Self {
-        Self {
-            beats_per_measure: num,
-            beat_value: den,
-        }
-    }
-
     fn display(&self) -> String {
         format!("{}/{}", self.beats_per_measure, self.beat_value)
     }
@@ -172,17 +189,6 @@ fn tempo_name(bpm: u32) -> &'static str {
         176..=199 => "Presto",
         _ => "Prestissimo",
     }
-}
-
-// ---------------------------------------------------------------------------
-// Beat state (for visual feedback)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BeatType {
-    Accent,      // First beat of measure (downbeat)
-    Normal,      // Regular beat
-    Subdivision, // Sub-beat
 }
 
 // ---------------------------------------------------------------------------
@@ -323,6 +329,21 @@ impl MetronomeApp {
         }
     }
 
+    /// Drop the tap history once the last tap is older than [`TAP_STALE_MS`].
+    ///
+    /// Called from `tick` rather than from `tap_tempo` so that one rule does
+    /// both jobs: the next tap after a long pause starts a fresh measurement
+    /// *because* the history has already been emptied, and the emptying is
+    /// what lets `tick_interval` give the clock back. Putting the test in
+    /// `tap_tempo` instead would fix the tempo and leave the clock running.
+    fn forget_stale_taps(&mut self) {
+        if let Some(&last) = self.tap_times_ms.last()
+            && self.now_ms.saturating_sub(last) > TAP_STALE_MS
+        {
+            self.tap_times_ms.clear();
+        }
+    }
+
     fn clear_tap(&mut self) {
         self.tap_times_ms.clear();
     }
@@ -356,17 +377,31 @@ impl MetronomeApp {
     /// nothing called it at all -- see known-issues.md lesson 45.  The old
     /// body also decayed the beat flash by a hard-coded `16`, a guess at the
     /// frame interval; the real one now arrives with the event.
-    fn tick(&mut self, delta_ms: u64) {
+    ///
+    /// Returns whether anything the user can *see* changed. Most ticks change
+    /// nothing — at 120 BPM and 60 fps, 29 of every 30 — and a frame per tick
+    /// would spend a desktop's whole budget redrawing a display that reads the
+    /// same. The verdict is computed here rather than by comparing fields from
+    /// outside because this is where the mutations are: a new visible effect
+    /// added to this function has its answer three lines away.
+    fn tick(&mut self, delta_ms: u64) -> bool {
         self.now_ms = self.now_ms.saturating_add(delta_ms);
+        let was_flashing = self.beat_flash_ms > 0;
         self.beat_flash_ms = self.beat_flash_ms.saturating_sub(delta_ms);
+        // The flash is drawn as lit-or-not (`beat_flash_ms > 0`), so only the
+        // crossing to zero is a visible change, not the countdown itself.
+        let unlit = was_flashing && self.beat_flash_ms == 0;
+
+        // Nothing anyone can see, but it is what allows the clock to stop.
+        self.forget_stale_taps();
 
         if !self.playing {
-            return;
+            return unlit;
         }
 
         let interval = self.beat_interval_ms();
         if self.now_ms.saturating_sub(self.last_beat_time_ms) < interval {
-            return;
+            return unlit;
         }
 
         // Advance the beat clock by exactly one interval rather than snapping
@@ -385,6 +420,7 @@ impl MetronomeApp {
 
         self.advance_beat();
         self.beat_flash_ms = BEAT_FLASH_MS;
+        true
     }
 
     fn advance_beat(&mut self) {
@@ -411,18 +447,6 @@ impl MetronomeApp {
                     }
                 }
             }
-        }
-    }
-
-    fn current_beat_type(&self) -> BeatType {
-        if self.current_sub > 0 {
-            return BeatType::Subdivision;
-        }
-        if self.current_beat < self.accents.len() as u32 && self.accents[self.current_beat as usize]
-        {
-            BeatType::Accent
-        } else {
-            BeatType::Normal
         }
     }
 
@@ -517,23 +541,18 @@ impl MetronomeApp {
         }
     }
 
-    fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(ke) => self.handle_key(ke),
-            // Without this the metronome never beat: `tick` was correct and
-            // tested, and nothing called it.  known-issues.md lesson 45.
-            Event::Tick { elapsed_ms } => self.tick(*elapsed_ms),
-            // Without this the metronome never beat: `tick` was correct and
-            // tested, and nothing called it.  known-issues.md lesson 45.
-            _ => {}
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Rendering
     // -----------------------------------------------------------------------
 
-    fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    /// The drawing itself, as a flat command list.
+    ///
+    /// Kept separate from `App::render` — which wraps this in a `RenderTree` —
+    /// because the tests assert over the commands, and because an inherent
+    /// `render` alongside the trait's would silently win the method lookup:
+    /// every existing `app.render(600.0, 800.0)` would keep compiling while
+    /// testing the wrong function.
+    fn render_commands(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Background
@@ -872,8 +891,83 @@ impl MetronomeApp {
     }
 }
 
-fn main() {
-    let _app = MetronomeApp::new();
+impl App for MetronomeApp {
+    fn title(&self) -> String {
+        String::from("Metronome")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (520, 720)
+    }
+
+    /// The clock is asked for only while something is actually moving.
+    ///
+    /// This is the method the harness's docs single out, and the metronome is
+    /// the case that shows why it is `Option` rather than a constant: a stopped
+    /// metronome has nothing to advance, and an app that keeps asking for ticks
+    /// with nothing to advance holds the whole desktop awake — the compositor
+    /// cannot park while any window has a deadline armed.
+    ///
+    /// Three things need it, and each stops needing it on its own:
+    ///
+    /// * `playing` — the beat itself.
+    /// * `beat_flash_ms` — the indicator is still lit and must go out. Without
+    ///   this the flash from the last beat before Stop would stay on screen,
+    ///   because the tick that would have cleared it is the one we declined.
+    /// * a live tap history — `now_ms` is the only clock tap tempo has, so it
+    ///   must keep running between taps or every tap would read as
+    ///   simultaneous. [`TAP_STALE_MS`] is what makes this term expire.
+    ///
+    /// 16 ms is a floor, not a promise: the harness may deliver late and the
+    /// app must advance by the `elapsed_ms` it is given, never by this value.
+    fn tick_interval(&self) -> Option<Duration> {
+        if self.playing || self.beat_flash_ms > 0 || !self.tap_times_ms.is_empty() {
+            Some(Duration::from_millis(16))
+        } else {
+            None
+        }
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            // Redraw unconditionally on a key, without working out whether
+            // this particular key changed anything. A keystroke is one event
+            // at human speed, so an occasional wasted frame costs nothing; a
+            // tick is 60 a second, which is why that arm below does the work
+            // to answer honestly.
+            Event::Key(ke) => {
+                self.handle_key(ke);
+                Response::Redraw
+            }
+            // Without this the metronome never beat: `tick` was correct and
+            // tested, and nothing called it. known-issues.md lesson 45, and
+            // lesson 47 for the shape it takes in a GUI app — the window still
+            // laid out, still repainted and still answered the keyboard while
+            // showing a beat counter frozen at one.
+            Event::Tick { elapsed_ms } => {
+                if self.tick(*elapsed_ms) {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            // `Resize` and `ScaleChanged` are absent on purpose: the harness
+            // redraws for those itself, because the frame on screen was drawn
+            // at the old geometry whatever the app thinks. See
+            // `oswindow::app::drive`.
+            _ => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        RenderTree {
+            commands: self.render_commands(width, height),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    oswindow::app::launch("metronome", &mut MetronomeApp::new())
 }
 
 // ===========================================================================
@@ -882,6 +976,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use guitk::event::Modifiers;
+
     use super::*;
 
     fn make_key(key: Key) -> KeyEvent {
@@ -906,9 +1002,15 @@ mod tests {
 
     #[test]
     fn time_signature_display() {
-        let ts = TimeSignature::new(4, 4);
+        let ts = TimeSignature {
+            beats_per_measure: 4,
+            beat_value: 4,
+        };
         assert_eq!(ts.display(), "4/4");
-        let ts2 = TimeSignature::new(6, 8);
+        let ts2 = TimeSignature {
+            beats_per_measure: 6,
+            beat_value: 8,
+        };
         assert_eq!(ts2.display(), "6/8");
     }
 
@@ -1207,28 +1309,6 @@ mod tests {
         assert_eq!(app.total_beats, 1);
     }
 
-    // --- Beat type ---
-
-    #[test]
-    fn beat_type_accent() {
-        let app = MetronomeApp::new();
-        assert_eq!(app.current_beat_type(), BeatType::Accent);
-    }
-
-    #[test]
-    fn beat_type_normal() {
-        let mut app = MetronomeApp::new();
-        app.current_beat = 1;
-        assert_eq!(app.current_beat_type(), BeatType::Normal);
-    }
-
-    #[test]
-    fn beat_type_subdivision() {
-        let mut app = MetronomeApp::new();
-        app.current_sub = 1;
-        assert_eq!(app.current_beat_type(), BeatType::Subdivision);
-    }
-
     // --- Tick ---
 
     #[test]
@@ -1259,16 +1339,17 @@ mod tests {
 
     /// A real `Event::Tick` reaches the beat clock.
     ///
-    /// Through `handle_event` on purpose: `tick` was correct and had its own
-    /// tests for months while `handle_event` matched only `Event::Key`, so a
-    /// test that calls `tick` directly cannot tell a metronome that beats
-    /// from one that sits silent.  Falsified by deleting the `Event::Tick`
-    /// arm and confirming this test, and only it, fails.
+    /// Through `App::on_event` on purpose -- the front door the harness uses.
+    /// `tick` was correct and had its own tests for months while the event
+    /// match named only `Event::Key`, so a test that calls `tick` directly
+    /// cannot tell a metronome that beats from one that sits silent.
+    /// Falsified by deleting the `Event::Tick` arm and confirming this test,
+    /// and only it, fails.
     #[test]
     fn a_tick_event_reaches_the_beat_clock() {
         let mut app = MetronomeApp::new();
         app.toggle_play();
-        app.handle_event(&Event::Tick { elapsed_ms: 501 });
+        app.on_event(&Event::Tick { elapsed_ms: 501 });
         assert_eq!(app.current_beat, 1, "Event::Tick did not reach `tick`");
     }
 
@@ -1332,6 +1413,117 @@ mod tests {
             app.tick(400);
         }
         assert_eq!(app.bpm, 150, "T did not reach tap_tempo");
+    }
+
+    /// A tap after a long pause starts a new measurement instead of poisoning
+    /// the old one.
+    ///
+    /// Without [`TAP_STALE_MS`] the gap itself is averaged in: two taps 400 ms
+    /// apart give 150 BPM, then one ten seconds later averages (400 + 10000)/2
+    /// = 5200 ms, which is 11 BPM and clamps to the 20 BPM floor. The user
+    /// tapped a tempo and got the slowest one the app has.
+    #[test]
+    fn a_tap_after_a_long_pause_does_not_average_the_pause_in() {
+        let mut app = MetronomeApp::new();
+        app.handle_key(&make_key(Key::T));
+        app.tick(400);
+        app.handle_key(&make_key(Key::T));
+        assert_eq!(app.bpm, 150, "two taps 400 ms apart are 150 BPM");
+
+        // Ten seconds of nothing, then one more tap.
+        app.tick(10_000);
+        app.handle_key(&make_key(Key::T));
+        assert_eq!(
+            app.bpm, 150,
+            "the pause was averaged into the tempo instead of ending the measurement"
+        );
+        assert_eq!(
+            app.tap_times_ms.len(),
+            1,
+            "the stale taps should have been forgotten, leaving only the new one"
+        );
+    }
+
+    /// The frame clock is asked for only while something is moving.
+    ///
+    /// An app that always returns an interval keeps the compositor awake for
+    /// ever: it cannot park while any window has a deadline armed. A stopped
+    /// metronome with its indicator dark has nothing to advance and must say
+    /// so.
+    #[test]
+    fn a_stopped_metronome_gives_the_clock_back() {
+        let mut app = MetronomeApp::new();
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a metronome that has never been started asked for a clock"
+        );
+
+        app.toggle_play();
+        assert!(app.tick_interval().is_some(), "playing needs the clock");
+
+        app.toggle_play();
+        assert!(
+            app.tick_interval().is_some(),
+            "the indicator lit by the downbeat still has to go out"
+        );
+        app.on_event(&Event::Tick {
+            elapsed_ms: BEAT_FLASH_MS + 1,
+        });
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "stopped, dark and untapped, and still holding the desktop awake"
+        );
+    }
+
+    /// Tap tempo's only clock is `now_ms`, so the clock must keep running
+    /// between taps — otherwise every tap reads as simultaneous with the last.
+    /// It is [`TAP_STALE_MS`] that lets this term expire rather than pinning
+    /// the clock on for the life of the process after a single tap.
+    #[test]
+    fn one_tap_keeps_the_clock_until_it_goes_stale() {
+        let mut app = MetronomeApp::new();
+        app.handle_key(&make_key(Key::T));
+        assert!(
+            app.tick_interval().is_some(),
+            "a tap with no clock cannot be timed against the next one"
+        );
+
+        app.on_event(&Event::Tick {
+            elapsed_ms: TAP_STALE_MS + 1,
+        });
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "one tap held the clock on for ever"
+        );
+    }
+
+    /// A tick that changes nothing visible must not cost a frame.
+    ///
+    /// At 120 BPM and 60 fps that is 29 ticks in every 30. Redrawing on all of
+    /// them spends a desktop's whole frame budget on a display that reads the
+    /// same, which is the cost the harness's `Response::Idle` exists to avoid.
+    #[test]
+    fn a_tick_between_beats_asks_for_no_frame() {
+        let mut app = MetronomeApp::new();
+        app.toggle_play(); // 120 BPM: beats 500 ms apart, flash 150 ms.
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 200 }),
+            Response::Redraw,
+            "the downbeat flash going out is visible and needs a frame"
+        );
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Idle,
+            "a tick with the indicator already dark redrew an identical frame"
+        );
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 300 }),
+            Response::Redraw,
+            "the beat itself did not ask for a frame"
+        );
     }
 
     /// Backspace throws away a mistimed tap history.
@@ -1491,9 +1683,9 @@ mod tests {
     // --- Event handling ---
 
     #[test]
-    fn handle_event() {
+    fn on_event_routes_a_key() {
         let mut app = MetronomeApp::new();
-        app.handle_event(&Event::Key(make_key(Key::Space)));
+        app.on_event(&Event::Key(make_key(Key::Space)));
         assert!(app.playing);
     }
 
@@ -1502,7 +1694,7 @@ mod tests {
     #[test]
     fn render_main_view() {
         let app = MetronomeApp::new();
-        let cmds = app.render(600.0, 800.0);
+        let cmds = app.render_commands(600.0, 800.0);
         assert!(!cmds.is_empty());
         let has_title = cmds
             .iter()
@@ -1513,7 +1705,7 @@ mod tests {
     #[test]
     fn render_bpm_display() {
         let app = MetronomeApp::new();
-        let cmds = app.render(600.0, 800.0);
+        let cmds = app.render_commands(600.0, 800.0);
         let has_bpm = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "120"));
@@ -1524,7 +1716,7 @@ mod tests {
     fn render_playing() {
         let mut app = MetronomeApp::new();
         app.playing = true;
-        let cmds = app.render(600.0, 800.0);
+        let cmds = app.render_commands(600.0, 800.0);
         let has_playing = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("PLAYING")));
@@ -1535,7 +1727,7 @@ mod tests {
     fn render_settings_view() {
         let mut app = MetronomeApp::new();
         app.show_settings = true;
-        let cmds = app.render(600.0, 800.0);
+        let cmds = app.render_commands(600.0, 800.0);
         let has_settings = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Metronome Settings"));
@@ -1545,7 +1737,7 @@ mod tests {
     #[test]
     fn render_has_background() {
         let app = MetronomeApp::new();
-        let cmds = app.render(600.0, 800.0);
+        let cmds = app.render_commands(600.0, 800.0);
         let has_bg = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
@@ -1555,7 +1747,7 @@ mod tests {
     #[test]
     fn render_beat_indicators() {
         let app = MetronomeApp::new();
-        let cmds = app.render(600.0, 800.0);
+        let cmds = app.render_commands(600.0, 800.0);
         // Should have 4 beat indicator circles (4/4 time)
         let beat_circles = cmds
             .iter()
@@ -1571,7 +1763,7 @@ mod tests {
     fn render_practice_mode() {
         let mut app = MetronomeApp::new();
         app.practice_mode = true;
-        let cmds = app.render(600.0, 800.0);
+        let cmds = app.render_commands(600.0, 800.0);
         let has_practice = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Practice:")));

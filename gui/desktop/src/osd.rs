@@ -273,9 +273,20 @@ impl OsdOverlay {
     /// Advance the overlay's animation state given the current time and config.
     /// Returns true if the overlay should be kept, false if dismissed.
     ///
-    /// Phase transitions inside a single tick re-enter the match loop so
-    /// that zero-duration phases (e.g. `fade_out_ms = 0`) collapse in one
-    /// call instead of needing a second tick to be observed.
+    /// Phase transitions inside a single tick re-enter the match loop so that a
+    /// tick long enough to cross a phase boundary — a zero-duration phase, or
+    /// simply a frame that took longer than the phase it landed in — lands in
+    /// the right phase in one call rather than needing one tick per phase.
+    ///
+    /// A transition moves `phase_start` **forward by the phase's own duration**
+    /// rather than to `now_ms`, so the overshoot is carried into the next phase
+    /// instead of being forgiven. Both halves of that matter. Forgiving it makes
+    /// the phases fail to partition time, so every overlay outlives its
+    /// configured lifetime by up to one frame per phase; and it defeats the loop
+    /// entirely — with `phase_start = now_ms` the re-entry always computes
+    /// `elapsed == 0`, so a single ten-second tick advances by exactly one
+    /// phase and an overlay takes three frames to retire no matter how much time
+    /// has passed.
     pub fn tick(&mut self, now_ms: u64, config: &OsdConfig) -> bool {
         loop {
             let elapsed = now_ms.saturating_sub(self.phase_start);
@@ -286,7 +297,7 @@ impl OsdOverlay {
                     if config.fade_in_ms == 0 || elapsed >= config.fade_in_ms {
                         self.opacity = 1.0;
                         self.phase = OsdPhase::Visible;
-                        self.phase_start = now_ms;
+                        self.phase_start = self.phase_start.saturating_add(config.fade_in_ms);
                     } else {
                         self.opacity = elapsed as f32 / config.fade_in_ms as f32;
                     }
@@ -295,7 +306,7 @@ impl OsdOverlay {
                     self.opacity = 1.0;
                     if elapsed >= config.timeout_ms {
                         self.phase = OsdPhase::FadingOut;
-                        self.phase_start = now_ms;
+                        self.phase_start = self.phase_start.saturating_add(config.timeout_ms);
                     }
                 }
                 OsdPhase::FadingOut => {
@@ -1462,6 +1473,49 @@ mod tests {
         assert_eq!(o.phase, OsdPhase::Visible);
         assert!((o.opacity - 1.0).abs() < 0.01);
         assert_eq!(o.phase_start, 1000);
+    }
+
+    /// One long frame must land in the right phase, not merely the next one.
+    ///
+    /// The frame clock delivers *measured* time, so a frame that ran long — a
+    /// stalled process, a machine that slept, a debugger — arrives as one tick
+    /// carrying the whole interval. An overlay whose phases advanced one per
+    /// tick would then need three more frames to retire whatever its clock
+    /// said, which is a volume indicator still on screen after the delay it was
+    /// given has passed several times over.
+    #[test]
+    fn one_long_frame_retires_an_overlay_that_the_clock_says_is_over() {
+        let config = OsdConfig::default();
+        let mut o = OsdOverlay::new(OsdKind::Brightness { level: 80 }, 0, 1);
+        let alive = o.tick(10_000, &config);
+        assert!(!alive, "ten seconds did not retire a 2.45-second overlay");
+        assert_eq!(o.phase, OsdPhase::Dismissed);
+    }
+
+    /// The phases have to partition the overlay's life, not merely follow one
+    /// another: a transition that moved the clock origin to *now* would forgive
+    /// the overshoot each time, so every overlay would outlive its configured
+    /// timeout by up to one frame per phase, and the drift would grow with the
+    /// frame time rather than staying bounded.
+    #[test]
+    fn a_phase_boundary_carries_its_overshoot_into_the_next_phase() {
+        let config = OsdConfig::default();
+        let mut o = OsdOverlay::new(OsdKind::Brightness { level: 80 }, 0, 1);
+
+        // A frame that lands 50 ms past the end of the 150 ms fade-in. The
+        // visible phase must be treated as having started at 150, not at 200.
+        o.tick(config.fade_in_ms + 50, &config);
+        assert_eq!(o.phase, OsdPhase::Visible);
+        assert_eq!(o.phase_start, config.fade_in_ms);
+
+        // So it is due to start fading out at exactly fade_in + timeout, and a
+        // tick one millisecond earlier must not have retired it.
+        let due = config.fade_in_ms + config.timeout_ms;
+        o.tick(due - 1, &config);
+        assert_eq!(o.phase, OsdPhase::Visible, "it faded a millisecond early");
+        o.tick(due, &config);
+        assert_eq!(o.phase, OsdPhase::FadingOut);
+        assert_eq!(o.phase_start, due);
     }
 
     #[test]

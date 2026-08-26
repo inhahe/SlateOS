@@ -6,7 +6,12 @@ description = "SlateOS Background File Indexer — builds and maintains a search
 
 # `textfmt`, not `guitk`: the indexer is a headless service, and the escaping
 # it needs for `/etc/indexer.conf` is not a reason to link a widget library.
+#
+# `globmatch` for the same reason a second search tool should not hold a second
+# opinion about what `[a-z]` means: this crate and `apps/filesearch` each had
+# their own matcher and their own bugs, and both are user-facing.
 [dependencies]
+globmatch = { path = "../globmatch" }
 textfmt = { path = "../../textfmt" }
 
 # Test fixtures only: a private temp directory per test, removed on drop --

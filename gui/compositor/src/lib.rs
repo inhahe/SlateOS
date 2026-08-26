@@ -36,7 +36,9 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -63,7 +65,7 @@ use osfont::raster::GlyphMask;
 use osfont::system::{Family, FontCache, Weight};
 
 mod buffer;
-pub use buffer::{BufferFormat, SharedBuffer};
+pub use buffer::{BufferFormat, ImageAsset, SharedBuffer};
 // The rendering-backend seam. Everything from `compose_frame` down to a
 // primitive is written against `RenderTarget`, so the CPU rasterizer below is a
 // *choice* rather than the only thing the compositor can do — which is what a
@@ -263,6 +265,13 @@ pub enum CompositorError {
     /// the failure is inventing a rectangle, and a window silently placed
     /// *somewhere* is a worse outcome than a request that visibly failed.
     ZoneNotInLayout(WindowId),
+    /// A key combination was claimed by one window and asked for by another.
+    ///
+    /// Reported rather than silently honoured because first-grabber-wins is only
+    /// a usable rule if the loser is told: a second shell whose Alt+Tab quietly
+    /// never fired would look exactly like a shell with no shortcut mechanism at
+    /// all, which is the bug the mechanism exists to end.
+    KeyAlreadyGrabbed(Key, Modifiers),
 }
 
 impl std::fmt::Display for CompositorError {
@@ -292,6 +301,22 @@ impl std::fmt::Display for CompositorError {
             Self::NotResizable(id) => write!(f, "window is not resizable: {}", id.raw()),
             Self::ZoneNotInLayout(id) => {
                 write!(f, "snap layout has no such zone: {}", id.raw())
+            }
+            // Names the chord, because "already grabbed" without it leaves the
+            // reader of a log to guess which of a shell's dozen shortcuts lost.
+            Self::KeyAlreadyGrabbed(key, modifiers) => {
+                write!(f, "key combination already grabbed: ")?;
+                for (held, name) in [
+                    (modifiers.ctrl, "Ctrl+"),
+                    (modifiers.alt, "Alt+"),
+                    (modifiers.shift, "Shift+"),
+                    (modifiers.super_key, "Super+"),
+                ] {
+                    if held {
+                        write!(f, "{name}")?;
+                    }
+                }
+                write!(f, "{key:?}")
             }
         }
     }
@@ -798,6 +823,19 @@ pub struct Window {
     pub id: WindowId,
     /// Window title (displayed in title bar).
     pub title: String,
+    /// Which program the client says this window belongs to.
+    ///
+    /// Stored and forwarded, never interpreted: the compositor has no opinion
+    /// about it and no way to verify it. It exists so that a shell can key a
+    /// window rule on something steadier than the title, which changes as the
+    /// user works.
+    ///
+    /// Fixed at creation, and there is deliberately no request to change it —
+    /// unlike the title, which has [`CompositorRequest::SetTitle`]. A program
+    /// able to rename itself mid-session could walk out from under a rule the
+    /// user wrote about it, which would make rules unreliable in exactly the
+    /// case they matter: a program misbehaving.
+    pub app_id: String,
     /// Position of the window's top-left corner (including decorations).
     pub x: i32,
     /// Position of the window's top-left corner (including decorations).
@@ -832,6 +870,16 @@ pub struct Window {
     /// compositor blits these pixels into the client area instead of replaying
     /// `render_tree`; the client renders directly into shared memory.
     pub buffer: Option<SharedBuffer>,
+    /// Images this window has uploaded, by the id its render commands name.
+    ///
+    /// Owned by the window rather than by the compositor for two reasons that
+    /// both come down to the id being the *client's* to choose. Two clients that
+    /// each pick id 1 must not collide, and a compositor-wide map would make
+    /// them; and a client that exits without unregistering must not leave its
+    /// pixels resident forever, which dropping with the window is what prevents.
+    ///
+    /// Empty for almost every window, so the map costs nothing until used.
+    pub images: HashMap<u64, ImageAsset>,
     /// Whether the window is in true fullscreen mode: it owns the entire
     /// display with no decorations. Distinct from `maximized` (which keeps the
     /// title bar/borders and respects panel reservations). Fullscreen is the
@@ -887,6 +935,23 @@ pub struct Window {
     /// from [`opacity`](Self::opacity), which fades the *whole* window
     /// uniformly including its decorations.
     pub transparent: bool,
+    /// Whether the pointer passes straight through this window.
+    ///
+    /// When set, [`window_at`](Compositor::window_at) and
+    /// [`window_at_with_decorations`](Compositor::window_at_with_decorations)
+    /// behave as though the window were not there, so clicks, hovers, drags and
+    /// scrolls all land on whatever is behind it. The window is consequently
+    /// unfocusable by pointer and receives no pointer events at all.
+    ///
+    /// Orthogonal to [`transparent`](Self::transparent), which is about pixels
+    /// rather than the hit test. A heads-up overlay — the volume OSD floating
+    /// over the middle of the screen — needs this one: it is briefly on top of
+    /// everything, and must not swallow the click aimed at what is underneath.
+    ///
+    /// It does not affect painting, stacking, or keyboard routing. A window
+    /// that something else focuses still receives keys; see
+    /// `design-decisions.md` 566.
+    pub input_transparent: bool,
     /// Smallest client area the window may be resized to, if it named one.
     pub min_size: Option<(u32, u32)>,
     /// Largest client area the window may be resized to, if it named one.
@@ -971,6 +1036,7 @@ impl Window {
         Self {
             id: WindowId::allocate(),
             title: spec.title.clone(),
+            app_id: spec.app_id.clone(),
             x,
             y,
             width: spec.width,
@@ -985,6 +1051,7 @@ impl Window {
             client_pid,
             render_tree: RenderTree::new(),
             buffer: None,
+            images: HashMap::new(),
             fullscreen: false,
             fs_restore_rect: None,
             restore_rect: None,
@@ -994,6 +1061,7 @@ impl Window {
             decorations: spec.decorations,
             resizable: spec.resizable,
             transparent: spec.transparent,
+            input_transparent: spec.input_transparent,
             min_size: spec.min_size,
             max_size: spec.max_size,
             cursor: CursorShape::Arrow,
@@ -2414,6 +2482,90 @@ impl RenderTarget for Framebuffer {
         }
     }
 
+    /// Nearest-neighbour resample of `image` into `dest`.
+    ///
+    /// Iterating the *destination* and sampling the source, rather than walking
+    /// the source and scattering, is what makes the cost proportional to the
+    /// pixels actually painted: an icon-view thumbnail is a 256×256 image drawn
+    /// at 64×64, and the source walk would read sixteen pixels for every one it
+    /// kept. It is also the only order that fills the destination without gaps
+    /// when the image is drawn *larger* than itself.
+    ///
+    /// The source coordinate is computed from the unclipped `dest` origin, so a
+    /// window sliding off the left edge keeps sampling the same source column
+    /// for a given screen column instead of the image shifting as it is revealed.
+    ///
+    /// All of the coordinate arithmetic is in `i64`. `dest` comes from a client's
+    /// render command by way of an `f32` cast and is not the compositor's to
+    /// trust: `py - dest.y` in `i32` overflows outright for a `dest.y` near
+    /// `i32::MIN`, and the multiply by the source height overflows for far less
+    /// than that.
+    fn draw_image(&mut self, image: &ImageAsset, dest: Rect, clip: Option<&Rect>, opacity: f32) {
+        let (src_w, src_h) = (image.width(), image.height());
+        if dest.width == 0 || dest.height == 0 || src_w == 0 || src_h == 0 {
+            return;
+        }
+
+        // Visible portion: the quad, the draw clip, and the surface. The frame
+        // clip is applied per pixel by `blend_pixel`, as it is for every other
+        // primitive.
+        let visible = match clip {
+            Some(c) => match dest.intersect(c) {
+                Some(r) => r,
+                None => return,
+            },
+            None => dest,
+        };
+        let x0 = visible.x.max(0);
+        let y0 = visible.y.max(0);
+        let x1 = visible
+            .right()
+            .min(i32::try_from(self.width).unwrap_or(i32::MAX));
+        let y1 = visible
+            .bottom()
+            .min(i32::try_from(self.height).unwrap_or(i32::MAX));
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+
+        let (dest_x, dest_y) = (i64::from(dest.x), i64::from(dest.y));
+        let (dest_w, dest_h) = (i64::from(dest.width), i64::from(dest.height));
+        let (sw, sh) = (i64::from(src_w), i64::from(src_h));
+
+        // The last source index, so a destination pixel exactly on the far edge
+        // (which the division can reach when `dest` extends past the clip)
+        // samples the final row/column rather than one past it.
+        let sx_max = sw.saturating_sub(1);
+        let sy_max = sh.saturating_sub(1);
+
+        // `checked_div`'s `None` arm is unreachable — both extents were rejected
+        // as zero above, and an `i64` built from a `u32` cannot be the `-1` that
+        // makes the other overflow case possible — but writing the division as
+        // fallible costs nothing and keeps the loop free of an operation the
+        // reader has to prove safe from context.
+        for py in y0..y1 {
+            let sy = i64::from(py)
+                .saturating_sub(dest_y)
+                .saturating_mul(sh)
+                .checked_div(dest_h)
+                .unwrap_or(0)
+                .clamp(0, sy_max);
+            for px in x0..x1 {
+                let sx = i64::from(px)
+                    .saturating_sub(dest_x)
+                    .saturating_mul(sw)
+                    .checked_div(dest_w)
+                    .unwrap_or(0)
+                    .clamp(0, sx_max);
+                // Both are in `0..src_*` by the clamp, so the casts are exact and
+                // the read cannot miss; `pixel` bounds-checks regardless.
+                if let Some(texel) = image.pixel(sx as u32, sy as u32) {
+                    self.blend_pixel(px as u32, py as u32, texel, opacity);
+                }
+            }
+        }
+    }
+
     fn present(&mut self) {
         self.swap();
     }
@@ -2827,6 +2979,52 @@ pub enum CompositorRequest {
     /// Like [`ShellControl`](Self::ShellControl) it names somebody else's
     /// window and is therefore not resolved against the sender's own.
     SetWindowWorkspace { window_id: WindowId, workspace: u32 },
+    /// Give a window's image store some pixels under a client-chosen id, so
+    /// that its [`RenderCommand::Image`] commands naming that id can draw.
+    /// Answered with [`CompositorResponse::Ok`].
+    ///
+    /// See [`Compositor::register_image`] for what it does and why uploading is
+    /// a separate step from drawing. Resolved against the sender's own windows
+    /// in the ordinary way — an image store belongs to a window, and a client
+    /// filling somebody else's would be both a memory attack and a way to
+    /// change what another application draws.
+    RegisterImage {
+        window_id: WindowId,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    },
+    /// Forget one of a window's images. Answered with
+    /// [`CompositorResponse::Ok`] whether or not one was there — see
+    /// [`guiremote::control::RequestBody::DropImage`] for why the absent case is
+    /// not an error.
+    UnregisterImage { window_id: WindowId, image_id: u64 },
+    /// Claim a key combination for a window, so that it arrives there whoever
+    /// has the keyboard. Answered with [`CompositorResponse::Ok`], or an error
+    /// if another window holds it.
+    ///
+    /// The window named is the sender's own — it is where the event will be
+    /// addressed, and it is the claim's lifetime — so this is resolved in the
+    /// ordinary way. It is nonetheless privileged, because the *effect* is on
+    /// everybody else: a chord one client holds is a chord no other client can
+    /// ever see. See [`guiremote::control::RequestBody::GrabKey`].
+    GrabKey {
+        window_id: WindowId,
+        key: Key,
+        modifiers: Modifiers,
+    },
+    /// Release a claim. Answered with [`CompositorResponse::Ok`] whether or not
+    /// this window held it — see
+    /// [`guiremote::control::RequestBody::UngrabKey`] for why the absent case
+    /// is not an error and somebody else's is.
+    UngrabKey {
+        window_id: WindowId,
+        key: Key,
+        modifiers: Modifiers,
+    },
 }
 
 /// Responses from the compositor to clients.
@@ -3368,6 +3566,7 @@ impl RenderEngine {
         &mut self,
         fb: &mut T,
         commands: &[RenderCommand],
+        images: &HashMap<u64, ImageAsset>,
         window_x: i32,
         window_y: i32,
         window_width: u32,
@@ -3384,7 +3583,7 @@ impl RenderEngine {
         self.translate_stack.push(window_x as f32, window_y as f32);
 
         for cmd in commands {
-            self.execute_command(fb, cmd, opacity);
+            self.execute_command(fb, cmd, images, opacity);
         }
 
         self.clip_stack.clear();
@@ -3399,6 +3598,7 @@ impl RenderEngine {
         &mut self,
         fb: &mut T,
         cmd: &RenderCommand,
+        images: &HashMap<u64, ImageAsset>,
         opacity: f32,
     ) {
         let (tx, ty) = self.translate_stack.offset();
@@ -3548,8 +3748,25 @@ impl RenderEngine {
             RenderCommand::PopFont => {
                 self.font_stack.pop();
             }
-            RenderCommand::Image { .. } => {
-                // Image rendering requires an asset store — stub for now.
+            RenderCommand::Image {
+                x,
+                y,
+                width,
+                height,
+                image_id,
+            } => {
+                // An id the window never registered draws nothing. Silently: a
+                // client whose upload is still in flight, or whose asset was
+                // dropped to reclaim memory, is in an ordinary transient state,
+                // not a fault, and a log line per unresolved id would be one per
+                // frame for as long as it lasted.
+                if let Some(image) = images.get(image_id) {
+                    let px = (*x + tx) as i32;
+                    let py = (*y + ty) as i32;
+                    let dest = Rect::new(px, py, *width as u32, *height as u32);
+                    let clip = self.clip_stack.current().copied();
+                    fb.draw_image(image, dest, clip.as_ref(), opacity);
+                }
             }
             RenderCommand::BoxShadow {
                 x,
@@ -4499,6 +4716,57 @@ pub struct Compositor {
     /// shell's. What the compositor owns is which one is *showing*, because
     /// that is the part that decides pixels.
     current_workspace: u32,
+    /// Chords claimed by a window, which reach it whoever has the keyboard.
+    ///
+    /// This is the whole of the desktop-shortcut mechanism, and it exists
+    /// because [`handle_key`](Self::handle_key) otherwise delivers to
+    /// [`focused_window`](Self::focused_window) and to nothing else: without it
+    /// the shell's Alt+Tab fires only while the shell is focused, which is never
+    /// — Alt+Tab exists to be pressed from inside some other window. Consulted
+    /// *before* the focus lookup, and a match is delivered **instead of**, not
+    /// as well as, the ordinary delivery.
+    ///
+    /// Keyed by the whole chord rather than by the key, so that Alt+Tab and a
+    /// bare Tab are different claims and grabbing the shortcut does not take
+    /// the Tab key away from every text field on the desktop.
+    ///
+    /// A `HashMap` and not a `Vec`: this is read on **every** key event, which
+    /// is the one path in this file where a linear scan would grow with how many
+    /// shortcuts the user has configured.
+    key_grabs: HashMap<(Key, Modifiers), WindowId>,
+    /// Scancodes whose *press* went to a grab, and where it went.
+    ///
+    /// Needed because a chord's release is not the same chord. Alt+Tab held open
+    /// while the user lets go of Alt sends `Tab` up with no modifiers, which no
+    /// longer matches the grab — and a release delivered to the focused window
+    /// instead is a key the grabber never sees go up, so a shell holding an
+    /// alt-tab switcher open would hold it open forever. Keyed by *scancode*
+    /// rather than by key, because the scancode is the physical key and is the
+    /// only thing guaranteed identical between a press and its release: a layout
+    /// change or a modifier fold between the two can change the `Key`.
+    grabbed_presses: HashMap<u32, WindowId>,
+    /// Modifier keys whose release is owed to a grabber, because a chord that
+    /// grabber holds was formed with them.
+    ///
+    /// Alt+Tab is not finished when Tab comes up — it is finished when *Alt*
+    /// comes up, which is how every window switcher decides which window the
+    /// user landed on. But the Alt press was never grabbed (nobody claims a bare
+    /// modifier), so without this the release goes to the focused window and the
+    /// switcher is never told the gesture ended. It would stay on screen until
+    /// the next unrelated keystroke, having activated nothing.
+    ///
+    /// The release is delivered to the grabber **in addition to** the ordinary
+    /// focus routing, not instead of it. The focused window received the press;
+    /// a press with no matching release leaves it believing Alt is still held
+    /// forever, which is the stuck-modifier bug
+    /// [`release_all_modifiers`](Compositor::release_all_modifiers) exists to
+    /// prevent, and a grab must not manufacture one. See
+    /// `design-decisions.md` 565.
+    ///
+    /// A `Vec` of windows per scancode because two grabbers can hold two
+    /// different Alt chords — a switcher on Alt+Tab and an accessibility tool on
+    /// Alt+F7 — and both are waiting for the same physical key to come up.
+    grabbed_modifiers: HashMap<u32, Vec<WindowId>>,
 }
 
 impl Compositor {
@@ -4545,6 +4813,9 @@ impl Compositor {
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
             current_workspace: 0,
+            key_grabs: HashMap::new(),
+            grabbed_presses: HashMap::new(),
+            grabbed_modifiers: HashMap::new(),
         })
     }
 
@@ -4808,6 +5079,12 @@ impl Compositor {
             self.drag = None;
             self.set_drag_preview(None);
         }
+
+        // Before the window leaves the list, so that a shortcut a closing window
+        // held is free the moment it is gone. Leaving them would let a crashed
+        // shell keep Alt+Tab for the rest of the session with nothing on screen
+        // able to release it.
+        self.release_grabs_of(window_id);
 
         let closed_layer = self.layer_of(window_id);
         self.windows.remove(idx);
@@ -5977,6 +6254,134 @@ impl Compositor {
     }
 
     // -----------------------------------------------------------------------
+    // Image assets
+    // -----------------------------------------------------------------------
+
+    /// Register an image under `image_id` for one window, so that the window's
+    /// [`RenderCommand::Image`] commands naming that id have pixels to draw.
+    ///
+    /// Uploading is separate from drawing because the two have opposite
+    /// frequencies: a file manager's thumbnail is produced once and drawn on
+    /// every frame the folder is on screen, and a protocol that carried the
+    /// pixels alongside the draw would re-send a megabyte sixty times a second
+    /// to show a still picture. It is the same split as a texture upload and a
+    /// textured quad, and for the same reason.
+    ///
+    /// Re-registering an existing id replaces it, which is how a client updates
+    /// a picture in place — a video frame, a re-rendered chart — without the
+    /// intervening frame where the id names nothing and the image blinks out.
+    ///
+    /// The id is the *client's* to choose and is scoped to the window: two
+    /// clients may both use id 1 without either seeing the other's pixels.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window is gone, or any error
+    /// from [`ImageAsset::import`] if the client's geometry is invalid. Both
+    /// leave the window's existing images untouched — the import happens before
+    /// any state is written, so a rejected upload cannot destroy the picture
+    /// that was there.
+    pub fn register_image(
+        &mut self,
+        window_id: WindowId,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: &[u8],
+    ) -> CompositorResult<()> {
+        let image = ImageAsset::import(width, height, stride, format, bytes)?;
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        window.images.insert(image_id, image);
+        window.dirty = true;
+        self.damage_window(window_id);
+        Ok(())
+    }
+
+    /// Drop one of a window's images. Returns whether an image was there.
+    ///
+    /// The window is damaged either way when one was removed: commands still
+    /// naming the id now draw nothing, and the pixels they used to cover have to
+    /// be repainted by whatever is behind them.
+    pub fn unregister_image(&mut self, window_id: WindowId, image_id: u64) -> bool {
+        let removed = match self.window_mut(window_id) {
+            Some(window) => {
+                let gone = window.images.remove(&image_id).is_some();
+                if gone {
+                    window.dirty = true;
+                }
+                gone
+            }
+            None => false,
+        };
+        if removed {
+            self.damage_window(window_id);
+        }
+        removed
+    }
+
+    /// How many images a window currently has registered, or `None` if there is
+    /// no such window.
+    ///
+    /// `None` rather than `0` for a missing window because the two are different
+    /// answers, and a client's own bookkeeping wants to tell them apart.
+    #[must_use]
+    pub fn image_count(&self, window_id: WindowId) -> Option<usize> {
+        self.window_ref(window_id).map(|w| w.images.len())
+    }
+
+    /// Total bytes held by every window's registered images.
+    ///
+    /// The compositor keeps clients' image pixels resident for as long as the
+    /// windows live, so this is the size of a resource no client can see the
+    /// total of. It exists to be reported.
+    #[must_use]
+    pub fn image_bytes(&self) -> usize {
+        self.windows
+            .iter()
+            .flat_map(|w| w.images.values())
+            .map(ImageAsset::size_bytes)
+            .fold(0usize, usize::saturating_add)
+    }
+
+    /// Bytes held by one window's registered images, or `None` if there is no
+    /// such window.
+    ///
+    /// The per-window half of [`image_bytes`](Self::image_bytes), and the one
+    /// the wire layer adds up across a connection's windows to decide whether an
+    /// upload fits its budget. `None` rather than `0` for a missing window, for
+    /// the same reason [`image_count`](Self::image_count) does it: a window that
+    /// is gone and a window holding nothing are different answers, and a caller
+    /// summing a budget wants to know it asked about a window that is not there.
+    #[must_use]
+    pub fn window_image_bytes(&self, window_id: WindowId) -> Option<usize> {
+        self.window_ref(window_id).map(|w| {
+            w.images
+                .values()
+                .map(ImageAsset::size_bytes)
+                .fold(0usize, usize::saturating_add)
+        })
+    }
+
+    /// Bytes held by one registered image, or `None` if that window has no image
+    /// under that id.
+    ///
+    /// Exists for the budget arithmetic: re-registering an id *replaces* it, so
+    /// an upload that overwrites a 40 MiB asset with a 41 MiB one costs one
+    /// megabyte and not forty-one. A budget computed without subtracting what is
+    /// about to be freed would refuse every in-place update — a video frame, a
+    /// re-rendered chart — from the moment the client passed half its allowance.
+    #[must_use]
+    pub fn image_size_bytes(&self, window_id: WindowId, image_id: u64) -> Option<usize> {
+        self.window_ref(window_id)
+            .and_then(|w| w.images.get(&image_id))
+            .map(ImageAsset::size_bytes)
+    }
+
+    // -----------------------------------------------------------------------
     // Input routing
     // -----------------------------------------------------------------------
 
@@ -6381,13 +6786,6 @@ impl Compositor {
         // event behind.
         self.modifiers.update(scancode, pressed);
 
-        // Updated unconditionally, even with no focused window: a modifier
-        // pressed while focus was elsewhere is still physically down, and
-        // skipping it here would leave the state wrong for every later event.
-        let Some(window_id) = self.focused_window else {
-            return;
-        };
-
         let level = self.modifiers.level();
         let (key, laid_out) = keymap::key_for_layout(self.layout, scancode, level);
         let mut modifiers = self.modifiers.modifiers();
@@ -6400,6 +6798,67 @@ impl Compositor {
             // Alt+Q shortcut must keep working from either side.
             modifiers.alt = self.modifiers.left_alt();
         }
+
+        // Grabs are consulted *here*: after the chord is known, before the
+        // focused window is looked up. Both halves matter. After, because a grab
+        // is on Alt+Tab and not on scancode 0x0F, so it cannot be matched until
+        // the layout and the AltGr fold have had their say. Before, because the
+        // whole point is to reach a client that is *not* focused — a shell's
+        // Alt+Tab exists to be pressed from inside somebody else's window.
+        //
+        // A match returns, so the keystroke does not also reach the focused
+        // window. Delivering to both was considered and refused: the focused
+        // window would see a bare `Tab` inserted into a text field every time
+        // the user switched windows.
+        // A modifier going up while a grabber is waiting for it, taken from the
+        // table *before* the grab check rather than after. A modifier key can
+        // itself be a grabbed chord — the shell holds the bare Super key, and
+        // Super is also the modifier in Super+D — so a debt collected after the
+        // early return below would never be collected at all for exactly the
+        // keys most likely to owe one, and would sit in the table until the
+        // window died. See `grabbed_modifiers`.
+        let owed = if pressed {
+            Vec::new()
+        } else {
+            self.grabbed_modifiers.remove(&scancode).unwrap_or_default()
+        };
+
+        if let Some(window_id) = self.grab_target(scancode, key, modifiers, pressed) {
+            self.pending_notifications
+                .push_back(EventNotification::KeyEvent {
+                    window_id,
+                    scancode,
+                    key,
+                    pressed,
+                    modifiers,
+                    // Never text. A shortcut is not typing, and the dead-key
+                    // composer is deliberately not run for a grabbed chord: an
+                    // accent waiting for its vowel must still be waiting after
+                    // the user presses Alt+Tab, because switching windows is not
+                    // the vowel.
+                    text: String::new(),
+                });
+            // The grab just delivered this release to one of the waiters; it
+            // does not want a second copy of the same event. Any *other* waiter
+            // still does, and would otherwise be stranded by the return.
+            self.deliver_owed_releases(&owed, Some(window_id), scancode, key, modifiers);
+            return;
+        }
+
+        // Delivered before the focus lookup and without returning, because this
+        // one is a copy rather than a redirection: the focused window got the
+        // press and must get the release too, or it is left with Alt held
+        // forever.
+        self.deliver_owed_releases(&owed, None, scancode, key, modifiers);
+
+        // Reached with the modifier state already updated, even when nothing is
+        // focused: a modifier pressed while focus was elsewhere is still
+        // physically down, and returning before the fold above would leave the
+        // state wrong for every later event.
+        let Some(window_id) = self.focused_window else {
+            return;
+        };
+
         // The source's own character wins where it has one, and the dead-key
         // machine is skipped with it: a source that hands over a finished
         // character has already run whatever composition its own layout
@@ -6437,6 +6896,187 @@ impl Compositor {
             });
     }
 
+    /// Where a keystroke goes if a grab claims it, or `None` for the ordinary
+    /// focus routing.
+    ///
+    /// Presses and releases are answered differently on purpose. A press is
+    /// matched against the chord table. A release is matched against *its own
+    /// press*: the user may let go of Alt before Tab, and the resulting bare
+    /// `Tab` up-event matches no grab at all, so matching a release by chord
+    /// would send it to the focused window and leave the grabber holding a key
+    /// that never came up. An alt-tab switcher written against that would stay
+    /// open forever.
+    ///
+    /// Auto-repeat re-inserts the same entry, which is why the press arm does
+    /// not care whether one was already there.
+    fn grab_target(
+        &mut self,
+        scancode: u32,
+        key: Key,
+        modifiers: Modifiers,
+        pressed: bool,
+    ) -> Option<WindowId> {
+        if pressed {
+            let target = *self.key_grabs.get(&(key, modifiers))?;
+            self.grabbed_presses.insert(scancode, target);
+            // The physical modifier keys that formed this chord now owe their
+            // release to the grabber as well: letting go of Alt is how Alt+Tab
+            // ends, and that release usually matches no grab of its own. Nothing
+            // is recorded for a chord with no modifiers — a bare media key is
+            // over when it comes up, and owes nobody anything.
+            for held in self
+                .modifiers
+                .held_keys_for(modifiers)
+                .into_iter()
+                .flatten()
+            {
+                let waiting = self.grabbed_modifiers.entry(held).or_default();
+                if !waiting.contains(&target) {
+                    waiting.push(target);
+                }
+            }
+            Some(target)
+        } else {
+            self.grabbed_presses.remove(&scancode)
+        }
+    }
+
+    /// Hand a modifier release to the grabbers that were waiting for it.
+    ///
+    /// `already_told` is the window the grab path has just delivered this same
+    /// event to, if any; it is skipped, because one physical release must not
+    /// arrive twice at one client. Everyone else in `owed` gets a copy — the
+    /// gesture they started ends with this key, and nothing else will tell them.
+    ///
+    /// Carries no text for the same reason [`grab_target`](Self::grab_target)'s
+    /// deliveries do not: this is the tail of a shortcut, not typing.
+    fn deliver_owed_releases(
+        &mut self,
+        owed: &[WindowId],
+        already_told: Option<WindowId>,
+        scancode: u32,
+        key: Key,
+        modifiers: Modifiers,
+    ) {
+        for &target in owed {
+            if already_told == Some(target) {
+                continue;
+            }
+            self.pending_notifications
+                .push_back(EventNotification::KeyEvent {
+                    window_id: target,
+                    scancode,
+                    key,
+                    pressed: false,
+                    modifiers,
+                    text: String::new(),
+                });
+        }
+    }
+
+    /// Claim a chord for a window, so that it arrives there whoever has the
+    /// keyboard.
+    ///
+    /// First grabber wins: a chord another window holds is refused rather than
+    /// replaced, because a grab that silently stopped working would be
+    /// indistinguishable from a shortcut nobody pressed — the exact failure this
+    /// mechanism exists to end. Re-grabbing a chord *this* window already holds
+    /// succeeds and changes nothing, which is what a shell does when it re-reads
+    /// its configuration.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist —
+    /// checked because a grab outlives the request, and one held by a window
+    /// that was never there could never be released.
+    /// [`CompositorError::KeyAlreadyGrabbed`] if somebody else holds it.
+    pub fn grab_key(
+        &mut self,
+        window_id: WindowId,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> CompositorResult<()> {
+        if self.window_index(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        match self.key_grabs.entry((key, modifiers)) {
+            Entry::Occupied(held) if *held.get() != window_id => {
+                Err(CompositorError::KeyAlreadyGrabbed(key, modifiers))
+            }
+            Entry::Occupied(_) => Ok(()),
+            Entry::Vacant(slot) => {
+                slot.insert(window_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// Release a chord claimed by [`grab_key`](Self::grab_key).
+    ///
+    /// Releasing one this window does not hold is **not** an error: a client
+    /// tidying up should not have to remember exactly what it took. Releasing
+    /// one *another* window holds is refused, or any client could strip the
+    /// shell of Alt+Tab without ever having held it.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::KeyAlreadyGrabbed`] if another window holds it.
+    pub fn ungrab_key(
+        &mut self,
+        window_id: WindowId,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> CompositorResult<()> {
+        match self.key_grabs.get(&(key, modifiers)) {
+            Some(&holder) if holder != window_id => {
+                Err(CompositorError::KeyAlreadyGrabbed(key, modifiers))
+            }
+            Some(_) => {
+                self.key_grabs.remove(&(key, modifiers));
+                // Deliberately *not* forgetting an in-flight press: if this key
+                // is physically down right now, its release still belongs to the
+                // window that got the press. Dropping it here would send a bare
+                // release into whatever is focused instead.
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Drop every claim a window holds, in flight or not.
+    ///
+    /// Called from [`destroy_window`](Self::destroy_window), which is also the
+    /// path a hung-up connection takes (`Server::reclaim` destroys the windows a
+    /// departed client owned), so a crashed shell releases its shortcuts by the
+    /// same route as a tidy one. This is the whole of the safety story for
+    /// grabs: without it a shell that died would keep Alt+Tab for the rest of
+    /// the session with nothing left on screen able to release it. It is the
+    /// same lifetime argument as a panel's edge reservation.
+    pub fn release_grabs_of(&mut self, window_id: WindowId) {
+        self.key_grabs.retain(|_, &mut holder| holder != window_id);
+        // The in-flight presses go too, and here they must: the window that
+        // would receive the release no longer exists. Their keys are simply
+        // not delivered, which is right — a release is only meaningful to
+        // whoever saw the press.
+        self.grabbed_presses
+            .retain(|_, &mut holder| holder != window_id);
+        // And the modifier releases owed to it, which are the same thing one
+        // step removed: a switcher that has gone owes nothing and is owed
+        // nothing. The entry is dropped once nobody is left waiting on that key,
+        // so an empty `Vec` is never carried around.
+        for waiting in self.grabbed_modifiers.values_mut() {
+            waiting.retain(|&holder| holder != window_id);
+        }
+        self.grabbed_modifiers
+            .retain(|_, waiting| !waiting.is_empty());
+    }
+
+    /// How many chords are claimed. For tests and diagnostics.
+    #[must_use]
+    pub fn grab_count(&self) -> usize {
+        self.key_grabs.len()
+    }
+
     /// Release every held modifier.
     ///
     /// Call when the compositor loses the keyboard — session switch, device
@@ -6449,9 +7089,24 @@ impl Compositor {
     /// reason: the keyboard is gone, so the vowel that would have completed it
     /// is never coming. Leaving it armed would attach an accent the user typed
     /// in one session to the first letter they type in the next.
-    pub const fn release_all_modifiers(&mut self) {
+    ///
+    /// In-flight grabbed presses go the same way, for the third instance of the
+    /// same reason: the physical key that was held is on a keyboard we no longer
+    /// have, so its release is never coming, and an entry left behind would send
+    /// the next press of that scancode's release to a grab that had ended. The
+    /// *claims* themselves stay — a shell does not stop owning Alt+Tab because
+    /// the user switched VTs.
+    ///
+    /// Modifier releases owed to a grabber go too, for the same reason and with
+    /// one extra consequence worth naming: a switcher whose Alt-release is
+    /// discarded here never commits, so the user comes back from a VT switch to
+    /// the window they started in rather than one chosen by a keystroke they
+    /// have long since forgotten making.
+    pub fn release_all_modifiers(&mut self) {
         self.modifiers.release_all();
         self.dead_keys.cancel();
+        self.grabbed_presses.clear();
+        self.grabbed_modifiers.clear();
     }
 
     /// The modifier keys currently held.
@@ -6470,11 +7125,17 @@ impl Compositor {
     // -----------------------------------------------------------------------
 
     /// Find the topmost window whose client area contains the point.
+    ///
+    /// A window with [`input_transparent`](Window::input_transparent) set is
+    /// skipped rather than returned, so the search continues *past* it to what
+    /// is behind — which is the whole point: the click was aimed at the window
+    /// under the overlay, not at the overlay.
     fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
         // Iterate z_stack from top to bottom.
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
                 && win.is_showing(self.current_workspace)
+                && !win.input_transparent
                 && win.client_rect().contains(x, y)
             {
                 return Some(window_id);
@@ -6484,10 +7145,17 @@ impl Compositor {
     }
 
     /// Find the topmost window whose full area (including decorations) contains the point.
+    ///
+    /// Skips click-through windows for the same reason [`window_at`] does. Both
+    /// paths must agree: a window the pointer falls through for a click but not
+    /// for a title-bar drag would be draggable by an edge the user cannot see.
+    ///
+    /// [`window_at`]: Self::window_at
     fn window_at_with_decorations(&self, x: i32, y: i32) -> Option<WindowId> {
         for &window_id in self.z_stack.iter().rev() {
             if let Some(win) = self.window_ref(window_id)
                 && win.is_showing(self.current_workspace)
+                && !win.input_transparent
                 && win.outer_rect().contains(x, y)
             {
                 return Some(window_id);
@@ -7141,9 +7809,29 @@ impl Compositor {
             }
 
             // 5. Execute client render commands.
+            //
+            // The image store is borrowed straight out of `self.windows` rather
+            // than cloned with the command list above: a window's images are
+            // measured in megabytes and are drawn, not consumed, so copying them
+            // once per window per frame would cost more than the compositing.
+            // Three disjoint field borrows — `windows` shared, `render_engine`
+            // and `backend` unique — which is why `images` is resolved by
+            // searching the field directly and not through the `window_ref`
+            // method, which would borrow the whole of `self`.
+            //
+            // `no_images` cannot actually be reached (the window was found a few
+            // lines above, and nothing since could have removed it) and costs
+            // nothing when it is not: an empty `HashMap` does not allocate.
+            let no_images = HashMap::new();
+            let images = self
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .map_or(&no_images, |w| &w.images);
             self.render_engine.execute(
                 &mut self.backend,
                 &commands,
+                images,
                 win_x,
                 win_y,
                 win_width,
@@ -7594,6 +8282,52 @@ impl Compositor {
                     }
                 }
             }
+            CompositorRequest::RegisterImage {
+                window_id,
+                image_id,
+                width,
+                height,
+                stride,
+                format,
+                bytes,
+            } => match self
+                .register_image(window_id, image_id, width, height, stride, format, &bytes)
+            {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::UnregisterImage {
+                window_id,
+                image_id,
+            } => {
+                // Deliberately not reporting whether anything was there: see
+                // `RequestBody::DropImage`. A client tidying up every id it ever
+                // used should not have to know which ones it already dropped.
+                self.unregister_image(window_id, image_id);
+                CompositorResponse::Ok
+            }
+            CompositorRequest::GrabKey {
+                window_id,
+                key,
+                modifiers,
+            } => match self.grab_key(window_id, key, modifiers) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::UngrabKey {
+                window_id,
+                key,
+                modifiers,
+            } => match self.ungrab_key(window_id, key, modifiers) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
         }
     }
 
@@ -8183,6 +8917,14 @@ impl Compositor {
                     pid: w.client_pid,
                     layer: w.layer,
                     title: w.title.clone(),
+                    // Passed through exactly as the client sent it, including
+                    // when that is the empty string. Substituting the title
+                    // for a window that named no program would be worse than
+                    // the gap it filled: every window of a program that
+                    // declined to identify itself would then carry a
+                    // *different* id, so a rule matching one of them would
+                    // silently be a rule about one document.
+                    app_id: w.app_id.clone(),
                     visible: w.visible,
                     minimized: w.minimized,
                     maximized: w.maximized,
@@ -8626,6 +9368,489 @@ mod tests {
         // Force frame timing to allow immediate recompose.
         comp.frame_stats.last_frame_start = None;
         assert!(!comp.compose_frame()); // No damage.
+    }
+
+    // -----------------------------------------------------------------------
+    // Key grabs
+    //
+    // Scancodes used below, scan code set 1: 0x0F Tab, 0x38 left Alt,
+    // 0x20 D, 0xE05B left Super -- the last with its extended prefix folded
+    // into the high byte, which is how every 0xE0-prefixed key reaches here.
+    // -----------------------------------------------------------------------
+
+    /// Two windows, the second focused, as a desktop actually is: the shell owns
+    /// a panel nobody is typing into, and the user is in an application.
+    fn shell_and_app() -> (Compositor, WindowId, WindowId) {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let shell = comp.create_window("Taskbar".to_string(), 800, 40, 1);
+        let app = comp.create_window("Editor".to_string(), 400, 300, 2);
+        assert_eq!(
+            comp.focused_window,
+            Some(app),
+            "the test's premise is that the shell is *not* focused"
+        );
+        (comp, shell, app)
+    }
+
+    /// Every key event now pending, in order.
+    fn key_events(comp: &mut Compositor) -> Vec<(WindowId, Key, bool, String)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::KeyEvent {
+                    window_id,
+                    key,
+                    pressed,
+                    text,
+                    ..
+                } => Some((window_id, key, pressed, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The entire point of the mechanism, stated as the thing that was broken:
+    /// Alt+Tab pressed while an application has the keyboard must reach the
+    /// shell. Before grabs existed `handle_key` returned early on
+    /// `focused_window` and this was unreachable, so every desktop shortcut in
+    /// the tree was dead whenever the user was actually using the computer.
+    #[test]
+    fn a_grabbed_chord_reaches_the_grabber_and_not_the_focused_window() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.drain_notifications();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+
+        let events = key_events(&mut comp);
+        let tab = events
+            .iter()
+            .find(|(_, key, _, _)| *key == Key::Tab)
+            .expect("the grabbed chord was not delivered at all");
+        assert_eq!(tab.0, shell, "Alt+Tab went to the focused window instead");
+        assert!(
+            !events
+                .iter()
+                .any(|(win, key, _, _)| *win == app && *key == Key::Tab),
+            "the focused window also got the Tab: a text field would have \
+             inserted one every time the user switched windows"
+        );
+        // The Alt itself is not grabbed and is ordinary traffic.
+        assert!(
+            events
+                .iter()
+                .any(|(win, key, _, _)| *win == app && *key == Key::LeftAlt),
+            "the modifier's own event should route normally"
+        );
+    }
+
+    /// A grab is on a *chord*. Taking Alt+Tab must not take Tab, or grabbing the
+    /// window switcher would break the Tab key in every text field and every
+    /// form on the desktop.
+    #[test]
+    fn a_grab_claims_a_chord_and_not_a_key() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.drain_notifications();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+
+        let events = key_events(&mut comp);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(win, key, _, _)| *win == app && *key == Key::Tab)
+                .count(),
+            1,
+            "a bare Tab belongs to whoever is typing"
+        );
+    }
+
+    /// The release trap. A user holds Alt, taps Tab, then lets go of Alt before
+    /// Tab — the resulting Tab-up carries no modifiers and matches no grab. If
+    /// it were routed by chord it would land in the application, and the shell
+    /// would be left holding a key that never came up: an alt-tab switcher
+    /// written against that stays open forever.
+    #[test]
+    fn a_release_follows_its_press_even_when_the_modifier_was_let_go_first() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x38 });
+        comp.drain_notifications();
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x0F });
+
+        let events = key_events(&mut comp);
+        let up = events
+            .iter()
+            .find(|(_, key, pressed, _)| *key == Key::Tab && !*pressed)
+            .expect("the release vanished");
+        assert_eq!(
+            up.0, shell,
+            "the release went to somebody who never saw it go down"
+        );
+    }
+
+    /// Alt+Tab does not end when Tab comes up — it ends when *Alt* comes up,
+    /// which is how every switcher decides which window the user landed on. The
+    /// Alt press was never grabbed, so without a rule for it that release goes
+    /// to the focused window and the switcher is never told the gesture is over.
+    #[test]
+    fn letting_go_of_the_modifier_is_how_the_gesture_ends() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x0F });
+        comp.drain_notifications();
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x38 });
+
+        let events = key_events(&mut comp);
+        assert!(
+            events
+                .iter()
+                .any(|(win, key, pressed, _)| *win == shell && *key == Key::LeftAlt && !*pressed),
+            "the shell was never told the user let go; the switcher stays up forever"
+        );
+    }
+
+    /// ...and the focused window gets that release too. It saw the Alt press —
+    /// nobody grabs a bare modifier — so a release routed away from it would
+    /// leave it believing Alt is held for the rest of the session. That is the
+    /// stuck-modifier bug `release_all_modifiers` exists to prevent, and a grab
+    /// must not be a new way to cause it.
+    #[test]
+    fn the_focused_window_still_gets_the_modifier_it_saw_go_down() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+        comp.drain_notifications();
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x38 });
+
+        let up: Vec<_> = key_events(&mut comp)
+            .into_iter()
+            .filter(|(_, key, pressed, _)| *key == Key::LeftAlt && !*pressed)
+            .map(|(win, ..)| win)
+            .collect();
+        assert!(
+            up.contains(&app),
+            "the application is left with Alt stuck down"
+        );
+        assert!(
+            up.contains(&shell),
+            "the grabber was not told the gesture ended"
+        );
+    }
+
+    /// A chord with no modifiers owes nobody anything. A volume key is over when
+    /// it comes up, and a grab of one must not arrange for the next Alt release
+    /// to be copied to the grabber — a shell receiving stray modifier releases it
+    /// never asked for would act on gestures that were not made.
+    #[test]
+    fn a_bare_chord_does_not_claim_the_next_modifier_release() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::VolumeUp, Modifiers::NONE)
+            .unwrap();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0xE030,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0xE030 });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.drain_notifications();
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x38 });
+
+        let up: Vec<_> = key_events(&mut comp)
+            .into_iter()
+            .filter(|(_, key, pressed, _)| *key == Key::LeftAlt && !*pressed)
+            .map(|(win, ..)| win)
+            .collect();
+        assert_eq!(up, vec![app], "the volume grab collected an unrelated Alt");
+    }
+
+    /// The awkward case: the modifier is *itself* a grabbed chord. The shell
+    /// holds the bare Super key (that is the start menu) and Super+D as well, so
+    /// the Super release is owed to the shell twice over — once because it ends
+    /// the Super+D chord, once because it is the release of a grab in its own
+    /// right. It must arrive exactly once, and the debt must not survive it: a
+    /// stranded entry would be delivered to some later Super release instead,
+    /// long after the gesture it belonged to was over.
+    #[test]
+    fn a_modifier_that_is_itself_grabbed_is_delivered_once_and_settles_the_debt() {
+        let (mut comp, shell, _app) = shell_and_app();
+        // Both spellings of the bare Super key, as the shell itself grabs. The
+        // press arrives with the Super bit already set, so a grab on
+        // `(LeftSuper, NONE)` alone would not match it; the press would go to
+        // the focused window, which would then be owed the release — correctly,
+        // but this test would be measuring something else.
+        comp.grab_key(shell, Key::LeftSuper, Modifiers::NONE)
+            .unwrap();
+        comp.grab_key(shell, Key::LeftSuper, Modifiers::super_key())
+            .unwrap();
+        comp.grab_key(shell, Key::D, Modifiers::super_key())
+            .unwrap();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0xE05B,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x20,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x20 });
+        comp.drain_notifications();
+        comp.handle_input(InputEvent::KeyUp { scancode: 0xE05B });
+
+        let ups: Vec<_> = key_events(&mut comp)
+            .into_iter()
+            .filter(|(_, _, pressed, _)| !*pressed)
+            .collect();
+        assert_eq!(
+            ups.len(),
+            1,
+            "the shell was told twice that one key came up: {ups:?}"
+        );
+        assert_eq!(ups[0].0, shell);
+
+        // And nothing is left owing. A second Super press-and-release, this time
+        // forming no chord, must be an ordinary grabbed key and nothing more.
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0xE05B,
+            character: None,
+        });
+        comp.drain_notifications();
+        comp.handle_input(InputEvent::KeyUp { scancode: 0xE05B });
+        assert_eq!(
+            key_events(&mut comp)
+                .into_iter()
+                .filter(|(_, _, pressed, _)| !*pressed)
+                .count(),
+            1,
+            "a debt from the earlier chord was paid out to a later keystroke"
+        );
+    }
+
+    /// Losing the keyboard cancels the gesture rather than completing it. The
+    /// Alt-release the switcher is waiting for is on a keyboard we no longer
+    /// have, so it is never coming; keeping the debt would deliver it to the
+    /// *next* Alt release, minutes later, and activate a window chosen by a
+    /// keystroke the user has long since forgotten making.
+    #[test]
+    fn losing_the_keyboard_cancels_a_gesture_rather_than_finishing_it() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+        comp.release_all_modifiers();
+        comp.drain_notifications();
+
+        // A fresh, unrelated Alt press and release, well after the switch back.
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x38 });
+
+        let up: Vec<_> = key_events(&mut comp)
+            .into_iter()
+            .filter(|(_, key, pressed, _)| *key == Key::LeftAlt && !*pressed)
+            .map(|(win, ..)| win)
+            .collect();
+        assert_eq!(
+            up,
+            vec![app],
+            "a stale debt was paid out of a later keystroke"
+        );
+    }
+
+    /// A shortcut is not typing. The chord must arrive with no text, and a
+    /// dead-key accent already waiting must survive it — pressing Alt+Tab is not
+    /// the vowel that completes an accent, so a shell shortcut must not eat one.
+    #[test]
+    fn a_grabbed_chord_carries_no_text() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_key(shell, Key::D, Modifiers::super_key())
+            .unwrap();
+        comp.drain_notifications();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0xE05B,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x20,
+            character: Some('d'),
+        });
+
+        let events = key_events(&mut comp);
+        let chord = events
+            .iter()
+            .find(|(win, key, _, _)| *win == shell && *key == Key::D)
+            .expect("Super+D did not reach the shell");
+        assert_eq!(
+            chord.3, "",
+            "the shortcut arrived as text; a client echoing key text would type a d"
+        );
+    }
+
+    /// First grabber wins, *loudly*. Silently letting the second claim win would
+    /// make the first shortcut stop working with no error anywhere, which is
+    /// indistinguishable from a shortcut nobody pressed.
+    #[test]
+    fn a_chord_that_is_held_cannot_be_taken() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        assert!(matches!(
+            comp.grab_key(app, Key::Tab, Modifiers::alt()),
+            Err(CompositorError::KeyAlreadyGrabbed(Key::Tab, _))
+        ));
+        assert_eq!(comp.grab_count(), 1, "the refused grab was recorded anyway");
+    }
+
+    /// Re-grabbing your own is what a shell does when it re-reads its config,
+    /// and must not be an error — otherwise every reload would log a failure for
+    /// every shortcut the user did not change.
+    #[test]
+    fn re_grabbing_a_chord_you_already_hold_is_not_an_error() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        assert_eq!(comp.grab_count(), 1);
+    }
+
+    /// The two asymmetric cases of releasing, together: yours-that-you-never-took
+    /// is fine (a tidy-up loop should not have to remember), somebody else's is
+    /// refused (or any client could strip the shell of Alt+Tab without ever
+    /// holding it).
+    #[test]
+    fn releasing_is_forgiving_of_absence_and_not_of_theft() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.ungrab_key(app, Key::F1, Modifiers::NONE)
+            .expect("releasing a chord nobody holds should be a no-op");
+
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        assert!(matches!(
+            comp.ungrab_key(app, Key::Tab, Modifiers::alt()),
+            Err(CompositorError::KeyAlreadyGrabbed(..))
+        ));
+        assert_eq!(comp.grab_count(), 1, "the theft succeeded");
+
+        comp.ungrab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        assert_eq!(comp.grab_count(), 0);
+    }
+
+    /// A grab must not outlive its window. This is also the crashed-shell path:
+    /// `Server::reclaim` destroys a departed client's windows through exactly
+    /// this function, so a shell that died releases Alt+Tab by the same route as
+    /// one that closed tidily. Without it the chord would be unreachable for the
+    /// rest of the session with nothing on screen able to release it.
+    #[test]
+    fn closing_a_window_releases_everything_it_grabbed() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.grab_key(shell, Key::D, Modifiers::super_key())
+            .unwrap();
+        assert_eq!(comp.grab_count(), 2);
+
+        comp.destroy_window(shell).unwrap();
+        assert_eq!(comp.grab_count(), 0, "a dead window still holds shortcuts");
+
+        // And the chord is genuinely free again, not merely absent from a count.
+        comp.grab_key(app, Key::Tab, Modifiers::alt())
+            .expect("the chord was not actually released");
+    }
+
+    /// Grabbing for a window that does not exist would create a claim nothing
+    /// could ever release: no destroy will fire for it, so the chord would be
+    /// dead for the rest of the session.
+    #[test]
+    fn a_grab_needs_a_window_that_exists() {
+        let (mut comp, _shell, _app) = shell_and_app();
+        assert!(matches!(
+            comp.grab_key(WindowId::from_raw(9999), Key::F1, Modifiers::NONE),
+            Err(CompositorError::WindowNotFound(_))
+        ));
+    }
+
+    /// Losing the keyboard voids the presses in flight but not the claims. The
+    /// physical key is on a device we no longer have, so its release is never
+    /// coming; the shell, meanwhile, does not stop owning Alt+Tab because the
+    /// user switched to another VT.
+    #[test]
+    fn losing_the_keyboard_drops_presses_in_flight_but_not_the_claims() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+
+        comp.release_all_modifiers();
+        assert_eq!(
+            comp.grab_count(),
+            1,
+            "the claim was dropped with the presses"
+        );
+        comp.drain_notifications();
+
+        // A stray release for a key we no longer believe is down goes nowhere
+        // near the grabber.
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x0F });
+        assert!(
+            !key_events(&mut comp)
+                .iter()
+                .any(|(win, _, _, _)| *win == shell),
+            "a release from a keyboard we lost was still routed to the grab"
+        );
     }
 
     #[test]
@@ -9453,6 +10678,7 @@ mod tests {
                 color: Color::rgba(255, 255, 255, 255),
                 corner_radii: CornerRadii::ZERO,
             }],
+            &HashMap::new(),
             0,
             0,
             64,
@@ -11288,6 +12514,260 @@ mod tests {
         // After compositing, the buffer is released exactly once.
         assert_eq!(comp.take_released_buffer_handles(), vec![0xABCD]);
         assert!(comp.take_released_buffer_handles().is_empty());
+    }
+
+    // -- image assets -------------------------------------------------------
+
+    /// A four-pixel image whose quadrants are four distinguishable colours, so
+    /// a resample that transposes, mirrors or shifts shows up as a wrong colour
+    /// rather than as a plausible blur.
+    ///
+    /// ```text
+    /// R G
+    /// B W
+    /// ```
+    const IMG_R: u32 = 0xFFFF_0000;
+    const IMG_G: u32 = 0xFF00_FF00;
+    const IMG_B: u32 = 0xFF00_00FF;
+    const IMG_W: u32 = 0xFFFF_FFFF;
+
+    fn quadrant_image_bytes() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(16);
+        for px in [IMG_R, IMG_G, IMG_B, IMG_W] {
+            bytes.extend_from_slice(&px.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// A window with the quadrant image registered under id 1 and a single
+    /// `Image` command drawing it at `(0, 0)` in client space at `size`x`size`.
+    fn image_window(comp: &mut Compositor, size: f32) -> WindowId {
+        let id = comp.create_window("Img".to_string(), 64, 64, 1);
+        comp.register_image(
+            id,
+            1,
+            2,
+            2,
+            8,
+            BufferFormat::Argb8888,
+            &quadrant_image_bytes(),
+        )
+        .expect("register");
+        comp.submit_render(
+            id,
+            vec![RenderCommand::Image {
+                x: 0.0,
+                y: 0.0,
+                width: size,
+                height: size,
+                image_id: 1,
+            }],
+        )
+        .expect("submit");
+        id
+    }
+
+    #[test]
+    fn a_registered_image_is_scaled_into_the_quad_the_command_asked_for() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        // 2x2 source drawn at 8x8: each source pixel becomes a 4x4 block.
+        let id = image_window(&mut comp, 8.0);
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+
+        let front = comp.backend.presented_pixels();
+        let stride = 400usize;
+        let at = |dx: usize, dy: usize| -> u32 {
+            front[(cy as usize + dy) * stride + (cx as usize + dx)]
+        };
+        // One probe per quadrant, and one just inside each boundary, which is
+        // what catches an off-by-one in the source index.
+        assert_eq!(at(0, 0), IMG_R, "top-left quadrant");
+        assert_eq!(at(3, 3), IMG_R, "last pixel still in the top-left quadrant");
+        assert_eq!(at(4, 0), IMG_G, "first pixel of the top-right quadrant");
+        assert_eq!(at(0, 4), IMG_B, "first pixel of the bottom-left quadrant");
+        assert_eq!(at(7, 7), IMG_W, "far corner of the bottom-right quadrant");
+    }
+
+    #[test]
+    fn an_image_drawn_smaller_than_itself_still_covers_its_quad() {
+        // 2x2 into 1x1. The degenerate direction: a destination smaller than the
+        // source must not divide by zero or drop the pixel.
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 1.0);
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+        let front = comp.backend.presented_pixels();
+        assert_eq!(front[cy as usize * 400 + cx as usize], IMG_R);
+    }
+
+    #[test]
+    fn an_image_id_that_was_never_registered_leaves_the_client_area_alone() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = comp.create_window("Img".to_string(), 64, 64, 1);
+        comp.submit_render(
+            id,
+            vec![RenderCommand::Image {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0,
+                image_id: 99,
+            }],
+        )
+        .expect("submit");
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+        // The compositor's own white undercoat, untouched: an unresolved id
+        // draws nothing rather than a black hole where the picture would be.
+        let front = comp.backend.presented_pixels();
+        assert_eq!(front[cy as usize * 400 + cx as usize], 0xFF_FF_FF_FF);
+    }
+
+    #[test]
+    fn registering_the_same_id_twice_replaces_the_picture() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        assert_eq!(comp.image_count(id), Some(1));
+
+        // A second upload under the same id: one solid colour, no quadrants.
+        let solid = solid_buffer_bytes(2, 2, IMG_G);
+        comp.register_image(id, 1, 2, 2, 8, BufferFormat::Argb8888, &solid)
+            .expect("re-register");
+        assert_eq!(comp.image_count(id), Some(1), "replaced, not accumulated");
+
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+        let front = comp.backend.presented_pixels();
+        assert_eq!(front[cy as usize * 400 + cx as usize], IMG_G);
+    }
+
+    #[test]
+    fn two_windows_may_use_the_same_image_id_without_seeing_each_others_pixels() {
+        // The id is the client's to choose, so a compositor-wide namespace would
+        // make two independent programs collide on id 1 — which every program
+        // that numbers its images from one would pick.
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let a = image_window(&mut comp, 8.0);
+        let b = comp.create_window("Other".to_string(), 64, 64, 2);
+        let solid = solid_buffer_bytes(2, 2, IMG_G);
+        comp.register_image(b, 1, 2, 2, 8, BufferFormat::Argb8888, &solid)
+            .expect("register");
+
+        // A's image still has its red top-left quadrant.
+        let img = comp
+            .window_ref(a)
+            .expect("window a")
+            .images
+            .get(&1)
+            .expect("image 1");
+        assert_eq!(img.pixel(0, 0), Some(IMG_R));
+        let img = comp
+            .window_ref(b)
+            .expect("window b")
+            .images
+            .get(&1)
+            .expect("image 1");
+        assert_eq!(img.pixel(0, 0), Some(IMG_G));
+    }
+
+    #[test]
+    fn unregistering_reports_whether_anything_was_there() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        assert!(comp.unregister_image(id, 1));
+        assert!(
+            !comp.unregister_image(id, 1),
+            "second removal finds nothing"
+        );
+        assert_eq!(comp.image_count(id), Some(0));
+        assert!(
+            !comp.unregister_image(WindowId(424242), 1),
+            "a window that does not exist has nothing to remove"
+        );
+        assert_eq!(comp.image_count(WindowId(424242)), None);
+    }
+
+    #[test]
+    fn a_rejected_upload_leaves_the_existing_picture_in_place() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        // Stride too small for the declared width.
+        assert!(matches!(
+            comp.register_image(id, 1, 4, 4, 8, BufferFormat::Argb8888, &[0u8; 64]),
+            Err(CompositorError::InvalidBuffer(_))
+        ));
+        let img = comp
+            .window_ref(id)
+            .expect("window")
+            .images
+            .get(&1)
+            .expect("the original image survived");
+        assert_eq!((img.width(), img.height()), (2, 2));
+        assert_eq!(img.pixel(0, 0), Some(IMG_R));
+
+        assert!(matches!(
+            comp.register_image(
+                WindowId(424242),
+                1,
+                2,
+                2,
+                8,
+                BufferFormat::Argb8888,
+                &quadrant_image_bytes()
+            ),
+            Err(CompositorError::WindowNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_windows_images_are_freed_with_the_window() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        assert_eq!(comp.image_bytes(), 16, "2x2 at four bytes a pixel");
+        comp.destroy_window(id).expect("destroy");
+        assert_eq!(
+            comp.image_bytes(),
+            0,
+            "a client that exits without unregistering must not strand its pixels"
+        );
+    }
+
+    #[test]
+    fn an_image_clipped_by_its_window_keeps_its_scale() {
+        // The quad is twice the client area. What is visible must be the
+        // *top-left* of a 128x128 rendering — the red quadrant filling all 64
+        // visible pixels — and not a 64x64 rendering of the whole image, which
+        // is what clipping before resampling would produce.
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 128.0);
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+        let front = comp.backend.presented_pixels();
+        let at =
+            |dx: usize, dy: usize| -> u32 { front[(cy as usize + dy) * 400 + (cx as usize + dx)] };
+        assert_eq!(at(0, 0), IMG_R);
+        assert_eq!(
+            at(63, 63),
+            IMG_R,
+            "the far corner of the client area is still inside the source's \
+             top-left quadrant, because the quad was 128 wide"
+        );
     }
 
     #[test]
@@ -13617,7 +15097,16 @@ mod tests {
         ];
 
         let (mut engine, mut fb) = round_canvas();
-        engine.execute(&mut fb, &commands, BOX_X, BOX_Y, BOX_SIDE, BOX_SIDE, 1.0);
+        engine.execute(
+            &mut fb,
+            &commands,
+            &HashMap::new(),
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            1.0,
+        );
 
         #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
         let (bx, by) = (BOX_X as u32, BOX_Y as u32);
@@ -16897,6 +18386,79 @@ mod tests {
     }
 
     #[test]
+    fn a_click_through_window_hands_the_click_to_what_is_behind_it() {
+        // The point of the flag: an overlay covering the middle of the screen
+        // for two seconds must not eat the click aimed at the window under it.
+        // Note this asserts the click reaches the *lower* window, not merely
+        // that the upper one missed -- a hit test that stopped at the first
+        // click-through window and returned `None` would be just as broken,
+        // and would look identical from the overlay's side.
+        let mut comp = ungated_compositor(400, 300);
+        let rect = Rect::new(20, 20, 100, 80);
+        let (under, x, y) = painted_window(&mut comp, Layer::Normal, rect, 0xFF11_2233);
+
+        let mut spec = WindowSpec::new("Overlay", rect.width, rect.height);
+        spec.position = Some((rect.x, rect.y));
+        spec.decorations = false;
+        spec.layer = Layer::Overlay;
+        spec.input_transparent = true;
+        let over = comp.create_window_from_spec(&spec, 2);
+
+        assert!(
+            comp.z_stack.iter().position(|&w| w == over)
+                > comp.z_stack.iter().position(|&w| w == under),
+            "the overlay is not above the window it is meant to cover"
+        );
+        assert_eq!(
+            comp.window_at(x, y),
+            Some(under),
+            "a click-through overlay swallowed the click"
+        );
+        assert_eq!(
+            comp.window_at_with_decorations(x, y),
+            Some(under),
+            "a click-through overlay swallowed a click on the frame"
+        );
+    }
+
+    #[test]
+    fn a_click_through_window_is_still_drawn() {
+        // Click-through is a fact about the hit test alone. An overlay culled
+        // from the frame because it takes no clicks would be a volume
+        // indicator nobody can see -- the one thing it exists to do.
+        let mut comp = ungated_compositor(400, 300);
+        let rect = Rect::new(20, 20, 100, 80);
+        painted_window(&mut comp, Layer::Normal, rect, 0xFF11_2233);
+
+        let over = 0xFF44_5566;
+        let mut spec = WindowSpec::new("Overlay", rect.width, rect.height);
+        spec.position = Some((rect.x, rect.y));
+        spec.decorations = false;
+        spec.layer = Layer::Overlay;
+        spec.input_transparent = true;
+        let id = comp.create_window_from_spec(&spec, 2);
+        let bytes = solid_buffer_bytes(rect.width, rect.height, over);
+        comp.attach_buffer(
+            id,
+            u64::from(rect.width),
+            rect.width,
+            rect.height,
+            rect.width.saturating_mul(4),
+            BufferFormat::Xrgb8888,
+            &bytes,
+        )
+        .expect("attach buffer");
+
+        assert!(comp.compose_frame(), "nothing was drawn");
+        let client = comp.window_ref(id).expect("window").client_rect();
+        assert_eq!(
+            pixel_at(&comp, client.x + 1, client.y + 1),
+            over,
+            "a click-through window was not painted"
+        );
+    }
+
+    #[test]
     fn a_window_on_another_virtual_desktop_does_not_occlude_the_one_in_front_of_you() {
         // The occlusion cull decides what *not* to draw by asking which
         // rectangles are opaquely covered. A hidden window left in that answer
@@ -17119,6 +18681,58 @@ mod tests {
             comp.window_list().windows.iter().any(|w| w.id == id.raw()),
             "a window on another desktop disappeared from the window list"
         );
+    }
+
+    #[test]
+    fn the_window_list_says_which_program_each_window_belongs_to() {
+        // Two windows of one program and one of another, because the single
+        // thing this field exists to make possible is telling those two cases
+        // apart. A shell keys a rule, a taskbar group and an icon lookup off
+        // it, and all three are wrong in the same way if the id travels but
+        // does not stay identical between siblings.
+        let mut comp = ungated_compositor(1920, 1080);
+        let mut notes = WindowSpec::new("notes.md", 400, 300);
+        notes.app_id = "editor".to_string();
+        let mut draft = WindowSpec::new("draft.md", 400, 300);
+        draft.app_id = "editor".to_string();
+        let mut other = WindowSpec::new("Files", 400, 300);
+        other.app_id = "explorer".to_string();
+
+        let notes_id = comp.create_window_from_spec(&notes, 1);
+        let draft_id = comp.create_window_from_spec(&draft, 1);
+        let other_id = comp.create_window_from_spec(&other, 2);
+
+        let list = comp.window_list();
+        let of = |id: WindowId| {
+            list.windows
+                .iter()
+                .find(|w| w.id == id.raw())
+                .expect("listed")
+                .app_id
+                .clone()
+        };
+        assert_eq!(of(notes_id), "editor");
+        assert_eq!(of(draft_id), "editor");
+        assert_eq!(of(other_id), "explorer");
+    }
+
+    #[test]
+    fn a_window_that_named_no_program_is_not_given_its_title_as_one() {
+        // The tempting gap-filler, and the wrong one. Every window of a
+        // program that declined to identify itself would get a *different*
+        // id -- its own document's name -- so a rule the user wrote against
+        // one of them would silently be a rule about one file, and would stop
+        // matching the moment they saved under a new name.
+        let mut comp = ungated_compositor(1920, 1080);
+        let id = comp.create_window_from_spec(&WindowSpec::new("notes.md", 400, 300), 1);
+        let list = comp.window_list();
+        let w = list
+            .windows
+            .iter()
+            .find(|w| w.id == id.raw())
+            .expect("listed");
+        assert_eq!(w.title, "notes.md");
+        assert_eq!(w.app_id, "", "the title was substituted for the app id");
     }
 
     #[test]

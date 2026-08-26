@@ -55007,3 +55007,31 @@ TRIGGER
   asserting that `realpath -e /nonexistent` fails where plain `realpath` does
   not.  That contrast is the whole point of the flag and is exactly the pair
   rung 23 now pins for the default mode.
+
+## The notification pane has no way to report a launch from a key (lane C, 2026-08-26)
+
+`DesktopShell::handle_mouse` and `DesktopShell::handle_hotkey` both wrap an
+inner function and then drain the notification pane's event buffer
+(`DesktopShell::apply_pane_events`, gui/desktop/src/lib.rs).  The drain returns
+`Option<String>` -- the program a clicked notification card names, if any.
+
+The mouse wrapper turns that into `ShellAction::Launch(path)`.  The key wrapper
+cannot: `HotkeyOutcome` carries compositor requests (grab/ungrab, redraw), not
+program starts, so it does `drop(self.apply_pane_events())`.
+
+Today that drops nothing, because no key the pane handles can click a card --
+its keys are Escape (close) and the scroll keys.  The moment the pane grows an
+"Enter opens the selected card" binding, that `drop` silently swallows the
+path and the key does half of what the mouse does.
+
+WHAT THE PROPER FIX IS
+  Give `HotkeyOutcome` a launch channel -- either a `launch: Option<String>`
+  field or a new variant -- and have the key wrapper populate it the way the
+  mouse wrapper populates `ShellAction::Launch`.  Not done now because nothing
+  produces a launch from a key, and a field no caller ever reads is surface
+  that rots: the first reader is what will say what shape it should be.
+
+TRIGGER
+  Adding any pane key binding that selects or activates a notification card.
+  The `drop(...)` call in `handle_hotkey` is the exact line to revisit; its doc
+  comment points here.

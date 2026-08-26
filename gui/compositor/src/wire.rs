@@ -101,7 +101,63 @@ pub struct ClientLink {
     /// produces a frame: `[]` never equals the encoding of an empty list, which
     /// carries a header.
     window_list_sent: Vec<u8>,
+    /// Most bytes of uploaded image pixels this connection may hold at once.
+    ///
+    /// Per link rather than a bare constant because the right number depends on
+    /// the machine and on what the connection is: a desktop with 64 GiB can
+    /// afford more than a thin client, and a server that knows one link is its
+    /// own trusted shell may reasonably give it more than an application it
+    /// just accepted a socket from. Defaults to
+    /// [`MAX_IMAGE_BYTES_PER_LINK`], so a server that has no opinion gets one.
+    ///
+    /// It is the *server's* to set and not the client's: nothing on the wire
+    /// can change it, which is what keeps it a limit rather than a suggestion.
+    image_budget: u64,
 }
+
+/// Default ceiling on the uploaded image pixels one connection may keep
+/// resident. A server may raise or lower it per link with
+/// [`ClientLink::set_image_budget`].
+///
+/// ## Why there is a limit at all
+///
+/// [`RequestBody::UploadImage`](guiremote::control::RequestBody::UploadImage) is
+/// the only request on this wire whose cost to the compositor is chosen by the
+/// sender. `MAX_IMAGE_BYTES` bounds *one* upload; nothing bounds their number,
+/// so without this a client with one window could hand over a 126 MiB picture
+/// under a fresh id in a loop until the machine is out of memory — and the
+/// compositor is the process every other program's windows depend on, so it is
+/// the worst process on the desktop to have killed by the allocator.
+///
+/// ## Why per link, and not per window
+///
+/// A per-window budget is bypassed by opening a second window. The connection is
+/// already the unit of accountability everywhere else here — `design-decisions.md`
+/// §458 makes a link own the windows opened over it — so it is the unit a
+/// resource limit has to use as well.
+///
+/// ## Why refuse rather than evict
+///
+/// The alternative is to drop the connection's least-recently-drawn asset and
+/// accept the new one. That is worse *because* it succeeds: a draw command
+/// naming an id with no pixels behind it renders nothing, silently and by
+/// design, so an evicted thumbnail is a picture that stops appearing with no
+/// error anywhere and no way for the client to learn it happened. Refusing
+/// returns [`ResponseBody::Error`] to the request that went over, which the
+/// client can log, retry smaller, or answer by dropping something itself. It is
+/// also what `design.txt` asks for in general — committed memory, no silent
+/// overcommit — and it costs no per-frame bookkeeping, where eviction would need
+/// a last-drawn timestamp maintained on the compositing hot path.
+///
+/// ## The number
+///
+/// 256 MiB is two full-screen 4K pictures at four bytes a pixel with room to
+/// spare, which is an image viewer showing one and pre-decoding the next, or a
+/// file manager with a very large folder of thumbnails. It is not a measurement
+/// — no application yet uploads anything — and it is deliberately generous,
+/// because the failure it exists to prevent is unbounded growth rather than
+/// large-but-bounded use.
+pub const MAX_IMAGE_BYTES_PER_LINK: u64 = 256 * 1024 * 1024;
 
 /// What went wrong serving a client.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -154,7 +210,23 @@ impl ClientLink {
             closed: false,
             wants_window_list: false,
             window_list_sent: Vec::new(),
+            image_budget: MAX_IMAGE_BYTES_PER_LINK,
         }
+    }
+
+    /// Most bytes of uploaded image pixels this connection may hold at once.
+    #[must_use]
+    pub const fn image_budget(&self) -> u64 {
+        self.image_budget
+    }
+
+    /// Set this connection's image budget.
+    ///
+    /// Lowering it below what the link already holds does not evict anything —
+    /// see [`MAX_IMAGE_BYTES_PER_LINK`] for why nothing here evicts — it only
+    /// means the next upload is refused until the client frees enough itself.
+    pub const fn set_image_budget(&mut self, bytes: u64) {
+        self.image_budget = bytes;
     }
 
     /// Whether this client is receiving the desktop's window list.
@@ -411,6 +483,41 @@ fn to_compositor_request(
             link.require_shell()?;
             CompositorRequest::SwitchWorkspace { workspace }
         }
+        // Resolved *and* privileged, the same pair as `ReserveEdge` and for the
+        // same shape of reason. `resolve` because the window named is the
+        // sender's own -- it is where the keystroke will be delivered and it is
+        // the grab's lifetime. `require_shell` because the effect lands on
+        // everyone else: a chord one client holds is a chord no other client can
+        // ever see, and a program able to claim Super+L could show a convincing
+        // fake lock screen and collect the password. Ownership first, so a
+        // program that is not a shell learns nothing about which window ids
+        // exist that it did not already know.
+        RequestBody::GrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            let window_id = link.resolve(window)?;
+            link.require_shell()?;
+            CompositorRequest::GrabKey {
+                window_id,
+                key,
+                modifiers,
+            }
+        }
+        RequestBody::UngrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            let window_id = link.resolve(window)?;
+            link.require_shell()?;
+            CompositorRequest::UngrabKey {
+                window_id,
+                key,
+                modifiers,
+            }
+        }
         RequestBody::SetWindowWorkspace { window, workspace } => {
             link.require_shell()?;
             CompositorRequest::SetWindowWorkspace {
@@ -418,6 +525,35 @@ fn to_compositor_request(
                 workspace,
             }
         }
+        // Resolved like any other window request, and *not* privileged: an
+        // application uploading a thumbnail into its own window is the ordinary
+        // case. What makes this one different is that it is the only request on
+        // this wire whose cost to the compositor is chosen by the sender, which
+        // is why `answer_requests` puts a second gate in front of it — see
+        // `image_budget_refusal`. Nothing about that gate can live here: it
+        // needs to know how many bytes this link already holds, and that is a
+        // question only the compositor can answer.
+        RequestBody::UploadImage {
+            window,
+            image_id,
+            width,
+            height,
+            stride,
+            format,
+            bytes,
+        } => CompositorRequest::RegisterImage {
+            window_id: link.resolve(window)?,
+            image_id,
+            width,
+            height,
+            stride,
+            format,
+            bytes,
+        },
+        RequestBody::DropImage { window, image_id } => CompositorRequest::UnregisterImage {
+            window_id: link.resolve(window)?,
+            image_id,
+        },
     })
 }
 
@@ -558,28 +694,118 @@ impl Compositor {
                 continue;
             }
             let body = match to_compositor_request(link, req.body.clone()) {
-                Ok(request) => {
-                    // Destruction is noted before dispatch and creation after,
-                    // because both read the link's window set and the id of a
-                    // new window does not exist until the compositor answers.
-                    let destroying = match request {
-                        CompositorRequest::DestroyWindow { window_id } => Some(window_id),
-                        _ => None,
-                    };
-                    let body = to_response_body(self.handle_request(request));
-                    if let Some(id) = destroying {
-                        link.windows.retain(|&w| w != id);
+                // Ownership was settled by the conversion; what is left is the
+                // second gate, and only one request has one. An upload is the
+                // only thing on this wire whose cost to the compositor the
+                // *sender* chooses, so it is weighed against what this link
+                // already holds before it is dispatched — and refused whole, so
+                // that a refusal cannot leave a half-replaced image behind.
+                Ok(request) => match self.image_budget_refusal(link, &request) {
+                    Some(refusal) => refusal,
+                    None => {
+                        // Destruction is noted before dispatch and creation
+                        // after, because both read the link's window set and the
+                        // id of a new window does not exist until the compositor
+                        // answers.
+                        let destroying = match request {
+                            CompositorRequest::DestroyWindow { window_id } => Some(window_id),
+                            _ => None,
+                        };
+                        let body = to_response_body(self.handle_request(request));
+                        if let Some(id) = destroying {
+                            link.windows.retain(|&w| w != id);
+                        }
+                        if let ResponseBody::WindowCreated { window } = body {
+                            link.windows.push(WindowId::from_raw(window));
+                        }
+                        body
                     }
-                    if let ResponseBody::WindowCreated { window } = body {
-                        link.windows.push(WindowId::from_raw(window));
-                    }
-                    body
-                }
+                },
                 Err(refusal) => refusal,
             };
             replies.push(Response::new(req.seq, body));
         }
         encode_responses_into(&mut link.outbox, &replies);
+    }
+
+    /// Weigh an image upload against what its connection already holds, and
+    /// return the refusal to send if it does not fit.
+    ///
+    /// `None` for every other request, so the caller can put one call in front
+    /// of the whole dispatch rather than a special case beside it.
+    ///
+    /// ## The arithmetic, and the subtlety in it
+    ///
+    /// The budget is measured against the total this link would hold **after**
+    /// the upload, not before it plus the upload. Those differ whenever the id
+    /// already exists, because re-registering replaces: overwriting a 40 MiB
+    /// asset with a 41 MiB one costs one megabyte. Adding without subtracting
+    /// would refuse every in-place update — a video frame, a re-rendered chart —
+    /// from the moment a client passed half its allowance, which is the point at
+    /// which such a client is doing exactly what it is supposed to.
+    ///
+    /// The size weighed is the *resident* size, `width * height * 4`, not the
+    /// number of bytes on the wire. They differ when a client uploads a
+    /// sub-rectangle of a larger picture with the original's stride: the wire
+    /// carries the padding and the compositor does not keep it. The budget is a
+    /// limit on what the compositor holds, so it counts what the compositor
+    /// holds. Four bytes because that is what an [`ImageAsset`](crate::ImageAsset)
+    /// stores per pixel whatever format it was handed, not
+    /// `format.bytes_per_pixel()`, which describes the sender's layout.
+    ///
+    /// Nothing here validates the geometry: absurd dimensions either fail this
+    /// check by being enormous or fail `ImageAsset::import` a moment later. A
+    /// second copy of the stride and coverage rules would be a second place for
+    /// them to be wrong, and only one of the two is the one a hostile client has
+    /// to get past.
+    fn image_budget_refusal(
+        &self,
+        link: &ClientLink,
+        request: &CompositorRequest,
+    ) -> Option<ResponseBody> {
+        let CompositorRequest::RegisterImage {
+            window_id,
+            image_id,
+            width,
+            height,
+            ..
+        } = *request
+        else {
+            return None;
+        };
+
+        // `u64` throughout, and saturating: every term is a number a client
+        // chose, and a budget check that overflowed to a small total would admit
+        // exactly the upload it exists to refuse.
+        let incoming = u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(4);
+        let held = link
+            .windows
+            .iter()
+            .filter_map(|&w| self.window_image_bytes(w))
+            .map(|n| u64::try_from(n).unwrap_or(u64::MAX))
+            .fold(0u64, u64::saturating_add);
+        let freed = self
+            .image_size_bytes(window_id, image_id)
+            .map_or(0u64, |n| u64::try_from(n).unwrap_or(u64::MAX));
+        let after = held.saturating_sub(freed).saturating_add(incoming);
+
+        if after > link.image_budget {
+            // The numbers are in the message because the client can act on
+            // them: it knows how much it asked for and now knows how much room
+            // there is, which is what it needs to decide between uploading a
+            // smaller picture and dropping one it no longer shows.
+            let limit = link.image_budget;
+            Some(ResponseBody::Error {
+                message: format!(
+                    "image upload of {incoming} bytes would put this connection at {after} bytes, \
+                     over the {limit}-byte limit"
+                ),
+            })
+        } else {
+            None
+        }
     }
 
     /// Take a picture a client submitted for one of its windows.
@@ -709,13 +935,16 @@ mod tests {
     )]
 
     use guiremote::control::{
-        CursorShape, Layer, Request, RequestBody, ShellControlAction, WindowSpec, decode_responses,
+        BufferFormat, CursorShape, Layer, Request, RequestBody, ShellControlAction, WindowSpec,
+        decode_responses,
     };
     use guiremote::input::decode_input_frame;
     use guiremote::window_list::{WindowInfo, WindowList};
     use guiremote::{InputEvent, encode_requests, encode_submit};
     use guitk::color::Color;
-    use guitk::event::Event;
+    use guitk::event::{Event, Key, Modifiers};
+
+    use crate::EventNotification;
 
     use super::*;
 
@@ -1467,6 +1696,88 @@ mod tests {
         assert_eq!(comp.current_workspace(), 3);
     }
 
+    /// The grab path end to end, over the real codec, with the shell *not*
+    /// focused — which is the only interesting case and the one that was
+    /// impossible before. Asserting on `Compositor::grab_key` alone would leave
+    /// the wire translation untested, and it is the translation that carries the
+    /// two checks: resolve the window against the sender, then `require_shell`.
+    #[test]
+    fn a_shell_grabs_a_chord_over_the_wire_and_receives_it_from_another_window() {
+        let (mut comp, mut shell) = wired();
+        let panel = open_in(&mut comp, &mut shell, "Taskbar", Layer::Overlay);
+        let mut app = ClientLink::new(99);
+        open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::GrabKey {
+                window: panel,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Ok),
+            "the grab was refused: {:?}",
+            responses[0].body
+        );
+
+        comp.drain_notifications();
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x38, // left Alt
+            character: None,
+        });
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x0F, // Tab
+            character: None,
+        });
+
+        let tab = comp
+            .drain_notifications()
+            .into_iter()
+            .find_map(|n| match n {
+                EventNotification::KeyEvent {
+                    window_id,
+                    key: Key::Tab,
+                    ..
+                } => Some(window_id.raw()),
+                _ => None,
+            })
+            .expect("Alt+Tab reached nobody");
+        assert_eq!(
+            tab, panel,
+            "Alt+Tab went to the focused editor: the shortcut is still unreachable"
+        );
+    }
+
+    /// The window in a grab is the *sender's*, resolved like any other window
+    /// request. Without that, a client could aim another program's shortcuts at
+    /// itself — or, more simply, register a grab whose deliveries would go to a
+    /// window it cannot read.
+    #[test]
+    fn a_grab_naming_somebody_elses_window_is_refused() {
+        let (mut comp, mut shell) = wired();
+        open_in(&mut comp, &mut shell, "Taskbar", Layer::Overlay);
+        let mut app = ClientLink::new(99);
+        let editor = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::GrabKey {
+                window: editor,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Error { .. }),
+            "a grab was accepted for a window the sender does not own"
+        );
+        assert_eq!(comp.grab_count(), 0);
+    }
+
     #[test]
     fn closing_the_last_window_sends_an_empty_list_rather_than_nothing() {
         // "Nothing to report" and "there is nothing left" are different, and a
@@ -1793,5 +2104,319 @@ mod tests {
                 "the reload request did not reach the interval the compositor measures with"
             );
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Image upload
+    // -----------------------------------------------------------------------
+
+    /// An `UploadImage` for `window` of `w × h` opaque pixels.
+    fn upload(window: u64, image_id: u64, w: u32, h: u32) -> RequestBody {
+        RequestBody::UploadImage {
+            window,
+            image_id,
+            width: w,
+            height: h,
+            stride: w * 4,
+            format: BufferFormat::Argb8888,
+            bytes: vec![0xFF; (w * h * 4) as usize],
+        }
+    }
+
+    #[test]
+    fn an_image_uploaded_over_the_wire_reaches_the_windows_image_store() {
+        // The whole point of the request: before it existed, `register_image`
+        // could only be called by code inside the compositor's own address
+        // space, so a picture drawn by a program in another process drew
+        // nothing — with no error either way. See `known-issues.md` →
+        // `TD-C-AN-IMAGE-CAN-ONLY-BE-UPLOADED-IN-PROCESS`.
+        let (mut comp, mut link) = wired();
+        let window = open(&mut comp, &mut link, "Viewer");
+
+        let responses = exchange(&mut comp, &mut link, vec![upload(window, 1, 4, 4)]);
+        assert!(
+            matches!(
+                responses.as_slice(),
+                [Response {
+                    body: ResponseBody::Ok,
+                    ..
+                }]
+            ),
+            "upload was not accepted: {responses:?}"
+        );
+
+        let id = WindowId::from_raw(window);
+        assert_eq!(comp.image_count(id), Some(1));
+        assert_eq!(comp.window_image_bytes(id), Some(4 * 4 * 4));
+        assert_eq!(comp.image_size_bytes(id, 1), Some(4 * 4 * 4));
+    }
+
+    #[test]
+    fn re_uploading_an_id_replaces_it_rather_than_adding_to_it() {
+        // The in-place update a video frame or a re-rendered chart is made of.
+        // If this ever *added*, a client redrawing at 60 Hz would exhaust its
+        // budget in seconds while holding exactly one picture.
+        let (mut comp, mut link) = wired();
+        let window = open(&mut comp, &mut link, "Player");
+        let id = WindowId::from_raw(window);
+
+        exchange(&mut comp, &mut link, vec![upload(window, 1, 8, 8)]);
+        exchange(&mut comp, &mut link, vec![upload(window, 1, 4, 4)]);
+
+        assert_eq!(comp.image_count(id), Some(1), "one id, one image");
+        assert_eq!(
+            comp.window_image_bytes(id),
+            Some(4 * 4 * 4),
+            "the replacement's size, not the sum of both"
+        );
+    }
+
+    #[test]
+    fn dropping_an_image_frees_it_and_dropping_it_twice_is_not_an_error() {
+        let (mut comp, mut link) = wired();
+        let window = open(&mut comp, &mut link, "Viewer");
+        let id = WindowId::from_raw(window);
+        exchange(&mut comp, &mut link, vec![upload(window, 1, 4, 4)]);
+
+        for round in 0..2 {
+            let responses = exchange(
+                &mut comp,
+                &mut link,
+                vec![RequestBody::DropImage {
+                    window,
+                    image_id: 1,
+                }],
+            );
+            assert!(
+                matches!(
+                    responses.as_slice(),
+                    [Response {
+                        body: ResponseBody::Ok,
+                        ..
+                    }]
+                ),
+                "drop round {round} was not answered Ok: {responses:?}"
+            );
+        }
+        assert_eq!(comp.image_count(id), Some(0));
+        assert_eq!(comp.window_image_bytes(id), Some(0));
+    }
+
+    #[test]
+    fn an_upload_naming_another_links_window_is_refused_exactly_like_a_missing_one() {
+        // The §458 rule, applied to the newest request that carries a window
+        // id. The two refusals must be *identical text*: a distinguishable
+        // "that exists but is not yours" is a way to enumerate the desktop's
+        // window ids one probe at a time.
+        let (mut comp, mut link) = wired();
+        let mut other = ClientLink::new(9999);
+        let theirs = open(&mut comp, &mut other, "Somebody else's");
+
+        let refused = exchange(&mut comp, &mut link, vec![upload(theirs, 1, 2, 2)]);
+        let nonexistent = exchange(&mut comp, &mut link, vec![upload(theirs, 1, 2, 2)]);
+        let ResponseBody::Error { message: a } = &refused[0].body else {
+            panic!("uploading into another link's window was allowed: {refused:?}");
+        };
+        // Same id, now asked for after establishing it is not ours: the
+        // messages must not differ, and neither must have left pixels behind.
+        let ResponseBody::Error { message: b } = &nonexistent[0].body else {
+            panic!("expected a refusal, got {nonexistent:?}");
+        };
+        assert_eq!(a, b);
+        assert_eq!(
+            comp.image_count(WindowId::from_raw(theirs)),
+            Some(0),
+            "the refused upload must not have reached the other link's window"
+        );
+    }
+
+    /// Bytes an `n × n` upload costs once resident: four per pixel, whatever
+    /// format it arrived in.
+    const fn resident(side: u32) -> u64 {
+        (side as u64) * (side as u64) * 4
+    }
+
+    /// A compositor and a link whose image budget is exactly two 8×8 pictures.
+    ///
+    /// The budget is set on the link rather than the tests being written
+    /// against [`MAX_IMAGE_BYTES_PER_LINK`] because filling 256 MiB for real —
+    /// twice, in each of four tests, with the compositor keeping its own copy —
+    /// is gigabytes of allocation to prove arithmetic that does not care how
+    /// big the numbers are. The budget being a per-link field is what makes
+    /// that substitution honest: these tests exercise the same code path a
+    /// 256 MiB link does, with the same comparison against the same field.
+    fn wired_with_small_budget() -> (Compositor, ClientLink) {
+        let (comp, mut link) = wired();
+        link.set_image_budget(resident(8) * 2);
+        (comp, link)
+    }
+
+    #[test]
+    fn a_fresh_link_starts_at_the_default_budget() {
+        // The substitution above is only sound if a link nobody configured gets
+        // the documented ceiling.
+        let (_comp, link) = wired();
+        assert_eq!(link.image_budget(), MAX_IMAGE_BYTES_PER_LINK);
+    }
+
+    #[test]
+    fn an_upload_over_the_links_budget_is_refused_and_changes_nothing() {
+        let (mut comp, mut link) = wired_with_small_budget();
+        let window = open(&mut comp, &mut link, "Hog");
+        let id = WindowId::from_raw(window);
+
+        // Half the budget, twice: the second fits exactly.
+        exchange(&mut comp, &mut link, vec![upload(window, 1, 8, 8)]);
+        exchange(&mut comp, &mut link, vec![upload(window, 2, 8, 8)]);
+        assert_eq!(
+            comp.window_image_bytes(id).map(|n| n as u64),
+            Some(link.image_budget()),
+            "the two halves should exactly fill the budget"
+        );
+
+        // One more pixel does not.
+        let responses = exchange(&mut comp, &mut link, vec![upload(window, 3, 1, 1)]);
+        let ResponseBody::Error { message } = &responses[0].body else {
+            panic!("an over-budget upload was accepted: {responses:?}");
+        };
+        assert!(
+            message.contains("limit"),
+            "the refusal should say what it hit: {message}"
+        );
+        assert_eq!(comp.image_count(id), Some(2), "nothing new was stored");
+        assert_eq!(
+            comp.window_image_bytes(id).map(|n| n as u64),
+            Some(link.image_budget()),
+            "a refused upload must not change what is held"
+        );
+    }
+
+    #[test]
+    fn replacing_an_image_is_weighed_against_the_total_after_the_replacement() {
+        // The subtlety the budget arithmetic exists for. A client holding most
+        // of its allowance in one asset re-uploads *that same asset* at the same
+        // size: the total afterwards is unchanged, so it must be accepted.
+        // Computing "held + incoming" instead would refuse it — and would
+        // therefore refuse every in-place update from the moment a client passed
+        // half its budget, which is when a video player is doing precisely what
+        // it is supposed to.
+        let (mut comp, mut link) = wired_with_small_budget();
+        let window = open(&mut comp, &mut link, "Player");
+        let id = WindowId::from_raw(window);
+
+        // 3/4 of the budget: 12×8 pixels against a two-8×8-picture ceiling.
+        exchange(&mut comp, &mut link, vec![upload(window, 1, 12, 8)]);
+        let responses = exchange(&mut comp, &mut link, vec![upload(window, 1, 12, 8)]);
+        assert!(
+            matches!(
+                responses.as_slice(),
+                [Response {
+                    body: ResponseBody::Ok,
+                    ..
+                }]
+            ),
+            "an in-place replacement at three-quarters of budget was refused: {responses:?}"
+        );
+        assert_eq!(comp.image_count(id), Some(1));
+        assert_eq!(comp.window_image_bytes(id), Some(12 * 8 * 4));
+    }
+
+    #[test]
+    fn the_budget_is_per_link_and_a_second_window_does_not_double_it() {
+        // The reason the budget is not per window: if it were, this would
+        // succeed, and "how much may one connection hold" would be answered by
+        // how many windows it felt like opening.
+        let (mut comp, mut link) = wired_with_small_budget();
+        let a = open(&mut comp, &mut link, "One");
+        let b = open(&mut comp, &mut link, "Two");
+
+        let first = exchange(&mut comp, &mut link, vec![upload(a, 1, 12, 8)]);
+        assert!(matches!(first[0].body, ResponseBody::Ok));
+
+        let second = exchange(&mut comp, &mut link, vec![upload(b, 1, 12, 8)]);
+        assert!(
+            matches!(second[0].body, ResponseBody::Error { .. }),
+            "a second window bought a second budget: {second:?}"
+        );
+        assert_eq!(comp.image_count(WindowId::from_raw(b)), Some(0));
+    }
+
+    #[test]
+    fn two_links_have_separate_budgets() {
+        // The other half of "per link": one connection filling its allowance
+        // must not refuse another's first upload. A single global total would
+        // let any program on the machine deny images to every other one.
+        let (mut comp, mut link) = wired_with_small_budget();
+        let mut other = ClientLink::new(5150);
+        other.set_image_budget(resident(8) * 2);
+
+        let mine = open(&mut comp, &mut link, "Mine");
+        let theirs = open(&mut comp, &mut other, "Theirs");
+        exchange(&mut comp, &mut link, vec![upload(mine, 1, 8, 8)]);
+        exchange(&mut comp, &mut link, vec![upload(mine, 2, 8, 8)]);
+
+        let responses = exchange(&mut comp, &mut other, vec![upload(theirs, 1, 8, 8)]);
+        assert!(
+            matches!(responses[0].body, ResponseBody::Ok),
+            "one link's full budget refused another link's first upload: {responses:?}"
+        );
+    }
+
+    #[test]
+    fn dropping_an_image_makes_room_for_the_next_one() {
+        // The client-side answer to a refusal, and the reason refusing is not a
+        // dead end: a program told it is over budget can free something and try
+        // again, which is the exchange an eviction policy would have replaced
+        // with a picture that silently stopped appearing.
+        let (mut comp, mut link) = wired_with_small_budget();
+        let window = open(&mut comp, &mut link, "Viewer");
+
+        exchange(&mut comp, &mut link, vec![upload(window, 1, 8, 8)]);
+        exchange(&mut comp, &mut link, vec![upload(window, 2, 8, 8)]);
+        let refused = exchange(&mut comp, &mut link, vec![upload(window, 3, 1, 1)]);
+        assert!(matches!(refused[0].body, ResponseBody::Error { .. }));
+
+        exchange(
+            &mut comp,
+            &mut link,
+            vec![RequestBody::DropImage {
+                window,
+                image_id: 2,
+            }],
+        );
+        let accepted = exchange(&mut comp, &mut link, vec![upload(window, 3, 1, 1)]);
+        assert!(
+            matches!(accepted[0].body, ResponseBody::Ok),
+            "the room freed by a drop was not reusable: {accepted:?}"
+        );
+    }
+
+    #[test]
+    fn an_upload_whose_bytes_do_not_cover_its_geometry_is_refused_by_the_importer() {
+        // The wire deliberately does *not* check that the stride covers the
+        // width or that the bytes cover the rows — `ImageAsset::import` does,
+        // and one copy of that arithmetic is the whole argument. This is the
+        // test that the request actually reaches it.
+        let (mut comp, mut link) = wired();
+        let window = open(&mut comp, &mut link, "Liar");
+
+        let responses = exchange(
+            &mut comp,
+            &mut link,
+            vec![RequestBody::UploadImage {
+                window,
+                image_id: 1,
+                width: 64,
+                height: 64,
+                stride: 256,
+                format: BufferFormat::Argb8888,
+                bytes: vec![0; 16], // nowhere near 64 rows of 256 bytes
+            }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Error { .. }),
+            "a frame that lied about its size was accepted: {responses:?}"
+        );
+        assert_eq!(comp.image_count(WindowId::from_raw(window)), Some(0));
     }
 }

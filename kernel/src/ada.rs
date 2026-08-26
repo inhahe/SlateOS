@@ -45,6 +45,11 @@
 
 #![allow(dead_code)] // Entry points land as drivers are migrated to them.
 
+// Used by `__gnat_last_chance_handler` and nothing else, so it carries that
+// function's `cfg` rather than an `allow(unused_imports)`: an import that
+// belongs to one cfg arm should say so, not be excused for looking unused in
+// the other.
+#[cfg(target_os = "none")]
 use core::ffi::c_char;
 
 /// Result of an Ada operation that reports a status rather than a value.
@@ -218,6 +223,24 @@ pub fn is_allocated(queue: u16, index: u16) -> bool {
 /// power of two. The power-of-two requirement is virtio's, and the ring-index
 /// masking on this side depends on it — rejecting it here is what lets the
 /// rest of the driver stop wondering.
+// The `mut` here is an Ada `out` parameter (`&raw mut status` below), so it is
+// genuine on the kernel target and only *looks* unused on a host build, where
+// the call it feeds is compiled out. This and the four functions like it carry
+// the attribute per-function rather than an `#![allow]` at the top of the file,
+// so a later genuinely-unused `mut` in some function with no Ada call is still
+// caught -- and `expect` rather than `allow`, so that if one of these is ever
+// restructured such that the lint stops firing, the now-pointless attribute
+// warns instead of sitting here forever claiming to suppress something.
+// Requested by lane B in `requests/b-a-ada-rs-generates-six-warnings-on-the-host-target.md`:
+// six standing warnings in the only whole-tree check that completes are six
+// lines a reader learns to skip, which is how the seventh gets missed.
+#[cfg_attr(
+    not(target_os = "none"),
+    expect(
+        unused_mut,
+        reason = "Ada `out` parameter; the call is cfg'd out on a host build"
+    )
+)]
 pub fn initialize(queue: u16, size: u16) -> Result<(), VqStatus> {
     let mut status: u8 = VqStatus::Unknown as u8;
     // SAFETY: `&mut status` is a live, aligned, exclusively-owned `u8` for the
@@ -268,6 +291,13 @@ pub fn reset(queue: u16) {
 /// **The returned index is proved to be a genuine index into this queue.** It
 /// is what justifies the pointer arithmetic in `virtio::queue`.
 #[must_use]
+#[cfg_attr(
+    not(target_os = "none"),
+    expect(
+        unused_mut,
+        reason = "Ada `out` parameter; the call is cfg'd out on a host build"
+    )
+)]
 pub fn allocate(queue: u16) -> Option<u16> {
     let mut index: u16 = NO_DESCRIPTOR;
     // SAFETY: as `initialize` — one `out` scalar into our own live local.
@@ -296,6 +326,13 @@ pub fn allocate(queue: u16) -> Option<u16> {
 /// # Errors
 /// [`VqStatus::BadQueue`], [`VqStatus::BadIndex`] if either index is beyond
 /// the queue, or [`VqStatus::NotAllocated`] if either end is not in use.
+#[cfg_attr(
+    not(target_os = "none"),
+    expect(
+        unused_mut,
+        reason = "Ada `out` parameter; the call is cfg'd out on a host build"
+    )
+)]
 pub fn link(queue: u16, from: u16, to: u16) -> Result<(), VqStatus> {
     let mut status: u8 = VqStatus::Unknown as u8;
     // SAFETY: as `initialize`.
@@ -315,6 +352,13 @@ pub fn link(queue: u16, from: u16, to: u16) -> Result<(), VqStatus> {
 /// # Errors
 /// [`VqStatus::BadQueue`], [`VqStatus::BadIndex`] or
 /// [`VqStatus::NotAllocated`].
+#[cfg_attr(
+    not(target_os = "none"),
+    expect(
+        unused_mut,
+        reason = "Ada `out` parameter; the call is cfg'd out on a host build"
+    )
+)]
 pub fn terminate_chain(queue: u16, index: u16) -> Result<(), VqStatus> {
     let mut status: u8 = VqStatus::Unknown as u8;
     // SAFETY: as `initialize`.
@@ -343,6 +387,13 @@ pub fn terminate_chain(queue: u16, index: u16) -> Result<(), VqStatus> {
 /// leave the queue in a state that is neither the old one nor a good one,
 /// after being handed input the device chose.
 #[must_use]
+#[cfg_attr(
+    not(target_os = "none"),
+    expect(
+        unused_mut,
+        reason = "Ada `out` parameter; the call is cfg'd out on a host build"
+    )
+)]
 pub fn free_chain(queue: u16, head: u16) -> u16 {
     let mut freed: u16 = 0;
     // SAFETY: as `initialize`.

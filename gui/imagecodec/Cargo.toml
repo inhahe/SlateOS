@@ -1,0 +1,19 @@
+[package]
+name = "imagecodec"
+version = "0.1.0"
+edition = "2024"
+description = "Decoding picture files into the pixels the compositor draws, without trusting the file."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free and `no_std` + `alloc`, for the same reason as
+# `yamldoc`, `textfmt` and `textfind`: the components that need to turn a file
+# into pixels are not all GUI components. The desktop shell's wallpaper and the
+# file manager's thumbnails are, but the preview/thumbnail engine and anything
+# that wants an image's real dimensions are not, and none of them should have to
+# take a dependency on a widget library to read a PNG.
+[dependencies]
+
+[lints]
+workspace = true

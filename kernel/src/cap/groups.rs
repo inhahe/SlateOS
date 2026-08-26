@@ -62,7 +62,16 @@ const MAX_GROUPS: usize = 32;
 /// definition is a group that silently means something narrower than its name.
 /// It was 16 against 26 resource types until 2026-08-21, which is why
 /// `install_builtin` now reports an overflow instead of truncating.
-const MAX_CAPS_PER_GROUP: usize = 32;
+///
+/// **Derived rather than written down, since 2026-08-26.** The literal `32` it
+/// replaces had only two slots left, so the next resource type appended for any
+/// reason at all would have turned the boot red *here* — in a file about group
+/// storage, with a message about capacity, some distance from the change that
+/// caused it. That is a bad failure: correct, loud, and pointing at the wrong
+/// place. The requirement was never "32"; it was "at least as many as there are
+/// types", so it is now spelled that way and cannot drift again. The slack is
+/// for the room a fixed-size table wants anyway, not for counting.
+const MAX_CAPS_PER_GROUP: usize = (ResourceType::LAST as usize).saturating_add(8);
 
 /// Maximum member GIDs per group.
 const MAX_MEMBERS_PER_GROUP: usize = 16;

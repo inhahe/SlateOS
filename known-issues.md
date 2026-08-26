@@ -87223,6 +87223,339 @@ test did not.
 appears to imply. Where a claim cannot be measured, say so in the file. The two
 above cost nothing to check — one `bash -c` each — and both were wrong.
 
+## osh: a special redirection filename must re-open fd N's file, not dup fd N
+
+**Status:** fixed 2026-08-26 (found the same day while triaging
+`the-status-of-a-fatal-expansion-abort-belongs-to-whoever-caught-it`). The
+`source` half landed in `0f3dfac29`; the redirect half, and the two structural
+blind spots it exposed, are described at the end of this entry.
+
+`interp.rs::resolve_special_redirect` resolves `/dev/stdin`, `/dev/stdout`,
+`/dev/stderr` and `/dev/fd/N` into the *dup* of descriptor N, and says so:
+
+```rust
+    /// See [`special_redirect_fd`] for the names. `read` picks the input side:
+    /// `< /dev/fd/3` shares fd 3's cursor exactly like `<&3`, while
+    /// `> /dev/fd/3` writes to it like `>&3`.
+```
+
+That claim is false, and it is false on *both* hosts — so it is not one of the
+MSYS artifacts this migration has been turning up, just an unmeasured
+assumption. bash does not special-case these names at all when the host
+provides `/dev/fd` (`HAVE_DEV_FD`): it calls plain `open()` and lets the kernel
+resolve the path, which yields a **new file description positioned at 0**, not a
+second reference to the existing one. Measured, bash 5.2, glibc and MSYS
+identical, against `t2.sh` = `echo A\necho B`:
+
+```text
+                                                         bash          osh
+exec 3< t2.sh; read -u 3 l; cat < /dev/fd/3              echo A|echo B  echo B
+exec 3< t2.sh; read -u 3 l; cat <&3                      echo B         echo B
+{ read -r l; cat < /dev/stdin; } < t2.sh                 echo A|echo B  echo B
+exec 3< t2.sh; read -u 3 l; cat < /dev/fd/3 >/dev/null
+  ; read -u 3 m; echo "m=[$m]"                           m=[echo B]     m=[]
+```
+
+The last line is the half that a dup can never reproduce: after the re-open the
+shell's *own* cursor on fd 3 is exactly where `read` left it, because the two
+descriptions are independent. Under `<&3` it is at end of file (`m=[]`), which
+is what osh produces for both.
+
+The write side is wrong in the more damaging direction — `>` on a re-opened
+path carries `O_TRUNC`:
+
+```text
+exec 3> w1;  echo AAAA >&3; echo B >  /dev/fd/3; …; cat w1   bash B/          osh AAAA/B/
+exec 3>> w3; echo AAAA >&3; echo B >> /dev/fd/3; …; cat w3   bash AAAA/B/     osh AAAA/B/AAAA/B/
+```
+
+so osh keeps data that bash discards, and the append case additionally doubles
+its output.
+
+The same root cause is why `source` is wrong: `builtin_source` opens its
+operand as a *host* path (`std::fs::read(self.host_path(path))`,
+interp.rs:54582), so `/dev/stdin` reaches the process's real fd 0 rather than
+the shell's modelled one. Measured with `printf 'echo REAL\n' |` feeding the
+shell's ambient stdin:
+
+```text
+                                              bash                         osh
+source /dev/stdin < t3.sh                     THREE                        REAL
+source /dev/stdin <<< "echo A"                A                            REAL
+source /dev/stderr 2< t3.sh                   THREE                        hangs (rc=124)
+source /dev/stdout 1< t3.sh                   THREE + write error, st=1    hangs
+exec 3< t3.sh; source /dev/fd/3 3<&-          No such file or directory,1  THREE
+source /dev/stdin < dd     (dd a directory)   …: is a directory, st=1      REAL, st=0
+source /dev/stdin <&-                         No such file or directory,1  REAL, st=0
+{ read -r l; source /dev/stdin; } < t2.sh     A|B  (rewinds)               REAL
+printf 'echo A\necho B\n' | { read -r l
+  ; source /dev/stdin; }                      B    (pipe, no rewind)       REAL
+printf 'echo FROMFILE\n' > o3
+  ; source /dev/stdout >> o3                  sources it — o3 doubles      hangs
+```
+
+`/dev/fd/N` for N >= 3 is right on Linux today only by accident: Rust's first
+`File::open` tends to land on host fd 3, so the host path resolves to the same
+file. It is wrong on Windows, wrong on SlateOS, and wrong on Linux the moment
+the descriptor is closed for the command (`3<&-`).
+
+**The rule both sides need.** Opening a special filename means: find the file
+behind the shell's *modelled* descriptor N and open it afresh with the
+redirect's own mode. Consequences, all measured above:
+
+| fd N's binding | opening the special path yields |
+|---|---|
+| a seekable file | an independent description at offset 0; `>` truncates, `>>` appends |
+| a pipe | the same pipe — no rewind is possible, so reading continues |
+| a here-document / here-string | **this row was wrong** — it is a *pipe* at or below 64 KiB and a temp file above, and only the temp file rewinds. Corrected and measured in "a here-document over 64 KiB is a temp file, which `/dev/stdin` re-opens from the start", below. |
+| write-only (fd 1 over a file) | still readable — `source /dev/stdout >> f` sources `f` |
+| unbound or closed (`<&-`) | `<path>: No such file or directory`, status 1 |
+| a directory | `<path>: is a directory`, status 1 |
+
+**Fix.** One resolver used by both `resolve_special_redirect` and
+`builtin_source`, replacing the dup. The handles osh models are real host
+descriptors, so the faithful re-open is the one the kernel would do —
+`/proc/self/fd/<raw>` on Unix, `GetFinalPathNameByHandleW` + re-open on
+Windows — with `InputSrc::Bytes` re-read from index 0 for the here-document
+case and the closed/unbound/directory shapes mapped to the diagnostics above.
+Recording the origin path on the handle instead would be simpler but diverges
+for the `exec 3< f; rm f; cat < /dev/fd/3` idiom, which bash serves from the
+still-open inode.
+
+### How it was fixed
+
+`/proc/self/fd/<raw>` is not merely *a* way to re-open the descriptor's file —
+it is literally what `/dev/fd` is a symlink to, so substituting it and letting
+the ordinary open proceed **inherits** every one of the six behaviours in the
+table above rather than emulating them. `O_TRUNC`, `>>`, `set -C` having a real
+file to protect, the descriptor's access mode not constraining the redirect,
+the live inode behind an unlinked path, and the fresh offset all fall out for
+free. So the shape of the fix is *substitute the path and fall through*:
+`resolve_special_redirect` now returns a path to open, and the callers open it
+exactly as they would have opened the word the user wrote.
+
+Two consequences of that shape needed structure of their own:
+
+- **The word the user wrote is what a diagnostic must name.** `>` on a
+  protected file has to say `/dev/fd/3: cannot overwrite existing file`, never
+  `/proc/self/fd/3: …`. `noclobber_check`, `open_input_source` and
+  `open_output_target` therefore take the original word alongside the path to
+  open.
+- **`/proc/self/fd/N` names a file only while fd N is open.** Some of the
+  descriptors answered here are made on the spot — a snapshot of a pipeline
+  stage's pipe, a dup of the real stdout — so returning the path alone let the
+  handle drop at the end of the resolver and the caller's `open` fail with
+  `ENOENT`. Measured: `{ echo hi > /dev/stdout; } | sed` died exactly that way.
+  `struct Reopen { path, _keep: Option<Arc<File>> }` ties the two lifetimes
+  together.
+
+### Two blind spots the fix exposed, both now closed
+
+Neither was introduced by this change; both were latent and only became
+visible once the special names started asking the shell "what *is* fd N here?"
+in earnest.
+
+**Redirect resolution could not see the command's own stdin.** A `RedirPlan` is
+built from the redirect list alone, so when nothing in the list and no `exec`
+had touched fd 0, the resolver had nothing left to consult and fell back to the
+*process's* fd 0 — the harness's pipe, not the command's. `AmbientStdin`
+(`Process` / `Fd(InputFd)` / `Opaque`) is now recorded on the plan when it is
+built, so fd 0 resolves to what the command was actually handed. The `Opaque`
+arm — a pipeline stage's reader, which has no name and no rewind — deliberately
+falls through to the dup, because that is what bash's re-open of a pipe yields
+anyway.
+
+**The write side had the same hole, one number over, and it was worse.**
+`write_special_src` fell back to `host_reopen_path(1)` / `(2)`: the process's
+descriptors. Inside a command substitution fd 1 is a capture buffer, in a
+pipeline stage it is the stage's pipe, and a scoped `2>` lives on
+`stderr_stack` — naming `/proc/self/fd/1` walked straight past all three and
+wrote to the terminal. `x=$(echo hi > /dev/stdout)` printed `hi` and left `x`
+empty. The fix reuses `alias_write_fd(n, out)`, which already answers "what is
+fd `n` *here*" for `N>&n` and already knows about `exec_stdout_shadowing`,
+`Out::Capture`, `Out::Pipe` and `snapshot_std_fd`; fd 2 additionally consults
+`stderr_target_at`. Writing a second, parallel answer would have been the
+mistake.
+
+### Verified
+
+`tests/corpus/redirect-dev-fd.sh` was rewritten around the open-not-dup
+contract — the old file asserted the dup reading in its header *and* in a probe
+(`"and it is a dup, so noclobber has no file to protect"`), both false — and
+now probes all six differences. A 28-probe scratch suite run side by side with
+glibc bash matches on 26; the two exceptions involve no special filename at all
+and are the separate pipeline-stage-stdin defect recorded below.
+
+## osh: a `read` in a pipeline stage swallows the rest of the pipe
+
+**Status:** fixed 2026-08-26 (found the same day while verifying the
+special-redirection-filename fix; **not** caused by it — it reproduced with no
+special filename involved). The fix went wider than the one proposed below, and
+took two neighbouring defects with it — see *"What was actually done"* at the
+end. Regression case:
+`userspace/oils/tests/corpus/a-pipeline-stages-fd-0-is-an-ordinary-descriptor.sh`.
+
+After `read` consumes a line from a pipeline stage's stdin, any *later command*
+in that same stage sees EOF. Measured, bash 5.2.21 vs osh, glibc:
+
+```text
+                                                    bash        osh
+printf 'A\nB\n' | { read -r l; /bin/cat; }          B           (nothing)
+printf 'A\nB\n' | { read -r l; cat; }               B           (nothing)
+printf 'A\nB\n' | { read -r l; sed 's/^/x/'; }      xB          (nothing)
+printf 'A\nB\n' | { read -r l; head -1; }           B           (nothing)
+printf 'A\nB\nC\n' | { read -r l; /bin/cat; }       B|C         (nothing)
+printf 'P1\nP2\n' | { exec 3<&0; read -u 3 l
+  ; cat < /dev/fd/3; }                              P2          (nothing)
+```
+
+Two neighbouring cases are *right*, which localises it precisely: two
+successive `read`s work (`l=A m=B`), and so does `while read`. Both of those
+stay inside the shell. Only handing the descriptor to a **child** loses data.
+
+**Cause.** `StdinSrc::pipe` (interp.rs:3200) wraps the pipe's read end in
+`io::BufReader::new(r)` — the default 8 KiB buffer. `read_record` peeks through
+`fill_buf`, which drains up to 8 KiB of the pipe into that buffer; the child
+then inherits the raw fd (`try_clone`, interp.rs:25933) and finds it already
+empty. The bytes are not lost, they are sitting in the shell's buffer where
+nothing will ever hand them back — a pipe has no `seek` to give them back with.
+
+The shortcut is already acknowledged in a comment at the `try_clone` site
+("Bytes already buffered by an earlier in-stage `read` are not replayed — a
+rare edge case"), but `read header; cat` is not a rare idiom, and bash gets it
+right.
+
+**Fix.** The rule this needs is one osh has already written down, one type over.
+`FileInput::build` (interp.rs:2506) sizes its buffer from seekability —
+`FILE_INPUT_READAHEAD` when the descriptor can seek, **1 byte when it cannot** —
+precisely because "without it `sync` cannot give the unconsumed remainder back,
+so there must not be one." A pipe can never seek, so `StdinSrc::pipe` must use
+`io::BufReader::with_capacity(1, r)`. That is also what bash does: `zsyncfd`
+reads unseekable input one byte at a time so the descriptor is left exactly
+after the delimiter. The cost — one `read(2)` per byte for `cmd | while read` —
+is the same cost bash pays, and correctness here is the point of the exercise.
+
+`take` (mapfile) and `read_to_end` are unaffected: both consume to EOF, and
+`BufReader` overrides `read_to_end` to drain its buffer and then delegate.
+
+**What was actually done.** Shrinking the buffer would have fixed the symptom
+and left the cause, which was not the buffer size but the fact that a pipeline
+stage's fd 0 was held as a *shape of its own* — `StdinSrc::Pipe`, a
+`RefCell<BufReader<PipeReader>>` — rather than as an ordinary input descriptor.
+Three defects followed from that one fact, and only the first is the one this
+entry was filed for:
+
+1. The stranded read-ahead above.
+2. **`exec 3<&0` in a pipeline stage was a silent no-op.** The fd-0 lookup
+   (`clone_input_fd`) only knows about `InputFd`s, so it found nothing to
+   duplicate and fell back to the empty stream it gives an unbound stdin:
+   `printf 'A\nB\n' | { exec 3<&0; read -u 3 l; }` left `l` empty with rc 0
+   where bash reads `A`. The transient form `{ read -r l <&3; } 3<&0` had the
+   same hole, through `plan_stdin_fd`.
+3. **`/dev/stdin` on a pipe was answered by draining the pipe** into a byte
+   snapshot rather than re-opening the descriptor.
+
+So `StdinSrc::Pipe` was deleted outright. `StdinSrc::pipe` now builds
+`StdinSrc::Fd(file_input(pipe_reader_into_file(r)))`, i.e. an
+`InputSrc::File(FileInput)` over a pipe-derived `File` — at which point
+`FileInput::build`'s existing seekability rule supplies the one-byte buffer for
+free, a child gets a duplicate positioned where the shell is, and `/dev/stdin`
+is a genuine `/proc/self/fd` re-open. Two supporting changes fell out:
+
+* `FileInput` gained a `seekable` field and a `readable_now()`, so `read -t 0`
+  still distinguishes a seekable file (always ready) from a live descriptor
+  (must be probed) now that the distinction is no longer visible in the enum's
+  shape. `pipe_reader_readable_now(&PipeReader)` became
+  `file_readable_now(&File)`.
+* `AmbientStdin` lost its `Opaque` variant (a stage's fd 0 is an
+  `AmbientStdin::Fd` like any other) and gained a reader, `Shell::dup_input_fd`,
+  which resolves fd 0 against the ambient rather than the `exec`-installed
+  table. Both dup paths — persistent (`apply_persistent_dup_in`) and transient
+  (`plan_stdin_fd`) — go through it, which is what closes defect 2.
+
+The comment conceding the shortcut ("Bytes already buffered by an earlier
+in-stage `read` are not replayed — a rare edge case") is gone with the code it
+described.
+
+One divergence in this area remains, and is **not** part of this: osh models
+fds ≥ 3 in user space and does not pass them to children, so
+`printf 'A\nB\n' | { exec 3<&0; ls -l /proc/self/fd/3; }` still fails where
+bash succeeds. That is the separately-tracked user-space-fd-table limitation.
+
+## osh: a here-document over 64 KiB is a temp file, which `/dev/stdin` re-opens from the start
+
+**Status:** open (found 2026-08-26, same session; a corner of the
+special-redirection-filename work that was left unmatched deliberately).
+
+Since bash 5.1 a here-document is **not** always a temp file. bash writes it
+down a *pipe* when it fits in the pipe buffer and spills to a temp file only
+when it does not — and the two re-open differently, because a pipe cannot
+rewind and a file can. Measured, bash 5.2.21, with
+`{ read a; read b < /dev/stdin; echo "a=${#a} b=${#b}"; }` over a document
+whose first line is `n` bytes and whose second is `second`:
+
+```text
+document total   bash              osh
+<= 65536         b=6   (no rewind) b=6   — matches
+>  65536         b=n   (rewinds)   b=6   — diverges
+```
+
+The boundary is exact and was bisected: a total of 65536 bytes is a pipe, 65537
+is a temp file. That is the pipe capacity, not a bash constant to guess at.
+
+osh models every here-document as an `InputSrc::Bytes` snapshot and always
+continues from the cursor, so it is right below the boundary and wrong above
+it. The false comment that used to sit on the `InputSrc::Bytes` arm of
+`Shell::input_special_src` — "bash's here-documents are temp files, which a
+re-open reads from the start" — asserted the opposite of the measurement and
+has been replaced with it.
+
+**Fix.** Split on the snapshot's length at the point the re-open is resolved:
+above the pipe capacity hand back the whole buffer (a rewind), at or below it
+hand back the remainder. The threshold should be read from the host rather than
+hardcoded, since it is the pipe capacity.
+
+**Why it was not fixed with the rest.** It is a behaviour of *here-document
+storage*, not of the special filenames, and touching how here-documents are
+held is a change with its own blast radius. The measurement is recorded here so
+the fix does not have to rediscover the boundary.
+
+## osh: a shell started with fd 0 closed sees `/dev/null` there, where bash sees nothing
+
+**Status:** open, and arguably **won't fix** — recorded so it is not
+rediscovered as a defect. Found 2026-08-26.
+
+```text
+$ bash --norc -c 'read l < /dev/stdin <<< x; echo "[$l]"' <&-
+bash: /dev/stdin: No such file or directory
+[]
+$ osh  --norc -c 'read l < /dev/stdin <<< x; echo "[$l]"' <&-
+[x]
+```
+
+The cause is not in osh's code at all. Rust's standard library sanitises the
+standard descriptors before `main` runs: if fd 0, 1 or 2 is closed at `exec`,
+it opens `/dev/null` onto it, so that a program which later opens a file cannot
+have it silently become "stdout". Inspecting the fd table shows it plainly —
+with fd 0 closed at exec, bash's fd 0 is absent while osh's is `/dev/null`.
+
+Every *shell-modelled* closed descriptor is handled correctly and matches bash
+exactly, which is the case that actually occurs in scripts:
+
+```text
+{ read l < /dev/stdin; echo "[$l]"; } <&-        both: /dev/stdin: No such file or directory
+exec 0<&-; { read l < /dev/stdin; ... }          both: /dev/stdin: No such file or directory
+{ cat < /dev/stdin; } <&-; echo "st=$?"          both: … + st=1
+exec 3<&-; cat < /dev/fd/3; echo "st=$?"         both: /dev/fd/3: … + st=1
+```
+
+Only the *invocation* form — the shell process itself started with fd 0
+already closed — differs. Matching bash would mean defeating std's guard, and
+by the time `main` runs the distinction is gone: `/dev/null` on fd 0 looks the
+same whether std put it there or the caller did. Detecting it would require a
+pre-`main` constructor in `.init_array`, which trades a real safety property
+for a corner case no script can reach.
+
 ---
 
 ## `C-LOCKSCREEN-HAD-NO-WINDOW-NO-CLOCK-AND-NO-WAY-TO-CHECK-A-PASSWORD` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26
@@ -87914,6 +88247,238 @@ an interrupt path.
 
 ---
 
+## C-NETMANAGER-HAD-NO-WINDOW-AND-NO-EVENT-HANDLER-AT-ALL (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**In short:** the Network Manager — the program you open to pick a Wi-Fi
+network, set a static IP address, reorder your DNS servers or switch a VPN on —
+never opened a window, so none of it ran. `fn main` was literally `fn main() {}`.
+Worse than the other unwired apps in this batch: those at least had a
+`handle_click` sitting unreachable, whereas netmanager had **no event handler of
+any kind** — eight tabs' worth of buttons, a Wi-Fi list, four editable text
+fields and a DNS priority list existed only as pixels, with nothing anywhere in
+the program that could have turned a click into an action. It now opens a
+window, and every control on all eight tabs works, with a keyboard and a mouse
+wheel. Two real bugs fell out of writing the tests: the Profiles tab hid the
+only button that can create your first profile, and a Wi-Fi selection could
+silently move to a *different* network across a scan, so Connect would have
+joined the wrong one.
+
+### What changed
+
+1. **The window.** `apps/netmanager` gained `oswindow` and an
+   `impl oswindow::app::App for NetManagerApp`, and `fn main` is now
+   `app::launch("netmanager", &mut app)`.
+
+2. **An interaction layer, built from nothing.** `Target` (21 variants) names
+   every control in the program; `activate(Target)` is the one place an action
+   happens; `handle_click`, `handle_key`, `handle_event` route to it. There was
+   no prior version of any of this to extend.
+
+3. **The geometry has exactly one copy, by construction.** The other apps in
+   this batch got a `…Layout` struct measured once and read by both the renderer
+   and the hit-test. That does not scale to netmanager: it is ~1200 lines of
+   running-`y` rendering across eight tabs, and a `Layout` for it would be a
+   second 1200-line transcription of the same arithmetic — which is precisely
+   the failure mode the systray entry above describes, just bigger. Instead the
+   renderer *records* each clickable box as it paints it (`frame.hit(target,
+   rect)`), and the hit-test runs the renderer and reads `Frame::hits` back to
+   front so the topmost control wins. The drawing helpers
+   (`render_button`, `render_mini_button`, `render_toggle_row`,
+   `render_editable_field`) return the rect they drew, so the call site can only
+   register the box that was actually painted. There is no second copy to
+   disagree with.
+
+4. **A keyboard, with a visible caret.** Tab walks the IP/mask/gateway fields,
+   typing lands in the focused one, Backspace deletes, Enter in the DNS box adds
+   the address without reaching for the button, Escape puts the caret away (and,
+   with no caret out, closes the window). The caret is drawn *into the field's
+   text* rather than as a separate command, because the render tree is the only
+   thing a test can see — a focus state that leaves no mark in the output is a
+   focus state no test can assert.
+
+5. **A wheel and a resize.** The sidebar scrolls through
+   `guitk::wheel::Accumulator`, which keeps the fraction of a row a trackpad
+   sends; rounding per event would discard slow scrolling entirely. `render`
+   believes the width and height it is handed and stores them, because the
+   first frame goes out *before* any `Event::Resize` — so `render` is the only
+   place the true size is known on frame one, and a hit-test that trusted the
+   constant would be wrong for exactly one frame at every startup.
+
+### The two product bugs the tests found
+
+- **The Profiles tab hid its own Add button when there were no profiles.** The
+  empty-list branch printed "No profiles" and `return`ed, which skipped the
+  Add-Profile button below it — so the control that creates your first profile
+  was unreachable in precisely the state that needs it. It now falls through.
+  Caught by `add_profile_is_reachable_when_there_are_no_profiles_yet`.
+
+- **A Wi-Fi selection was tracked by list index across a rescan.** `refresh()`
+  rebuilt the network list and merely clamped the stored index into range. A
+  scan reorders the air — signal strengths change, networks appear and vanish —
+  so the surviving index quietly pointed at a *different* network, and Connect
+  would have joined that one. The selection now follows its **SSID**: if the
+  chosen network is no longer on the air, neither is the selection. Caught by
+  `a_wifi_selection_follows_its_network_across_a_scan`, which failed on the
+  first run; the fix went into the production code, not the test.
+
+### How the tests were written so they could fail
+
+136 tests, all green. Nothing in the geometry tests recomputes a position from a
+layout constant — a test that recomputes geometry agrees with the renderer only
+by accident. Instead:
+
+- **`rect_of(app, target)` reads the rect out of the rendered `Frame`**, and
+  `click(app, target)` clicks its centre, so a test that clicks a button clicks
+  wherever the renderer actually put it.
+- **Boundaries are asserted, not assumed.** `Rect::contains` is half-open on
+  both axes, so adjacent rows cannot both claim a boundary pixel;
+  `the_far_edge_of_a_row_belongs_to_the_row_below_it` pins that down by clicking
+  `x + w - 0.5`, never `x + w`.
+- **`no_two_controls_claim_the_same_pixel_on_any_tab`** walks every tab and
+  checks every pair of recorded rects for overlap, which is the assertion that
+  makes "the topmost wins" a design rather than a coincidence.
+- **`render_believes_the_size_it_is_handed_on_the_very_first_frame`** and
+  `a_resize_is_believed_and_the_hit_test_follows_the_window` cover the frame-one
+  case above, which no amount of clicking at the default size would reach.
+
+## C-ARCHIVEMANAGER-HAD-NO-WINDOW-AND-NO-EVENT-HANDLER-AT-ALL (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**In short:** the Archive Manager drew a complete-looking window — toolbar, a
+folder tree down the left, sortable columns, a file list, a progress strip — and
+none of it could be touched. `fn main` was empty, so the program started and
+immediately exited without ever opening a window. Every button existed only for
+the unit tests to call. It now opens a real window and everything in it responds
+to the mouse and the keyboard. What it still cannot do is *read an archive* —
+see the entry below this one.
+
+### What changed
+
+1. **`oswindow` dependency and a real `fn main`.** `apps/archivemanager` now
+   depends on `gui/window` and `main` ends in `app::launch("archivemanager",
+   &mut state)`. `AppState` implements the `App` trait: `title` (which names the
+   open archive), `app_id`, `initial_size`, `on_event`, `render`.
+
+2. **One renderer, which records where it put things.** The eight `render_*`
+   functions used to append to a `Vec<RenderCommand>`; they now take a `&mut
+   Frame`, which is that vector plus a list of `(Target, Rect)` pairs recorded
+   as the drawing happens. `AppState::hit_test` answers a click by *running the
+   renderer* and reading the list back-to-front. There is no second copy of the
+   layout arithmetic for the two to disagree about, which is the failure mode a
+   separate `Layout` struct would have had in a 3,700-line running-`y` renderer.
+
+3. **The hit list is clip-aware.** `Frame::push` watches for `PushClip`/`PopClip`
+   and keeps a clip stack; `Frame::hit` trims each rect to the clip in force and
+   drops it if it falls outside. Without this a row scrolled off the top of the
+   list would still take clicks from the column header painted over it.
+
+4. **Rows are addressed by identity, not by position.** `Target::FileRow` carries
+   the entry's stable `id` and `Target::TreeRow` is resolved through the
+   flattened tree at click time, because both lists reorder under the pointer —
+   the file list when a column header is clicked, the tree when a node is
+   expanded. `re_sorting_does_not_move_the_selection_to_a_different_file` is the
+   test that pins this.
+
+5. **`content_band` is the single copy of the vertical layout.** The height of
+   the file list was computed once in the renderer and again wherever a scroll
+   limit was needed. Those two copies disagreed as soon as the progress strip
+   appeared, which would have let the last rows be scrolled behind it and stay
+   there. `build_frame` now `debug_assert!`s its own `y` against `content_band`
+   rather than recomputing it.
+
+6. **Pre-existing clippy debt cleared.** The crate had 32 `arithmetic_side_effects`
+   / `indexing_slicing` / `slicing` errors that predate this work — unchecked
+   `+= 1` on every counter, `&parts[..parts.len() - 1]`, `self.nav_history[i]`.
+   All are now `saturating_*`/`checked_*`/`get`/`split_last`. The one remaining
+   suppression is on `get_or_create_child`, where every safe `Vec` accessor
+   returns an `Option` and there is no honest `TreeNode` to put in the `None`
+   arm; the index is established by a `push` two lines above.
+
+### Two things the wiring work found and fixed
+
+- **`navigate_back` and `navigate_forward` indexed `nav_history` directly.** A
+  `nav_position` that ever got out of step with the history — which
+  `navigate_to`'s truncate-then-push could produce — would have panicked the
+  program rather than refusing to navigate. Both now read through `get` and
+  return `false` on a miss.
+- **Home and End moved the cursor by `isize::MIN / 2`.** "Move very far" is a
+  worse way to say "go to the first row", and `-isize::MIN` is an overflow that
+  only the `/ 2` was hiding. There is now a `set_cursor(index)` that Home and
+  End name a row with directly.
+
+### How the tests were written so they could fail
+
+142 tests, all green. The 40 new interaction tests find their coordinates by
+rendering and reading the recorded hit boxes back — `centre_of(&state, pred,
+what)` panics rather than skipping if the control it wants was never drawn, so a
+test cannot quietly pass against a program that has no such button. Four
+deliberate mutations were run against the finished suite to check the tests
+actually bite:
+
+| Mutation | Test that caught it |
+|---|---|
+| `Frame::hit` records the untrimmed rect | `a_row_scrolled_off_the_top_is_not_clickable_where_it_used_to_be` |
+| `hit_test` searches front-to-back | `the_tree_arrow_collapses_without_navigating` |
+| `on_event` drops the resize scroll re-clamp | `resizing_updates_the_size_and_reclamps_both_scrolls` |
+| `render` trusts the stored size instead of its argument | `the_first_frame_is_drawn_at_the_size_the_window_gives_it` |
+
+`scripts/check-window-wiring.py` baseline lowered 124 → 123.
+
+## C-ARCHIVEMANAGER-CANNOT-ACTUALLY-READ-AN-ARCHIVE (lane C, 2026-08-26)
+
+**In short:** the Archive Manager can now be clicked, but it has nothing to click
+*on* except a hard-coded sample listing. Pressing Open, Extract All, Extract
+Selected, Add or Test does not read or write a single byte of any file on disk —
+each one just writes "not yet implemented — no archive back end" into the status
+bar. The window, the tree, the sorting and the selection are all real; the
+archive behind them is a fiction.
+
+**Where it lives:** `apps/archivemanager/src/main.rs`, `AppState::run_toolbar`
+(the `other =>` arm) and `AppState::open_entry` (the non-directory branch).
+`create_sample_archive()` is what populates the list at startup.
+
+**What a user sees:** the program opens showing a listing of files that are not
+on their computer, and every button that would touch a real archive politely
+declines. Nothing lies about having succeeded — that was deliberate — but
+nothing works either.
+
+**What the proper fix looks like:** a ZIP reader built on the two crates already
+in the tree, `deflate/` (lane A's inflate implementation, already used by
+`gui/imagecodec`) and `crc32/`. Concretely:
+
+1. Parse the end-of-central-directory record, then the central directory, into
+   `ArchiveEntry` values — the struct already has every field the format
+   carries (`crc32`, `compressed_size`, `method`, `modified`).
+2. `Open` reads a real path and replaces `create_sample_archive()`. This needs a
+   file-picker; `guitk::dialog::FileDialog` exists but has no `handle_click` and
+   no `read_dir`, so embedding it is its own piece of work (see
+   `TD-C-FILEDIALOG-PATHS-ARE-STRINGS…`).
+3. `Test` inflates each entry and compares the CRC-32 it computes against the
+   one in the directory. `ArchiveTestResults` and `TestResult::CrcMismatch`
+   already exist to receive the answer, and `OperationProgress` already exists
+   to report the sweep.
+4. `Extract All` / `Extract Selected` write the inflated bytes out. Paths must
+   be validated against `..` traversal before anything is written — a ZIP is an
+   untrusted input and an entry named `../../etc/passwd` is the oldest bug in
+   the format.
+5. Writing (`Add`, `Delete` against the file rather than the list) needs a
+   deflate *compressor*, which the `deflate/` crate may not have; storing
+   uncompressed (method 0) is a correct first cut if not.
+
+**Filed with lane A:** `requests/c-a-zip-is-trapped-in-the-kernel-binary.md`.
+`kernel/src/fs/zip.rs` is already a complete 799-line ZIP reader *and* writer
+with ZIP64 and a boot self-test -- but it is a module of a binary crate, so
+nothing outside the kernel can depend on it. Writing a second ZIP parser here
+would be the same mistake `requests/c-a-two-inflates.md` documents, with more
+force: a ZIP parser reads untrusted input, so a second copy is a second attack
+surface for `..` traversal, the backwards end-of-central-directory scan and the
+ZIP64 shadow fields. **This entry stays open until that crate exists**, and the
+"proper fix" above is then a matter of calling it rather than writing it.
+
+**Why the window was wired first rather than waiting:** the window and the back end
+fail independently and are tested completely differently — one against rendered
+geometry, the other against archive bytes. This mirrors what was done for
+`apps/diskcleanup`, which was wired first and given a real back end in the
+following commit.
 ## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26)
 
 **In short:** `kernel/src/kcounters.rs` has two halves — a registry that

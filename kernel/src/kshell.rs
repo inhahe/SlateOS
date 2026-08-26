@@ -18914,6 +18914,183 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command(&alloc::format!("ipcns destroy {ns_id}"));
     }
 
+    serial_println!(
+        "  kshell::self_test 92: every operand was written required and implemented optional, and \
+         the guesses landed hours after the typo"
+    );
+    // Two things make `colortemp` read differently from every batch before it.
+    //
+    // First, its ids already refused an unreadable word — the `match … parse()`
+    // was correct. What they guessed was an *absent* word, `unwrap_or(&"1")`,
+    // and the synopsis brackets say `<id>`, not `[id]`. So the defect was not
+    // "cannot read" but "was never told", and bare `colortemp set` edited
+    // profile 1 without being asked to. Every operand of this command is
+    // documented required and was implemented optional.
+    //
+    // Second, most of these values are *stored, not applied*. `daynight` and
+    // `schedule` write a pair and return; nothing recomputes until the next
+    // `update`. A guessed value therefore does not appear when the command is
+    // typed — it appears at the next transition, hours later, with nothing
+    // connecting the wrong colour to the line that caused it.
+    {
+        // `colortemp::self_test` runs from the boot battery under
+        // `with_pristine`, so the table may be `None` here. `init` is
+        // idempotent and seeds profile 1.
+        let _ = capture_command("colortemp init");
+
+        // Put known, distinctive values in place. These are what the refusals
+        // below must leave untouched.
+        let out = capture_command("colortemp mode 1 scheduled");
+        assert_output_contains(
+            "the profile is put in scheduled mode",
+            &out,
+            b"Mode: Scheduled",
+        );
+        assert_eq!(last_exit(), 0, "`colortemp mode' succeeds");
+        let out = capture_command("colortemp daynight 1 6000 3000");
+        assert_output_contains(
+            "with a known day/night pair",
+            &out,
+            b"Day: 6000K, Night: 3000K",
+        );
+        let out = capture_command("colortemp schedule 1 1140 400 20");
+        assert_output_contains(
+            "and a known schedule",
+            &out,
+            b"Sunset: 19:00, Sunrise: 06:40",
+        );
+
+        // Snapshot everything the subsystem will admit to, so the severity pin
+        // at the bottom can be an *equality* rather than a needle. It has to
+        // be: `list` prints the current temperature as `{} {}K [{}]`, where
+        // the only fixed text between the mode and the enabled flag is `K [`,
+        // so no assertion on a literal can anchor `current_kelvin` — the value
+        // that both `set` and `update` write. `list` carries the mode, the
+        // enabled flag, `current_kelvin` and the whole schedule; `stats`
+        // carries `total_adjustments`, the counter `update` bumps. Neither
+        // reader takes the `with_state` path, so neither perturbs `ops` and
+        // the two captures are comparable.
+        let before_list = capture_command("colortemp list");
+        let before_stats = capture_command("colortemp stats");
+
+        // The absent-operand half: required in the synopsis, defaulted in the
+        // code. Bare `set` used to mean "profile 1, 4000K".
+        let out = capture_command("colortemp set");
+        assert_output_contains(
+            "an omitted profile id is reported rather than assumed to be 1",
+            &out,
+            b"colortemp: set: missing profile id",
+        );
+        assert_eq!(last_exit(), 1, "an omitted profile id errors");
+
+        // The unreadable-operand half. `set_temperature` clamps to
+        // 1000..=10000, so the guessed 4000 was always a legal, plausible
+        // colour temperature — nothing downstream could have caught it.
+        let out = capture_command("colortemp set 1 4O00");
+        assert_output_contains(
+            "an unreadable temperature is named rather than clamped to a plausible 4000",
+            &out,
+            b"`4O00' is not a temperature in K",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable temperature errors");
+
+        // The guess that pointed the wrong way: `_ => Off`. Three of the four
+        // modes are ways of being on, and every misspelling collapsed onto the
+        // fourth — so a typo turned the night-light *off* and said so as
+        // though asked.
+        let out = capture_command("colortemp mode 1 sunsynk");
+        assert_output_contains(
+            "a mistyped mode is refused rather than silently meaning `off'",
+            &out,
+            b"`sunsynk' is not a mode",
+        );
+        assert_eq!(last_exit(), 1, "an unrecognised mode errors");
+
+        let out = capture_command("colortemp daynight 1 65OO 3000");
+        assert_output_contains(
+            "an unreadable day temperature is named",
+            &out,
+            b"`65OO' is not a day temperature in K",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable day temperature errors");
+
+        // The times. A guessed 1200 is 20:00, and the success line formats it
+        // back as `20:00` rather than echoing the digits typed — so the shell
+        // used to answer a typo with a plausible schedule in a shape that made
+        // it look deliberate.
+        let out = capture_command("colortemp schedule 1 12OO 420 30");
+        assert_output_contains(
+            "an unreadable sunset is named rather than presented back as 20:00",
+            &out,
+            b"`12OO' is not a sunset time in minutes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable sunset errors");
+
+        // `update` reads like a query and writes: it stores `current_kelvin`.
+        let out = capture_command("colortemp update 1 72O");
+        assert_output_contains(
+            "an unreadable time is refused rather than answered about noon",
+            &out,
+            b"`72O' is not a time in minutes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable time errors");
+
+        let out = capture_command("colortemp active 1O");
+        assert_output_contains(
+            "and an unreadable id in `active' names the word",
+            &out,
+            b"`1O' is not a profile id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `active' errors");
+
+        // The uncounted non-numeric guess. `MAX_PROFILES` is 8, so repeated
+        // bare `create`s used to exhaust the table with profiles named
+        // `Profile` that nothing could tell apart.
+        let out = capture_command("colortemp create");
+        assert_output_contains(
+            "an omitted name is reported, not invented as `Profile'",
+            &out,
+            b"colortemp: create: missing profile name",
+        );
+        assert_eq!(last_exit(), 1, "a missing profile name errors");
+
+        // The assertions that pin the severity rather than the wording: after
+        // seven refusals, every stored value is exactly what was set at the
+        // top.
+        //
+        // The needle comes first, because an equality between two *empty*
+        // captures would hold just as well. It is the schedule line, and it
+        // proves the `mode` defect specifically: `list` prints that line only
+        // when the mode is `Scheduled` or `SunSync`, so its mere presence is
+        // the evidence that the mistyped `sunsynk` did not fall through to
+        // `Off`. Before this batch it would have been absent, with `enabled`
+        // cleared.
+        let after_list = capture_command("colortemp list");
+        assert_output_contains(
+            "the refused mode left the profile in a scheduled mode, not off",
+            &after_list,
+            b"Day: 6000K, Night: 3000K, Sunset: 19:00, Sunrise: 06:40",
+        );
+        // Then the equality, which covers what no literal in `list` can
+        // anchor: `current_kelvin` is the value `set 1 4O00` used to clamp to
+        // 4000 and `update 1 72O` used to recompute for noon, and it sits
+        // between two placeholders.
+        assert!(
+            after_list == before_list,
+            "seven refusals changed nothing `colortemp list' reports"
+        );
+        let after_stats = capture_command("colortemp stats");
+        assert!(
+            after_stats == before_stats,
+            "and the refused `update' counted no adjustment for a time it could not read"
+        );
+
+        // Leave the profile as this rung found it, so rung order cannot matter.
+        let _ = capture_command("colortemp mode 1 off");
+        let _ = capture_command("colortemp daynight 1 6500 3400");
+        let _ = capture_command("colortemp schedule 1 1200 420 30");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -76327,15 +76504,27 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "set" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            // Two separate defects sat in these two lines, and the id one is
+            // the reason this function reads differently from every earlier
+            // batch: the id *did* refuse an unreadable word already. What it
+            // guessed was an **absent** one — `parts.get(1).unwrap_or(&"1")`
+            // — and the synopsis says `set <id> <kelvin>`, angle brackets, so
+            // there is no documented default to fall back to. Every operand of
+            // this command is written required and was implemented optional.
+            //
+            // The refusal was also anonymous: "Invalid profile ID" never says
+            // *which* word it could not read, which is the §604 wording rule.
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
-            let kelvin: u32 = parts.get(2).unwrap_or(&"4000").parse().unwrap_or(4000);
+            // `set_temperature` clamps to 1000..=10000, so the guessed 4000 was
+            // always a legal, plausible-looking colour temperature — there is
+            // no out-of-range value to catch it, and the success line prints
+            // the clamped number as though it had been asked for.
+            let Some(kelvin) = required_num::<u32>(&parts, 2, "colortemp", sub, "temperature in K")
+            else {
+                return;
+            };
             match colortemp::set_temperature(id, kelvin) {
                 Ok(()) => shell_println!("Temperature: {}K", kelvin.clamp(1000, 10000)),
                 Err(e) => {
@@ -76345,19 +76534,35 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "mode" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
+            };
+            // The uncounted guess, and the one that points the wrong way:
+            // `_ => Off` meant every unrecognised word turned the feature
+            // **off**. `off` is not a neutral reading of a typo — it is the
+            // one value of the four that stops the profile doing anything, so
+            // `colortemp mode 1 sunsynk` disabled the night-light and reported
+            // "Mode: Off" as though that had been the request. Three of the
+            // four modes are ways of being on; the guess collapsed all
+            // misspellings onto the fourth.
+            let mode = match parts.get(2).copied() {
+                Some("off") => colortemp::TempMode::Off,
+                Some("manual") => colortemp::TempMode::Manual,
+                Some("scheduled" | "sched") => colortemp::TempMode::Scheduled,
+                Some("sunsync" | "sun") => colortemp::TempMode::SunSync,
+                Some(word) => {
+                    shell_println!(
+                        "colortemp: mode: `{}' is not a mode (off, manual, scheduled, sunsync)",
+                        word
+                    );
                     set_exit(1);
                     return;
                 }
-            };
-            let mode = match parts.get(2).copied().unwrap_or("off") {
-                "manual" => colortemp::TempMode::Manual,
-                "scheduled" | "sched" => colortemp::TempMode::Scheduled,
-                "sunsync" | "sun" => colortemp::TempMode::SunSync,
-                _ => colortemp::TempMode::Off,
+                None => {
+                    shell_println!("colortemp: mode: missing mode");
+                    set_exit(1);
+                    return;
+                }
             };
             match colortemp::set_mode(id, mode) {
                 Ok(()) => shell_println!("Mode: {}", mode.label()),
@@ -76368,16 +76573,28 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "daynight" | "dn" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
-            let day: u32 = parts.get(2).unwrap_or(&"6500").parse().unwrap_or(6500);
-            let night: u32 = parts.get(3).unwrap_or(&"3400").parse().unwrap_or(3400);
+            // These two are stored, not applied: `set_day_night` writes the
+            // pair and returns, and nothing is recomputed until the next
+            // `update`. So a guessed value here does not show up when the
+            // command is typed — it shows up hours later, at the next
+            // transition, with nothing on screen connecting the wrong colour
+            // to the line that caused it. That is the same delayed
+            // manifestation as `schedule` below, and it is what makes these
+            // guesses harder to trace than a wrong `set`, which at least
+            // takes effect immediately.
+            let Some(day) =
+                required_num::<u32>(&parts, 2, "colortemp", sub, "day temperature in K")
+            else {
+                return;
+            };
+            let Some(night) =
+                required_num::<u32>(&parts, 3, "colortemp", sub, "night temperature in K")
+            else {
+                return;
+            };
             match colortemp::set_day_night(id, day, night) {
                 Ok(()) => shell_println!(
                     "Day: {}K, Night: {}K",
@@ -76391,17 +76608,32 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "schedule" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
-            let sunset: u16 = parts.get(2).unwrap_or(&"1200").parse().unwrap_or(1200);
-            let sunrise: u16 = parts.get(3).unwrap_or(&"420").parse().unwrap_or(420);
-            let trans: u16 = parts.get(4).unwrap_or(&"30").parse().unwrap_or(30);
+            // The sharpest of the delayed ones, because these operands are
+            // *times*. A guessed sunset of 1200 is 20:00 — a reading the
+            // output then confirms, since the success line formats it back as
+            // `20:00` rather than echoing the digits the user typed. So the
+            // shell answered `colortemp schedule 1 12OO 420 30` by printing a
+            // plausible schedule that nobody had asked for, in a format that
+            // made it look deliberate, to take effect at a time of day when
+            // whoever typed it would be long past connecting the two.
+            let Some(sunset) =
+                required_num::<u16>(&parts, 2, "colortemp", sub, "sunset time in minutes")
+            else {
+                return;
+            };
+            let Some(sunrise) =
+                required_num::<u16>(&parts, 3, "colortemp", sub, "sunrise time in minutes")
+            else {
+                return;
+            };
+            let Some(trans) =
+                required_num::<u16>(&parts, 4, "colortemp", sub, "transition length in minutes")
+            else {
+                return;
+            };
             match colortemp::set_schedule_times(id, sunset, sunrise, trans) {
                 Ok(()) => shell_println!(
                     "Sunset: {:02}:{:02}, Sunrise: {:02}:{:02}, Transition: {}m",
@@ -76418,15 +76650,24 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "update" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
-            let time: u16 = parts.get(2).unwrap_or(&"720").parse().unwrap_or(720);
+            // `update` reads like a query and is not one: `update_for_time`
+            // *writes* `p.current_kelvin` and bumps `total_adjustments`. So a
+            // guessed 720 did not merely answer a question about noon that
+            // nobody asked — it set the profile's current temperature to
+            // whatever noon implies, on a mistyped word.
+            //
+            // Honest mitigation, unlike most of this burn-down: the success
+            // line is `Temperature at {:02}:{:02}`, so it does echo the time
+            // it used, and a reader who looks would see `12:00` where they
+            // meant something else. That makes this the most discoverable
+            // guess in the function — which is not the same as discovered.
+            let Some(time) = required_num::<u16>(&parts, 2, "colortemp", sub, "time in minutes")
+            else {
+                return;
+            };
             match colortemp::update_for_time(id, time) {
                 Ok(k) => shell_println!("Temperature at {:02}:{:02}: {}K", time / 60, time % 60, k),
                 Err(e) => {
@@ -76436,7 +76677,16 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("Profile");
+            // `create <name>` in the synopsis, so the name is not optional.
+            // The guess built a real profile called `Profile` and consumed one
+            // of only eight slots (`MAX_PROFILES`), which is the detail that
+            // makes this one more than cosmetic: a handful of bare `create`s
+            // exhausts the table with profiles nobody can tell apart.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("colortemp: create: missing profile name");
+                set_exit(1);
+                return;
+            };
             match colortemp::create_profile(name) {
                 Ok(id) => shell_println!("Created profile #{}: {}", id, name),
                 Err(e) => {
@@ -76446,13 +76696,8 @@ fn cmd_colortemp(args: &str) {
             }
         }
         "active" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Invalid profile ID");
-                    set_exit(1);
-                    return;
-                }
+            let Some(id) = required_num::<u32>(&parts, 1, "colortemp", sub, "profile id") else {
+                return;
             };
             match colortemp::set_active(id) {
                 Ok(()) => shell_println!("Active profile: #{}", id),

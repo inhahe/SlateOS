@@ -81109,7 +81109,95 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **494 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **487 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-fourth batch): `cmd_colortemp` (7,
+> plus two uncounted) cleared — 494 → 487 across 219 → 218 functions. Pinned
+> by `kshell::self_test` rung 92.
+>
+> **In short:** every operand of `colortemp` is written `<required>` in the
+> command's own synopsis, and every one of them was implemented optional. The
+> shell did not merely guess at words it could not read — it also guessed at
+> words that were never typed, so bare `colortemp set` meant "profile 1, 4000
+> Kelvin" and did it.
+>
+> **The half that is new: the guess for an *absent* word, not an unreadable
+> one.** Twenty-three batches of this burn-down have been about the second
+> prohibited shape in §600 — a word read, not parsed, replaced. `cmd_colortemp`
+> has those too, but its `set` arm had already been refusing unreadable ids
+> before this batch. What it had not been refusing was an id that was not
+> there: `parts.get(1).unwrap_or(&"1")`. §607 says a bracketed `[operand]`
+> keeps its documented default and only an *unreadable* one is refused. The
+> converse is what applies here — an operand written `<id>` has no documented
+> default, so inventing one is the same defect wearing the other shape. Every
+> operand in this function is angle-bracketed.
+>
+> **The refusal it did have was anonymous.** `set 1 4O00` printed `Invalid
+> profile ID`, which never says which word could not be read, and in a
+> two-operand command names the wrong one. That is the §604 wording rule: a
+> refusal must name the word it could not read.
+>
+> **The mode guess points the wrong way.** `mode` matched four names and had
+> `_ => TempMode::Off` — an uncounted guess, because the checker matches numeric
+> parses and this one is an enum. `off` is not a neutral reading of a typo. It
+> is the one value of the four that stops the profile doing anything: three of
+> the four modes are ways of being *on*, and every misspelling collapsed onto
+> the fourth. `colortemp mode 1 sunsynk` turned the night-light off and printed
+> `Mode: Off` as though that had been the request. The `cputhr` thesis — the
+> guessed default is always the *reassuring* value — inverts here: the guess is
+> the value that quietly disables the feature, and it still reads as a success.
+>
+> **The severity row this batch adds: *delayed manifestation*.** Every earlier
+> row is about what the guess did at the moment it was typed. Here most of the
+> values are *stored, not applied*. `set_day_night` writes a pair and returns.
+> `set_schedule_times` writes three numbers and returns. Nothing recomputes
+> until the next `update_for_time`, which in real use is a clock tick hours
+> away. So the guess produces no wrong output at all when the command is typed
+> — it produces a wrong *colour on the screen* at 20:00, with nothing on screen
+> connecting it to a line typed at lunchtime.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **stored, not applied** (`cmd_colortemp` `daynight`, `schedule`) | nothing, until the next transition | the screen is the wrong colour hours later, with no line to blame |
+>
+> **`schedule` is the sharpest case, because its operands are *times*.** The
+> guessed sunset was `1200`, and the success line does not echo the digits
+> typed — it formats them back as `20:00`. So `colortemp schedule 1 12OO 420
+> 30` answered a typo with a plausible-looking schedule, in a shape that made
+> it look deliberate, to take effect at an hour when whoever typed it would be
+> long past connecting the two.
+>
+> **`update` reads like a query and is not one.** `update_for_time` *writes*
+> `p.current_kelvin` and bumps `total_adjustments`. A guessed `720` did not
+> merely answer a question about noon that nobody asked; it set the profile's
+> current temperature to whatever noon implies. This is the one honest
+> mitigation in the function: the success line is `Temperature at {:02}:{:02}`,
+> so it does echo the time it used, and a reader who looked would see `12:00`
+> where they meant something else. That makes it the most discoverable guess
+> here, which is not the same as discovered.
+>
+> **`create` was the second uncounted one**, and matters because the table is
+> small: `MAX_PROFILES` is 8, and bare `colortemp create` built a real profile
+> named `Profile`. A handful of them exhausts the table with entries nothing
+> can tell apart — the same shape as `ipcns create`'s `unnamed` in the previous
+> batch, in a namespace an eighth the size.
+>
+> **A note on the pin.** Rung 92's severity assertion is an *equality* between
+> two `colortemp list` captures, not a needle, and that is forced rather than
+> chosen. `list` prints the current temperature as `{} {}K [{}]`, whose longest
+> run of fixed text is the three bytes `K [` — below `check-selftest-wording.py`'s
+> four-byte `MIN_FIXED_RUN`, and rightly so, since three bytes cannot anchor an
+> alignment. `current_kelvin` is exactly the value `set` and `update` write, so
+> the only way to assert it went unchanged is to compare the whole capture. The
+> needle that remains is the schedule line, which `list` prints *only* when the
+> mode is `Scheduled` or `SunSync` — so its presence is itself the proof that
+> the mistyped `sunsynk` did not fall through to `Off`. (Neither `list_profiles`
+> nor `stats` takes the `with_state` path, so neither perturbs the `ops`
+> counter and the before/after captures are comparable.)
+>
+> **Found while reading for evidence:** an inverted day/night pair panicked the
+> kernel from the shell. Fixed separately —
+> `A-COLORTEMP-AN-INVERTED-DAY-NIGHT-PAIR-PANICS-THE-KERNEL`.
 
 > **Burn-down log.** 2026-08-26 (twenty-third batch): `cmd_ipcns` (7) cleared —
 > 501 → 494 across 220 → 219 functions. Pinned by `kshell::self_test` rung 91.

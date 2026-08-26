@@ -316,7 +316,10 @@ pub fn vector_name(vector: usize) -> &'static str {
     match vector {
         // `EXCEPTION_NAMES` covers exactly 0–31, so this index cannot be out of
         // bounds; `.get()` rather than `[]` so that stays true if it is resized.
-        0..=31 => EXCEPTION_NAMES.get(vector).copied().unwrap_or("(exception)"),
+        0..=31 => EXCEPTION_NAMES
+            .get(vector)
+            .copied()
+            .unwrap_or("(exception)"),
         32 => "APIC Timer",
         33..=56 => "Device IRQ",
         251 => "TLB Shootdown IPI",

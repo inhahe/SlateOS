@@ -88636,7 +88636,36 @@ now asserts "the disk did not win" instead of pinning the neighbouring value.
 
 ---
 
-## `A-IRQBALANCE-CAN-NEVER-BALANCE-FOR-TWO-INDEPENDENT-REASONS` (lane A, 2026-08-26)
+## `A-IRQBALANCE-CAN-NEVER-BALANCE-FOR-TWO-INDEPENDENT-REASONS` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26, and it was three
+
+**Fixed** in `1ae48ea8c` (the wiring and the off-by-one) on top of `16d2a7857`
+(the counting). Boot-verified — see the closing note at the end of this entry.
+
+**There was a third reason, found only while fixing the first two**, and it is
+the interesting one: `balance()` computed the vector for IRQ *N* as `N + 32`,
+but `ioapic.rs` programs IOAPIC input *N* onto `IRQ_VECTOR_BASE + N` = **33** +
+*N*, deliberately "keeping vector 32 reserved for the LAPIC timer". So IRQ 0's
+rate was read from the *timer's* slot, IRQ 1's from IRQ 0's, and so on down the
+line.
+
+**That third defect was harmless only because of the second one.** With no
+hardware vector counted, every slot read zero — and a shifted index into an
+all-zero array also reads zero. The moment the counts became real, slot 32
+started carrying ~1000 ticks a second, far above `MIN_RATE_THRESHOLD`. Fixing
+reasons 1 and 2 alone would therefore have produced a balancer that concluded
+IRQ 0 was the busiest line on the machine and began migrating it on the strength
+of the timer's traffic. **Dead would have become actively wrong**, and the
+"fix" would have been the thing that armed it.
+
+The general lesson, which is worth more than the bug: *a dormant subsystem can
+hide defects in its own logic, because dormancy feeds it uniform inputs that
+every version of the logic maps to the same output.* Reviving one is not one
+change but two — turn it on, and separately re-derive whether its arithmetic was
+ever right. Do not assume the code between the entry and the exit was correct
+merely because nobody had complained; nobody could have.
+
+`vector_for_irq()` now derives the mapping from `ioapic::IRQ_VECTOR_BASE` rather
+than restating it, since restating it is exactly how the two drifted apart.
 
 **In short:** the interrupt balancer — `kernel/src/irqbalance.rs`, ~500 lines of
 greedy bin-packing that is supposed to spread device interrupts across CPUs —

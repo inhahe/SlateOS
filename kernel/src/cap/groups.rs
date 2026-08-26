@@ -234,6 +234,14 @@ pub fn init() {
         ResourceType::PrivilegedPort,
         ResourceType::ResourceLimit,
         ResourceType::InputDevice,
+        // Granted deliberately, not by default.  `admin` is gid 0, and a root
+        // account that cannot write a disk image to a stick is not the account
+        // Unix has meant by root for fifty years -- `dd if=... of=/dev/sda` is
+        // the canonical root operation.  Withholding it here would not make the
+        // system safer; it would make `admin` a group whose members have to be
+        // handed the authority by some other route, which is the same authority
+        // reached by a longer path.
+        ResourceType::BlockDevice,
     ]
     .map(|resource_type| CapGrant {
         resource_type,

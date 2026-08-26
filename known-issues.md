@@ -87555,6 +87555,7 @@ by the time `main` runs the distinction is gone: `/dev/null` on fd 0 looks the
 same whether std put it there or the caller did. Detecting it would require a
 pre-`main` constructor in `.init_array`, which trades a real safety property
 for a corner case no script can reach.
+
 ---
 
 ## `C-LOCKSCREEN-HAD-NO-WINDOW-NO-CLOCK-AND-NO-WAY-TO-CHECK-A-PASSWORD` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26

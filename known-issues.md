@@ -80232,7 +80232,7 @@ well as the pipe, and the supplied final newline.
 
 ---
 
-## `A-KSHELL-COLUMN-S-TAKES-ONE-CHARACTER-WHERE-GNU-TAKES-A-SET` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (the set); the whitespace-separator gap below is still open
+## `A-KSHELL-COLUMN-S-TAKES-ONE-CHARACTER-WHERE-GNU-TAKES-A-SET` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (both halves); one cosmetic gap below remains open
 
 **In short:** `column -s` was documented and implemented as "use this one
 character as the delimiter". GNU treats the argument as a *set* — any one of
@@ -80281,48 +80281,68 @@ indistinguishable in the history — the same reason `diff`'s missing
 `Binary files X and Y differ` was kept out of the `diff` byte fix (and was
 then landed on its own, 2026-08-25).
 
-**A second, smaller gap in the same place — STILL OPEN.** The flag walk is
-`args.split_whitespace()`, so a separator that *is* whitespace cannot be
-expressed at all: `column -t -s ' '` loses the argument to the splitter and
-falls back to the default. Harmless today because space is the default, but
-`column -t -s '<TAB>'` — meaning tab and *not* space, which is how one lines up
-a TSV whose fields contain spaces — is unreachable. Pre-existing; not introduced
-by the byte conversion or by the set fix.
+**A second, smaller gap in the same place — ✅ FIXED 2026-08-25** (`e4444e980`, its
+own commit). The flag walk was `args.split_whitespace()`, so a separator that
+*is* whitespace could not be expressed at all: `column -t -s ' '` lost the
+argument to the splitter and fell back to the default. Harmless in that one case
+because space is the default, but `column -t -s '<TAB>'` — meaning tab and *not*
+space, which is how one lines up a TSV whose fields contain spaces — was
+unreachable. Pre-existing; not introduced by the byte conversion or by the set
+fix.
 
-> **The fix is available and the earlier note was wrong to imply otherwise.**
+> **The fix was available and the earlier note was wrong to imply otherwise.**
 > This was previously written up as needing a quote-aware splitter that
-> `kshell.rs` did not have. It has one: [`split_words`], and the mechanism for
-> reaching it is [`command_parses_own_quotes`], the list of commands that receive
+> `kshell.rs` did not have. It has one: `split_words`, and the mechanism for
+> reaching it is `command_parses_own_quotes`, the list of commands that receive
 > their arguments with the quoting still in place. `column -s` is *precisely* the
-> shape of `cut -d`, which is already on that list for the identical reason —
+> shape of `cut -d`, which was already on that list for the identical reason —
 > `cut -d' ' -f1` is how you say "split on spaces", and dequoted it became
 > `-d  -f1`, so the delimiter turned into the string `-f1`. `tr` is there for the
 > same reason and failed silently rather than loudly.
->
-> So the fix is: add `"column"` to `command_parses_own_quotes`, switch
-> `column_parse_args` from `args.split_whitespace()` to `split_words(args)`, and
-> model the loop on `parse_cut_args` (index-based over `Vec<String>`).
-> `ColumnArgs::file_path` becomes a `String`, since the words are owned.
->
-> One behaviour note for whoever does it: `split_words` drops an empty word, so
-> `-s ''` will arrive as a bare `-s` with no argument and be refused with
-> "`-s` requires a separator" rather than falling back to the default split.
-> That is a *better* answer than the current silent fallback, but it contradicts
-> the paragraph currently in `column_parse_args`'s doc comment, which must be
-> updated in the same commit.
->
-> Kept separate from the set fix because they are different changes: one is what
-> the separator *means*, the other is whether the separator *arrives*.
 
-**A third, smaller one, noted while reading `parse_cut_args`.** `column` takes
-`-s` only as two words. getopt also accepts the attached form, `column -s,;`,
-which `cut` supports via `cut_opt_value` (`cut -d:` and `cut -d :` are both
-legal). Not a wrong answer — `column -s,;` is refused as an unrecognised option,
-loudly — but it is a legal invocation this shell rejects.
+**How the second half was fixed.** Exactly as that note said: `"column"` joined
+`command_parses_own_quotes`; `column_parse_args` moved from
+`args.split_whitespace()` to `split_words(args)` with an index-based loop
+modelled on `parse_cut_args`, since an option that takes a value has to look at
+the *next* word; `ColumnArgs::file_path` became a `String` (the words are owned
+now), which dropped the struct's lifetime parameter. Three things worth carrying
+forward:
 
-**Severity.** Low, and lower now. The set half is fixed. What remains is a
-separator that cannot be *expressed* (a refusal or a fallback, not a wrong
-answer) and an option form that is rejected rather than misread.
+- **A control assertion is what proves the separator arrived**, not the
+  separator assertion. `column -t -s ' '` and `column -t` produce *different*
+  output on `zz_a  zz_b` — the explicit space separator keeps the empty field
+  between the two spaces, the default collapses runs of blanks — so the pair,
+  asserted together, distinguishes "the tab/space reached `-s`" from "`-s` was
+  lost and the default did the work". Asserting only the former would have
+  passed before this change too.
+- **`-s ''` is now refused, not silently defaulted**, because `split_words`
+  drops an empty word so `-s` arrives with nothing after it. That is the better
+  answer — a separator you asked for and did not get should say so — and the
+  paragraph in `column_parse_args`'s doc comment that described the old fallback
+  was rewritten in the same commit rather than left to contradict the code.
+- **The quoted *operand* comes free and was pinned anyway.** Once the line
+  arrives quoted, `column -t '/tmp/a file.txt'` names one file instead of
+  producing an "extra operand" error. It is a consequence of the same change,
+  not a separate feature, and an assertion holds it in place so a later revert
+  to `split_whitespace` cannot take it back quietly.
+
+Kept in its own commit, separate from the set fix, because they are different
+changes: one is what the separator *means*, the other is whether the separator
+*arrives*.
+
+**A third, smaller one, noted while reading `parse_cut_args` — STILL OPEN.**
+`column` takes `-s` only as two words. getopt also accepts the attached form,
+`column -s,;`, which `cut` supports via `cut_opt_value` (`cut -d:` and
+`cut -d :` are both legal). Not a wrong answer — `column -s,;` is refused as an
+unrecognised option, loudly — but it is a legal invocation this shell rejects.
+The fix is to route the `-s` branch of `column_parse_args` through
+`cut_opt_value` the way `parse_cut_args` does, which also picks up `--separator=`
+if that is ever wanted.
+
+**Severity.** Low, and lower again. Both halves that could produce a *wrong or
+unreachable* answer are fixed. What remains is one option *form* that is
+rejected rather than misread — the failure mode is a diagnostic, not a bad
+table.
 
 ---
 

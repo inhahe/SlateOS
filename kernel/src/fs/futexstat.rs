@@ -352,10 +352,7 @@ pub fn self_test() {
     // accounting helpers.  A single `futexstat test` from the shell would
     // therefore switch futex accounting off for the rest of the boot, and the
     // only symptom would be /proc reporting the zeros it used to report anyway.
-    {
-        let mut guard = STATE.lock();
-        *guard = None;
-    }
+    *STATE.lock() = None;
     init_defaults();
 
     crate::serial_println!("futexstat::self_test() — all 8 tests passed");

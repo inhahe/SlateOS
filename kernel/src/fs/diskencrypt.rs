@@ -588,11 +588,14 @@ pub fn self_test() {
     }
     crate::serial_println!("  [12/12] non-UTF-8 device nodes: OK");
 
-    // Leave NO residue: the tests above encrypt the seeded system volume and
-    // register several more.  Clearing the state restores exactly what a
-    // fresh boot has -- there is no lazy init, so nothing re-populates it
-    // until a caller asks for `init_defaults()`.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     *STATE.lock() = None;
+    init_defaults();
 
     crate::serial_println!("diskencrypt::self_test() — all 12 tests passed");
 }

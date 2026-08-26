@@ -882,12 +882,14 @@ pub fn self_test() {
     }
     serial_println!("[screenrec] 12/12 non-UTF-8 output directory OK");
 
-    // Leave the module exactly as a fresh boot has it: uninitialised.
-    // `init_defaults()` is otherwise reachable only from `screenrec init`, and
-    // `with_state` does not lazily initialise, so `None` — not the defaults —
-    // is the untouched state. Without this the suite would leave a mutated
-    // config and its own spent recordings visible in `screenrec show`.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     *STATE.lock() = None;
+    init_defaults();
 
     serial_println!("[screenrec] All self-tests passed.");
 }

@@ -153,13 +153,21 @@ def main() -> int:
         if not _report(path.name, rc, out, time.monotonic() - t):
             failures += 1
 
-    # The unwrap/expect scan is not a check-*.py, so the glob above misses it --
-    # which is exactly the kind of gap this script exists to close.
-    scan = SCRIPTS / "scan-unwrap.py"
-    if scan.is_file():
+    # The scan-*.py gates are not check-*.py, so the glob above misses them --
+    # which is exactly the kind of gap this script exists to close.  Each also
+    # takes a bespoke flag, which is the reason they cannot simply be renamed
+    # into the glob: the glob runs a script bare, and both of these do something
+    # else when run bare (a full report rather than a verdict).
+    for name, flag, why in (
+        ("scan-unwrap.py", "--summary", "unwrap/expect in kernel production paths"),
+        ("scan-orphan-modules.py", "--check", "newly unreachable library modules"),
+    ):
+        scan = SCRIPTS / name
+        if not scan.is_file():
+            continue
         t = time.monotonic()
-        rc, out = _run([sys.executable, str(scan), "--summary"])
-        if not _report("scan-unwrap.py --summary", rc, out, time.monotonic() - t):
+        rc, out = _run([sys.executable, str(scan), flag])
+        if not _report(f"{name} {flag}  ({why})", rc, out, time.monotonic() - t):
             failures += 1
 
     # Clippy last: it is the long pole (~113s after a source edit, ~5s warm --

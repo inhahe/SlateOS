@@ -81109,8 +81109,70 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **529 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **522 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (nineteenth batch): `cmd_cputhr` (7) cleared —
+> 529 → 522 across 224 → 223 functions. Pinned by `kshell::self_test` rung 87.
+>
+> **The guessed number is never a random wrong number. It is the reassuring
+> one.** Every batch so far has asked *what the guess broke*; this one is the
+> first where the answer is that the guess is indistinguishable from good news.
+> All three of `cputhr`'s numeric operands defaulted to a value that means
+> "nothing is wrong":
+>
+> | Typed | Meant | Recorded | What the recorded value says |
+> |---|---|---|---|
+> | `cputhr temp 0 9O000` | 90.0 °C | **65.0 °C** | a normal load temperature |
+> | `cputhr cap 0 8OO` | 800 MHz | **2000 MHz** | a cap so loose it is barely one |
+> | `cputhr throttle 0 1O00` | 1000 ms | **100 ms** | the shortest stall worth recording |
+>
+> A selector guess (batches 1–13) acts on the wrong object and you notice,
+> because the object you meant is still sitting there untouched. A *measurement*
+> guess files a number nobody measured. This is that, plus a bias: the invented
+> number is always the one that makes the machine look healthier than the
+> operator was trying to say it was. `temp` is the case that matters — someone
+> types a temperature only when they are recording something abnormal, and the
+> guess replaces the abnormal reading with a normal one, then prints a success
+> line and repeats the invented figure to everyone who later runs `cputhr cpus`.
+>
+> **And for `temp` the guess was literally a no-op, which took reading the
+> subsystem to see.** `cputhr::init_defaults` starts CPU 0 at `temp_mc:
+> 65_000` — the same 65 000 the shell guessed. So on a freshly-initialised
+> machine `cputhr temp 0 9O000` wrote back the value already in the state: the
+> command changed nothing at all, and said it had set a temperature. A command
+> that reports success, makes no change, and cannot be told apart from one that
+> worked is the end state this whole entry exists to remove. It is also a
+> reminder that the severity of a guessed default cannot be judged from the
+> shell alone — 65 000 looks like an arbitrary plausible number until you open
+> `kernel/src/fs/cputhr.rs`.
+>
+> `clear` is the fourth arm and a different shape again: it takes a CPU number
+> and erases that CPU's throttle state. Guessing `0` there never failed into a
+> diagnostic the way `aiostat`'s id guesses did, because **CPU 0 exists on every
+> machine** — so `cputhr clear` with the operand omitted or mistyped silently
+> cleared core 0 and reported it. `clear` was also the one arm the usage block
+> never documented, which was survivable while omission meant "CPU 0" and is not
+> survivable now that omission is refused; a `clear <cpu>` line was added in the
+> same change, per §299 — a gate whose rule is undocumented is just a wall.
+>
+> §607 keeps the bracketed operands: `throttle <cpu> [ms]`, `cap <cpu> [mhz]`
+> and `temp <cpu> [millicelsius]` all still work with the operand omitted, and
+> rung 87 asserts `cputhr cap 0` still applies the documented 2000 MHz. Only the
+> unreadable word is refused. Unlike batch 18 there is no compounding here —
+> every bracketed operand is *last*, so no guess can eat the word another
+> operand needed.
+>
+> **A note on the wording gate, in the direction of the corrections above rather
+> than against them.** Rung 87 asserts ` cap=800MHz` against the `cpus` arm,
+> whose cap string is built at run time (`alloc::format!("{}MHz", …)` /
+> `String::from("none")`) — the same construction that was restructured in
+> `cmd_cgiostat`. The gate **accepted** it, because the leading space makes
+> ` cap=` a four-byte fixed run and `MIN_FIXED_RUN` is 4. That is the behaviour
+> predicted when the sixteenth entry was corrected, now observed rather than
+> reasoned about. The `cpus` arm was therefore left alone in this commit: it has
+> the same discoverability weakness `cgiostat` had, but saying so is an argument
+> to be made on its own, not a claim that a gate demanded it.
+>
 > **Burn-down log.** 2026-08-26 (eighteenth batch): `cmd_brightness` (7) cleared
 > — 536 → 529 across 225 → 224 functions. Pinned by `kshell::self_test` rung 85.
 >

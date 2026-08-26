@@ -57,7 +57,6 @@ cmd_colortemp 7
 cmd_compstat 1
 cmd_coredump 5
 cmd_cpuset 4
-cmd_cputhr 7
 cmd_cursorsettings 2
 cmd_datausage 5
 cmd_defaultapps 4

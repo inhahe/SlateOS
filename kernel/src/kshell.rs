@@ -18357,6 +18357,107 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "a bare `blkread` errors");
     }
 
+    serial_println!(
+        "  kshell::self_test 87: the guessed number is not a random wrong one, it is the reassuring \
+         one, and for `temp' it is the value already there"
+    );
+    // `cputhr` is where the guessed default stops being merely wrong and starts
+    // being *comforting*. `temp` guessed 65_000mC — a normal load temperature —
+    // so a mistyped 90°C was filed as healthy; `cap` guessed 2000MHz, the
+    // loosest cap in the table, against a request whose entire purpose is to
+    // impose a tight one. Neither guess produces a value a reader would question.
+    //
+    // The `temp` case has a sharper edge that only reading `cputhr::init_defaults`
+    // reveals: 65_000 is CPU 0's *starting* temperature, so the guess wrote back
+    // the value already in the state. The command changed nothing and said it
+    // had. This rung pins a distinguishable temperature first precisely so that
+    // "the refusal left it alone" is observable at all — against the initial
+    // state it would not be.
+    {
+        let _ = capture_command("cputhr init");
+
+        // Pin a temperature that is *not* the guessed default, so the assertion
+        // below can tell "refused and left alone" apart from "guessed 65_000".
+        let out = capture_command("cputhr temp 0 90000");
+        assert_output_contains(
+            "a readable temperature is recorded",
+            &out,
+            b"cputhr: temp cpu=0 90.0",
+        );
+        assert_eq!(last_exit(), 0, "`cputhr temp` succeeds");
+
+        // The mistyping the whole batch is about: letter O for zero.
+        let out = capture_command("cputhr temp 0 9O000");
+        assert_output_contains(
+            "an unreadable temperature is refused by naming the word",
+            &out,
+            b"`9O000' is not a temperature in millicelsius",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable temperature errors");
+
+        // The refusal has to leave the reading alone. Under the guess this
+        // printed a success line and reset CPU 0 to 65.0°C.
+        let out = capture_command("cputhr cpus");
+        assert_output_contains(
+            "and the pinned temperature survives the refusal",
+            &out,
+            b"CPU 0 pkg=0 90.0",
+        );
+
+        // `cap`'s guess ran against the request's intent rather than beside it:
+        // 2000MHz is two and a half times looser than the 800 asked for.
+        let out = capture_command("cputhr cap 0 8OO");
+        assert_output_contains(
+            "an unreadable frequency cap is refused rather than loosened",
+            &out,
+            b"`8OO' is not a frequency cap in MHz",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable cap errors");
+
+        // §607: `cap <cpu> [mhz]` brackets the frequency, so omitting it stays a
+        // documented request and the default still applies.
+        let out = capture_command("cputhr cap 0");
+        assert_output_contains(
+            "while the documented default cap still applies when omitted",
+            &out,
+            b"cputhr: cap cpu=0 2000MHz",
+        );
+        assert_eq!(last_exit(), 0, "`cputhr cap` with no MHz succeeds");
+
+        // `clear` is the one arm whose guess always *succeeded*, against the
+        // wrong core: CPU 0 exists everywhere, so unlike an id-space guess it
+        // never failed into a diagnostic. Pin a cap, then withhold the CPU.
+        let _ = capture_command("cputhr cap 0 800");
+        let out = capture_command("cputhr clear");
+        assert_output_contains(
+            "a missing CPU number is reported as missing",
+            &out,
+            b"cputhr: clear: missing CPU number",
+        );
+        assert_eq!(last_exit(), 1, "a bare `cputhr clear` errors");
+
+        // The proof that it refused rather than cleared CPU 0 behind the user.
+        let out = capture_command("cputhr cpus");
+        assert_output_contains(
+            "and CPU 0's cap was not cleared behind the request",
+            &out,
+            b" cap=800MHz",
+        );
+
+        // An unreadable CPU number is named too, not rounded down to core 0.
+        let out = capture_command("cputhr clear 1O");
+        assert_output_contains(
+            "an unreadable CPU number is named rather than guessed",
+            &out,
+            b"`1O' is not a CPU number",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable CPU number errors");
+
+        // Leave the table as this rung found it, so rung order cannot matter.
+        let _ = capture_command("cputhr clear 0");
+        let _ = capture_command("cputhr temp 0 65000");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -98750,14 +98851,27 @@ fn cmd_cputhr(args: &str) {
             shell_println!("cputhr: initialized");
         }
         "throttle" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ms = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(100);
+            // Every guessed default in this function is the *reassuring* value,
+            // which is what makes `cputhr` worse than a plain selector guess.
+            // Elsewhere a bad guess acts on the wrong object and you notice
+            // because the thing you meant is untouched. Here the guess lands in
+            // a health reading: an unreadable duration became `100`, the
+            // shortest throttle worth recording, so a stall that was mistyped as
+            // `1O00` was filed as a tenth of its length and the machine looked
+            // healthier than it is. The number is not a selector and not a
+            // measurement anyone took — it is a sedative.
+            //
+            // `<cpu>` is angle-bracketed in the synopsis, so nothing documented
+            // is lost by requiring it (§607); `[ms]` is bracketed, so its
+            // default survives and only an unreadable word is refused.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "cputhr", sub, "CPU number") else {
+                return;
+            };
+            let Some(ms) =
+                optional_num::<u64>(&parts, 2, "cputhr", sub, "duration in milliseconds", 100)
+            else {
+                return;
+            };
             match cputhr::record_throttle(cpu, ms) {
                 Ok(()) => shell_println!("cputhr: throttle cpu={} {}ms", cpu, ms),
                 Err(e) => {
@@ -98767,10 +98881,15 @@ fn cmd_cputhr(args: &str) {
             }
         }
         "clear" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `clear` erases the throttle state of whichever CPU it is given, so
+            // guessing `0` here does not merely fail to clear the CPU that was
+            // asked for — it clears a *different* one, and says it did. CPU 0
+            // exists on every machine, so unlike the id-space guesses in
+            // `aiostat` this one never fails into a diagnostic; it always
+            // succeeds against the wrong core.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "cputhr", sub, "CPU number") else {
+                return;
+            };
             match cputhr::clear_throttle(cpu) {
                 Ok(()) => shell_println!("cputhr: cleared cpu {}", cpu),
                 Err(e) => {
@@ -98780,14 +98899,23 @@ fn cmd_cputhr(args: &str) {
             }
         }
         "cap" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let mhz = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(2000);
+            // A frequency cap is asked for in order to hold a CPU *below* some
+            // speed, so the guess runs directly against the request's intent:
+            // `cputhr cap 0 8OO` — meaning 800MHz, typed with letter O — recorded
+            // a cap of **2000MHz**, two and a half times looser than the one
+            // asked for, and printed `cputhr: cap cpu=0 2000MHz` as though that
+            // had been the instruction. Like `cgiostat`'s zero-means-unlimited
+            // (§600), the guessed value is not a random wrong number; it is the
+            // one that most nearly means "no cap", which is the opposite of why
+            // anyone types `cap`.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "cputhr", sub, "CPU number") else {
+                return;
+            };
+            let Some(mhz) =
+                optional_num::<u32>(&parts, 2, "cputhr", sub, "frequency cap in MHz", 2000)
+            else {
+                return;
+            };
             match cputhr::record_cap(cpu, mhz) {
                 Ok(()) => shell_println!("cputhr: cap cpu={} {}MHz", cpu, mhz),
                 Err(e) => {
@@ -98797,14 +98925,41 @@ fn cmd_cputhr(args: &str) {
             }
         }
         "temp" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let mc = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(65_000);
+            // The sharpest case of the three, and the reason this batch is worth
+            // a note of its own. `cputhr temp 0 9O000` — 90°C, mistyped — did not
+            // fail and did not record a nonsense reading. It recorded
+            // **65.0°C**: a normal load temperature, well under any thermal
+            // limit, indistinguishable from a healthy machine. The guess does not
+            // merely lose the alarm; it files the reassurance that the alarm was
+            // meant to displace, and every later `cputhr cpus` repeats it to
+            // anyone who looks.
+            //
+            // This is the *measurement* row of the severity table (§600) at its
+            // worst: nobody observed 65°C, nothing in the log says the number was
+            // invented, and the one operand that would have revealed the mistake
+            // — the word actually typed — was discarded before anyone saw it.
+            //
+            // Worse than that, and worth checking before believing: 65_000 is
+            // also CPU 0's *initial* `temp_mc` in `cputhr::init_defaults`. So on
+            // a freshly-initialised machine the guess did not merely report a
+            // wrong number — it wrote back the value already there, leaving the
+            // state byte-for-byte unchanged while printing a line that says a
+            // temperature was set. A command that reports success, changes
+            // nothing, and cannot be distinguished from one that worked is the
+            // end state this whole burn-down exists to remove.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "cputhr", sub, "CPU number") else {
+                return;
+            };
+            let Some(mc) = optional_num::<u32>(
+                &parts,
+                2,
+                "cputhr",
+                sub,
+                "temperature in millicelsius",
+                65_000,
+            ) else {
+                return;
+            };
             match cputhr::set_temp(cpu, mc) {
                 Ok(()) => shell_println!(
                     "cputhr: temp cpu={} {}.{}°C",
@@ -98856,6 +99011,12 @@ fn cmd_cputhr(args: &str) {
         _ => {
             shell_println!("Usage: cputhr <init|throttle|clear|cap|temp|cpus|stats|test>");
             shell_println!("  throttle <cpu> [ms]            — record throttle event");
+            // `clear` took an operand all along and never said so. That was
+            // survivable while the operand was guessed — omitting it quietly
+            // meant CPU 0 — but it is not survivable now that omitting it is
+            // refused, so the synopsis has to name what the refusal will ask
+            // for. A gate whose rule is undocumented is just a wall (§299).
+            shell_println!("  clear <cpu>                    — clear throttle state");
             shell_println!("  cap <cpu> [mhz]                — record freq cap");
             shell_println!("  temp <cpu> [millicelsius]      — set temperature");
             set_exit(1);

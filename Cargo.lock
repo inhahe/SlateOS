@@ -3674,6 +3674,7 @@ dependencies = [
  "byteread",
  "guitk",
  "imagecodec",
+ "oswindow",
  "scratchdir",
  "textfind",
 ]

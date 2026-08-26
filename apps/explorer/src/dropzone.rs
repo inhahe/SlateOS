@@ -162,6 +162,16 @@ struct RegisteredZone {
     rect: Rect,
     is_dir: bool,
     kind: ZoneKind,
+    /// For a [`ZoneKind::FileRow`], its index in the listing; `None` for a
+    /// sidebar item, which is a place rather than a row.
+    ///
+    /// Kept so that [`DropZoneManager::find_file_row`] can answer "which entry
+    /// did the user click?" from the rectangles the renderer actually emitted.
+    /// The alternative is a second copy of the icon-grid and list-row layout
+    /// arithmetic living in the click handler, which is two computations of one
+    /// rectangle to keep in agreement — and when they disagree the user clicks
+    /// one file and opens another.
+    index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -245,16 +255,20 @@ impl DropZoneManager {
 
     /// Register a visible file row.
     ///
-    /// * `_index` -- row index in the file list (reserved for future use).
+    /// * `index` -- row index in the file list, as [`find_file_row`] reports it
+    ///   back.
     /// * `path` -- absolute path of the file/folder.
     /// * `rect` -- bounding rectangle of the row.
     /// * `is_dir` -- whether the entry is a directory.
-    pub fn register_file_row(&mut self, _index: usize, path: &Path, rect: Rect, is_dir: bool) {
+    ///
+    /// [`find_file_row`]: Self::find_file_row
+    pub fn register_file_row(&mut self, index: usize, path: &Path, rect: Rect, is_dir: bool) {
         self.zones.push(RegisteredZone {
             path: path.to_path_buf(),
             rect,
             is_dir,
             kind: ZoneKind::FileRow,
+            index: Some(index),
         });
     }
 
@@ -265,6 +279,7 @@ impl DropZoneManager {
             rect,
             is_dir: true, // sidebar items are always directories
             kind: ZoneKind::SidebarItem,
+            index: None,
         });
     }
 
@@ -311,6 +326,45 @@ impl DropZoneManager {
         }
 
         DropZone::None
+    }
+
+    /// Which listing row the pointer at `(x, y)` is over, if any.
+    ///
+    /// **This is how a click finds the file it landed on.** The rectangles were
+    /// put here by the same code that drew the rows, so the row the user sees
+    /// under the pointer is the row this returns — including in the icon view,
+    /// whose cells are a grid whose column count depends on the pane width, and
+    /// after a scroll or a resize that moved every row. Recomputing the layout
+    /// in the click handler instead would be a second copy of that arithmetic,
+    /// and the first time the two disagreed the user would click one file and
+    /// open another.
+    ///
+    /// Reverse order, matching [`Self::find_zone`]: whatever was registered
+    /// last was drawn last and so is on top.
+    ///
+    /// Unlike `find_zone` this does *not* fall through to the list area — a
+    /// click on empty space is a click on no file, which is what clears a
+    /// selection rather than what extends one.
+    #[must_use]
+    pub fn find_file_row(&self, x: f32, y: f32) -> Option<usize> {
+        self.zones
+            .iter()
+            .rev()
+            .find(|z| z.kind == ZoneKind::FileRow && z.rect.contains(x, y))
+            .and_then(|z| z.index)
+    }
+
+    /// Which sidebar place the pointer at `(x, y)` is over, if any.
+    ///
+    /// The navigation counterpart of [`Self::find_file_row`], and registered by
+    /// the same renderer for the same reason.
+    #[must_use]
+    pub fn find_sidebar_item(&self, x: f32, y: f32) -> Option<&Path> {
+        self.zones
+            .iter()
+            .rev()
+            .find(|z| z.kind == ZoneKind::SidebarItem && z.rect.contains(x, y))
+            .map(|z| z.path.as_path())
     }
 
     // ------------------------------------------------------------------

@@ -59,7 +59,8 @@
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
 use crate::{
-    DecodeError, Reader, capacity_hint, write_f32, write_i32, write_string, write_u32, write_u64,
+    DecodeError, Reader, capacity_hint, write_bytes, write_f32, write_i32, write_string, write_u32,
+    write_u64,
 };
 
 /// Request-frame magic: `b"CREQ"` (client → compositor).
@@ -159,6 +160,66 @@ impl CursorShape {
             0x0B => Self::Crosshair,
             0x0C => Self::NotAllowed,
             0x0D => Self::Hidden,
+            _ => return None,
+        })
+    }
+}
+
+// ============================================================================
+// Pixel formats
+// ============================================================================
+
+/// Pixel layout of a block of client-supplied pixels.
+///
+/// This is the one the *wire* uses, and — by the same rule that left
+/// [`CursorShape`] the only cursor enum — deliberately the only one. The
+/// compositor previously declared its own `BufferFormat`, which was fine while
+/// pixels could only be handed over in-process; the moment
+/// [`RequestBody::UploadImage`] let them arrive from another process, two enums
+/// meant two orderings for the byte-per-variant mapping, and nothing to make
+/// them agree beyond a reviewer noticing. Byte `0x01` means `Argb8888` here
+/// because it is written down here, and the compositor imports this type rather
+/// than translating into a copy of it.
+///
+/// Both variants are 32 bits per pixel and little-endian. The compositor works
+/// internally in `0xAARRGGBB`, so an import converts to that.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BufferFormat {
+    /// 32 bits per pixel with an alpha channel. Memory bytes (low→high) are
+    /// `[B, G, R, A]`, i.e. a little-endian `u32` of `0xAARRGGBB`.
+    #[default]
+    Argb8888,
+    /// Same byte order as [`Argb8888`](BufferFormat::Argb8888) but the high
+    /// byte is ignored and the pixel is treated as fully opaque.
+    Xrgb8888,
+}
+
+impl BufferFormat {
+    /// Bytes occupied by a single pixel in this format.
+    #[must_use]
+    pub const fn bytes_per_pixel(self) -> u32 {
+        match self {
+            Self::Argb8888 | Self::Xrgb8888 => 4,
+        }
+    }
+
+    /// Whether this format carries per-pixel alpha. `Xrgb8888` does not.
+    #[must_use]
+    pub const fn has_alpha(self) -> bool {
+        matches!(self, Self::Argb8888)
+    }
+
+    const fn to_byte(self) -> u8 {
+        match self {
+            Self::Argb8888 => 0x01,
+            Self::Xrgb8888 => 0x02,
+        }
+    }
+
+    const fn from_byte(b: u8) -> Option<Self> {
+        Some(match b {
+            0x01 => Self::Argb8888,
+            0x02 => Self::Xrgb8888,
             _ => return None,
         })
     }
@@ -696,6 +757,61 @@ pub enum RequestBody {
     /// Answered with [`ResponseBody::Ok`], including when the file turns out
     /// not to have changed, exactly as for appearance.
     ReloadInput,
+    /// Hand the compositor a block of pixels and give it a name, so that this
+    /// window's [`RenderCommand::Image`](guitk::render::RenderCommand::Image)
+    /// commands naming that name have something to draw.
+    ///
+    /// **Uploading is a separate request from drawing** because the two have
+    /// opposite frequencies: a file manager's thumbnail is produced once and
+    /// drawn on every frame the folder is on screen, and a protocol that
+    /// carried the pixels alongside the draw would re-send a megabyte sixty
+    /// times a second to show a still picture. It is the same split as a texture
+    /// upload and a textured quad, and for the same reason.
+    ///
+    /// `image_id` is the **client's** to choose and is scoped to this window.
+    /// Two clients may both use id 1 without either seeing the other's pixels,
+    /// and a client with two windows must upload to each separately — an id
+    /// resolved against the window is what makes the previous sentence true.
+    /// Re-uploading an existing id **replaces** it, which is how a picture is
+    /// updated in place (a video frame, a re-rendered chart) without the
+    /// intervening frame where the id names nothing and the image blinks out.
+    ///
+    /// The pixels travel **inline**, not as a shared mapping. That is a real
+    /// cost for a full-resolution photograph and it is what this protocol can
+    /// honestly offer: the transport is a TCP connection
+    /// (`design-decisions.md` §460) whose far end need not be on this machine,
+    /// and a mapping that only works over loopback would be a fast path that
+    /// silently is not there.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error — the window is not
+    /// yours, the geometry does not describe the bytes, or you have more pixels
+    /// resident with this compositor than it is willing to hold for one
+    /// connection. A refused upload changes nothing: whatever `image_id` named
+    /// before is still there.
+    UploadImage {
+        window: u64,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        /// Bytes from the start of one row to the start of the next. May exceed
+        /// `width * bytes_per_pixel` — a client cropping a larger picture
+        /// uploads the sub-rectangle's width with the original's stride rather
+        /// than repacking it.
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    },
+    /// Forget one of this window's uploaded images and release its memory.
+    ///
+    /// Commands still naming the id afterwards draw nothing, which is the same
+    /// thing an id that was never uploaded does, and is not an error: a frame
+    /// already in flight when the drop was sent must not be able to fault the
+    /// window that sent it.
+    ///
+    /// Answered with [`ResponseBody::Ok`] whether or not an image was there.
+    /// Reporting "there was nothing to drop" would tell a client something it
+    /// cannot act on and would make the ordinary tidy-up-everything loop noisy.
+    DropImage { window: u64, image_id: u64 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -721,6 +837,8 @@ enum RequestTag {
     SwitchWorkspace = 0x12,
     SetWindowWorkspace = 0x13,
     ReloadInput = 0x14,
+    UploadImage = 0x15,
+    DropImage = 0x16,
 }
 
 impl RequestTag {
@@ -746,6 +864,8 @@ impl RequestTag {
             0x12 => Self::SwitchWorkspace,
             0x13 => Self::SetWindowWorkspace,
             0x14 => Self::ReloadInput,
+            0x15 => Self::UploadImage,
+            0x16 => Self::DropImage,
             _ => return None,
         })
     }
@@ -1002,6 +1122,32 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::SetWindowWorkspace as u8);
             write_u64(out, *window);
             write_u32(out, *workspace);
+        }
+        RequestBody::UploadImage {
+            window,
+            image_id,
+            width,
+            height,
+            stride,
+            format,
+            bytes,
+        } => {
+            out.push(RequestTag::UploadImage as u8);
+            write_u64(out, *window);
+            write_u64(out, *image_id);
+            write_u32(out, *width);
+            write_u32(out, *height);
+            write_u32(out, *stride);
+            out.push(format.to_byte());
+            // Bytes last, so that everything the receiver needs to decide
+            // whether it wants them has already been read by the time the
+            // length prefix arrives.
+            write_bytes(out, bytes);
+        }
+        RequestBody::DropImage { window, image_id } => {
+            out.push(RequestTag::DropImage as u8);
+            write_u64(out, *window);
+            write_u64(out, *image_id);
         }
     }
 }
@@ -1263,6 +1409,38 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 workspace: r.read_u32()?,
             }
         }
+        RequestTag::UploadImage => {
+            let window = r.read_u64()?;
+            let image_id = r.read_u64()?;
+            let width = r.read_u32()?;
+            let height = r.read_u32()?;
+            let stride = r.read_u32()?;
+            let b = r.read_u8()?;
+            let format = BufferFormat::from_byte(b).ok_or(DecodeError::BadBufferFormat(b))?;
+            // Nothing is validated against anything else here: whether the
+            // stride covers the width, and whether the bytes cover the rows, is
+            // the compositor's import check, which is where the answer has to
+            // be right anyway. A second copy in the decoder would be a second
+            // place for the arithmetic to be wrong, and only one of them would
+            // be the one a hostile client actually has to get past.
+            let bytes = r.read_bytes()?;
+            RequestBody::UploadImage {
+                window,
+                image_id,
+                width,
+                height,
+                stride,
+                format,
+                bytes,
+            }
+        }
+        RequestTag::DropImage => {
+            let window = r.read_u64()?;
+            RequestBody::DropImage {
+                window,
+                image_id: r.read_u64()?,
+            }
+        }
     })
 }
 
@@ -1426,8 +1604,140 @@ mod tests {
             Request::new(15, RequestBody::SubscribeWindowList { subscribe: false }),
             Request::new(16, RequestBody::ReloadAppearance),
             Request::new(17, RequestBody::ReloadInput),
+            // Both formats, for the same reason both polarities of the flag
+            // above: the format is one byte and a codec that wrote a constant
+            // would round-trip whichever one a sample happened to pick.
+            Request::new(
+                18,
+                RequestBody::UploadImage {
+                    window: 7,
+                    image_id: u64::MAX,
+                    width: 2,
+                    height: 1,
+                    stride: 8,
+                    format: BufferFormat::Argb8888,
+                    bytes: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                },
+            ),
+            Request::new(
+                19,
+                RequestBody::UploadImage {
+                    window: 7,
+                    image_id: 0,
+                    width: 1,
+                    height: 1,
+                    stride: 4,
+                    format: BufferFormat::Xrgb8888,
+                    bytes: vec![9, 9, 9, 9],
+                },
+            ),
+            // An empty payload: the length prefix is what distinguishes "no
+            // bytes" from "the frame ended here", and a codec that omitted the
+            // prefix for an empty slice would decode the next message's tag as
+            // this one's first pixel.
+            Request::new(
+                20,
+                RequestBody::UploadImage {
+                    window: 7,
+                    image_id: 1,
+                    width: 0,
+                    height: 0,
+                    stride: 0,
+                    format: BufferFormat::Argb8888,
+                    bytes: Vec::new(),
+                },
+            ),
+            Request::new(
+                21,
+                RequestBody::DropImage {
+                    window: 7,
+                    image_id: 1,
+                },
+            ),
         ];
         assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    #[test]
+    fn an_image_payload_over_the_cap_is_refused_before_it_is_read() {
+        // Hand-built: the encoder cannot produce this, which is the point — the
+        // frame comes from another process and the decoder is what stands
+        // between a four-gigabyte length prefix and a four-gigabyte allocation.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&REQUEST_MAGIC);
+        bytes.push(CONTROL_VERSION);
+        bytes.push(0);
+        write_u32(&mut bytes, 1); // one message
+        write_u32(&mut bytes, 1); // seq
+        bytes.push(RequestTag::UploadImage as u8);
+        write_u64(&mut bytes, 7); // window
+        write_u64(&mut bytes, 1); // image_id
+        write_u32(&mut bytes, 1); // width
+        write_u32(&mut bytes, 1); // height
+        write_u32(&mut bytes, 4); // stride
+        bytes.push(BufferFormat::Argb8888.to_byte());
+        write_u32(&mut bytes, crate::MAX_IMAGE_BYTES.saturating_add(1));
+        // …and nothing behind it. Reporting `UnexpectedEof` here would be the
+        // wrong answer twice over: it is not a truncated frame, and a caller
+        // told so would sit waiting for bytes the sender never intends to send.
+        assert!(matches!(
+            decode_requests(&bytes),
+            Err(DecodeError::ImageTooLarge(_))
+        ));
+    }
+
+    #[test]
+    fn an_unknown_buffer_format_names_itself() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&REQUEST_MAGIC);
+        bytes.push(CONTROL_VERSION);
+        bytes.push(0);
+        write_u32(&mut bytes, 1);
+        write_u32(&mut bytes, 1);
+        bytes.push(RequestTag::UploadImage as u8);
+        write_u64(&mut bytes, 7);
+        write_u64(&mut bytes, 1);
+        write_u32(&mut bytes, 1);
+        write_u32(&mut bytes, 1);
+        write_u32(&mut bytes, 4);
+        bytes.push(0x77); // no such format
+        write_u32(&mut bytes, 0);
+        assert_eq!(
+            decode_requests(&bytes),
+            Err(DecodeError::BadBufferFormat(0x77))
+        );
+    }
+
+    #[test]
+    fn every_byte_of_an_upload_frame_can_be_corrupted_without_a_panic() {
+        // The same sweep `INPT` gets, and for the same reason: this frame
+        // carries a length prefix and a format byte chosen by another process,
+        // and the decoder's whole contract is that it answers a wrong one with
+        // an error rather than a crash. Flipping every bit of every byte in
+        // turn is cheap on a frame this size and covers the lengths, the tag,
+        // the format and the payload alike.
+        let frame = encode_requests(&[Request::new(
+            1,
+            RequestBody::UploadImage {
+                window: 3,
+                image_id: 4,
+                width: 2,
+                height: 2,
+                stride: 8,
+                format: BufferFormat::Argb8888,
+                bytes: vec![0xAB; 16],
+            },
+        )]);
+        for i in 0..frame.len() {
+            for bit in 0..8u32 {
+                let mut corrupt = frame.clone();
+                corrupt[i] ^= 1u8 << bit;
+                // Whatever it decodes to, it must not panic and must not read
+                // past the buffer. Both outcomes are acceptable: a flipped bit
+                // in a payload byte is still a valid frame.
+                let _ = decode_requests(&corrupt);
+            }
+        }
     }
 
     /// Every action there is: the seven that name no zone, and one per

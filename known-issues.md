@@ -81888,7 +81888,47 @@ path — `Drop` runs during unwind where a trailing `remove_dir_all` does not.
 
 ---
 
-## `TD-C-AN-IMAGE-CAN-ONLY-BE-UPLOADED-IN-PROCESS` (lane C, 2026-08-25) — **open**
+## `TD-C-AN-IMAGE-CAN-ONLY-BE-UPLOADED-IN-PROCESS` (lane C, 2026-08-25) — **FIXED** 2026-08-26
+
+**In short:** the compositor could draw pictures, but the only way to hand it
+one was to be *inside* the compositor program. Every real application is a
+separate program, so none of them could show a picture at all — the file
+manager's icons would simply not appear, with no error to say why. There is now
+a request on the wire (`UploadImage`, and `DropImage` to take it back again), a
+`Connection::upload_image` / `Connection::drop_image` pair for applications to
+call, and a per-connection memory limit so that a program which uploads without
+end is refused rather than allowed to exhaust the machine.
+
+**What was built.**
+
+| Piece | Where |
+|---|---|
+| `RequestBody::UploadImage` / `DropImage` (tags `0x15`/`0x16`) | `gui/remote/src/control.rs` |
+| `MAX_IMAGE_BYTES`, `write_bytes`, `Reader::read_bytes`, `DecodeError::{ImageTooLarge, BadBufferFormat}` | `gui/remote/src/{lib.rs, reader.rs}` |
+| `BufferFormat` moved to `guiremote::control` and re-exported by the compositor | `gui/remote/src/control.rs`, `gui/compositor/src/buffer.rs` |
+| `CompositorRequest::{RegisterImage, UnregisterImage}` and the two byte-count accessors the budget needs | `gui/compositor/src/lib.rs` |
+| `ClientLink::image_budget` / `set_image_budget`, `MAX_IMAGE_BYTES_PER_LINK`, the refusal gate | `gui/compositor/src/wire.rs` |
+| `Connection::upload_image` / `drop_image` | `gui/remote/src/client.rs` |
+
+**How the two open questions were answered** — see design-decisions.md → 556.
+The budget is **per connection, not per window** (a per-window one is bypassed
+by opening a second window) and an upload over it is **refused, not evicted**
+(eviction "succeeds": a draw naming an id with no pixels behind it renders
+nothing, silently and by design, so an evicted thumbnail is a picture that stops
+appearing with no error anywhere). The bytes travel **inline**.
+
+**The entry's own premise about mapping was wrong.** It said "the surface path
+already maps rather than copies", and offered that as a reason an image might
+too. It does not: `SharedBuffer` and `attach_buffer` appear nowhere in
+`gui/remote/` — there is no surface-attach request on the wire at all, and
+`buffer.rs`'s own module doc says the IPC layer is "currently stubbed" and
+`SharedBuffer::import` takes bytes already mapped by someone else. In-process,
+"mapping" is a `&[u8]` that was never copied. Over a TCP connection
+(design-decisions.md → 460) whose far end need not be on this machine, there is
+nothing to map, and a fast path that only exists over loopback would be a fast
+path that silently is not there.
+
+**Original entry follows.**
 
 **What it is.** The compositor now has an image store and paints
 `RenderCommand::Image` for real (design-decisions.md → 554). But the only way to
@@ -82236,3 +82276,64 @@ user*, and neither one's test suite can see it, because each is tested only
 against itself. The differential is what makes the disagreement visible, and it
 needs a third-party oracle: had the two been compared only to each other, all
 646 differences would have looked like a coin-flip over which was right.
+
+---
+
+## `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING` (lane C, 2026-08-26) — **open**
+
+**In short:** the desktop can now draw a picture and, as of today, a program in
+another process can send one. Nothing in the tree can turn a `.png` or `.jpg`
+file into the pixels either of those needs. Five places already ask for a
+picture to be drawn and every one of them names an id that no pixels were ever
+stored under — and drawing an unknown id renders *nothing, silently, by design*,
+so a wallpaper the user chose simply does not appear and no error is produced
+anywhere. This is the last missing link in the chain, not a corner case in it.
+
+**The chain, and where it breaks.**
+
+| Link | State |
+|---|---|
+| A file on disk → pixels | **missing — there is no image decoder in the tree** |
+| Pixels → the compositor's store, in-process | `Compositor::register_image` ✅ |
+| Pixels → the compositor's store, from another process | `RequestBody::UploadImage` ✅ (today) |
+| An id → pixels on screen | `RenderCommand::Image`, rasterised ✅ (design-decisions.md → 554) |
+
+**The five callers that already draw one.**
+
+| Site | Where its id comes from |
+|---|---|
+| `gui/desktop/src/wallpaper.rs:993` | `alloc_image_id()` — a counter bumped by `set_image`; the file at `config.image_path` is never opened |
+| `apps/explorer/src/thumbs.rs:1317` | `thumbnail_image_id(thumb)`, a hash of the source path. Its own comment says *"The caller is responsible for registering the pixel data with the compositor under this ID"* — and no caller does |
+| `apps/imageviewer/src/main.rs:1225` | the decoded image — except `Image::load` synthesises a grey checkerboard (`main.rs:194–208`) rather than reading the file |
+| `apps/imageviewer/src/video.rs:1242` | a frame id from the video path, which is likewise not decoded |
+| `gui/toolkit/src/grid.rs:1483,1516` | the caller's, passed through |
+
+**Why it is not simply a bug in each of them.** All five are correct code
+waiting on a dependency that does not exist. Writing five ad-hoc PNG readers
+would be the glob-matcher mistake (design-decisions.md → 555) made five times
+over: one user-facing concept, five implementations, each tested only against
+itself.
+
+**What the proper fix is.** A decoder crate under `gui/` — PNG first, since it
+is the format the icons, the cursors and most wallpapers are in, it is lossless,
+and its spec is small and completely specified (RFC 2083; the compression is
+DEFLATE, RFC 1951). JPEG second, for photographs. Then each of the five call
+sites gains an upload: in-process for the desktop shell, and
+`Connection::upload_image` for the applications once they are converted to
+`oswindow::app`.
+
+**Two things that must be true of it, because the input is untrusted.** A
+wallpaper or a thumbnail is a file the user was handed by someone else, so the
+decoder is an attack surface in the same way the wire decoder is:
+
+1. **It must not panic on malformed input**, on any byte sequence, the way
+   `guiremote`'s `Reader` must not — a corrupt icon in a directory listing must
+   not take down the file manager, let alone the shell.
+2. **It must bound what it will allocate before allocating it.** A PNG header
+   declaring 65535×65535 is 17 GB, and the declaration costs the attacker eight
+   bytes. The compositor's `MAX_BUFFER_PIXELS` bounds what may be *stored*;
+   nothing yet bounds what may be *decoded*.
+
+**How you would notice.** Set a wallpaper in Settings: the desktop stays the
+background colour. Open a folder of photographs in the file manager: every icon
+is the generic file glyph. Neither reports an error.

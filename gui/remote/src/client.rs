@@ -47,7 +47,7 @@ use guitk::render::RenderTree;
 
 use crate::DecodeError;
 use crate::control::{
-    Request, RequestBody, ResponseBody, ShellControlAction, encode_requests_into,
+    BufferFormat, Request, RequestBody, ResponseBody, ShellControlAction, encode_requests_into,
 };
 use crate::frame::{Frame, try_decode_any};
 use crate::input::InputEvent;
@@ -637,6 +637,68 @@ impl<T: Transport> Connection<T> {
         }
     }
 
+    /// Give the compositor a picture to keep, under an id this window's draw
+    /// commands can name later.
+    ///
+    /// Uploading is separate from drawing because the two have wildly different
+    /// rates: a render tree is re-sent whenever anything about the window
+    /// changes, and a protocol that carried the pixels along with it would
+    /// re-send a megabyte sixty times a second to keep a still picture on
+    /// screen. Upload once, then name the id in every frame that shows it.
+    ///
+    /// `image_id` is the caller's to choose and is scoped to `window`, so two
+    /// windows may both use id 1 without colliding. Uploading an id that is
+    /// already registered *replaces* it, which is how a client repaints a
+    /// thumbnail without having to invent a fresh id and drop the old one.
+    ///
+    /// `stride` is the distance in bytes from the start of one row to the start
+    /// of the next, and may exceed `width * format.bytes_per_pixel()` — a caller
+    /// uploading a sub-rectangle of a larger picture passes the sub-rectangle's
+    /// width with the original's stride rather than repacking the rows.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::round_trip`], plus [`ClientError::Refused`] if the compositor
+    /// declined. A refusal means the window is not this connection's, or the
+    /// geometry does not describe the bytes, or the upload would put the
+    /// connection over its image budget. In every one of those cases nothing
+    /// changed: an id that was registered before is still registered, with the
+    /// pixels it had.
+    pub fn upload_image(
+        &mut self,
+        window: u64,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::UploadImage {
+            window,
+            image_id,
+            width,
+            height,
+            stride,
+            format,
+            bytes,
+        })
+    }
+
+    /// Forget one of this window's uploaded images and release its memory.
+    ///
+    /// Succeeds whether or not anything was registered under `image_id`, so a
+    /// client tidying up every id it ever used need not track which ones it has
+    /// already dropped. Draw commands naming a dropped id render nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::round_trip`], plus [`ClientError::Refused`] if `window` is not
+    /// this connection's.
+    pub fn drop_image(&mut self, window: u64, image_id: u64) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::DropImage { window, image_id })
+    }
+
     /// Send one window's picture.
     ///
     /// # Errors
@@ -882,6 +944,67 @@ mod tests {
         assert_eq!(
             c.create_window(WindowSpec::new("Test", 320, 240)),
             Err(ClientError::Closed)
+        );
+    }
+
+    #[test]
+    fn an_uploaded_image_reaches_the_wire_with_its_pixels_intact() {
+        // The point of the convenience method is that a caller does not have to
+        // build the request by hand; the point of this test is that it builds
+        // the same one they would have. Pixels are checked byte for byte
+        // because a stride or format field silently swapped for another would
+        // still decode.
+        let mut c = conn(vec![reply(1, ResponseBody::Ok)]);
+        let pixels: Vec<u8> = (0u8..64).collect();
+        c.upload_image(7, 9, 4, 4, 16, BufferFormat::Xrgb8888, pixels.clone())
+            .unwrap();
+
+        let sent = &c.transport().sent[0];
+        let (reqs, _) = crate::control::decode_requests(sent).unwrap();
+        assert_eq!(
+            reqs[0].body,
+            RequestBody::UploadImage {
+                window: 7,
+                image_id: 9,
+                width: 4,
+                height: 4,
+                stride: 16,
+                format: BufferFormat::Xrgb8888,
+                bytes: pixels,
+            }
+        );
+    }
+
+    #[test]
+    fn a_refused_upload_is_an_error_the_caller_can_read() {
+        // Over budget, bad geometry and not-your-window all arrive this way,
+        // and all of them mean nothing changed. A method that swallowed the
+        // refusal would leave the caller drawing an id with no pixels behind
+        // it, which renders nothing and reports nothing.
+        let mut c = conn(vec![reply(
+            1,
+            ResponseBody::Error {
+                message: "over the 512-byte limit".to_string(),
+            },
+        )]);
+        assert_eq!(
+            c.upload_image(7, 9, 4, 4, 16, BufferFormat::Argb8888, vec![0; 64]),
+            Err(ClientError::Refused("over the 512-byte limit".to_string()))
+        );
+    }
+
+    #[test]
+    fn dropping_an_image_asks_for_that_and_nothing_else() {
+        let mut c = conn(vec![reply(1, ResponseBody::Ok)]);
+        c.drop_image(7, 9).unwrap();
+        let sent = &c.transport().sent[0];
+        let (reqs, _) = crate::control::decode_requests(sent).unwrap();
+        assert_eq!(
+            reqs[0].body,
+            RequestBody::DropImage {
+                window: 7,
+                image_id: 9,
+            }
         );
     }
 

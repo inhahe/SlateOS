@@ -1597,6 +1597,8 @@ pub mod testing {
                 RequestBody::ReserveEdge { .. } => "ReserveEdge",
                 RequestBody::SwitchWorkspace { .. } => "SwitchWorkspace",
                 RequestBody::SetWindowWorkspace { .. } => "SetWindowWorkspace",
+                RequestBody::UploadImage { .. } => "UploadImage",
+                RequestBody::DropImage { .. } => "DropImage",
             }
         }
     }

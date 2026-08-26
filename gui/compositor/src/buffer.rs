@@ -47,36 +47,18 @@
 
 use crate::{CompositorError, CompositorResult, MAX_FB_HEIGHT, MAX_FB_WIDTH};
 
-/// Pixel layout of a client-supplied shared buffer.
+/// Pixel layout of a client-supplied buffer.
 ///
-/// Both supported formats are 32-bit little-endian. Internally the compositor
-/// works exclusively in `0xAARRGGBB` (the same layout
-/// [`Framebuffer`](crate::Framebuffer) blends), so import converts to that.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BufferFormat {
-    /// 32 bits per pixel with an alpha channel. Memory bytes (low→high) are
-    /// `[B, G, R, A]`, i.e. a little-endian `u32` of `0xAARRGGBB`.
-    Argb8888,
-    /// Same byte order as [`Argb8888`](BufferFormat::Argb8888) but the
-    /// high byte is ignored and the pixel is treated as fully opaque.
-    Xrgb8888,
-}
-
-impl BufferFormat {
-    /// Bytes occupied by a single pixel in this format.
-    #[must_use]
-    pub const fn bytes_per_pixel(self) -> u32 {
-        match self {
-            Self::Argb8888 | Self::Xrgb8888 => 4,
-        }
-    }
-
-    /// Whether this format carries per-pixel alpha. `Xrgb8888` does not.
-    #[must_use]
-    pub const fn has_alpha(self) -> bool {
-        matches!(self, Self::Argb8888)
-    }
-}
+/// Re-exported from [`guiremote::control`] rather than declared here. The
+/// compositor used to own this enum, which was tenable while pixels could only
+/// be handed over in-process; once [`RequestBody::UploadImage`] let them arrive
+/// from another process the format became part of the *wire*, and the wire owns
+/// its own vocabulary — the same rule that left `guiremote::control::CursorShape`
+/// the tree's only cursor enum. Two enums would have meant two byte-per-variant
+/// tables with nothing but a reviewer to keep them in step.
+///
+/// [`RequestBody::UploadImage`]: guiremote::control::RequestBody::UploadImage
+pub use guiremote::control::BufferFormat;
 
 /// Upper bound on a shared buffer's pixel count, mirroring the framebuffer cap.
 ///

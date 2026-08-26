@@ -2923,6 +2923,29 @@ pub enum CompositorRequest {
     /// Like [`ShellControl`](Self::ShellControl) it names somebody else's
     /// window and is therefore not resolved against the sender's own.
     SetWindowWorkspace { window_id: WindowId, workspace: u32 },
+    /// Give a window's image store some pixels under a client-chosen id, so
+    /// that its [`RenderCommand::Image`] commands naming that id can draw.
+    /// Answered with [`CompositorResponse::Ok`].
+    ///
+    /// See [`Compositor::register_image`] for what it does and why uploading is
+    /// a separate step from drawing. Resolved against the sender's own windows
+    /// in the ordinary way — an image store belongs to a window, and a client
+    /// filling somebody else's would be both a memory attack and a way to
+    /// change what another application draws.
+    RegisterImage {
+        window_id: WindowId,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    },
+    /// Forget one of a window's images. Answered with
+    /// [`CompositorResponse::Ok`] whether or not one was there — see
+    /// [`guiremote::control::RequestBody::DropImage`] for why the absent case is
+    /// not an error.
+    UnregisterImage { window_id: WindowId, image_id: u64 },
 }
 
 /// Responses from the compositor to clients.
@@ -6185,6 +6208,40 @@ impl Compositor {
             .fold(0usize, usize::saturating_add)
     }
 
+    /// Bytes held by one window's registered images, or `None` if there is no
+    /// such window.
+    ///
+    /// The per-window half of [`image_bytes`](Self::image_bytes), and the one
+    /// the wire layer adds up across a connection's windows to decide whether an
+    /// upload fits its budget. `None` rather than `0` for a missing window, for
+    /// the same reason [`image_count`](Self::image_count) does it: a window that
+    /// is gone and a window holding nothing are different answers, and a caller
+    /// summing a budget wants to know it asked about a window that is not there.
+    #[must_use]
+    pub fn window_image_bytes(&self, window_id: WindowId) -> Option<usize> {
+        self.window_ref(window_id).map(|w| {
+            w.images
+                .values()
+                .map(ImageAsset::size_bytes)
+                .fold(0usize, usize::saturating_add)
+        })
+    }
+
+    /// Bytes held by one registered image, or `None` if that window has no image
+    /// under that id.
+    ///
+    /// Exists for the budget arithmetic: re-registering an id *replaces* it, so
+    /// an upload that overwrites a 40 MiB asset with a 41 MiB one costs one
+    /// megabyte and not forty-one. A budget computed without subtracting what is
+    /// about to be freed would refuse every in-place update — a video frame, a
+    /// re-rendered chart — from the moment the client passed half its allowance.
+    #[must_use]
+    pub fn image_size_bytes(&self, window_id: WindowId, image_id: u64) -> Option<usize> {
+        self.window_ref(window_id)
+            .and_then(|w| w.images.get(&image_id))
+            .map(ImageAsset::size_bytes)
+    }
+
     // -----------------------------------------------------------------------
     // Input routing
     // -----------------------------------------------------------------------
@@ -7822,6 +7879,32 @@ impl Compositor {
                         message: CompositorError::StreamNotFound(stream_id).to_string(),
                     }
                 }
+            }
+            CompositorRequest::RegisterImage {
+                window_id,
+                image_id,
+                width,
+                height,
+                stride,
+                format,
+                bytes,
+            } => match self
+                .register_image(window_id, image_id, width, height, stride, format, &bytes)
+            {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::UnregisterImage {
+                window_id,
+                image_id,
+            } => {
+                // Deliberately not reporting whether anything was there: see
+                // `RequestBody::DropImage`. A client tidying up every id it ever
+                // used should not have to know which ones it already dropped.
+                self.unregister_image(window_id, image_id);
+                CompositorResponse::Ok
             }
         }
     }

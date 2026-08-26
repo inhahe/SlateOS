@@ -38,6 +38,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -264,6 +265,13 @@ pub enum CompositorError {
     /// the failure is inventing a rectangle, and a window silently placed
     /// *somewhere* is a worse outcome than a request that visibly failed.
     ZoneNotInLayout(WindowId),
+    /// A key combination was claimed by one window and asked for by another.
+    ///
+    /// Reported rather than silently honoured because first-grabber-wins is only
+    /// a usable rule if the loser is told: a second shell whose Alt+Tab quietly
+    /// never fired would look exactly like a shell with no shortcut mechanism at
+    /// all, which is the bug the mechanism exists to end.
+    KeyAlreadyGrabbed(Key, Modifiers),
 }
 
 impl std::fmt::Display for CompositorError {
@@ -293,6 +301,22 @@ impl std::fmt::Display for CompositorError {
             Self::NotResizable(id) => write!(f, "window is not resizable: {}", id.raw()),
             Self::ZoneNotInLayout(id) => {
                 write!(f, "snap layout has no such zone: {}", id.raw())
+            }
+            // Names the chord, because "already grabbed" without it leaves the
+            // reader of a log to guess which of a shell's dozen shortcuts lost.
+            Self::KeyAlreadyGrabbed(key, modifiers) => {
+                write!(f, "key combination already grabbed: ")?;
+                for (held, name) in [
+                    (modifiers.ctrl, "Ctrl+"),
+                    (modifiers.alt, "Alt+"),
+                    (modifiers.shift, "Shift+"),
+                    (modifiers.super_key, "Super+"),
+                ] {
+                    if held {
+                        write!(f, "{name}")?;
+                    }
+                }
+                write!(f, "{key:?}")
             }
         }
     }
@@ -2946,6 +2970,29 @@ pub enum CompositorRequest {
     /// [`guiremote::control::RequestBody::DropImage`] for why the absent case is
     /// not an error.
     UnregisterImage { window_id: WindowId, image_id: u64 },
+    /// Claim a key combination for a window, so that it arrives there whoever
+    /// has the keyboard. Answered with [`CompositorResponse::Ok`], or an error
+    /// if another window holds it.
+    ///
+    /// The window named is the sender's own — it is where the event will be
+    /// addressed, and it is the claim's lifetime — so this is resolved in the
+    /// ordinary way. It is nonetheless privileged, because the *effect* is on
+    /// everybody else: a chord one client holds is a chord no other client can
+    /// ever see. See [`guiremote::control::RequestBody::GrabKey`].
+    GrabKey {
+        window_id: WindowId,
+        key: Key,
+        modifiers: Modifiers,
+    },
+    /// Release a claim. Answered with [`CompositorResponse::Ok`] whether or not
+    /// this window held it — see
+    /// [`guiremote::control::RequestBody::UngrabKey`] for why the absent case
+    /// is not an error and somebody else's is.
+    UngrabKey {
+        window_id: WindowId,
+        key: Key,
+        modifiers: Modifiers,
+    },
 }
 
 /// Responses from the compositor to clients.
@@ -4637,6 +4684,35 @@ pub struct Compositor {
     /// shell's. What the compositor owns is which one is *showing*, because
     /// that is the part that decides pixels.
     current_workspace: u32,
+    /// Chords claimed by a window, which reach it whoever has the keyboard.
+    ///
+    /// This is the whole of the desktop-shortcut mechanism, and it exists
+    /// because [`handle_key`](Self::handle_key) otherwise delivers to
+    /// [`focused_window`](Self::focused_window) and to nothing else: without it
+    /// the shell's Alt+Tab fires only while the shell is focused, which is never
+    /// — Alt+Tab exists to be pressed from inside some other window. Consulted
+    /// *before* the focus lookup, and a match is delivered **instead of**, not
+    /// as well as, the ordinary delivery.
+    ///
+    /// Keyed by the whole chord rather than by the key, so that Alt+Tab and a
+    /// bare Tab are different claims and grabbing the shortcut does not take
+    /// the Tab key away from every text field on the desktop.
+    ///
+    /// A `HashMap` and not a `Vec`: this is read on **every** key event, which
+    /// is the one path in this file where a linear scan would grow with how many
+    /// shortcuts the user has configured.
+    key_grabs: HashMap<(Key, Modifiers), WindowId>,
+    /// Scancodes whose *press* went to a grab, and where it went.
+    ///
+    /// Needed because a chord's release is not the same chord. Alt+Tab held open
+    /// while the user lets go of Alt sends `Tab` up with no modifiers, which no
+    /// longer matches the grab — and a release delivered to the focused window
+    /// instead is a key the grabber never sees go up, so a shell holding an
+    /// alt-tab switcher open would hold it open forever. Keyed by *scancode*
+    /// rather than by key, because the scancode is the physical key and is the
+    /// only thing guaranteed identical between a press and its release: a layout
+    /// change or a modifier fold between the two can change the `Key`.
+    grabbed_presses: HashMap<u32, WindowId>,
 }
 
 impl Compositor {
@@ -4683,6 +4759,8 @@ impl Compositor {
             stream_sessions: BTreeMap::new(),
             next_stream_id: 1,
             current_workspace: 0,
+            key_grabs: HashMap::new(),
+            grabbed_presses: HashMap::new(),
         })
     }
 
@@ -4946,6 +5024,12 @@ impl Compositor {
             self.drag = None;
             self.set_drag_preview(None);
         }
+
+        // Before the window leaves the list, so that a shortcut a closing window
+        // held is free the moment it is gone. Leaving them would let a crashed
+        // shell keep Alt+Tab for the rest of the session with nothing on screen
+        // able to release it.
+        self.release_grabs_of(window_id);
 
         let closed_layer = self.layer_of(window_id);
         self.windows.remove(idx);
@@ -6647,13 +6731,6 @@ impl Compositor {
         // event behind.
         self.modifiers.update(scancode, pressed);
 
-        // Updated unconditionally, even with no focused window: a modifier
-        // pressed while focus was elsewhere is still physically down, and
-        // skipping it here would leave the state wrong for every later event.
-        let Some(window_id) = self.focused_window else {
-            return;
-        };
-
         let level = self.modifiers.level();
         let (key, laid_out) = keymap::key_for_layout(self.layout, scancode, level);
         let mut modifiers = self.modifiers.modifiers();
@@ -6666,6 +6743,44 @@ impl Compositor {
             // Alt+Q shortcut must keep working from either side.
             modifiers.alt = self.modifiers.left_alt();
         }
+
+        // Grabs are consulted *here*: after the chord is known, before the
+        // focused window is looked up. Both halves matter. After, because a grab
+        // is on Alt+Tab and not on scancode 0x0F, so it cannot be matched until
+        // the layout and the AltGr fold have had their say. Before, because the
+        // whole point is to reach a client that is *not* focused — a shell's
+        // Alt+Tab exists to be pressed from inside somebody else's window.
+        //
+        // A match returns, so the keystroke does not also reach the focused
+        // window. Delivering to both was considered and refused: the focused
+        // window would see a bare `Tab` inserted into a text field every time
+        // the user switched windows.
+        if let Some(window_id) = self.grab_target(scancode, key, modifiers, pressed) {
+            self.pending_notifications
+                .push_back(EventNotification::KeyEvent {
+                    window_id,
+                    scancode,
+                    key,
+                    pressed,
+                    modifiers,
+                    // Never text. A shortcut is not typing, and the dead-key
+                    // composer is deliberately not run for a grabbed chord: an
+                    // accent waiting for its vowel must still be waiting after
+                    // the user presses Alt+Tab, because switching windows is not
+                    // the vowel.
+                    text: String::new(),
+                });
+            return;
+        }
+
+        // Reached with the modifier state already updated, even when nothing is
+        // focused: a modifier pressed while focus was elsewhere is still
+        // physically down, and returning before the fold above would leave the
+        // state wrong for every later event.
+        let Some(window_id) = self.focused_window else {
+            return;
+        };
+
         // The source's own character wins where it has one, and the dead-key
         // machine is skipped with it: a source that hands over a finished
         // character has already run whatever composition its own layout
@@ -6703,6 +6818,129 @@ impl Compositor {
             });
     }
 
+    /// Where a keystroke goes if a grab claims it, or `None` for the ordinary
+    /// focus routing.
+    ///
+    /// Presses and releases are answered differently on purpose. A press is
+    /// matched against the chord table. A release is matched against *its own
+    /// press*: the user may let go of Alt before Tab, and the resulting bare
+    /// `Tab` up-event matches no grab at all, so matching a release by chord
+    /// would send it to the focused window and leave the grabber holding a key
+    /// that never came up. An alt-tab switcher written against that would stay
+    /// open forever.
+    ///
+    /// Auto-repeat re-inserts the same entry, which is why the press arm does
+    /// not care whether one was already there.
+    fn grab_target(
+        &mut self,
+        scancode: u32,
+        key: Key,
+        modifiers: Modifiers,
+        pressed: bool,
+    ) -> Option<WindowId> {
+        if pressed {
+            let target = *self.key_grabs.get(&(key, modifiers))?;
+            self.grabbed_presses.insert(scancode, target);
+            Some(target)
+        } else {
+            self.grabbed_presses.remove(&scancode)
+        }
+    }
+
+    /// Claim a chord for a window, so that it arrives there whoever has the
+    /// keyboard.
+    ///
+    /// First grabber wins: a chord another window holds is refused rather than
+    /// replaced, because a grab that silently stopped working would be
+    /// indistinguishable from a shortcut nobody pressed — the exact failure this
+    /// mechanism exists to end. Re-grabbing a chord *this* window already holds
+    /// succeeds and changes nothing, which is what a shell does when it re-reads
+    /// its configuration.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist —
+    /// checked because a grab outlives the request, and one held by a window
+    /// that was never there could never be released.
+    /// [`CompositorError::KeyAlreadyGrabbed`] if somebody else holds it.
+    pub fn grab_key(
+        &mut self,
+        window_id: WindowId,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> CompositorResult<()> {
+        if self.window_index(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        match self.key_grabs.entry((key, modifiers)) {
+            Entry::Occupied(held) if *held.get() != window_id => {
+                Err(CompositorError::KeyAlreadyGrabbed(key, modifiers))
+            }
+            Entry::Occupied(_) => Ok(()),
+            Entry::Vacant(slot) => {
+                slot.insert(window_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// Release a chord claimed by [`grab_key`](Self::grab_key).
+    ///
+    /// Releasing one this window does not hold is **not** an error: a client
+    /// tidying up should not have to remember exactly what it took. Releasing
+    /// one *another* window holds is refused, or any client could strip the
+    /// shell of Alt+Tab without ever having held it.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::KeyAlreadyGrabbed`] if another window holds it.
+    pub fn ungrab_key(
+        &mut self,
+        window_id: WindowId,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> CompositorResult<()> {
+        match self.key_grabs.get(&(key, modifiers)) {
+            Some(&holder) if holder != window_id => {
+                Err(CompositorError::KeyAlreadyGrabbed(key, modifiers))
+            }
+            Some(_) => {
+                self.key_grabs.remove(&(key, modifiers));
+                // Deliberately *not* forgetting an in-flight press: if this key
+                // is physically down right now, its release still belongs to the
+                // window that got the press. Dropping it here would send a bare
+                // release into whatever is focused instead.
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Drop every claim a window holds, in flight or not.
+    ///
+    /// Called from [`destroy_window`](Self::destroy_window), which is also the
+    /// path a hung-up connection takes (`Server::reclaim` destroys the windows a
+    /// departed client owned), so a crashed shell releases its shortcuts by the
+    /// same route as a tidy one. This is the whole of the safety story for
+    /// grabs: without it a shell that died would keep Alt+Tab for the rest of
+    /// the session with nothing left on screen able to release it. It is the
+    /// same lifetime argument as a panel's edge reservation.
+    pub fn release_grabs_of(&mut self, window_id: WindowId) {
+        self.key_grabs.retain(|_, &mut holder| holder != window_id);
+        // The in-flight presses go too, and here they must: the window that
+        // would receive the release no longer exists. Their keys are simply
+        // not delivered, which is right — a release is only meaningful to
+        // whoever saw the press.
+        self.grabbed_presses
+            .retain(|_, &mut holder| holder != window_id);
+    }
+
+    /// How many chords are claimed. For tests and diagnostics.
+    #[must_use]
+    pub fn grab_count(&self) -> usize {
+        self.key_grabs.len()
+    }
+
     /// Release every held modifier.
     ///
     /// Call when the compositor loses the keyboard — session switch, device
@@ -6715,9 +6953,17 @@ impl Compositor {
     /// reason: the keyboard is gone, so the vowel that would have completed it
     /// is never coming. Leaving it armed would attach an accent the user typed
     /// in one session to the first letter they type in the next.
-    pub const fn release_all_modifiers(&mut self) {
+    ///
+    /// In-flight grabbed presses go the same way, for the third instance of the
+    /// same reason: the physical key that was held is on a keyboard we no longer
+    /// have, so its release is never coming, and an entry left behind would send
+    /// the next press of that scancode's release to a grab that had ended. The
+    /// *claims* themselves stay — a shell does not stop owning Alt+Tab because
+    /// the user switched VTs.
+    pub fn release_all_modifiers(&mut self) {
         self.modifiers.release_all();
         self.dead_keys.cancel();
+        self.grabbed_presses.clear();
     }
 
     /// The modifier keys currently held.
@@ -7906,6 +8152,26 @@ impl Compositor {
                 self.unregister_image(window_id, image_id);
                 CompositorResponse::Ok
             }
+            CompositorRequest::GrabKey {
+                window_id,
+                key,
+                modifiers,
+            } => match self.grab_key(window_id, key, modifiers) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::UngrabKey {
+                window_id,
+                key,
+                modifiers,
+            } => match self.ungrab_key(window_id, key, modifiers) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
         }
     }
 
@@ -8938,6 +9204,290 @@ mod tests {
         // Force frame timing to allow immediate recompose.
         comp.frame_stats.last_frame_start = None;
         assert!(!comp.compose_frame()); // No damage.
+    }
+
+    // -----------------------------------------------------------------------
+    // Key grabs
+    //
+    // Scancodes used below, scan code set 1: 0x0F Tab, 0x38 left Alt,
+    // 0x20 D, 0xE05B left Super -- the last with its extended prefix folded
+    // into the high byte, which is how every 0xE0-prefixed key reaches here.
+    // -----------------------------------------------------------------------
+
+    /// Two windows, the second focused, as a desktop actually is: the shell owns
+    /// a panel nobody is typing into, and the user is in an application.
+    fn shell_and_app() -> (Compositor, WindowId, WindowId) {
+        let mut comp = Compositor::new(800, 600, 60).unwrap();
+        let shell = comp.create_window("Taskbar".to_string(), 800, 40, 1);
+        let app = comp.create_window("Editor".to_string(), 400, 300, 2);
+        assert_eq!(
+            comp.focused_window,
+            Some(app),
+            "the test's premise is that the shell is *not* focused"
+        );
+        (comp, shell, app)
+    }
+
+    /// Every key event now pending, in order.
+    fn key_events(comp: &mut Compositor) -> Vec<(WindowId, Key, bool, String)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::KeyEvent {
+                    window_id,
+                    key,
+                    pressed,
+                    text,
+                    ..
+                } => Some((window_id, key, pressed, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The entire point of the mechanism, stated as the thing that was broken:
+    /// Alt+Tab pressed while an application has the keyboard must reach the
+    /// shell. Before grabs existed `handle_key` returned early on
+    /// `focused_window` and this was unreachable, so every desktop shortcut in
+    /// the tree was dead whenever the user was actually using the computer.
+    #[test]
+    fn a_grabbed_chord_reaches_the_grabber_and_not_the_focused_window() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.drain_notifications();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+
+        let events = key_events(&mut comp);
+        let tab = events
+            .iter()
+            .find(|(_, key, _, _)| *key == Key::Tab)
+            .expect("the grabbed chord was not delivered at all");
+        assert_eq!(tab.0, shell, "Alt+Tab went to the focused window instead");
+        assert!(
+            !events
+                .iter()
+                .any(|(win, key, _, _)| *win == app && *key == Key::Tab),
+            "the focused window also got the Tab: a text field would have \
+             inserted one every time the user switched windows"
+        );
+        // The Alt itself is not grabbed and is ordinary traffic.
+        assert!(
+            events
+                .iter()
+                .any(|(win, key, _, _)| *win == app && *key == Key::LeftAlt),
+            "the modifier's own event should route normally"
+        );
+    }
+
+    /// A grab is on a *chord*. Taking Alt+Tab must not take Tab, or grabbing the
+    /// window switcher would break the Tab key in every text field and every
+    /// form on the desktop.
+    #[test]
+    fn a_grab_claims_a_chord_and_not_a_key() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.drain_notifications();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+
+        let events = key_events(&mut comp);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(win, key, _, _)| *win == app && *key == Key::Tab)
+                .count(),
+            1,
+            "a bare Tab belongs to whoever is typing"
+        );
+    }
+
+    /// The release trap. A user holds Alt, taps Tab, then lets go of Alt before
+    /// Tab — the resulting Tab-up carries no modifiers and matches no grab. If
+    /// it were routed by chord it would land in the application, and the shell
+    /// would be left holding a key that never came up: an alt-tab switcher
+    /// written against that stays open forever.
+    #[test]
+    fn a_release_follows_its_press_even_when_the_modifier_was_let_go_first() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x38 });
+        comp.drain_notifications();
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x0F });
+
+        let events = key_events(&mut comp);
+        let up = events
+            .iter()
+            .find(|(_, key, pressed, _)| *key == Key::Tab && !*pressed)
+            .expect("the release vanished");
+        assert_eq!(
+            up.0, shell,
+            "the release went to somebody who never saw it go down"
+        );
+    }
+
+    /// A shortcut is not typing. The chord must arrive with no text, and a
+    /// dead-key accent already waiting must survive it — pressing Alt+Tab is not
+    /// the vowel that completes an accent, so a shell shortcut must not eat one.
+    #[test]
+    fn a_grabbed_chord_carries_no_text() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_key(shell, Key::D, Modifiers::super_key())
+            .unwrap();
+        comp.drain_notifications();
+
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0xE05B,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x20,
+            character: Some('d'),
+        });
+
+        let events = key_events(&mut comp);
+        let chord = events
+            .iter()
+            .find(|(win, key, _, _)| *win == shell && *key == Key::D)
+            .expect("Super+D did not reach the shell");
+        assert_eq!(
+            chord.3, "",
+            "the shortcut arrived as text; a client echoing key text would type a d"
+        );
+    }
+
+    /// First grabber wins, *loudly*. Silently letting the second claim win would
+    /// make the first shortcut stop working with no error anywhere, which is
+    /// indistinguishable from a shortcut nobody pressed.
+    #[test]
+    fn a_chord_that_is_held_cannot_be_taken() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        assert!(matches!(
+            comp.grab_key(app, Key::Tab, Modifiers::alt()),
+            Err(CompositorError::KeyAlreadyGrabbed(Key::Tab, _))
+        ));
+        assert_eq!(comp.grab_count(), 1, "the refused grab was recorded anyway");
+    }
+
+    /// Re-grabbing your own is what a shell does when it re-reads its config,
+    /// and must not be an error — otherwise every reload would log a failure for
+    /// every shortcut the user did not change.
+    #[test]
+    fn re_grabbing_a_chord_you_already_hold_is_not_an_error() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        assert_eq!(comp.grab_count(), 1);
+    }
+
+    /// The two asymmetric cases of releasing, together: yours-that-you-never-took
+    /// is fine (a tidy-up loop should not have to remember), somebody else's is
+    /// refused (or any client could strip the shell of Alt+Tab without ever
+    /// holding it).
+    #[test]
+    fn releasing_is_forgiving_of_absence_and_not_of_theft() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.ungrab_key(app, Key::F1, Modifiers::NONE)
+            .expect("releasing a chord nobody holds should be a no-op");
+
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        assert!(matches!(
+            comp.ungrab_key(app, Key::Tab, Modifiers::alt()),
+            Err(CompositorError::KeyAlreadyGrabbed(..))
+        ));
+        assert_eq!(comp.grab_count(), 1, "the theft succeeded");
+
+        comp.ungrab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        assert_eq!(comp.grab_count(), 0);
+    }
+
+    /// A grab must not outlive its window. This is also the crashed-shell path:
+    /// `Server::reclaim` destroys a departed client's windows through exactly
+    /// this function, so a shell that died releases Alt+Tab by the same route as
+    /// one that closed tidily. Without it the chord would be unreachable for the
+    /// rest of the session with nothing on screen able to release it.
+    #[test]
+    fn closing_a_window_releases_everything_it_grabbed() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.grab_key(shell, Key::D, Modifiers::super_key())
+            .unwrap();
+        assert_eq!(comp.grab_count(), 2);
+
+        comp.destroy_window(shell).unwrap();
+        assert_eq!(comp.grab_count(), 0, "a dead window still holds shortcuts");
+
+        // And the chord is genuinely free again, not merely absent from a count.
+        comp.grab_key(app, Key::Tab, Modifiers::alt())
+            .expect("the chord was not actually released");
+    }
+
+    /// Grabbing for a window that does not exist would create a claim nothing
+    /// could ever release: no destroy will fire for it, so the chord would be
+    /// dead for the rest of the session.
+    #[test]
+    fn a_grab_needs_a_window_that_exists() {
+        let (mut comp, _shell, _app) = shell_and_app();
+        assert!(matches!(
+            comp.grab_key(WindowId::from_raw(9999), Key::F1, Modifiers::NONE),
+            Err(CompositorError::WindowNotFound(_))
+        ));
+    }
+
+    /// Losing the keyboard voids the presses in flight but not the claims. The
+    /// physical key is on a device we no longer have, so its release is never
+    /// coming; the shell, meanwhile, does not stop owning Alt+Tab because the
+    /// user switched to another VT.
+    #[test]
+    fn losing_the_keyboard_drops_presses_in_flight_but_not_the_claims() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_key(shell, Key::Tab, Modifiers::alt()).unwrap();
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x38,
+            character: None,
+        });
+        comp.handle_input(InputEvent::KeyDown {
+            scancode: 0x0F,
+            character: None,
+        });
+
+        comp.release_all_modifiers();
+        assert_eq!(
+            comp.grab_count(),
+            1,
+            "the claim was dropped with the presses"
+        );
+        comp.drain_notifications();
+
+        // A stray release for a key we no longer believe is down goes nowhere
+        // near the grabber.
+        comp.handle_input(InputEvent::KeyUp { scancode: 0x0F });
+        assert!(
+            !key_events(&mut comp)
+                .iter()
+                .any(|(win, _, _, _)| *win == shell),
+            "a release from a keyboard we lost was still routed to the grab"
+        );
     }
 
     #[test]

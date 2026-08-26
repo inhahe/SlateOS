@@ -204,7 +204,7 @@ macro_rules! key_table {
     ($($code:literal => $variant:ident,)*) => {
         /// The wire byte for a key, or `None` for [`Key::Unknown`], which
         /// carries its raw code separately.
-        const fn key_code(k: Key) -> Option<u8> {
+        pub(crate) const fn key_code(k: Key) -> Option<u8> {
             match k {
                 $(Key::$variant => Some($code),)*
                 Key::Unknown(_) => None,
@@ -212,7 +212,7 @@ macro_rules! key_table {
         }
 
         /// The key for a wire byte, or `None` if this decoder does not know it.
-        const fn key_from_code(b: u8) -> Option<Key> {
+        pub(crate) const fn key_from_code(b: u8) -> Option<Key> {
             match b {
                 $($code => Some(Key::$variant),)*
                 _ => None,
@@ -391,7 +391,16 @@ const fn button_from_code(b: u8) -> Option<MouseButton> {
     }
 }
 
-fn encode_key(out: &mut Vec<u8>, key: Key) {
+/// Write a key as one table byte, or as `KEY_UNKNOWN` followed by its raw code.
+///
+/// `pub(crate)`, along with its three neighbours, because the *control* protocol
+/// carries keys too: a client grabbing a chord
+/// ([`crate::control::RequestBody::GrabKey`]) has to name the key it wants.
+/// Sharing this codec rather than giving that protocol one of its own is the
+/// same argument the `key_table!` macro makes one level down — two tables are
+/// two chances to encode `Home` and decode `End`, and no round-trip test written
+/// against either table alone would catch it.
+pub(crate) fn encode_key(out: &mut Vec<u8>, key: Key) {
     match key {
         // The one variant `key_code` cannot name, because its wire form is
         // data rather than an identity.
@@ -416,7 +425,7 @@ fn encode_key(out: &mut Vec<u8>, key: Key) {
     }
 }
 
-const fn encode_modifiers(m: Modifiers) -> u8 {
+pub(crate) const fn encode_modifiers(m: Modifiers) -> u8 {
     let mut bits = 0u8;
     if m.shift {
         bits |= MOD_SHIFT;
@@ -569,7 +578,7 @@ fn decode_button(r: &mut Reader<'_>) -> Result<MouseButton, DecodeError> {
     button_from_code(b).ok_or(DecodeError::BadMouseButton(b))
 }
 
-fn decode_key(r: &mut Reader<'_>) -> Result<Key, DecodeError> {
+pub(crate) fn decode_key(r: &mut Reader<'_>) -> Result<Key, DecodeError> {
     let code = r.read_u8()?;
     if code == KEY_UNKNOWN {
         return Ok(Key::Unknown(r.read_u32()?));
@@ -577,7 +586,7 @@ fn decode_key(r: &mut Reader<'_>) -> Result<Key, DecodeError> {
     key_from_code(code).ok_or(DecodeError::BadKey(code))
 }
 
-const fn decode_modifiers(bits: u8) -> Result<Modifiers, DecodeError> {
+pub(crate) const fn decode_modifiers(bits: u8) -> Result<Modifiers, DecodeError> {
     if bits & !MOD_KNOWN != 0 {
         return Err(DecodeError::ReservedFlags(bits));
     }

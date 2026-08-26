@@ -330,7 +330,13 @@ pub enum Key {
 }
 
 /// Modifier key state.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// `Hash` because a modifier set is half of a *chord*, and a chord is a map key:
+/// the compositor's key-grab table is keyed by `(Key, Modifiers)`. Derived
+/// rather than written by hand so that it cannot drift from `PartialEq` — two
+/// modifier sets that compare equal must hash equal, and a hand-rolled version
+/// that forgot a field would look right and silently lose grabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
@@ -346,23 +352,44 @@ impl Modifiers {
         super_key: false,
     };
 
-    pub fn ctrl() -> Self {
+    /// Ctrl alone.
+    #[must_use]
+    pub const fn ctrl() -> Self {
         Self {
             ctrl: true,
             ..Self::NONE
         }
     }
 
-    pub fn shift() -> Self {
+    /// Shift alone.
+    #[must_use]
+    pub const fn shift() -> Self {
         Self {
             shift: true,
             ..Self::NONE
         }
     }
 
-    pub fn alt() -> Self {
+    /// Alt alone.
+    #[must_use]
+    pub const fn alt() -> Self {
         Self {
             alt: true,
+            ..Self::NONE
+        }
+    }
+
+    /// Super (the Windows/Command key) alone.
+    ///
+    /// The last of the four to get a constructor, which is backwards: Super is
+    /// the modifier a *desktop* shortcut uses — Super+D, Super+E, Super+L — and
+    /// the other three are what applications bind. It was missing only because
+    /// nothing had needed to name a system-wide chord until the compositor grew
+    /// a key-grab table.
+    #[must_use]
+    pub const fn super_key() -> Self {
+        Self {
+            super_key: true,
             ..Self::NONE
         }
     }

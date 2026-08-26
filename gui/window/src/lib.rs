@@ -1666,6 +1666,8 @@ pub mod testing {
                 RequestBody::SetWindowWorkspace { .. } => "SetWindowWorkspace",
                 RequestBody::UploadImage { .. } => "UploadImage",
                 RequestBody::DropImage { .. } => "DropImage",
+                RequestBody::GrabKey { .. } => "GrabKey",
+                RequestBody::UngrabKey { .. } => "UngrabKey",
             }
         }
     }

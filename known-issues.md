@@ -83421,14 +83421,20 @@ the focus lookup above:
 This is the X11 / `RegisterHotKey` shape, and it is the reason those systems'
 shortcuts work from inside applications.
 
-**The part that needs deciding before it is built** — see
-`open-questions.md`. As described, *any* client could grab Super+L and put up a
-fake lock screen, or grab Alt+Tab and break window switching for the whole
-session. The compositor has no capability plumbing to its clients today, so
-there is no existing mechanism to say "only the shell may do this". The options
-are roughly: allow any grab (simple, and what X11 does); restrict grabs to
-clients on `Layer::Overlay`; or add a capability the session manager hands only
-to the shell. This is a security-policy choice, not an implementation detail.
+**Who is allowed to grab, and why that needed no new decision.** A grab is
+plainly privileged — a program that claims Super+L can put up a fake lock screen
+and collect the password, and one that claims Alt+Tab breaks window switching for
+the whole session. That question was briefly filed for the operator and then
+withdrawn, because the compositor had already answered it:
+`ClientLink::require_shell` (`gui/compositor/src/wire.rs`) is the single seam
+every privileged request goes through, it refuses nobody today, and it says so at
+length — the honest gate needs a capability the kernel attests at connection
+accept, which kernel channel IPC does not yet carry to the compositor
+(`design-decisions.md` §495, tracked as
+`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`). Key grabs go behind that same
+seam rather than growing a policy of their own, so the day the capability arrives
+they are gated along with reading the window list, acting on other people's
+windows and reserving a panel edge.
 
 **What happens if nothing is done.** It does not get worse with time, but it
 gets more expensive to notice: every shortcut added from here on is written,

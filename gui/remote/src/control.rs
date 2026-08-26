@@ -56,6 +56,8 @@
 //! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
 //! naming what was wrong.
 
+use guitk::event::{Key, Modifiers};
+
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
 use crate::{
@@ -71,7 +73,15 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 
 /// Control protocol version. Bump on any incompatible layout change; never
 /// reuse a number.
-pub const CONTROL_VERSION: u8 = 1;
+///
+/// **2** — the request vocabulary gained [`RequestBody::GrabKey`] and
+/// [`RequestBody::UngrabKey`] (tags `0x17`/`0x18`). No existing message moved a
+/// byte, but an unrecognised tag is [`DecodeError::BadTag`] and the decoder
+/// stops there, so a version-1 compositor handed a grab fails the frame rather
+/// than skipping one message in it. As with
+/// [`INPUT_VERSION`](crate::input::INPUT_VERSION) 2, "incompatible" is about
+/// what the other end can read, not only about where the bytes sit.
+pub const CONTROL_VERSION: u8 = 2;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -812,6 +822,69 @@ pub enum RequestBody {
     /// Reporting "there was nothing to drop" would tell a client something it
     /// cannot act on and would make the ordinary tidy-up-everything loop noisy.
     DropImage { window: u64, image_id: u64 },
+    /// Claim one key combination for a window, so that it arrives there
+    /// whatever else has the keyboard.
+    ///
+    /// **This is the only way a desktop-wide shortcut can work.** Without it a
+    /// key event goes to the focused window and nowhere else, which means the
+    /// taskbar's Alt+Tab fires only while the taskbar itself is focused — never,
+    /// in practice, because Alt+Tab exists to be pressed from inside some other
+    /// window. The compositor consults its grab table *before* it looks up the
+    /// focused window, and a grabbed chord is delivered to the grabber **instead
+    /// of**, not as well as, the window the user is typing in.
+    ///
+    /// The window named is the sender's own and is resolved in the ordinary way:
+    /// it is where the [`crate::input::InputEvent`] will be addressed, and it is
+    /// also the grab's *lifetime*. Grabs die when the window is destroyed and
+    /// when the connection hangs up, which is what stops a crashed shell
+    /// swallowing Alt+Tab for the rest of the session with nothing left on
+    /// screen to release it. This is the same lifetime argument as
+    /// [`ReserveEdge`](Self::ReserveEdge).
+    ///
+    /// **First grabber wins.** A second client asking for a chord somebody else
+    /// holds is refused with an error rather than quietly shadowing or replacing
+    /// the first: a grab that silently does nothing is indistinguishable from a
+    /// shortcut nobody has pressed, which is precisely the bug this whole
+    /// mechanism exists to end. Re-grabbing a chord *you already hold* is not an
+    /// error — it is what a shell does when it re-reads its config.
+    ///
+    /// **Both the press and the release** of a grabbed key go to the grabber,
+    /// and the release follows the press even if the modifiers were let go
+    /// first: Alt+Tab held open is a chord whose release is `Tab` with Alt
+    /// already up, and a release delivered to somebody else is a key the grabber
+    /// never sees go up.
+    ///
+    /// A grabbed chord produces **no text**. The dead-key composer is not run
+    /// for it and no character is attached, because a shortcut is not typing.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`: a program that could
+    /// claim Super+L could show a convincing fake lock screen and collect the
+    /// password. See that function for why the gate does not yet answer.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error naming the conflict.
+    GrabKey {
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    },
+    /// Release a claim made by [`GrabKey`](Self::GrabKey).
+    ///
+    /// Releasing a chord this window does not hold is **not** an error, for the
+    /// same reason [`DropImage`](Self::DropImage) is not: a client tidying up
+    /// should not have to remember precisely what it took, and the ordinary
+    /// release-everything loop would otherwise be noisy. Releasing one that
+    /// *another* window holds is refused — otherwise any client could strip the
+    /// shell of Alt+Tab without ever holding it.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`, so that the refusal
+    /// above cannot be used as a way to probe which chords are taken.
+    ///
+    /// Answered with [`ResponseBody::Ok`].
+    UngrabKey {
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -839,6 +912,8 @@ enum RequestTag {
     ReloadInput = 0x14,
     UploadImage = 0x15,
     DropImage = 0x16,
+    GrabKey = 0x17,
+    UngrabKey = 0x18,
 }
 
 impl RequestTag {
@@ -866,6 +941,8 @@ impl RequestTag {
             0x14 => Self::ReloadInput,
             0x15 => Self::UploadImage,
             0x16 => Self::DropImage,
+            0x17 => Self::GrabKey,
+            0x18 => Self::UngrabKey,
             _ => return None,
         })
     }
@@ -1148,6 +1225,30 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::DropImage as u8);
             write_u64(out, *window);
             write_u64(out, *image_id);
+        }
+        // Both grab verbs carry the same three fields in the same order, and
+        // deliberately share the input protocol's key and modifier codecs rather
+        // than spelling a chord out here: one table for the whole crate is what
+        // stops a chord grabbed as `Home` being matched as `End`.
+        RequestBody::GrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            out.push(RequestTag::GrabKey as u8);
+            write_u64(out, *window);
+            crate::input::encode_key(out, *key);
+            out.push(crate::input::encode_modifiers(*modifiers));
+        }
+        RequestBody::UngrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            out.push(RequestTag::UngrabKey as u8);
+            write_u64(out, *window);
+            crate::input::encode_key(out, *key);
+            out.push(crate::input::encode_modifiers(*modifiers));
         }
     }
 }
@@ -1441,6 +1542,31 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 image_id: r.read_u64()?,
             }
         }
+        // Read field by field into locals rather than inline in the struct
+        // literal, because the order the fields are *read* is the wire order and
+        // the order they are *written* in the literal is not; a struct literal
+        // that happened to list them differently would decode a chord out of
+        // alignment with what the encoder wrote.
+        RequestTag::GrabKey => {
+            let window = r.read_u64()?;
+            let key = crate::input::decode_key(r)?;
+            let modifiers = crate::input::decode_modifiers(r.read_u8()?)?;
+            RequestBody::GrabKey {
+                window,
+                key,
+                modifiers,
+            }
+        }
+        RequestTag::UngrabKey => {
+            let window = r.read_u64()?;
+            let key = crate::input::decode_key(r)?;
+            let modifiers = crate::input::decode_modifiers(r.read_u8()?)?;
+            RequestBody::UngrabKey {
+                window,
+                key,
+                modifiers,
+            }
+        }
     })
 }
 
@@ -1684,6 +1810,99 @@ mod tests {
             decode_requests(&bytes),
             Err(DecodeError::ImageTooLarge(_))
         ));
+    }
+
+    /// A chord has to survive the wire exactly, in both directions, for every
+    /// key and every modifier combination. Encoding `Home` and decoding `End`
+    /// would give the shell a shortcut that fires on the wrong key — and unlike
+    /// most protocol bugs it would look like a *configuration* mistake, which is
+    /// the sort of thing that gets chased for a day in the wrong file.
+    #[test]
+    fn a_grabbed_chord_survives_the_round_trip() {
+        let mut reqs = Vec::new();
+        let mut seq = 0;
+        for key in [
+            Key::Tab,
+            Key::D,
+            Key::VolumeUp,
+            Key::MediaPlayPause,
+            Key::F1,
+            Key::Unknown(0xE0FF),
+        ] {
+            for bits in 0u8..16 {
+                let modifiers = Modifiers {
+                    shift: bits & 1 != 0,
+                    ctrl: bits & 2 != 0,
+                    alt: bits & 4 != 0,
+                    super_key: bits & 8 != 0,
+                };
+                seq += 1;
+                reqs.push(Request::new(
+                    seq,
+                    RequestBody::GrabKey {
+                        window: 3,
+                        key,
+                        modifiers,
+                    },
+                ));
+                seq += 1;
+                reqs.push(Request::new(
+                    seq,
+                    RequestBody::UngrabKey {
+                        window: 3,
+                        key,
+                        modifiers,
+                    },
+                ));
+            }
+        }
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// The two verbs carry identical payloads, so a decoder that read one tag
+    /// for the other would round-trip a *grab* into an *ungrab* with every field
+    /// intact — the shortcut would register and then immediately release itself,
+    /// and the shape of the bug would be "the hotkey does nothing", which is
+    /// indistinguishable from having no mechanism at all. Asserted by tag byte
+    /// rather than by round trip, because a round trip cannot see it.
+    #[test]
+    fn grab_and_ungrab_are_not_the_same_tag() {
+        assert_ne!(RequestTag::GrabKey as u8, RequestTag::UngrabKey as u8);
+        let grab = encode_requests(&[Request::new(
+            1,
+            RequestBody::GrabKey {
+                window: 1,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+        )]);
+        let ungrab = encode_requests(&[Request::new(
+            1,
+            RequestBody::UngrabKey {
+                window: 1,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+        )]);
+        assert_ne!(grab, ungrab, "the two verbs encode to the same bytes");
+    }
+
+    /// Growing the request vocabulary is a version change even though no
+    /// existing message moved a byte: an unknown tag stops the decoder, so a
+    /// version-1 compositor handed a grab fails the whole frame rather than
+    /// ignoring one message in it. Pinned as "not 1" rather than "at least 2" so
+    /// that a later unrelated bump does not fail this test.
+    #[test]
+    fn the_grab_verbs_moved_the_protocol_version() {
+        assert_ne!(
+            CONTROL_VERSION, 1,
+            "GrabKey/UngrabKey were added in control version 2"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x19),
+            None,
+            "0x19 is the next free tag"
+        );
     }
 
     #[test]

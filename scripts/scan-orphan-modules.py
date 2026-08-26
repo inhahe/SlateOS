@@ -17,6 +17,19 @@ any of its thirteen public items or its module path.  The tests make it look
 covered, which is what makes an island worse than plain dead code: `cargo
 build` cannot warn about a `pub` item, and the test suite reports it green.
 
+Measured 2026-08-25: **57 of the 200 library modules under lane C's roots are
+islands, 113k lines**, and 39 of those 57 are in `gui/desktop` alone -- a
+crate whose `lib.rs` declares 59 modules.  Read that against the hand-count in
+`known-issues.md`'s
+`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`, arrived at by a
+different method: four modules drawn, thirty-nine with no caller at all.  The
+two agree, and that agreement is the best evidence this scan is calibrated.
+Note that the *first* run of it said 21, not 57 -- three separate alibi
+classes (`member_names`, `plausible`, `code_only`) each hid a slice, and each
+was found only by hand-checking a module the scan had cleared.  A scan of this
+kind is not finished when it runs; it is finished when its clearances survive
+being disbelieved.
+
 **A hit is not automatically a bug.**  Four benign explanations:
 
   * the crate is a library whose consumer is outside this tree entirely;
@@ -45,16 +58,19 @@ item's visibility without anyone having used it, and counting it would make
 every re-exported island look reached.  Mentions inside `#[cfg(test)]` do not
 count -- a test is not a user -- though a module reached *only* from other
 files' tests is reported separately as a test helper, which is a complete and
-benign explanation.  Comments do not count either; see `strip_comment`.
+benign explanation.  Comments and string literals do not count either; see
+`code_only`.
 
 **What it cannot see.**  A glob re-export (`pub use power::*;`) followed by an
 unqualified use in a third file is invisible as an edge to the module, though
 the *item* mention in that third file is still counted, so the module is
 correctly reported as reached.  Macro-generated paths are invisible.  Names
-shared with another module or with any enum variant are dropped from the
-evidence entirely (see `variant_names`), so a module all of whose items have
-common names rests on its module path alone.  It never proves a module is
-dead; it produces a short list worth reading.
+shared with another module, with any enum variant, or with any associated
+`fn`/`const`/`type` are dropped from the evidence entirely (see
+`variant_names` and `member_names`), so a module all of whose items have
+common names rests on its module path alone.  Struct field names are the one
+spelling hazard still not folded in; `member_names` says why.  It never proves
+a module is dead; it produces a short list worth reading.
 """
 
 import pathlib
@@ -89,8 +105,8 @@ REEXPORT = re.compile(r"^\s*pub(?:\([^)]*\))?\s+use\b")
 IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def strip_comment(line):
-    """`line` with any trailing `//` comment removed.
+def code_only(line):
+    """`line` with any trailing `//` comment and every string literal removed.
 
     Prose is not a caller, and in a tree that documents itself as heavily as
     this one that distinction decides findings.  `user_accounts.rs` defines
@@ -99,11 +115,21 @@ def strip_comment(line):
     comment, and `apps/contacts` says "// Avatar circle".  Counting those, the
     module reported as reached.
 
-    The `//` is ignored inside a string literal, so a `"https://..."` does not
-    truncate the line.  Char literals and raw strings with embedded quotes can
-    still fool it; the failure is to keep a comment, which can only *hide* an
-    island, and every island printed is checked by hand anyway.
+    A string literal is prose too, and dropping only comments was not enough.
+    Every mention of `desktop` in lane A's `kernel/src/fs/contextmenu.rs` is a
+    comment save one -- `serial_println!("[contextmenu] test 3 passed:
+    desktop menu build")` -- and that one word inside that one string was the
+    whole basis on which the file counted as a plausible user of the desktop
+    crate, which in turn was the whole basis on which
+    `gui/desktop/src/context_ext.rs` reported as reached.  Rust has no way to
+    name an item from inside a string, so nothing real is lost.
+
+    The `//` scan is string-aware, so a `"https://..."` does not truncate the
+    line.  Char literals and raw or multi-line strings can still fool the
+    state machine; the failure is then to keep text that is not code, which
+    can only *hide* an island, and every island printed is checked by hand.
     """
+    out = []
     in_str = False
     escaped = False
     for i, ch in enumerate(line):
@@ -114,8 +140,10 @@ def strip_comment(line):
         elif ch == '"':
             in_str = not in_str
         elif ch == "/" and not in_str and line[i + 1 : i + 2] == "/":
-            return line[:i]
-    return line
+            break
+        if not in_str and ch != '"':
+            out.append(ch)
+    return "".join(out)
 
 # Files that aggregate rather than define.  A crate root naming its own modules
 # says nothing about whether anyone uses them.
@@ -196,6 +224,45 @@ def variant_names(lines):
     return names
 
 
+MEMBER = re.compile(
+    r"^\s+(?:pub(?:\([^)]*\))?\s+)?(?:default\s+)?(?:const\s+)?(?:async\s+)?"
+    r'(?:unsafe\s+)?(?:extern\s+"[^"]*"\s+)?(?:fn|const|type)\s+'
+    r"([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def member_names(lines):
+    """Every associated `fn`/`const`/`type` name declared in `lines`.
+
+    An associated item lives in its own per-type namespace, so `Taskbar` and
+    `ProcExplorer` may each have a `render_context_menu` without either being
+    the other -- but a *call* to one, `self.render_context_menu(..)`, is
+    spelled exactly like a call to a free `pub fn render_context_menu`, and a
+    spelling is all this scan has.  That is not hypothetical: it is the third
+    module this scan reported as reached and was not.
+    `gui/desktop/src/context_ext.rs` has 2042 lines and a single mentioned
+    name -- its free `pub fn render_context_menu` -- and the three mentions
+    are inherent methods on `taskbar::Taskbar`, `procexplorer` and
+    `sysmonitor`, which do not know the module exists.  Nothing else in the
+    file, `ContextMenuExtensionManager` and `ExtensionSettingsUI` included, is
+    named anywhere outside it.
+
+    Note the shape shared with `variant_names`: both fold a *non-owner* that
+    nonetheless spoils a spelling into the ambiguity pool.  Struct **fields**
+    are the same hazard one step further (`cfg.timeout_policy` reads like a
+    call to a free `timeout_policy`) and are deliberately not folded in yet --
+    fields are far more numerous than methods, and each name dropped costs a
+    real edge.  If a hand-check of a future run turns up a field alibi, this
+    is where it goes.
+    """
+    names = set()
+    for line in lines:
+        m = MEMBER.match(line)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
 def public_items(lines):
     """`{name: line_no}` for every top-level public item defined outside tests."""
     spans = test_spans(lines)
@@ -263,15 +330,16 @@ def main():
         for name in items:
             owners.setdefault(name, set()).add(f)
 
-    # Enum variants anywhere in the repository, for the reason in
-    # `variant_names`: a variant is not an owner, but it spoils a spelling.
+    # Enum variants and associated items anywhere in the repository, for the
+    # reason in `variant_names` and `member_names`: neither is an owner, but
+    # each spoils a spelling, and a spelling is the whole of the evidence.
     variants = {}
     for f in rust_files(base):
         try:
             lines = f.read_text(encoding="utf-8", errors="replace").split("\n")
         except OSError:
             continue
-        for name in variant_names(lines):
+        for name in variant_names(lines) | member_names(lines):
             variants.setdefault(name, set()).add(f)
 
     unambiguous = {
@@ -347,6 +415,12 @@ def main():
     # complete explanation, and lumping it in with unreferenced code is how a
     # report earns the reputation of crying wolf.
     hits = {"prod": {}, "test": {}}
+
+    # Which crates each file so much as names.  Used to scope the *item* edge
+    # to plausible users; see `reached_by`.
+    all_crates = set(crate_names.values())
+    crate_mentions = {}
+
     for f in rust_files(base):
         try:
             lines = f.read_text(encoding="utf-8", errors="replace").split("\n")
@@ -356,11 +430,13 @@ def main():
         for i, raw in enumerate(lines):
             if REEXPORT.match(raw):
                 continue
-            line = strip_comment(raw)
+            line = code_only(raw)
             where = "test" if in_spans(i, spans) else "prod"
             for name in IDENT.findall(line):
                 if name in unambiguous:
                     hits[where].setdefault(name, set()).add(f)
+                if name in all_crates:
+                    crate_mentions.setdefault(f, set()).add(name)
             for seg in path_use.findall(line):
                 if seg in stems:
                     key = ("mod", seg, crate_of(f))
@@ -370,9 +446,39 @@ def main():
                     if seg in stems:
                         hits[where].setdefault(("qual", crate, seg), set()).add(f)
 
+    def plausible(f, mentioners):
+        """`mentioners`, minus files that cannot be naming *this* module's item.
+
+        The item edge is matched by spelling across the whole repository, and
+        an unambiguous spelling is only unambiguous *among candidates* -- lane
+        A and lane B are not scanned for owners, so a type of the same name
+        over there vouches for a lane-C module it has never heard of.  That is
+        how `gui/desktop/src/context_ext.rs` (2042 lines) reported as reached:
+        its one surviving name, `ContextTarget`, is also
+        `kernel/src/fs/contextmenu.rs`'s own enum, in a crate that does not
+        depend on the desktop shell at all.
+
+        The rule that removes it costs nothing real.  A mention from inside
+        the same crate always counts.  A mention from *outside* counts only if
+        that file also names the owning crate somewhere -- which a genuine
+        cross-crate user must, since it can reach the item no other way than
+        `use guitk::table::Table;` or `guitk::table::Table`.  The four apps
+        that import `guitk::table` all say `guitk`; `contextmenu.rs` never
+        says `desktop`.
+        """
+        home = crate_of(f)
+        own = crate_names.get(home)
+        return {
+            g
+            for g in mentioners
+            if g != f and (crate_of(g) == home or (own and own in crate_mentions.get(g, ())))
+        }
+
     def reached_by(f, items, where):
-        keys = [n for n in items if n in unambiguous]
-        keys.append(("mod", f.stem, crate_of(f)))
+        for n in items:
+            if n in unambiguous and plausible(f, hits[where].get(n, set())):
+                return True
+        keys = [("mod", f.stem, crate_of(f))]
         own = crate_names.get(crate_of(f))
         if own:
             keys.append(("qual", own, f.stem))

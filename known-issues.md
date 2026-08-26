@@ -68056,6 +68056,8 @@ from "written but not yet wired":
 - `apps/explorer/src/main.rs` writes `mod columns; mod dropzone; mod thumbs;`
   and then never mentions any of the three again — 5,611 lines compiled into
   the binary by an explicit declaration and reachable from nothing.
+  (`columns.rs`, 2,372 of those lines, was wired up on 2026-08-25 — see
+  "Repayment log" at the end of this entry.)
 - `gui/compositor/src/server.rs` (1,334) reaches `lib.rs` only through
   `pub use server::{Disconnect, Server, ServerStats};`, and no file in the
   tree consumes any of the three names. A re-export is plumbing, not a
@@ -68123,6 +68125,45 @@ not a clean bill of health for its contents.
 **Do not wire these up before C-Q6 is answered.** Adding `load()`/`save()` to
 six models that may be deleted is lesson 45 at a larger size — a bigger unused
 feature, with the same round-trip tests making it look covered.
+
+### Repayment log
+
+The ledger is a ratchet, not a monument: `scripts/orphan-modules-baseline.txt`
+shrinks as entries are paid off, and `--check` prints "reached now, drop from
+the baseline" when one is. Entries C-Q6 does not gate are being paid down while
+it sits.
+
+- **2026-08-25 — `apps/explorer/src/columns.rs` (2,372 lines) is reached.**
+  The detail view's three hardcoded x-offsets are gone; it now draws through
+  `render_column_header` / `render_column_values_from`, so a folder of images
+  grows a Dimensions column and a folder of source grows Language and Lines.
+  Two defects had to be fixed to make the wiring safe rather than merely
+  possible, and both are the same shape as lesson 45 one level down — *a
+  provider written for a caller that never arrived is never found out*:
+  - `StandardColumns::value` returned `ColumnValue::Empty` for **Size, Date
+    Modified, Date Created and Attributes**, with the comment "In a real
+    implementation this would stat the file. Return empty as a stub; the
+    explorer already has size info." Routing the view through it as-written
+    would have silently deleted the two columns the explorer already showed.
+    They stat now.
+  - `ColumnManager` had only `sort_by`, a three-state header-click toggle
+    (asc → desc → **none**). The explorer's own sort is two-state, so no
+    number of toggles reliably lands on the state it wants. Added
+    `set_sort(id, order)`, with `sort_by` rewritten in terms of it — the
+    toggle for a header click, the setter for a caller that already owns the
+    sort.
+
+  A third hazard was designed around rather than fixed: every `columns.rs`
+  lookup takes a `&str` path, which a name that is not valid UTF-8 cannot
+  become without loss. `ExplorerState::row_values` therefore builds the
+  standard cells from the `FileEntry` it already has — which also takes a
+  per-cell `stat` off the per-frame path — and only falls back to the path for
+  columns a *provider* owns. A non-UTF-8 name costs a blank Dimensions cell,
+  never a wrong one and never a dropped row.
+
+  Still pinned from this app: `dropzone.rs` (1,259) and `thumbs.rs` (1,980).
+  `thumbs.rs` has an obvious home — `ViewMode::Icons` currently renders an
+  empty pane, because `render_file_list` only ever drew the `Details` case.
 
 ## TD-B-FIVE-COPIES-OF-THE-FILE-TYPE-HALF-OF-A-MODE-WORD (lane B, 2026-08-22) — RESOLVED 2026-08-22
 

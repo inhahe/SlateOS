@@ -485,26 +485,40 @@ impl ColumnManager {
     /// Set (or toggle) the sort column.  If already sorting by `id`,
     /// flip direction; otherwise start ascending.
     pub fn sort_by(&mut self, id: ColumnId) {
-        if self.sort_column == Some(id) {
-            self.sort_direction = match self.sort_direction {
+        let next = if self.sort_column == Some(id) {
+            match self.sort_direction {
                 SortOrder::Ascending => SortOrder::Descending,
                 SortOrder::Descending => SortOrder::None,
                 SortOrder::None => SortOrder::Ascending,
-            };
-        } else {
-            // Clear previous column's sort indicator.
-            if let Some(prev) = self.sort_column
-                && let Some(def) = self.all_columns.get_mut(&prev)
-            {
-                def.sort_order = SortOrder::None;
             }
-            self.sort_column = Some(id);
-            self.sort_direction = SortOrder::Ascending;
+        } else {
+            SortOrder::Ascending
+        };
+        self.set_sort(id, next);
+    }
+
+    /// Set the sort column and direction outright.
+    ///
+    /// [`Self::sort_by`] is the click-a-header toggle, written in terms of
+    /// this. A caller that owns the sort itself — the file explorer sorts its
+    /// own entry list — needs the header arrow to *agree* with a decision
+    /// already made, not to make one, and would otherwise have to guess how
+    /// many toggles land on the state it wants.
+    pub fn set_sort(&mut self, id: ColumnId, order: SortOrder) {
+        // Clear the previous column's indicator, or two headers would carry
+        // an arrow at once.
+        if let Some(prev) = self.sort_column
+            && prev != id
+            && let Some(def) = self.all_columns.get_mut(&prev)
+        {
+            def.sort_order = SortOrder::None;
         }
 
-        // Update the definition's stored sort order.
+        self.sort_column = Some(id);
+        self.sort_direction = order;
+
         if let Some(def) = self.all_columns.get_mut(&id) {
-            def.sort_order = self.sort_direction;
+            def.sort_order = order;
         }
     }
 
@@ -540,6 +554,22 @@ impl ColumnManager {
         }
 
         ColumnValue::Empty
+    }
+
+    /// Look up every active column's value for one file, in active-column
+    /// order.
+    ///
+    /// This exists so a caller that already knows a row's facts — the file
+    /// explorer knows each entry's size and mtime from the `readdir` that
+    /// produced the row — can build the same `Vec<ColumnValue>` itself and
+    /// hand it straight to [`render_column_values_from`], instead of paying
+    /// a provider dispatch and a `stat` per cell on every frame. Callers
+    /// that have only a path use this.
+    pub fn row_values(&self, path: &str) -> Vec<ColumnValue> {
+        self.active_columns
+            .iter()
+            .map(|&id| self.get_value(path, id))
+            .collect()
     }
 
     // ------------------------------------------------------------------
@@ -716,6 +746,18 @@ impl StandardColumns {
             })
             .collect()
     }
+
+    /// Seconds since the Unix epoch, or `None` for a stamp that predates it.
+    ///
+    /// A filesystem can legitimately store a pre-1970 timestamp, and
+    /// [`ColumnValue::DateTime`] cannot represent one. Blank is the honest
+    /// answer; clamping to the epoch would invent a date the file does not
+    /// have.
+    fn epoch_secs(t: std::time::SystemTime) -> Option<u64> {
+        t.duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs())
+    }
 }
 
 impl ColumnProvider for StandardColumns {
@@ -732,12 +774,29 @@ impl ColumnProvider for StandardColumns {
                 let name = path.rsplit('/').next().unwrap_or(path);
                 ColumnValue::Text(name.to_string())
             }
-            ColumnId::SIZE => {
-                // In a real implementation this would stat the file.
-                // Return empty as a stub; the explorer already has size info.
-                ColumnValue::Empty
-            }
-            ColumnId::DATE_MODIFIED | ColumnId::DATE_CREATED => ColumnValue::Empty,
+            // These three stat the file. A caller rendering a whole directory
+            // listing should not reach them once per cell per frame — it
+            // already has these facts from its own `readdir` and should build
+            // the row with `render_column_values_from`. They are here so that
+            // a caller holding nothing but a path still gets a real answer
+            // rather than a blank cell.
+            ColumnId::SIZE => match std::fs::metadata(path) {
+                // A directory's own byte count is not what a Size column
+                // means, so leave it blank as every file manager does.
+                Ok(md) if md.is_dir() => ColumnValue::Empty,
+                Ok(md) => ColumnValue::Size(md.len()),
+                Err(_) => ColumnValue::Empty,
+            },
+            ColumnId::DATE_MODIFIED => std::fs::metadata(path)
+                .and_then(|md| md.modified())
+                .ok()
+                .and_then(Self::epoch_secs)
+                .map_or(ColumnValue::Empty, ColumnValue::DateTime),
+            ColumnId::DATE_CREATED => std::fs::metadata(path)
+                .and_then(|md| md.created())
+                .ok()
+                .and_then(Self::epoch_secs)
+                .map_or(ColumnValue::Empty, ColumnValue::DateTime),
             ColumnId::TYPE => {
                 let ext = path_extension(path);
                 if ext.is_empty() {
@@ -746,7 +805,19 @@ impl ColumnProvider for StandardColumns {
                     ColumnValue::Text(format!("{} File", ext.to_uppercase()))
                 }
             }
-            ColumnId::ATTRIBUTES => ColumnValue::Text(String::new()),
+            ColumnId::ATTRIBUTES => match std::fs::metadata(path) {
+                Ok(md) => {
+                    let mut flags = String::new();
+                    if md.is_dir() {
+                        flags.push('D');
+                    }
+                    if md.permissions().readonly() {
+                        flags.push('R');
+                    }
+                    ColumnValue::Text(flags)
+                }
+                Err(_) => ColumnValue::Empty,
+            },
             _ => ColumnValue::Empty,
         }
     }
@@ -1218,11 +1289,44 @@ pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<Re
 /// Render one row of column values for a file.
 ///
 /// `y` is the top of the row.  Returns render commands for each cell.
+///
+/// Every cell is resolved through [`ColumnManager::get_value`], which walks
+/// the provider list and — for the standard Size and Date columns — stats the
+/// file. That is fine for a caller that has nothing but a path, but a caller
+/// rendering a directory listing already knows those facts and would be
+/// paying a syscall per cell per frame to be told them again. Such callers
+/// should build the values themselves and call [`render_column_values_from`].
 pub fn render_column_values(
     manager: &ColumnManager,
     path: &str,
     y: f32,
     total_width: f32,
+) -> Vec<RenderCommand> {
+    render_column_values_from(manager, &manager.row_values(path), y, total_width, None)
+}
+
+/// Render one row from values the caller already has.
+///
+/// `values` is parallel to [`ColumnManager::active_columns`]: element `i` is
+/// the cell for active column `i`. A short slice is not an error — the
+/// missing trailing cells simply render as blank, which is what a column
+/// that has no value for this row looks like anyway.
+///
+/// `y` is the top of the row. Cells are laid out from `x = 0`, so the caller
+/// translates the whole table into place rather than each cell.
+///
+/// `name_color` overrides the colour of the [`ColumnId::NAME`] cell only.
+/// Cell colour is otherwise a property of the value's *kind*, which is right
+/// for every column that describes a file but cannot express a property of
+/// the file itself — the explorer draws directory names in a different colour
+/// from file names, and that distinction is the caller's to make, not the
+/// column system's.
+pub fn render_column_values_from(
+    manager: &ColumnManager,
+    values: &[ColumnValue],
+    y: f32,
+    total_width: f32,
+    name_color: Option<Color>,
 ) -> Vec<RenderCommand> {
     let mut cmds = Vec::new();
     let active = manager.active_columns();
@@ -1239,16 +1343,19 @@ pub fn render_column_values(
             }
         };
 
-        let value = manager.get_value(path, col_id);
+        let value = values.get(i).cloned().unwrap_or(ColumnValue::Empty);
         let text = value.display();
 
         if !text.is_empty() {
-            let color = match value {
-                ColumnValue::Empty => ColumnColors::CELL_DIM,
-                ColumnValue::Size(_) | ColumnValue::Number(_) | ColumnValue::Percentage(_) => {
-                    ColumnColors::CELL_DIM
-                }
-                _ => ColumnColors::CELL_TEXT,
+            let color = match (col_id, name_color) {
+                (ColumnId::NAME, Some(c)) => c,
+                _ => match value {
+                    ColumnValue::Empty => ColumnColors::CELL_DIM,
+                    ColumnValue::Size(_) | ColumnValue::Number(_) | ColumnValue::Percentage(_) => {
+                        ColumnColors::CELL_DIM
+                    }
+                    _ => ColumnColors::CELL_TEXT,
+                },
             };
 
             let text_x = match def.alignment {
@@ -2321,6 +2428,195 @@ mod tests {
         let mgr = ColumnManager::with_defaults();
         let cmds = render_column_values(&mgr, "/test/file.txt", 0.0, 800.0);
         assert!(!cmds.is_empty(), "row should produce render commands");
+    }
+
+    /// `render_column_values` and `render_column_values_from` are one
+    /// renderer, so the path-based wrapper must not drift from the
+    /// values-based one it delegates to.
+    /// `RenderCommand` is not `PartialEq` — it carries `f32`s, and an
+    /// equality on those is the kind of thing a drawing primitive should not
+    /// invite. Comparing the debug rendering compares every field without
+    /// putting that operator on the type.
+    fn same_commands(a: &[RenderCommand], b: &[RenderCommand]) -> bool {
+        format!("{a:?}") == format!("{b:?}")
+    }
+
+    #[test]
+    fn the_two_row_renderers_agree() {
+        let mgr = ColumnManager::with_defaults();
+        let path = "/test/file.txt";
+        let via_path = render_column_values(&mgr, path, 0.0, 800.0);
+        let via_values = render_column_values_from(&mgr, &mgr.row_values(path), 0.0, 800.0, None);
+        assert!(
+            same_commands(&via_path, &via_values),
+            "the path wrapper must draw exactly what it delegates to"
+        );
+    }
+
+    #[test]
+    fn a_row_has_one_value_per_active_column() {
+        let mut mgr = ColumnManager::with_defaults();
+        assert_eq!(
+            mgr.row_values("/test/file.txt").len(),
+            mgr.active_columns().len()
+        );
+
+        mgr.set_columns(vec![ColumnId::NAME, ColumnId::TYPE]);
+        assert_eq!(
+            mgr.row_values("/test/file.txt"),
+            vec![
+                ColumnValue::Text("file.txt".to_string()),
+                ColumnValue::Text("TXT File".to_string()),
+            ]
+        );
+    }
+
+    /// A caller that supplies fewer values than there are columns gets blank
+    /// trailing cells, not a panic — a column with no value for this row and
+    /// a column the caller declined to fill look the same to a reader.
+    #[test]
+    fn a_short_value_slice_renders_blanks_rather_than_panicking() {
+        let mut mgr = ColumnManager::with_defaults();
+        mgr.set_columns(vec![ColumnId::NAME, ColumnId::SIZE, ColumnId::TYPE]);
+
+        let full = render_column_values_from(
+            &mgr,
+            &[
+                ColumnValue::Text("a".to_string()),
+                ColumnValue::Empty,
+                ColumnValue::Empty,
+            ],
+            0.0,
+            800.0,
+            None,
+        );
+        let short = render_column_values_from(
+            &mgr,
+            &[ColumnValue::Text("a".to_string())],
+            0.0,
+            800.0,
+            None,
+        );
+        assert!(
+            same_commands(&short, &full),
+            "missing trailing values should render as blank cells"
+        );
+    }
+
+    /// The name-colour override is scoped to the Name cell. Tinting a whole
+    /// row would recolour the dimmed Size and Date cells too.
+    #[test]
+    fn the_name_colour_override_touches_only_the_name_cell() {
+        let mut mgr = ColumnManager::with_defaults();
+        mgr.set_columns(vec![ColumnId::NAME, ColumnId::TYPE]);
+        let values = vec![
+            ColumnValue::Text("folder".to_string()),
+            ColumnValue::Text("Folder".to_string()),
+        ];
+        let tint = Color::rgba(0, 102, 204, 255);
+
+        let cmds = render_column_values_from(&mgr, &values, 0.0, 800.0, Some(tint));
+        let colors: Vec<Color> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(colors, vec![tint, ColumnColors::CELL_TEXT]);
+    }
+
+    /// `StandardColumns::value` used to return `Empty` for Size and the two
+    /// date columns with a comment saying a real implementation would stat the
+    /// file. A provider that answers "I don't know" to the columns it declares
+    /// is not a provider.
+    #[test]
+    fn the_standard_provider_reports_a_real_size_and_date() {
+        let scratch = scratchdir::ScratchDir::new("explorer_standard_columns");
+        let file = scratch.dir().join("payload.bin");
+        std::fs::write(&file, [0u8; 1234]).expect("write fixture");
+        let path = file.to_str().expect("scratch paths are ASCII");
+
+        assert_eq!(
+            StandardColumns.value(path, ColumnId::SIZE),
+            ColumnValue::Size(1234)
+        );
+
+        match StandardColumns.value(path, ColumnId::DATE_MODIFIED) {
+            ColumnValue::DateTime(secs) => assert!(
+                secs > 1_600_000_000,
+                "a file written just now should carry a recent mtime, got {secs}"
+            ),
+            other => panic!("Date Modified should be a timestamp, got {other:?}"),
+        }
+    }
+
+    /// A directory has no meaningful byte count, and a Size column that showed
+    /// one would be showing the size of the directory entry rather than of its
+    /// contents.
+    #[test]
+    fn the_standard_provider_leaves_a_directory_size_blank() {
+        let scratch = scratchdir::ScratchDir::new("explorer_standard_dir_size");
+        let path = scratch.dir().to_str().expect("scratch paths are ASCII");
+        assert_eq!(
+            StandardColumns.value(path, ColumnId::SIZE),
+            ColumnValue::Empty
+        );
+    }
+
+    /// A file that is not there is not an error the table can show; the cell
+    /// is simply blank.
+    #[test]
+    fn a_missing_file_yields_blank_cells_not_a_panic() {
+        let path = "/definitely/not/here/nope.bin";
+        assert_eq!(
+            StandardColumns.value(path, ColumnId::SIZE),
+            ColumnValue::Empty
+        );
+        assert_eq!(
+            StandardColumns.value(path, ColumnId::DATE_MODIFIED),
+            ColumnValue::Empty
+        );
+    }
+
+    /// `sort_by` is the header-click toggle; `set_sort` is for a caller that
+    /// already owns the sort. Setting must move the arrow and clear the one it
+    /// left behind.
+    #[test]
+    fn set_sort_moves_the_arrow_and_clears_the_old_one() {
+        let mut mgr = ColumnManager::with_defaults();
+
+        mgr.set_sort(ColumnId::NAME, SortOrder::Ascending);
+        mgr.set_sort(ColumnId::SIZE, SortOrder::Descending);
+
+        assert_eq!(
+            mgr.current_sort(),
+            (Some(ColumnId::SIZE), SortOrder::Descending)
+        );
+        assert_eq!(
+            mgr.column_def(ColumnId::NAME).expect("name def").sort_order,
+            SortOrder::None,
+            "only one header may carry an arrow"
+        );
+        assert_eq!(
+            mgr.column_def(ColumnId::SIZE).expect("size def").sort_order,
+            SortOrder::Descending
+        );
+    }
+
+    /// Setting the same column twice must not clear its own indicator on the
+    /// second call — the "clear the previous column" step has to exclude the
+    /// column being set.
+    #[test]
+    fn setting_the_same_column_twice_keeps_its_arrow() {
+        let mut mgr = ColumnManager::with_defaults();
+        mgr.set_sort(ColumnId::SIZE, SortOrder::Ascending);
+        mgr.set_sort(ColumnId::SIZE, SortOrder::Descending);
+        assert_eq!(
+            mgr.column_def(ColumnId::SIZE).expect("size def").sort_order,
+            SortOrder::Descending
+        );
     }
 
     #[test]

@@ -2,7 +2,9 @@
 //!
 //! Graphical file manager with:
 //! - Directory tree sidebar
-//! - File/folder list with icon, name, size, date columns
+//! - File/folder list with an extensible column set (see [`columns`]): the
+//!   built-in Name/Size/Date/Type, plus whatever the directory's contents
+//!   warrant — image dimensions, audio duration, source line counts
 //! - Address bar with path navigation
 //! - Toolbar (back, forward, up, new folder, delete, rename)
 //! - Status bar (item count, selected size)
@@ -30,6 +32,7 @@ mod thumbs;
 use guitk::color::Color;
 use guitk::render::RenderTree;
 
+use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
 use fileops::{
     ConflictPolicy, ErrorPolicy, FileOpEvent, FileOperation, OperationExecutor, OperationPlan,
     OperationSummary, RecycleBin, UndoStack,
@@ -55,6 +58,23 @@ pub struct FileEntry {
     pub file_type: FileType,
     pub selected: bool,
     pub icon_id: u32,
+}
+
+impl FileEntry {
+    /// Label for the detail view's Type column.
+    ///
+    /// The category when the entry has a recognised one, and the bare
+    /// extension otherwise, so an unrecognised `.qcow2` reads "QCOW2 File"
+    /// rather than a bare "File" that says nothing.
+    fn type_label(&self) -> String {
+        if self.file_type != FileType::Unknown {
+            return self.file_type.label().to_string();
+        }
+        match self.path.extension().and_then(|e| e.to_str()) {
+            Some(ext) if !ext.is_empty() => format!("{} File", ext.to_uppercase()),
+            _ => "File".to_string(),
+        }
+    }
 }
 
 /// Known file types for icon/association purposes.
@@ -89,6 +109,23 @@ impl FileType {
         }
     }
 
+    /// Human-readable category name, as shown in the detail view's Type
+    /// column.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Directory => "Folder",
+            Self::Text => "Text Document",
+            Self::Image => "Image",
+            Self::Audio => "Audio",
+            Self::Video => "Video",
+            Self::Archive => "Archive",
+            Self::Executable => "Application",
+            Self::Document => "Document",
+            Self::Code => "Source File",
+            Self::Unknown => "File",
+        }
+    }
+
     /// Icon character for this file type (unicode placeholder).
     pub fn icon_char(self) -> char {
         match self {
@@ -117,6 +154,16 @@ pub enum ViewMode {
     List,    // Simple list
     Icons,   // Grid of icons
 }
+
+/// Height of the detail view's header bar. Matches the column system's own
+/// `HEADER_HEIGHT`, which is what actually draws it.
+const HEADER_H: f32 = 22.0;
+
+/// Height of one detail-view row.
+const ROW_H: f32 = 22.0;
+
+/// Width reserved to the left of the first column for the entry's type icon.
+const ICON_GUTTER: f32 = 28.0;
 
 /// Sort criteria.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,6 +247,13 @@ pub struct ExplorerState {
     pub undo: UndoStack,
     /// Recycle bin used by non-permanent delete.
     pub recycle: RecycleBin,
+    /// The detail view's column set: which columns are shown, in what order,
+    /// at what widths, and which one carries the sort arrow.
+    ///
+    /// Re-derived from the directory's contents on every load, so a folder of
+    /// images grows a Dimensions column and a folder of source grows Language
+    /// and Lines without the user asking.
+    pub columns: ColumnManager,
 }
 
 impl ExplorerState {
@@ -225,7 +279,9 @@ impl ExplorerState {
             sidebar_width: 200.0,
             undo: UndoStack::new(),
             recycle: RecycleBin::default_location(),
+            columns: ColumnManager::with_defaults(),
         };
+        state.sync_sort_indicator();
         state.load_directory();
         state
     }
@@ -355,6 +411,61 @@ impl ExplorerState {
 
         self.sort_entries();
         self.update_status();
+        detect_columns(&mut self.columns, &self.entries);
+    }
+
+    /// The detail view's cells for one entry, in active-column order.
+    ///
+    /// Built from the [`FileEntry`] the listing already produced rather than
+    /// from the entry's path, for two reasons. The facts are in hand — the
+    /// `readdir` that made the row already stat'ed the file — so routing them
+    /// back through [`ColumnManager::get_value`] would re-stat every file
+    /// twice per row on every frame. And that call takes a `&str`, which a
+    /// name that is not valid UTF-8 cannot become without either losing the
+    /// row or corrupting the name.
+    ///
+    /// Columns a *provider* owns — image dimensions, audio duration — still
+    /// need the path, and are the one place a non-UTF-8 name costs anything:
+    /// a blank cell, never a wrong one.
+    fn row_values(&self, entry: &FileEntry) -> Vec<ColumnValue> {
+        let path = entry.path.to_str();
+        self.columns
+            .active_columns()
+            .iter()
+            .map(|&id| match id {
+                ColumnId::NAME => ColumnValue::Text(entry.name.clone()),
+                // A directory's own byte count is not what a Size column
+                // means, so it stays blank — as it did before this view used
+                // the column system at all.
+                ColumnId::SIZE if entry.is_dir => ColumnValue::Empty,
+                ColumnId::SIZE => ColumnValue::Size(entry.size),
+                ColumnId::DATE_MODIFIED => entry
+                    .modified
+                    .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map_or(ColumnValue::Empty, |d| ColumnValue::DateTime(d.as_secs())),
+                ColumnId::TYPE => ColumnValue::Text(entry.type_label()),
+                other => path.map_or(ColumnValue::Empty, |p| self.columns.get_value(p, other)),
+            })
+            .collect()
+    }
+
+    /// Keep the detail header's sort arrow on the column the list is actually
+    /// sorted by.
+    ///
+    /// The explorer owns the sort — [`Self::sort_entries`] does the work — so
+    /// the column manager is told the answer rather than asked for one.
+    fn sync_sort_indicator(&mut self) {
+        let id = match self.sort_by {
+            SortBy::Name => ColumnId::NAME,
+            SortBy::Size => ColumnId::SIZE,
+            SortBy::Modified => ColumnId::DATE_MODIFIED,
+            SortBy::Type => ColumnId::TYPE,
+        };
+        let order = match self.sort_dir {
+            SortDir::Ascending => SortOrder::Ascending,
+            SortDir::Descending => SortOrder::Descending,
+        };
+        self.columns.set_sort(id, order);
     }
 
     /// Sort entries according to current sort settings.
@@ -855,75 +966,65 @@ impl ExplorerState {
         let list_w = self.window_width as f32 - self.sidebar_width;
         let list_h = self.window_height as f32 - 64.0 - 24.0;
 
-        // Column headers (details mode)
         if self.view_mode == ViewMode::Details {
-            let header_h = 22.0;
-            tree.fill_rect(list_x, list_y, list_w, header_h, Color::from_hex(0xE0E0E0));
-            tree.text(
-                list_x + 32.0,
-                list_y + 4.0,
-                "Name",
-                Color::from_hex(0x333333),
-                11.0,
-            );
-            tree.text(
-                list_x + list_w - 200.0,
-                list_y + 4.0,
-                "Size",
-                Color::from_hex(0x333333),
-                11.0,
-            );
-            tree.text(
-                list_x + list_w - 100.0,
-                list_y + 4.0,
-                "Modified",
-                Color::from_hex(0x333333),
-                11.0,
-            );
-
-            // Entries
-            let row_h = 22.0;
-            let start_y = list_y + header_h;
-            let visible_rows = ((list_h - header_h) / row_h) as usize;
-
-            for (i, entry) in self.entries.iter().take(visible_rows).enumerate() {
-                let ey = start_y + i as f32 * row_h;
-
-                // Selection highlight
-                if entry.selected {
-                    tree.fill_rect(list_x, ey, list_w, row_h, Color::from_hex(0xCCE8FF));
-                } else if i % 2 == 1 {
-                    tree.fill_rect(list_x, ey, list_w, row_h, Color::from_hex(0xFAFAFA));
-                }
-
-                // Icon
-                let icon = if entry.is_dir {
-                    "\u{1F4C1}"
-                } else {
-                    "\u{1F4C4}"
-                };
-                tree.text(list_x + 8.0, ey + 3.0, icon, Color::BLACK, 12.0);
-
-                // Name
-                let name_color = if entry.is_dir {
-                    Color::from_hex(0x0066CC)
-                } else {
-                    Color::BLACK
-                };
-                tree.text(list_x + 32.0, ey + 4.0, &entry.name, name_color, 12.0);
-
-                // Size
-                if !entry.is_dir {
-                    tree.text(
-                        list_x + list_w - 200.0,
-                        ey + 4.0,
-                        &format_size(entry.size),
-                        Color::GRAY,
-                        11.0,
-                    );
-                }
-            }
+            self.render_details(tree, list_x, list_y, list_w, list_h);
         }
+    }
+
+    /// The detail view: a header bar plus one row per entry, laid out by the
+    /// column system rather than by three hardcoded x-offsets.
+    ///
+    /// `columns::render_*` emit commands from `(0, 0)`, so the whole table is
+    /// translated into the pane once instead of every cell carrying the pane's
+    /// origin. The icon occupies a fixed gutter to the left of the first
+    /// column; the header's own bar starts where the columns do, so the gutter
+    /// strip of it is filled here to keep the bar continuous.
+    fn render_details(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+        let table_w = (w - ICON_GUTTER).max(0.0);
+        let visible_rows = ((h - HEADER_H) / ROW_H).max(0.0) as usize;
+
+        tree.translate(x, y);
+
+        tree.fill_rect(0.0, 0.0, ICON_GUTTER, HEADER_H, Color::from_hex(0xE0E0E0));
+        tree.translate(ICON_GUTTER, 0.0);
+        for cmd in columns::render_column_header(&self.columns, table_w) {
+            tree.push(cmd);
+        }
+        tree.untranslate();
+
+        for (i, entry) in self.entries.iter().take(visible_rows).enumerate() {
+            let ey = HEADER_H + i as f32 * ROW_H;
+
+            if entry.selected {
+                tree.fill_rect(0.0, ey, w, ROW_H, Color::from_hex(0xCCE8FF));
+            } else if i % 2 == 1 {
+                tree.fill_rect(0.0, ey, w, ROW_H, Color::from_hex(0xFAFAFA));
+            }
+
+            let mut icon = [0u8; 4];
+            tree.text(
+                8.0,
+                ey + 3.0,
+                entry.file_type.icon_char().encode_utf8(&mut icon),
+                Color::BLACK,
+                12.0,
+            );
+
+            // Directory names stay visually distinct from file names, as they
+            // were when this view drew its own three columns.
+            let name_color = entry.is_dir.then(|| Color::from_hex(0x0066CC));
+
+            let values = self.row_values(entry);
+            tree.translate(ICON_GUTTER, 0.0);
+            for cmd in
+                columns::render_column_values_from(&self.columns, &values, ey, table_w, name_color)
+            {
+                tree.push(cmd);
+            }
+            tree.untranslate();
+        }
+
+        tree.untranslate();
     }
 
     fn render_status_bar(&self, tree: &mut RenderTree) {
@@ -955,6 +1056,7 @@ impl ExplorerState {
             self.sort_by = by;
             self.sort_dir = SortDir::Ascending;
         }
+        self.sync_sort_indicator();
         self.sort_entries();
     }
 
@@ -974,6 +1076,27 @@ impl ExplorerState {
 
 fn format_size(bytes: u64) -> String {
     guitk::bytes::iec(bytes)
+}
+
+/// Re-derive the active column set from what the directory actually holds.
+///
+/// A free function rather than a method because it borrows two fields of
+/// [`ExplorerState`] at once — the entries immutably and the manager mutably —
+/// which the borrow checker allows at a call site but not through `&mut self`.
+///
+/// Paths are converted with [`Path::to_str`], not `to_string_lossy`: a name
+/// that is not valid UTF-8 simply does not vote on which columns appear, which
+/// is right, since every extension auto-detection looks for is ASCII. Making
+/// one up with replacement characters could only produce a wrong answer.
+fn detect_columns(columns: &mut ColumnManager, entries: &[FileEntry]) {
+    let infos: Vec<FileInfo<'_>> = entries
+        .iter()
+        .map(|e| FileInfo {
+            path: e.path.to_str().unwrap_or(""),
+            extension: e.path.extension().and_then(|x| x.to_str()).unwrap_or(""),
+        })
+        .collect();
+    columns.auto_detect_columns(&infos);
 }
 
 /// Check that `name` is usable as a single entry name in a directory.
@@ -1536,5 +1659,160 @@ mod tests {
 
         assert!(!root.join("before.txt").exists());
         assert_eq!(fs::read_to_string(root.join("after.txt")).unwrap(), "data");
+    }
+
+    // ------------------------------------------------------------------
+    // Detail view / columns
+    // ------------------------------------------------------------------
+
+    /// Every `Text` command in a render tree, in emission order.
+    fn texts(tree: &RenderTree) -> Vec<String> {
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn details_tree(state: &ExplorerState) -> RenderTree {
+        let mut tree = RenderTree::new();
+        state.render_details(&mut tree, 0.0, 0.0, 600.0, 400.0);
+        tree
+    }
+
+    #[test]
+    fn the_detail_header_names_the_active_columns() {
+        let root_scratch = temp_dir("cols_header");
+        let root = root_scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let state = state_at(&root);
+        let drawn = texts(&details_tree(&state));
+
+        for label in ["Name", "Size", "Date Modified", "Type"] {
+            assert!(
+                drawn.iter().any(|t| t == label),
+                "the header should name every active column; {label:?} missing from {drawn:?}"
+            );
+        }
+    }
+
+    /// The regression this whole wiring risked: routing the detail view
+    /// through the column system must not lose the two columns it already
+    /// showed. `StandardColumns` used to return `Empty` for both.
+    #[test]
+    fn a_row_still_shows_the_size_it_showed_before() {
+        let root_scratch = temp_dir("cols_size");
+        let root = root_scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "0123456789");
+
+        let state = state_at(&root);
+        let drawn = texts(&details_tree(&state));
+
+        let expected = format_size(10);
+        assert!(
+            drawn.contains(&expected),
+            "the Size cell should read {expected:?}, got {drawn:?}"
+        );
+        assert!(
+            drawn.iter().any(|t| t == "a.txt"),
+            "the Name cell should read the entry's name, got {drawn:?}"
+        );
+    }
+
+    /// A directory has no meaningful byte count, so its Size cell stays blank
+    /// — which is what the hand-written view did, and what every file manager
+    /// does.
+    #[test]
+    fn a_folder_row_leaves_the_size_cell_blank() {
+        let root_scratch = temp_dir("cols_dir_size");
+        let root = root_scratch.dir().to_path_buf();
+        fs::create_dir_all(root.join("sub")).unwrap();
+
+        let mut state = state_at(&root);
+        let entry = state
+            .entries
+            .iter()
+            .find(|e| e.name == "sub")
+            .expect("the subdirectory should be listed")
+            .clone();
+        state.columns.set_columns(vec![ColumnId::SIZE]);
+
+        assert_eq!(state.row_values(&entry), vec![ColumnValue::Empty]);
+    }
+
+    /// The row's cells come from the `FileEntry`, so a name that is not valid
+    /// UTF-8 must still produce a row rather than being dropped or mangled.
+    #[test]
+    fn a_row_is_one_cell_per_active_column() {
+        let root_scratch = temp_dir("cols_row_len");
+        let root = root_scratch.dir().to_path_buf();
+        write(&root.join("a.rs"), "fn main() {}");
+
+        let mut state = state_at(&root);
+        let entry = state.entries[0].clone();
+
+        let n = state.columns.active_columns().len();
+        assert_eq!(state.row_values(&entry).len(), n);
+
+        state
+            .columns
+            .set_columns(vec![ColumnId::NAME, ColumnId::TYPE]);
+        assert_eq!(
+            state.row_values(&entry),
+            vec![
+                ColumnValue::Text("a.rs".to_string()),
+                ColumnValue::Text("Source File".to_string()),
+            ]
+        );
+    }
+
+    /// A directory of source gains the code columns without the user asking.
+    #[test]
+    fn a_folder_of_source_grows_the_code_columns() {
+        let root_scratch = temp_dir("cols_detect");
+        let root = root_scratch.dir().to_path_buf();
+        write(&root.join("main.rs"), "fn main() {}");
+
+        let state = state_at(&root);
+        assert!(
+            state.columns.is_visible(ColumnId::LANGUAGE),
+            "a .rs file should switch on the Language column: {:?}",
+            state.columns.active_columns()
+        );
+    }
+
+    /// The explorer owns the sort; the header arrow must follow it rather than
+    /// keep a state of its own.
+    #[test]
+    fn the_header_arrow_follows_the_list_sort() {
+        let root_scratch = temp_dir("cols_sort");
+        let root = root_scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        assert_eq!(
+            state.columns.current_sort(),
+            (Some(ColumnId::NAME), SortOrder::Ascending),
+            "a fresh explorer sorts by name ascending"
+        );
+
+        state.set_sort(SortBy::Size);
+        assert_eq!(
+            state.columns.current_sort(),
+            (Some(ColumnId::SIZE), SortOrder::Ascending)
+        );
+
+        // Same column again: the explorer flips direction, and so must the
+        // arrow. The manager's own three-state toggle would have gone to
+        // `None` here, which is why the explorer sets rather than toggles.
+        state.set_sort(SortBy::Size);
+        assert_eq!(
+            state.columns.current_sort(),
+            (Some(ColumnId::SIZE), SortOrder::Descending)
+        );
+        assert_eq!(state.sort_dir, SortDir::Descending);
     }
 }

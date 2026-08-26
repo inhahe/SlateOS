@@ -15,7 +15,6 @@
 # TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
 # largest entries are blocked on open-questions.md -> C-Q6, which decides
 # whether the shell's settings pages survive at all.
-apps/explorer/src/columns.rs
 apps/explorer/src/dropzone.rs
 apps/explorer/src/thumbs.rs
 apps/imageviewer/src/video.rs

@@ -77,12 +77,23 @@ drift on every edit and an allowlist that rots is a rubber stamp.
 Exit status: 0 clean, 1 unaccounted sites found.
 """
 
+import importlib.util
 import pathlib
 import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from rust_scopes import scope_stack_per_line, classify  # noqa: E402
+
+# `strip_noise` is the directory's one self-tested Rust scanner. The filename's
+# hyphens make it un-`import`able normally, hence the spec dance.
+_SIBLING = pathlib.Path(__file__).resolve().parent / "check-recursive-locks.py"
+_spec = importlib.util.spec_from_file_location("check_recursive_locks", _SIBLING)
+if _spec is None or _spec.loader is None:  # pragma: no cover - packaging error
+    print(f"error: cannot load {_SIBLING}", file=sys.stderr)
+    raise SystemExit(2)
+_rl = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_rl)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 PATH = ROOT / "kernel" / "src" / "kshell.rs"
@@ -172,57 +183,33 @@ def outer_fn(stack) -> str:
     return "<top>"
 
 
-def strip_strings(line: str) -> str:
-    """Line with string literals blanked, for brace counting."""
-    out = []
-    in_str = False
-    esc = False
-    for ch in line:
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            out.append(" ")
-            continue
-        if ch == '"':
-            in_str = True
-            out.append(" ")
-            continue
-        out.append(ch)
-    return "".join(out)
+# Comments must never be read as code. Two of the three entries this file's
+# ALLOWED table used to carry were doc-comment prose describing the very bug
+# the detector looks for -- the explanation of what was fixed tripped the check
+# that the fix was still in place. That is a defect in the detector, not an
+# exemption to grant: a checker whose only workaround is "stop writing down
+# what the bug was" teaches you to delete the explanation, which is the most
+# valuable line in the fix. Both entries went when the stripping was added.
+#
+# That stripping was a line-local `strip_comments` understanding only `//` to
+# end of line, one of five hand-rolled Rust scanners in this directory. It now
+# uses the one that is self-tested and handles nested `/* */`, raw strings and
+# char literals -- see `check-recursive-locks.py::strip_noise`.
 
 
-def strip_comments(line: str) -> str:
-    """Line with any trailing `//` comment removed, so no detector reads prose.
+def loop_bodies(struct: list[str]):
+    """Yield `(open_index, close_index)` for every `while`/`for` block.
 
-    Two of the three entries this file's ALLOWED table used to carry were
-    doc-comment prose describing the very bug the detector looks for -- the
-    explanation of what was fixed tripped the check that the fix was still in
-    place.  That is a defect in the detector, not an exemption to grant: a
-    checker whose only workaround is "stop writing down what the bug was"
-    teaches you to delete the explanation, which is the most valuable line in
-    the fix.  Both entries were dropped when this function was added.
-
-    String literals are blanked first, so the `//` in a `"https://..."` is not
-    mistaken for the start of a comment.  The *original* text is returned,
-    truncated -- callers that look for string literals (OPTION_LITERAL) need
-    them intact.
+    `struct` must have comments *and* literals blanked: a brace in either is
+    not structure, and a comment is exactly where an unbalanced one is allowed
+    to appear.
     """
-    idx = strip_strings(line).find("//")
-    return line if idx < 0 else line[:idx]
-
-
-def loop_bodies(lines: list[str]):
-    """Yield `(open_index, close_index)` for every `while`/`for` block."""
-    for i, ln in enumerate(lines):
+    for i, ln in enumerate(struct):
         if not LOOP_OPEN.match(ln):
             continue
         depth = 0
-        for k in range(i, min(i + 400, len(lines))):
-            s = strip_strings(lines[k])
+        for k in range(i, min(i + 400, len(struct))):
+            s = struct[k]
             depth += s.count("{") - s.count("}")
             if depth <= 0 and k > i:
                 yield (i, k)
@@ -237,7 +224,14 @@ def allowed(fn: str, text: str) -> bool:
 
 
 def main(argv: list[str]) -> int:
-    lines = PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+    text = PATH.read_text(encoding="utf-8", errors="replace")
+    # Three views of one file, identically numbered because `strip_noise`
+    # blanks in place: verbatim for reporting, comments-gone/literals-kept for
+    # matching (every detector here looks for literal option spellings), and
+    # both-gone for the only place braces are counted.
+    lines = text.splitlines()
+    code_lines = _rl.strip_noise(text, keep_literals=True).splitlines()
+    struct = _rl.strip_noise(text).splitlines()
     stacks = scope_stack_per_line(lines)
     rel = str(PATH.relative_to(ROOT)).replace("\\", "/")
 
@@ -252,21 +246,21 @@ def main(argv: list[str]) -> int:
         if not is_production(i):
             continue
         fn = outer_fn(stacks[i])
-        code = strip_comments(ln)
-        text = ln.strip()
-        if D1.search(code) and not allowed(fn, text):
-            guessed.append((i + 1, fn, text[:96]))
-        if D2.search(code) and not allowed(fn, text):
-            dropped.append((i + 1, fn, text[:96]))
+        code = code_lines[i]
+        shown = ln.strip()
+        if D1.search(code) and not allowed(fn, shown):
+            guessed.append((i + 1, fn, shown[:96]))
+        if D2.search(code) and not allowed(fn, shown):
+            dropped.append((i + 1, fn, shown[:96]))
 
-    for open_i, close_i in loop_bodies(lines):
+    for open_i, close_i in loop_bodies(struct):
         if not is_production(open_i):
             continue
         # Comments are stripped here too, and in both directions: an option
         # spelling quoted in a comment would push a loop over the two-spelling
         # threshold it never reached in code, and the word `set_exit` in a
         # comment would silence a loop that has no refusal at all.
-        body = "\n".join(strip_comments(x) for x in lines[open_i:close_i + 1])
+        body = "\n".join(code_lines[open_i:close_i + 1])
         spellings = {m.group(1) for m in OPTION_LITERAL.finditer(body)}
         if len(spellings) < 2:
             continue

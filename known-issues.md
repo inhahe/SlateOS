@@ -68039,7 +68039,7 @@ The largest islands:
 | `gui/desktop/src/network_settings.rs` | 4,172 | the whole network settings page |
 | `gui/desktop/src/osd.rs` | 3,457 | volume/brightness/lock on-screen display |
 | `gui/toolkit/src/svg.rs` | 3,393 | an SVG path/transform/colour parser |
-| `gui/desktop/src/notif_pane.rs` | 3,374 | the notification pane and quick settings |
+| `gui/desktop/src/notif_pane.rs` | 3,374 | the notification pane and quick settings — **reached 2026-08-26, see the repayment log** |
 | `gui/toolkit/src/menubar.rs` | 3,337 | the menu bar widget |
 | `gui/desktop/src/touchpad.rs` | 2,841 | touchpad gestures and settings |
 | `gui/desktop/src/window_rules.rs` | 2,605 | per-application window placement rules |
@@ -68265,6 +68265,61 @@ it sits.
   feature rather than a wiring one. Until it exists, the refusal is at least
   visible before the user releases the button. See
   `TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE` below.
+
+- **2026-08-26 — `gui/desktop/src/notif_pane.rs` (3,374 lines) is reached, and
+  with it the desktop gets its first place to say something the user did not
+  ask about.** 53 remain repo-wide, from 54.
+
+  The pane lives on `DesktopShell` and is opened by Super+N, on the pattern
+  §493 set for the calendar: the pane's own `PaneState::is_visible` **is** the
+  open flag, and there is no second `notifications_open: bool` anywhere. It
+  joins `dismiss_popups`, the session's `popups_open`, `anything_moving` and
+  `step_frame`, and it is drawn last of the popup parts — its scrim dims what
+  is behind it, so drawn earlier it would be the thing dimmed, by its own
+  scrim, under a switcher it is meant to be in front of.
+
+  **This was not merely unwired; it was unwireable as written.** `show()` set
+  the state to `SlideIn(0.0)`, and both `render` and `handle_mouse_event`
+  place the pane's left edge at `screen_width - PANE_WIDTH * visibility`. At a
+  visibility of zero that is the right-hand edge of the screen: the pane draws
+  nothing, its dimming layer is fully transparent, and a click anywhere is
+  judged to have landed *outside* the pane — which the pane treats as "close
+  me". Wiring it as-written would have produced a Super+N that appeared to do
+  nothing at all. This is the identical defect §520 found in the Exposé
+  overlay, and it is now fixed the identical way (§562): the plain verbs land
+  on their destination, and a caller that owns a frame clock calls
+  `begin_slide()` to rewind the jump into an animation.
+
+  **What the wiring was for.** `ShellSession::wallpaper_error` had four writers
+  and exactly one reader — a `pub fn` nothing in the tree called — so a
+  wallpaper that failed to decode left the user looking at a plain colour with
+  no way whatever to find out why. `set_wallpaper_error` is now the single
+  writer and posts a notification when the message is new. The three conditions
+  are each load-bearing:
+  - *When the message is **new**, not when it is `Some`.* `paint_background`
+    runs on every repaint, so an unconditional post files one complaint per
+    mouse click for as long as a broken file stays selected.
+  - *New **message**, not "is there already an error".* Deduplicating on the
+    latter silences every failure after the first, so a user who fixes one path
+    and mistypes the next hears nothing about the second.
+  - *Posted without **opening** the pane.* A wallpaper that did not load is a
+    thing to explain, not an emergency to interrupt with; a panel that shoved
+    itself over the screen at login because of a missing file would be worse
+    than the missing file.
+
+  Two smaller gaps closed on the way: `PaneState::visibility`/`is_visible` were
+  private on a public enum (so no external caller could ask whether the pane
+  was open), and the pane had no reader for its own history at all —
+  `unread_count` was the whole of its readable state, which is the same reason
+  nothing could ask it to draw.
+
+  **Still an island next door:** `gui/desktop/src/osd.rs` (3,457 lines), the
+  volume/brightness/lock on-screen display, remains uncalled. It was the other
+  candidate for the wallpaper message and lost on the merits — an OSD
+  auto-dismisses, so a user away from the machine at login would miss the text
+  for ever, while a notification persists in a history they can come back to.
+  It still needs a caller of its own, for the transient messages an OSD is
+  actually right for.
 
 ## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25)
 

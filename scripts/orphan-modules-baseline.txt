@@ -44,7 +44,6 @@ gui/desktop/src/mouse_settings.rs
 gui/desktop/src/multimon.rs
 gui/desktop/src/network_indicator.rs
 gui/desktop/src/network_settings.rs
-gui/desktop/src/notif_pane.rs
 gui/desktop/src/notification_settings.rs
 gui/desktop/src/osd.rs
 gui/desktop/src/power_settings.rs

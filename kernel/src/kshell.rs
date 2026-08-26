@@ -1462,6 +1462,15 @@ fn remove_quotes(s: &str) -> String {
 /// and exited 0: the one outcome indistinguishable from a file that needed no
 /// translating.
 ///
+/// `column` is `cut`'s case exactly. Its `-s` separator can *be* whitespace,
+/// and `column -t -s '<TAB>'` — meaning tab and not space, which is how one
+/// lines up a TSV whose fields contain spaces — is the invocation that needs
+/// it. Dequoted, the tab is whitespace like any other, so the flag walk's word
+/// splitter swallowed it and `-s` was left with the *next* word as its
+/// argument, or with none at all. Unlike `cut`, this one never produced a wrong
+/// answer: a lost separator fell back to the default split on blanks, which is
+/// what the user got and not what they asked for.
+///
 /// `sed` is `awk`'s case: the script is one argument whose interior spaces are
 /// load-bearing, on both sides of a substitution. Dequoted,
 /// `sed 's/hello world/hi/'` becomes the two words `s/hello` and `world/hi/`,
@@ -1478,7 +1487,7 @@ fn remove_quotes(s: &str) -> String {
 fn command_parses_own_quotes(cmd: &str) -> bool {
     matches!(
         cmd,
-        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed"
+        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column"
     )
 }
 
@@ -15232,6 +15241,58 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "a second -s replaces the first set instead of extending it"
         );
 
+        // A separator that *is* whitespace. The flag walk used to be
+        // `str::split_whitespace`, which swallowed the argument, so `-s` was
+        // left with the next word or with none -- and a lost separator fell
+        // back silently to the default split on blanks. `column` is now on
+        // `command_parses_own_quotes`, so the quoting survives to here and
+        // `split_words` keeps the tab as one word.
+        //
+        // Tab and *not* space is the invocation that needs this: it lines up a
+        // TSV whose fields contain spaces. Under the default split `zz_a b`
+        // would be two fields; here it is one.
+        let out = piped("column -t -s '\t'", b"zz_a b\tzz_c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a b  zz_c\n",
+            "a tab separator is expressible, and a space inside a field survives it"
+        );
+
+        // A quoted space is the other half, and it is observably not the same
+        // as the default: the default collapses runs of blanks, an explicit
+        // separator keeps the empty field between two of them.
+        let out = piped("column -t -s ' '", b"zz_a  zz_b\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a    zz_b\n",
+            "an explicit space separator keeps the empty field the default split collapses"
+        );
+
+        // ...and the same input under the default split, to show the two really
+        // do differ. Without this the assertion above could pass on a `-s` that
+        // was dropped, if the default happened to agree.
+        let out = piped("column -t", b"zz_a  zz_b\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b\n",
+            "the default split collapses the run, so the previous case proves -s arrived"
+        );
+
+        // An empty separator argument is refused rather than ignored.
+        // `split_words` yields no word for `''`, so `-s` finds nothing after it
+        // -- and a `-s` the user typed but that reached nothing is exactly the
+        // silent-guess shape, so it must not fall back to the default.
+        let out = piped("column -t -s ''", b"zz_a zz_b\n");
+        assert_eq!(
+            last_exit(),
+            1,
+            "an empty -s argument is refused, not silently ignored"
+        );
+        assert!(
+            out.starts_with(b"column: -s requires a separator"),
+            "and says so"
+        );
+
         // An explicit separator keeps empty fields, where the default split
         // collapses runs -- unchanged from `str::split` and worth holding still,
         // since `split_on_any_of` is new code doing an old job.
@@ -15259,6 +15320,27 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "and formats to the same bytes the pipe did"
         );
         let _ = crate::fs::Vfs::remove(path);
+
+        // The other half of what moving `column` onto
+        // `command_parses_own_quotes` buys: an operand with a space in it. Our
+        // paths allow every byte but `/` and NUL, so this is an ordinary file
+        // name. Dequoted at the dispatch boundary it became two words, and the
+        // second tripped the extra-operand refusal -- so the file was
+        // unreachable rather than misread, but unreachable all the same.
+        let spaced = "/tmp/kshell column spaced.txt";
+        crate::fs::Vfs::write_file(spaced, b"zz_a zz_b\n")?;
+        let out = capture_command("column -t '/tmp/kshell column spaced.txt'");
+        assert_eq!(
+            last_exit(),
+            0,
+            "a quoted operand containing a space names one file, not two operands"
+        );
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b\n",
+            "and its contents are formatted"
+        );
+        let _ = crate::fs::Vfs::remove(spaced);
 
         // A last line with no newline gains one. That is GNU's behaviour --
         // `column` emits a row terminator after every row -- and it is stated
@@ -16096,7 +16178,7 @@ fn cmd_column(args: &str) {
         return;
     }
 
-    let path = resolve_path(parsed.file_path);
+    let path = resolve_path(&parsed.file_path);
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
@@ -16116,14 +16198,18 @@ fn cmd_column(args: &str) {
 /// have told apart from a differently-ordered one anyway. Naming the fields
 /// also means the two call sites destructure by name, so adding a fourth flag
 /// later cannot silently reorder them.
-struct ColumnArgs<'a> {
+struct ColumnArgs {
     /// `-t`: format into an aligned table rather than passing lines through.
     table_mode: bool,
     /// `-s`: the separator **set**, one entry per character, or `None` for the
     /// default split on runs of space and tab.
     seps: Option<Vec<Vec<u8>>>,
     /// The single file operand, or `""` when reading from a pipe.
-    file_path: &'a str,
+    ///
+    /// Owned rather than borrowed from the argument string: the words come from
+    /// [`split_words`], which builds them, because a quoted operand's bytes are
+    /// not a contiguous slice of the line it was written on.
+    file_path: String,
 }
 
 /// Parse `column`'s flags, shared by the file and pipe entry points.
@@ -16145,19 +16231,36 @@ struct ColumnArgs<'a> {
 /// A `-s` given more than once replaces the previous set rather than adding to
 /// it, matching util-linux, where the option's argument *is* the set.
 ///
-/// An empty argument (`-s ''`) yields no separators and therefore falls back to
-/// the default blank splitting, which is the same thing the old first-character
-/// reading did with it. Unreachable today for a second reason — see the
-/// `split_whitespace` note in `known-issues.md` — but it is the behaviour if it
-/// ever becomes reachable.
-fn column_parse_args(args: &str) -> Option<ColumnArgs<'_>> {
+/// The words come from [`split_words`], not from `str::split_whitespace`, which
+/// is what makes a separator that *is* whitespace expressible at all.
+/// `column -t -s '<TAB>'` — tab and not space, which is how one lines up a TSV
+/// whose fields contain spaces — used to lose its argument to the splitter and
+/// silently fall back to the default split on blanks. `column` is on
+/// [`command_parses_own_quotes`] for this reason, exactly as `cut` is for
+/// `cut -d' ' -f1`.
+///
+/// One consequence to know about: `split_words` produces no word at all for an
+/// empty quoted argument, so `column -s ''` arrives as a bare `-s` and is
+/// refused with "`-s` requires a separator". That is a better answer than the
+/// silent fallback it replaced — an empty separator set is not something a user
+/// can have meant — but it is a refusal where this function's older comment
+/// promised a fallback, so it is stated rather than left to be discovered.
+fn column_parse_args(args: &str) -> Option<ColumnArgs> {
     let mut table_mode = false;
     let mut sep: Option<Vec<Vec<u8>>> = None;
-    let mut file_path = "";
+    let mut file_path = String::new();
     let mut flags_done = false;
 
-    let mut words = args.split_whitespace();
-    while let Some(w) = words.next() {
+    // Index-based over an owned `Vec<String>`, as `parse_cut_args` is: an
+    // option that takes a value has to look at the *next* word, which an
+    // iterator borrowed from `words` cannot do while `words` is being consumed
+    // by the outer loop.
+    let words = split_words(args);
+    let mut i = 0usize;
+    while let Some(word) = words.get(i) {
+        i = i.saturating_add(1);
+        let w = word.as_str();
+
         if !flags_done && w == "--" {
             flags_done = true;
             continue;
@@ -16170,17 +16273,18 @@ fn column_parse_args(args: &str) -> Option<ColumnArgs<'_>> {
                 set_exit(1);
                 return None;
             }
-            file_path = w;
+            file_path = String::from(w);
             continue;
         }
         if w == "-t" {
             table_mode = true;
         } else if w == "-s" {
-            let Some(s) = words.next() else {
+            let Some(s) = words.get(i) else {
                 shell_println!("column: -s requires a separator");
                 set_exit(1);
                 return None;
             };
+            i = i.saturating_add(1);
             let set: Vec<Vec<u8>> = s
                 .chars()
                 .map(|c| {
@@ -16191,6 +16295,8 @@ fn column_parse_args(args: &str) -> Option<ColumnArgs<'_>> {
             // An empty set means "no explicit separator", which is what the
             // default blank split already is -- carrying `Some(vec![])` would
             // reach `split_on_any_of` and make it decide the same thing again.
+            // Not reachable through `split_words`, which drops an empty word;
+            // kept because `set` is derived rather than assumed non-empty.
             sep = if set.is_empty() { None } else { Some(set) };
         } else {
             shell_println!("column: unrecognized option `{}'", w);
@@ -16222,7 +16328,7 @@ fn cmd_column_input(args: &str, input: &[u8]) {
     if parsed.file_path.is_empty() {
         column_format(input, parsed.table_mode, parsed.seps.as_deref());
     } else {
-        let path = resolve_path(parsed.file_path);
+        let path = resolve_path(&parsed.file_path);
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
             Err(e) => {

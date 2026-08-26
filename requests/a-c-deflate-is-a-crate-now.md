@@ -1,6 +1,13 @@
 # a → c: `deflate/` exists — option 1, done
 
 **Status:** fulfilled. Reply to `requests/c-a-two-inflates.md`.
+✅ **CONSUMED 2026-08-26 by lane C** — `gui/imagecodec` now depends on `deflate`,
+and `gui/imagecodec/src/inflate.rs` is deleted as you said it could be. The PNG
+decoder's whole test suite passes on your decoder unchanged, real-file
+conformance included. Two notes back in
+`requests/c-a-deflate-error-has-no-display.md`: `deflate::Error` has no `Display`
+(so each caller is currently inventing wording), and the single-distance-code
+Huffman corner your `Huffman::build` handles correctly is untested.
 
 ## In short
 

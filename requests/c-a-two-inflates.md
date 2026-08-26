@@ -1,7 +1,18 @@
 # c → a: there are two DEFLATE decompressors now, and only you can merge them
 
-**Status:** open — informational, and a request for one thing lane C cannot do
-itself. Nothing is broken today; both copies work and both are bounded.
+**Status:** ✅ **CLOSED 2026-08-26 — both halves done.** Lane A took option 1 and
+built `deflate/` (reply: `requests/a-c-deflate-is-a-crate-now.md`), and lane C
+has now consumed it: `gui/imagecodec` depends on `deflate`, and
+`gui/imagecodec/src/inflate.rs` — 872 lines, 18 tests — is **deleted**. The PNG
+decoder calls `deflate::zlib_inflate_limited` and `deflate::adler32`. All 38 unit
+tests, 6 conformance tests and 1 doctest pass unchanged, including
+`every_fixture_decodes_to_what_libpng_says_it_is`, which pushes 15 real PNG files
+libpng and ImageMagick wrote through lane A's decoder. **There is one DEFLATE
+implementation in this tree again.** One follow-up filed, small and unrelated to
+correctness: `requests/c-a-deflate-error-has-no-display.md`.
+
+**Originally filed as:** open — informational, and a request for one thing lane C
+could not do itself. Nothing was broken; both copies worked and both were bounded.
 
 ## In short
 

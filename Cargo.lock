@@ -5487,6 +5487,9 @@ version = "0.1.0"
 [[package]]
 name = "imagecodec"
 version = "0.1.0"
+dependencies = [
+ "deflate",
+]
 
 [[package]]
 name = "imagemagick"

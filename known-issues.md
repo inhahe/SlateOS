@@ -84098,9 +84098,9 @@ it does.
 
 | | |
 |---|---|
-| Crate | `gui/imagecodec` — `no_std` + `alloc`, zero dependencies |
+| Crate | `gui/imagecodec` — `no_std` + `alloc`, and nothing from the GUI |
 | Coverage | PNG (RFC 2083) in full: all five colour types, bit depths 1/2/4/8/16, `PLTE`, `tRNS`, all five scanline filters, Adam7 interlacing |
-| Also written | `imagecodec::inflate` — DEFLATE (RFC 1951) and zlib (RFC 1950) from scratch, because PNG pixel data is a zlib stream. See `requests/c-a-two-inflates.md` for why this is a *second* copy and what it would take to have one |
+| Decompression | `deflate` — the tree's one DEFLATE (RFC 1951) / zlib (RFC 1950) implementation, since PNG pixel data is a zlib stream. **Corrected 2026-08-26:** this row used to read "*Also written:* `imagecodec::inflate` … from scratch", and the crate row used to say "zero dependencies". Both were true and both were the problem — that decoder was the *second* copy in the tree (`requests/c-a-two-inflates.md`). Lane A promoted the kernel's to a root-level crate, and lane C deleted its own: 872 lines and 18 tests gone, the whole PNG suite passing on lane A's decoder unchanged, real-file conformance included. `deflate` is `no_std` + `alloc` and depends only on `crc32`, so the property this crate actually needs — that nothing forces a widget-library dependency on a thumbnail engine — is untouched. Zero dependencies was never the goal; zero *GUI* dependencies was |
 | Not covered | JPEG (the next thing this crate should grow); colour management (`gAMA`/`cHRM`/`iCCP`/`sRGB` are parsed past, not applied); APNG animation (decodes to the first frame, as the APNG spec requires of a decoder that does not animate) |
 | Output contract | densely packed `0xAARRGGBB`, **straight** alpha — matching `BufferFormat::Argb8888` and the compositor's `blend_pixel`, so no conversion pass stands between a file and a screen |
 | Safety | nothing panics for any input; nothing is allocated on the strength of a header field — `Limits` is checked against the header *before* the pixel buffer exists, and the decompressor is given the exact output size the header implies |

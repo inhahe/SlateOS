@@ -80483,7 +80483,27 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **282 of 334 remain**
+
+> **Burn-down log.** 2026-08-25: `cmd_installer` (18), `cmd_fstune` (17),
+> `cmd_certmgr` (10), `cmd_fontmgr` (6) and one stray `<top>` site cleared
+> together — 52 sites, five ledger lines deleted, 334 → 282 across 119 → 114
+> functions. They went as one change because they were one *idiom*: 42 of the
+> 52 were the character-for-character identical line
+> `let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);`,
+> now a shared `required_id` helper. The rest split into numeric operands
+> (`required_u32` / `optional_u32` — which is where the omitted-vs-mistyped
+> distinction described below finally lives in code rather than in this
+> paragraph) and fourteen `match … { _ => Default }` arms over user-typed
+> *names*, where the default variant is the guess.
+>
+> Worst instance found: `installer remove abc` did not refuse. The id became 0,
+> so it removed whatever session 0 was, printed `Removed`, and exited 0.
+> `remove` is the subcommand where "guess which object they meant" is least
+> defensible, and it had the same one-line idiom as `info`.
+>
+> See the sibling entry `A-KSHELL-TWO-CHECKERS-READ-COMMENTS-AS-CODE` for what
+> this sweep turned up inside the gates themselves.
 
 **In short:** 334 places in the shell read a word the user typed, fail to make
 sense of it, and quietly substitute a default. `theme set 300 0 0` sets the red
@@ -80513,8 +80533,8 @@ Sampled instances, to show the range:
 | `cmd_colorpicker` RGB components (7 sites) | `.and_then(parse).unwrap_or(0)` | `colorpicker rgb 300 0 0` yields black, silently |
 | `cmd_namespace`, a mount-namespace id | `.unwrap_or(mount_ns::ROOT_NAMESPACE)` | an unreadable id operates on the *root* namespace |
 | `cmd_pidns`, a pid argument | `.unwrap_or(0)` | pid 0 is the idle task |
-| `cmd_installer` (18 sites) | assorted | the most sites of any single function |
-| `cmd_fstune` (17 sites) | assorted | tuning knobs that silently keep their old value |
+| ~~`cmd_installer` (18 sites)~~ | ~~assorted~~ | fixed 2026-08-25; `installer remove abc` removed session 0 |
+| ~~`cmd_fstune` (17 sites)~~ | ~~assorted~~ | fixed 2026-08-25; tuning knobs that silently took 0 |
 
 **Why it is pinned rather than fixed now.** 334 edits across 119 functions is a
 sweep in its own right, and leaving the gate unwired while it is done would let
@@ -80530,6 +80550,184 @@ than exist, so a fix that forgets to lower the count fails the build too; the
 ledger cannot silently rot into a rubber stamp.
 
 **Not a regression.** True since each site was written.
+
+---
+
+## `A-KSHELL-TWO-CHECKERS-READ-COMMENTS-AS-CODE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+**In short:** two of the build's own gate scripts searched the source with
+plain text matching and never skipped comments — so an English sentence
+*about* code counted as the code. One shell command had an option loop with no
+way to refuse an unknown flag, and the gate that exists to catch exactly that
+had been quietly passing it for as long as it existed, because a comment next
+to it contained the words it was grepping for.
+
+**Where.** `scripts/check-option-refusal.py` and `scripts/check-usage-status.py`.
+Both read `lines[i]` raw and ran a regex over it.
+
+**How it hid.** The comment in `cmd_fsck_ext4` read, in full:
+
+```rust
+// No `set_exit(1)`: `--help` succeeded at what it was asked.
+```
+
+`check-usage-status.py` looks for `set_exit(` near a usage message to decide
+the command reports failure. `check-option-refusal.py`'s D3 detector looks for
+the same token to decide an option loop can refuse. **A comment stating that
+there is deliberately no `set_exit(1)` here satisfied both greps for
+`set_exit(1)`.** The clearer the note, the more completely it defeated the
+check — and "explain why this arm deliberately does *not* do X" is exactly
+what a careful author writes.
+
+The same shape ran the other way in `check-option-refusal.py`'s `ALLOWED`
+table, which carried two exemptions whose stated reason was *"prose in the doc
+comment describing the bug that was removed, not code"*. Two hand-granted
+exemptions for the same root cause is the signal that it is a defect in the
+detector, not a series of special cases — and the workaround it was pushing
+toward (stop writing down what the bug was) would have deleted the single most
+valuable line in each of those fixes.
+
+**What it was hiding.** With comments stripped, the option-refusal checker
+immediately reported `cmd_fsck_ext4`'s flag loop, which had no refusal at all:
+
+| Invocation | What happened |
+|---|---|
+| `fsck.ext4 /dev/sda --verbse` | the typo fell through to `device = w`, so it checked a device *named* `--verbse` |
+| `fsck.ext4 --verbse /dev/sda` | worse — the real device overwrote the typo, so the check ran, verbosely-not-verbose, with nothing to say a flag had been ignored |
+| `fsck.ext4 /dev/sda /dev/sdb` | the second device silently replaced the first |
+
+All three now refuse. Pinned by rung 65.
+
+**The fix.** Both checkers strip comments before matching, blanking string
+literals first so the `//` inside a `"https://…"` is not mistaken for one.
+The two prose exemptions were deleted, since the detector no longer needs
+them: 3 allowed → 1.
+
+**One further consequence worth keeping.** Once the `--help` arm was correctly
+seen as a usage message that returns 0, it needed a real exemption — and it
+could not have one, because `check-usage-status.py`'s `ALLOWED` is keyed by
+enclosing function plus a fragment of the line, and the help arm and the
+missing-device arm printed *character-for-character the same* synopsis. One
+entry would have exempted both, so removing the `set_exit(1)` from the error
+arm later would have gone unnoticed. The text moved into an
+`fsck_ext4_usage()` formatter — the precedent six other entries in that table
+already follow — so the exemption names only the formatter, and the two
+callers differ in the one way that matters and that duplicated text cannot
+show: their exit status.
+
+**Residual.** Both checkers now strip comments with a *line-local* scanner,
+which does not understand `/* … */` block comments or raw strings. A block
+comment containing `set_exit(1)` would still fool them. `scripts/rust_scopes.py`
+already has a correct lexer (`_strip`) that tracks block-comment nesting and
+raw-string hash counts across lines — but it discards string literals too, and
+these detectors need those (`USAGE` matches `"Usage: …"`, `OPTION_LITERAL`
+matches `"-x"`, D2 matches `.starts_with('-')`). The proper fix is a
+`keep_strings` mode on `_strip` and a shared `code_only(lines)` helper that all
+the detector-style checkers use, replacing both ad-hoc copies. Filed as
+`TD-A-CHECKERS-STRIP-COMMENTS-WITH-A-LINE-LOCAL-SCANNER` below.
+
+**Not a regression.** Both checkers were blind from the day they were written.
+
+---
+
+## `TD-A-CHECKERS-STRIP-COMMENTS-WITH-A-LINE-LOCAL-SCANNER` (lane A, 2026-08-25) — **open**
+
+**In short:** the fix above taught two gate scripts to ignore comments, but
+each got its own small comment-stripper that only understands `// …` to
+end-of-line. Rust also has `/* … */` (which nests) and raw strings
+(`r#"…"#`). A `set_exit(1)` inside a block comment would still be read as
+code, which is the same bug in a rarer shape. A survey of the other twelve
+`scripts/check-*.py` (done 2026-08-25, read-only, while the boot test ran)
+found the problem is both **wider** and **worse** than that, in two ways
+recorded below.
+
+**Where.** `strip_comments` in `scripts/check-option-refusal.py` and in
+`scripts/check-usage-status.py` — two near-identical copies, which is itself
+the smell.
+
+### Finding 1 — there are five hand-rolled Rust lexers, not two
+
+| Script | Blanks | Preserves offsets | Raw strings | Char literals | Self-test |
+|---|---|---|---|---|---|
+| `check-recursive-locks.py::strip_noise` | comments **+ literals** | ✅ | ✅ | ✅ | ✅ |
+| `check-tick-wiring.py::strip_comments` | comments **+ literals** | ✅ | ❌ | ✅ | ❌ |
+| `check-variant-lists.py::strip_comments` | comments only | ❌ | ❌ | ❌ | ❌ |
+| `check-option-refusal.py::strip_comments` | comments only | ✅ | ❌ | ❌ | ❌ |
+| `check-usage-status.py::strip_comments` | comments only | ✅ | ❌ | ❌ | ❌ |
+
+So the shared implementation to converge on is **not**
+`scripts/rust_scopes.py::_strip` as this entry first proposed — it is
+`check-recursive-locks.py::strip_noise`, which is already the most complete of
+the five (nested block comments, raw strings, char literals, offsets exact,
+and a self-test that includes `apostrophe in block comment`). Three checkers —
+`check-selftest-skips.py`, `check-vfs-permission-gate.py`,
+`check-vfs-under-lock.py` — already import it by `importlib` (the filename's
+hyphens make it un-`import`able normally), so the borrowing convention exists
+and works.
+
+It cannot be used *as-is* by the two detectors above for the same reason
+`rust_scopes._strip` could not: it blanks string literals too, and these
+detectors match *on* string literals (`"Usage: …"`, `"-x"`,
+`.starts_with('-')`). The fix is one parameter — `strip_noise(src,
+keep_literals=False)` — plus a self-test case for the new mode, then delete
+the other four copies.
+
+### Finding 2 — the brace counters read comments as code, which fails silently
+
+This is the more serious half, and it is not the same shape as the bug fixed
+above. `check-query-status.py` — which its own docstring calls the mirror of
+`check-usage-status.py` — locates a block's start and end by **counting
+braces** over lines that have had *strings* removed but **not comments**:
+`strip_strings` there is one line (`"".join(s.split('"')[::2])`) and is applied
+to raw `lines[k]` at `:134`, `:149` and `:196`, scanning a ±400-line window.
+Two further reads on the same loop are not filtered at all — `PRINT.search(
+lines[k])` at `:198` will collect a `shell_println!` written *inside a comment*
+as one of the block's answers, and the hit guard at `:178`
+(`ln.lstrip().startswith("//")`) only recognises a comment that occupies the
+whole line, not a trailing one.
+
+`check-usage-status.py` had the identical defect and **no longer does** — its
+depth line reads `strip_strings(s)` where `s` is already
+`strip_comments(lines[k])`, so the fix recorded above closed its brace counter
+too, as a side effect rather than by intent. That is worth stating plainly:
+the mirror pair was written to stay in step, one of the two drifted out of it
+silently, and nothing in either script would have reported that.
+
+`kernel/src/kshell.rs` currently contains **26 comments holding an unbalanced
+brace**, which is precisely the thing a comment is allowed to contain:
+
+```rust
+i = i.saturating_add(1);  // skip `{`
+i = i.saturating_add(1);  // skip `}`
+/// Brace nesting depth.  Starts at 1 (the opening `{`).
+// Don't include the final `}` line in the body.
+```
+
+Any one of these falling inside a scan window shifts the computed block
+boundary, so the checker then examines *the wrong range of lines* — which can
+both miss a real finding and manufacture a false one, with no diagnostic
+either way. Two of the five lexers above already wrote this hazard down
+independently, in almost the same words — `check-variant-lists.py`: *"Done
+before any brace counting, because a comment is exactly the place an
+unbalanced brace or bracket is allowed to appear"*; `check-tick-wiring.py`:
+*"a `'{'` … in the source would otherwise throw the match off and swallow the
+rest of the file"*. The two checkers that most need the warning are the two
+that never received it.
+
+**Not yet proven to be biting.** The 26 comments are real and the scan is
+real, but no current finding has been traced to a window that contains one.
+That is a reason to fix it, not a reason to wait: the failure mode is a gate
+silently reading the wrong lines.
+
+**Why none of it was done in the same change.** A boot test was running
+against `scripts/` at the time, and editing a gate script mid-run invalidates
+it. The line-local version closes the case that actually occurred; this closes
+the class.
+
+**Severity.** Low-to-moderate. Finding 1 narrows a gate, and a gate that is
+too narrow fails open. Finding 2 lets a gate answer about lines it was not
+asked about, which is worse than failing open because the answer still looks
+authoritative.
 
 ---
 

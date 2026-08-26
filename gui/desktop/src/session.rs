@@ -13,7 +13,7 @@
 //! pointer and key events into shell calls, and sends the resulting intents
 //! back out as protocol requests.
 //!
-//! # The three surfaces, and why three
+//! # The four surfaces, and why four
 //!
 //! A shell is not one window. Its parts sit in different bands of the stacking
 //! order, and the band is not advisory — a taskbar demoted to [`Layer::Normal`]
@@ -24,6 +24,7 @@
 //! | background | [`Layer::Background`] | the whole screen | the wallpaper |
 //! | panel | [`Layer::Overlay`] | [`DesktopShell::taskbar_rect`] | the taskbar |
 //! | popups | [`Layer::Overlay`] | the whole screen | start menu, power menu, calendar, Alt-Tab |
+//! | osd | [`Layer::Overlay`], click-through | the whole screen | the volume and brightness overlays |
 //!
 //! The popup surface is full-screen rather than menu-sized, and that is the
 //! whole mechanism behind click-outside-to-dismiss: a press on bare desktop
@@ -31,6 +32,14 @@
 //! it can only do that if some surface of the shell's is under it. It is
 //! unmapped while nothing is open, so an idle desktop is not covered by an
 //! invisible sheet that eats every click.
+//!
+//! The overlay surface is full-screen for a quite different reason — an OSD is
+//! centred on the display and is *not* there to be clicked — and it is the one
+//! surface created `input_transparent`, so a press lands on whatever is
+//! underneath instead of on a volume indicator that happens to be fading over
+//! it. That is also why it cannot share the popup surface: those two want
+//! opposite answers to the same question, and they come and go on unrelated
+//! schedules, so one surface would have to be mapped whenever either wanted it.
 //!
 //! # Two coordinate spaces, one origin
 //!
@@ -173,6 +182,20 @@ pub struct ShellSession<T: Transport> {
     /// `set_visible` is a round trip only when the answer changes, rather than
     /// on every repaint.
     popups_shown: bool,
+    /// The full-screen, click-through surface the heads-up overlays are drawn
+    /// on.
+    ///
+    /// Separate from `popups` rather than sharing it, because the two differ in
+    /// the one property neither can compromise on: a menu exists to be clicked
+    /// and an overlay must never be. They also come and go on unrelated
+    /// schedules — an OSD can appear over an open start menu — so one surface
+    /// would have to be mapped whenever *either* wanted it, which would leave
+    /// the menu's full-screen click-catcher up during a volume fade and swallow
+    /// the next click on bare desktop.
+    osd: Surface,
+    /// Whether the overlay surface is currently mapped, tracked as
+    /// `popups_shown` is and reconciled from `shell.osd.has_visible()`.
+    osd_shown: bool,
     /// Whether the shell currently holds the Escape key.
     ///
     /// Tracked for the same reason `popups_shown` is, and reconciled by
@@ -269,6 +292,26 @@ impl<T: Transport> ShellSession<T> {
             ))?,
             origin: (0.0, 0.0),
         };
+        // Last, so it is above the menus: an overlay is a heads-up report and
+        // has to be readable over whatever is on screen, including a start menu
+        // the user opened while the volume was still fading.
+        let osd = Surface {
+            window: events.create(Spec {
+                // The one surface that declines the mouse. Everything else the
+                // shell owns is here to be clicked; this is here to be read,
+                // and a press aimed at the document under a volume indicator
+                // must reach the document. See `design-decisions.md` 566.
+                input_transparent: true,
+                ..chrome(
+                    "Shell overlays",
+                    display.width,
+                    display.height,
+                    (0, 0),
+                    Layer::Overlay,
+                )
+            })?,
+            origin: (0.0, 0.0),
+        };
 
         events.watch_desktop(true)?;
 
@@ -288,7 +331,7 @@ impl<T: Transport> ShellSession<T> {
         // desktop. The one refusal that is *not* a bug — another shell already
         // holds the chord — is a refusal to run two shells at once, which is
         // correct.
-        for &(key, modifiers) in DesktopShell::global_chords() {
+        for (key, modifiers) in DesktopShell::global_chords() {
             events.grab_key(panel.window, key, modifiers)?;
         }
 
@@ -303,6 +346,11 @@ impl<T: Transport> ShellSession<T> {
             // first `paint_chrome` unmaps it. Recording `true` here rather than
             // `false` is what makes that first unmap actually happen.
             popups_shown: true,
+            osd,
+            // For the same reason as `popups_shown`: nothing is showing yet, so
+            // the first `paint_chrome` has to unmap a surface the compositor
+            // just mapped.
+            osd_shown: true,
             // Nothing is open on a fresh desktop, and nothing was grabbed above.
             escape_held: false,
             revision: 0,
@@ -355,6 +403,13 @@ impl<T: Transport> ShellSession<T> {
     #[must_use]
     pub const fn popups(&self) -> Surface {
         self.popups
+    }
+
+    /// The full-screen click-through surface the heads-up overlays are drawn
+    /// on, mapped only while one is showing.
+    #[must_use]
+    pub const fn osd(&self) -> Surface {
+        self.osd
     }
 
     /// The programs the user has asked to start since this was last called.
@@ -642,6 +697,22 @@ impl<T: Transport> ShellSession<T> {
             self.events
                 .submit(self.popups.window, &self.popups.localize(&tree))?;
         }
+
+        // The overlays, on their own surface and on their own schedule: an OSD
+        // is not a popup and neither one's visibility implies anything about
+        // the other's.
+        let overlays = self.shell.render_osd();
+        let showing = overlays.is_some();
+        if showing != self.osd_shown {
+            if let Some(mut handle) = self.events.window_mut(self.osd.window) {
+                handle.set_visible(showing)?;
+            }
+            self.osd_shown = showing;
+        }
+        if let Some(tree) = overlays {
+            self.events
+                .submit(self.osd.window, &self.osd.localize(&tree))?;
+        }
         Ok(())
     }
 
@@ -809,6 +880,13 @@ impl<T: Transport> ShellSession<T> {
             Some(self.panel)
         } else if window == self.popups.window {
             Some(self.popups)
+        } else if window == self.osd.window {
+            // Listed even though it is click-through and so can never carry a
+            // pointer event: a surface the shell owns but does not recognise
+            // would be counted as the compositor misrouting, and every
+            // non-pointer event the loop may deliver about it — a resize, a
+            // close — would be dropped on that mistaken ground.
+            Some(self.osd)
         } else {
             None
         }
@@ -832,6 +910,12 @@ impl<T: Transport> ShellSession<T> {
         // tick as well would see the end of the slide as a fresh gesture and
         // start the slide over, for ever.
         let notifications_were_open = self.shell.notifications.pane_state().is_visible();
+        // And once more for the overlays. Sampled here rather than beside
+        // `handle_hotkey` because a volume key is not the only way one can
+        // appear — `shell_mut().show_osd(..)` is public, and the shell will grow
+        // its own callers (a brightness key, a caps-lock report) that this must
+        // not have to learn about one at a time.
+        let osd_was_visible = self.shell.osd.has_visible();
         let is_tick = matches!(event, Event::Tick { .. });
         match event {
             Event::Mouse(mouse) => self.pointer(&surface.to_screen(&mouse))?,
@@ -871,6 +955,18 @@ impl<T: Transport> ShellSession<T> {
         if !is_tick && notifications_were_open != self.shell.notifications.pane_state().is_visible()
         {
             self.begin_notifications_slide();
+        }
+        // An overlay that has just appeared has started something nothing else
+        // will wake up for: the overview and the pane are opened by gestures
+        // that go on to draw, but an OSD's whole life is a timeout, and a
+        // timeout with no frame behind it never comes due.
+        //
+        // Only on the transition, never unconditionally: re-arming a wake-up
+        // that is already pending resets the instant its delta is measured
+        // from, so a keystroke landing mid-fade would silently shorten that
+        // frame and make every animation on screen jump.
+        if !osd_was_visible && self.shell.osd.has_visible() {
+            self.arm_next_frame();
         }
         Ok(())
     }
@@ -984,6 +1080,11 @@ impl<T: Transport> ShellSession<T> {
         )]
         let secs = dt as f32 / 1000.0;
         self.shell.notifications.tick(secs);
+        // Given `elapsed_ms` rather than `dt`: the overlay clock is the one
+        // animator here that is not stepped but *dated*, so a frame long enough
+        // to saturate the `u32` above must not be quietly shortened to 49 days
+        // when the whole point of that frame is to retire everything on screen.
+        self.shell.advance_osd(elapsed_ms);
         // The stepped rectangles are deliberately not used here. A window's
         // geometry belongs to the compositor, not to the shell — the shell
         // cannot move a window by drawing it somewhere else — so a window
@@ -1015,6 +1116,12 @@ impl<T: Transport> ShellSession<T> {
         self.animations.has_active()
             || self.shell.overview.is_fading()
             || self.shell.notifications.is_sliding()
+            // `has_visible`, not "is fading": an overlay sitting at full opacity
+            // waiting for its timeout is still a thing that has to be woken up
+            // for, because the timeout is the thing the wake-up is measuring
+            // towards. A term that only counted fades would leave a freshly
+            // shown OSD on screen for ever on an otherwise idle desktop.
+            || self.shell.osd.has_visible()
     }
 
     /// One pointer event, already in screen coordinates.
@@ -1078,6 +1185,14 @@ impl<T: Transport> ShellSession<T> {
             handle.set_size(px(bar.w), px(bar.h))?;
         }
         if let Some(mut handle) = self.events.window_mut(self.popups.window) {
+            handle.set_size(width, height)?;
+        }
+        // The overlay surface follows too. `DesktopShell::show_osd` re-seeds the
+        // manager's own screen size on the way in, so the drawing would centre
+        // itself correctly regardless — but on a surface still the old size, and
+        // an overlay centred on a 4K desktop inside a 1080p window is clipped
+        // away entirely.
+        if let Some(mut handle) = self.events.window_mut(self.osd.window) {
             handle.set_size(width, height)?;
         }
         self.repaint()

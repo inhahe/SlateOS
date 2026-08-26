@@ -36,9 +36,9 @@ type Desktop = Rc<RefCell<TestDesktop>>;
 
 /// A started session and the compositor behind it.
 ///
-/// `TestDesktop` hands out ids from 100, so the three surfaces are 100
-/// (background), 101 (panel) and 102 (popups), in the order `start` creates
-/// them.
+/// `TestDesktop` hands out ids from 100, so the four surfaces are 100
+/// (background), 101 (panel), 102 (popups) and 103 (osd), in the order `start`
+/// creates them.
 fn session() -> (Session, Desktop) {
     let (events, desktop) = wired();
     let session = ShellSession::start(events).expect("the harness refused a surface");
@@ -129,16 +129,17 @@ fn centre(r: Rect) -> (f32, f32) {
 // ---- the surfaces ----
 
 #[test]
-fn the_shell_opens_a_background_a_panel_and_a_menu_surface() {
+fn the_shell_opens_a_background_a_panel_a_menu_and_an_overlay_surface() {
     let (session, desktop) = session();
     let specs = created(&desktop);
-    assert_eq!(specs.len(), 3, "a shell is three surfaces, not one");
+    assert_eq!(specs.len(), 4, "a shell is four surfaces, not one");
 
     // The band each one is in is the load-bearing part: a taskbar in
     // `Layer::Normal` vanishes behind the first window the user opens.
     assert_eq!(specs[0].layer, oswindow::Layer::Background);
     assert_eq!(specs[1].layer, oswindow::Layer::Overlay);
     assert_eq!(specs[2].layer, oswindow::Layer::Overlay);
+    assert_eq!(specs[3].layer, oswindow::Layer::Overlay);
 
     // None of them is a window in the ordinary sense.
     for spec in &specs {
@@ -150,18 +151,43 @@ fn the_shell_opens_a_background_a_panel_and_a_menu_surface() {
         );
     }
 
-    // The panel is exactly the taskbar; the other two are the whole display.
+    // The panel is exactly the taskbar; the other three are the whole display.
     let bar = session.shell().taskbar_rect();
     assert_eq!(specs[1].position, Some((bar.x as i32, bar.y as i32)));
     assert_eq!(specs[1].width, bar.w.round() as u32);
     assert_eq!(specs[1].height, bar.h.round() as u32);
     assert_eq!((specs[0].width, specs[0].height), (2560, 1440));
     assert_eq!((specs[2].width, specs[2].height), (2560, 1440));
+    assert_eq!((specs[3].width, specs[3].height), (2560, 1440));
 
     // And the origins the session will translate by say the same thing.
     assert_eq!(session.background().origin(), (0.0, 0.0));
     assert_eq!(session.panel().origin(), (bar.x, bar.y));
     assert_eq!(session.popups().origin(), (0.0, 0.0));
+    assert_eq!(session.osd().origin(), (0.0, 0.0));
+}
+
+/// Exactly one of the shell's surfaces declines the mouse, and it is the one
+/// whose job is to be looked at rather than clicked.
+///
+/// Both halves matter. A clickable OSD is a full-screen sheet that eats the
+/// press aimed at the document under a volume indicator; a click-through
+/// *taskbar* is a taskbar whose buttons do nothing, and the taskbar is already
+/// `transparent`, so this is the assertion that keeps the two flags apart. See
+/// `design-decisions.md` 566.
+#[test]
+fn only_the_overlay_surface_refuses_the_mouse() {
+    let (_session, desktop) = session();
+    let specs = created(&desktop);
+    let click_through: Vec<&str> = specs
+        .iter()
+        .filter(|s| s.input_transparent)
+        .map(|s| s.title.as_str())
+        .collect();
+    assert_eq!(click_through, ["Shell overlays"]);
+    // And it is the last one created, so it is above the menus: an overlay is a
+    // report, and a report under the start menu is a report nobody reads.
+    assert!(specs[3].input_transparent);
 }
 
 #[test]
@@ -187,7 +213,7 @@ fn the_shell_claims_its_shortcuts_before_it_starts_listening() {
     let (session, desktop) = session();
     let panel = session.panel().window();
     let seen = &desktop.borrow().seen;
-    for &(key, modifiers) in DesktopShell::global_chords() {
+    for (key, modifiers) in DesktopShell::global_chords() {
         assert!(
             seen.iter().any(|r| r.body
                 == RequestBody::GrabKey {
@@ -1772,5 +1798,251 @@ fn a_frame_tick_does_not_restart_the_slide_it_just_finished() {
         session.shell().notifications.pane_state(),
         crate::notif_pane::PaneState::Hidden,
         "the pane bounced back open when its slide finished"
+    );
+}
+
+// ---- the heads-up overlays ----
+
+/// A bare media key, with no modifiers. The three are bound
+/// modifier-agnostically — a key with one meaning and no other job is not a
+/// chord — so this is only the most ordinary of the sixteen ways to press one.
+fn media(k: Key) -> guitk::event::Event {
+    key(k)
+}
+
+#[test]
+fn the_overlay_surface_is_unmapped_until_something_asks_to_be_shown() {
+    let (mut session, desktop) = session();
+    let osd = session.osd().window();
+
+    // Mapped at creation, like the popup surface, so the first paint has to
+    // take it away again.
+    assert!(
+        desktop.borrow().seen.iter().any(|r| r.body
+            == RequestBody::SetVisible {
+                window: osd,
+                visible: false
+            }),
+        "the overlay surface was left covering the desktop"
+    );
+
+    let panel = session.panel().window();
+    let before = desktop.borrow().seen.len();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, media(Key::VolumeUp))]);
+    session.pump().expect("pump");
+
+    assert!(
+        desktop.borrow().seen[before..].iter().any(|r| r.body
+            == RequestBody::SetVisible {
+                window: osd,
+                visible: true
+            }),
+        "the volume changed and the overlay had nothing to be drawn on"
+    );
+    let drawn = desktop
+        .borrow_mut()
+        .drawn()
+        .into_iter()
+        .rfind(|(w, _)| *w == osd)
+        .expect("the overlay surface was mapped and never painted");
+    assert!(
+        drawn.1 > 2,
+        "the overlay surface got only its translation wrapper — a mapped, \
+         blank, full-screen sheet"
+    );
+}
+
+#[test]
+fn the_volume_keys_move_the_volume_and_say_so() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let start = session.shell().notifications.volume();
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, media(Key::VolumeUp))]);
+    session.pump().expect("pump");
+    let up = session.shell().notifications.volume();
+    assert!(
+        up > start,
+        "VolumeUp did not turn the volume up: {start} then {up}"
+    );
+    assert!(
+        session.shell().osd.has_visible(),
+        "the volume moved with nothing on screen to say it had"
+    );
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, media(Key::VolumeDown))]);
+    session.pump().expect("pump");
+    assert_eq!(
+        session.shell().notifications.volume(),
+        start,
+        "down did not undo up"
+    );
+}
+
+/// The overlay's whole life is a timeout, and a timeout with no frame behind it
+/// never comes due: a shell that showed one without arming a frame would leave
+/// the volume indicator on screen until the user happened to move something
+/// else. The §520 failure in its second form.
+#[test]
+fn showing_an_overlay_asks_for_a_frame_and_the_last_one_stops_asking() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    assert!(
+        !session.events_mut().is_waking(panel),
+        "the test's premise is wrong: the desktop was not idle to begin with"
+    );
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, media(Key::VolumeUp))]);
+    session.pump().expect("pump");
+    assert!(
+        session.events_mut().is_waking(panel),
+        "an overlay was put on screen and no frame was asked for, so its \
+         timeout can never come due"
+    );
+
+    // Well short of the whole fade-in plus timeout plus fade-out.
+    frame(&mut session, &desktop, 500);
+    assert!(
+        session.shell().osd.has_visible(),
+        "half a second retired it"
+    );
+    assert!(
+        session.events_mut().is_waking(panel),
+        "the shell stopped asking for frames with an overlay still up"
+    );
+
+    // Past the end: gone, the surface taken away again, and — the point of the
+    // whole design — no wake-up left, so the loop parks unbounded.
+    let osd = session.osd().window();
+    let before = desktop.borrow().seen.len();
+    frame(&mut session, &desktop, 10_000);
+    assert!(
+        !session.shell().osd.has_visible(),
+        "ten seconds did not retire a two-second overlay"
+    );
+    assert!(
+        desktop.borrow().seen[before..].iter().any(|r| r.body
+            == RequestBody::SetVisible {
+                window: osd,
+                visible: false
+            }),
+        "the overlay expired but its surface stayed up"
+    );
+    assert!(
+        !session.events_mut().is_waking(panel),
+        "the last overlay went away and the desktop kept waking up for ever"
+    );
+}
+
+/// The overlay is not a menu, and the two must not be confused for each other:
+/// a volume indicator that dismissed the start menu, or a start menu whose
+/// surface was taken away when the volume faded, would both be this failing.
+#[test]
+fn an_overlay_and_a_menu_do_not_disturb_each_other() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let popups = session.popups().window();
+
+    let start = centre(session.shell().start_button_rect());
+    press_at(&desktop, session.panel(), start.0, start.1);
+    session.pump().expect("pump");
+    assert!(session.shell().start_menu_open);
+
+    let before = desktop.borrow().seen.len();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, media(Key::VolumeUp))]);
+    session.pump().expect("pump");
+    assert!(
+        session.shell().start_menu_open,
+        "turning the volume up closed the start menu"
+    );
+    assert!(
+        session.shell().osd.has_visible(),
+        "the overlay did not appear over the open menu"
+    );
+
+    // Now let the overlay expire, with the menu still open: the menu's surface
+    // must not go with it.
+    frame(&mut session, &desktop, 10_000);
+    assert!(!session.shell().osd.has_visible());
+    assert!(
+        !desktop.borrow().seen[before..].iter().any(|r| r.body
+            == RequestBody::SetVisible {
+                window: popups,
+                visible: false
+            }),
+        "the overlay faded and took the start menu's surface with it"
+    );
+}
+
+#[test]
+fn the_mute_key_silences_without_forgetting_the_level() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let level = session.shell().notifications.volume();
+    assert!(
+        level > 0,
+        "the test needs a level there is something to keep"
+    );
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, media(Key::VolumeMute))]);
+    session.pump().expect("pump");
+    assert!(session.shell().notifications.is_muted(), "mute did nothing");
+    assert_eq!(
+        session.shell().notifications.volume(),
+        level,
+        "muting threw the level away, so unmuting has nothing to restore"
+    );
+
+    // And turning it up is a way back: a key that only moves an inaudible
+    // number looks broken.
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, media(Key::VolumeUp))]);
+    session.pump().expect("pump");
+    assert!(
+        !session.shell().notifications.is_muted(),
+        "turning the volume up left it muted"
+    );
+}
+
+/// A display that changed size while an overlay was up would otherwise centre
+/// the drawing on the new screen inside a surface still the old size, which
+/// clips it away entirely.
+#[test]
+fn the_overlay_surface_follows_the_display() {
+    let (mut session, desktop) = session();
+    let background = session.background().window();
+    let osd = session.osd().window();
+    let before = desktop.borrow().seen.len();
+
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        background,
+        guitk::event::Event::Resize {
+            width: 1920,
+            height: 1080,
+        },
+    )]);
+    session.pump().expect("pump");
+
+    assert!(
+        desktop.borrow().seen[before..].iter().any(|r| r.body
+            == RequestBody::Resize {
+                window: osd,
+                width: 1920,
+                height: 1080
+            }),
+        "the display shrank and the overlay surface stayed at the old size"
     );
 }

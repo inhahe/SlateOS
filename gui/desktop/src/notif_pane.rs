@@ -488,6 +488,13 @@ struct QuickSettingsState {
     focus_mode: bool,
     /// Volume 0..=100
     volume: u8,
+    /// Whether output is silenced without forgetting how loud it was.
+    ///
+    /// Separate from a `volume` of zero, because unmuting has to restore the
+    /// level the user last chose. A mute that wrote 0 over it would leave
+    /// nothing to come back to, and the user would find the slider at the
+    /// bottom rather than where they left it.
+    muted: bool,
     /// Brightness 0..=100
     brightness: u8,
 }
@@ -501,6 +508,7 @@ impl Default for QuickSettingsState {
             bluetooth: true,
             focus_mode: false,
             volume: 75,
+            muted: false,
             brightness: 80,
         }
     }
@@ -934,6 +942,59 @@ impl NotificationPane {
     /// Get volume (0..=100).
     pub fn volume(&self) -> u8 {
         self.quick_settings.volume
+    }
+
+    /// Whether output is silenced.
+    ///
+    /// Independent of [`volume`](Self::volume), which keeps reporting the level
+    /// the user chose while muted — that is the level unmuting comes back to.
+    pub const fn is_muted(&self) -> bool {
+        self.quick_settings.muted
+    }
+
+    /// Put the volume at `level`, clamped to `0..=100`.
+    ///
+    /// Unmutes for any level above zero, for the reason
+    /// [`adjust_volume`](Self::adjust_volume) does: a user who has just dragged
+    /// the slider to two thirds and still hears nothing will conclude the
+    /// slider is broken, not that a separate switch is still down.
+    pub const fn set_volume(&mut self, level: u8) {
+        self.quick_settings.volume = if level > 100 { 100 } else { level };
+        if self.quick_settings.volume > 0 {
+            self.quick_settings.muted = false;
+        }
+    }
+
+    /// Move the volume by `delta` steps, clamped to `0..=100`, and return where
+    /// it ended up.
+    ///
+    /// Saturating rather than wrapping, which is the whole reason this is a
+    /// method and not `pane.volume += 5` at the call site: a volume key held
+    /// down at either end of the range must sit there, and `u8` arithmetic
+    /// that wrapped would take the user from silent to deafening on one press.
+    ///
+    /// **Turning it up unmutes.** A volume key pressed on a muted machine that
+    /// only moved a number the user cannot hear is a key that appears not to
+    /// work. Turning it *down* does not mute, because the user asking for less
+    /// of something already silent has said nothing about wanting it back.
+    pub fn adjust_volume(&mut self, delta: i16) -> u8 {
+        let level = i16::from(self.quick_settings.volume)
+            .saturating_add(delta)
+            .clamp(0, 100);
+        // The clamp above has just put this inside `u8`, so the conversion
+        // cannot fail; keeping the current level is the fallback rather than an
+        // `unwrap`, which in the shell would be a panic on the keystroke path.
+        self.quick_settings.volume = u8::try_from(level).unwrap_or(self.quick_settings.volume);
+        if delta > 0 {
+            self.quick_settings.muted = false;
+        }
+        self.quick_settings.volume
+    }
+
+    /// Silence output, or let it back, and return whether it is now silent.
+    pub const fn toggle_mute(&mut self) -> bool {
+        self.quick_settings.muted = !self.quick_settings.muted;
+        self.quick_settings.muted
     }
 
     /// Get brightness (0..=100).
@@ -1879,7 +1940,7 @@ impl NotificationPane {
                 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
                 let value = (frac * 100.0) as u8;
                 if hit == QsHit::Volume {
-                    self.quick_settings.volume = value;
+                    self.set_volume(value);
                 } else {
                     self.quick_settings.brightness = value;
                 }
@@ -2355,6 +2416,64 @@ mod tests {
             );
             probe += 1.0;
         }
+    }
+
+    /// The volume keys move the level in steps, and a key held down at either
+    /// end must stop there rather than wrap: `adjust_volume` works in `i16`
+    /// precisely so that the arithmetic that overshoots is done somewhere it
+    /// cannot overflow, and the clamp is what makes that worth doing.
+    #[test]
+    fn the_volume_stops_at_both_ends_instead_of_wrapping() {
+        let mut pane = NotificationPane::new();
+        for _ in 0..100 {
+            pane.adjust_volume(5);
+        }
+        assert_eq!(pane.volume(), 100, "turning it up past the top wrapped");
+        for _ in 0..100 {
+            pane.adjust_volume(-5);
+        }
+        assert_eq!(pane.volume(), 0, "turning it down past the bottom wrapped");
+
+        // And the reported level is the level, not the level that was asked
+        // for: the overlay is drawn from this number.
+        assert_eq!(pane.adjust_volume(-5), 0);
+        assert_eq!(pane.adjust_volume(5), 5);
+        assert_eq!(pane.adjust_volume(i16::MAX), 100);
+        assert_eq!(pane.adjust_volume(i16::MIN), 0);
+    }
+
+    /// Mute is a separate fact from a level of zero, because unmuting has to
+    /// restore the level the user chose. Collapsing the two would make the mute
+    /// key a one-way door.
+    #[test]
+    fn muting_keeps_the_level_and_turning_it_up_unmutes() {
+        let mut pane = NotificationPane::new();
+        pane.set_volume(70);
+        assert!(!pane.is_muted(), "a fresh pane is not muted");
+
+        assert!(pane.toggle_mute());
+        assert_eq!(pane.volume(), 70, "muting threw the level away");
+        assert!(!pane.toggle_mute());
+        assert_eq!(pane.volume(), 70);
+
+        // Turning it *up* while muted is a way back — a key that only moved an
+        // inaudible number would look broken.
+        pane.toggle_mute();
+        pane.adjust_volume(5);
+        assert!(!pane.is_muted(), "turning the volume up left it muted");
+
+        // Turning it *down* is not: quieter is what was asked for, and silence
+        // is a level, not a mute.
+        pane.toggle_mute();
+        pane.adjust_volume(-5);
+        assert!(pane.is_muted(), "turning the volume down unmuted");
+
+        // Nor does dragging the slider to zero mute, but dragging it back up
+        // from any level does unmute.
+        pane.set_volume(0);
+        assert!(pane.is_muted(), "a level of zero is not the same as muted");
+        pane.set_volume(30);
+        assert!(!pane.is_muted(), "choosing an audible level left it muted");
     }
 
     #[test]

@@ -925,6 +925,43 @@ pub struct DesktopShell {
     /// exists. [`sync_snap_area`](Self::sync_snap_area) re-seeds it at the top
     /// of every gesture that reads it instead.
     pub snap: snap::SnapManager,
+    /// The heads-up overlays: what the volume keys put on screen.
+    ///
+    /// The only part of the shell that draws *without* the user having asked to
+    /// look at anything — every other surface here is opened by a click or a
+    /// chord and stays until it is closed. An OSD appears because something
+    /// changed, says what it was, and goes away on a timer.
+    ///
+    /// Consequences, both of which the session honours: it is the one surface
+    /// that must not take clicks (a volume indicator that ate the press aimed
+    /// at the document beneath it would be worse than no indicator — see
+    /// `design-decisions.md` 566), and it is the one that keeps animating with
+    /// no input at all, so it has to be counted in
+    /// [`ShellSession::anything_moving`](session::ShellSession) or its fade
+    /// stops halfway and the overlay stays on screen for ever.
+    ///
+    /// Timed off [`osd_clock_ms`](Self::osd_clock_ms) rather than off the wall
+    /// clock; see that field for why the difference does not matter here.
+    pub osd: osd::OsdManager,
+    /// Milliseconds of animation time the shell has been told about, and the
+    /// only clock [`show_osd`](Self::show_osd) consults.
+    ///
+    /// [`OsdManager`](osd::OsdManager) works in absolute stamps, because a
+    /// timeout is a deadline and a deadline cannot be computed from a delta.
+    /// But the *origin* of those stamps is arbitrary: every one the manager
+    /// compares is one this counter issued, so an epoch of "when this shell was
+    /// constructed" answers every question the manager asks, and the shell does
+    /// not have to be handed a wall clock — which is what keeps it testable
+    /// without also controlling the machine's time.
+    ///
+    /// It advances only when [`advance_osd`](Self::advance_osd) is called, so
+    /// it stands still while the desktop is idle. That is exactly right rather
+    /// than merely tolerable: nothing is scheduled while the desktop is idle,
+    /// so no deadline can fall due during the gap, and `oswindow` resets a
+    /// window's delta origin when it is ticked without re-arming — so the first
+    /// frame after a park reports the length of *that frame*, not the length of
+    /// the pause, and the pause never lands on an overlay's deadline at all.
+    osd_clock_ms: u64,
 }
 
 /// Desktop visual theme — every colour the shell paints with.
@@ -1137,6 +1174,11 @@ impl DesktopShell {
             // a caller reading `shell.snap.layout()` before ever opening the
             // overlay gets the screen it is actually on.
             snap: snap::SnapManager::new(snap::WorkArea::whole_screen(0.0, 0.0)),
+            // Screen-sized from the start, unlike `snap` above: the OSD centres
+            // itself on the whole display rather than on the work area, because
+            // it is a heads-up overlay and may sit over the taskbar.
+            osd: osd::OsdManager::new(screen_width as f32, screen_height as f32),
+            osd_clock_ms: 0,
         };
         shell.sync_snap_area();
         shell
@@ -2629,6 +2671,29 @@ impl DesktopShell {
                     HotkeyOutcome::ignored()
                 }
             }
+            // The overlay is shown from the level the pane reports back, not
+            // from the level this arm asked for: `adjust_volume` clamps, so at
+            // either end of the range the two differ, and an indicator that
+            // read 105% would be reporting a keystroke rather than a volume.
+            DesktopAction::Volume(step) => {
+                let level = self.notifications.adjust_volume(step.delta());
+                self.show_osd(osd::OsdKind::Volume {
+                    level,
+                    muted: self.notifications.is_muted(),
+                });
+                HotkeyOutcome::consumed()
+            }
+            DesktopAction::ToggleMute => {
+                let muted = self.notifications.toggle_mute();
+                // The level as well as the flag, because muting does not change
+                // the level and the overlay is what tells you what unmuting
+                // will bring back.
+                self.show_osd(osd::OsdKind::Volume {
+                    level: self.notifications.volume(),
+                    muted,
+                });
+                HotkeyOutcome::consumed()
+            }
         }
     }
 
@@ -2698,6 +2763,39 @@ enum DesktopAction {
     /// Close whatever popup is open. Unlike every other action here, this one
     /// can decline: see [`DesktopShell::run_desktop_action`].
     DismissPopup,
+    /// Turn the volume up or down by one step.
+    ///
+    /// One variant with a sign rather than two, because the two differ in
+    /// nothing but that sign and a `VolumeUp`/`VolumeDown` pair would be two
+    /// arms doing one job.
+    Volume(VolumeStep),
+    /// Silence output, or let it back.
+    ToggleMute,
+}
+
+/// Which way a volume key moves the level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VolumeStep {
+    Up,
+    Down,
+}
+
+impl VolumeStep {
+    /// How far one press moves the volume, in percentage points.
+    ///
+    /// Five, so twenty presses cross the whole range: a step small enough to
+    /// aim with and large enough that turning the volume down from a startle is
+    /// a few presses rather than a drum roll. The same number every desktop
+    /// picks, for the same reason.
+    const SIZE: i16 = 5;
+
+    /// The signed step this direction applies.
+    const fn delta(self) -> i16 {
+        match self {
+            Self::Up => Self::SIZE,
+            Self::Down => -Self::SIZE,
+        }
+    }
 }
 
 impl DesktopAction {
@@ -2749,6 +2847,19 @@ impl DesktopAction {
             // press is not consumed and reaches the focused window, whose own
             // dialog may be what the user meant to dismiss.
             (false, false, false, false, Key::Escape) => Some(Self::DismissPopup),
+            // The volume keys, bare. Unlike every chord above they carry no
+            // modifier, because they are not chords: a dedicated key means one
+            // thing wherever it is pressed, and requiring a modifier on one
+            // would be requiring a modifier on a key that has no other job.
+            //
+            // They are matched with the modifier fields *ignored* rather than
+            // required to be clear. A keyboard whose volume key sits behind an
+            // Fn layer can report it with whatever the layer left set, and a
+            // volume key that stopped working because Shift was down would be
+            // a bug nobody could describe.
+            (_, _, _, _, Key::VolumeUp) => Some(Self::Volume(VolumeStep::Up)),
+            (_, _, _, _, Key::VolumeDown) => Some(Self::Volume(VolumeStep::Down)),
+            (_, _, _, _, Key::VolumeMute) => Some(Self::ToggleMute),
             _ => None,
         }
     }
@@ -2822,6 +2933,56 @@ const GLOBAL_CHORDS: &[(Key, Modifiers)] = &[
     ),
 ];
 
+/// Keys the shell claims *whatever modifiers are held*.
+///
+/// A dedicated key is not a chord. `VolumeUp` has one meaning and no other job,
+/// so requiring a bare press would mean a volume key that stopped working
+/// because Shift happened to be down — a bug the user could feel but never
+/// describe. Keyboards that put these behind an Fn layer are free to report
+/// whatever the layer left set, and several do.
+///
+/// Expanded over [`ALL_MODIFIER_SETS`] by
+/// [`global_chords`](DesktopShell::global_chords), because a grab names an
+/// exact chord: there is no "any modifier" spelling in the protocol, and
+/// inventing one for three keys would put a special case in the compositor's
+/// keystroke path to save forty-eight entries in a hash map.
+const MODIFIER_AGNOSTIC_KEYS: &[Key] = &[Key::VolumeUp, Key::VolumeDown, Key::VolumeMute];
+
+/// Every distinct [`Modifiers`] value there is.
+///
+/// Sixteen, because there are four flags. Written out rather than counted up in
+/// a loop so that this is a list a reader can check against `Modifiers` by eye,
+/// and so a fifth flag added to that struct leaves this obviously — rather than
+/// silently — short.
+const ALL_MODIFIER_SETS: [Modifiers; 16] = {
+    const fn m(shift: bool, ctrl: bool, alt: bool, super_key: bool) -> Modifiers {
+        Modifiers {
+            shift,
+            ctrl,
+            alt,
+            super_key,
+        }
+    }
+    [
+        m(false, false, false, false),
+        m(true, false, false, false),
+        m(false, true, false, false),
+        m(true, true, false, false),
+        m(false, false, true, false),
+        m(true, false, true, false),
+        m(false, true, true, false),
+        m(true, true, true, false),
+        m(false, false, false, true),
+        m(true, false, false, true),
+        m(false, true, false, true),
+        m(true, true, false, true),
+        m(false, false, true, true),
+        m(true, false, true, true),
+        m(false, true, true, true),
+        m(true, true, true, true),
+    ]
+};
+
 /// The chord the shell holds only while one of its own surfaces is open.
 ///
 /// See [`GLOBAL_CHORDS`] for why it is not in that list.
@@ -2830,12 +2991,22 @@ const CONDITIONAL_CHORD: (Key, Modifiers) = (Key::Escape, Modifiers::NONE);
 impl DesktopShell {
     /// The chords the shell needs delivered wherever the keyboard is.
     ///
-    /// See [`GLOBAL_CHORDS`]. Exposed as a function rather than the constant so
-    /// that the list stays the shell's own business — a caller's job is to grab
-    /// what it is given, not to reason about which shortcut is which.
+    /// See [`GLOBAL_CHORDS`], plus [`MODIFIER_AGNOSTIC_KEYS`] expanded over
+    /// every [`ALL_MODIFIER_SETS`] entry. Exposed as a function rather than the
+    /// constants so that the list stays the shell's own business — a caller's
+    /// job is to grab what it is given, not to reason about which shortcut is
+    /// which, still less about why one of them appears sixteen times.
+    ///
+    /// Built rather than returned by reference because of that expansion. It is
+    /// read once, at startup, so the allocation is not on any path that runs
+    /// twice.
     #[must_use]
-    pub const fn global_chords() -> &'static [(Key, Modifiers)] {
-        GLOBAL_CHORDS
+    pub fn global_chords() -> Vec<(Key, Modifiers)> {
+        let mut chords = GLOBAL_CHORDS.to_vec();
+        for &key in MODIFIER_AGNOSTIC_KEYS {
+            chords.extend(ALL_MODIFIER_SETS.map(|modifiers| (key, modifiers)));
+        }
+        chords
     }
 
     /// The chord to hold only while [`any_popup_open`](Self::any_popup_open).
@@ -3773,6 +3944,57 @@ impl DesktopShell {
         self.taskbar_rect().y
     }
 
+    /// Put a heads-up overlay on screen, or refresh the one already there.
+    ///
+    /// Takes no clock: it is stamped from
+    /// [`osd_clock_ms`](Self::osd_clock_ms), which is why the volume keys can
+    /// be handled by [`handle_hotkey`](Self::handle_hotkey) — a keystroke
+    /// handler that had to be told the time would have to be told it by all
+    /// forty of its callers.
+    pub fn show_osd(&mut self, kind: osd::OsdKind) {
+        self.sync_osd_screen();
+        self.osd.show(kind, self.osd_clock_ms);
+    }
+
+    /// Advance the overlay clock by one frame's worth of time and expire
+    /// whatever that made due.
+    ///
+    /// Saturating, so the 49-day frame that a debugger produces puts every
+    /// overlay at its end rather than wrapping the clock backwards and pinning
+    /// them on screen for ever.
+    pub fn advance_osd(&mut self, dt_ms: u64) {
+        self.osd_clock_ms = self.osd_clock_ms.saturating_add(dt_ms);
+        self.osd.tick(self.osd_clock_ms);
+    }
+
+    /// Re-seed the overlay manager's idea of how big the display is.
+    ///
+    /// Pull-on-use, exactly as [`sync_snap_area`](Self::sync_snap_area) is and
+    /// for the same reason: `screen_width` and `screen_height` are public
+    /// fields that anything may assign, so a push-on-change scheme would be one
+    /// forgotten call site away from centring an overlay on a screen size that
+    /// no longer exists.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "screen dimensions are far inside f32's exact-integer range"
+    )]
+    fn sync_osd_screen(&mut self) {
+        self.osd.screen_width = self.screen_width as f32;
+        self.osd.screen_height = self.screen_height as f32;
+    }
+
+    /// Render the heads-up overlays, if any are showing.
+    #[must_use]
+    pub fn render_osd(&self) -> Option<RenderTree> {
+        if !self.osd.has_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands
+            .extend(self.osd.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
+    }
+
     /// Render the notification pane, if it is open.
     #[must_use]
     pub fn render_notifications(&self) -> Option<RenderTree> {
@@ -4362,24 +4584,12 @@ mod window_manager_tests {
     // The grab list against the binding table
     // ==================================================================
 
-    /// Every modifier combination there is, for sweeping the binding table.
-    fn all_modifier_sets() -> Vec<Modifiers> {
-        (0u8..16)
-            .map(|bits| Modifiers {
-                shift: bits & 1 != 0,
-                ctrl: bits & 2 != 0,
-                alt: bits & 4 != 0,
-                super_key: bits & 8 != 0,
-            })
-            .collect()
-    }
-
     /// A claimed chord that means nothing is a key taken from every application
     /// on the desktop in exchange for nothing at all. The compositor cannot
     /// notice — a grab is a grab — so it has to be noticed here.
     #[test]
     fn every_grabbed_chord_is_a_chord_the_shell_acts_on() {
-        for &(key, modifiers) in DesktopShell::global_chords() {
+        for (key, modifiers) in DesktopShell::global_chords() {
             assert!(
                 super::DesktopAction::for_chord(modifiers, key).is_some(),
                 "{key:?} with {modifiers:?} is claimed from the compositor and then dropped"
@@ -4397,12 +4607,11 @@ mod window_manager_tests {
     #[test]
     fn every_chord_the_shell_acts_on_is_a_chord_it_can_hear() {
         let claimed: std::collections::HashSet<_> = DesktopShell::global_chords()
-            .iter()
-            .copied()
+            .into_iter()
             .chain(std::iter::once(DesktopShell::conditional_chord()))
             .collect();
         for &key in guiremote::input::ALL_KEYS {
-            for modifiers in all_modifier_sets() {
+            for modifiers in super::ALL_MODIFIER_SETS {
                 if super::DesktopAction::for_chord(modifiers, key).is_some() {
                     assert!(
                         claimed.contains(&(key, modifiers)),

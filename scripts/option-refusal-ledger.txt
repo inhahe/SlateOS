@@ -32,7 +32,6 @@ cmd_autostart 1
 cmd_backupsched 2
 cmd_battery 1
 cmd_cal 2
-cmd_certmgr 10
 cmd_cgroup 1
 cmd_cgroupfs 3
 cmd_cliphistory 1
@@ -58,9 +57,7 @@ cmd_filerules 1
 cmd_fileshare 2
 cmd_filevault 1
 cmd_firewall 4
-cmd_fontmgr 6
 cmd_fsbench 5
-cmd_fstune 17
 cmd_fswatch 1
 cmd_fwsettings 1
 cmd_gamemode 2
@@ -68,7 +65,6 @@ cmd_hdrdisplay 2
 cmd_head_input 1
 cmd_hexdump 2
 cmd_httpd 3
-cmd_installer 18
 cmd_iolatency 1
 cmd_ionice 1
 cmd_iotdevice 2

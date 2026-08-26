@@ -15725,6 +15725,137 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = Vfs::remove(Path::new(dir));
     }
 
+    serial_println!(
+        "  kshell::self_test 65: an id or a name that cannot be read is not replaced by a default"
+    );
+    // `fstune`, `certmgr`, `installer` and `fontmgr` between them held 52 sites
+    // that answered an unreadable word with a value of their own. Two shapes:
+    // a number that became 0 (or the documented default), and a name that
+    // matched no arm and fell through `_` to the default variant. Neither
+    // reported anything -- the command ran, printed a success line, and exited
+    // 0, having done something the user did not ask for.
+    //
+    // Every assertion below is on a command whose refusal happens *before* any
+    // state is touched, which is the property that makes the fix worth having:
+    // the old code had already acted by the time it printed.
+    {
+        // The dangerous one. `remove` names which object to destroy, and an
+        // unreadable name became session 0 -- so this used to print "Removed".
+        let out = capture_command("installer remove abc");
+        assert_output_contains(
+            "installer refuses a session id it cannot read",
+            &out,
+            b"is not a session id",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "installer remove: an unreadable id is an error"
+        );
+        assert!(
+            !out.windows(7).any(|w| w == b"Removed"),
+            "and it does not also claim to have removed something"
+        );
+
+        // Omitted and mistyped were the same answer before: both id 0.
+        let out = capture_command("installer info");
+        assert_output_contains(
+            "installer refuses a missing session id",
+            &out,
+            b"missing session id",
+        );
+        assert_eq!(last_exit(), 1, "installer info: a missing id is an error");
+
+        // A numeric operand with no sensible default: 0 is not a block size.
+        let out = capture_command("fstune blocksize 1 4o96");
+        assert_output_contains(
+            "fstune refuses a block size it cannot read",
+            &out,
+            b"is not a block size",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "fstune blocksize: an unreadable size is an error"
+        );
+
+        // A numeric operand whose default is a *query* sentinel. `fontmgr size`
+        // with no operand prints the current size, and `fontmgr size 1l`
+        // (letter L) printed it too -- so a typo was indistinguishable from a
+        // successful set, right down to a plausible number in the output.
+        let out = capture_command("fontmgr size 1l");
+        assert_output_contains(
+            "fontmgr refuses a point size it cannot read",
+            &out,
+            b"is not a size in points",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "fontmgr size: an unreadable size is an error"
+        );
+
+        // The control for that pair: absent still means "show me", so the fix
+        // refused the typo without taking the query form away.
+        let out = capture_command("fontmgr size");
+        assert_eq!(last_exit(), 0, "fontmgr size with no operand still reports");
+        assert_output_contains("and still prints the current size", &out, b"Size:");
+
+        // A name that matched no arm. `create` used to build an *easy* install
+        // session and report success for a mode nobody asked for.
+        let out = capture_command("installer create qwerty");
+        assert_output_contains(
+            "installer refuses an install mode it does not know",
+            &out,
+            b"unknown mode",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "installer create: an unknown mode is an error"
+        );
+
+        // The fall-through here widened the query instead of narrowing it: an
+        // unknown category listed *every* font, which looks like it worked.
+        let out = capture_command("fontmgr list qwerty");
+        assert_output_contains(
+            "fontmgr refuses a category it does not know",
+            &out,
+            b"unknown category",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "fontmgr list: an unknown category is an error"
+        );
+
+        // A mistyped flag used to become the device name. The device here does
+        // not exist, which is the point: the refusal must come first, so this
+        // never reaches the filesystem.
+        let out = capture_command("fsck.ext4 /dev/zz_no_such_device --verbse");
+        assert_output_contains(
+            "fsck.ext4 refuses a misspelled flag rather than checking a device by that name",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "fsck.ext4: an unknown option is an error");
+
+        // `file` means swap-in-a-file; anything else is a size in MiB. An
+        // unreadable size fell to `None`, which *is* swap-in-a-file -- the plan
+        // and the output were identical to having asked for one.
+        let out = capture_command("installer partition 1 /dev/sda 1024 abc");
+        assert_output_contains(
+            "installer refuses a swap size it cannot read",
+            &out,
+            b"is not a swap size in MiB",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "installer partition: an unreadable swap size is an error"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -40142,6 +40273,96 @@ fn cmd_swapcfg(args: &str) {
     }
 }
 
+/// The numeric id that a `<cmd> <sub> <id> …` shell command takes as its first
+/// operand — read, or refused with a diagnostic naming the word that failed.
+///
+/// Forty-two subcommand arms across `fstune`, `certmgr`, `installer` and
+/// `fontmgr` each wrote this as
+/// `parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0)`, which folds two
+/// different mistakes into one silent answer: an id the user *omitted* and an id
+/// the user *mistyped* both became id 0. So `installer remove abc` did not
+/// refuse — it removed whatever session 0 happened to be, reported "Removed",
+/// and exited 0. The mistyped case is the dangerous one, because the user has a
+/// specific object in mind and gets a different one.
+///
+/// Neither case has a defensible default: the operand does not configure the
+/// action, it names *which object* to act on, and there is no object the user
+/// can be assumed to have meant. Both are therefore errors
+/// (design-decisions.md §600 — no value is guessed for a word that could not be
+/// read).
+///
+/// `noun` names the thing for the diagnostic ("session", "profile",
+/// "certificate", "font"), so the message says which id-space the word was
+/// judged against rather than the bare "is not a number".
+fn required_id(parts: &[&str], cmd: &str, sub: &str, noun: &str) -> Option<u64> {
+    let Some(word) = parts.get(1) else {
+        shell_println!("{}: {}: missing {} id", cmd, sub, noun);
+        set_exit(1);
+        return None;
+    };
+    let Ok(id) = word.parse::<u64>() else {
+        shell_println!("{}: {}: `{}' is not a {} id", cmd, sub, word, noun);
+        set_exit(1);
+        return None;
+    };
+    Some(id)
+}
+
+/// A numeric operand that the subcommand cannot do without: both an absent word
+/// and an unreadable one are refused.
+///
+/// The sites this replaces wrote `…parse().ok().unwrap_or(0)`, so
+/// `fstune blocksize 3 4o96` (letter O) set the block size to **zero** and said
+/// "Block size set to 0". Zero is not a plausible reading of any word the user
+/// typed here; it is the shape of a value chosen because none could be read.
+fn required_u32(parts: &[&str], idx: usize, cmd: &str, sub: &str, noun: &str) -> Option<u32> {
+    let Some(word) = parts.get(idx) else {
+        shell_println!("{}: {}: missing {}", cmd, sub, noun);
+        set_exit(1);
+        return None;
+    };
+    let Ok(v) = word.parse::<u32>() else {
+        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
+/// A numeric operand that may legitimately be omitted, in which case `default`
+/// stands in — but which is still refused when a word *is* present and cannot be
+/// read.
+///
+/// The distinction is the whole point. `installer scaling 3` with no DPI meaning
+/// "96" is a documented default; `installer scaling 3 ninetysix` meaning "96" is
+/// a guess. The old `…parse().ok().unwrap_or(96)` could not tell them apart.
+///
+/// It matters most where the default is a sentinel for *query* mode:
+/// `fontmgr size` prints the current size because the operand is absent, and
+/// `fontmgr size 1l` (letter L) used to print it too — so a typo looked exactly
+/// like a successful set, right down to a plausible-looking size in the output.
+///
+/// Returns `None` only for the refusal, so callers use the same
+/// `let Some(v) = … else { return; }` shape as [`required_u32`].
+fn optional_u32(
+    parts: &[&str],
+    idx: usize,
+    cmd: &str,
+    sub: &str,
+    noun: &str,
+    default: u32,
+) -> Option<u32> {
+    let Some(word) = parts.get(idx) else {
+        return Some(default);
+    };
+    let Ok(v) = word.parse::<u32>() else {
+        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
 /// `fstune` — filesystem tuning profiles and parameters.
 fn cmd_fstune(args: &str) {
     use crate::fs::fstune;
@@ -40198,7 +40419,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "info" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             match fstune::get_profile(id) {
                 Ok(p) => {
                     shell_println!("ID:              {}", p.id);
@@ -40235,18 +40458,36 @@ fn cmd_fstune(args: &str) {
         "create" => {
             let name = parts.get(1).copied().unwrap_or("unnamed");
             let fs_type = match parts.get(2).copied().unwrap_or("ext4") {
+                "ext4" => fstune::FsType::Ext4,
                 "btrfs" => fstune::FsType::Btrfs,
                 "xfs" => fstune::FsType::Xfs,
                 "f2fs" => fstune::FsType::F2fs,
                 "fat32" => fstune::FsType::Fat32,
-                _ => fstune::FsType::Ext4,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown filesystem type `{}' (ext4, btrfs, xfs, f2fs, fat32)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             let workload = match parts.get(3).copied().unwrap_or("desktop") {
+                "desktop" => fstune::WorkloadType::Desktop,
                 "database" | "db" => fstune::WorkloadType::Database,
                 "server" | "srv" => fstune::WorkloadType::Server,
                 "dev" | "development" => fstune::WorkloadType::Development,
                 "gaming" | "game" => fstune::WorkloadType::Gaming,
-                _ => fstune::WorkloadType::Desktop,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown workload `{}' (desktop, database, server, dev, gaming)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match fstune::create_profile(name, fs_type, workload) {
                 Ok(id) => shell_println!("Created profile {} (ID {})", name, id),
@@ -40257,7 +40498,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "remove" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             match fstune::remove_profile(id) {
                 Ok(()) => shell_println!("Removed"),
                 Err(e) => {
@@ -40267,13 +40510,24 @@ fn cmd_fstune(args: &str) {
             }
         }
         "workload" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let wl = match parts.get(2).copied().unwrap_or("desktop") {
+                "desktop" => fstune::WorkloadType::Desktop,
                 "database" | "db" => fstune::WorkloadType::Database,
                 "server" | "srv" => fstune::WorkloadType::Server,
                 "dev" | "development" => fstune::WorkloadType::Development,
                 "gaming" | "game" => fstune::WorkloadType::Gaming,
-                _ => fstune::WorkloadType::Desktop,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown workload `{}' (desktop, database, server, dev, gaming)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match fstune::apply_workload(id, wl) {
                 Ok(()) => shell_println!("Applied workload preset"),
@@ -40284,8 +40538,12 @@ fn cmd_fstune(args: &str) {
             }
         }
         "blocksize" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let sz: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
+            let Some(sz) = required_u32(&parts, 2, "fstune", sub, "block size") else {
+                return;
+            };
             match fstune::set_block_size(id, sz) {
                 Ok(()) => shell_println!("Block size set to {}", sz),
                 Err(e) => {
@@ -40295,12 +40553,23 @@ fn cmd_fstune(args: &str) {
             }
         }
         "journal" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let mode = match parts.get(2).copied().unwrap_or("ordered") {
+                "ordered" => fstune::JournalMode::Ordered,
                 "journal" | "full" => fstune::JournalMode::Journal,
                 "writeback" | "wb" => fstune::JournalMode::Writeback,
                 "off" | "none" => fstune::JournalMode::Off,
-                _ => fstune::JournalMode::Ordered,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown journal mode `{}' (ordered, journal, writeback, off)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match fstune::set_journal_mode(id, mode) {
                 Ok(()) => shell_println!("Journal mode set"),
@@ -40311,8 +40580,13 @@ fn cmd_fstune(args: &str) {
             }
         }
         "commit" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let secs: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
+            let Some(secs) = required_u32(&parts, 2, "fstune", sub, "commit interval in seconds")
+            else {
+                return;
+            };
             match fstune::set_commit_interval(id, secs) {
                 Ok(()) => shell_println!("Commit interval set to {}s", secs),
                 Err(e) => {
@@ -40322,8 +40596,12 @@ fn cmd_fstune(args: &str) {
             }
         }
         "reserved" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let pct: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
+            let Some(pct) = required_u32(&parts, 2, "fstune", sub, "reserved percentage") else {
+                return;
+            };
             match fstune::set_reserved_pct(id, pct) {
                 Ok(()) => shell_println!("Reserved {}%", pct),
                 Err(e) => {
@@ -40333,8 +40611,12 @@ fn cmd_fstune(args: &str) {
             }
         }
         "inode" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let ratio: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
+            let Some(ratio) = required_u32(&parts, 2, "fstune", sub, "inode ratio") else {
+                return;
+            };
             match fstune::set_inode_ratio(id, ratio) {
                 Ok(()) => shell_println!("Inode ratio set to {}", ratio),
                 Err(e) => {
@@ -40344,11 +40626,22 @@ fn cmd_fstune(args: &str) {
             }
         }
         "alloc" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let strat = match parts.get(2).copied().unwrap_or("spread") {
+                "spread" => fstune::AllocStrategy::Spread,
                 "pack" => fstune::AllocStrategy::Pack,
                 "sequential" | "seq" => fstune::AllocStrategy::Sequential,
-                _ => fstune::AllocStrategy::Spread,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown allocation strategy `{}' (spread, pack, sequential)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match fstune::set_alloc_strategy(id, strat) {
                 Ok(()) => shell_println!("Alloc strategy set"),
@@ -40359,7 +40652,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "discard" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match fstune::set_discard(id, on) {
                 Ok(()) => shell_println!("Discard {}", if on { "enabled" } else { "disabled" }),
@@ -40370,7 +40665,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "checksum" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match fstune::set_data_checksum(id, on) {
                 Ok(()) => {
@@ -40383,7 +40680,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "compress" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let algo = parts.get(2).copied().unwrap_or("off");
             if algo == "off" {
                 match fstune::set_compression(id, false, "") {
@@ -40404,7 +40703,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "apply" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             match fstune::mark_applied(id) {
                 Ok(()) => shell_println!("Marked as applied"),
                 Err(e) => {
@@ -40513,7 +40814,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "info" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             match certmgr::get_cert(id) {
                 Ok(c) => {
                     shell_println!("ID:          {}", c.id);
@@ -40556,12 +40859,21 @@ fn cmd_certmgr(args: &str) {
         "import" => {
             let cn = parts.get(1).copied().unwrap_or("unknown");
             let ct = match parts.get(2).copied().unwrap_or("server") {
+                "server" => certmgr::CertType::Server,
                 "root" => certmgr::CertType::Root,
                 "inter" => certmgr::CertType::Intermediate,
                 "client" => certmgr::CertType::Client,
                 "code" => certmgr::CertType::CodeSigning,
                 "self" => certmgr::CertType::SelfSigned,
-                _ => certmgr::CertType::Server,
+                other => {
+                    shell_println!(
+                        "certmgr {}: unknown certificate type `{}' (server, root, inter, client, code, self)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             let cert_path = parts.get(3).copied().unwrap_or("/etc/ssl/certs/cert.pem");
             let key_path = parts.get(4).copied().unwrap_or("");
@@ -40582,7 +40894,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "remove" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             match certmgr::remove_cert(id) {
                 Ok(()) => shell_println!("Removed"),
                 Err(e) => {
@@ -40592,7 +40906,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "san" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let name = parts.get(2).copied().unwrap_or("");
             match certmgr::add_san(id, name) {
                 Ok(()) => shell_println!("SAN added: {}", name),
@@ -40603,7 +40919,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "service" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let svc = parts.get(2).copied().unwrap_or("");
             match certmgr::set_service(id, svc) {
                 Ok(()) => shell_println!("Service set: {}", svc),
@@ -40614,13 +40932,24 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "status" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let st = match parts.get(2).copied().unwrap_or("valid") {
+                "valid" => certmgr::CertStatus::Valid,
                 "expired" => certmgr::CertStatus::Expired,
                 "revoked" => certmgr::CertStatus::Revoked,
                 "disabled" | "off" => certmgr::CertStatus::Disabled,
                 "untrusted" => certmgr::CertStatus::Untrusted,
-                _ => certmgr::CertStatus::Valid,
+                other => {
+                    shell_println!(
+                        "certmgr {}: unknown status `{}' (valid, expired, revoked, disabled, untrusted)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match certmgr::set_status(id, st) {
                 Ok(()) => shell_println!("Status updated"),
@@ -40631,7 +40960,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "autorenew" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match certmgr::set_auto_renew(id, on) {
                 Ok(()) => shell_println!("Auto-renew {}", if on { "enabled" } else { "disabled" }),
@@ -40642,7 +40973,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "pin" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match certmgr::set_pinned(id, on) {
                 Ok(()) => shell_println!("{}", if on { "Pinned" } else { "Unpinned" }),
@@ -40653,7 +40986,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "renew" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             match certmgr::renew_cert(id) {
                 Ok(()) => shell_println!("Renewed"),
                 Err(e) => {
@@ -40663,7 +40998,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "threshold" => {
-            let days: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(days) = optional_u32(&parts, 1, "certmgr", sub, "number of days", 0) else {
+                return;
+            };
             if days == 0 {
                 shell_println!("Renewal threshold: {} days", certmgr::renewal_threshold());
             } else {
@@ -40693,7 +41030,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "complete" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             match certmgr::complete_request(id) {
                 Ok(cid) => shell_println!("Certificate created (ID {})", cid),
                 Err(e) => {
@@ -40799,7 +41138,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "info" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::get_session(id) {
                 Ok(s) => {
                     shell_println!("ID:        {}", s.id);
@@ -40846,9 +41187,18 @@ fn cmd_installer(args: &str) {
         }
         "create" => {
             let mode = match parts.get(1).copied().unwrap_or("easy") {
+                "easy" => installer::InstallMode::Easy,
                 "manual" => installer::InstallMode::Manual,
                 "unattended" | "auto" => installer::InstallMode::Unattended,
-                _ => installer::InstallMode::Easy,
+                other => {
+                    shell_println!(
+                        "installer {}: unknown mode `{}' (easy, manual, unattended)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match installer::create_session(mode) {
                 Ok(id) => shell_println!("Created session {}", id),
@@ -40859,7 +41209,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "remove" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::remove_session(id) {
                 Ok(()) => shell_println!("Removed"),
                 Err(e) => {
@@ -40869,7 +41221,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "keyboard" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let layout = parts.get(2).copied().unwrap_or("us");
             let variant = parts.get(3).copied().unwrap_or("");
             match installer::set_keyboard(id, layout, variant) {
@@ -40881,8 +41235,12 @@ fn cmd_installer(args: &str) {
             }
         }
         "scaling" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let dpi: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(96);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
+            let Some(dpi) = optional_u32(&parts, 2, "installer", sub, "DPI", 96) else {
+                return;
+            };
             match installer::detect_and_set_scaling(id, dpi) {
                 Ok(p) => shell_println!("DPI {} → {:?}", dpi, p),
                 Err(e) => {
@@ -40892,12 +41250,23 @@ fn cmd_installer(args: &str) {
             }
         }
         "workload" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let wl = match parts.get(2).copied().unwrap_or("desktop") {
+                "desktop" => installer::WorkloadType::Desktop,
                 "server" | "srv" => installer::WorkloadType::Server,
                 "dev" | "development" => installer::WorkloadType::Development,
                 "gaming" | "game" => installer::WorkloadType::Gaming,
-                _ => installer::WorkloadType::Desktop,
+                other => {
+                    shell_println!(
+                        "installer {}: unknown workload `{}' (desktop, server, dev, gaming)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match installer::set_workload(id, wl) {
                 Ok(()) => shell_println!("Workload set"),
@@ -40908,14 +41277,32 @@ fn cmd_installer(args: &str) {
             }
         }
         "partition" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let disk = parts.get(2).copied().unwrap_or("/dev/sda");
-            let boot: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(1024);
+            let Some(boot) = optional_u32(&parts, 3, "installer", sub, "boot size in MiB", 1024)
+            else {
+                return;
+            };
             let swap_str = parts.get(4).copied().unwrap_or("file");
+            // `file` means "swap in a file, no partition"; anything else must be
+            // a size in MiB. It used to be `.parse().ok()`, so a mistyped size
+            // fell through to `None` -- indistinguishable, in the plan and in
+            // the output, from having asked for a swap file.
             let swap = if swap_str == "file" {
                 None
             } else {
-                swap_str.parse().ok()
+                let Ok(mib) = swap_str.parse() else {
+                    shell_println!(
+                        "installer {}: `{}' is not a swap size in MiB (or `file')",
+                        sub,
+                        swap_str
+                    );
+                    set_exit(1);
+                    return;
+                };
+                Some(mib)
             };
             match installer::set_partition_plan(
                 id,
@@ -40935,7 +41322,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "check" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::sanity_check(id) {
                 Ok(r) => {
                     shell_println!(
@@ -40956,7 +41345,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "install" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::execute_install(id) {
                 Ok(()) => shell_println!("Installation complete — reboot required"),
                 Err(e) => {
@@ -40966,7 +41357,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "firstboot" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::start_first_boot(id) {
                 Ok(()) => shell_println!("First-boot setup started"),
                 Err(e) => {
@@ -40976,7 +41369,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "timezone" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let tz = parts.get(2).copied().unwrap_or("UTC");
             match installer::set_timezone(id, tz) {
                 Ok(()) => shell_println!("Timezone: {}", tz),
@@ -40987,7 +41382,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "user" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let name = parts.get(2).copied().unwrap_or("user");
             let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
             let auto = parts.get(4).copied().unwrap_or("no") == "yes";
@@ -41000,12 +41397,23 @@ fn cmd_installer(args: &str) {
             }
         }
         "browser" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let br = match parts.get(2).copied().unwrap_or("firefox") {
+                "firefox" => installer::BrowserChoice::Firefox,
                 "chromium" | "chrome" => installer::BrowserChoice::Chromium,
                 "epiphany" | "gnome" => installer::BrowserChoice::Epiphany,
                 "custom" => installer::BrowserChoice::Custom,
-                _ => installer::BrowserChoice::Firefox,
+                other => {
+                    shell_println!(
+                        "installer {}: unknown browser `{}' (firefox, chromium, epiphany, custom)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match installer::set_browser(id, br) {
                 Ok(()) => shell_println!("Browser set"),
@@ -41016,7 +41424,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "theme" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let mode = parts.get(2).copied().unwrap_or("dark");
             match installer::set_theme(id, mode) {
                 Ok(()) => shell_println!("Theme: {}", mode),
@@ -41027,7 +41437,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "wifi" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let ssid = parts.get(2).copied().unwrap_or("");
             let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
             match installer::set_wifi(id, ssid, pass) {
@@ -41039,7 +41451,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "audio" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let dev = parts.get(2).copied().unwrap_or("default");
             match installer::set_audio_device(id, dev) {
                 Ok(()) => shell_println!("Audio: {}", dev),
@@ -41050,7 +41464,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "complete" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::complete_first_boot(id) {
                 Ok(()) => shell_println!("First-boot complete"),
                 Err(e) => {
@@ -41286,14 +41702,26 @@ fn cmd_fontmgr(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "list" => {
+            // `None` here means "every category", which is exactly what `all`
+            // asks for -- so an unknown category used to *widen* the listing
+            // rather than refuse it, and looked like it had worked.
             let cat = match parts.get(1).copied().unwrap_or("all") {
+                "all" => None,
                 "sans" => Some(fontmgr::FontCategory::SansSerif),
                 "serif" => Some(fontmgr::FontCategory::Serif),
                 "mono" => Some(fontmgr::FontCategory::Monospace),
                 "display" => Some(fontmgr::FontCategory::Display),
                 "hand" => Some(fontmgr::FontCategory::Handwriting),
                 "symbol" => Some(fontmgr::FontCategory::Symbol),
-                _ => None,
+                other => {
+                    shell_println!(
+                        "fontmgr {}: unknown category `{}' (all, sans, serif, mono, display, hand, symbol)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             let fonts = fontmgr::list_fonts(cat);
             if fonts.is_empty() {
@@ -41346,7 +41774,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "info" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fontmgr", sub, "font") else {
+                return;
+            };
             match fontmgr::get_font(id) {
                 Ok(f) => {
                     shell_println!("ID:       {}", f.id);
@@ -41386,7 +41816,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "uninstall" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fontmgr", sub, "font") else {
+                return;
+            };
             match fontmgr::uninstall_font(id) {
                 Ok(()) => shell_println!("Uninstalled"),
                 Err(e) => {
@@ -41396,7 +41828,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "enable" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fontmgr", sub, "font") else {
+                return;
+            };
             match fontmgr::set_enabled(id, true) {
                 Ok(()) => shell_println!("Enabled"),
                 Err(e) => {
@@ -41406,7 +41840,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "disable" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fontmgr", sub, "font") else {
+                return;
+            };
             match fontmgr::set_enabled(id, false) {
                 Ok(()) => shell_println!("Disabled"),
                 Err(e) => {
@@ -41417,11 +41853,20 @@ fn cmd_fontmgr(args: &str) {
         }
         "default" => {
             let role = match parts.get(1).copied().unwrap_or("ui") {
+                "ui" => fontmgr::FontRole::Ui,
                 "doc" | "document" => fontmgr::FontRole::Document,
                 "mono" | "monospace" => fontmgr::FontRole::Monospace,
                 "title" | "titlebar" => fontmgr::FontRole::Titlebar,
                 "fallback" => fontmgr::FontRole::Fallback,
-                _ => fontmgr::FontRole::Ui,
+                other => {
+                    shell_println!(
+                        "fontmgr {}: unknown role `{}' (ui, doc, mono, title, fallback)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             let family = parts.get(2).copied().unwrap_or("");
             if family.is_empty() {
@@ -41442,7 +41887,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "size" => {
-            let pt: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(pt) = optional_u32(&parts, 1, "fontmgr", sub, "size in points", 0) else {
+                return;
+            };
             if pt == 0 {
                 shell_println!("Size: {} pt", fontmgr::render_settings().global_size_pt);
             } else {
@@ -41457,23 +41904,43 @@ fn cmd_fontmgr(args: &str) {
         }
         "hint" => {
             match parts.get(1).copied().unwrap_or("slight") {
+                "slight" => fontmgr::set_hint_mode(fontmgr::HintMode::Slight),
                 "none" => fontmgr::set_hint_mode(fontmgr::HintMode::None),
                 "medium" | "med" => fontmgr::set_hint_mode(fontmgr::HintMode::Medium),
                 "full" => fontmgr::set_hint_mode(fontmgr::HintMode::Full),
-                _ => fontmgr::set_hint_mode(fontmgr::HintMode::Slight),
+                other => {
+                    shell_println!(
+                        "fontmgr {}: unknown hint mode `{}' (slight, none, medium, full)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             }
             shell_println!("Hinting set");
         }
         "antialias" | "aa" => {
             match parts.get(1).copied().unwrap_or("subpixel") {
+                "subpixel" => fontmgr::set_antialias(fontmgr::AntialiasMode::Subpixel),
                 "none" | "off" => fontmgr::set_antialias(fontmgr::AntialiasMode::None),
                 "gray" | "grayscale" => fontmgr::set_antialias(fontmgr::AntialiasMode::Grayscale),
-                _ => fontmgr::set_antialias(fontmgr::AntialiasMode::Subpixel),
+                other => {
+                    shell_println!(
+                        "fontmgr {}: unknown antialias mode `{}' (subpixel, none, gray)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             }
             shell_println!("Antialiasing set");
         }
         "dpi" => {
-            let dpi: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(dpi) = optional_u32(&parts, 1, "fontmgr", sub, "DPI", 0) else {
+                return;
+            };
             if dpi == 0 {
                 shell_println!("DPI: {}", fontmgr::render_settings().dpi);
             } else {

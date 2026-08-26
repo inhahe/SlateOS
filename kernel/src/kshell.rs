@@ -19269,16 +19269,28 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // a table where the number *is* the interface the loss is a permanent
     // renumbering rather than a recoverable deletion.
     {
-        // `fdtable::self_test` runs earlier in the boot battery (main.rs) and
-        // leaves tables for pids 1, 100 and 999. Pid 100 holds fd 0, the
-        // socket, plus its dup — so it is a fixture that already exists and
-        // this rung neither creates nor destroys one. The needle below is what
-        // makes that dependency fail loudly if the ordering ever changes.
-        let before_show = capture_command("fdtable show 100");
+        // This rung builds and tears down its own fixture rather than borrowing
+        // one. `fdtable::self_test` runs earlier in the boot battery, but it
+        // ends with `*STATE.lock() = None` precisely so that its fixtures do not
+        // masquerade as live processes in `/proc/fdtable` — so by the time this
+        // rung runs the table is empty, and an earlier draft that read pid 100
+        // panicked on `FDs for PID 100 (0):`. That is the assertion doing its
+        // job; the lesson is that a rung must own its fixture.
+        //
+        // `close_all` at the bottom is what lets it: the module now has a
+        // process-exit path, so this rung leaves no table behind either.
+        let out = capture_command("fdtable open 424242 /rung94/held");
         assert_output_contains(
-            "the fixture this rung reads is present before any refusal",
+            "the fixture this rung will act on is created by this rung",
+            &out,
+            b"Opened fd=0 for PID 424242",
+        );
+        assert_eq!(last_exit(), 0, "`fdtable open' succeeds");
+        let before_show = capture_command("fdtable show 424242");
+        assert_output_contains(
+            "and the descriptor is fd 0 — the number the guesses below resolve to",
             &before_show,
-            b"] socket:[5678] flags=",
+            b"/rung94/held flags=",
         );
         let before_stats = capture_command("fdtable stats");
 
@@ -19296,7 +19308,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // The path was `unwrap_or("")` folded into the same usage line as the
         // pid, so an omitted path and an unreadable pid were indistinguishable.
-        let out = capture_command("fdtable open 100");
+        let out = capture_command("fdtable open 424242");
         assert_output_contains(
             "an omitted path is reported as a missing path, not as a bad command",
             &out,
@@ -19309,8 +19321,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "an unreadable pid in `close' errors");
 
         // The one that acted. This closed fd 0 and printed
-        // "Closed fd=0 for PID 100".
-        let out = capture_command("fdtable close 100 1O");
+        // "Closed fd=0 for PID 424242".
+        let out = capture_command("fdtable close 424242 1O");
         assert_output_contains(
             "an unreadable descriptor is named rather than resolved to the process's first fd",
             &out,
@@ -19325,7 +19337,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The additive twin: this duplicated fd 0, consumed a number from
         // `next_fd`, and bumped `total_dups` — a tally with no decrement, so
         // even closing the surplus alias leaves the count permanently wrong.
-        let out = capture_command("fdtable dup 100 1O");
+        let out = capture_command("fdtable dup 424242 1O");
         assert_output_contains(
             "and the descriptor in `dup', which added an alias rather than removing an entry",
             &out,
@@ -19337,7 +19349,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // would have destroyed is still listed, no alias was added beside it,
         // and `next_fd` was not advanced — which the totals report, since a dup
         // that had happened would still be counted after the alias was closed.
-        let after_show = capture_command("fdtable show 100");
+        let after_show = capture_command("fdtable show 424242");
         assert!(
             after_show == before_show,
             "seven refusals left every descriptor of the process untouched"
@@ -19347,6 +19359,18 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             after_stats == before_stats,
             "and counted no open, no close and no dup for words the shell refused to read"
         );
+
+        // Tear the fixture down, so `/proc/fdtable` does not carry a process
+        // this rung invented. The count doubles as the pin on `close_all`
+        // itself: one descriptor was held, so one is released — had any of the
+        // seven refusals actually run, this would read 0 or 2.
+        let out = capture_command("fdtable exit 424242");
+        assert_output_contains(
+            "the rung's fixture is released, and exactly the one descriptor it held",
+            &out,
+            b"Released 1 fd(s) and the table for PID 424242",
+        );
+        assert_eq!(last_exit(), 0, "`fdtable exit' succeeds");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -95798,6 +95822,19 @@ fn cmd_fdtable(args: &str) {
                 }
             }
         }
+        "exit" => {
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
+                return;
+            };
+            fdtable::init_defaults();
+            match fdtable::close_all(pid) {
+                Ok(n) => shell_println!("Released {} fd(s) and the table for PID {}", n, pid),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
         "stats" => {
             fdtable::init_defaults();
             let (tables, opens, closes, dups, ops) = fdtable::stats();
@@ -95814,7 +95851,7 @@ fn cmd_fdtable(args: &str) {
         }
         _ => {
             shell_println!(
-                "Usage: fdtable [list|show <pid>|open <pid> <path>|close <pid> <fd>|dup <pid> <fd>|stats|test]"
+                "Usage: fdtable [list|show <pid>|open <pid> <path>|close <pid> <fd>|dup <pid> <fd>|exit <pid>|stats|test]"
             );
             end_help_arm("fdtable", sub);
         }

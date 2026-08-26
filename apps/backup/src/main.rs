@@ -577,8 +577,11 @@ fn parse_unicode_escape(input: &str, start: usize) -> Result<(char, usize), Stri
         && (0xDC00..0xE000).contains(&lo)
         // Bounded by the two range checks above: at most 0x10000 + 0xFFC00 +
         // 0x3FF = 0x10FFFF, so neither the shift nor the sums can overflow.
-        && let Some(c) =
-            char::from_u32(0x1_0000 + (hi.saturating_sub(0xD800) << 10) + lo.saturating_sub(0xDC00))
+        && let Some(c) = char::from_u32(
+            0x1_0000_u32
+                .saturating_add(hi.saturating_sub(0xD800) << 10)
+                .saturating_add(lo.saturating_sub(0xDC00)),
+        )
     {
         return Ok((c, after_lo));
     }
@@ -679,34 +682,42 @@ fn parse_null(input: &str) -> Result<(JsonValue, &str), String> {
 }
 
 fn parse_number(input: &str) -> Result<(JsonValue, &str), String> {
-    let mut end = 0;
     let bytes = input.as_bytes();
-    if end < bytes.len() && bytes[end] == b'-' {
-        end += 1;
+    let mut end = 0usize;
+
+    // Reading through `get` carries the bound with the byte, so the "am I still
+    // inside the string?" test cannot drift apart from the byte it guards.
+    if bytes.get(end) == Some(&b'-') {
+        end = end.saturating_add(1);
     }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end = end.saturating_add(1);
     }
-    if end < bytes.len() && bytes[end] == b'.' {
-        end += 1;
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
+    if bytes.get(end) == Some(&b'.') {
+        end = end.saturating_add(1);
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end = end.saturating_add(1);
         }
     }
-    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
-        end += 1;
-        if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
-            end += 1;
+    if matches!(bytes.get(end), Some(&b'e' | &b'E')) {
+        end = end.saturating_add(1);
+        if matches!(bytes.get(end), Some(&b'+' | &b'-')) {
+            end = end.saturating_add(1);
         }
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end = end.saturating_add(1);
         }
     }
-    let num_str = &input[..end];
+
+    // Every byte the scan accepted is ASCII, so `end` is always on a character
+    // boundary and neither split can panic — but `get` states that rather than
+    // relying on the reader to re-derive it.
+    let num_str = input.get(..end).unwrap_or_default();
+    let rest = input.get(end..).unwrap_or_default();
     let num: f64 = num_str
         .parse()
-        .map_err(|_| format!("invalid number: {}", num_str))?;
-    Ok((JsonValue::Number(num), &input[end..]))
+        .map_err(|_| format!("invalid number: {num_str}"))?;
+    Ok((JsonValue::Number(num), rest))
 }
 
 // ============================================================================
@@ -1495,8 +1506,12 @@ fn scan_dir_recursive(
                 }
             };
 
-            progress.processed_files += 1;
-            progress.processed_bytes += meta.len();
+            // Saturating rather than wrapping: these two counters are only ever
+            // read to print a progress line and a summary, so a total that stops
+            // climbing is a wrong number a human notices, whereas one that wraps
+            // to zero mid-backup reads as "nothing has been copied yet".
+            progress.processed_files = progress.processed_files.saturating_add(1);
+            progress.processed_bytes = progress.processed_bytes.saturating_add(meta.len());
             progress.current_file = rel.display().to_string();
 
             // Report progress every 100 files
@@ -1561,8 +1576,8 @@ fn estimate_recursive(
             if meta.is_dir() {
                 estimate_recursive(root, &path, excludes, files, bytes);
             } else if meta.is_file() {
-                *files += 1;
-                *bytes += meta.len();
+                *files = files.saturating_add(1);
+                *bytes = bytes.saturating_add(meta.len());
             }
         }
     }
@@ -1785,7 +1800,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     let mut total_size: u64 = 0;
 
     for entry in &files_to_backup {
-        total_size += entry.size;
+        total_size = total_size.saturating_add(entry.size);
 
         if entry.is_symlink {
             // Symlinks don't need blob storage
@@ -1796,8 +1811,8 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
         // Store blob in CAS
         let file_path = source.join(&entry.path);
         match store.store_file(&file_path, &entry.hash) {
-            Ok(true) => new_blobs += 1,
-            Ok(false) => dedup_blobs += 1,
+            Ok(true) => new_blobs = new_blobs.saturating_add(1),
+            Ok(false) => dedup_blobs = dedup_blobs.saturating_add(1),
             Err(e) => {
                 eprintln!("warning: failed to store {}: {}", entry.path.display(), e);
                 continue;
@@ -1857,7 +1872,17 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     println!("  New blobs: {}", new_blobs);
     println!("  Deduplicated: {}", dedup_blobs);
     if dedup_blobs > 0 {
-        let saved_pct = (dedup_blobs * 100) / (new_blobs + dedup_blobs);
+        // Widened to `u128` so the `* 100` is exact rather than saturated: both
+        // operands are file counts, so the product cannot come close to the
+        // range, and a ratio that saturates would print a percentage nobody
+        // could tell apart from a real one.  The divisor is non-zero because
+        // this branch is only reached when `dedup_blobs > 0`, but `checked_div`
+        // states that instead of leaving the reader to re-derive it.
+        let total_blobs = u128::from(new_blobs).saturating_add(u128::from(dedup_blobs));
+        let saved_pct = u128::from(dedup_blobs)
+            .saturating_mul(100)
+            .checked_div(total_blobs)
+            .unwrap_or(0);
         println!("  Dedup ratio: {}%", saved_pct);
     }
 
@@ -2157,25 +2182,25 @@ fn cmd_verify(dest: &Path, backup_id: &str) -> io::Result<()> {
 
     for entry in &manifest.files {
         if entry.is_symlink {
-            ok += 1;
+            ok = ok.saturating_add(1);
             continue;
         }
 
         if !store.has_blob(&entry.hash) {
             eprintln!("  MISSING: {} (hash: {})", entry.path.display(), entry.hash);
-            missing += 1;
+            missing = missing.saturating_add(1);
             continue;
         }
 
         match store.verify_blob(&entry.hash) {
-            Ok(true) => ok += 1,
+            Ok(true) => ok = ok.saturating_add(1),
             Ok(false) => {
                 eprintln!("  CORRUPT: {} (hash: {})", entry.path.display(), entry.hash);
-                corrupt += 1;
+                corrupt = corrupt.saturating_add(1);
             }
             Err(e) => {
                 eprintln!("  ERROR: {} — {}", entry.path.display(), e);
-                corrupt += 1;
+                corrupt = corrupt.saturating_add(1);
             }
         }
     }
@@ -2308,7 +2333,7 @@ fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
     for blob_hash in &all_blobs {
         if !referenced_hashes.contains(blob_hash) {
             store.remove_blob(blob_hash)?;
-            removed_blobs += 1;
+            removed_blobs = removed_blobs.saturating_add(1);
         }
     }
 
@@ -2554,8 +2579,17 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
     if !diff.modified.is_empty() {
         println!("Modified ({}):", diff.modified.len());
         for (old, new) in &diff.modified {
-            let size_change = new.size as i64 - old.size as i64;
-            let sign = if size_change >= 0 { "+" } else { "" };
+            // Going through `i64` was two lossy casts and a subtraction that
+            // overflows for a large enough pair of sizes — and a file bigger
+            // than `i64::MAX` is not the absurdity it sounds like once a
+            // manifest can be hand-edited or corrupted.  `abs_diff` is exact
+            // for every pair of `u64`, and the sign is already known from the
+            // comparison that chose which way round to subtract.
+            let (sign, size_change) = if new.size >= old.size {
+                ("+", new.size.abs_diff(old.size))
+            } else {
+                ("-", old.size.abs_diff(new.size))
+            };
             println!("  ~ {} ({}{} bytes)", new.path.display(), sign, size_change);
         }
         println!();
@@ -2628,8 +2662,8 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
             |e| e.to_string_lossy().into_owned(),
         );
         let (count, size) = by_ext.entry(ext).or_insert((0, 0));
-        *count += 1;
-        *size += entry.size;
+        *count = count.saturating_add(1);
+        *size = size.saturating_add(entry.size);
     }
 
     if !by_ext.is_empty() {
@@ -2645,7 +2679,7 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
             );
         }
         if sorted.len() > 10 {
-            println!("    ... and {} more types", sorted.len() - 10);
+            println!("    ... and {} more types", sorted.len().saturating_sub(10));
         }
     }
 

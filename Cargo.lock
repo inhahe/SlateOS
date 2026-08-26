@@ -5470,6 +5470,10 @@ name = "illustrator-cli"
 version = "0.1.0"
 
 [[package]]
+name = "imagecodec"
+version = "0.1.0"
+
+[[package]]
 name = "imagemagick"
 version = "0.1.0"
 

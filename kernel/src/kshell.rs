@@ -17182,7 +17182,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and captures nothing", &out, b"Captured full screen");
 
         let out = capture_command("scap full");
-        assert_output_contains("bare `scap full` still captures", &out, b"Captured full screen");
+        assert_output_contains(
+            "bare `scap full` still captures",
+            &out,
+            b"Captured full screen",
+        );
         assert_output_contains(
             "and does so at the documented default resolution",
             &out,

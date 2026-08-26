@@ -33054,6 +33054,123 @@ Settings was the application this entry singled out because it had something
 specific it could not call. That is closed. The entry stays open for the other
 136 unwired applications.
 
+**Update 2026-08-25 — the strap is written once, and the recipe below is the
+whole of what converting an app now costs.**
+
+Three applications had by then been wired — editor, Settings, and (as of this
+update) metronome — and each had its own hand-written `run`. That is the failure
+step (d) named at the top of this entry, arriving from the other direction: the
+loop was written once *for the tree* and then written again, per app, because
+nothing had extracted the parts that are identical in all of them. Three copies
+is where the divergence starts being cheap to fix; 136 is where it is not.
+
+`gui/window/src/app.rs` (`oswindow::app`) now holds it: an `App` trait
+(`title`, `initial_size`, `resizable`, `tick_interval`, `on_event`, `render`,
+the first three and the fourth defaulted), `open`, `drive`, `Args`, and
+`launch`/`launch_with`. Editor and metronome are on it; Settings is not yet.
+
+**The recipe.** For an ordinary single-window application:
+
+1. Add `oswindow = { path = "../../gui/window" }` to its `Cargo.toml`. An app
+   names `oswindow` and never `guiremote`, for the reason a Unix program does
+   not name the socket layer.
+2. Delete `#![allow(dead_code)]` if it has one. It is almost always there
+   because the app was never wired, and it is what hides the fact — see
+   `lesson 46`. Expect to delete genuinely dead code once the lint works again,
+   and expect some of it to be *test-only* dead code, which is lesson 45 exactly
+   and is invisible unless you compare `cargo build` against `cargo test`.
+3. `impl oswindow::app::App` for the app's state type.
+   - If it has an inherent `render`, **rename it** (`render_commands`,
+     `render_tree`). At equal arity an inherent method silently wins method
+     lookup over the trait's and every existing call keeps compiling while
+     testing the other function.
+   - **`tick_interval` is the one to get right.** Anything the app ages — a
+     beat, a blink, a countdown, a toast — needs it, and the default `None`
+     ships the feature frozen with its tests still passing (`lesson 47`).
+     Return `None` only when the app genuinely ages nothing, and gate it on
+     what is actually moving so an idle desktop can park.
+   - Do **not** answer `Redraw` to `Event::Resize`/`ScaleChanged`; `drive` takes
+     that decision for every app, because 137 apps each remembering to is 137
+     chances to forget.
+   - If the app's renderer reads its own stored window size, have `App::render`
+     reconcile it with the size it is *handed* — a compositor may grant a size
+     that was never requested, and the first frame is drawn before any event.
+4. `fn main() -> ExitCode` becomes one line, `app::launch("name", &mut state)`
+   — or, for an app with arguments of its own, `Args::from_env()` +
+   `launch_with(name, args.display.as_deref(), &mut state)`, because `launch`
+   rejects unexpected arguments with exit 2.
+5. Delete the app's own display parsing, dialer, diagnostic and window build.
+   All four are in `oswindow::app` and were identical in every copy.
+6. Run `python scripts/check-tick-wiring.py` and
+   `python scripts/scan-unwired.py`. The second reports reach per binary; a
+   conversion should raise it, and if it *falls*, suspect the scanner's
+   `ENTRY_POINTS` list before suspecting the app (that list has already lagged
+   the code once).
+
+**What the extraction cost, which is the argument for having done it before app
+four rather than after app forty.** `guiremote::client::Client` — step (d)'s
+original home for the loop — was retired in the same work. It had been
+superseded by `oswindow::EventLoop` within a week of being written and had sat
+since with **no production caller of its own**, which is this entry's own defect
+arriving inside its own cure. It also structurally could not tick: no wake-up
+list, so it parked in `Transport::wait` until the compositor spoke, and any app
+built on it would have reproduced lesson 47 through no fault of its own.
+
+Two live defects surfaced in the two conversions, both of them in `main` and
+both invisible until `main` had something in it worth testing: `apps/metronome`
+never advanced (its `Event::Tick` fell into a `_ => {}` arm), and
+`apps/editor` showed a stray blank tab beside every file named on its command
+line. That is the yield to expect per app, and it is the reason the conversions
+are worth doing individually rather than by a mechanical sweep.
+
+**Update 2026-08-25 (later) — Settings converted; the harness grew the one thing
+an application can need that a loop cannot guess.**
+
+Settings was the third and last hand-written strap, and it is the reason step 3
+of the recipe now has a fifth bullet. It edits `appearance.yaml` and
+`input.yaml`, which the *compositor* reads — window corners, drop shadows,
+whether two clicks are one double click — so it must tell the compositor when it
+has rewritten one. Its own loop did that; `drive` had no way to express it, and
+converting Settings without adding one would have been a silent downgrade
+producing exactly the defect this entry is about: a setting that appears to work
+and does not, its own preview updating while every real window keeps its old
+corners until the next login.
+
+`App::take_reloads` is the hook, drained after every event and turned into the
+`ReloadAppearance`/`ReloadInput` requests `EventLoop` already had. Two flags,
+because they become two requests. **Per event and not once per batch**, which is
+the one placement decision here with a wrong answer: a batch ending in
+`CloseRequested` never reaches `Dispatch::Settled`, so news held for the boundary
+is lost exactly when a user makes their last change and closes the window.
+
+Add to step 3 of the recipe:
+
+  - If the app writes a file another process reads, implement `take_reloads` —
+    and make it *drain*, not peek, or the compositor re-reads the file on every
+    event for the rest of the session.
+
+Two further notes from this conversion, both worth having before the next app:
+
+- **An app whose handlers speak `guitk::EventResult` should map at the seam, not
+  convert the handlers.** Settings' internal handlers use `Consumed`/`Ignored`
+  for what it genuinely means — whether an event keeps propagating up a widget
+  tree — so the four-line mapping in `on_event` is right and pushing `Response`
+  down into the hierarchy would be wrong. The mapping is imprecise in the
+  harmless direction only (a click on an already-selected item repaints an
+  identical frame) and never in the harmful one.
+- **A claim in a commit message is a claim to falsify like any other.** This
+  conversion deleted Settings' `split_args` tests on the grounds that `launch`
+  now carried the rule. It did not — `launch` needs a socket, so nothing in it
+  had ever been executed by a test. Fixed by extracting `leftover_complaint`,
+  which is the only part of `launch` that can be tested without a compositor.
+
+**Count: 135 to go.** All three applications that open a window — editor,
+Settings, metronome — are now on `oswindow::app`, so there is no fourth copy of
+the strap to retire and the remaining work is the placeholder `main`s. The next
+one is a judgement call rather than a forced move: pick an app whose state type
+already exists and already has a `handle_event`, since that is most of the work,
+and expect roughly one live defect per app (three conversions, three defects).
+
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
 **What.** `gui/compositor/src/keymap.rs` holds one hard-coded US-QWERTY
@@ -80941,5 +81058,71 @@ stays a decision. Boot-tested green (`BOOT_OK` after 370 s) with **neither
 assertion firing** — which is the useful half of the result: the precondition
 was not merely documented-and-hoped-for, it holds at every call the boot path
 makes, and now a future call that breaks it says so instead of hanging.
+
+---
+
+## TD-B-TEST-FIXTURES-SKIP-SCRATCHDIR — twelve test fixtures in three of lane B's files name a fixed temp path, so two concurrent runs delete each other's (filed by lane C, 2026-08-25) — **open**
+
+**Not lane C's to fix** — `userspace/coreutils/src/bin/sed.rs`,
+`userspace/firejail/src/main.rs` and `userspace/useradd/src/main.rs` are lane
+B's. Filed as
+`requests/c-b-twelve-test-fixtures-skip-scratchdir-and-collide-between-runs.md`;
+recorded here because it fails the *workspace* gate, which
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING` makes mandatory for
+every lane, so the next lane to hit it should find this rather than re-derive
+it.
+
+**Symptom.** Two `cargo test --workspace --no-fail-fast` runs on one commit,
+each failing a *different* single test and passing the other:
+
+```
+thread 'tests::capital_r_takes_one_line_per_cycle_from_a_shared_position'
+panicked at userspace\coreutils\src\bin\sed.rs:4728:9:
+  left: "1\n2\n"   right: "1\nA\n2\nB\n"
+```
+```
+thread 'tests::test_file_roundtrip_passwd'
+panicked at userspace\useradd\src\main.rs:2775:73: failed to rename
+  ...\useradd_test_7\passwd.tmp -> ...\useradd_test_7\passwd (os error 2)
+```
+
+**Observed, not inferred.** Two `cargo test --workspace` processes were alive
+at once on the same worktree. One exited **0**; the other failed. Two processes,
+one commit, one fixture directory, opposite results.
+
+**Mechanism.** `userspace/scratchdir` exists precisely for this and states the
+rule: uniqueness needs the pid **and** a process-wide counter, because they
+cover two different axes — concurrent *runs* and concurrent *threads*. Twelve
+sites cover one axis or neither: `sed.rs` 4696/4721/4822 and `firejail`
+3050/3082/3094/3122/3134/3143/3159/3171 vary nothing at all, and `useradd`'s
+`TestEnv::new` (1615) varies an `AtomicU32` but not the pid — so two runs both
+produce `useradd_test_7`, and `TestEnv::new` opens with `remove_dir_all`, which
+is why the loser sees a vanished directory rather than a wrong value.
+
+**Three lessons, all general.**
+
+1. **A fixture path with no per-process component is a shared mutable global.**
+   It looks local because it is written inside the test. `cargo test`'s own
+   thread scheduling never exposes it, so the usual "tests run in parallel"
+   reasoning does not reach the case; it only appears when the suite runs twice
+   at once — which on this project is normal, with three lanes and an operator
+   sharing one machine.
+2. **A per-process counter is the *right* fix to the *other* axis.** `useradd`'s
+   comment ("Each test uses a unique temp directory to avoid interference") is
+   true and still insufficient. Half a uniqueness scheme reads exactly like a
+   whole one.
+3. **A silent-by-design no-op in the code under test erases the evidence its own
+   tests need.** `sed`'s `R` is right to say nothing about a short file — but
+   that makes "the fixture was destroyed" and "the feature is broken"
+   byte-identical, so the failure points at the innocent file. Where a test
+   feeds a file to code that treats an empty read as a legitimate answer, assert
+   the fixture immediately after writing it.
+
+**A grep for `pid` will not audit this.** `firejail_test_nopid` is a fixed name
+that contains the letters.
+
+**Suggested fix** (lane B's call; spelled out in the request): convert all
+twelve to `scratchdir::ScratchDir`, which also gets cleanup on the *failing*
+path — `Drop` runs during unwind where a trailing `remove_dir_all` does not.
 
 ---

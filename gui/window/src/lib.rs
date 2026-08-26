@@ -73,6 +73,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+pub mod app;
+
 use guiremote::client::{ClientError, Connection, Transport};
 use guiremote::control::{CursorShape, DisplayInfo, RequestBody, ResponseBody, WindowSpec};
 
@@ -163,6 +165,26 @@ pub enum EventResponse {
     Continue,
     /// Stop the event loop and return.
     Exit,
+}
+
+/// What [`EventLoop::run_batched`] is handing over.
+///
+/// Two things rather than one because drawing and reacting happen at different
+/// rates: an application reacts to every event and should draw only once the
+/// events have run out. See [`EventLoop::run_batched`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum Dispatch {
+    /// One event, and the window it is addressed to.
+    Event {
+        /// The window the compositor sent it to.
+        window: u64,
+        /// What happened.
+        event: Event,
+    },
+    /// Everything readable has now been dispatched, so the application's state
+    /// has settled. This is the moment to draw it, and the loop is about to
+    /// park.
+    Settled,
 }
 
 // ---------------------------------------------------------------------------
@@ -1146,6 +1168,37 @@ impl<T: Transport> EventLoop<T> {
     where
         F: FnMut(&mut Self, u64, Event) -> EventResponse,
     {
+        self.run_batched(|events, dispatch| match dispatch {
+            Dispatch::Event { window, event } => handler(events, window, event),
+            Dispatch::Settled => EventResponse::Continue,
+        })
+    }
+
+    /// [`Self::run`], with the end of each batch of events handed over too.
+    ///
+    /// The batch boundary is the loop's to know and nobody else's: [`Self::poll`]
+    /// drains everything the connection has made readable, and only the code
+    /// around that drain can tell where one run of events ends and the parking
+    /// begins. A handler with no way to see it must draw from inside itself,
+    /// which costs one frame per event — and a mouse drag arrives as a burst of
+    /// thirty moves, of which the first twenty-nine are stale before they are
+    /// sent. [`Dispatch::Settled`] is where the one frame that is not stale
+    /// belongs.
+    ///
+    /// One handler rather than two closures, because the second would need the
+    /// same `&mut` state as the first and could not have it.
+    ///
+    /// `Settled` arrives only after a batch that actually dispatched something,
+    /// and never after one that ended in [`EventResponse::Exit`] — an
+    /// application on its way out has nothing to show.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::pump`] and [`Connection::wait`].
+    pub fn run_batched<F>(&mut self, mut handler: F) -> Result<(), Error<T>>
+    where
+        F: FnMut(&mut Self, Dispatch) -> EventResponse,
+    {
         self.running = true;
         while self.running && self.conn.is_open() {
             let mut dispatched = false;
@@ -1155,10 +1208,15 @@ impl<T: Transport> EventLoop<T> {
                 // window. A title-bar X that does nothing is worse than an
                 // application that quits when it would rather not have.
                 let requested_close = matches!(event, Event::CloseRequested);
-                if handler(self, window, event) == EventResponse::Exit || requested_close {
+                let verdict = handler(self, Dispatch::Event { window, event });
+                if verdict == EventResponse::Exit || requested_close {
                     self.running = false;
                     break;
                 }
+            }
+            if dispatched && self.running && handler(self, Dispatch::Settled) == EventResponse::Exit
+            {
+                self.running = false;
             }
             // Only block when there was nothing to do. Waiting after a burst
             // would add a frame of latency to the next one for no benefit.

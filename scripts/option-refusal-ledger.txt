@@ -131,7 +131,6 @@ cmd_memcg 3
 cmd_memdiag 1
 cmd_memtest 1
 cmd_migstat 1
-cmd_mmapstat 6
 cmd_mobilelink 2
 cmd_msivec 3
 cmd_multiclip 1

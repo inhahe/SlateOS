@@ -3693,6 +3693,27 @@ pub fn cpu_ticks(tid: TaskId) -> Option<(u64, u64)> {
     Some((task.user_ticks, task.sys_ticks))
 }
 
+/// Return a task's current [`TaskState`] by its scheduler id, or `None` if no
+/// such task is registered.
+///
+/// This exists because `pcb::state` — the *process* state — cannot distinguish
+/// the two ways a self-test's poll loop can time out, and they call for opposite
+/// fixes. A process whose last thread is `Ready` is merely starved and the poll
+/// budget was too small; one whose thread is `Blocked` is parked on an event
+/// that has already happened, which is a lost wakeup and a real bug. Both
+/// report `ProcessState::Running`, so a harness that logs only the process state
+/// records the same word for a tuning problem and a kernel defect. See
+/// `A-FASTPY-FORKEXEC-PARENT-MISSES-THE-4000-YIELD-POLL-BUDGET` in
+/// `known-issues.md`, which was diagnosed twice and wrongly for want of exactly
+/// this distinction.
+///
+/// Takes the global `SCHED` lock — diagnostic use only, not for hot paths.
+#[must_use]
+pub fn task_state(tid: TaskId) -> Option<TaskState> {
+    let state = SCHED.lock();
+    Some(state.tasks.get(&tid)?.state)
+}
+
 /// Charge a page fault to a task's per-task fault counters.
 ///
 /// `major == true` increments `maj_flt` (the fault required I/O to

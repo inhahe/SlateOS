@@ -18306,6 +18306,370 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("bright undim");
     }
 
+    serial_println!(
+        "  kshell::self_test 86: a parse that happens behind a helper is invisible to the gate, so \
+         the helper has to name the word itself"
+    );
+    // `blkread` is the one site in the shell where the conflation of "you left
+    // it out" with "I could not read it" happens *inside a helper*.
+    // `parse_blkread_args` returned `Option<u64>` and threw away which of three
+    // failures had occurred, so the caller could only print the synopsis —
+    // answering `blkread vda 1O` with the syntax of the line the user had just
+    // typed almost correctly, and never mentioning `1O`.
+    //
+    // Neither gate could see it: D1 in `check-option-refusal.py` matches a parse
+    // and a substituted value within one *statement*, and here the parse is on
+    // the far side of a function boundary. A sweep of the other 50
+    // synopsis-on-`None` sites in this file found all 50 to be genuine absences
+    // with no parse in them, which is what makes this one worth pinning rather
+    // than generalising.
+    {
+        let out = capture_command("blkread vda 1O");
+        assert_output_contains(
+            "the unreadable sector is named, not just the syntax",
+            &out,
+            b"`1O' is not a sector number",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable sector errors");
+
+        // The one-word form's word is a sector, so an unreadable one is named
+        // the same way rather than being mistaken for a device.
+        let out = capture_command("blkread zznotasector");
+        assert_output_contains(
+            "and so is the one-word form's",
+            &out,
+            b"`zznotasector' is not a sector number",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable one-word sector errors");
+
+        // Absence is now a different answer from unreadability.
+        let out = capture_command("blkread");
+        assert_output_contains(
+            "no sector at all is reported as missing",
+            &out,
+            b"missing sector number",
+        );
+        assert_output_lacks(
+            "and is not described as a word that could not be read",
+            &out,
+            b"is not a sector number",
+        );
+        assert_eq!(last_exit(), 1, "a bare `blkread` errors");
+    }
+
+    serial_println!(
+        "  kshell::self_test 87: the guessed number is not a random wrong one, it is the reassuring \
+         one, and for `temp' it is the value already there"
+    );
+    // `cputhr` is where the guessed default stops being merely wrong and starts
+    // being *comforting*. `temp` guessed 65_000mC — a normal load temperature —
+    // so a mistyped 90°C was filed as healthy; `cap` guessed 2000MHz, the
+    // loosest cap in the table, against a request whose entire purpose is to
+    // impose a tight one. Neither guess produces a value a reader would question.
+    //
+    // The `temp` case has a sharper edge that only reading `cputhr::init_defaults`
+    // reveals: 65_000 is CPU 0's *starting* temperature, so the guess wrote back
+    // the value already in the state. The command changed nothing and said it
+    // had. This rung pins a distinguishable temperature first precisely so that
+    // "the refusal left it alone" is observable at all — against the initial
+    // state it would not be.
+    {
+        let _ = capture_command("cputhr init");
+
+        // Pin a temperature that is *not* the guessed default, so the assertion
+        // below can tell "refused and left alone" apart from "guessed 65_000".
+        let out = capture_command("cputhr temp 0 90000");
+        assert_output_contains(
+            "a readable temperature is recorded",
+            &out,
+            b"cputhr: temp cpu=0 90.0",
+        );
+        assert_eq!(last_exit(), 0, "`cputhr temp` succeeds");
+
+        // The mistyping the whole batch is about: letter O for zero.
+        let out = capture_command("cputhr temp 0 9O000");
+        assert_output_contains(
+            "an unreadable temperature is refused by naming the word",
+            &out,
+            b"`9O000' is not a temperature in millicelsius",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable temperature errors");
+
+        // The refusal has to leave the reading alone. Under the guess this
+        // printed a success line and reset CPU 0 to 65.0°C.
+        let out = capture_command("cputhr cpus");
+        assert_output_contains(
+            "and the pinned temperature survives the refusal",
+            &out,
+            b"CPU 0 pkg=0 90.0",
+        );
+
+        // `cap`'s guess ran against the request's intent rather than beside it:
+        // 2000MHz is two and a half times looser than the 800 asked for.
+        let out = capture_command("cputhr cap 0 8OO");
+        assert_output_contains(
+            "an unreadable frequency cap is refused rather than loosened",
+            &out,
+            b"`8OO' is not a frequency cap in MHz",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable cap errors");
+
+        // §607: `cap <cpu> [mhz]` brackets the frequency, so omitting it stays a
+        // documented request and the default still applies.
+        let out = capture_command("cputhr cap 0");
+        assert_output_contains(
+            "while the documented default cap still applies when omitted",
+            &out,
+            b"cputhr: cap cpu=0 2000MHz",
+        );
+        assert_eq!(last_exit(), 0, "`cputhr cap` with no MHz succeeds");
+
+        // `clear` is the one arm whose guess always *succeeded*, against the
+        // wrong core: CPU 0 exists everywhere, so unlike an id-space guess it
+        // never failed into a diagnostic. Pin a cap, then withhold the CPU.
+        let _ = capture_command("cputhr cap 0 800");
+        let out = capture_command("cputhr clear");
+        assert_output_contains(
+            "a missing CPU number is reported as missing",
+            &out,
+            b"cputhr: clear: missing CPU number",
+        );
+        assert_eq!(last_exit(), 1, "a bare `cputhr clear` errors");
+
+        // The proof that it refused rather than cleared CPU 0 behind the user.
+        let out = capture_command("cputhr cpus");
+        assert_output_contains(
+            "and CPU 0's cap was not cleared behind the request",
+            &out,
+            b" cap=800MHz",
+        );
+
+        // An unreadable CPU number is named too, not rounded down to core 0.
+        let out = capture_command("cputhr clear 1O");
+        assert_output_contains(
+            "an unreadable CPU number is named rather than guessed",
+            &out,
+            b"`1O' is not a CPU number",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable CPU number errors");
+
+        // Leave the table as this rung found it, so rung order cannot matter.
+        let _ = capture_command("cputhr clear 0");
+        let _ = capture_command("cputhr temp 0 65000");
+    }
+
+    serial_println!(
+        "  kshell::self_test 88: one sentinel served as the guess and as the invalidity marker, so \
+         three different mistakes got one answer"
+    );
+    // `shmem` is the mildest severity in the burn-down: every site guessed `0`
+    // and then immediately tested for `0`, so the guess never reached the
+    // subsystem and no state was ever corrupted. Only the diagnosis was lost —
+    // but all of it, because `0` was doing two jobs. Omitted, unreadable and
+    // readable-but-invalid all collapsed onto `Usage: …`, which asserts the user
+    // got the *form* wrong when the form was right and one character was not.
+    {
+        // Absent, unreadable and invalid-but-readable are three answers now.
+        let out = capture_command("shmem create zzrung88");
+        assert_output_contains(
+            "an omitted size is reported as missing",
+            &out,
+            b"shmem: create: missing size in bytes",
+        );
+        assert_eq!(last_exit(), 1, "a missing size errors");
+
+        let out = capture_command("shmem create zzrung88 1O24");
+        assert_output_contains(
+            "an unreadable size names the word",
+            &out,
+            b"`1O24' is not a size in bytes",
+        );
+        // There is deliberately no `lacks b"Usage: shmem create"` here. The
+        // wording gate rejected one, and rightly: that text no longer exists
+        // anywhere in `cmd_shmem`, so the needle could not be checked against
+        // any format string and a misspelling of it would have passed forever.
+        // The guarantee is now structural rather than asserted — the synopsis
+        // cannot be printed in answer to a typo because the arm no longer
+        // contains it — which is stronger than a runtime check, and the
+        // `contains` above already pins what *is* printed.
+        assert_eq!(last_exit(), 1, "an unreadable size errors");
+
+        let out = capture_command("shmem create zzrung88 0");
+        assert_output_contains(
+            "a readable zero is refused for being zero, not for being unreadable",
+            &out,
+            b"size must be greater than zero",
+        );
+        assert_eq!(last_exit(), 1, "a zero size errors");
+
+        // The control: the same line with the size spelled correctly works, so
+        // the three refusals above cannot be passing by having broken `create`.
+        let out = capture_command("shmem create zzrung88 1024");
+        assert_output_contains(
+            "while a readable size creates the region",
+            &out,
+            b"Created shared region #",
+        );
+        assert_eq!(last_exit(), 0, "`shmem create` succeeds");
+
+        // Two operands, which the old guard could not tell apart: both orders
+        // produced the identical synopsis. They are different messages now.
+        let out = capture_command("shmem attach 1O 3");
+        assert_output_contains(
+            "an unreadable region id is named as a region id",
+            &out,
+            b"`1O' is not a region id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable region id errors");
+
+        let out = capture_command("shmem attach 3 1O");
+        assert_output_contains(
+            "and an unreadable pid in the same command is named as a process id",
+            &out,
+            b"`1O' is not a process id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable pid errors");
+
+        // `delete 0` keeps no special shell-side rule: ids start at 1, so zero
+        // is simply absent and the subsystem says so — the same answer any other
+        // absent id gets. Zero was only ever special because it was the guess.
+        //
+        // Asserted positively rather than as a `lacks b"Usage: shmem delete"`.
+        // The wording gate rejected that form and was right to: the synopsis no
+        // longer exists anywhere in `cmd_shmem`, so the needle matched no format
+        // string and a misspelling of it would have passed forever. `Error:` is
+        // fixed text in the arm's own `shell_println!("Error: {:?}", e)`, which
+        // is what makes it checkable — and it says something the absence could
+        // not, namely that the word reached `shmem::delete` and the *subsystem*
+        // answered, rather than the shell short-circuiting on a sentinel.
+        let out = capture_command("shmem delete 0");
+        assert_output_contains(
+            "a readable zero id is answered by the subsystem, not by the shell's syntax",
+            &out,
+            b"Error:",
+        );
+        assert_eq!(last_exit(), 1, "deleting a nonexistent region errors");
+
+        // The help arm must still behave as rung 67's shapes require: bare
+        // `shmem` is a request for help, not a complaint.
+        let out = capture_command("shmem");
+        assert_output_lacks(
+            "and bare `shmem` still asks for help rather than erroring",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 0, "bare `shmem` is output, not a complaint");
+    }
+
+    serial_println!(
+        "  kshell::self_test 89: one guessed zero was the strictest limit in one arm and the \
+         emptiest question in another"
+    );
+    // `diskquota` is the first batch where the same guessed constant is wrong in
+    // two opposite directions inside one function. `0` was substituted for any
+    // unreadable number, and `0` is an extreme of this operand's range at both
+    // ends: as a *limit* it is the strictest one there is, and as a *request* it
+    // is the emptiest. So `set` locked the user out and `check` cleared them,
+    // and both printed a success line.
+    {
+        // `with_state` answers `NotSupported` until `init_defaults` has run, and
+        // `init_defaults` returns early when state exists, so this is safe to
+        // repeat and cannot disturb an earlier rung.
+        let _ = capture_command("diskquota init");
+
+        // Two numeric operands in adjacent positions: each is now named on its
+        // own, so which of the two was mistyped is part of the answer.
+        let out = capture_command("diskquota set zzrung89 user 1O0 200");
+        assert_output_contains(
+            "an unreadable soft limit is named as the soft limit",
+            &out,
+            b"`1O0' is not a soft limit in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable soft limit errors");
+
+        let out = capture_command("diskquota set zzrung89 user 100 2O0");
+        assert_output_contains(
+            "and an unreadable hard limit beside it is named as the hard limit",
+            &out,
+            b"`2O0' is not a hard limit in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable hard limit errors");
+
+        // This is the assertion that pins the severity. `check_quota` answers
+        // `Ok(true)` for a name it has no entry for, so an unquotaed user may
+        // write freely — and that is precisely the state the old guessed
+        // `hard = 0` replaced with a total lockout. Refusing the word has to
+        // leave the name *unrestricted*, not half-configured.
+        let out = capture_command("diskquota check zzrung89 user 4096");
+        assert_output_contains(
+            "a refused `set' stores no quota, so the name is still unrestricted",
+            &out,
+            b"write of 4096 bytes",
+        );
+        assert_eq!(last_exit(), 0, "checking a name with no quota succeeds");
+
+        // The control: the same line with both numbers spelled correctly sets
+        // the quota, so the two refusals above cannot be passing by having
+        // broken `set`.
+        let out = capture_command("diskquota set zzrung89 user 100 200");
+        assert_output_contains(
+            "while a readable pair sets both limits",
+            &out,
+            b"soft=100 hard=200",
+        );
+        assert_eq!(last_exit(), 0, "`diskquota set' succeeds");
+
+        // The other direction. `check` is asked *before* a write, so answering
+        // the zero-byte question with the reassuring word is the worse of the
+        // two even though it changes no state.
+        let out = capture_command("diskquota check zzrung89 user 5OO");
+        assert_output_contains(
+            "an unreadable size is refused, not answered as a question about zero bytes",
+            &out,
+            b"`5OO' is not a size in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable size errors");
+
+        let out = capture_command("diskquota update zzrung89 user 1O");
+        assert_output_contains(
+            "an unreadable byte delta is named",
+            &out,
+            b"`1O' is not a byte delta",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable byte delta errors");
+
+        // The deltas are `i64` on purpose: freeing space is a negative delta, so
+        // a refusal that swallowed the minus sign would refuse correct input.
+        let out = capture_command("diskquota update zzrung89 user -50");
+        assert_output_contains(
+            "while a negative delta is a release of space, not a typo",
+            &out,
+            b"bytes=-50",
+        );
+        assert_eq!(last_exit(), 0, "a negative byte delta succeeds");
+
+        // §607: the synopsis brackets `[file_delta]`, so omitting it keeps
+        // meaning zero. Only a word that is present and unreadable is refused.
+        let out = capture_command("diskquota update zzrung89 user 2048");
+        assert_output_contains(
+            "an omitted file delta keeps its documented default",
+            &out,
+            b"files=+0",
+        );
+        assert_eq!(last_exit(), 0, "an omitted file delta succeeds");
+
+        let out = capture_command("diskquota update zzrung89 user 2048 3o");
+        assert_output_contains(
+            "but a present, unreadable one is refused rather than defaulted",
+            &out,
+            b"`3o' is not a file delta",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable file delta errors");
+
+        // Leave the table as this rung found it, so rung order cannot matter.
+        let _ = capture_command("diskquota remove zzrung89 user");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -19295,9 +19659,10 @@ fn cmd_disk() {
 // Hex-dump formatting uses offsets bounded by SECTOR_SIZE (512).
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_blkread(args: &str) {
-    // Parse: "blkread <sector>" or "blkread <device> <sector>"
-    let (dev_name, sector) = parse_blkread_args(args);
-    let Some(sector) = sector else {
+    // Parse: "blkread <sector>" or "blkread <device> <sector>". The helper has
+    // already named whichever word it could not read, so the synopsis is
+    // printed only as a reminder of the form, never as the whole answer.
+    let Some((dev_name, sector)) = parse_blkread_args(args) else {
         shell_println!("Usage: blkread [device] <sector>");
         shell_println!("  e.g., blkread 0  or  blkread vda 0");
         set_exit(1);
@@ -19345,25 +19710,56 @@ fn cmd_blkread(args: &str) {
 }
 
 /// Parse blkread args: either "<sector>" or "<device> <sector>".
-/// Returns (device_name, Some(sector)) or (_, None) on parse error.
-fn parse_blkread_args(args: &str) -> (alloc::string::String, Option<u64>) {
+///
+/// Returns `None` having already said why, so the caller has nothing left to
+/// decide. The previous signature returned `(device, Option<u64>)` and folded
+/// three different failures into that one `None` — no argument at all, a
+/// two-word form whose sector would not parse, and a one-word form whose word
+/// was neither a sector nor anything else — leaving the caller able to print
+/// only the synopsis. `blkread vda 1O` answered
+///
+/// ```text
+/// Usage: blkread [device] <sector>
+///   e.g., blkread 0  or  blkread vda 0
+/// ```
+///
+/// which is the syntax of the line the user had just typed correctly, and never
+/// mentioned `1O`.
+///
+/// This site is worth a note because neither gate could see it. `check-option-
+/// refusal.py`'s D1 looks for a parse and a substituted value *in one
+/// statement*; here the parse is behind a function boundary and the substitution
+/// is the enclosing function's synopsis, so the shape is invisible to it. A
+/// sweep of the 50 other synopsis-on-`None` sites in this file found every one
+/// of them to be a genuine *absence*, with no parse involved — this helper is
+/// the only place in the shell where a helper conflates "you left it out" with
+/// "I could not read it".
+fn parse_blkread_args(args: &str) -> Option<(alloc::string::String, u64)> {
     let mut parts = args.split_whitespace();
-    let first = match parts.next() {
-        Some(s) => s,
-        None => return (alloc::string::String::from("vda"), None),
+    let Some(first) = parts.next() else {
+        shell_println!("blkread: missing sector number");
+        return None;
     };
 
     if let Some(second) = parts.next() {
-        // Two args: device name + sector
+        // Two words: device name, then sector. The device is whatever was
+        // typed -- `with_device` below reports an unknown one by name -- so
+        // only the sector can be unreadable here.
         match second.parse::<u64>() {
-            Ok(s) => (alloc::string::String::from(first), Some(s)),
-            Err(_) => (alloc::string::String::from("vda"), None),
+            Ok(s) => Some((alloc::string::String::from(first), s)),
+            Err(_) => {
+                shell_println!("blkread: `{}' is not a sector number", second);
+                None
+            }
         }
     } else {
-        // One arg: try as sector number (default device "vda")
+        // One word: the documented `[device]`-omitted form, so it is a sector.
         match first.parse::<u64>() {
-            Ok(s) => (alloc::string::String::from("vda"), Some(s)),
-            Err(_) => (alloc::string::String::from("vda"), None),
+            Ok(s) => Some((alloc::string::String::from("vda"), s)),
+            Err(_) => {
+                shell_println!("blkread: `{}' is not a sector number", first);
+                None
+            }
         }
     }
 }
@@ -84289,8 +84685,29 @@ fn cmd_diskquota(args: &str) {
             } else {
                 diskquota::QuotaTarget::User
             };
-            let soft = parts[3].parse::<u64>().unwrap_or(0);
-            let hard = parts[4].parse::<u64>().unwrap_or(0);
+            // `0` is the most punitive value this operand has, and it was the
+            // one substituted for any word that would not parse. `QuotaEntry::
+            // status` asks `bytes_used >= hard_limit_bytes`, so a hard limit of
+            // zero reports `HardExceeded` on an entry that has stored *nothing*
+            // — zero is not less than zero — and `check_quota` asks
+            // `new_usage > hard_limit_bytes`, so every write of a single byte
+            // is denied.
+            //
+            // What makes it a lockout rather than merely a wrong number is the
+            // state it replaces: `check_quota` returns `Ok(true)` for a name
+            // with no entry at all. So `diskquota set alice user 100 2O0` moves
+            // alice from *unrestricted* to *cannot write one byte*, on one
+            // mistyped character, and reports it as a quota successfully set.
+            let Some(soft) =
+                required_num::<u64>(&parts, 3, "diskquota", sub, "soft limit in bytes")
+            else {
+                return;
+            };
+            let Some(hard) =
+                required_num::<u64>(&parts, 4, "diskquota", sub, "hard limit in bytes")
+            else {
+                return;
+            };
             match diskquota::set_quota(name, target, soft, hard) {
                 Ok(id) => shell_println!(
                     "Quota #{} for {} '{}': soft={} hard={}",
@@ -84318,8 +84735,22 @@ fn cmd_diskquota(args: &str) {
             } else {
                 diskquota::QuotaTarget::User
             };
-            let soft = parts[3].parse::<u64>().unwrap_or(0);
-            let hard = parts[4].parse::<u64>().unwrap_or(0);
+            // The same guess as `set`, but its damage is *latent*: nothing in
+            // the tree ever reads `soft_limit_files` or `hard_limit_files`, so
+            // a file limit of zero locks nobody out today. It becomes the same
+            // lockout as `set` the moment that enforcement is written, which is
+            // the reason to refuse the word now rather than when it bites. See
+            // `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.
+            let Some(soft) =
+                required_num::<u64>(&parts, 3, "diskquota", sub, "soft file-count limit")
+            else {
+                return;
+            };
+            let Some(hard) =
+                required_num::<u64>(&parts, 4, "diskquota", sub, "hard file-count limit")
+            else {
+                return;
+            };
             match diskquota::set_file_limits(name, target, soft, hard) {
                 Ok(()) => shell_println!(
                     "File limits for {} '{}': soft={} hard={}",
@@ -84346,7 +84777,21 @@ fn cmd_diskquota(args: &str) {
             } else {
                 diskquota::QuotaTarget::User
             };
-            let bytes = parts[3].parse::<u64>().unwrap_or(0);
+            // The same guessed `0` as `set`, at the *opposite* extreme. Here it
+            // is the emptiest possible request: `check_quota` tests
+            // `bytes_used + bytes > hard_limit_bytes`, so asking about zero
+            // bytes asks whether the user is already over — which for anyone
+            // inside their quota answers `ALLOWED`, unconditionally.
+            //
+            // `check` exists to be asked before a write. Answering the question
+            // nobody asked with the reassuring word is the worst of the two
+            // directions, even though it is the one that changes no state: a
+            // caller who types `diskquota check alice user 5OO` is told the
+            // write is fine, and it is not.
+            let Some(bytes) = required_num::<u64>(&parts, 3, "diskquota", sub, "size in bytes")
+            else {
+                return;
+            };
             match diskquota::check_quota(name, target, bytes) {
                 Ok(allowed) => shell_println!(
                     "{} write of {} bytes: {}",
@@ -84374,11 +84819,28 @@ fn cmd_diskquota(args: &str) {
             } else {
                 diskquota::QuotaTarget::User
             };
-            let bdelta = parts[3].parse::<i64>().unwrap_or(0);
-            let fdelta = parts
-                .get(4)
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0);
+            // Signed, and `i64` rather than a width that "looks safe": these are
+            // deltas, and a release of space is a negative one. `u64` here would
+            // refuse exactly the arguments that are correct.
+            //
+            // The guessed `0` was the identity for both, so a mistyped delta was
+            // a no-op reported as an update — `Updated user 'alice': bytes=+0`.
+            // That is the accounting equivalent of the `check` case: the usage
+            // figure the whole subsystem gates on silently stops tracking
+            // reality, and every later `status`, denial and grace-period start
+            // is computed from a total that is missing whatever this call was
+            // supposed to add.
+            let Some(bdelta) = required_num::<i64>(&parts, 3, "diskquota", sub, "byte delta")
+            else {
+                return;
+            };
+            // Genuinely optional per the synopsis — `[file_delta]` — so an
+            // absent word still means "no file-count change" (§607). An
+            // unreadable one no longer does.
+            let Some(fdelta) = optional_num::<i64>(&parts, 4, "diskquota", sub, "file delta", 0)
+            else {
+                return;
+            };
             match diskquota::update_usage(name, target, bdelta, fdelta) {
                 Ok(()) => shell_println!(
                     "Updated {} '{}': bytes={:+} files={:+}",
@@ -94014,11 +94476,40 @@ fn cmd_shmem(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            let size_str = parts.get(2).copied().unwrap_or("0");
-            let size = size_str.parse::<u64>().unwrap_or(0);
-            if name.is_empty() || size == 0 {
-                shell_println!("Usage: shmem create <name> <size>");
+            // `shmem` is the mildest severity in this whole burn-down, and the
+            // reason is worth stating: **the guessed value was never used.**
+            // Every one of these seven sites guessed `0` and then immediately
+            // tested for `0` and printed the synopsis, so no state was corrupted
+            // and no measurement was invented. What was destroyed is only the
+            // diagnosis — and all of it.
+            //
+            // `shmem create foo 1O24` answered `Usage: shmem create <name>
+            // <size>`, which tells the user the *form* was wrong. The form was
+            // right; one character was wrong. Worse, `shmem create foo`,
+            // `shmem create foo 1O24` and `shmem create foo 0` were three
+            // different mistakes — omitted, unreadable, and readable-but-invalid
+            // — and the sentinel collapsed all three onto one answer, because
+            // `0` served as both the guess and the invalidity marker.
+            //
+            // This is the same shape as `cmd_blkread` (rung 86), with one
+            // difference that says something about the gate rather than the
+            // code: there the parse sat behind a function boundary and D1 could
+            // not see it, so it had to be found by hand; here the parse and the
+            // substitution share a statement, so it was counted all along.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("shmem: create: missing name");
+                set_exit(1);
+                return;
+            };
+            let Some(size) = required_num::<u64>(&parts, 2, "shmem", sub, "size in bytes") else {
+                return;
+            };
+            // A readable zero is a different mistake from an unreadable word and
+            // now gets a different answer. `shmem::create` rejects it too
+            // (`InvalidArgument`, shmem.rs:152), so nothing is being invented
+            // here — only said in words rather than as an opaque enum.
+            if size == 0 {
+                shell_println!("shmem: create: size must be greater than zero");
                 set_exit(1);
                 return;
             }
@@ -94032,13 +94523,17 @@ fn cmd_shmem(args: &str) {
             }
         }
         "delete" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: shmem delete <id>");
-                set_exit(1);
+            // The `id == 0` sentinel is dropped rather than reworded. Region ids
+            // are allocated from 1 (`init_defaults` seeds `next_id: 1`), so
+            // `delete 0` finds nothing
+            // and `shmem::delete` already answers `NotFound` — which is true,
+            // and is the same answer `delete 999` gets. Keeping a shell-side
+            // rule that singles out zero would invent a distinction the id space
+            // does not have; the only reason `0` was special was that it used to
+            // be the guess.
+            let Some(id) = required_num::<u32>(&parts, 1, "shmem", sub, "region id") else {
                 return;
-            }
+            };
             shmem::init_defaults();
             match shmem::delete(id) {
                 Ok(()) => shell_println!("Deleted region #{}", id),
@@ -94049,15 +94544,16 @@ fn cmd_shmem(args: &str) {
             }
         }
         "attach" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let pid_str = parts.get(2).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if id == 0 || pid == 0 {
-                shell_println!("Usage: shmem attach <id> <pid>");
-                set_exit(1);
+            // Two operands, and the old guard could not say which of them it was
+            // complaining about: `shmem attach 3 1O` and `shmem attach 1O 3`
+            // produced the identical synopsis. `required_num` names the word and
+            // the operand, so the two are now different messages.
+            let Some(id) = required_num::<u32>(&parts, 1, "shmem", sub, "region id") else {
                 return;
-            }
+            };
+            let Some(pid) = required_num::<u32>(&parts, 2, "shmem", sub, "process id") else {
+                return;
+            };
             shmem::init_defaults();
             match shmem::attach(id, pid) {
                 Ok(()) => shell_println!("Attached PID {} to region #{}", pid, id),
@@ -94068,15 +94564,12 @@ fn cmd_shmem(args: &str) {
             }
         }
         "detach" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let pid_str = parts.get(2).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if id == 0 || pid == 0 {
-                shell_println!("Usage: shmem detach <id> <pid>");
-                set_exit(1);
+            let Some(id) = required_num::<u32>(&parts, 1, "shmem", sub, "region id") else {
                 return;
-            }
+            };
+            let Some(pid) = required_num::<u32>(&parts, 2, "shmem", sub, "process id") else {
+                return;
+            };
             shmem::init_defaults();
             match shmem::detach(id, pid) {
                 Ok(()) => shell_println!("Detached PID {} from region #{}", pid, id),
@@ -94087,13 +94580,13 @@ fn cmd_shmem(args: &str) {
             }
         }
         "pid" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 {
-                shell_println!("Usage: shmem pid <pid>");
-                set_exit(1);
+            // A query, not a mutation: `regions_for_pid` on a pid with nothing
+            // attached returns an empty list, which is the honest answer for
+            // pid 0 as much as for pid 4242. Nothing is lost by letting a
+            // readable number through.
+            let Some(pid) = required_num::<u32>(&parts, 1, "shmem", sub, "process id") else {
                 return;
-            }
+            };
             shmem::init_defaults();
             let regs = shmem::regions_for_pid(pid);
             shell_println!("Regions for PID {} ({}):", pid, regs.len());
@@ -98667,14 +99160,27 @@ fn cmd_cputhr(args: &str) {
             shell_println!("cputhr: initialized");
         }
         "throttle" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ms = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(100);
+            // Every guessed default in this function is the *reassuring* value,
+            // which is what makes `cputhr` worse than a plain selector guess.
+            // Elsewhere a bad guess acts on the wrong object and you notice
+            // because the thing you meant is untouched. Here the guess lands in
+            // a health reading: an unreadable duration became `100`, the
+            // shortest throttle worth recording, so a stall that was mistyped as
+            // `1O00` was filed as a tenth of its length and the machine looked
+            // healthier than it is. The number is not a selector and not a
+            // measurement anyone took — it is a sedative.
+            //
+            // `<cpu>` is angle-bracketed in the synopsis, so nothing documented
+            // is lost by requiring it (§607); `[ms]` is bracketed, so its
+            // default survives and only an unreadable word is refused.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "cputhr", sub, "CPU number") else {
+                return;
+            };
+            let Some(ms) =
+                optional_num::<u64>(&parts, 2, "cputhr", sub, "duration in milliseconds", 100)
+            else {
+                return;
+            };
             match cputhr::record_throttle(cpu, ms) {
                 Ok(()) => shell_println!("cputhr: throttle cpu={} {}ms", cpu, ms),
                 Err(e) => {
@@ -98684,10 +99190,15 @@ fn cmd_cputhr(args: &str) {
             }
         }
         "clear" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `clear` erases the throttle state of whichever CPU it is given, so
+            // guessing `0` here does not merely fail to clear the CPU that was
+            // asked for — it clears a *different* one, and says it did. CPU 0
+            // exists on every machine, so unlike the id-space guesses in
+            // `aiostat` this one never fails into a diagnostic; it always
+            // succeeds against the wrong core.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "cputhr", sub, "CPU number") else {
+                return;
+            };
             match cputhr::clear_throttle(cpu) {
                 Ok(()) => shell_println!("cputhr: cleared cpu {}", cpu),
                 Err(e) => {
@@ -98697,14 +99208,23 @@ fn cmd_cputhr(args: &str) {
             }
         }
         "cap" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let mhz = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(2000);
+            // A frequency cap is asked for in order to hold a CPU *below* some
+            // speed, so the guess runs directly against the request's intent:
+            // `cputhr cap 0 8OO` — meaning 800MHz, typed with letter O — recorded
+            // a cap of **2000MHz**, two and a half times looser than the one
+            // asked for, and printed `cputhr: cap cpu=0 2000MHz` as though that
+            // had been the instruction. Like `cgiostat`'s zero-means-unlimited
+            // (§600), the guessed value is not a random wrong number; it is the
+            // one that most nearly means "no cap", which is the opposite of why
+            // anyone types `cap`.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "cputhr", sub, "CPU number") else {
+                return;
+            };
+            let Some(mhz) =
+                optional_num::<u32>(&parts, 2, "cputhr", sub, "frequency cap in MHz", 2000)
+            else {
+                return;
+            };
             match cputhr::record_cap(cpu, mhz) {
                 Ok(()) => shell_println!("cputhr: cap cpu={} {}MHz", cpu, mhz),
                 Err(e) => {
@@ -98714,14 +99234,41 @@ fn cmd_cputhr(args: &str) {
             }
         }
         "temp" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let mc = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(65_000);
+            // The sharpest case of the three, and the reason this batch is worth
+            // a note of its own. `cputhr temp 0 9O000` — 90°C, mistyped — did not
+            // fail and did not record a nonsense reading. It recorded
+            // **65.0°C**: a normal load temperature, well under any thermal
+            // limit, indistinguishable from a healthy machine. The guess does not
+            // merely lose the alarm; it files the reassurance that the alarm was
+            // meant to displace, and every later `cputhr cpus` repeats it to
+            // anyone who looks.
+            //
+            // This is the *measurement* row of the severity table (§600) at its
+            // worst: nobody observed 65°C, nothing in the log says the number was
+            // invented, and the one operand that would have revealed the mistake
+            // — the word actually typed — was discarded before anyone saw it.
+            //
+            // Worse than that, and worth checking before believing: 65_000 is
+            // also CPU 0's *initial* `temp_mc` in `cputhr::init_defaults`. So on
+            // a freshly-initialised machine the guess did not merely report a
+            // wrong number — it wrote back the value already there, leaving the
+            // state byte-for-byte unchanged while printing a line that says a
+            // temperature was set. A command that reports success, changes
+            // nothing, and cannot be distinguished from one that worked is the
+            // end state this whole burn-down exists to remove.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "cputhr", sub, "CPU number") else {
+                return;
+            };
+            let Some(mc) = optional_num::<u32>(
+                &parts,
+                2,
+                "cputhr",
+                sub,
+                "temperature in millicelsius",
+                65_000,
+            ) else {
+                return;
+            };
             match cputhr::set_temp(cpu, mc) {
                 Ok(()) => shell_println!(
                     "cputhr: temp cpu={} {}.{}°C",
@@ -98773,6 +99320,12 @@ fn cmd_cputhr(args: &str) {
         _ => {
             shell_println!("Usage: cputhr <init|throttle|clear|cap|temp|cpus|stats|test>");
             shell_println!("  throttle <cpu> [ms]            — record throttle event");
+            // `clear` took an operand all along and never said so. That was
+            // survivable while the operand was guessed — omitting it quietly
+            // meant CPU 0 — but it is not survivable now that omitting it is
+            // refused, so the synopsis has to name what the refusal will ask
+            // for. A gate whose rule is undocumented is just a wall (§299).
+            shell_println!("  clear <cpu>                    — clear throttle state");
             shell_println!("  cap <cpu> [mhz]                — record freq cap");
             shell_println!("  temp <cpu> [millicelsius]      — set temperature");
             set_exit(1);

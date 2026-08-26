@@ -81109,8 +81109,193 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **529 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **508 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (twenty-first batch): `cmd_diskquota` (7)
+> cleared — 515 → 508 across 222 → 221 functions. Pinned by
+> `kshell::self_test` rung 89.
+>
+> **The first batch where the same guessed constant is wrong in two opposite
+> directions inside one function.** Every previous entry could state a single
+> bias: `cputhr` always guessed the *reassuring* value, `cgiostat` always
+> guessed the *inverting* one. `diskquota` substituted `0` for any unreadable
+> number, and `0` is an extreme of this operand's range at **both** ends — as a
+> *limit* it is the strictest value there is, as a *request* it is the emptiest.
+>
+> | Typed | `0` stood in for | What it means there | Result |
+> |---|---|---|---|
+> | `diskquota set alice user 100 2O0` | the **hard limit** | the strictest possible | alice cannot write one byte |
+> | `diskquota check alice user 5OO` | the **size asked about** | the emptiest possible | `ALLOWED` — to a question nobody asked |
+> | `diskquota update alice user 1O` | the **byte delta** | the identity | usage silently stops tracking reality |
+>
+> So the guess is not biased toward safety, and not biased toward permissiveness
+> either. It is biased toward **whatever the surrounding code happens to make
+> `0` mean** — which the shell never considered, because it was not choosing a
+> value at all, only filling a hole.
+>
+> **Why the `set` case is a lockout and not merely a wrong number.**
+> `QuotaEntry::status` asks `bytes_used >= hard_limit_bytes`, so a hard limit of
+> zero reports `HardExceeded` on an entry storing *nothing* — zero is not less
+> than zero. `check_quota` asks `new_usage > hard_limit_bytes`, so every write
+> of a single byte is denied. What completes it is the state being replaced:
+> `check_quota` returns `Ok(true)` for a name with **no entry at all**. One
+> mistyped character therefore moved a user from *unrestricted* to *cannot write
+> one byte*, and reported it as a quota successfully set. Rung 89 pins this
+> directly — after a refused `set`, `diskquota check` must still answer for an
+> unquotaed name, proving the refusal left nothing half-configured.
+>
+> **The honest mitigation, recorded because the last three entries earned the
+> habit.** Unlike `cputhr temp` — where the guess wrote back the value already
+> in the field, leaving the state byte-for-byte unchanged — `diskquota set`
+> echoes the guess in its success line: `soft=100 hard=0`. A reader who checks
+> the numbers can see it. The defect is that nothing *makes* them look, and the
+> line's grammar asserts success.
+>
+> **`update`'s deltas are `i64`, deliberately, not by default.** Freeing space
+> is a negative delta, so reaching for `u64` here would refuse exactly the
+> arguments that are correct — the point made in `required_num`'s own doc
+> comment. Rung 89 asserts `diskquota update … -50` still succeeds, so a later
+> "tightening" that swallows the minus sign fails the build.
+>
+> **§607 holds:** `update`'s synopsis brackets `[file_delta]`, so an omitted
+> file delta still means zero; only a word that is present and unreadable is
+> refused.
+>
+> **Scope note.** The `files` arm's two sites are fixed on the same terms, but
+> their damage is *latent*: nothing in the tree reads `soft_limit_files` or
+> `hard_limit_files`, so a guessed file limit of zero locks nobody out today. It
+> becomes the same lockout as `set` the moment that enforcement is written,
+> which is the argument for refusing the word now rather than when it bites. See
+> `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.
+
+> **Burn-down log.** 2026-08-26 (twentieth batch): `cmd_shmem` (7) cleared —
+> 522 → 515 across 223 → 222 functions. Pinned by `kshell::self_test` rung 88.
+>
+> **The mildest severity in the burn-down, and the one that shows what the
+> counted ledger is actually counting.** Every other batch has been able to name
+> damage: a wrong object acted on, a number nobody measured filed as fact, a
+> guess that meant the negation of what was typed. `shmem` has none of that.
+> All seven sites guessed `0` and then, on the very next line, tested for `0`
+> and bailed — so **the guessed value never reached the subsystem**. No state
+> was written, nothing was corrupted, nothing was invented.
+>
+> What was destroyed is only the diagnosis, and all of it. `0` was doing two
+> jobs: it was the guess *and* it was the marker for "invalid". That collapses
+> three different mistakes onto one answer:
+>
+> | Typed | The mistake | What the shell said |
+> |---|---|---|
+> | `shmem create foo` | the size is **missing** | `Usage: shmem create <name> <size>` |
+> | `shmem create foo 1O24` | the size is **mistyped** (letter O) | `Usage: shmem create <name> <size>` |
+> | `shmem create foo 0` | the size is **readable and invalid** | `Usage: shmem create <name> <size>` |
+>
+> A synopsis is a specific claim: *you got the form wrong*. In rows two and
+> three the form was right. The operator is told to re-read a syntax line that
+> already matches what they typed, while the actual fault — one character, or a
+> value the subsystem will not accept — goes unmentioned. That is the sixth
+> severity row, **conflation**: not a wrong action, but one answer standing in
+> for three questions, and it is the answer to none of them.
+>
+> `shmem attach` is the same defect with a second edge. It takes two numbers,
+> and `shmem attach 1O 3` and `shmem attach 3 1O` printed the *identical* line —
+> so the message did not even narrow which of the two words was the problem.
+> They are now `` `1O' is not a region id `` and `` `1O' is not a process id ``.
+>
+> **The `delete 0` sentinel was dropped, not reworded.** Region ids are
+> allocated from 1 (`init_defaults` seeds `next_id: 1` in
+> `kernel/src/fs/shmem.rs`), so `delete 0` finds nothing
+> and `shmem::delete` answers `NotFound` — which is true, and is the same answer
+> `delete 999` gets. A shell-side rule singling out zero would invent a
+> distinction the id space does not have. Zero was only ever special *because it
+> was the guess*; once the guess is gone the special case has no reason to
+> exist. This is the general shape to look for in the remaining batches: a
+> sentinel test that looks like validation is often just the guess's shadow.
+>
+> **Why the checker could not have found this by shape.** `cmd_blkread`
+> (rung 86, eighteenth batch) had a structurally identical guess-then-test-the-
+> guess pair, and D1 did not flag it, because there the parse sat behind a
+> function boundary the statement-level regex cannot cross. The two batches
+> together are the argument for the ledger being keyed by *function* rather than
+> by pattern: the checker finds the sites it can see, and the count is what
+> keeps the ones it cannot from being forgotten.
+>
+> Rung 88 pins all three answers as distinct, both `attach` orders as distinct,
+> and carries a control — `shmem create zzrung88 1024` still succeeds — so the
+> three refusals cannot be passing by having simply broken `create`.
+>
+> **§604 note.** Two assertions in the first draft of rung 88 were
+> `assert_output_lacks(.., b"Usage: shmem create")` and the same for `delete`.
+> The wording gate rejected both as unfireable, and was right: after the fix
+> that text exists nowhere in `cmd_shmem`, so the needle matched no format
+> string and a misspelling of it would have passed forever. Both were replaced
+> rather than weakened — one by a comment (the guarantee is structural: the arm
+> cannot print a synopsis it no longer contains, which is stronger than a
+> runtime check), one by a positive `contains b"Error:"`, which is fixed text in
+> the arm's own `shell_println!` and asserts something the absence could not —
+> that the word reached `shmem::delete` and the *subsystem* answered.
+
+> **Burn-down log.** 2026-08-26 (nineteenth batch): `cmd_cputhr` (7) cleared —
+> 529 → 522 across 224 → 223 functions. Pinned by `kshell::self_test` rung 87.
+>
+> **The guessed number is never a random wrong number. It is the reassuring
+> one.** Every batch so far has asked *what the guess broke*; this one is the
+> first where the answer is that the guess is indistinguishable from good news.
+> All three of `cputhr`'s numeric operands defaulted to a value that means
+> "nothing is wrong":
+>
+> | Typed | Meant | Recorded | What the recorded value says |
+> |---|---|---|---|
+> | `cputhr temp 0 9O000` | 90.0 °C | **65.0 °C** | a normal load temperature |
+> | `cputhr cap 0 8OO` | 800 MHz | **2000 MHz** | a cap so loose it is barely one |
+> | `cputhr throttle 0 1O00` | 1000 ms | **100 ms** | the shortest stall worth recording |
+>
+> A selector guess (batches 1–13) acts on the wrong object and you notice,
+> because the object you meant is still sitting there untouched. A *measurement*
+> guess files a number nobody measured. This is that, plus a bias: the invented
+> number is always the one that makes the machine look healthier than the
+> operator was trying to say it was. `temp` is the case that matters — someone
+> types a temperature only when they are recording something abnormal, and the
+> guess replaces the abnormal reading with a normal one, then prints a success
+> line and repeats the invented figure to everyone who later runs `cputhr cpus`.
+>
+> **And for `temp` the guess was literally a no-op, which took reading the
+> subsystem to see.** `cputhr::init_defaults` starts CPU 0 at `temp_mc:
+> 65_000` — the same 65 000 the shell guessed. So on a freshly-initialised
+> machine `cputhr temp 0 9O000` wrote back the value already in the state: the
+> command changed nothing at all, and said it had set a temperature. A command
+> that reports success, makes no change, and cannot be told apart from one that
+> worked is the end state this whole entry exists to remove. It is also a
+> reminder that the severity of a guessed default cannot be judged from the
+> shell alone — 65 000 looks like an arbitrary plausible number until you open
+> `kernel/src/fs/cputhr.rs`.
+>
+> `clear` is the fourth arm and a different shape again: it takes a CPU number
+> and erases that CPU's throttle state. Guessing `0` there never failed into a
+> diagnostic the way `aiostat`'s id guesses did, because **CPU 0 exists on every
+> machine** — so `cputhr clear` with the operand omitted or mistyped silently
+> cleared core 0 and reported it. `clear` was also the one arm the usage block
+> never documented, which was survivable while omission meant "CPU 0" and is not
+> survivable now that omission is refused; a `clear <cpu>` line was added in the
+> same change, per §299 — a gate whose rule is undocumented is just a wall.
+>
+> §607 keeps the bracketed operands: `throttle <cpu> [ms]`, `cap <cpu> [mhz]`
+> and `temp <cpu> [millicelsius]` all still work with the operand omitted, and
+> rung 87 asserts `cputhr cap 0` still applies the documented 2000 MHz. Only the
+> unreadable word is refused. Unlike batch 18 there is no compounding here —
+> every bracketed operand is *last*, so no guess can eat the word another
+> operand needed.
+>
+> **A note on the wording gate, in the direction of the corrections above rather
+> than against them.** Rung 87 asserts ` cap=800MHz` against the `cpus` arm,
+> whose cap string is built at run time (`alloc::format!("{}MHz", …)` /
+> `String::from("none")`) — the same construction that was restructured in
+> `cmd_cgiostat`. The gate **accepted** it, because the leading space makes
+> ` cap=` a four-byte fixed run and `MIN_FIXED_RUN` is 4. That is the behaviour
+> predicted when the sixteenth entry was corrected, now observed rather than
+> reasoned about. The `cpus` arm was therefore left alone in this commit: it has
+> the same discoverability weakness `cgiostat` had, but saying so is an argument
+> to be made on its own, not a claim that a gate demanded it.
+>
 > **Burn-down log.** 2026-08-26 (eighteenth batch): `cmd_brightness` (7) cleared
 > — 536 → 529 across 225 → 224 functions. Pinned by `kshell::self_test` rung 85.
 >
@@ -81197,18 +81382,31 @@ file` all still work — so the rung cannot pass by having broken the options.
 > Per §607 the bracketed operands keep their defaults — `create <pid> [sq_size]
 > [cq_size]`, `submit <ring_id> [count]` — and rung 84 asserts they still work.
 >
-> **The wording gate earned its keep a second time in two batches**, in the
-> opposite direction from the last one. Rung 84's closing assertion was written
+> **The wording gate fired again**, in the opposite direction from the last
+> batch. Rung 84's closing assertion was written
 > `assert_output_lacks(.., b"NotFound")`; the gate reported it as *an assertion
 > that can never fire*, because `NotFound` reaches the screen only through a
-> `{:?}` and appears in no format string in the shell. It was right — that
-> assertion would have passed against an unfixed kernel, and against one that
-> printed nothing at all. Rewritten against the `aiostat: error:` prefix, which
-> is fixed text, it means what it was meant to mean. Note the pair: in batch
-> sixteen the gate rejected a `contains` that was true but underivable and the
-> fix belonged in the **code**; here it rejected a `lacks` that was vacuous and
-> the fix belonged in the **test**. Both times the useful move was to believe
-> the gate rather than to soften the assertion.
+> `{:?}` and appears in no format string in the shell. Rewritten against the
+> `aiostat: error:` prefix, which is fixed text, it says the same thing in a
+> form the gate can check.
+>
+> **Be precise about what the gate did and did not establish** — the first
+> version of this paragraph said the old assertion "would have passed against an
+> unfixed kernel", and that is simply false. Checked: an unfixed `aiostat
+> destroy 1O` prints `aiostat: error: NotFound`, so `lacks b"NotFound"` would
+> have **failed**. The assertion discriminated correctly at run time. What the
+> gate objects to is narrower and still worth objecting to: it cannot verify
+> that `NotFound` is text this command can produce, so it cannot tell a working
+> `lacks` from one whose needle is misspelled — and a misspelled `lacks` passes
+> forever, silently, against every kernel. The assertion was right by luck of
+> spelling, and depending on that luck is the thing the gate exists to stop.
+>
+> Two corrections in two consecutive entries, both in the same direction —
+> crediting the gate with more than it found — is itself the finding. The gate
+> is a spelling check on assertions with a four-byte fixed-run rule. It is not
+> an oracle, it does not know what a command *should* print, and every claim
+> here that it "caught a bug" should be read back against what it actually
+> reported before being believed.
 >
 > **Burn-down log.** 2026-08-26 (sixteenth batch): `cmd_cgiostat` (8) cleared —
 > 552 → 544 across 227 → 226 functions. Pinned by `kshell::self_test` rung 83.
@@ -81254,13 +81452,31 @@ file` all still work — so the rung cannot pass by having broken the options.
 > down, in the one line whose job is to *reveal* it. Both spellings are now
 > branches of the format string.
 >
-> `check-selftest-wording.py` is what surfaced this: it rejected the rung's
+> `check-selftest-wording.py` is what surfaced it: it rejected the rung's
 > `bw=100000000B/s` and `bw=unlimited` assertions as text the command cannot
-> print, which was **correct** — no format literal in the function contained
-> either. The temptation was to weaken the assertions; the right reading is that
-> the gate had found a real defect in the code under test, not in the test. That
-> is the second time this gate has paid for itself by refusing an assertion that
-> was true of the running kernel but underivable from its source.
+> print, and pointed at the interpolated `bw={}` that made them underivable.
+>
+> **Correction, made the same day, because the first version of this paragraph
+> overstated the gate's role and this file is only useful if it is trustworthy.**
+> The gate did *not* force the code change. Its rule is a run of four consecutive
+> bytes of fixed text, and the rejected needles fell one byte short — `bw=` is
+> three. Measured directly against the checker's own `producible()`, ` bw=unlimited`
+> with a single leading space is accepted against the **old** format string:
+>
+> | needle | against old `… throttle={} bw={}` |
+> |---|---|
+> | `bw=unlimited` | rejected (fixed run `bw=`, 3 bytes) |
+> | ` bw=unlimited` | **accepted** (fixed run ` bw=`, 4 bytes) |
+>
+> So widening the needle by one character would have satisfied the gate and left
+> the `alloc::format!` in place. The code change stands on the argument above it
+> — that a zero limit rendering as `unlimited` should be visible in the function
+> that renders it — and not on any demand from the checker. What the gate
+> actually did was smaller and still worth having: it drew attention to a line
+> whose two spellings were invented outside its own format string. Claiming it
+> had "found a defect the fix was forced to address" would make the gate sound
+> stronger than it is, and would teach the next reader to stop investigating at
+> the first plausible story.
 >
 > **Burn-down log.** 2026-08-26 (fifteenth batch): `cmd_taskio` (8) cleared —
 > 560 → 552 across 228 → 227 functions. Pinned by `kshell::self_test` rung 82.
@@ -83607,6 +83823,140 @@ upload site in `gui/**` and `apps/**` at once.
 and blue exchanged — a blue sky above orange grass — and semi-transparent
 pixels come out wrong. Nothing reports an error.
 
+### A-FASTPY-FORKEXEC-PARENT-MISSES-THE-4000-YIELD-POLL-BUDGET. `self_test_fastpy_forkexec` failed once in 15 boots: the guest printed its success line, but the parent task had still not exited when the harness gave up polling — 2026-08-26 — **Status: OPEN (one occurrence, cause not established)**
+
+**In short:** the kernel runs a start-up self-test that launches a small Python
+program, has it start a second program, and waits for the first one to finish.
+On one boot the program did its whole job and said so, but the kernel gave up
+waiting a moment too soon and declared the test failed. The boot was otherwise
+completely clean. It has happened once and has not been reproduced, so it is
+recorded rather than diagnosed — and this entry exists mainly so the *next*
+occurrence is recognised as the second one rather than investigated from
+scratch.
+
+**Where.** `kernel/src/proc/spawn.rs`, `self_test_fastpy_forkexec` — the poll
+loop at ~9261 and the verdict at ~9277:
+
+```rust
+let mut became_zombie = false;
+for _ in 0..4000 {
+    if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) { became_zombie = true; break; }
+    crate::sched::yield_now();
+}
+let state = pcb::state(result.pid);
+…
+thread::on_thread_exit(result.task_id);   // ← this force-reaps the parent
+pcb::destroy(result.pid);
+if !became_zombie || state != Some(pcb::ProcessState::Zombie) { … FAIL … }
+```
+
+**The observation.** Boot `497f31a17` (debug, QEMU TCG, 430 s to `BOOT_OK`),
+`build/serial-test.txt` lines 3300–3382:
+
+```
+[spawn] Created process 192 ("fastpy-forkexec")
+[sched] Spawned task 155 …                    ← the parent
+[sched] Spawned task 156 … in process 193     ← the fork child
+[exec] Process 193 exec complete …            ← the child execs `cat`
+fastpy fork+exec+wait OK                      ← the CHILD: `cat` echoing the staged file
+[thread] Process 193 has no threads left — now zombie
+[sched] Task 156 exiting
+[thread] Process 192 has no threads left — now zombie
+[spawn]   FAIL: fastpy-forkexec (ring 3) — expected Zombie, got Some(Running)
+```
+
+**Read the last two lines in the right order or the diagnosis inverts.** It
+looks as though process 192 became a zombie and the harness then failed it
+anyway, i.e. a stale read. It is not that. `[thread] Process N has no threads
+left — now zombie` is printed by `thread::on_thread_exit`
+(`kernel/src/proc/thread.rs:767`), and the *harness itself* calls
+`on_thread_exit(result.task_id)` at spawn.rs:9273 — after capturing `state` at
+9270 and before printing the verdict at 9278. So that zombie line is the
+harness force-reaping the parent, not the parent exiting on its own. The read
+was not stale; task 155 really had not exited.
+
+**What is not the cause.** The commit under test changed only
+`parse_blkread_args` in `kshell.rs` and added self-test rung 86. The spawn
+self-tests run at serial line ~3300; `kshell::self_test 86` runs at line 40962.
+The changed code executes roughly 37,000 serial lines *after* the failure, so it
+cannot have contributed. The 14 boots immediately preceding this one were all
+`PASS`, and the boot in question was clean everywhere else — 0 `!! ` lines,
+`kshell::self_test PASSED`, `BOOT_OK detected`.
+
+**Two candidate causes, not distinguished.**
+
+1. *Budget too tight.* 4000 `yield_now()` calls is a fixed count, not a
+   deadline, so what it is worth in real time depends on how much else is
+   runnable. This boot took 430 s to `BOOT_OK` against a recent median of ~400 s
+   and was competing with a concurrent `cargo`/gate run on the host. A
+   fastpy parent has an interpreter to tear down after its last `print`, and
+   that teardown is not free.
+2. *Same family as `B-FORKEXEC-BOOT-HANG`.* That entry documents the exit path
+   of a just-reaped process wedging, with a suspected raw-spin
+   holder-preemption deadlock (Q24). The signature there is a **silent** stop
+   with no further output; here output continued and the boot completed, so it
+   is not the same event — but "the last thread of a fork/exec parent is slow
+   or stuck leaving" is the same neighbourhood, and this may be a survivable
+   instance of it.
+
+**Correction, made the same day, before this entry had been acted on — and it
+changes which cause is likely.** The first version of this entry read
+`fastpy fork+exec+wait OK` as the *parent's* success line and built a
+hypothesis on it: that the line appears before the child's zombie line, which
+would mean `waitpid` returned before the child was reaped. That is wrong twice
+over. The runner program (`services/fastpy-forkexec/build.py`, the embedded
+source at lines 78–96) **prints nothing at all** — it ends
+`sys.exit(os.WEXITSTATUS(status))`. And `FE_CONTENT` in spawn.rs:9208 is
+literally `b"fastpy fork+exec+wait OK\n"`: the harness stages that text in
+`/tmp/forkexec-input.txt`, and the line on serial is `cat` — *the child* —
+echoing the file it was handed. There is no ordering anomaly and no early
+`waitpid`.
+
+**The corrected reading is worse for cause 1, not better.** With the line
+attributed to the child, the log says the child had printed its output, exited,
+zombified *and* had its task torn down — and the parent still had not left
+`waitpid` when the budget expired. The parent had produced no output of its own
+and had no interpreter teardown left to blame, because it never got past the
+wait. So "the fastpy parent needed a few more yields to finish exiting" is not
+supported by anything in the log; what the log shows is a parent still blocked
+in `wait4` after the event it was waiting for had fully completed.
+
+That makes **a lost wakeup on the guest's `wait4` the leading hypothesis**, and
+it is worth being explicit that this is *not* excluded by the static audit under
+`B-FORKEXEC-BOOT-HANG`. That audit ruled out a lost wakeup on the ground that
+"the kernel harness … does not block — it *polls*", which is true and remains
+true. It says nothing about the **guest parent**, which genuinely does block in
+`waitpid`. The two are different waiters and only one of them was cleared.
+
+**Deliberately not "fixed" by raising the budget.** Changing `4000` to a bigger
+number would make the symptom rarer without establishing which of the two
+causes is real, and if it is cause 2 the loop would be papering over a kernel
+bug with a longer wait. Note also that the harness reports a *poll timeout*
+with the words "faulted on the fork / execv / waitpid path", which is a
+misdiagnosis of exactly the kind §600 is about: nothing faulted.
+
+**Next step on recurrence.** Print the parent's `pcb::state` *and its scheduler
+state* at the moment the budget expires — the distinction that matters is
+`Ready` (merely starved: cause 1) versus `Blocked` (parked in `wait4` with the
+child already reaped: a lost wakeup). The harness currently records only
+`pcb::state`, which reports `Running` for both and so cannot tell them apart;
+that is the single cheapest instrumentation change and should be made whether
+or not this recurs. Then re-run with `--hard-lockup-watchdog` to capture the
+guest RIP.
+
+If it is cause 1, the fix is a *deadline* (a tick-based timeout) rather than a
+yield count, plus a verdict line that says "still Running after N ms" instead of
+blaming the fork/exec path. If it is the lost wakeup, the place to look is the
+wait/reap side: whether the child's zombification wakes a parent already parked
+in `wait4`, and whether the `pending_wake` flag in `sched/mod.rs` (which closes
+the register→park window for the core protocol) is actually on the path
+`wait4` uses.
+
+**Note on the evidence.** `build/serial-test.txt` is overwritten by the next
+boot, so the log quoted above no longer exists on disk. The excerpt in this
+entry is the whole of the surviving record — which is the argument for quoting
+generously here rather than referring to a file.
+
 ---
 
 ## `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS` (lane C, 2026-08-26)
@@ -83761,3 +84111,97 @@ The shell's grab list is checked against `DesktopAction::for_chord` in both
 directions by test, sweeping the entire key vocabulary, so a binding added
 without a grab — a shortcut silently dead in every window but one — fails the
 build rather than shipping.
+
+---
+
+## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **open**, tech debt
+
+**In short:** `diskquota` can limit two things: how many *bytes* a user may
+store, and how many *files*. The byte half works. The file half is a prop —
+`diskquota files alice user 100 200` accepts the numbers, stores them, prints a
+confirmation, and nothing anywhere ever looks at them again. A user given a
+200-file limit can create any number of files.
+
+**Where.** `kernel/src/fs/diskquota.rs`. The fields exist
+(`QuotaEntry::soft_limit_files`, `hard_limit_files`, lines ~83–84) and are
+written in exactly two places — the `u64::MAX` seed for a newly created entry
+(~195–196) and `set_file_limits` (~218–219). A tree-wide grep for
+`limit_files` returns no reader outside this file, and inside it there is none
+either: `QuotaEntry::status()` compares `bytes_used` against the byte limits
+only, and `check_quota` likewise tests `new_usage > entry.hard_limit_bytes`.
+
+The usage side is *also* live and equally unconsulted: `update_usage` maintains
+`entry.file_count` (~272–274), so the kernel dutifully tracks a running file
+count and dutifully stores a ceiling for it, and never once compares the two.
+
+**Why it is worth an entry rather than a shrug.** This is not a stub that
+announces itself. `set_file_limits` returns `KernelResult<()>` and reports
+`NotFound` when there is no such quota entry, so it fails in exactly the
+situation a real implementation would, which makes it look implemented. The
+shell prints `File limits for user 'alice': soft=100 hard=200` — a success line
+naming the numbers. Everything about the interface says the limit took effect.
+
+**The proper fix** is to enforce it, not to remove it: extend `status()` to
+return the worse of the byte and file verdicts, and give `check_quota` a
+file-count counterpart (or a `files: u64` parameter) so a write that would
+create a file is tested against `hard_limit_files` the way its bytes are tested
+against `hard_limit_bytes`. The grace-period machinery already keyed off the
+soft byte limit should apply to the soft file limit on the same terms.
+
+**Until then, do not let the D1 burn-down overstate the damage in this arm.**
+When `cmd_diskquota`'s guessed-value sites are fixed, the `files` subcommand's
+guessed `0` is a *latent* fault, not an active one: it records a limit that is
+wrong and that nothing currently enforces. It becomes an active lockout the
+moment the enforcement above is written. The `set` arm's guessed `0` is a live
+lockout today, because the byte path is real.
+
+**Not a regression.** True since `set_file_limits` was written.
+
+---
+
+## `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING` (lane A, 2026-08-26) — **open**, tech debt
+
+**In short:** `groupmgr delete 0` destroys the `root` group and prints
+`Deleted group 0.` as a success. There is no confirmation, no privilege check,
+and no protection for system groups — even though the code carries a
+`GroupType::System` label that looks like exactly that protection. The label is
+never read by anything.
+
+**Where.** `kernel/src/fs/groupmgr.rs`.
+
+- `init_defaults` seeds GID 0 as `root` and GID 1 as `wheel`, both
+  `group_type: GroupType::System` (~124–134).
+- `delete_group` is four lines: `state.groups.retain(|g| g.gid != gid)`, then
+  `NotFound` if nothing was removed, else `Ok(())`. It does not look at
+  `group_type`, at membership, or at the caller.
+- A tree-wide grep for `GroupType::System` returns **three** hits: the two
+  constructions above and one assertion inside the module's own self-test.
+  Nothing anywhere *branches* on it. The variant is a display label
+  (`group_type.label()` in the shell listing) wearing the name of a policy.
+
+**Why this is worth an entry.** The danger is not that a destructive operation
+exists — it is that the codebase reads as though the case were already handled.
+A reviewer who greps for `System` finds the variant, sees it set on `root`, and
+reasonably concludes that system groups are distinguished from user groups for
+a reason. They are not. The same is true of the shell: `groupmgr` lists a
+`[System]` tag beside `root`, which tells the operator the system knows this
+group is special, at a prompt where deleting it is one word.
+
+**The proper fix.** Decide what `GroupType::System` is *for* and then make it
+load-bearing, rather than adding a special case for GID 0 specifically. The
+narrow version is `delete_group` returning `KernelError::PermissionDenied` (or
+`InvalidArgument`) for any `GroupType::System` group; the fuller version also
+refuses to remove the last member of a system group and refuses `remove_member`
+on `root`. Deleting by GID-0-literal is the wrong shape of guard — it protects
+one id rather than the property that made that id worth protecting, and `wheel`
+at GID 1 is just as load-bearing.
+
+**Relationship to the D1 burn-down.** These are two different bugs that
+compound, and fixing one does not fix the other. Before the twenty-first batch,
+`cmd_groupmgr`'s `delete` arm guessed GID **0** for any word it could not parse
+— so `groupmgr delete 1O` deleted the root group. That guess is now refused, so
+reaching this operation requires *typing* `0`. The operation itself is still
+unguarded, and a correctly-typed `groupmgr delete 0` still destroys `root`. See
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+
+**Not a regression.** True since `delete_group` was written.

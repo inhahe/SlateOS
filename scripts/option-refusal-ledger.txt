@@ -57,7 +57,6 @@ cmd_colortemp 7
 cmd_compstat 1
 cmd_coredump 5
 cmd_cpuset 4
-cmd_cputhr 7
 cmd_cursorsettings 2
 cmd_datausage 5
 cmd_defaultapps 4
@@ -66,7 +65,6 @@ cmd_devfreq 5
 cmd_dictation 1
 cmd_directio 3
 cmd_diskhealth 1
-cmd_diskquota 7
 cmd_diskstat 4
 cmd_display 3
 cmd_displayarrange 4
@@ -199,7 +197,6 @@ cmd_secureerase 1
 cmd_seq 2
 cmd_service_limits 4
 cmd_sharesheet 1
-cmd_shmem 7
 cmd_signalq 6
 cmd_slabstat 1
 cmd_snaplayout 1

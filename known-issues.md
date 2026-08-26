@@ -84156,3 +84156,52 @@ moment the enforcement above is written. The `set` arm's guessed `0` is a live
 lockout today, because the byte path is real.
 
 **Not a regression.** True since `set_file_limits` was written.
+
+---
+
+## `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING` (lane A, 2026-08-26) — **open**, tech debt
+
+**In short:** `groupmgr delete 0` destroys the `root` group and prints
+`Deleted group 0.` as a success. There is no confirmation, no privilege check,
+and no protection for system groups — even though the code carries a
+`GroupType::System` label that looks like exactly that protection. The label is
+never read by anything.
+
+**Where.** `kernel/src/fs/groupmgr.rs`.
+
+- `init_defaults` seeds GID 0 as `root` and GID 1 as `wheel`, both
+  `group_type: GroupType::System` (~124–134).
+- `delete_group` is four lines: `state.groups.retain(|g| g.gid != gid)`, then
+  `NotFound` if nothing was removed, else `Ok(())`. It does not look at
+  `group_type`, at membership, or at the caller.
+- A tree-wide grep for `GroupType::System` returns **three** hits: the two
+  constructions above and one assertion inside the module's own self-test.
+  Nothing anywhere *branches* on it. The variant is a display label
+  (`group_type.label()` in the shell listing) wearing the name of a policy.
+
+**Why this is worth an entry.** The danger is not that a destructive operation
+exists — it is that the codebase reads as though the case were already handled.
+A reviewer who greps for `System` finds the variant, sees it set on `root`, and
+reasonably concludes that system groups are distinguished from user groups for
+a reason. They are not. The same is true of the shell: `groupmgr` lists a
+`[System]` tag beside `root`, which tells the operator the system knows this
+group is special, at a prompt where deleting it is one word.
+
+**The proper fix.** Decide what `GroupType::System` is *for* and then make it
+load-bearing, rather than adding a special case for GID 0 specifically. The
+narrow version is `delete_group` returning `KernelError::PermissionDenied` (or
+`InvalidArgument`) for any `GroupType::System` group; the fuller version also
+refuses to remove the last member of a system group and refuses `remove_member`
+on `root`. Deleting by GID-0-literal is the wrong shape of guard — it protects
+one id rather than the property that made that id worth protecting, and `wheel`
+at GID 1 is just as load-bearing.
+
+**Relationship to the D1 burn-down.** These are two different bugs that
+compound, and fixing one does not fix the other. Before the twenty-first batch,
+`cmd_groupmgr`'s `delete` arm guessed GID **0** for any word it could not parse
+— so `groupmgr delete 1O` deleted the root group. That guess is now refused, so
+reaching this operation requires *typing* `0`. The operation itself is still
+unguarded, and a correctly-typed `groupmgr delete 0` still destroys `root`. See
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+
+**Not a regression.** True since `delete_group` was written.

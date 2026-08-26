@@ -88054,7 +88054,17 @@ in the tree, `deflate/` (lane A's inflate implementation, already used by
    deflate *compressor*, which the `deflate/` crate may not have; storing
    uncompressed (method 0) is a correct first cut if not.
 
-**Why it was split off rather than done at once:** the window and the back end
+**Filed with lane A:** `requests/c-a-zip-is-trapped-in-the-kernel-binary.md`.
+`kernel/src/fs/zip.rs` is already a complete 799-line ZIP reader *and* writer
+with ZIP64 and a boot self-test -- but it is a module of a binary crate, so
+nothing outside the kernel can depend on it. Writing a second ZIP parser here
+would be the same mistake `requests/c-a-two-inflates.md` documents, with more
+force: a ZIP parser reads untrusted input, so a second copy is a second attack
+surface for `..` traversal, the backwards end-of-central-directory scan and the
+ZIP64 shadow fields. **This entry stays open until that crate exists**, and the
+"proper fix" above is then a matter of calling it rather than writing it.
+
+**Why the window was wired first rather than waiting:** the window and the back end
 fail independently and are tested completely differently — one against rendered
 geometry, the other against archive bytes. This mirrors what was done for
 `apps/diskcleanup`, which was wired first and given a real back end in the

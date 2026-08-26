@@ -121,6 +121,33 @@ pub enum Response {
     Exit,
 }
 
+/// Shared configuration files an application has rewritten and must announce.
+///
+/// These files are read by *other* processes — the compositor draws window
+/// corners and shadows from `appearance.yaml`, and times two clicks as one
+/// double click from `input.yaml` — so an application that writes one and says
+/// nothing produces a setting that appears to work and does not: the preview in
+/// its own window updates, and every real window keeps its old corners until the
+/// next login. That is worse than a setting that plainly does nothing, because
+/// nobody goes looking for it.
+///
+/// A record of *what was written*, not a request to change anything. The
+/// notifications it becomes carry no settings, so a client cannot swap the
+/// user's mouse buttons by asking — it can only say "the file you read is not
+/// the one you have". See [`EventLoop::appearance_changed`].
+///
+/// The two are separate flags rather than one because they become separate
+/// requests: a new double-click interval must not repaint the desktop, and a new
+/// accent colour must not have the compositor re-read the pointer
+/// configuration.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reloads {
+    /// `appearance.yaml` was rewritten.
+    pub appearance: bool,
+    /// `input.yaml` was rewritten.
+    pub input: bool,
+}
+
 /// The part of an application the toolkit cannot write for it.
 ///
 /// Everything with a default is a decision an application is entitled not to
@@ -183,6 +210,21 @@ pub trait App {
     /// changed. Returning it unconditionally is the easy mistake and costs a
     /// full frame per mouse move.
     fn on_event(&mut self, event: &Event) -> Response;
+
+    /// Which shared configuration files have been rewritten since last asked.
+    ///
+    /// Draining, not peeking: the loop asks after every event and announces
+    /// whatever comes back, so an implementation must clear its record when it
+    /// answers or the compositor is told the same news for the rest of the
+    /// session.
+    ///
+    /// Almost every application leaves this at its default. It exists for the
+    /// handful — Settings, today exactly one — that edit files another process
+    /// reads. See [`Reloads`] for why saying nothing is the defect it guards
+    /// against.
+    fn take_reloads(&mut self) -> Reloads {
+        Reloads::default()
+    }
 
     /// Draw the current state at the current window size.
     ///
@@ -276,7 +318,25 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             if matches!(event, Event::Resize { .. } | Event::ScaleChanged { .. }) {
                 dirty = true;
             }
-            match app.on_event(event) {
+            let response = app.on_event(event);
+            // Drained per event rather than once per batch, and *before* the
+            // response is acted on. Two reasons, both about not losing one:
+            //
+            // An application may write a file while answering `Idle` — nothing
+            // visible changed in *its* window, but the desktop's colours did —
+            // so the drain must not sit behind the redraw decision.
+            //
+            // And a batch ending in `CloseRequested` never reaches `Settled`:
+            // the loop stops as soon as the close is dispatched (see
+            // `EventLoop::run_batched`). A notification held for the batch
+            // boundary would be a setting the user changed with their last
+            // click before closing the window, saved to disk, and never
+            // announced — visibly not applied until the next login.
+            if let Err(e) = announce_reloads(events, app.take_reloads()) {
+                failure = Some(e);
+                return EventResponse::Exit;
+            }
+            match response {
                 Response::Idle => EventResponse::Continue,
                 Response::Redraw => {
                     dirty = true;
@@ -308,6 +368,24 @@ pub fn drive<T: Transport, A: App + ?Sized>(
     })?;
 
     failure.map_or(Ok(()), Err)
+}
+
+/// Tell the compositor about whichever shared files were just rewritten.
+///
+/// One request each, rather than one "something changed": the compositor acts
+/// on them differently, and a single notification would have it re-read the
+/// pointer configuration every time an accent colour moved.
+fn announce_reloads<T: Transport>(
+    events: &mut EventLoop<T>,
+    reloads: Reloads,
+) -> Result<(), Error<T>> {
+    if reloads.appearance {
+        events.appearance_changed()?;
+    }
+    if reloads.input {
+        events.input_changed()?;
+    }
+    Ok(())
 }
 
 /// Bring a window's wake-up into agreement with what the application now wants.
@@ -508,6 +586,9 @@ mod tests {
         drawn: Rc<RefCell<Vec<(f32, f32)>>>,
         answer: Response,
         interval: Option<Duration>,
+        /// What the next `take_reloads` will report, drained when it is asked —
+        /// exactly as a real application's own record is.
+        reloads: Rc<RefCell<Reloads>>,
     }
 
     impl Recorder {
@@ -517,11 +598,18 @@ mod tests {
                 drawn: Rc::new(RefCell::new(Vec::new())),
                 answer,
                 interval: None,
+                reloads: Rc::new(RefCell::new(Reloads::default())),
             }
         }
 
         fn ticking(mut self, every: Duration) -> Self {
             self.interval = Some(every);
+            self
+        }
+
+        /// Stand in for having written a shared configuration file.
+        fn having_written(self, reloads: Reloads) -> Self {
+            *self.reloads.borrow_mut() = reloads;
             self
         }
     }
@@ -542,6 +630,10 @@ mod tests {
         fn on_event(&mut self, event: &Event) -> Response {
             self.seen.borrow_mut().push(event.clone());
             self.answer
+        }
+
+        fn take_reloads(&mut self) -> Reloads {
+            std::mem::take(&mut *self.reloads.borrow_mut())
         }
 
         fn render(&mut self, width: f32, height: f32) -> RenderTree {
@@ -871,6 +963,176 @@ mod tests {
         events.inject_event(window, Event::CloseRequested);
         drive(&mut events, window, &mut app).expect("the loop should have run");
         assert!(!events.is_running());
+    }
+
+    // -----------------------------------------------------------------------
+    // Announcing a rewritten configuration file
+    // -----------------------------------------------------------------------
+
+    /// Every reload request the desktop was sent, in order.
+    fn reloads_seen(desktop: &Rc<RefCell<crate::testing::TestDesktop>>) -> Vec<&'static str> {
+        desktop
+            .borrow()
+            .seen
+            .iter()
+            .filter_map(|r| match r.body {
+                crate::RequestBody::ReloadAppearance => Some("appearance"),
+                crate::RequestBody::ReloadInput => Some("input"),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An application that writes `appearance.yaml` and tells nobody produces a
+    /// setting that appears to work and does not: its own preview updates while
+    /// every real window keeps its old corners until the next login.
+    ///
+    /// Scripted through the desktop rather than injected, here and below, so the
+    /// change-carrying event is a batch of its own. [`EventLoop::inject_event`]
+    /// puts everything in one batch, which would make every test in this section
+    /// exercise the close path and say the same thing as the last one.
+    #[test]
+    fn a_rewritten_file_is_announced_to_the_compositor() {
+        let mut app = Recorder::new(Response::Redraw).having_written(Reloads {
+            appearance: true,
+            input: false,
+        });
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(reloads_seen(&desktop), ["appearance"]);
+    }
+
+    /// Drained, not peeked: an implementation that answered the same news for
+    /// ever would have the compositor re-read the file on every mouse move for
+    /// the rest of the session.
+    #[test]
+    fn the_news_is_announced_once_and_not_for_ever() {
+        let mut app = Recorder::new(Response::Idle).having_written(Reloads {
+            appearance: true,
+            input: false,
+        });
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        {
+            let mut desk = desktop.borrow_mut();
+            for _ in 0..4 {
+                desk.script
+                    .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+            }
+        }
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(
+            reloads_seen(&desktop),
+            ["appearance"],
+            "the record was read rather than taken"
+        );
+    }
+
+    /// The two files are separate requests, so a new double-click interval does
+    /// not repaint the desktop and a new accent colour does not have the
+    /// compositor re-read the pointer configuration.
+    #[test]
+    fn the_two_files_are_announced_separately() {
+        let mut app = Recorder::new(Response::Idle).having_written(Reloads {
+            appearance: false,
+            input: true,
+        });
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(
+            reloads_seen(&desktop),
+            ["input"],
+            "an input change must not send the appearance request too"
+        );
+    }
+
+    /// An application may change the desktop without changing its own window, so
+    /// `Idle` must not suppress the announcement. There is no such control
+    /// today; this is what keeps the rule when there is one.
+    #[test]
+    fn a_file_written_while_answering_idle_is_still_announced() {
+        let mut app = Recorder::new(Response::Idle).having_written(Reloads {
+            appearance: true,
+            input: true,
+        });
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+        let drawn = Rc::clone(&app.drawn);
+
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(reloads_seen(&desktop), ["appearance", "input"]);
+        assert_eq!(
+            drawn.borrow().len(),
+            1,
+            "announcing is not redrawing: only the unprompted first frame"
+        );
+    }
+
+    /// The reason the drain is per event and not once per batch — and the only
+    /// test in this section that tells those two placements apart.
+    ///
+    /// A batch that ends in `CloseRequested` never reaches `Dispatch::Settled`:
+    /// [`EventLoop::run_batched`] stops the moment the close is dispatched. News
+    /// held for the batch boundary would therefore be lost exactly when a user
+    /// makes their last change and closes the window — saved to disk, never
+    /// announced, and visibly not applied until the next login. That is the
+    /// worst shape this defect takes, because the file on disk says it worked.
+    ///
+    /// Injected rather than scripted, because one batch containing the change
+    /// *and* the close is precisely the case under test.
+    #[test]
+    fn the_last_change_before_the_window_closes_is_still_announced() {
+        let mut app = Recorder::new(Response::Redraw).having_written(Reloads {
+            appearance: true,
+            input: false,
+        });
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        events.inject_event(window, Event::CloseRequested);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert_eq!(reloads_seen(&desktop), ["appearance"]);
+    }
+
+    /// The default must be silence. Almost every application never writes one
+    /// of these files, and a loop that announced unconditionally would have the
+    /// compositor re-read two YAML files per event of every application on the
+    /// desktop.
+    #[test]
+    fn an_application_that_writes_nothing_announces_nothing() {
+        let mut app = Recorder::new(Response::Redraw);
+        let (mut events, desktop) = desktop();
+        let window = open(&mut events, &app).expect("granted");
+
+        desktop
+            .borrow_mut()
+            .script
+            .push_back(vec![InputEvent::new(window, Event::FocusIn)]);
+        drive(&mut events, window, &mut app).expect("the loop should have run");
+
+        assert!(reloads_seen(&desktop).is_empty());
     }
 
     /// A transport that stops accepting bytes when the flag is set.

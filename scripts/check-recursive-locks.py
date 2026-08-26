@@ -221,14 +221,17 @@ def strip_noise(src: str, keep_literals: bool = False) -> str:
     return "".join(out)
 
 
-def find_bodies(src: str) -> dict[str, tuple[int, int]]:
-    """Map each function name in the file to its body's [start, end) offsets.
+def find_all_bodies(src: str) -> dict[str, list[tuple[int, int]]]:
+    """Map each function name to the [start, end) offsets of *every* definition.
 
-    Nested functions and same-named methods in different impl blocks both occur
-    here; a later definition simply wins, which is acceptable for a heuristic
-    whose output is hand-checked.
+    A name is not unique in a Rust file: `fn report` may be a method on four
+    different enums, and a nested `fn piped` may be redeclared in a dozen
+    sibling blocks. A caller that wants to know "what can a call to this name
+    reach" must consider all of them, because it cannot resolve the receiver's
+    type -- so it unions their bodies and over-approximates. `find_bodies`
+    exists for callers that only need one span and are hand-checked.
     """
-    bodies: dict[str, tuple[int, int]] = {}
+    bodies: dict[str, list[tuple[int, int]]] = {}
     for m in FN_DEF.finditer(src):
         name = m.group(1)
         # Walk forward to the body's opening brace, skipping the parameter list,
@@ -263,10 +266,21 @@ def find_bodies(src: str) -> dict[str, tuple[int, int]]:
             elif src[j] == "}":
                 depth -= 1
                 if depth == 0:
-                    bodies[name] = (start + 1, j)
+                    bodies.setdefault(name, []).append((start + 1, j))
                     break
             j += 1
     return bodies
+
+
+def find_bodies(src: str) -> dict[str, tuple[int, int]]:
+    """Map each function name in the file to its body's [start, end) offsets.
+
+    Nested functions and same-named methods in different impl blocks both occur
+    here; a later definition simply wins, which is acceptable for a heuristic
+    whose output is hand-checked. Use `find_all_bodies` when every definition
+    matters.
+    """
+    return {name: spans[-1] for name, spans in find_all_bodies(src).items()}
 
 
 def direct_locks(body: str) -> set[str]:

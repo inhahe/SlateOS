@@ -85484,3 +85484,113 @@ original.
 than overflow it. Buttons are right-aligned inside the box, so the overflow ran
 off the **left** edge — the near side, where it reads as an intentional inset
 rather than as a mistake.
+
+---
+
+## BUG-C-THE-WRITE-BUTTON-WAS-NOT-A-BUTTON — fixed in `c9c7902bd`
+
+**In short:** The disk imager's whole purpose is to write an image to a USB
+drive. The "Write Image" button that starts that had been on screen since the
+tab was written, and clicking it did nothing at all — no handler anywhere
+listened for it. The program could read images, inspect them, hash them and
+verify them, but it could not do the thing it is named after.
+
+**Where it lived:** `apps/diskimager/src/main.rs` — `render_write_tab` drew the
+button; `handle_mouse` had branches for the tab bar, the drive list and the ISO
+browser, and none for the Write tab.
+
+**What it took down with it.** The button was the only way in, so everything
+behind it was unreachable too: `ConfirmDialog` and its `show_write_confirm`, the
+140-line `render_confirm_dialog`, and the Enter/Escape handling in
+`handle_key`. Roughly 200 lines of tested-looking, never-run code — two unit
+tests exercised `ConfirmDialog` as a struct, which is why "it has tests" did not
+mean "it works."
+
+**Why nothing caught it.** `dead_code` is the lint that catches a feature with
+no way in, and it could not fire: the dialog was reachable *from the tests*, and
+the tests are compiled into the same crate. A crate-wide `#![allow(dead_code)]`
+had also been present until 2026-08-25. Nothing else in the toolkit can notice —
+a `FillRect` is a `FillRect` whether or not anyone will ever click it.
+
+**The fix:** a `WriteTabLayout` computed once, drawn from by `render_write_tab`
+and hit-tested by `handle_mouse`; the rows below the image and drive cards move
+with the selection, so the button's position is not a constant a hit test could
+have restated. `confirm_write()` puts the dialog up, guarded by the same
+`can_write()` that decides whether the button is drawn enabled — one test, so
+the button's look and its effect cannot disagree.
+
+**The lesson worth keeping:** a widget that is drawn but not wired is invisible
+to every automatic check there is. The test that catches it is the one that
+clicks where the pixels are — `the_write_button_opens_the_confirmation` —
+paired with one asserting the drawn rectangle is the hit-tested rectangle. Both
+now exist; either alone would pass while the feature stayed broken.
+
+---
+
+## BUG-C-A-DIALOG-DREW-ITSELF-ONE-HEIGHT-AND-WAS-CLICKED-AT-ANOTHER — fixed in `c9c7902bd`
+
+**In short:** The disk imager's confirmation box grew or shrank to fit its text,
+but the code that decided which button a click had hit always assumed the box
+was 200 pixels tall. Whenever the text made the box a different size — which was
+most of the time — the Cancel and Write buttons were clickable at a place on
+screen where nothing was drawn, and unclickable where they actually appeared.
+
+**Where it lived:** `apps/diskimager/src/main.rs` — `handle_dialog_click` opened
+with `let dialog_h = 200.0_f32;` and derived the button row from it, while
+`render_confirm_dialog` measured its own wrapped message and warning and used
+whatever height that came to.
+
+**Why it never fired in practice:** the button was inert (the entry above), so
+the dialog never opened outside a unit test, and the unit tests called
+`ConfirmDialog` methods directly rather than clicking anything. Two latent bugs
+covering for each other: the reachability bug meant the geometry bug had no way
+to be observed, and the geometry bug meant fixing the reachability bug alone
+would have shipped a dialog whose buttons miss.
+
+**The fix:** the whole hand-rolled dialog is gone, replaced by
+`guitk::modal::AlertDialog`, which stores the rectangles it drew and hit-tests
+against those. `clicking_the_verb_starts_the_write` renders the dialog, asks it
+where the button that means `Ok` landed, clicks the centre of that rectangle and
+asserts the write started — a test that only passes if the drawn geometry and
+the hit geometry are the same object.
+
+**The general shape, seen three times now** (here, in the toolkit's button
+widths, and in the Write button above): a rectangle computed twice agrees only
+until one copy is edited, and nothing warns you when they part. The fix is
+always the same — compute once, read twice — and the test is always the same
+too: recover the rectangle from the render tree, not from the code that was
+supposed to have drawn it.
+
+---
+
+## BUG-C-A-FULL-DIALOG-DROPPED-THE-WARNING-AND-KEPT-THE-QUESTION — fixed in `c9c7902bd`
+
+**In short:** The toolkit's alert box refuses to grow past 500 pixels tall, and
+when its text did not fit it stopped drawing lines at the bottom. The warning
+line sits *below* the message, so the bottom is where the warning is: a long
+drive name would push "This action cannot be undone" off the box and the user
+would be asked to confirm an irreversible write with the word "irreversible"
+missing. The name that causes it comes from the device, not from us, so its
+length was never ours to bound.
+
+**Where it lived:** `gui/toolkit/src/modal.rs` — `AlertDialog::render` drew the
+message and the detail in two hand-rolled loops, each with a `break` when the
+next line would cross the button row.
+
+**How to see it:** an `AlertDialog::destructive` whose message is a drive name
+repeated enough times to wrap past ~7 lines at the dialog's width. The yellow
+detail text is simply absent from the render tree — no ellipsis, no indication
+that anything was cut.
+
+**The fix:** `line_budget` decides both allowances up front, before either is
+drawn. The detail is served first, capped at half the column so it cannot crowd
+out the question; the message gets the rest, with a floor of one line, because a
+confirmation showing only its consequence with the question missing is not a
+question. Whichever is cut is elided with `…` by `text::Paragraph`, which
+already knew how — the old loops were a second, worse copy of wrapping logic
+that existed. Three tests: that an overlong message does not take the warning
+with it, that a cut is marked, and that no text reaches the button row.
+
+**The principle:** when a box is too small, cutting at the bottom cuts whatever
+happens to be last, which is a layout accident rather than a decision about what
+matters least. Decide what to keep before you decide where to stop.

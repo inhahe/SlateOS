@@ -104,6 +104,10 @@ ALLOWED = {
         "bare `ksyms` prints its synopsis as output; documented exclusion",
     ("cmd_scrollback", "Usage: scrollback [N | search <pattern> | screen]"):
         "same: the `\"\"` arm is bare invocation, which succeeds",
+    ("cmd_lockdep", "  Usage: lockdep [classes|edges|held|all]"):
+        "same: the `subcmd.is_empty()` branch is bare `lockdep`, whose whole "
+        "output is this synopsis and the four descriptions under it. Its sibling "
+        "unrecognised-subcommand branch prints the identical line and does fail",
 
     # A usage line appended to a *successful query* as a hint, not printed as a
     # complaint. Both are guarded on "no argument given", so the branch is only
@@ -171,6 +175,11 @@ ALLOWED = {
         "the no-argument `else`: a query, answered by the current-mode line above",
     ("cmd_faceunlock", "Usage: faceunlock security <low|standard|high|maximum>"):
         "the no-argument `else`: a query, answered by the current-level line above",
+    ("cmd_credentials", "Use: cred autofill <app> to list rules for an app"):
+        "two hint lines under the answer to bare `cred autofill`, which lists "
+        "every rule. It only looked like a bare complaint because the listing "
+        "was missing: the branch called `list_all()` and dropped it on the floor "
+        "with `let _ = all`",
 
     # `tsession` reaches this arm from `""`, `info` and `status` -- all three
     # are requests for the session summary, which the lines above print. Its
@@ -274,14 +283,33 @@ def main(argv):
     unaccounted = []
     seen_conflated = {}
     for i, ln in enumerate(code):
-        if not USAGE.search(ln):
+        if not (m_usage := USAGE.search(ln)):
             continue
 
-        # Walk to wherever control leaves this block, looking for a failure status.
-        depth = 0
+        # Walk to wherever control leaves this block, looking for a failure
+        # status.
+        #
+        # The walk is `strip_noise`'s, not this file's, and the difference is
+        # not cosmetic. The local one counted braces a *line* at a time, so
+        # `} else {` -- which closes one block and opens another -- summed to
+        # zero and the walk sailed straight through it into the `else` branch.
+        # Any `set_exit(1)` living there was credited to the `if`, so the
+        # overwhelmingly common
+        #
+        #     if parts.len() < 2 { <usage> } else { .. set_exit(1) .. }
+        #
+        # counted as accounted for. This gate reported zero findings while
+        # hiding 195 real ones across 50 commands, and a gate that is wrong in
+        # the clean direction has no symptom at all.
+        #
+        # The match's column is passed too: a one-liner spelled entirely on the
+        # usage line would otherwise be walked from column zero, counting the
+        # `{` the usage print is already inside.
         raised = False
-        for k in range(i, min(i + 300, len(code))):
-            s = code[k]
+        for k, a, b in _rl.walk_block(struct, i, m_usage.start()):
+            # Only the slice the walk vouches for. Text outside it is a
+            # sibling block's, which is the whole point.
+            s = code[k][a:b]
             if "set_exit(" in s and "set_exit(0)" not in s:
                 raised = True
                 break
@@ -295,10 +323,7 @@ def main(argv):
             if "end_help_arm(" in s:
                 raised = True
                 break
-            if k > i and re.search(r"\breturn\b", struct[k]):
-                break
-            depth += struct[k].count("{") - struct[k].count("}")
-            if depth < 0:
+            if k > i and re.search(r"\breturn\b", struct[k][a:b]):
                 break
         if raised:
             continue

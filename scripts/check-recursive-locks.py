@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 # A lock acquisition on a static receiver: STATE.lock(), TABLE.lock_irqsave().
@@ -313,6 +314,59 @@ def block_end(src: str, pos: int, limit: int) -> int:
     return limit
 
 
+def walk_block(
+    struct: list[str], start: int, start_col: int = 0, limit: int = 300
+) -> Iterator[tuple[int, int, int]]:
+    """Walk forward from a point until control leaves the block containing it.
+
+    Yields `(index, from_col, to_col)` for each line, where the slice
+    `line[from_col:to_col]` is the part of that line that belongs to the block
+    the walk started in.  A caller must match only that slice: text outside it
+    belongs to a *sibling* block, and attributing it to this one is the entire
+    bug this helper exists to prevent.
+
+    `struct` must have comments *and* literals blanked -- `strip_noise(text)`,
+    split on newlines.  A brace inside a comment or a string is not structure,
+    and counting one shifts every boundary after it.
+
+    Braces are counted a character at a time, never a line at a time.  The line
+    `} else {` closes one block and opens another, so a line-granular sum nets
+    to zero: the walk never sees depth go negative, sails straight past the
+    brace that ends the block, and carries on into the `else` branch.  Anything
+    it finds there gets credited to the `if`.  That is not hypothetical --
+    `check-usage-status.py` counted by the line and so reported *zero* findings
+    while hiding 195 real ones across 50 shell commands, for months, with no
+    symptom other than looking clean.
+
+    The distinction worth keeping in mind, because three other counters in this
+    directory are line-granular and *correct*: a walk over a **balanced** block
+    (start on its `{`, stop when depth returns to 0) is safe at line
+    granularity, because `} else {` nets to zero truthfully -- the block really
+    does end at depth 0.  Only a walk like this one, which must notice depth
+    going **negative** -- leaving a block it never entered -- is broken by it,
+    because that dip happens *within* the line and a line-sum cannot see it.
+
+    `start_col` matters for the same reason.  A caller that found its match
+    mid-line must pass the match's column, or a one-liner such as
+    `if n < 2 { a(); } else { b(); }` walks from column zero, counts the `{` it
+    was already inside, and reads the `else` branch as its own.
+    """
+    depth = 0
+    for k in range(start, min(start + limit, len(struct))):
+        line = struct[k]
+        col = start_col if k == start else 0
+        for j in range(col, len(line)):
+            ch = line[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth < 0:
+                    yield k, col, j
+                    return
+        yield k, col, len(line)
+
+
 def analyse(path: Path) -> list[str]:
     raw = path.read_text(encoding="utf-8", errors="replace")
     src = strip_noise(raw)
@@ -436,6 +490,67 @@ _KEEP_LITERAL_CASES: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# `walk_block` cases, as (name, source, start line, start column, expected).
+# The expected value is the text the walk says belongs to the starting block,
+# lines joined by newline -- written out in full so a boundary that moves by one
+# character is visible in the failure message rather than inferred from a count.
+#
+# Every case below is answered *wrongly* by a line-granular count, which is what
+# all of this checker's callers used before the walk was shared. They are
+# regression tests for a bug that hid 195 findings while the gate printed a
+# clean line.
+_BLOCK_WALK_CASES: tuple[tuple[str, str, int, int, str], ...] = (
+    # The shipped bug, at its smallest: `} else {` nets to zero by the line, so
+    # a line-granular walk reads `b()` -- which is the else branch -- as part of
+    # the `if`.
+    (
+        "} else { ends the block",
+        "if n < 2 {\n    a();\n} else {\n    b();\n}\n",
+        1,
+        0,
+        "    a();\n",
+    ),
+    # The same shape spelled as match arms: a sibling arm must not be read as a
+    # continuation of this one. Starts mid-line, as a real caller does.
+    (
+        "a sibling match arm is not entered",
+        "match x {\n    A => { a(); }\n    B => { b(); }\n}\n",
+        1,
+        11,
+        "a(); ",
+    ),
+    # The converse, and the reason this cannot simply stop at the first `}`:
+    # a block *opened after* the start closes back to depth 0 and the walk must
+    # continue through it.
+    (
+        "a balanced nested block does not end the walk",
+        "a();\nif q { b(); }\nc();\n}\n",
+        0,
+        0,
+        "a();\nif q { b(); }\nc();\n",
+    ),
+    # `start_col` earning its place: from column zero this walk counts the `{`
+    # it is already inside and hands back the else branch as well.
+    (
+        "start_col keeps a one-liner honest",
+        "if n < 2 { a(); } else { b(); }\n",
+        0,
+        11,
+        "a(); ",
+    ),
+    # Braces in comments and literals are not structure. Passing raw lines here
+    # instead of `strip_noise` output would end the walk at the `}` in the
+    # comment, one line early.
+    (
+        "a brace in a comment is not structure",
+        "a();\nb(); // closes with }\nc();\n}\n",
+        0,
+        0,
+        "a();\nb();                 \nc();\n",
+    ),
+)
+
+
 def self_test() -> int:
     """Check the source scanner against the literal forms that have broken it.
 
@@ -476,7 +591,14 @@ def self_test() -> int:
             failures += 1
             print(f"FAIL keep_literals/{name}: offsets not preserved")
 
-    total = len(_PARSER_CASES) + len(_KEEP_LITERAL_CASES)
+    for name, src, start, col, want in _BLOCK_WALK_CASES:
+        struct = strip_noise(src).split("\n")
+        got = "\n".join(struct[k][a:b] for k, a, b in walk_block(struct, start, col))
+        if got != want:
+            failures += 1
+            print(f"FAIL walk_block/{name}:\n  expected {want!r}\n  got      {got!r}")
+
+    total = len(_PARSER_CASES) + len(_KEEP_LITERAL_CASES) + len(_BLOCK_WALK_CASES)
     if failures:
         print(f"\n[parser self-test] {failures} failure(s) across {total} case(s)", file=sys.stderr)
         return 1

@@ -16058,6 +16058,118 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 67: a usage complaint reports failure, and a synopsis does not"
+    );
+    {
+        // 192 subcommands printed `Usage: ...` for a missing operand and then
+        // exited 0. They were invisible to `check-usage-status.py` because it
+        // counted braces one line at a time, and the shape they all share is
+        //
+        //     if parts.len() < 2 { <usage> } else { .. set_exit(1) .. }
+        //
+        // where `} else {` nets to zero by the line, so the gate's walk read
+        // the *else* branch's status as the *if* branch's. See
+        // A-KSHELL-THE-USAGE-GATE-WALKS-STRAIGHT-THROUGH-} else {.
+        //
+        // A sample rather than all 192: the gate is what proves completeness,
+        // and it now sees every one of them. What a rung adds that the gate
+        // cannot is the run-time half -- that the status actually reaches the
+        // caller. So the sample is chosen to cover each *guard shape* the gate
+        // groups them by, one per shape, because a shape is what a future
+        // regression would break at once.
+        //
+        // Each is paired with a control naming an operand that does not exist.
+        // The control must not print a synopsis: it proves the command still
+        // gets past its arity guard and fails for the real reason, so the rung
+        // cannot pass by having broken the command outright.
+        let arity_cases: &[(&str, &str)] = &[
+            // `parts.len() < N`, the 111-site majority, at N = 2, 3 and 5.
+            ("useracct remove", "useracct remove 4294967295"),
+            ("scriptlang addext", "scriptlang addext 999999 .zz"),
+            (
+                "kernelbuild register",
+                "kernelbuild register zz n kernel /zz",
+            ),
+            // An emptiness test on a word pulled out with `unwrap_or("")`.
+            ("soundmixer rmdev", "soundmixer rmdev nosuchdevice"),
+            ("cred get", "cred get nosuchapp nosuchsvc"),
+            // `if <id> == 0`, where the zero is `unwrap_or(0)`'s and so means
+            // both "absent" and "unreadable".
+            ("vd remove", "vd remove 999999"),
+            ("tile add", "tile add 999999"),
+            // The `} else if` form: the branch the gate mis-read is followed
+            // by a chain rather than a plain `else`.
+            ("netsettings dns", "netsettings dns nosuchif auto"),
+            ("perfmon dismiss", "perfmon dismiss 999999"),
+        ];
+        for (bare, control) in arity_cases {
+            let out = capture_command(bare);
+            assert_output_contains("a missing operand is reported", &out, b"Usage:");
+            assert_eq!(last_exit(), 1, "a usage complaint must report failure");
+
+            let out = capture_command(control);
+            assert_output_lacks("naming the operand clears the arity guard", &out, b"Usage:");
+        }
+
+        // `bright set [display_id] <level>` is the one synopsis here whose
+        // *optional* operand comes first. Reading `parts[1]` as the display
+        // made the documented one-word form print its own usage line, so the
+        // regression assertion is the absence of that line.
+        let out = capture_command("bright set 50");
+        assert_output_lacks(
+            "`bright set <level>` is the documented one-word form and must work",
+            &out,
+            b"Usage:",
+        );
+
+        let out = capture_command("bright set");
+        assert_output_contains(
+            "no level at all is still missing",
+            &out,
+            b"missing percentage",
+        );
+        assert_eq!(last_exit(), 1, "bright set: a missing level errors");
+
+        // And the guess that lived under it: `abc` parsed to 0, which
+        // `set_brightness` clamps and stores, so the backlight went off and
+        // the shell said `Brightness -> 0%` and exited 0.
+        let out = capture_command("bright set 999 abc");
+        assert_output_contains(
+            "an unreadable level is refused, not read as zero",
+            &out,
+            b"is not a percentage",
+        );
+        assert_eq!(last_exit(), 1, "bright set: an unreadable level errors");
+
+        // The other direction, which is what `check-query-status.py` guards:
+        // a command reached only by asking must not report failure for
+        // answering. Bare `lockdep` prints its synopsis *as* its output.
+        let out = capture_command("lockdep");
+        assert_output_contains(
+            "bare `lockdep` prints its synopsis",
+            &out,
+            b"Usage: lockdep",
+        );
+        assert_eq!(last_exit(), 0, "bare `lockdep` is output, not a complaint");
+
+        // Bare `cred autofill` is a listing, and it was a listing that never
+        // listed: it fetched the *credential* list, dropped it with
+        // `let _ = all`, and printed only its two hint lines. Asserting on
+        // those hints would therefore have passed against the broken version,
+        // so the rung adds a rule of its own and looks for *that* -- the only
+        // evidence that a listing happened -- then removes it again.
+        let _ = capture_command("cred autofill selftestapp password selftestsvc");
+        let out = capture_command("cred autofill");
+        assert_output_contains(
+            "bare `cred autofill` lists the rule that was just added",
+            &out,
+            b"selftestapp",
+        );
+        assert_eq!(last_exit(), 0, "a listing is not a complaint");
+        let _ = capture_command("cred rmautofill selftestapp password");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -32279,6 +32391,7 @@ fn cmd_widgets(args: &str) {
             let name = parts.get(2).copied().unwrap_or("");
             if type_id.is_empty() || name.is_empty() {
                 shell_println!("Usage: widgets regtype <type_id> <name> [width height app]");
+                set_exit(1);
             } else {
                 let w = parts
                     .get(3)
@@ -32302,6 +32415,7 @@ fn cmd_widgets(args: &str) {
             let type_id = parts.get(1).copied().unwrap_or("");
             if type_id.is_empty() {
                 shell_println!("Usage: widgets unregtype <type_id>");
+                set_exit(1);
             } else {
                 match widgets::unregister_type(type_id) {
                     Ok(()) => shell_println!("Custom type '{}' unregistered", type_id),
@@ -32418,6 +32532,7 @@ fn cmd_soundmixer(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             if id.is_empty() || parts.len() < 3 {
                 shell_println!("Usage: soundmixer adddev <id> <name...>");
+                set_exit(1);
             } else {
                 let name = parts[2..].join(" ");
                 match soundmixer::add_device(id, &name) {
@@ -32433,6 +32548,7 @@ fn cmd_soundmixer(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             if id.is_empty() {
                 shell_println!("Usage: soundmixer rmdev <id>");
+                set_exit(1);
             } else {
                 match soundmixer::remove_device(id) {
                     Ok(()) => shell_println!("Device '{}' removed", id),
@@ -32447,6 +32563,7 @@ fn cmd_soundmixer(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             if id.is_empty() {
                 shell_println!("Usage: soundmixer default <device_id>");
+                set_exit(1);
             } else {
                 match soundmixer::set_default_device(id) {
                     Ok(()) => shell_println!("Default device: {}", id),
@@ -32462,6 +32579,7 @@ fn cmd_soundmixer(args: &str) {
             let vol = parts.get(2).and_then(|s| s.parse::<u8>().ok());
             if id.is_empty() || vol.is_none() {
                 shell_println!("Usage: soundmixer devvol <device_id> <0-100>");
+                set_exit(1);
             } else if let Some(v) = vol {
                 match soundmixer::set_device_volume(id, v) {
                     Ok(()) => shell_println!("Device '{}' volume: {}%", id, v.min(100)),
@@ -32503,6 +32621,7 @@ fn cmd_soundmixer(args: &str) {
             let vol = parts.get(2).and_then(|s| s.parse::<u8>().ok());
             if app.is_empty() || vol.is_none() {
                 shell_println!("Usage: soundmixer appvol <app_id> <0-100>");
+                set_exit(1);
             } else if let Some(v) = vol {
                 match soundmixer::set_app_volume(app, v) {
                     Ok(()) => shell_println!("App '{}' volume: {}%", app, v.min(100)),
@@ -32518,6 +32637,7 @@ fn cmd_soundmixer(args: &str) {
             let val = parts.get(2).copied().unwrap_or("true");
             if app.is_empty() {
                 shell_println!("Usage: soundmixer appmute <app_id> [true|false]");
+                set_exit(1);
             } else {
                 let muted = val != "false" && val != "0";
                 match soundmixer::set_app_muted(app, muted) {
@@ -32536,6 +32656,7 @@ fn cmd_soundmixer(args: &str) {
             let dev = parts.get(2).copied();
             if app.is_empty() {
                 shell_println!("Usage: soundmixer approute <app_id> [device_id]");
+                set_exit(1);
             } else {
                 match soundmixer::set_app_output(app, dev) {
                     Ok(()) => {
@@ -32592,6 +32713,7 @@ fn cmd_soundmixer(args: &str) {
             if app_id.is_empty() || name.is_empty() {
                 shell_println!("Usage: soundmixer stream <app_id> <name> <label> [category]");
                 shell_println!("Categories: system comm media game app");
+                set_exit(1);
             } else {
                 match soundmixer::register_stream(app_id, name, label, cat) {
                     Ok(id) => shell_println!("Stream registered: id={} app={}", id, app_id),
@@ -32785,6 +32907,7 @@ fn cmd_wallpaper(args: &str) {
             };
             if path.is_empty() {
                 shell_println!("Usage: wallpaper set <path>");
+                set_exit(1);
             } else {
                 match wallpaper::set_image(&path) {
                     Ok(()) => shell_println!("Wallpaper set: {}", path),
@@ -32874,6 +32997,7 @@ fn cmd_wallpaper(args: &str) {
             }
             if paths.is_empty() {
                 shell_println!("Usage: wallpaper slideshow <path1> [path2 ...] [--interval N]");
+                set_exit(1);
             } else {
                 match wallpaper::set_slideshow(&paths, interval) {
                     Ok(()) => {
@@ -32925,6 +33049,7 @@ fn cmd_wallpaper(args: &str) {
             };
             if source.is_empty() {
                 shell_println!("Usage: wallpaper animated <source>");
+                set_exit(1);
             } else {
                 match wallpaper::set_animated(&source) {
                     Ok(()) => shell_println!("Animated wallpaper: {}", source),
@@ -32943,6 +33068,7 @@ fn cmd_wallpaper(args: &str) {
             };
             if source.is_empty() {
                 shell_println!("Usage: wallpaper dynamic <source>");
+                set_exit(1);
             } else {
                 match wallpaper::set_dynamic(&source) {
                     Ok(()) => shell_println!("Dynamic wallpaper: {}", source),
@@ -32982,6 +33108,7 @@ fn cmd_wallpaper(args: &str) {
             };
             if mon.is_empty() {
                 shell_println!("Usage: wallpaper monitor <id> <path>");
+                set_exit(1);
             } else if path.is_empty() {
                 let wp = wallpaper::wallpaper_for_monitor(mon);
                 // An unset override is the empty path, so the two arms cannot
@@ -33208,6 +33335,7 @@ fn cmd_credentials(args: &str) {
             if app.is_empty() || svc.is_empty() || secret.is_empty() {
                 shell_println!("Usage: cred store <app> <service> <user> <secret> [kind]");
                 shell_println!("Kinds: password apikey token ssh cert generic");
+                set_exit(1);
             } else {
                 match credentials::store(app, svc, user, secret, kind) {
                     Ok(()) => shell_println!("Credential stored: {}@{}", app, svc),
@@ -33223,6 +33351,7 @@ fn cmd_credentials(args: &str) {
             let svc = parts.get(2).copied().unwrap_or("");
             if app.is_empty() || svc.is_empty() {
                 shell_println!("Usage: cred get <app> <service>");
+                set_exit(1);
             } else {
                 match credentials::retrieve(app, svc) {
                     Ok(c) => {
@@ -33247,6 +33376,7 @@ fn cmd_credentials(args: &str) {
             let svc = parts.get(2).copied().unwrap_or("");
             if app.is_empty() || svc.is_empty() {
                 shell_println!("Usage: cred delete <app> <service>");
+                set_exit(1);
             } else {
                 match credentials::delete(app, svc) {
                     Ok(()) => shell_println!("Deleted: {}@{}", app, svc),
@@ -33333,11 +33463,32 @@ fn cmd_credentials(args: &str) {
             let field = parts.get(2).copied().unwrap_or("");
             let svc = parts.get(3).copied().unwrap_or("");
             if app.is_empty() {
-                // List all autofill rules.
-                let all = credentials::list_all();
+                // Bare `cred autofill` lists every rule, which is what the
+                // comment here always claimed. It did not: it called
+                // `list_all()` -- the *credential* list, not the autofill one
+                // -- threw the result away with `let _ = all`, and printed the
+                // two hint lines alone. A listing that never listed, and the
+                // `let _` is what kept the compiler quiet about it.
+                let rules = credentials::list_all_autofill();
+                if rules.is_empty() {
+                    shell_println!("No autofill rules");
+                } else {
+                    shell_println!("{:16} {:16} {:24} {}", "APP", "FIELD", "SERVICE", "AUTO");
+                    for r in &rules {
+                        shell_println!(
+                            "{:16} {:16} {:24} {}",
+                            r.app_id,
+                            r.field_type,
+                            r.service,
+                            if r.auto { "yes" } else { "prompt" }
+                        );
+                    }
+                }
+                // Hints under a successful answer, not a complaint: the
+                // listing above is the output, so the status stays zero. Same
+                // shape as `elog echo` -- see check-usage-status.py's ALLOWED.
                 shell_println!("Use: cred autofill <app> to list rules for an app");
                 shell_println!("     cred autofill <app> <field> <service> [auto]  to add a rule");
-                let _ = all;
             } else if field.is_empty() {
                 let rules = credentials::list_autofill(app);
                 if rules.is_empty() {
@@ -33356,6 +33507,7 @@ fn cmd_credentials(args: &str) {
                 }
             } else if svc.is_empty() {
                 shell_println!("Usage: cred autofill <app> <field> <service> [auto]");
+                set_exit(1);
             } else {
                 let auto = parts.get(4).copied().unwrap_or("true") != "false";
                 match credentials::add_autofill(app, field, svc, auto) {
@@ -33372,6 +33524,7 @@ fn cmd_credentials(args: &str) {
             let field = parts.get(2).copied().unwrap_or("");
             if app.is_empty() || field.is_empty() {
                 shell_println!("Usage: cred rmautofill <app> <field>");
+                set_exit(1);
             } else {
                 match credentials::remove_autofill(app, field) {
                     Ok(()) => shell_println!("Autofill rule removed"),
@@ -33402,6 +33555,7 @@ fn cmd_credentials(args: &str) {
             };
             if app.is_empty() || svc.is_empty() {
                 shell_println!("Usage: cred label <app> <service> <label...>");
+                set_exit(1);
             } else {
                 match credentials::set_label(app, svc, &label) {
                     Ok(()) => shell_println!("Label set"),
@@ -33686,6 +33840,7 @@ fn cmd_display(args: &str) {
                 .unwrap_or(0);
             if id.is_empty() {
                 shell_println!("Usage: display add <id> [name] [phys_w_mm] [phys_h_mm]");
+                set_exit(1);
             } else {
                 match display::add_monitor(id, name, pw, ph) {
                     Ok(()) => shell_println!("Added monitor '{}'", id),
@@ -33700,6 +33855,7 @@ fn cmd_display(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             if id.is_empty() {
                 shell_println!("Usage: display remove <id>");
+                set_exit(1);
             } else {
                 match display::remove_monitor(id) {
                     Ok(()) => shell_println!("Removed '{}'", id),
@@ -33933,6 +34089,7 @@ fn cmd_display(args: &str) {
             let id = parts.get(1).copied().unwrap_or("");
             if id.is_empty() {
                 shell_println!("Usage: display primary <id>");
+                set_exit(1);
             } else {
                 match display::set_primary(id) {
                     Ok(()) => shell_println!("Primary: {}", id),
@@ -34014,6 +34171,7 @@ fn cmd_vdesktop(args: &str) {
                 .unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: vd remove <id>");
+                set_exit(1);
             } else {
                 match vdesktop::remove(id) {
                     Ok(()) => shell_println!("Removed desktop #{}", id),
@@ -34036,6 +34194,7 @@ fn cmd_vdesktop(args: &str) {
             };
             if id == 0 || name.is_empty() {
                 shell_println!("Usage: vd rename <id> <name>");
+                set_exit(1);
             } else {
                 match vdesktop::rename(id, &name) {
                     Ok(()) => shell_println!("Renamed #{} → {}", id, name),
@@ -34100,6 +34259,7 @@ fn cmd_vdesktop(args: &str) {
                 .unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: vd switch <id>");
+                set_exit(1);
             } else {
                 match vdesktop::switch(id) {
                     Ok(()) => shell_println!("Switched to #{}", id),
@@ -34138,6 +34298,7 @@ fn cmd_vdesktop(args: &str) {
                 .unwrap_or(0);
             if did == 0 || wid == 0 {
                 shell_println!("Usage: vd addwin <desktop_id> <window_id>");
+                set_exit(1);
             } else {
                 match vdesktop::add_window(did, wid) {
                     Ok(()) => shell_println!("Added window {} to desktop #{}", wid, did),
@@ -34159,6 +34320,7 @@ fn cmd_vdesktop(args: &str) {
                 .unwrap_or(0);
             if did == 0 || wid == 0 {
                 shell_println!("Usage: vd rmwin <desktop_id> <window_id>");
+                set_exit(1);
             } else {
                 match vdesktop::remove_window(did, wid) {
                     Ok(()) => shell_println!("Removed window {} from desktop #{}", wid, did),
@@ -34184,6 +34346,7 @@ fn cmd_vdesktop(args: &str) {
                 .unwrap_or(0);
             if wid == 0 || from == 0 || to == 0 {
                 shell_println!("Usage: vd movewin <window_id> <from_desktop> <to_desktop>");
+                set_exit(1);
             } else {
                 match vdesktop::move_window(wid, from, to) {
                     Ok(()) => shell_println!("Moved window {} from #{} to #{}", wid, from, to),
@@ -34235,6 +34398,7 @@ fn cmd_vdesktop(args: &str) {
                 .unwrap_or(0);
             if wid == 0 {
                 shell_println!("Usage: vd pin <window_id>");
+                set_exit(1);
             } else {
                 match vdesktop::pin(wid) {
                     Ok(()) => shell_println!("Pinned window {}", wid),
@@ -34271,6 +34435,7 @@ fn cmd_vdesktop(args: &str) {
             let path = parts.get(2).copied().unwrap_or("");
             if id == 0 {
                 shell_println!("Usage: vd wp <id> [path|clear]");
+                set_exit(1);
             } else if path == "clear" {
                 match vdesktop::clear_wallpaper(id) {
                     Ok(()) => shell_println!("Cleared wallpaper for #{}", id),
@@ -34343,6 +34508,7 @@ fn cmd_vdesktop(args: &str) {
                 .unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: vd reorder <id> <position>");
+                set_exit(1);
             } else {
                 match vdesktop::reorder(id, pos) {
                     Ok(()) => shell_println!("Reordered #{} to position {}", id, pos),
@@ -34399,6 +34565,7 @@ fn cmd_keylayout(args: &str) {
             };
             if name.is_empty() {
                 shell_println!("Usage: kbl create <name> [description]");
+                set_exit(1);
             } else {
                 match keylayout::create_layout(name, &desc) {
                     Ok(()) => shell_println!("Created layout '{}'", name),
@@ -34413,6 +34580,7 @@ fn cmd_keylayout(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: kbl remove <name>");
+                set_exit(1);
             } else {
                 match keylayout::remove_layout(name) {
                     Ok(()) => shell_println!("Removed '{}'", name),
@@ -34645,6 +34813,7 @@ fn cmd_screenshot(args: &str) {
                 .unwrap_or(600);
             if wid == 0 {
                 shell_println!("Usage: scap window <window_id> [w] [h]");
+                set_exit(1);
             } else {
                 match screenshot::capture_window(wid, w, h) {
                     Ok(id) => shell_println!("Captured window #{} ({}x{})", id, w, h),
@@ -34687,6 +34856,7 @@ fn cmd_screenshot(args: &str) {
                 .unwrap_or(1080);
             if mid.is_empty() {
                 shell_println!("Usage: scap monitor <id> [w] [h]");
+                set_exit(1);
             } else {
                 match screenshot::capture_monitor(mid, w, h) {
                     Ok(id) => shell_println!("Captured monitor '{}' #{}", mid, id),
@@ -35281,6 +35451,7 @@ fn cmd_ime(args: &str) {
             let compose = parts.get(5).copied() != Some("false");
             if id.is_empty() {
                 shell_println!("Usage: ime reg <id> [name] [lang] [indicator] [compose]");
+                set_exit(1);
             } else {
                 match ime::register_method(id, name, lang, ind, compose) {
                     Ok(()) => shell_println!("Registered '{}' ({} [{}])", id, name, lang),
@@ -35504,6 +35675,7 @@ fn cmd_netindicator(args: &str) {
             let mac = parts.get(3).copied().unwrap_or("00:00:00:00:00:00");
             if name.is_empty() {
                 shell_println!("Usage: netind addif <name> [type] [mac]");
+                set_exit(1);
             } else {
                 match netindicator::update_interface(name, t, mac) {
                     Ok(()) => shell_println!("Added {} ({})", name, t.label()),
@@ -35648,6 +35820,7 @@ fn cmd_netindicator(args: &str) {
             let pw = parts.get(2).copied().unwrap_or("");
             if ssid.is_empty() {
                 shell_println!("Usage: netind connect <ssid> [password]");
+                set_exit(1);
             } else {
                 match netindicator::connect_wifi(ssid, pw) {
                     Ok(()) => shell_println!("Connected to {}", ssid),
@@ -35862,6 +36035,7 @@ fn cmd_winsnap(args: &str) {
             let desc = parts[2..].join(" ");
             if name.is_empty() {
                 shell_println!("Usage: wsnap addlayout <name> <desc>");
+                set_exit(1);
             } else {
                 match winsnap::add_layout(name, &desc) {
                     Ok(()) => shell_println!("Layout '{}' created", name),
@@ -35903,6 +36077,7 @@ fn cmd_winsnap(args: &str) {
                 .unwrap_or(0);
             if lay.is_empty() || zname.is_empty() {
                 shell_println!("Usage: wsnap addzone <layout> <name> <x> <y> <w> <h> (0-1000)");
+                set_exit(1);
             } else {
                 match winsnap::add_zone(lay, zname, xp, yp, wp, hp) {
                     Ok(()) => shell_println!("Zone '{}' added to '{}'", zname, lay),
@@ -36258,6 +36433,7 @@ fn cmd_colorpicker(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: cpick mkpal <name>");
+                set_exit(1);
             } else {
                 match colorpicker::create_palette(name) {
                     Ok(()) => shell_println!("Palette '{}' created", name),
@@ -36577,6 +36753,7 @@ fn cmd_cursorsettings(args: &str) {
             let sz = 24u32;
             if name.is_empty() {
                 shell_println!("Usage: cursor addtheme <name> <description>");
+                set_exit(1);
             } else {
                 match cursorsettings::register_theme(name, &desc, sz, false) {
                     Ok(()) => shell_println!("Theme '{}' created", name),
@@ -36949,6 +37126,7 @@ fn cmd_kbsettings(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: kbs mkprofile <name>");
+                set_exit(1);
             } else {
                 match kbsettings::create_profile(name) {
                     Ok(()) => shell_println!("Profile '{}' created", name),
@@ -37115,6 +37293,7 @@ fn cmd_detailcols(args: &str) {
                 .unwrap_or(detailcols::ColumnCategory::AppDefined);
             if id.is_empty() || name.is_empty() {
                 shell_println!("Usage: dcols register <id> <name> [type] [category]");
+                set_exit(1);
             } else {
                 match detailcols::register_column(id, name, ct, cat, 15, true, "shell") {
                     Ok(()) => shell_println!("Registered column '{}'", id),
@@ -37140,6 +37319,7 @@ fn cmd_detailcols(args: &str) {
             let col_ids: Vec<&str> = parts[2..].to_vec();
             if mime.is_empty() || col_ids.is_empty() {
                 shell_println!("Usage: dcols bind <mime> <col_id> [col_id...]");
+                set_exit(1);
             } else {
                 match detailcols::bind_columns(mime, &col_ids) {
                     Ok(()) => shell_println!("Bound {} columns to {}", col_ids.len(), mime),
@@ -37188,6 +37368,7 @@ fn cmd_detailcols(args: &str) {
             let col_ids: Vec<&str> = parts[2..].to_vec();
             if mime.is_empty() {
                 shell_println!("Usage: dcols userset <mime> <col_id> [col_id...]");
+                set_exit(1);
             } else {
                 match detailcols::set_user_columns(mime, &col_ids) {
                     Ok(()) => shell_println!("User columns set for {}", mime),
@@ -37286,6 +37467,7 @@ fn cmd_partmgr(args: &str) {
                 .unwrap_or(0);
             if name.is_empty() || gb == 0 {
                 shell_println!("Usage: pmgr adddisk <name> <model> <size_gb>");
+                set_exit(1);
             } else {
                 match partmgr::register_disk(
                     name,
@@ -37440,6 +37622,7 @@ fn cmd_partmgr(args: &str) {
                 .unwrap_or(0);
             if new_mb == 0 {
                 shell_println!("Usage: pmgr resize <disk_id> <part_id> <new_size_mb>");
+                set_exit(1);
             } else {
                 match partmgr::resize_partition(did, pid, new_mb * 1024 * 1024) {
                     Ok(()) => shell_println!("Resized to {}MB", new_mb),
@@ -37900,6 +38083,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: useracct remove <uid>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::remove_user(uid) {
@@ -37923,6 +38107,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: useracct info <uid|username>");
+                    set_exit(1);
                 } else {
                     let result = if let Ok(uid) = parts[1].parse::<u64>() {
                         useracct::get_user(uid)
@@ -37977,6 +38162,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: useracct login <username> <password>");
+                    set_exit(1);
                 } else {
                     match useracct::authenticate(parts[1], parts[2]) {
                         Ok(sid) => shell_println!("Logged in as '{}' (session={})", parts[1], sid),
@@ -37994,6 +38180,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: useracct logout <session_id>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(sid) => match useracct::logout(sid) {
@@ -38037,6 +38224,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: useracct passwd <uid> <new_password>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::change_password(uid, parts[2]) {
@@ -38060,6 +38248,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: useracct enable <uid>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::set_enabled(uid, true) {
@@ -38083,6 +38272,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: useracct disable <uid>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::set_enabled(uid, false) {
@@ -38106,6 +38296,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: useracct unlock <uid>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => match useracct::unlock(uid) {
@@ -38129,6 +38320,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: useracct type <uid> <admin|standard|guest>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => {
@@ -38160,6 +38352,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: useracct display <uid> <name...>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => {
@@ -38217,6 +38410,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: useracct autologin <uid> <on|off>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(uid) => {
@@ -38262,6 +38456,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: useracct addgroup <name> [description] [--system]");
+                    set_exit(1);
                 } else {
                     let sys = parts.contains(&"--system");
                     let desc = parts.get(2).copied().unwrap_or("");
@@ -38281,6 +38476,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: useracct rmgroup <gid>");
+                    set_exit(1);
                 } else {
                     match parts[1].parse::<u64>() {
                         Ok(gid) => match useracct::remove_group(gid) {
@@ -38304,6 +38500,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: useracct join <uid> <gid>");
+                    set_exit(1);
                 } else {
                     match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
                         (Ok(uid), Ok(gid)) => match useracct::add_to_group(uid, gid) {
@@ -38327,6 +38524,7 @@ fn cmd_useracct(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: useracct leave <uid> <gid>");
+                    set_exit(1);
                 } else {
                     match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
                         (Ok(uid), Ok(gid)) => match useracct::remove_from_group(uid, gid) {
@@ -38465,6 +38663,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: progmgr info <app_id>");
+                    set_exit(1);
                 } else {
                     match progmgr::get_program(parts[1]) {
                         Ok(p) => {
@@ -38503,6 +38702,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 4 {
                     shell_println!("Usage: progmgr register <app_id> <name> <install_dir> [size]");
+                    set_exit(1);
                 } else {
                     let size = parts
                         .get(4)
@@ -38581,6 +38781,7 @@ fn cmd_progmgr(args: &str) {
                     );
                     shell_println!("  notifications, autostart, system, crossapp, background,");
                     shell_println!("  hardware, install, usermgmt, clipboard");
+                    set_exit(1);
                 } else {
                     let cap = match parts[2] {
                         "network" | "net" => Some(progmgr::ProgCapability::Network),
@@ -38622,6 +38823,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: progmgr revoke <app_id> <cap>");
+                    set_exit(1);
                 } else {
                     let cap = match parts[2] {
                         "network" | "net" => Some(progmgr::ProgCapability::Network),
@@ -38663,6 +38865,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: progmgr addnotif <app_id> <name>");
+                    set_exit(1);
                 } else {
                     match progmgr::add_notification(parts[1], parts[2]) {
                         Ok(()) => {
@@ -38682,6 +38885,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: progmgr rmnotif <app_id> <name>");
+                    set_exit(1);
                 } else {
                     match progmgr::remove_notification(parts[1], parts[2]) {
                         Ok(()) => {
@@ -38835,6 +39039,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: progmgr rmsnap <app_id> <snap_id>");
+                    set_exit(1);
                 } else {
                     match parts[2].parse::<u64>() {
                         Ok(id) => match progmgr::delete_snapshot(parts[1], id) {
@@ -38858,6 +39063,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: progmgr snaps <app_id>");
+                    set_exit(1);
                 } else {
                     match progmgr::list_snapshots(parts[1]) {
                         Ok(snaps) => {
@@ -38895,6 +39101,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: progmgr rollback <app_id> <snap_id>");
+                    set_exit(1);
                 } else {
                     match parts[2].parse::<u64>() {
                         Ok(id) => match progmgr::rollback(parts[1], id) {
@@ -38924,6 +39131,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: progmgr compile <app_id> <source_dir> [params]");
+                    set_exit(1);
                 } else {
                     let params = if parts.len() > 3 {
                         parts[3..].join(" ")
@@ -38948,6 +39156,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: progmgr buildparams <app_id> <params...>");
+                    set_exit(1);
                 } else {
                     let params = parts[2..].join(" ");
                     match progmgr::set_build_params(parts[1], &params) {
@@ -38966,6 +39175,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: progmgr wipedata <app_id>");
+                    set_exit(1);
                 } else {
                     match progmgr::wipe_data(parts[1]) {
                         Ok(dir) => shell_println!("Wiped data directory: {}", dir.display()),
@@ -38983,6 +39193,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: progmgr wipesettings <app_id>");
+                    set_exit(1);
                 } else {
                     match progmgr::wipe_settings(parts[1]) {
                         Ok(dir) => {
@@ -39002,6 +39213,7 @@ fn cmd_progmgr(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: progmgr version <app_id> <version>");
+                    set_exit(1);
                 } else {
                     match progmgr::set_version(parts[1], parts[2]) {
                         Ok(()) => shell_println!("Version set for '{}'", parts[1]),
@@ -39112,6 +39324,7 @@ fn cmd_scriptlang(args: &str) {
         "info" | "show" => {
             if parts.len() < 2 {
                 shell_println!("Usage: scriptlang info <engine_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::get_engine(id) {
@@ -39188,6 +39401,7 @@ fn cmd_scriptlang(args: &str) {
         "unregister" | "unreg" => {
             if parts.len() < 2 {
                 shell_println!("Usage: scriptlang unregister <engine_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::unregister_engine(id) {
@@ -39207,6 +39421,7 @@ fn cmd_scriptlang(args: &str) {
         "enable" => {
             if parts.len() < 2 {
                 shell_println!("Usage: scriptlang enable <engine_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::set_enabled(id, true) {
@@ -39226,6 +39441,7 @@ fn cmd_scriptlang(args: &str) {
         "disable" => {
             if parts.len() < 2 {
                 shell_println!("Usage: scriptlang disable <engine_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::set_enabled(id, false) {
@@ -39245,6 +39461,7 @@ fn cmd_scriptlang(args: &str) {
         "addext" => {
             if parts.len() < 3 {
                 shell_println!("Usage: scriptlang addext <engine_id> <extension>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::add_extension(id, parts[2]) {
@@ -39264,6 +39481,7 @@ fn cmd_scriptlang(args: &str) {
         "addmime" => {
             if parts.len() < 3 {
                 shell_println!("Usage: scriptlang addmime <engine_id> <mime_type>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::add_mime_type(id, parts[2]) {
@@ -39332,6 +39550,7 @@ fn cmd_scriptlang(args: &str) {
         "ctx" | "create" => {
             if parts.len() < 3 {
                 shell_println!("Usage: scriptlang ctx <engine_id> <app_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match scriptlang::create_context(id, parts[2]) {
@@ -39356,6 +39575,7 @@ fn cmd_scriptlang(args: &str) {
         "destroy" => {
             if parts.len() < 2 {
                 shell_println!("Usage: scriptlang destroy <handle>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(h) => match scriptlang::destroy_context(h) {
@@ -39392,6 +39612,7 @@ fn cmd_scriptlang(args: &str) {
         "bind" => {
             if parts.len() < 4 {
                 shell_println!("Usage: scriptlang bind <handle> <name> <type> [rw]");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(h) => {
@@ -39414,6 +39635,7 @@ fn cmd_scriptlang(args: &str) {
         "unbind" => {
             if parts.len() < 3 {
                 shell_println!("Usage: scriptlang unbind <handle> <name>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(h) => match scriptlang::remove_binding(h, parts[2]) {
@@ -39433,6 +39655,7 @@ fn cmd_scriptlang(args: &str) {
         "eval" => {
             if parts.len() < 3 {
                 shell_println!("Usage: scriptlang eval <handle> <code...>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(h) => {
@@ -39524,6 +39747,7 @@ fn cmd_osreset(args: &str) {
         "checkpoint" | "cp" => {
             if parts.len() < 2 {
                 shell_println!("Usage: osreset checkpoint <name> [full|keepfiles|keepapps|repair]");
+                set_exit(1);
             } else {
                 let scope = match parts.get(2).copied().unwrap_or("keepfiles") {
                     "full" => osreset::ResetScope::Full,
@@ -39560,6 +39784,7 @@ fn cmd_osreset(args: &str) {
         "rmcp" => {
             if parts.len() < 2 {
                 shell_println!("Usage: osreset rmcp <checkpoint_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match osreset::delete_checkpoint(id) {
@@ -39579,6 +39804,7 @@ fn cmd_osreset(args: &str) {
         "plan" => {
             if parts.len() < 2 {
                 shell_println!("Usage: osreset plan <full|keepfiles|keepapps|repair>");
+                set_exit(1);
             } else {
                 let scope = match parts[1] {
                     "full" => osreset::ResetScope::Full,
@@ -39636,6 +39862,7 @@ fn cmd_osreset(args: &str) {
         "showplan" => {
             if parts.len() < 2 {
                 shell_println!("Usage: osreset showplan <plan_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match osreset::get_plan(id) {
@@ -39689,6 +39916,7 @@ fn cmd_osreset(args: &str) {
         "appinc" => {
             if parts.len() < 4 {
                 shell_println!("Usage: osreset appinc <plan_id> <app_id> <on|off>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(pid) => {
@@ -39716,6 +39944,7 @@ fn cmd_osreset(args: &str) {
         "execute" | "exec" => {
             if parts.len() < 2 {
                 shell_println!("Usage: osreset execute <plan_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match osreset::execute_reset(id) {
@@ -39735,6 +39964,7 @@ fn cmd_osreset(args: &str) {
         "cancel" => {
             if parts.len() < 2 {
                 shell_println!("Usage: osreset cancel <plan_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match osreset::cancel_plan(id) {
@@ -39754,6 +39984,7 @@ fn cmd_osreset(args: &str) {
         "rollback" | "rb" => {
             if parts.len() < 2 {
                 shell_println!("Usage: osreset rollback <checkpoint_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match osreset::rollback(id) {
@@ -39938,6 +40169,7 @@ fn cmd_bootcfg(args: &str) {
         "remove" | "rm" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bootcfg remove <entry_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match bootcfg::remove_entry(id) {
@@ -39957,6 +40189,7 @@ fn cmd_bootcfg(args: &str) {
         "default" | "def" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bootcfg default <entry_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match bootcfg::set_default(id) {
@@ -39976,6 +40209,7 @@ fn cmd_bootcfg(args: &str) {
         "params" => {
             if parts.len() < 3 {
                 shell_println!("Usage: bootcfg params <entry_id> <parameters...>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => {
@@ -39998,6 +40232,7 @@ fn cmd_bootcfg(args: &str) {
         "hide" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bootcfg hide <entry_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match bootcfg::set_hidden(id, true) {
@@ -40017,6 +40252,7 @@ fn cmd_bootcfg(args: &str) {
         "unhide" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bootcfg unhide <entry_id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match bootcfg::set_hidden(id, false) {
@@ -40036,6 +40272,7 @@ fn cmd_bootcfg(args: &str) {
         "timeout" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bootcfg timeout <seconds>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u32>() {
                     Ok(s) => match bootcfg::set_timeout(s) {
@@ -40055,6 +40292,7 @@ fn cmd_bootcfg(args: &str) {
         "console" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bootcfg console <text|graphical|verbose|silent>");
+                set_exit(1);
             } else {
                 let mode = match parts[1] {
                     "text" => bootcfg::ConsoleMode::Text,
@@ -40074,6 +40312,7 @@ fn cmd_bootcfg(args: &str) {
         "activity" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bootcfg activity <on|off>");
+                set_exit(1);
             } else {
                 let on = matches!(parts[1], "on" | "true" | "yes" | "1");
                 match bootcfg::set_boot_activity(on) {
@@ -40090,6 +40329,7 @@ fn cmd_bootcfg(args: &str) {
         "gfx" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bootcfg gfx <resolution>");
+                set_exit(1);
             } else {
                 match bootcfg::set_gfx_mode(parts[1]) {
                     Ok(()) => shell_println!("GFX mode set to {}", parts[1]),
@@ -40103,6 +40343,7 @@ fn cmd_bootcfg(args: &str) {
         "loader" => {
             if parts.len() < 2 {
                 shell_println!("Usage: bootcfg loader <grub2|systemd|custom|direct>");
+                set_exit(1);
             } else {
                 let lt = match parts[1] {
                     "grub2" | "grub" => bootcfg::BootloaderType::Grub2,
@@ -40282,6 +40523,7 @@ fn cmd_swapcfg(args: &str) {
         "remove" | "rm" => {
             if parts.len() < 2 {
                 shell_println!("Usage: swapcfg remove <id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match swapcfg::remove_swap(id) {
@@ -40301,6 +40543,7 @@ fn cmd_swapcfg(args: &str) {
         "on" | "activate" => {
             if parts.len() < 2 {
                 shell_println!("Usage: swapcfg on <id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match swapcfg::activate(id) {
@@ -40320,6 +40563,7 @@ fn cmd_swapcfg(args: &str) {
         "off" | "deactivate" => {
             if parts.len() < 2 {
                 shell_println!("Usage: swapcfg off <id>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u64>() {
                     Ok(id) => match swapcfg::deactivate(id) {
@@ -40339,6 +40583,7 @@ fn cmd_swapcfg(args: &str) {
         "resize" => {
             if parts.len() < 3 {
                 shell_println!("Usage: swapcfg resize <id> <new_size_mb>");
+                set_exit(1);
             } else {
                 match (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
                     (Ok(id), Ok(mb)) => match swapcfg::resize(id, mb * 1024 * 1024) {
@@ -40358,6 +40603,7 @@ fn cmd_swapcfg(args: &str) {
         "priority" | "prio" => {
             if parts.len() < 3 {
                 shell_println!("Usage: swapcfg priority <id> <value>");
+                set_exit(1);
             } else {
                 match (parts[1].parse::<u64>(), parts[2].parse::<i32>()) {
                     (Ok(id), Ok(p)) => match swapcfg::set_priority(id, p) {
@@ -40377,6 +40623,7 @@ fn cmd_swapcfg(args: &str) {
         "swappiness" => {
             if parts.len() < 2 {
                 shell_println!("Usage: swapcfg swappiness <0-100>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u32>() {
                     Ok(v) => match swapcfg::set_swappiness(v) {
@@ -40410,6 +40657,7 @@ fn cmd_swapcfg(args: &str) {
         "zswap" => {
             if parts.len() < 3 {
                 shell_println!("Usage: swapcfg zswap <on|off> <algorithm> [max_pool_%]");
+                set_exit(1);
             } else {
                 let on = matches!(parts[1], "on" | "true" | "yes");
                 let algo = parts[2];
@@ -45515,6 +45763,7 @@ fn cmd_appnotify(args: &str) {
         "show" => {
             if parts.len() < 2 {
                 shell_println!("Usage: appnotify show <app-id>");
+                set_exit(1);
             } else {
                 match appnotify::get_app(parts[1]) {
                     Ok(app) => {
@@ -45548,6 +45797,7 @@ fn cmd_appnotify(args: &str) {
         "register" | "reg" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify register <app-id> <display-name>");
+                set_exit(1);
             } else {
                 let name = parts[2..].join(" ");
                 match appnotify::register_app(parts[1], &name) {
@@ -45562,6 +45812,7 @@ fn cmd_appnotify(args: &str) {
         "unregister" | "unreg" => {
             if parts.len() < 2 {
                 shell_println!("Usage: appnotify unregister <app-id>");
+                set_exit(1);
             } else {
                 match appnotify::unregister_app(parts[1]) {
                     Ok(()) => shell_println!("Unregistered: {}", parts[1]),
@@ -45575,6 +45826,7 @@ fn cmd_appnotify(args: &str) {
         "enable" => {
             if parts.len() < 2 {
                 shell_println!("Usage: appnotify enable <app-id>");
+                set_exit(1);
             } else {
                 match appnotify::set_app_enabled(parts[1], true) {
                     Ok(()) => shell_println!("Enabled: {}", parts[1]),
@@ -45588,6 +45840,7 @@ fn cmd_appnotify(args: &str) {
         "disable" => {
             if parts.len() < 2 {
                 shell_println!("Usage: appnotify disable <app-id>");
+                set_exit(1);
             } else {
                 match appnotify::set_app_enabled(parts[1], false) {
                     Ok(()) => shell_println!("Disabled: {}", parts[1]),
@@ -45601,6 +45854,7 @@ fn cmd_appnotify(args: &str) {
         "sound" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify sound <app-id> <default|silent|filename>");
+                set_exit(1);
             } else {
                 let snd = match parts[2] {
                     "default" => appnotify::SoundChoice::SystemDefault,
@@ -45645,6 +45899,7 @@ fn cmd_appnotify(args: &str) {
         "critical" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify critical <app-id> <on|off>");
+                set_exit(1);
             } else {
                 let allow = matches!(parts[2], "on" | "yes" | "true");
                 match appnotify::set_allow_critical(parts[1], allow) {
@@ -45663,6 +45918,7 @@ fn cmd_appnotify(args: &str) {
         "ratelimit" | "rate" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify ratelimit <app-id> <per-minute|0>");
+                set_exit(1);
             } else {
                 match parts[2].parse::<u32>() {
                     Ok(v) => match appnotify::set_rate_limit(parts[1], v) {
@@ -45682,6 +45938,7 @@ fn cmd_appnotify(args: &str) {
         "group" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify group <app-id> <on|off>");
+                set_exit(1);
             } else {
                 let g = matches!(parts[2], "on" | "yes" | "true");
                 match appnotify::set_group(parts[1], g) {
@@ -45700,6 +45957,7 @@ fn cmd_appnotify(args: &str) {
         "addtype" => {
             if parts.len() < 4 {
                 shell_println!("Usage: appnotify addtype <app-id> <type-key> <description...>");
+                set_exit(1);
             } else {
                 let desc = parts[3..].join(" ");
                 match appnotify::register_notification_type(
@@ -45719,6 +45977,7 @@ fn cmd_appnotify(args: &str) {
         "rmtype" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify rmtype <app-id> <type-key>");
+                set_exit(1);
             } else {
                 match appnotify::unregister_notification_type(parts[1], parts[2]) {
                     Ok(()) => shell_println!("Removed type '{}' from {}", parts[2], parts[1]),
@@ -45732,6 +45991,7 @@ fn cmd_appnotify(args: &str) {
         "type-enable" | "ten" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify type-enable <app-id> <type-key>");
+                set_exit(1);
             } else {
                 match appnotify::set_type_enabled(parts[1], parts[2], true) {
                     Ok(()) => shell_println!("Enabled '{}' for {}", parts[2], parts[1]),
@@ -45745,6 +46005,7 @@ fn cmd_appnotify(args: &str) {
         "type-disable" | "tdis" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify type-disable <app-id> <type-key>");
+                set_exit(1);
             } else {
                 match appnotify::set_type_enabled(parts[1], parts[2], false) {
                     Ok(()) => shell_println!("Disabled '{}' for {}", parts[2], parts[1]),
@@ -45809,6 +46070,7 @@ fn cmd_appnotify(args: &str) {
         "addsound" => {
             if parts.len() < 4 {
                 shell_println!("Usage: appnotify addsound <filename> <label> <category>");
+                set_exit(1);
             } else {
                 match appnotify::register_sound(parts[1], parts[2], parts[3]) {
                     Ok(()) => shell_println!("Added sound: {}", parts[1]),
@@ -45902,6 +46164,7 @@ fn cmd_kernelbuild(args: &str) {
         "info" | "show" => {
             if parts.len() < 2 {
                 shell_println!("Usage: kernelbuild info <component-id>");
+                set_exit(1);
             } else {
                 match kernelbuild::get_component(parts[1]) {
                     Ok(c) => {
@@ -45950,6 +46213,7 @@ fn cmd_kernelbuild(args: &str) {
             if parts.len() < 5 {
                 shell_println!("Usage: kernelbuild register <id> <name> <type> <source-dir>");
                 shell_println!("Types: kernel, module, service, utility, library, bootloader");
+                set_exit(1);
             } else {
                 let ct = match parts[3] {
                     "kernel" => Some(kernelbuild::ComponentType::Kernel),
@@ -45984,6 +46248,7 @@ fn cmd_kernelbuild(args: &str) {
         "remove" | "rm" => {
             if parts.len() < 2 {
                 shell_println!("Usage: kernelbuild remove <component-id>");
+                set_exit(1);
             } else {
                 match kernelbuild::remove_component(parts[1]) {
                     Ok(()) => shell_println!("Removed: {}", parts[1]),
@@ -45997,6 +46262,7 @@ fn cmd_kernelbuild(args: &str) {
         "param" | "set" => {
             if parts.len() < 4 {
                 shell_println!("Usage: kernelbuild param <component-id> <key> <value>");
+                set_exit(1);
             } else {
                 match kernelbuild::set_param(parts[1], parts[2], parts[3]) {
                     Ok(()) => shell_println!("Set {}={} for {}", parts[2], parts[3], parts[1]),
@@ -46010,6 +46276,7 @@ fn cmd_kernelbuild(args: &str) {
         "addparam" => {
             if parts.len() < 5 {
                 shell_println!("Usage: kernelbuild addparam <comp-id> <key> <default> <desc...>");
+                set_exit(1);
             } else {
                 let desc = parts[4..].join(" ");
                 match kernelbuild::add_param(parts[1], parts[2], &desc, parts[3], &[], false) {
@@ -46024,6 +46291,7 @@ fn cmd_kernelbuild(args: &str) {
         "resetparam" => {
             if parts.len() < 3 {
                 shell_println!("Usage: kernelbuild resetparam <component-id> <key>");
+                set_exit(1);
             } else {
                 match kernelbuild::reset_param(parts[1], parts[2]) {
                     Ok(()) => shell_println!("Reset {} for {}", parts[2], parts[1]),
@@ -46037,6 +46305,7 @@ fn cmd_kernelbuild(args: &str) {
         "resetall" => {
             if parts.len() < 2 {
                 shell_println!("Usage: kernelbuild resetall <component-id>");
+                set_exit(1);
             } else {
                 match kernelbuild::reset_all_params(parts[1]) {
                     Ok(()) => shell_println!("Reset all params for {}", parts[1]),
@@ -46050,6 +46319,7 @@ fn cmd_kernelbuild(args: &str) {
         "opt" => {
             if parts.len() < 3 {
                 shell_println!("Usage: kernelbuild opt <component-id> <debug|o1|o2|release|size>");
+                set_exit(1);
             } else {
                 let level = match parts[2] {
                     "debug" => Some(kernelbuild::OptLevel::Debug),
@@ -46077,6 +46347,7 @@ fn cmd_kernelbuild(args: &str) {
         "auto" => {
             if parts.len() < 3 {
                 shell_println!("Usage: kernelbuild auto <component-id> <on|off>");
+                set_exit(1);
             } else {
                 let on = matches!(parts[2], "on" | "yes" | "true");
                 match kernelbuild::set_auto_rebuild(parts[1], on) {
@@ -46095,6 +46366,7 @@ fn cmd_kernelbuild(args: &str) {
         "dep" => {
             if parts.len() < 3 {
                 shell_println!("Usage: kernelbuild dep <component-id> <dependency-id>");
+                set_exit(1);
             } else {
                 match kernelbuild::add_dependency(parts[1], parts[2]) {
                     Ok(()) => shell_println!("Added dep {} → {}", parts[1], parts[2]),
@@ -46108,6 +46380,7 @@ fn cmd_kernelbuild(args: &str) {
         "build" => {
             if parts.len() < 2 {
                 shell_println!("Usage: kernelbuild build <component-id>");
+                set_exit(1);
             } else {
                 match kernelbuild::build(parts[1]) {
                     Ok(()) => shell_println!("Build successful: {}", parts[1]),
@@ -46266,6 +46539,7 @@ fn cmd_wakesensor(args: &str) {
         "consent" => {
             if parts.len() < 3 {
                 shell_println!("Usage: wakesensor consent <camera|mic> <grant|revoke>");
+                set_exit(1);
             } else {
                 let sensor = match parts[1] {
                     "camera" | "cam" => Some(wakesensor::SensorType::Camera),
@@ -46302,6 +46576,7 @@ fn cmd_wakesensor(args: &str) {
         "camera" | "cam" => {
             if parts.len() < 2 {
                 shell_println!("Usage: wakesensor camera <on|off>");
+                set_exit(1);
             } else {
                 let on = matches!(parts[1], "on" | "yes" | "true" | "enable");
                 match wakesensor::set_sensor_enabled(wakesensor::SensorType::Camera, on) {
@@ -46318,6 +46593,7 @@ fn cmd_wakesensor(args: &str) {
         "mic" | "microphone" => {
             if parts.len() < 2 {
                 shell_println!("Usage: wakesensor mic <on|off>");
+                set_exit(1);
             } else {
                 let on = matches!(parts[1], "on" | "yes" | "true" | "enable");
                 match wakesensor::set_sensor_enabled(wakesensor::SensorType::Microphone, on) {
@@ -46371,6 +46647,7 @@ fn cmd_wakesensor(args: &str) {
         "threshold" => {
             if parts.len() < 3 {
                 shell_println!("Usage: wakesensor threshold <camera|mic> <0-100>");
+                set_exit(1);
             } else {
                 let sensor = match parts[1] {
                     "camera" | "cam" => Some(wakesensor::SensorType::Camera),
@@ -46402,6 +46679,7 @@ fn cmd_wakesensor(args: &str) {
             if parts.len() < 4 {
                 shell_println!("Usage: wakesensor hours <camera|mic> <start-hour> <end-hour>");
                 shell_println!("  Use 'clear' for start to remove schedule");
+                set_exit(1);
             } else {
                 let sensor = match parts[1] {
                     "camera" | "cam" => Some(wakesensor::SensorType::Camera),
@@ -46444,6 +46722,7 @@ fn cmd_wakesensor(args: &str) {
         "cooldown" => {
             if parts.len() < 2 {
                 shell_println!("Usage: wakesensor cooldown <seconds>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u32>() {
                     Ok(v) => match wakesensor::set_cooldown(v) {
@@ -46463,6 +46742,7 @@ fn cmd_wakesensor(args: &str) {
         "battery" => {
             if parts.len() < 2 {
                 shell_println!("Usage: wakesensor battery <disable-on-battery|always>");
+                set_exit(1);
             } else {
                 let dis = matches!(parts[1], "disable" | "off" | "disable-on-battery");
                 match wakesensor::set_disable_on_battery(dis) {
@@ -46610,6 +46890,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: netsettings show <interface>");
+                    set_exit(1);
                 } else {
                     match netsettings::get_interface(parts[1]) {
                         Ok(i) => {
@@ -46656,6 +46937,7 @@ fn cmd_netsettings(args: &str) {
                 if parts.len() < 4 {
                     shell_println!("Usage: netsettings add <name> <type> <mac>");
                     shell_println!("Types: ethernet, wifi, loopback, virtual, vpn");
+                    set_exit(1);
                 } else {
                     let it = match parts[2] {
                         "ethernet" | "eth" => Some(netsettings::InterfaceType::Ethernet),
@@ -46692,6 +46974,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: netsettings remove <interface>");
+                    set_exit(1);
                 } else {
                     match netsettings::remove_interface(parts[1]) {
                         Ok(()) => shell_println!("Removed: {}", parts[1]),
@@ -46709,6 +46992,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: netsettings up <interface>");
+                    set_exit(1);
                 } else {
                     match netsettings::set_link_state(parts[1], netsettings::LinkState::Up) {
                         Ok(()) => shell_println!("{} up", parts[1]),
@@ -46726,6 +47010,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: netsettings down <interface>");
+                    set_exit(1);
                 } else {
                     match netsettings::set_link_state(parts[1], netsettings::LinkState::Down) {
                         Ok(()) => shell_println!("{} down", parts[1]),
@@ -46805,6 +47090,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: netsettings dns <iface> <auto|server1,server2,...>");
+                    set_exit(1);
                 } else if parts[2] == "auto" {
                     match netsettings::set_dns(parts[1], true, &[]) {
                         Ok(()) => shell_println!("DNS set to auto for {}", parts[1]),
@@ -46831,6 +47117,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: netsettings doh <iface> <url|off>");
+                    set_exit(1);
                 } else {
                     let url = if parts[2] == "off" { "" } else { parts[2] };
                     match netsettings::set_doh(parts[1], url) {
@@ -46849,6 +47136,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 3 {
                     shell_println!("Usage: netsettings mtu <iface> <value>");
+                    set_exit(1);
                 } else {
                     match parts[2].parse::<u32>() {
                         Ok(v) => match netsettings::set_mtu(parts[1], v) {
@@ -46908,6 +47196,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 4 {
                     shell_println!("Usage: netsettings connect <iface> <ssid> [password]");
+                    set_exit(1);
                 } else {
                     let pass = parts.get(3).copied().unwrap_or("");
                     match netsettings::connect_wifi(parts[1], parts[2], pass) {
@@ -46926,6 +47215,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: netsettings disconnect <iface>");
+                    set_exit(1);
                 } else {
                     match netsettings::disconnect_wifi(parts[1]) {
                         Ok(()) => shell_println!("Disconnected"),
@@ -46970,6 +47260,7 @@ fn cmd_netsettings(args: &str) {
             fn case(parts: &[&str]) {
                 if parts.len() < 2 {
                     shell_println!("Usage: netsettings forget <ssid>");
+                    set_exit(1);
                 } else {
                     match netsettings::forget_network(parts[1]) {
                         Ok(()) => shell_println!("Forgot: {}", parts[1]),
@@ -47460,6 +47751,7 @@ fn cmd_perfmon(args: &str) {
         "dismiss" => {
             if parts.len() < 2 {
                 shell_println!("Usage: perfmon dismiss <id|all>");
+                set_exit(1);
             } else if parts[1] == "all" {
                 perfmon::dismiss_all_alerts();
                 shell_println!("All alerts dismissed");
@@ -47506,6 +47798,7 @@ fn cmd_perfmon(args: &str) {
         "interval" => {
             if parts.len() < 2 {
                 shell_println!("Usage: perfmon interval <ms>");
+                set_exit(1);
             } else {
                 match parts[1].parse::<u32>() {
                     Ok(v) => {
@@ -48308,6 +48601,7 @@ fn cmd_storageclean(args: &str) {
             let path = parts.get(1).copied().unwrap_or("");
             if path.is_empty() {
                 shell_println!("Usage: sclean unexclude <path>");
+                set_exit(1);
             } else {
                 match storageclean::remove_exclusion(path) {
                     Ok(()) => shell_println!("Removed exclusion: {}", path),
@@ -66114,6 +66408,7 @@ fn cmd_driverupdate(args: &str) {
             let ver = parts.get(2).copied().unwrap_or("1.0.0");
             if name.is_empty() {
                 shell_println!("Usage: dupdate register <name> [version]");
+                set_exit(1);
             } else {
                 match driverupdate::register_driver(
                     name,
@@ -66180,6 +66475,7 @@ fn cmd_driverupdate(args: &str) {
             let ver = parts.get(2).copied().unwrap_or("");
             if id_str.is_empty() || ver.is_empty() {
                 shell_println!("Usage: dupdate setupdate <id> <version>");
+                set_exit(1);
             } else if let Ok(id) = id_str.parse::<u32>() {
                 match driverupdate::set_available_update(id, ver) {
                     Ok(()) => shell_println!("Update v{} staged for driver {}", ver, id),
@@ -66307,6 +66603,7 @@ fn cmd_netshare(args: &str) {
             let mountpt = parts.get(3).copied().unwrap_or("");
             if host.is_empty() || mountpt.is_empty() {
                 shell_println!("Usage: nshare mount <host> <remote_path> <mount_point> [user]");
+                set_exit(1);
             } else {
                 let user = parts.get(4).copied().unwrap_or("guest");
                 match netshare::mount(
@@ -66647,6 +66944,7 @@ fn cmd_remoteassist(args: &str) {
             let helper = parts.get(2).copied().unwrap_or("Helper");
             if code.is_empty() {
                 shell_println!("Usage: rassist connect <code> [helper_name]");
+                set_exit(1);
             } else {
                 match remoteassist::connect(code, helper) {
                     Ok(id) => shell_println!("Connected to session {} as '{}'", id, helper),
@@ -66909,6 +67207,7 @@ fn cmd_taskmon(args: &str) {
             let prio_str = parts.get(2).copied().unwrap_or("");
             if pid_str.is_empty() || prio_str.is_empty() {
                 shell_println!("Usage: tmon priority <pid> <realtime|high|normal|below|low|idle>");
+                set_exit(1);
             } else if let Ok(pid) = pid_str.parse::<u32>() {
                 let prio = match prio_str {
                     "realtime" | "rt" => taskmon::TaskPriority::RealTime,
@@ -66939,6 +67238,7 @@ fn cmd_taskmon(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: tmon register <name> [parent_pid]");
+                set_exit(1);
             } else {
                 let ppid = parts
                     .get(2)
@@ -67085,6 +67385,7 @@ fn cmd_printqueue(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: pqueue add <printer_name>");
+                set_exit(1);
             } else {
                 match printqueue::add_printer(name) {
                     Ok(id) => shell_println!("Added printer '{}' (id={})", name, id),
@@ -67101,6 +67402,7 @@ fn cmd_printqueue(args: &str) {
             let pages_str = parts.get(3).copied().unwrap_or("1");
             if printer_str.is_empty() {
                 shell_println!("Usage: pqueue submit <printer_id> [document] [pages]");
+                set_exit(1);
             } else if let Ok(pid) = printer_str.parse::<u32>() {
                 let pages = pages_str.parse::<u32>().unwrap_or(1);
                 match printqueue::submit_job(
@@ -67359,6 +67661,7 @@ fn cmd_servicemgr(args: &str) {
             let type_str = parts.get(2).copied().unwrap_or("");
             if id_str.is_empty() || type_str.is_empty() {
                 shell_println!("Usage: svcmgr startup <id> <auto|manual|disabled|delayed>");
+                set_exit(1);
             } else if let Ok(id) = id_str.parse::<u32>() {
                 let st = match type_str {
                     "auto" | "automatic" => servicemgr::StartupType::Automatic,
@@ -67388,6 +67691,7 @@ fn cmd_servicemgr(args: &str) {
             let display = parts.get(2).copied().unwrap_or(name);
             if name.is_empty() {
                 shell_println!("Usage: svcmgr register <name> [display_name]");
+                set_exit(1);
             } else {
                 match servicemgr::register_service(
                     name,
@@ -67590,6 +67894,7 @@ fn cmd_hwmonitor(args: &str) {
             let val_str = parts.get(2).copied().unwrap_or("");
             if id_str.is_empty() || val_str.is_empty() {
                 shell_println!("Usage: hwmon update <sensor_id> <value>");
+                set_exit(1);
             } else if let (Ok(id), Ok(val)) = (id_str.parse::<u32>(), val_str.parse::<i64>()) {
                 match hwmonitor::update_sensor(id, val) {
                     Ok(Some(true)) => shell_println!(
@@ -67904,6 +68209,7 @@ fn cmd_gamepadinput(args: &str) {
             let type_str = parts.get(2).copied().unwrap_or("generic");
             if name.is_empty() {
                 shell_println!("Usage: gamepad add <name> [xbox|ps|switch|generic|stick|wheel]");
+                set_exit(1);
             } else {
                 let gtype = match type_str {
                     "xbox" | "xb" => gamepadinput::GamepadType::Xbox,
@@ -68296,6 +68602,7 @@ fn cmd_audiomux(args: &str) {
             let pid_str = parts.get(2).copied().unwrap_or("0");
             if app.is_empty() {
                 shell_println!("Usage: amux stream <app_name> [pid] [output_id]");
+                set_exit(1);
             } else {
                 let pid = pid_str.parse::<u32>().unwrap_or(0);
                 let out = parts.get(3).and_then(|s| s.parse::<u32>().ok());
@@ -68477,6 +68784,7 @@ fn cmd_netthrottle(args: &str) {
                 .unwrap_or(0);
             if app.is_empty() {
                 shell_println!("Usage: nthrottle add <app> [max_down_bps] [max_up_bps]");
+                set_exit(1);
             } else {
                 match netthrottle::add_rule(app, down, up, netthrottle::QosPriority::Normal) {
                     Ok(id) => shell_println!("Added rule {} for '{}'", id, app),
@@ -68884,6 +69192,7 @@ fn cmd_parentaltime(args: &str) {
                 .unwrap_or(0);
             if user.is_empty() {
                 shell_println!("Usage: ptime create <user> [daily_min] [weekly_min]");
+                set_exit(1);
             } else {
                 match parentaltime::create_config(user, daily, weekly) {
                     Ok(id) => shell_println!(
@@ -69068,6 +69377,7 @@ fn cmd_mediakeys(args: &str) {
                 .unwrap_or(1);
             if app.is_empty() {
                 shell_println!("Usage: mkeys register <app_name> [pid]");
+                set_exit(1);
             } else {
                 match mediakeys::register_session(app, pid) {
                     Ok(id) => shell_println!("Registered session {} for '{}'", id, app),
@@ -69275,6 +69585,7 @@ fn cmd_webcam(args: &str) {
             let name = parts.get(1).copied().unwrap_or("");
             if name.is_empty() {
                 shell_println!("Usage: cam register <name> [usb|builtin|network|virtual]");
+                set_exit(1);
             } else {
                 let conn = match parts.get(2).copied().unwrap_or("usb") {
                     "builtin" => webcam::CameraConnection::Builtin,
@@ -69330,6 +69641,7 @@ fn cmd_webcam(args: &str) {
                 .unwrap_or(30);
             if cam_id == 0 {
                 shell_println!("Usage: cam open <cam_id> [app] [width] [height] [fps]");
+                set_exit(1);
             } else {
                 match webcam::open_stream(cam_id, app, 0, w, h, fps) {
                     Ok(sid) => shell_println!("Opened stream {} on camera {}", sid, cam_id),
@@ -69388,6 +69700,7 @@ fn cmd_webcam(args: &str) {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
                 shell_println!("Usage: cam block <app_name>");
+                set_exit(1);
             } else {
                 match webcam::block_app(app) {
                     Ok(()) => shell_println!("Blocked '{}'", app),
@@ -69402,6 +69715,7 @@ fn cmd_webcam(args: &str) {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
                 shell_println!("Usage: cam unblock <app_name>");
+                set_exit(1);
             } else {
                 match webcam::unblock_app(app) {
                     Ok(()) => shell_println!("Unblocked '{}'", app),
@@ -69586,6 +69900,7 @@ fn cmd_speechio(args: &str) {
             };
             if name.is_empty() {
                 shell_println!("Usage: speech addvoice <name> [lang] [male|female|neutral]");
+                set_exit(1);
             } else {
                 match speechio::add_voice(name, lang, gender) {
                     Ok(id) => shell_println!("Added voice {} '{}'", id, name),
@@ -69759,6 +70074,7 @@ fn cmd_mobilelink(args: &str) {
             let model = parts.get(2).copied().unwrap_or("Unknown");
             if name.is_empty() {
                 shell_println!("Usage: mlink pair <name> [model] [android|ios|other]");
+                set_exit(1);
             } else {
                 let platform = match parts.get(3).copied().unwrap_or("android") {
                     "ios" => mobilelink::MobilePlatform::Ios,
@@ -69871,6 +70187,7 @@ fn cmd_mobilelink(args: &str) {
             if let Ok(id) = id_str.parse::<u32>() {
                 if to.is_empty() || body.is_empty() {
                     shell_println!("Usage: mlink sms <device_id> <recipient> <message>");
+                    set_exit(1);
                 } else {
                     match mobilelink::send_sms(id, to, &body) {
                         Ok(mid) => shell_println!("Sent SMS {} to {}", mid, to),
@@ -70292,6 +70609,7 @@ fn cmd_appstore(args: &str) {
             };
             if name.is_empty() {
                 shell_println!("Usage: store add <name> [developer] [category]");
+                set_exit(1);
             } else {
                 match appstore::add_app(name, dev, "", cat, "1.0.0", 1024) {
                     Ok(id) => shell_println!("Added app {} '{}'.", id, name),
@@ -70469,6 +70787,7 @@ fn cmd_wintiling(args: &str) {
                 .unwrap_or(1);
             if wid == 0 {
                 shell_println!("Usage: tile add <window_id> [title] [workspace]");
+                set_exit(1);
             } else {
                 match wintiling::add_window(wid, title, ws) {
                     Ok(()) => shell_println!("Added window {} to workspace {}.", wid, ws),
@@ -70596,6 +70915,7 @@ fn cmd_wintiling(args: &str) {
                 .unwrap_or(0);
             if wid == 0 || ws == 0 {
                 shell_println!("Usage: tile move <window_id> <workspace>");
+                set_exit(1);
             } else {
                 match wintiling::move_to_workspace(wid, ws) {
                     Ok(()) => shell_println!("Moved window {} to workspace {}.", wid, ws),
@@ -70691,6 +71011,7 @@ fn cmd_peninput(args: &str) {
             };
             if name.is_empty() {
                 shell_println!("Usage: pen add <name> [stylus|airbrush|artpen|eraser|touch]");
+                set_exit(1);
             } else {
                 let caps = peninput::PenCapabilities {
                     pressure: true,
@@ -70792,6 +71113,7 @@ fn cmd_peninput(args: &str) {
             let action = parts.get(3).copied().unwrap_or("");
             if pen_id == 0 || action.is_empty() {
                 shell_println!("Usage: pen map <pen_id> <button> <action>");
+                set_exit(1);
             } else {
                 match peninput::set_button_mapping(pen_id, btn, action) {
                     Ok(()) => shell_println!("Button {} → '{}'.", btn, action),
@@ -70885,23 +71207,38 @@ fn cmd_brightness(args: &str) {
             }
         }
         "set" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let level = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            if level == 0 && parts.get(2).is_none() {
-                shell_println!("Usage: bright set [display_id] <level>");
+            // `bright set [display_id] <level>` is the rare synopsis whose
+            // *optional* operand comes first, so the operand count is what
+            // says which is which: one word is the level, two are the display
+            // and then the level.  Reading `parts[1]` as the display
+            // unconditionally made the documented one-word form -- the form
+            // anyone with a single screen would type -- fall into the arity
+            // guard and print its own usage line instead of working.
+            let (id_idx, level_idx) = if parts.len() >= 3 {
+                (Some(1), 2)
             } else {
-                match brightness::set_brightness(id, level) {
-                    Ok(()) => shell_println!("Brightness → {}%", level),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                (None, 1)
+            };
+            let Some(level) = required_u32(&parts, level_idx, "bright", sub, "percentage") else {
+                return;
+            };
+            // Guessing here was the same defect twice over: `bright set 1 abc`
+            // read as level 0 and turned the backlight *off*, then said
+            // `Brightness → 0%` and exited 0.
+            let id = match id_idx {
+                None => 1,
+                Some(i) => {
+                    let Some(v) = required_u32(&parts, i, "bright", sub, "display ID") else {
+                        return;
+                    };
+                    v
+                }
+            };
+            match brightness::set_brightness(id, level) {
+                Ok(()) => shell_println!("Brightness → {}%", level),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -71075,6 +71412,7 @@ fn cmd_quicksettings(args: &str) {
                 .unwrap_or(0);
             if id == 0 {
                 shell_println!("Usage: qs set <tile_id> <value>");
+                set_exit(1);
             } else {
                 match quicksettings::set_value(id, val) {
                     Ok(()) => shell_println!("Set to {}%", val),
@@ -71095,6 +71433,7 @@ fn cmd_quicksettings(args: &str) {
             };
             if name.is_empty() {
                 shell_println!("Usage: qs add <name> [toggle|slider|action]");
+                set_exit(1);
             } else {
                 match quicksettings::add_tile(name, name, tile_type) {
                     Ok(id) => shell_println!("Added tile {} '{}'", id, name),
@@ -88133,6 +88472,7 @@ fn cmd_kmod(args: &str) {
             let value = parts.get(3).copied().unwrap_or("");
             if modname.is_empty() || param.is_empty() {
                 shell_println!("Usage: kmod param <module> <param> <value>");
+                set_exit(1);
             } else {
                 match kmod::set_param(modname, param, value, "user-set parameter") {
                     Ok(()) => shell_println!("Set {}.{} = {}", modname, param, value),

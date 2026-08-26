@@ -2819,8 +2819,53 @@ pub fn self_test() -> KernelResult<()> {
     test_owner_died_relock()?;
     test_pi_owner_death_handoff()?;
     test_priority_inheritance()?;
+    test_accounting_reaches_futexstat()?;
 
     serial_println!("[futex] Futex self-test PASSED");
+    Ok(())
+}
+
+/// Check that the tests above actually reached `fs::futexstat`.
+///
+/// This is the test whose absence let the accounting gap exist for the whole
+/// life of the module.  Every other test here proves the futex *works*, and
+/// `futexstat`'s own self-test proves its bookkeeping works; neither could
+/// notice that the two were never connected, so `/proc/futexstat` reported an
+/// empty hotspot table and zero waits on a system doing real futex work, and
+/// nothing failed.
+///
+/// It must run last, after `test_blocking_wait_wake` has performed a genuine
+/// block-and-wake — this deliberately measures the side effects of the earlier
+/// tests rather than making its own, because a call it made itself could be
+/// wired up while the real paths were not.
+fn test_accounting_reaches_futexstat() -> KernelResult<()> {
+    let (addrs, _procs, waits, wakes, _timeouts, ops) = crate::fs::futexstat::stats();
+
+    if ops == 0 {
+        serial_println!(
+            "[futex]   FAIL: fs::futexstat recorded nothing; the accounting helpers are unwired"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if waits == 0 {
+        serial_println!("[futex]   FAIL: blocking waits happened but futexstat counted 0");
+        return Err(KernelError::InternalError);
+    }
+    if wakes == 0 {
+        serial_println!("[futex]   FAIL: wakes happened but futexstat counted 0");
+        return Err(KernelError::InternalError);
+    }
+    if addrs == 0 {
+        serial_println!("[futex]   FAIL: futexstat has no per-address rows to build hotspots from");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[futex]   Accounting reaches futexstat: OK ({} addr(s), {} wait(s), {} wake(s))",
+        addrs,
+        waits,
+        wakes
+    );
     Ok(())
 }
 

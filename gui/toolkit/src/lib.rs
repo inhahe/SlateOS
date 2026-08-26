@@ -36,6 +36,7 @@ pub mod dnd;
 pub mod event;
 pub mod filetypes;
 pub mod fontdb;
+pub mod frame;
 pub mod grid;
 pub mod history;
 pub mod idseq;

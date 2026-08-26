@@ -88170,6 +88170,83 @@ path and deserves its own change and its own benchmark.
 
 **Not a regression.** True since the IOAPIC device vectors were installed.
 
+### Addendum, 2026-08-26 — a choke point, and a landmine in the display side
+
+Two findings from reading the consumers before implementing. Both change the
+plan above materially, so they are recorded here rather than discovered again
+halfway through the edit.
+
+**1. Step 1 should be one call, not five.** The list above — `isr_timer`,
+`handle_device_irq`, the two IPI ISRs, `isr_spurious` — is not where the count
+belongs. `idt.rs`'s `dispatch_vector` is a single function that *every* hardware
+vector already funnels through:
+
+```rust
+extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
+    match vector {
+        32 => crate::apic::handle_timer_irq(frame_ref, 0),
+        251 => crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0),
+        252 => crate::apic::handle_reschedule_irq(frame_ref, 0),
+        255 => crate::apic::handle_spurious_irq(frame_ref, 0),
+        v @ 33..=56 => { ... crate::ioapic::handle_device_irq(irq); }
+        _ => {}
+    }
+}
+```
+
+So `count_vector(vector as usize)` at the top of it covers 32, 33–56, 251, 252
+and 255 in one line — and, more to the point, covers whatever vector is added
+next *without anyone remembering to*. This is the same argument that decided the
+block-device capability gate in `devfs`: one call at the point every caller
+passes through beats a call each caller must not forget. Prefer it. The
+five-site version in step 1 is strictly worse and should not be implemented.
+
+Note the ordering constraint that comes with it: the count must be taken
+*before* the `match`, not inside each arm, or the `_ => {}` arm — an interrupt
+on an installed-but-unhandled vector, which is exactly the event worth
+counting — stays invisible.
+
+**2. Fixing the count breaks `kshell`'s exception health line.** At
+`kernel/src/kshell.rs:123411`:
+
+```rust
+let exc_total: u64 = crate::idt::vector_counts().iter().sum();
+```
+
+printed as `"Exceptions: total="`, with a companion
+`if non_pf_exceptions > 100 { "HIGH" }` indicator. That label is accurate
+**only because nothing currently counts hardware vectors.** The moment step 1
+lands, every timer tick — millions of them — folds into a figure labelled
+"Exceptions", and the HIGH indicator pins on within the first second of uptime
+and never clears.
+
+This is the asymmetry that makes the fix one careful commit rather than a
+one-liner: the same change flips `kstat.rs:159` and `kcounters.rs:279` from
+wrong to right, and flips this line from right to wrong. `exc_total` must be
+narrowed to `vector_counts().iter().take(32).sum()` **in the same commit**, not
+in a follow-up — a commit that is correct on its own terms and leaves a
+permanently-red health indicator behind it is worse than no commit.
+
+**Also in the same blast radius**, all in `kshell.rs`:
+
+| site | what is wrong | why it matters after the fix |
+|---|---|---|
+| `cmd_irqrate` (127706) | hardcodes `for i in 0..48` | 48–56, 251, 252, 255 never print |
+| `cmd_irqrate` | `33..=47 => "Device IRQ"` | IOAPIC maps 33–**56**, so 48–56 print "Unknown" |
+| `cmd_irqrate` | `rates.rates_x10[i]` / `EXCEPTION_NAMES[i]` with `[]` | widening `VECTOR_STATS_SIZE` makes the two arrays different lengths; index them with `.get()` |
+| `cmd_exceptions` (123556) | names every `i >= 32` as just `"IRQ"` | the whole point of counting them is telling them apart |
+| `kcounters.rs:288` | `irq_counts[32]` with `[]` | fine today, but `.get(32).copied().unwrap_or(0)` costs nothing and cannot panic |
+
+`cmd_irqrate` already skips zero-rate vectors, so widening the loop will not
+flood its output — it will show exactly the vectors that are actually live.
+
+**Sizing note.** Widening `VECTOR_STATS_SIZE` 48 → 256 makes `InterruptRates`
+(`rates_x10: [u64; VECTOR_STATS_SIZE]`) a ~2 KB by-value return. Acceptable:
+`vector_rates()` is called only from a hand-run diagnostic command, never from
+an interrupt path.
+
+---
+
 ## C-NETMANAGER-HAD-NO-WINDOW-AND-NO-EVENT-HANDLER-AT-ALL (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
 
 **In short:** the Network Manager — the program you open to pick a Wi-Fi
@@ -88402,3 +88479,260 @@ fail independently and are tested completely differently — one against rendere
 geometry, the other against archive bytes. This mirrors what was done for
 `apps/diskcleanup`, which was wired first and given a real back end in the
 following commit.
+## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26)
+
+**In short:** `kernel/src/kcounters.rs` has two halves — a registry that
+subsystems are meant to add counters to, and a hardcoded aggregator that reads
+existing atomics directly. The registry half has **zero registrants**: nothing
+in the tree invokes `define_counter!`, so `snapshot()` returns an empty vector
+on every call and `count()` returns 0, permanently. The `counters` shell command
+concatenates that empty list onto the aggregator's real one, so it prints a
+healthy-looking table and nothing ever reveals that half the module contributes
+nothing.
+
+**The dead surface**, all in `kernel/src/kcounters.rs`, all with no callers
+anywhere in the repository:
+
+| item | line | state |
+|---|---|---|
+| `define_counter!` | 161 | never invoked; only the doc examples at 22-23 |
+| `counter_inc!` | 176 | never invoked; only the doc example at 26 |
+| `counter_add!` | 184 | never invoked; only the doc example at 29 |
+| `CounterDesc` | 50 | constructed only by `define_counter!` |
+| `register()` | 93 | `pub unsafe fn`, no callers |
+| `seal()` | 105 | no callers, so `REGISTRATION_DONE` is never set |
+| `Registry` / `MAX_COUNTERS` (64) | 47-75 | array of 64 `None`, never written |
+
+**Why it is worse than plain dead code.** `kshell.rs:124919` (`cmd_counters`)
+does:
+
+```rust
+let builtin = crate::kcounters::builtin_snapshot();   // real values
+let registered = crate::kcounters::snapshot();        // always empty
+let all = builtin.iter().chain(registered.iter()) ... // looks complete
+```
+
+`builtin_snapshot()` supplies genuine data, so the command's output is correct
+and useful — which is exactly what stops anyone noticing. The empty half is
+masked by the live half. Compare the tick-wiring gate's lesson: state that is
+never advanced shows a plausible zero rather than an obvious absence, and a
+plausible zero is not reportable by any test that only asks "did it print
+something sensible?". The command's own doc comment leads with the dead half
+("Shows all registered counters ... plus built-in counters"), which is the
+reverse of what it actually does.
+
+Note `register()` is an `unsafe fn` with a `# Safety` contract about
+single-threaded boot ordering that has never had a caller — so the contract has
+never been exercised or reviewed against a real call site.
+
+**The tree has already chosen, in writing.** `builtin_snapshot()`'s own doc
+comment (line ~197) says it pulls from subsystem atomics *"rather than requiring
+every subsystem to use our macro"*. So the bypass was a deliberate decision; what
+was not done is removing the mechanism it bypassed. That is what makes this tech
+debt rather than an open design question.
+
+**The proper fix** — delete the registry half, keeping the aggregator:
+
+1. Remove `CounterDesc`, `Registry`, `MAX_COUNTERS`, `REGISTRY`,
+   `REGISTRATION_DONE`, `register()`, `seal()`, `snapshot()`, `count()`, and the
+   three macros. This also removes two `static mut` accesses and one `unsafe fn`
+   from the kernel, which is a security-surface reduction, not just tidying.
+2. Simplify `cmd_counters` to read `builtin_snapshot()` alone and fix its doc
+   comment to describe what it does.
+3. Rewrite the module `//!` doc, whose entire usage example (lines 22-29) is of
+   the deleted API.
+
+Keeping `counter_inc!`/`counter_add!` is tempting since they are harmless
+one-liners, but they are `fetch_add(1, Relaxed)` spelled longer, and leaving two
+macros behind as the residue of a deleted subsystem invites someone to reach for
+the registry that no longer exists.
+
+**If instead the registry should live**, the fix is the opposite and larger:
+migrate the ~20 hardcoded pulls in `builtin_snapshot()` onto `define_counter!`
+and call `seal()` from boot. That is a real option — a registry scales to
+subsystems this file does not know about, whereas the aggregator must be edited
+for every new counter — but nobody has wanted it in the time the module has
+existed, and an unused generalisation that costs a `static mut` is not free.
+
+**How it was found.** Looking for real counters to project into `/proc`-style
+files (the same search that produced the `netdev` and `irqstat` entries above);
+`kcounters` looked like a rich source until the registry turned out to be empty.
+
+**Not a regression.** True since the module was written — it has never had a
+registrant.
+
+---
+
+## `A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES` (lane A, 2026-08-26)
+
+**In short:** `stat("/dev/null")` reports `S_IFREG` — a regular file — instead
+of `S_IFCHR`, a character device. Eleven of the twelve nodes at the devfs root
+are declared with `DevNode::file`, so `ls -l /dev/null` shows `-rw-rw-rw-`
+rather than `crw-rw-rw-`, and the standard shell test `[ -c /dev/null ]` is
+false. The devices *work* — reads and writes do the right thing — so nothing
+fails loudly; only the type is wrong.
+
+**The affected nodes**, all in `DEV_NODES` at `kernel/src/fs/devfs.rs:215`:
+
+| node | declared | should be |
+|---|---|---|
+| `null`, `zero`, `full`, `random`, `urandom` | `file` | `chr` |
+| `console`, `tty` | `file` | `chr` |
+| `stdin`, `stdout`, `stderr` | `file` | `chr` (Linux makes these symlinks to `/proc/self/fd/N`; `chr` is the closer of the two available answers) |
+| `kmsg` | `file` | `chr` |
+| `uptime` | `file` | **stays `file`** — it is a text file, and the only one here that genuinely is one |
+
+The nested nodes are already correct: `input/event0`, `input/event1`,
+`dri/card0`, `dri/renderD128` and the three `snd/*` are `DevNode::chr`.
+
+**The tree already knows why this matters** — it just never applied the
+reasoning at the root. `syscall/linux.rs:19852`, on the `CharDevice` arm of
+`meta_mode_bits`:
+
+```
+// The point of the variant: libinput refuses a node that is not
+// S_ISCHR, and libdrm and ALSA make the same check.
+```
+
+That is exactly the argument for `null` and `tty` as well; the variant was
+added for the device *directories* and the root nodes were left as they were.
+
+**Why it is worth fixing rather than shrugging at.** `[ -c /dev/null ]` and
+`[ -c /dev/tty ]` are ordinary idioms in configure scripts and shell libraries,
+and a program that special-cases a character device to avoid seeking, buffering
+or truncating will take the regular-file path on all eleven. The failure is
+quiet in the same way the others in this file are: the node behaves correctly
+when used, so only code that *asks what it is* gets a wrong answer, and that
+code usually responds by silently choosing a different strategy rather than by
+erroring.
+
+**Care needed — this is not a one-word change.** `EntryType` is load-bearing in
+routing, not only in `stat`:
+
+1. `Vfs::read_at_routed` page-caches only `EntryType::File` with a stable
+   inode. Retyping these to `CharDevice` removes them from the page cache —
+   which is *correct* (a device must not be cached; that is the property that
+   makes block nodes safe for verify-after-write) but it is a behaviour change
+   on the read path and needs checking, not assuming.
+2. `container.rs` merges `CharDevice | BlockDevice` into an arm that refuses
+   `read_file`, so an archive walk does not descend into a device. `/dev/null`
+   moving into that arm changes what a recursive walk does with it.
+3. `kshell`'s `ls -F`, `file`, and long-listing arms all switch on the type, as
+   does `d_type` in `getdents64`.
+4. `devfs`'s own self-tests assert entry types in several places.
+
+**The proper fix:** change the eleven declarations, leave `uptime` alone, then
+walk each of the four sites above and confirm the new routing is the intended
+one — in particular re-run the devfs and container self-tests, which is where a
+wrong answer will show up first.
+
+**How it was found.** A block-device self-test asserted that registering a disk
+named `null` could not shadow `/dev/null`, and expected the survivor to stat as
+`CharDevice`. It stats as `File`. The anti-shadowing property held; the
+expectation was wrong, and it was wrong because the node is mistyped. That rung
+now asserts "the disk did not win" instead of pinning the neighbouring value.
+
+**Not a regression.** True since devfs was written.
+
+---
+
+## `A-IRQBALANCE-CAN-NEVER-BALANCE-FOR-TWO-INDEPENDENT-REASONS` (lane A, 2026-08-26)
+
+**In short:** the interrupt balancer — `kernel/src/irqbalance.rs`, ~500 lines of
+greedy bin-packing that is supposed to spread device interrupts across CPUs —
+has never moved a single interrupt, and cannot. Its `balance()` pass takes an
+early `return` on every invocation, for **two separate reasons, either of which
+alone is sufficient.** Its self-test prints `[irqbalance] Self-test PASSED` on
+every boot.
+
+**Reason 1 — no IRQ is ever marked active.** `balance()` skips any IRQ whose
+`state.active` flag is false:
+
+```rust
+for (i, state) in IRQ_STATES.iter().enumerate() {
+    if !state.active.load(Ordering::Relaxed) { continue; }      // always taken
+```
+
+The only thing that sets that flag is `notify_irq()`, whose doc says *"call from
+ISR path"*. It has **no callers on any ISR path** — the only two calls in the
+repository are at `irqbalance.rs:465` and `:490`, both inside the module's own
+`self_test`. So the loop body never executes in production and `active_count`
+stays 0.
+
+**Reason 2 — the counts it would read are all zero.** Even with the flag set,
+the rate comes from:
+
+```rust
+let vector = i + 32;
+let current = vector_counts.get(vector).copied().unwrap_or(0);
+let delta = current.saturating_sub(last);
+if delta >= MIN_RATE_THRESHOLD  // = 10
+```
+
+`idt::vector_counts()` is only ever incremented by `count_vector()`, which is
+called exclusively from the CPU **exception** handlers. `dispatch_vector()` —
+the one function every hardware interrupt passes through — never calls it (see
+`A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS` above). So every
+vector at 32 and up reads 0 forever, `delta` is 0, and 0 is never `>= 10`.
+
+Then:
+
+```rust
+if active_count == 0 {
+    BALANCE_OPS.fetch_add(1, Ordering::Relaxed);
+    return; // Nothing to balance.
+}
+```
+
+`BALANCE_OPS` still increments, so `irqbalance` stats report a healthy and
+rising number of balance passes. Every one of them did nothing.
+
+**Why no test caught it — and it is the lesson already written down in this
+tree.** `self_test`'s Test 4 is:
+
+```rust
+assert!(!IRQ_STATES[10].active.load(Ordering::Relaxed));
+notify_irq(10);
+assert!(IRQ_STATES[10].active.load(Ordering::Relaxed));
+```
+
+It calls `notify_irq` itself and checks the flag moved. That verifies the
+setter, and is structurally incapable of detecting that nothing else in the
+kernel ever calls it. `check-tick-wiring.py`'s own failure text says this in as
+many words: *"write the regression test through handle_event, never against the
+advancing function: a test that calls tick() directly cannot tell a wired app
+from an unwired one, which is how all five of these shipped green."* This is the
+same shape one subsystem over, and it is worth noting that the existing gate
+cannot see it — that gate asks about `Event::Tick` in GUI apps specifically, not
+about kernel ISR wiring.
+
+**The proper fix**, and both halves are required — fixing one leaves the
+balancer just as dead:
+
+1. Call `count_vector(vector as usize)` at the top of `idt::dispatch_vector`,
+   and widen `VECTOR_STATS_SIZE` from 48 to 256 so vectors 251/252/255 are not
+   silently dropped by the `.get()`. This is the other known-issue entry and
+   fixes reason 2 for every consumer at once (`kstat`, `kcounters`, `irqstat`,
+   `irqrate`) because `dispatch_vector` is the single choke point.
+2. Call `irqbalance::notify_irq(irq)` from `ioapic::handle_device_irq`, which is
+   where the ISR path actually knows the IRQ number. That fixes reason 1.
+3. Then write the regression test **through the dispatch path**, not through
+   `notify_irq` — otherwise the replacement test has the same blind spot as the
+   one it replaces.
+
+**Do not "fix" this by lowering `MIN_RATE_THRESHOLD`.** The threshold is not the
+bug; it is the only thing that would stop a balancer fed real data from
+migrating an IRQ that fired twice. It becomes load-bearing the moment reason 2
+is fixed.
+
+**Open question once it works.** Nobody has ever observed this algorithm running
+against real counts, so its behaviour is entirely untested in the sense that
+matters — greedy bin-packing that migrates an interrupt every pass would be
+worse than not balancing at all. Expect to need a damping/hysteresis rule, and
+measure before trusting it.
+
+**How it was found.** Tracing the consumers of `idt::vector_counts()` while
+scoping the `dispatch_vector` counting fix; `irqbalance` turned out to be the
+consumer with real consequences rather than display ones.
+
+**Not a regression.** True since the module was written.

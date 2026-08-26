@@ -58,13 +58,26 @@ pub enum EntryType {
     /// the same check. Before this variant, `stat("/dev/input/event0")`
     /// reported a regular file, and those libraries would have rejected a
     /// device that works perfectly.
-    ///
-    /// Deliberately no `BlockDevice` sibling: this kernel has no block device
-    /// nodes to name — storage is reached through the VFS, not through
-    /// `/dev/sdaN` — and a variant with no producer is one that every `match`
-    /// must answer for while teaching the reader something untrue about the
-    /// system.
     CharDevice,
+
+    /// Block device node (`/dev/vda`, `/dev/nvme0n1`, …).
+    ///
+    /// This variant did not exist until there was something to name. The
+    /// comment it replaces said so plainly — "this kernel has no block device
+    /// nodes to name" — and that was true: storage was reached through the VFS
+    /// and nothing else. It stopped being true when
+    /// [`devfs`](crate::fs::devfs) began publishing one node per registered
+    /// [`crate::blkdev`] device, which is what a disk imager or a partition
+    /// editor needs: those programs' subject *is* the raw device, so reaching
+    /// it through a mounted filesystem is not a smaller version of the job, it
+    /// is a different job.
+    ///
+    /// `S_IFBLK` is load-bearing for the same reason `S_IFCHR` is above. A
+    /// program that is about to overwrite a whole disk checks what it is
+    /// pointed at first, and a raw device reported as a regular file is one
+    /// that such a check waves through — the failure mode being writing a disk
+    /// image over somebody's file rather than over their USB stick.
+    BlockDevice,
 }
 
 /// A single directory entry returned by readdir.

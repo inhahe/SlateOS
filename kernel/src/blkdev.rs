@@ -443,6 +443,25 @@ impl RamBlockDevice {
         }
     }
 
+    /// Create a zeroed RAM disk of `sector_count` sectors that rejects writes.
+    ///
+    /// Exists because until 2026-08-26 nothing in the tree could set
+    /// `read_only`, which made it a field with exactly one reachable value and
+    /// left three branches on it — [`BlockDevice::write_sector`]'s refusal,
+    /// [`BlockDevice::is_writable`], and `fs::devfs`'s
+    /// [`KernelError::ReadOnlyFilesystem`] — as code no test could enter. A
+    /// write-protected stick (the physical switch, or a device the driver
+    /// probed as read-only) is an ordinary thing for a disk imager to be
+    /// pointed at, and "the error path for the ordinary case is unexercised" is
+    /// not a state to leave a destructive subsystem in.
+    #[must_use]
+    pub fn new_read_only(sector_count: u64) -> Self {
+        Self {
+            read_only: true,
+            ..Self::new(sector_count)
+        }
+    }
+
     /// Byte offset of sector `lba`, or `None` if it lies outside the device.
     fn sector_range(&self, lba: u64) -> Option<(usize, usize)> {
         let start = usize::try_from(lba).ok()?.checked_mul(SECTOR_SIZE)?;

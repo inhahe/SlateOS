@@ -131,6 +131,57 @@ pub enum Error {
     },
 }
 
+/// The text a person sees when a compressed file will not open.
+///
+/// **Why this lives in the crate rather than in each caller.** [`Error`] is
+/// `#[non_exhaustive]`, so a `match` on it from outside this crate needs a
+/// wildcard arm — which means adding a variant here would silently give the
+/// caller's table the fallback wording instead of failing its build. The match
+/// below is local, so it needs no wildcard, and a new variant without a message
+/// is a compile error in the same commit that adds the variant. That asymmetry,
+/// not brevity, is the reason for the impl: it is the only place where "every
+/// error has wording" can be enforced rather than merely intended.
+///
+/// (It is not hypothetical. `gui/imagecodec` carried exactly such a table, and
+/// it was already missing [`Error::SizeMismatch`] — added here after the table
+/// was written, absorbed by its wildcard, and reported as a generic failure.)
+///
+/// The two mismatch variants print the numbers they compared. A bare "checksum
+/// mismatch" tells a reader the file is damaged; the pair of values tells them
+/// whether it is damaged *at all* — `expected` of zero, for instance, is a
+/// truncated download rather than a corrupted one.
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::UnexpectedEnd => f.write_str("compressed stream ended mid-symbol"),
+            Self::ReservedBlockType => f.write_str("reserved DEFLATE block type 3"),
+            Self::StoredLengthMismatch => {
+                f.write_str("stored block length does not match its complement")
+            }
+            Self::InvalidHuffmanTable => f.write_str("invalid Huffman code lengths"),
+            Self::InvalidSymbol => f.write_str("undecodable Huffman symbol"),
+            Self::DistanceTooFar => {
+                f.write_str("back-reference points before the start of the output")
+            }
+            Self::OutputTooLarge => f.write_str("decompressed size exceeds the caller's limit"),
+            Self::BadWrapperHeader => {
+                f.write_str("not a gzip or zlib stream this decoder supports")
+            }
+            Self::PresetDictionary => f.write_str("zlib preset dictionary, which is not supported"),
+            Self::ChecksumMismatch { expected, actual } => write!(
+                f,
+                "checksum mismatch: stream declares {expected:#010x}, \
+                 the decompressed bytes give {actual:#010x}"
+            ),
+            Self::SizeMismatch { expected, actual } => write!(
+                f,
+                "length mismatch: gzip trailer declares {expected} byte(s), \
+                 decompression produced {actual}"
+            ),
+        }
+    }
+}
+
 /// Shorthand for this crate's fallible operations.
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -1997,6 +2048,8 @@ mod tests {
         fixed_lit_lengths, gunzip, gunzip_limited, gzip, inflate, inflate_limited, lz77_tokenize,
         zlib_deflate, zlib_inflate, zlib_inflate_limited,
     };
+    use alloc::format;
+    use alloc::string::String;
     use alloc::vec::Vec;
 
     /// Wrap `payload` in a gzip stream whose DEFLATE part is a single stored
@@ -2328,5 +2381,108 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Every variant must produce a sentence, and no two may produce the same
+    /// one.
+    ///
+    /// The *exhaustiveness* half is enforced by the compiler, in the `Display`
+    /// impl itself: it has no wildcard arm, so a new variant without a message
+    /// fails the build. What a test adds is the half a compiler cannot check —
+    /// that the wording is an explanation rather than an identifier, and that
+    /// two different failures do not read alike. A duplicate message is a
+    /// variant distinction that never reaches the person it was drawn for.
+    #[test]
+    fn every_error_variant_reads_as_a_sentence_and_no_two_read_alike() {
+        let all = [
+            Error::UnexpectedEnd,
+            Error::ReservedBlockType,
+            Error::StoredLengthMismatch,
+            Error::InvalidHuffmanTable,
+            Error::InvalidSymbol,
+            Error::DistanceTooFar,
+            Error::OutputTooLarge,
+            Error::BadWrapperHeader,
+            Error::PresetDictionary,
+            Error::ChecksumMismatch {
+                expected: 0x1234_5678,
+                actual: 0x8765_4321,
+            },
+            Error::SizeMismatch {
+                expected: 100,
+                actual: 99,
+            },
+        ];
+        let mut seen: Vec<String> = Vec::new();
+        for e in all {
+            let text = format!("{e}");
+            assert!(!text.is_empty(), "{e:?} has no message");
+            // A `Display` that forwards to `Debug` is the failure this catches:
+            // it compiles, it is non-empty, and it puts `DistanceTooFar` in
+            // front of somebody trying to open a wallpaper.
+            assert_ne!(text, format!("{e:?}"), "{e:?} prints its identifier");
+            assert!(
+                text.chars().next().is_some_and(|c| !c.is_uppercase()),
+                "{e:?}: capitalised, but callers embed this mid-sentence: {text}"
+            );
+            assert!(!seen.contains(&text), "two variants both say: {text}");
+            seen.push(text);
+        }
+    }
+
+    /// The two mismatch variants must print the values they compared.
+    ///
+    /// "checksum mismatch" says the file is damaged; the pair of numbers says
+    /// *how* — an expected value of zero is a truncated download rather than a
+    /// corrupted one, and that is the difference between retrying and not.
+    #[test]
+    fn a_mismatch_prints_both_of_the_numbers_it_compared() {
+        let text = format!(
+            "{}",
+            Error::ChecksumMismatch {
+                expected: 0x1234_5678,
+                actual: 0x8765_4321,
+            }
+        );
+        assert!(text.contains("12345678"), "expected value missing: {text}");
+        assert!(text.contains("87654321"), "actual value missing: {text}");
+
+        let text = format!(
+            "{}",
+            Error::SizeMismatch {
+                expected: 100,
+                actual: 99,
+            }
+        );
+        assert!(text.contains("100"), "expected value missing: {text}");
+        assert!(text.contains("99"), "actual value missing: {text}");
+    }
+
+    /// An incomplete (under-subscribed) Huffman code with a single symbol must
+    /// be **accepted**, not rejected.
+    ///
+    /// It is what a DEFLATE stream with exactly one distance code produces,
+    /// real encoders emit it, and a decoder that rejects it fails on files that
+    /// open everywhere else. `build` already gets this right — it rejects only
+    /// `left < 0`, i.e. over-subscription. The test exists because nothing
+    /// pinned the property, and it is precisely what a later "tighten the
+    /// validation" change breaks without meaning to.
+    ///
+    /// Reported by lane C in `requests/c-a-deflate-error-has-no-display.md`,
+    /// found by diffing the deleted `gui/imagecodec` decoder's tests against
+    /// this crate's.
+    #[test]
+    fn a_lone_one_bit_code_is_under_subscribed_and_still_legal() {
+        assert!(
+            HuffmanTable::build(&[1, 0, 0]).is_ok(),
+            "a single one-bit code is legal and real encoders emit it"
+        );
+        // The neighbouring case must still fail: three symbols cannot all hold
+        // a one-bit code, and accepting that would be over-subscription.
+        assert_eq!(
+            HuffmanTable::build(&[1, 1, 1]).err(),
+            Some(Error::InvalidHuffmanTable),
+            "over-subscription must still be rejected"
+        );
     }
 }

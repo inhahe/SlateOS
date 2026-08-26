@@ -17,15 +17,64 @@
 //! ├── stdin/stdout/stderr, kmsg, uptime
 //! ├── input/     event0 (keyboard), event1 (mouse)
 //! ├── dri/       card0, renderD128
-//! └── snd/       controlC0, pcmC0D0p, pcmC0D0c
+//! ├── snd/       controlC0, pcmC0D0p, pcmC0D0c
+//! └── <disk>     One per registered block device: vda, nvme0n1, …
 //! ```
 //!
 //! ## Design
 //!
 //! This is a minimal devfs for kernel-mode use.  In our microkernel
 //! architecture, hardware devices are managed by userspace drivers via
-//! IPC — the devfs does NOT expose block devices or hardware directly.
-//! It provides the standard "utility" device files that programs expect.
+//! IPC.  It provides the standard "utility" device files that programs expect.
+//!
+//! ## Block devices, and why they are the exception
+//!
+//! Everything above this line is a fixed table.  Block device nodes are not:
+//! they are enumerated from [`crate::blkdev`] on every lookup, so the namespace
+//! reflects what is registered rather than what was true when this file was
+//! written.
+//!
+//! This module used to say, in this paragraph, that "the devfs does NOT expose
+//! block devices."  That was a real position and not an oversight — storage is
+//! reached through a mounted filesystem, and a program that wants a file should
+//! open a file.  What changed is that two programs turned up whose subject is
+//! the device itself: a disk imager writing an `.iso` to a USB stick, and a
+//! partition editor.  Neither is asking for a shortcut to a file; for both, the
+//! raw device *is* the object, and there is no filesystem on it to go through
+//! — that is the point of the program.  Routing them through IPC to a userspace
+//! driver would not change what they do, only how many hops it takes to do it,
+//! because the driver is in this kernel already.
+//!
+//! Three properties make this safe to serve from here rather than merely
+//! convenient:
+//!
+//! - **The bytes are not cached.**  The VFS page cache routes only
+//!   `EntryType::File` with a stable inode ([`crate::fs::vfs`]
+//!   `read_at_routed`), so a block node bypasses it by construction.  That is
+//!   load-bearing for the imager's verify pass, which writes a device and then
+//!   reads it back: a cached read would compare the image against itself and
+//!   pass on a stick that was never written.
+//! - **The offset means something.**  Unlike every other node here, these are
+//!   seekable, and `write_at` honours the offset instead of forwarding to
+//!   `write_file`.
+//! - **Moving bytes needs authority, not just a mode bit.**  Overwriting a
+//!   whole disk is the most destructive thing a userspace program on this
+//!   system can do, and reading one sees every file the caller could not open
+//!   by name, so each direction demands a
+//!   [`ResourceType::BlockDevice`](crate::cap::ResourceType::BlockDevice)
+//!   capability with the matching right — checked in [`require_block_cap`],
+//!   here rather than in the syscall layer, for the reason given there.
+//!   Enumerating is not gated: `readdir` and `stat` name devices without
+//!   yielding a byte of them, listing which disks exist is not destructive, and
+//!   a program that had to hold the right to erase every disk in the machine
+//!   before it could draw its sidebar is one that must be launched
+//!   over-privileged.
+//!
+//! Reads are byte-granular over a sector-granular device and may come back
+//! short; writes are all-or-nothing (see [`block_write_at`] for why the return
+//! type forces that).  `read_file` on a block node is refused rather than
+//! served — a whole-device read into one `Vec` is not a smaller version of the
+//! right thing.
 //!
 //! ## The subdirectories are a namespace, not an implementation
 //!
@@ -49,6 +98,7 @@
 
 #![allow(dead_code)]
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
@@ -199,9 +249,281 @@ fn find_node(rel: &str) -> Option<&'static DevNode> {
     DEV_NODES.iter().find(|n| n.path == rel)
 }
 
+// ---------------------------------------------------------------------------
+// Block devices — the one part of this namespace that is not a fixed table
+// ---------------------------------------------------------------------------
+
+/// The block device named by a devfs-relative path, if there is one.
+///
+/// Unlike everything in [`DEV_NODES`], these names are not known at compile
+/// time: they come from whatever [`crate::blkdev::register`] was given, which
+/// depends on what the machine has. So the lookup is a query rather than a
+/// table scan, and a name that was valid a moment ago can stop being valid when
+/// a device is unregistered — callers must treat `None` as "gone", not as
+/// "impossible".
+///
+/// Only the devfs root can hold one: `rel` containing a `/` is rejected before
+/// the query, so `input/vda` cannot alias `vda`.
+fn find_block(rel: &str) -> Option<crate::blkdev::BlockDeviceInfo> {
+    if rel.is_empty() || rel.contains('/') {
+        return None;
+    }
+    // A name that collides with a fixed node loses to it. That collision
+    // should never happen -- no block driver names a device `null` -- but if
+    // one ever did, silently shadowing `/dev/null` with a disk is the single
+    // worst outcome available, so the static table wins by construction.
+    if find_node(rel).is_some() {
+        return None;
+    }
+    crate::blkdev::info(rel)
+}
+
+/// Total byte capacity of a block device, saturating rather than wrapping.
+///
+/// `sector_count * sector_size` is a `u64 * u32` that cannot overflow for any
+/// real disk, but "cannot" here rests on a driver reporting an honest geometry,
+/// and this number is handed to userspace as a file size. Saturating keeps a
+/// nonsense geometry to a nonsense *size* instead of letting it wrap to a small
+/// one, which is the version that would let a bounds check pass.
+fn block_size_bytes(info: &crate::blkdev::BlockDeviceInfo) -> u64 {
+    info.sector_count
+        .saturating_mul(u64::from(info.sector_size))
+}
+
+/// This device's sector size as a divisor that is known not to be zero.
+///
+/// A driver reporting a zero sector size would make every `/ sector_size` below
+/// a divide fault. Nothing in-tree does, and this is what keeps "nothing does"
+/// from being load-bearing.
+///
+/// It returns a [`NonZeroU64`](core::num::NonZeroU64) rather than checking and
+/// returning a plain `u64` so that the guard is carried in the *type* to every
+/// division instead of being re-established beside each one. That is not
+/// stylistic: with a plain `u64` the connection between the check at the top of
+/// a function and the division forty lines down exists only in the reader's
+/// head, and a later edit that moves one past the other compiles. Here the
+/// divisions cannot be written at all without a value that has already been
+/// checked -- and, incidentally, `clippy::arithmetic_side_effects` knows the
+/// same thing, so the divisions stop being warnings that must be individually
+/// excused.
+fn sector_size_of(info: &crate::blkdev::BlockDeviceInfo) -> KernelResult<core::num::NonZeroU64> {
+    core::num::NonZeroU64::new(u64::from(info.sector_size)).ok_or(KernelError::InvalidArgument)
+}
+
+/// Largest single read this filesystem will allocate for a block device.
+///
+/// A read is allowed to come back short (POSIX says so, and every caller that
+/// streams a device already loops), so a cap costs the caller one extra
+/// iteration and costs the kernel a bounded allocation. Without one, `read(fd,
+/// buf, 4 GiB)` on `/dev/nvme0n1` is a 4 GiB kernel allocation requested by
+/// userspace. 8 MiB is comfortably above the 1 MiB chunk the disk imager
+/// streams with, so the cap is never reached in the case it was written for.
+///
+/// **Writes are not capped**, because [`FileSystem::write_at`] returns no byte
+/// count and so has no way to say "I wrote less than you asked". A capped write
+/// would have to either lie or fail; instead the write loop below chunks
+/// internally, keeping the allocation bounded without ever writing part of a
+/// request and reporting success.
+const MAX_BLOCK_READ: usize = 8 * 1024 * 1024;
+
+/// Sectors per read-modify-write chunk in [`block_write_at`].
+///
+/// Bounds the staging buffer at `BLOCK_WRITE_CHUNK * SECTOR_SIZE` (512 KiB)
+/// regardless of how much the caller passed.
+const BLOCK_WRITE_CHUNK: u64 = 1024;
+
+/// Demand a [`ResourceType::BlockDevice`](crate::cap::ResourceType::BlockDevice)
+/// capability carrying `rights` before raw sectors move either way.
+///
+/// # Why the check is here and not in the syscall layer
+///
+/// Every other capability check in this kernel sits in `syscall/handlers.rs`,
+/// and this one deliberately does not. Raw device bytes are reachable through
+/// `SYS_FS_READ`, `SYS_FS_WRITE`, Linux `read`/`write`/`pread`/`pwrite`, and any
+/// future path that resolves a name and asks the VFS for bytes — and *none* of
+/// those sites can tell a block node from a regular file without asking this
+/// module. A gate that each caller must remember to invoke, and that requires a
+/// lookup here to even evaluate, is a gate with as many holes as it has callers.
+/// Putting it at the point where the node type is already known makes "was this
+/// checked?" answerable by reading one function instead of auditing every
+/// syscall that can produce bytes.
+///
+/// Kernel-internal callers (the shell, self-tests) have no owning process;
+/// [`require_cap_type`](crate::syscall::handlers::require_cap_type) returns `Ok`
+/// for those, so this constrains userspace without making the kernel ask
+/// permission of itself.
+///
+/// # Why reads are gated too
+///
+/// Reading a raw device is weaker than writing one but is not weak: the sectors
+/// contain every file the caller could not open through the ordinary path, plus
+/// every file that was deleted and not yet overwritten. Handing that out for
+/// free would make the filesystem's permission bits advisory. Note that this
+/// gates *bytes*, not *names* — `readdir`, `stat` and `/sys`'s block listing ask
+/// nothing, which is what lets a program show the user which disks exist without
+/// holding the authority to read or erase them.
+fn require_block_cap(rights: crate::cap::Rights) -> KernelResult<()> {
+    crate::syscall::handlers::require_cap_type(crate::cap::ResourceType::BlockDevice, rights)
+}
+
+/// Read `len` bytes at byte `offset` from a block device.
+///
+/// Requires a `BlockDevice` capability with `READ` — see [`require_block_cap`].
+///
+/// Byte-granular over a sector-granular device: the covering sector range is
+/// read and then sliced. Callers do not have to align, and the disk imager in
+/// particular does not — it streams an image whose length is whatever the image
+/// is.
+///
+/// Returns a short buffer at the end of the device and an empty one past it,
+/// which is EOF as every streaming caller expects.
+fn block_read_at(
+    info: &crate::blkdev::BlockDeviceInfo,
+    offset: u64,
+    len: usize,
+) -> KernelResult<Vec<u8>> {
+    // Before the EOF short-circuit below, not after: a caller without the
+    // capability must not be able to learn the device's size by probing which
+    // offsets return empty rather than denied.
+    require_block_cap(crate::cap::Rights::READ)?;
+    let total = block_size_bytes(info);
+    if offset >= total || len == 0 {
+        return Ok(Vec::new());
+    }
+    let sector_size = sector_size_of(info)?;
+
+    let avail = total.saturating_sub(offset);
+    let want = (len as u64).min(avail).min(MAX_BLOCK_READ as u64);
+    let first_lba = offset / sector_size;
+    let skip = (offset % sector_size) as usize;
+    // `want >= 1` here, so `offset + want - 1` is the last byte requested.
+    let last_lba = offset.saturating_add(want).saturating_sub(1) / sector_size;
+    let count = last_lba
+        .checked_sub(first_lba)
+        .and_then(|n| n.checked_add(1))
+        .ok_or(KernelError::InvalidArgument)?;
+    let count32 = u32::try_from(count).map_err(|_| KernelError::InvalidArgument)?;
+    let staging_len = count
+        .checked_mul(sector_size.get())
+        .and_then(|n| usize::try_from(n).ok())
+        .ok_or(KernelError::InvalidArgument)?;
+
+    let mut staging = vec![0u8; staging_len];
+    crate::blkdev::with_device(&info.name, |dev| {
+        dev.read_sectors(first_lba, count32, &mut staging)
+    })
+    .ok_or(KernelError::NotFound)??;
+
+    let want_usize = usize::try_from(want).map_err(|_| KernelError::InvalidArgument)?;
+    let end = skip
+        .checked_add(want_usize)
+        .ok_or(KernelError::InvalidArgument)?;
+    let slice = staging.get(skip..end).ok_or(KernelError::InvalidArgument)?;
+    Ok(slice.to_vec())
+}
+
+/// Write `data` at byte `offset` to a block device, all of it or none of it.
+///
+/// Read-modify-write on the partial sectors at each end, because a caller
+/// writing bytes 10..20 must not lose bytes 0..10 of that sector. The middle is
+/// written whole-sector without a preceding read.
+///
+/// A write that would run off the end of the device fails with
+/// [`KernelError::DiskFull`] **before writing anything**. Truncating it instead
+/// would be a silent short write that the return type cannot report, and for a
+/// caller streaming a disk image that is the difference between a bootable
+/// stick and one that fails somewhere in the middle with no error to point at.
+fn block_write_at(
+    info: &crate::blkdev::BlockDeviceInfo,
+    offset: u64,
+    data: &[u8],
+) -> KernelResult<()> {
+    // First, and ahead of the empty-write short-circuit: a zero-length write is
+    // the cheapest possible probe for "am I allowed to write this disk", and it
+    // should answer honestly rather than succeed vacuously.
+    require_block_cap(crate::cap::Rights::WRITE)?;
+    if info.read_only {
+        return Err(KernelError::ReadOnlyFilesystem);
+    }
+    if data.is_empty() {
+        return Ok(());
+    }
+    let sector_size = sector_size_of(info)?;
+    let total = block_size_bytes(info);
+    let end = offset
+        .checked_add(data.len() as u64)
+        .ok_or(KernelError::InvalidArgument)?;
+    if end > total {
+        return Err(KernelError::DiskFull);
+    }
+
+    let mut written: usize = 0;
+    let mut pos = offset;
+    while written < data.len() {
+        let first_lba = pos / sector_size;
+        let skip = (pos % sector_size) as usize;
+        let remaining = data.len().saturating_sub(written);
+        // How many sectors this chunk spans, capped so the staging buffer is
+        // bounded no matter how large `data` is.
+        let span_bytes = (skip as u64)
+            .checked_add(remaining as u64)
+            .ok_or(KernelError::InvalidArgument)?;
+        let mut count = span_bytes
+            .div_ceil(sector_size.get())
+            .min(BLOCK_WRITE_CHUNK);
+        if count == 0 {
+            count = 1;
+        }
+        let count32 = u32::try_from(count).map_err(|_| KernelError::InvalidArgument)?;
+        let staging_len = count
+            .checked_mul(sector_size.get())
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or(KernelError::InvalidArgument)?;
+
+        // How many of the caller's bytes land in this chunk.
+        let take = remaining.min(staging_len.saturating_sub(skip));
+        let tail = staging_len.saturating_sub(skip.saturating_add(take));
+
+        let mut staging = vec![0u8; staging_len];
+        // Read first only when the chunk has bytes this write does not
+        // replace -- a leading partial sector, a trailing one, or both.
+        // A chunk that covers whole sectors end to end needs no read, which
+        // is the common case in the middle of a stream.
+        if skip != 0 || tail != 0 {
+            crate::blkdev::with_device(&info.name, |dev| {
+                dev.read_sectors(first_lba, count32, &mut staging)
+            })
+            .ok_or(KernelError::NotFound)??;
+        }
+        let src = data
+            .get(written..written.saturating_add(take))
+            .ok_or(KernelError::InvalidArgument)?;
+        let dst = staging
+            .get_mut(skip..skip.saturating_add(take))
+            .ok_or(KernelError::InvalidArgument)?;
+        dst.copy_from_slice(src);
+
+        crate::blkdev::with_device(&info.name, |dev| {
+            dev.write_sectors(first_lba, count32, &staging)
+        })
+        .ok_or(KernelError::NotFound)??;
+
+        written = written.saturating_add(take);
+        pos = pos.saturating_add(take as u64);
+        if take == 0 {
+            // Cannot happen -- `staging_len > skip` always, since `skip` is a
+            // remainder of `sector_size` and `staging_len` is a multiple of it
+            // and non-zero. Bailing rather than spinning is what makes that
+            // reasoning safe to be wrong about.
+            return Err(KernelError::InvalidArgument);
+        }
+    }
+    Ok(())
+}
+
 /// The entries directly inside `dir` (`""` for the devfs root).
 fn children_of(dir: &str) -> Vec<DirEntry> {
-    DEV_NODES
+    let mut entries: Vec<DirEntry> = DEV_NODES
         .iter()
         .filter(|n| n.parent() == dir)
         .map(|n| DirEntry {
@@ -210,7 +532,27 @@ fn children_of(dir: &str) -> Vec<DirEntry> {
             // Special files have no meaningful static size.
             size: 0,
         })
-        .collect()
+        .collect();
+
+    // Block devices live in the root only, and are appended rather than
+    // merged in sorted order: the fixed nodes are the ones a caller is most
+    // likely to be scanning for, and readdir order is not a promise anywhere
+    // in this tree.
+    if dir.is_empty() {
+        for info in crate::blkdev::list_devices() {
+            if find_node(&info.name).is_some() {
+                continue; // shadowed by a fixed node; see `find_block`
+            }
+            entries.push(DirEntry {
+                name: PathBuf::from(info.name.as_str()),
+                entry_type: EntryType::BlockDevice,
+                // Unlike every other node here, this size is real, and it is
+                // what `ls -l /dev` and a progress bar both read.
+                size: block_size_bytes(&info),
+            });
+        }
+    }
+    entries
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +585,11 @@ fn unserved(rel: &str) -> KernelError {
     match find_node(rel) {
         Some(n) if n.entry_type == EntryType::Directory => KernelError::IsADirectory,
         Some(_) => KernelError::NotSupported,
+        // A block device *is* served here, just not by the whole-file path
+        // that reached this function. Distinguishing it from a missing name
+        // matters: `NotFound` for a device `stat` just described would send
+        // the caller hunting for an absent node instead of using `read_at`.
+        None if find_block(rel).is_some() => KernelError::NotSupported,
         None => KernelError::NotFound,
     }
 }
@@ -261,6 +608,7 @@ impl FileSystem for DevFs {
         match find_node(rel) {
             Some(node) if node.entry_type == EntryType::Directory => Ok(children_of(rel)),
             Some(_) => Err(KernelError::NotADirectory),
+            None if find_block(rel).is_some() => Err(KernelError::NotADirectory),
             None => Err(KernelError::NotFound),
         }
     }
@@ -340,7 +688,10 @@ impl FileSystem for DevFs {
                 let text = alloc::format!("{secs}.{frac:09}\n");
                 Ok(text.into_bytes())
             }
-            _ => Err(unserved(rel)),
+            _ => match find_block(rel) {
+                Some(info) => block_read_at(&info, offset, len),
+                None => Err(unserved(rel)),
+            },
         }
     }
 
@@ -414,9 +765,15 @@ impl FileSystem for DevFs {
         }
     }
 
-    fn write_at(&mut self, path: &Path, _offset: u64, data: &[u8]) -> KernelResult<()> {
-        // For device files, write_at behaves the same as write_file —
-        // offset is meaningless for streaming devices.
+    fn write_at(&mut self, path: &Path, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let rel = strip_root(path)?;
+
+        // A block device is the one node here for which the offset means
+        // something. Everything else is a stream whose position is not a
+        // place, so those keep forwarding to `write_file`.
+        if let Some(info) = find_block(rel) {
+            return block_write_at(&info, offset, data);
+        }
         self.write_file(path, data)
     }
 
@@ -428,6 +785,14 @@ impl FileSystem for DevFs {
                 name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
+            });
+        }
+
+        if let Some(info) = find_block(rel) {
+            return Ok(DirEntry {
+                name: PathBuf::from(info.name.as_str()),
+                entry_type: EntryType::BlockDevice,
+                size: block_size_bytes(&info),
             });
         }
 
@@ -450,6 +815,27 @@ impl FileSystem for DevFs {
                 nlinks: 1,
                 blocks: 0,
                 ..FileMeta::minimal(EntryType::Directory, 0)
+            });
+        }
+
+        if let Some(info) = find_block(rel) {
+            let size = block_size_bytes(&info);
+            return Ok(FileMeta {
+                size,
+                entry_type: EntryType::BlockDevice,
+                // 0o660 for the same reason the character nodes use it: on
+                // Linux this is `brw-rw----` owned by group `disk`. We have no
+                // groups, so the bits are the honest part. A read-only device
+                // drops the write bits, which is not the authority check --
+                // that is `CAP_BLOCK_WRITE` in the syscall layer -- but it is
+                // what `ls -l` shows and what a program's own pre-flight check
+                // reads.
+                permissions: if info.read_only { 0o440 } else { 0o660 },
+                attributes: FileAttr::NONE,
+                nlinks: 1,
+                // In 512-byte units, matching `st_blocks` everywhere else.
+                blocks: size / 512,
+                ..FileMeta::minimal(EntryType::BlockDevice, size)
             });
         }
 
@@ -514,18 +900,53 @@ pub fn self_test() -> KernelResult<()> {
 
     let mut fs = DevFs::new();
 
-    // Test root readdir.  The root holds every node whose path has no slash.
-    let expect_root = DEV_NODES.iter().filter(|n| n.parent().is_empty()).count();
+    // Test root readdir.  The root holds every node whose path has no slash,
+    // plus one per registered block device.
+    //
+    // Asserted as a *composition* rather than as a total, which is the lesson
+    // this assertion taught the moment block devices landed: it compared
+    // against the fixed-node count alone, so the first QEMU boot with four real
+    // block devices registered failed with "19 entries, expected 15" -- a
+    // correct complaint about a listing that was entirely correct.  A total is
+    // only as stable as the least stable thing it sums, and the number of disks
+    // attached to a machine is not stable at all.  Counting the two populations
+    // separately says what is actually meant, and cannot be falsified by
+    // plugging in a drive.
+    let expect_fixed = DEV_NODES.iter().filter(|n| n.parent().is_empty()).count();
     let entries = fs.readdir(Path::new("/"))?;
-    if entries.len() != expect_root {
+    let (blocks, fixed): (Vec<_>, Vec<_>) = entries
+        .iter()
+        .partition(|e| e.entry_type == EntryType::BlockDevice);
+    if fixed.len() != expect_fixed {
         serial_println!(
-            "[devfs]   FAIL: readdir returned {} entries, expected {}",
-            entries.len(),
-            expect_root
+            "[devfs]   FAIL: readdir returned {} non-block entries, expected {}",
+            fixed.len(),
+            expect_fixed
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[devfs]   readdir /: {} entries OK", entries.len());
+    // Every block entry must name a device that is really registered.  This is
+    // the direction a count cannot check: a stale node, or one invented by a
+    // bug in `children_of`, keeps the total right while naming nothing.
+    for e in &blocks {
+        let listed = e.name.as_path().as_bytes();
+        let found = core::str::from_utf8(listed)
+            .ok()
+            .and_then(crate::blkdev::info)
+            .is_some();
+        if !found {
+            serial_println!(
+                "[devfs]   FAIL: /{} is listed but no such block device exists",
+                e.name.as_path().display()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[devfs]   readdir /: {} fixed + {} block device(s) OK",
+        fixed.len(),
+        blocks.len()
+    );
 
     // Test stat on root.
     let root_stat = fs.stat(Path::new("/"))?;
@@ -757,7 +1178,184 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[devfs]   through-the-mount: /dev not mounted, skipped");
     }
 
+    // ---- Block devices -------------------------------------------------
+    //
+    // Over a scratch `RamBlockDevice`, never a real disk: every assertion below
+    // writes, and the whole point of this node type is that a write to it is
+    // unrecoverable.  The names are registered and unregistered inside this
+    // block so a failed assertion cannot leave `/dev` with a device in it.
+    //
+    // The capability gate is transparent here -- a self-test runs as a bare
+    // kernel task with no owning process, and `require_cap_type` passes those
+    // through.  That is deliberate and is not a hole in the coverage: the gate's
+    // own plumbing (that `BlockDevice` round-trips the wire ABI, and that
+    // `admin` grants it) is checked by `cap::groups`' two tests, which walk
+    // `1..=ResourceType::LAST` and so covered this type the moment it existed.
+    // What this block checks is the part those cannot: the I/O underneath.
+    {
+        const SCRATCH: &str = "selftestblk0";
+        const SECTORS: u64 = 64;
+        const CAP: u64 = SECTORS.saturating_mul(512);
+
+        crate::blkdev::register(
+            SCRATCH,
+            Box::new(crate::blkdev::RamBlockDevice::new(SECTORS)),
+        );
+        let result = self_test_block(&mut fs, SCRATCH, CAP);
+        crate::blkdev::unregister(SCRATCH);
+        result?;
+
+        // A device may not shadow a fixed node.  Registering one called `null`
+        // is the worst case available: `/dev/null` silently becoming a disk
+        // means every program that discards output starts overwriting sectors.
+        //
+        // Asserted as "the disk did not win" rather than as a specific type,
+        // because the fixed node's own type belongs to DEV_NODES and not to
+        // this test.  The first version demanded `CharDevice` and failed on a
+        // correct tree: `null` is declared with `DevNode::file`, so it stats as
+        // `File`.  Pinning the neighbouring value would have made this rung
+        // fail again the day `null` is retyped -- which it arguably should be,
+        // see A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES.
+        crate::blkdev::register("null", Box::new(crate::blkdev::RamBlockDevice::new(8)));
+        let shadowed = fs.stat(Path::new("/null")).map(|m| m.entry_type);
+        let nul_len = fs.read_file(Path::new("/null")).map(|v| v.len());
+        crate::blkdev::unregister("null");
+        let fixed_won = matches!(shadowed, Ok(t) if t != EntryType::BlockDevice);
+        if !fixed_won || nul_len != Ok(0) {
+            serial_println!(
+                "[devfs]   FAIL: a block device named `null` shadowed /dev/null \
+                 (type={shadowed:?}, read={nul_len:?})"
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        // Read-only devices refuse writes before touching anything.
+        crate::blkdev::register(
+            SCRATCH,
+            Box::new(crate::blkdev::RamBlockDevice::new_read_only(SECTORS)),
+        );
+        let ro = fs.write_at(Path::new("/selftestblk0"), 0, &[1u8; 4]);
+        crate::blkdev::unregister(SCRATCH);
+        if ro != Err(KernelError::ReadOnlyFilesystem) {
+            serial_println!("[devfs]   FAIL: write to a read-only device gave {ro:?}");
+            return Err(KernelError::InternalError);
+        }
+
+        serial_println!(
+            "[devfs]   block devices: stat/unaligned rw/RMW/EOF/DiskFull, no shadowing, \
+             read-only refused OK"
+        );
+    }
+
     skips.report("[devfs]");
     serial_println!("[devfs] Self-test PASSED{}", skips.suffix());
+    Ok(())
+}
+
+/// The writable half of the block-device rung, split out so its caller can
+/// [`crate::blkdev::unregister`] the scratch device on every exit path.
+///
+/// Inlining this would mean an early `return Err` on a failed assertion leaves
+/// `selftestblk0` registered, and the next test to list `/dev` would find a
+/// device that no longer has an owner -- turning one failure into a confusing
+/// second one somewhere else.
+fn self_test_block(fs: &mut DevFs, name: &str, cap: u64) -> KernelResult<()> {
+    use crate::serial_println;
+
+    let path_buf = alloc::format!("/{name}");
+    let path = Path::new(path_buf.as_str());
+
+    // Named, sized, and typed.
+    let meta = fs.stat(path)?;
+    if meta.entry_type != EntryType::BlockDevice || meta.size != cap {
+        serial_println!(
+            "[devfs]   FAIL: stat /{name} gave {:?} size {}, want BlockDevice size {cap}",
+            meta.entry_type,
+            meta.size
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !fs
+        .readdir(Path::new("/"))?
+        .iter()
+        .any(|e| e.name.as_path() == Path::new(name) && e.entry_type == EntryType::BlockDevice)
+    {
+        serial_println!("[devfs]   FAIL: /{name} is missing from the root listing");
+        return Err(KernelError::InternalError);
+    }
+
+    // Unaligned round-trip straddling the 512-byte sector boundary, which is
+    // the case byte-granular access over a sector-granular device exists for.
+    // 500..510 lies in sector 0; 505..515 crosses into sector 1.
+    let pattern: [u8; 15] = [
+        0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE,
+    ];
+    fs.write_at(path, 505, &pattern)?;
+    let got = fs.read_at(path, 505, pattern.len())?;
+    if got != pattern {
+        serial_println!("[devfs]   FAIL: unaligned cross-sector round-trip gave {got:?}");
+        return Err(KernelError::InternalError);
+    }
+
+    // Read-modify-write must preserve the bytes it did not write.  Byte 504 is
+    // in the same sector as the write above and one byte before it; it was
+    // never written, so it must still be zero.  A write path that read the
+    // sector, ignored it, and wrote the whole thing back would pass every
+    // assertion above and fail this one.
+    let neighbour = fs.read_at(path, 504, 1)?;
+    if neighbour != [0u8] {
+        serial_println!("[devfs]   FAIL: RMW clobbered byte 504: {neighbour:?}");
+        return Err(KernelError::InternalError);
+    }
+
+    // Short at the end, empty past it -- EOF as a streaming caller expects.
+    let tail = fs.read_at(path, cap.saturating_sub(4), 64)?;
+    if tail.len() != 4 {
+        serial_println!(
+            "[devfs]   FAIL: read at EOF-4 gave {} bytes, want 4",
+            tail.len()
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !fs.read_at(path, cap, 16)?.is_empty() {
+        serial_println!("[devfs]   FAIL: read past the end returned bytes");
+        return Err(KernelError::InternalError);
+    }
+
+    // A write that would run off the end fails whole, and does not write the
+    // part that fits.  Checking byte `cap - 4` afterwards is what distinguishes
+    // "refused" from "wrote four bytes and then reported an error".
+    let over = fs.write_at(path, cap.saturating_sub(4), &[0xFFu8; 8]);
+    if over != Err(KernelError::DiskFull) {
+        serial_println!("[devfs]   FAIL: write past the end gave {over:?}, want DiskFull");
+        return Err(KernelError::InternalError);
+    }
+    if fs.read_at(path, cap.saturating_sub(4), 4)? != [0u8; 4] {
+        serial_println!("[devfs]   FAIL: a refused write still wrote its first bytes");
+        return Err(KernelError::InternalError);
+    }
+
+    // Whole-device operations are refused rather than served.
+    match fs.read_file(path) {
+        Err(KernelError::NotSupported) => {}
+        other => {
+            serial_println!(
+                "[devfs]   FAIL: read_file on a block node gave {:?}, want NotSupported",
+                other.map(|v| v.len())
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    match fs.readdir(path) {
+        Err(KernelError::NotADirectory) => {}
+        other => {
+            serial_println!(
+                "[devfs]   FAIL: readdir on a block node gave {:?}, want NotADirectory",
+                other.map(|v| v.len())
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+
     Ok(())
 }

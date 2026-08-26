@@ -357,6 +357,36 @@ pub enum ResourceType {
     /// Wayland was built around.  A compositor legitimately needs both, but
     /// nothing should acquire the second by holding the first.
     InputDevice = 30,
+
+    /// Raw byte access to a whole storage device (`/dev/vda`, `/dev/nvme0n1`).
+    ///
+    /// `resource_id` is reserved for a future per-device grant and is 0 today;
+    /// the class grant is what `init` hands a disk imager. `Rights::READ` is
+    /// the authority to read sectors, `Rights::WRITE` the authority to write
+    /// them, and [`crate::fs::devfs`] checks each separately — an imager that
+    /// only ever captures an image should not be able to destroy one.
+    ///
+    /// Deliberately **not** folded into [`File`](ResourceType::File), for the
+    /// same reason [`NetRaw`](ResourceType::NetRaw) is not folded into
+    /// [`Socket`](ResourceType::Socket): it is the same resource reached
+    /// underneath every check that makes the ordinary type safe. A `File`
+    /// write goes through path resolution, the mount's read-only flag, the
+    /// file's own permission bits and its owning user; a write here goes to
+    /// the sectors those things are *stored in*, so it can rewrite any file on
+    /// the disk — including the ones the caller was denied — or destroy the
+    /// filesystem entirely. Reading is not much weaker: raw sectors include
+    /// every file the caller cannot open and every file that was deleted but
+    /// not overwritten. If holding `File` implied holding this, then every
+    /// program that can write its own config file could erase the disk, which
+    /// is precisely the ambient authority this whole subsystem exists to
+    /// refuse.
+    ///
+    /// *Enumerating* devices needs nothing: `readdir`/`stat` on `/dev` and the
+    /// `/sys` block listing are ungated, because showing a user which disks
+    /// exist is not destructive and a program that had to hold the right to
+    /// erase every disk in the machine before it could draw its sidebar is one
+    /// that must be launched over-privileged.
+    BlockDevice = 31,
 }
 
 impl ResourceType {
@@ -366,7 +396,7 @@ impl ResourceType {
     /// variant count. Consumers that need "every type" iterate `1..=LAST`
     /// rather than keeping their own list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
-    pub const LAST: u16 = Self::InputDevice as u16;
+    pub const LAST: u16 = Self::BlockDevice as u16;
 
     /// This type's wire discriminant, as sent to userspace.
     ///
@@ -432,7 +462,8 @@ impl ResourceType {
             | Self::SystemClock
             | Self::PrivilegedPort
             | Self::ResourceLimit
-            | Self::InputDevice => self as u16,
+            | Self::InputDevice
+            | Self::BlockDevice => self as u16,
         }
     }
 
@@ -458,7 +489,8 @@ impl ResourceType {
     ///
     /// # Why a `match` and not `transmute`
     ///
-    /// `transmute` would accept `31` and produce a `ResourceType` that is not
+    /// `transmute` would accept any `u16` past [`Self::LAST`] and produce a
+    /// `ResourceType` that is not
     /// any variant — instant UB, from a value userspace chooses. The match is
     /// the validation, which is the entire job.
     ///
@@ -498,6 +530,7 @@ impl ResourceType {
             28 => Self::PrivilegedPort,
             29 => Self::ResourceLimit,
             30 => Self::InputDevice,
+            31 => Self::BlockDevice,
             _ => return None,
         };
         Some(ty)
@@ -698,9 +731,9 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     //    It earns the exception because the value is not ours — it is the
     //    wire's, and the other copy of it lives in a tree this build cannot
     //    compile, so there is nothing to derive it from.
-    if ResourceType::LAST != 30 {
+    if ResourceType::LAST != 31 {
         serial_println!(
-            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 30 — a new resource type \
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 31 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
              and file a request so lane B adds it to posix/src/sys_capability.rs. Until \
              they do, userspace decodes the new type as unknown.",

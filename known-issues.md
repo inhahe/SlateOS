@@ -81109,8 +81109,61 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **544 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **536 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (seventeenth batch): `cmd_aiostat` (8) cleared —
+> 544 → 536 across 226 → 225 functions. Pinned by `kshell::self_test` rung 84.
+>
+> **A fifth row, and it is about what the command *says* rather than what it
+> does.** Every batch so far has been about a command acting wrongly and
+> reporting success. `cmd_aiostat` allocates its ring ids from 1, so the guessed
+> `0` never collided with a live ring — `aiostat destroy 1O` genuinely failed.
+> It failed like this:
+>
+> ```
+> aiostat: error: NotFound
+> ```
+>
+> which says that the ring the user named does not exist. The ring exists. The
+> word `1O` is what could not be read. **A confident wrong diagnosis is not a
+> milder version of no diagnosis** — a bare failure sends the reader back to
+> what they typed; this sends them into the subsystem to hunt for a ring that
+> was sitting there the whole time. The cost of a defect is measured in where it
+> makes someone look next, and this is the worst answer available.
+>
+> That generalises, and it is the reason this batch gets a write-up rather than
+> a line. A large share of the remaining ledger sits behind a `NotFound`-style
+> lookup, and wherever the guessed sentinel happens *not* to name a live object,
+> the D1 defect stops producing a wrong **action** and starts producing a wrong
+> **explanation**. Those sites look harmless when skimmed — the command errors,
+> the status is 1, the shape looks like a refusal — and they are not. When
+> triaging the rest of the ledger, do not treat "it already fails" as evidence
+> that a site is low priority.
+>
+> The rest of the command is shapes already catalogued. `create`'s pid is the
+> fact the ring is keyed on, so `unwrap_or(0)` produced a ring owned by a
+> process that does not exist and reported it created, after which every
+> submission against it looked legitimate. The `submit`/`complete` counts are
+> the rung-82 measurement shape: `aiostat submit 3 1O24` recorded **one**
+> submission where 1024 were meant, and left a counter with nothing anywhere to
+> contradict it.
+>
+> Per §607 the bracketed operands keep their defaults — `create <pid> [sq_size]
+> [cq_size]`, `submit <ring_id> [count]` — and rung 84 asserts they still work.
+>
+> **The wording gate earned its keep a second time in two batches**, in the
+> opposite direction from the last one. Rung 84's closing assertion was written
+> `assert_output_lacks(.., b"NotFound")`; the gate reported it as *an assertion
+> that can never fire*, because `NotFound` reaches the screen only through a
+> `{:?}` and appears in no format string in the shell. It was right — that
+> assertion would have passed against an unfixed kernel, and against one that
+> printed nothing at all. Rewritten against the `aiostat: error:` prefix, which
+> is fixed text, it means what it was meant to mean. Note the pair: in batch
+> sixteen the gate rejected a `contains` that was true but underivable and the
+> fix belonged in the **code**; here it rejected a `lacks` that was vacuous and
+> the fix belonged in the **test**. Both times the useful move was to believe
+> the gate rather than to soften the assertion.
+>
 > **Burn-down log.** 2026-08-26 (sixteenth batch): `cmd_cgiostat` (8) cleared —
 > 552 → 544 across 227 → 226 functions. Pinned by `kshell::self_test` rung 83.
 >

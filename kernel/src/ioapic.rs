@@ -755,6 +755,17 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     irq_notify(irq);
     crate::irq_storm::record_irq(irq);
 
+    // Tell the balancer this line exists.  Without this its per-IRQ `active`
+    // flags were never set from any production path -- only from its own
+    // self-test -- so `balance()` skipped every IRQ, found nothing to balance,
+    // and returned early on every pass since the module was written.  The
+    // self-test called `notify_irq` directly and asserted the flag flipped,
+    // which is exactly the shape that cannot tell a wired subsystem from an
+    // unwired one: it exercised the setter, not the wiring.
+    if let Ok(irq_u8) = u8::try_from(irq) {
+        crate::irqbalance::notify_irq(irq_u8);
+    }
+
     // 2. Fast path: try immediate wake of the registered task.
     //    If the wake attempt fails (scheduler lock contention), raise
     //    a softirq so the wake is retried immediately after EOI with

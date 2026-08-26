@@ -65,6 +65,28 @@ impl TilingLayout {
             Self::ThreeColumn => "Three Column",
         }
     }
+
+    /// Parse a layout name, returning `None` for a word this does not know.
+    ///
+    /// It lives here rather than in the shell because the shell had two copies
+    /// of the same `match` — one in `tile create`, one in `tile layout` — and
+    /// they had drifted: `layout` refused an unknown word, while `create`
+    /// silently fell through to `MasterStack`, so `tile create work grd`
+    /// produced a master-stack workspace and reported it as created. Sharing
+    /// one parser makes that divergence impossible to reintroduce.
+    #[must_use]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "float" | "floating" => Some(Self::Floating),
+            "hsplit" | "horizontal" => Some(Self::HorizontalSplit),
+            "vsplit" | "vertical" => Some(Self::VerticalSplit),
+            "master" | "ms" => Some(Self::MasterStack),
+            "grid" => Some(Self::Grid),
+            "monocle" | "max" => Some(Self::Monocle),
+            "3col" | "three" => Some(Self::ThreeColumn),
+            _ => None,
+        }
+    }
 }
 
 /// Window geometry (position and size).

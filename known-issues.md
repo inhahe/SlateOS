@@ -74316,6 +74316,94 @@ its own synopsis *is* the command's output, the documented `ksyms` precedent).
 
 ---
 
+## A-KSHELL-A-RUNG-THAT-SPELLS-A-DIAGNOSTIC-FAILS-THE-KERNEL-FOR-IMPROVING-IT — ✅ FIXED 2026-08-26 (lane A)
+
+**In short:** the boot test panicked and the kernel died — not because the
+kernel was wrong, but because a self-test had written the *exact wording* of an
+error message into its assertion, and the burn-down then improved that wording.
+`vd remove` with no operand used to print `Usage: vd remove <id>`; after being
+converted to the shared operand helper it prints `vd: remove: missing desktop
+id`, which names what is missing instead of reprinting a synopsis. That is the
+outcome the whole burn-down exists to produce. The rung failed it anyway,
+because it asserted the six characters `Usage:`.
+
+**Symptom.** `scripts/boot-test.sh` on `adddc7459`:
+
+```
+!! `a missing operand is reported`: output lacked text it must contain
+   expected somewhere in the output:  Usage:
+   actual output (31 bytes):          vd: remove: missing desktop id
+!!! KERNEL PANIC !!!  panicked at kernel\src\kshell.rs:446:5
+```
+
+**Where.** Two tables in `kshell::self_test`, both written during the
+`} else {` blind-spot repair:
+
+| Table | Rung | Cases affected |
+|---|---|---|
+| `arity_cases` | 67 | `vd remove`, `tile add` — converted to `required_id`/`required_num` |
+| `refusal_cases` | 67 | `wsnap snap 999 zznosuch` — converted to name the word |
+
+Both looped `assert_output_contains(…, b"Usage:")` over every row.
+
+**Fix.** Each table gained a third column: the fragment the complaint must
+contain, per case. The loop asserts that fragment for the failing invocation
+and its *absence* for the paired control, so the control half keeps working
+too. Nothing about the rungs' coverage changed; what changed is that they now
+pin the rule — *a missing or unusable operand is reported, and the status
+reaches the caller* — rather than one wording of it.
+
+**Why it is worth an entry.** This is a trap the burn-down manufactures at a
+steady rate. Every batch converts more commands from "print a synopsis" to
+"name the word", and there are now eight rungs' worth of assertions written
+against the old wording. Two rules follow, and they are the reason this is
+written down rather than just fixed:
+
+1. **Assert the fragment that carries the rule, not the sentence.** `is not a
+   layout` and `missing window id` are rules; `Usage:` and the full synopsis
+   text are formatting. A rung should fail when a command stops refusing, not
+   when it starts refusing more clearly.
+2. **A table-driven rung needs a per-row expectation.** The two tables here
+   were uniform when written and stopped being uniform the moment one row's
+   command was improved. A shared literal in a loop is a coupling between rows
+   that have nothing to do with each other.
+
+**Severity.** Low as a defect — the kernel was correct throughout and the boot
+test is exactly the thing that caught it, at the first opportunity, before the
+lane merged to `main`. Notable as a process finding: the gates (`cargo check`,
+all eight kshell scanners) were green on the broken tree, because none of them
+runs the shell. Only the QEMU boot does. That is the argument for booting every
+burn-down batch rather than batching several and booting once.
+
+**Follow-up 2026-08-26 — the class is now caught statically, and it was not the
+only instance.** The two rules above were written for a human to remember, which
+is the weakest possible enforcement for a defect whose only detector is an
+eleven-minute boot. `scripts/check-selftest-wording.py` now enforces them: for
+every `assert_output_contains`/`_lacks` in `self_test` it resolves the captured
+command through the dispatch table to its `cmd_*` function, narrows to the
+`match` arm the subcommand selects, and requires the fragment to be producible
+from a literal that arm — or anything it calls in `kshell.rs` — passes to a
+print macro. `boot-test.sh` runs it, and runs its `--self-test` fixture first.
+Rationale and the over-approximation argument: design-decisions §604.
+
+Running it on the current tree found **two more dead guards of the same class**,
+both in the `lacks` direction — the half of the defect this entry named but did
+not go looking for:
+
+| Rung | Asserted the absence of | Why it could never fire |
+|---|---|---|
+| 74, `wsnap` | `Left half` | `cmd_winsnap` names the position through `SnapPosition::label()`, which spells it `left`. No code in the tree produces `Left half`. |
+| 67, `bright` | `Usage:` | The `set` arm was converted to `required_num` and says `missing percentage` instead. The guard died in the same kind of conversion that caused this entry's bug. |
+
+These are the *mirror image* of what happened here: a `contains` on stale
+wording fails a correct kernel and is loud, while a `lacks` on stale wording
+passes forever and is silent. The silent one is the worse of the two — the rung
+still reads as a guarantee, and the regression it was written to catch has been
+unguarded ever since. Fixed in `c87e74627`; each now names a sentence the
+command still owns.
+
+---
+
 ## A-KSHELL-A-HELP-ARM-AND-A-TYPO-REPORTED-THE-SAME-THING — ✅ FIXED 2026-08-25 (lane A)
 
 **In short:** `nat help` and `nat banana` produced identical output and an
@@ -80899,7 +80987,277 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **706 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **581 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (eleventh batch): `cmd_a11y` (10) cleared —
+> 591 → 581 across 232 → 231 functions. Pinned by `kshell::self_test` rung 78.
+>
+> Six of the ten were the set/query conflation, which makes this the third
+> consecutive settings command dominated by it — it is now clearly the default
+> failure of the shape rather than a quirk of any one command. So this batch
+> stopped fixing instances and built the helper: `toggle_arg` returns
+> `Option<Toggle>` where `Toggle` is `Query` or `Set(bool)`, so absence — and
+> only absence — selects the query. See §605; the reason it needs three
+> outcomes rather than two is that "no word" and "a word I could not read" are
+> the two situations the bug consists of confusing, and an `Option<bool>`
+> return has nowhere to put the difference.
+>
+> Four sites the ledger cannot count, and they are a good sample of why the
+> counted number is a floor rather than a total:
+>
+> * **`a11y regelem 1 buton Save`** registered a *generic* element and said so.
+>   An unknown role fell through a `_ =>` to a default role, so the element
+>   existed, was announced, and had the wrong semantics — the screen reader
+>   would describe a button as a plain element for the life of the process.
+> * **`a11y announce alrt`** did two wrong things at once: it downgraded the
+>   priority to `normal` and it ate the word, so the *message* announced was
+>   whatever followed. Now refused, and the refusal enumerates
+>   `Priorities: low, normal, high, alert`.
+> * **`a11y inject key F1`** injected scancode 0. There is no sentinel to key
+>   on here, which is the general lesson: `required_num` is needed even where a
+>   zero-check would appear to work, because 0 is a legitimate scancode.
+> * **Seven `.ok()` / `let _ =` discards** across `inject`, `set_font_scale` and
+>   the toggles, each reporting success for an operation that had failed.
+>
+> **Burn-down log.** 2026-08-26 (tenth batch): `cmd_filepicker` (10) cleared —
+> 601 → 591 across 233 → 232 functions. Pinned by `kshell::self_test` rung 77.
+>
+> The least interesting batch so far, and worth logging for exactly that
+> reason: all ten sites were the *same* line — a dialog id read with
+> `unwrap_or(0)` — repeated across ten arms, and dialog 0 is never a live
+> dialog, so every one of them acted on nothing and reported success. Ten
+> hand-edits of an identical line is how a transcription error gets in, so the
+> conversion was done by a one-shot script that asserted its own arity (exactly
+> ten matches, or abort) and was then deleted. Keeping such a script would
+> imply it is a tool; it is a proof that a mechanical edit was mechanical.
+>
+> The one judgement call: `nav`, `select` and `filename` take a path after the
+> id, and the path guard was previously fused with the id guard, so a missing
+> path was reported as a missing id. They are now split, because the two
+> mistakes need different messages to be actionable.
+>
+> **Burn-down log.** 2026-08-26 (ninth batch): `cmd_peninput` (10) cleared —
+> 611 → 601 across 234 → 233 functions. Pinned by `kshell::self_test` rung 76.
+>
+> Contains one instance of each of the four failure modes the family has
+> turned up, which makes it the best single worked example in this entry:
+>
+> * **Silence.** `pen rm abc` — inner `if let Ok(id)` with no `else` — printed
+>   nothing and exited 0.
+> * **A sentinel that cannot do the job.** `sim` used `unwrap_or(0)` guarded by
+>   `if pen_id == 0 { synopsis }`. That looks like validation and is not: it
+>   cannot tell an *omitted* operand from a *mistyped* one, and the synopsis it
+>   prints never names the offending word, so the user is told the syntax of a
+>   command they typed correctly.
+> * **No sentinel available.** `pen map 3 x click` bound button **0**, and 0 is
+>   a real button, so no guard of that shape could have caught it.
+> * **A guessed enum.** `register` accepted any word as a pen type.
+>
+> This batch also produced the article bug behind §606. The rung asserted
+> `` `4o96' is not an x coordinate `` and the wording gate refused it, because
+> `optional_num` hard-coded `a` and the kernel could only say `a x coordinate`.
+> Fixed here by renaming the noun to "horizontal coordinate" — a fix that is
+> better English but does not generalise, which is what motivated `article_for`
+> two batches later.
+>
+> **Burn-down log.** 2026-08-26 (eighth batch): `cmd_screenshot` (10) cleared —
+> 621 → 611 across 235 → 234 functions. Pinned by `kshell::self_test` rung 75.
+>
+> Region and window captures read their geometry with `unwrap_or`, so
+> `scap region 0 0 8oo 600` captured an 0×600 region and reported a successful
+> capture. Same shape as `wsnap addzone` in the sixth batch: a geometry operand
+> is a field in a set, and one bad field yields a degenerate result that the
+> command has no reason to think is wrong.
+>
+> Two `ALLOWED` entries were added to the wording gate in this batch
+> (`("scap", b"(1920x1080)")` and `("scap", b"(800x600)")`): the resolution is
+> assembled with `{}x{}` from values the gate cannot constant-fold, so it
+> cannot see that the literal is producible. Recorded because an allow-list
+> entry is a small hole in a gate and should never be added silently.
+>
+> **Burn-down log.** 2026-08-26 (seventh batch): `cmd_wintiling` (11) cleared —
+> 632 → 621 across 236 → 235 functions. Pinned by `kshell::self_test` rung 74.
+>
+> This batch names the fourth and last failure mode in the family, and it is
+> the worst of them: **saying nothing at all.** Three arms — `rmws`, `rm` and
+> `float` — were spelled
+>
+> ```rust
+> if let Some(w) = parts.get(1) {
+>     if let Ok(id) = w.parse::<u32>() { … }   // no `else`
+> } else { <synopsis>; set_exit(1); }
+> ```
+>
+> The *outer* `if let` had an `else`, so an omitted operand was reported. The
+> *inner* one did not, so `tile rmws abc` produced no output whatsoever and
+> exited 0. Set against the other three modes the ledger has turned up —
+> guess a value, answer a query, report a clamp — silence is the hardest to
+> notice, because there is no sentence to disbelieve. A user who typed
+> `tile rm 1O` (letter O) and saw nothing would reasonably conclude the window
+> was gone.
+>
+> Three more sites the ledger cannot count, all of a different shape again:
+>
+> * **A guessed enum, from two copies of one parser that had drifted.** The
+>   layout `match` existed twice — in `create` and in `layout`. `layout`
+>   refused an unknown word; `create` fell through `_ => MasterStack` and
+>   reported the workspace as created, so `tile create work grd` silently
+>   built the wrong layout. Fixed by moving the parser onto the enum as
+>   `TilingLayout::from_str`, which makes the divergence impossible to
+>   reintroduce rather than merely fixing this instance of it.
+> * **Two errors discarded with `.ok()`** (`gap`, `ratio`), against the
+>   explicit rule in `CLAUDE.md` §9. `tile gap 999 5` for a workspace that
+>   does not exist printed `Gap → 5px` and exited 0 — a setting reported as
+>   applied to nothing.
+> * **A clamp the caller could not see.** `set_master_ratio` stores
+>   `ratio.clamp(10, 90)`, but the shell echoed the number it was *given*, so
+>   `tile ratio 1 200` printed `Master ratio → 200%` while the workspace held
+>   90. This is worth separating from the guessed-value family because the
+>   value is not guessed — it is *known* and then misreported. The fix refuses
+>   out-of-range rather than echoing the clamp: a clamp the caller cannot see
+>   is a guess by another name, and one the ledger's regex will never find.
+>
+> Of the eleven counted sites, the interesting ones are `add`'s destination
+> workspace (no guard at all, so a typo put the window on workspace 1 and said
+> so) and `retile`/`windows`, where the default — workspace 1, and the "all
+> workspaces" sentinel 0 — is documented and correct for an *absent* operand
+> and had simply been extended to an unreadable one. Those two took
+> `optional_num`; the rest took `required_num`.
+>
+> **Burn-down log.** 2026-08-26 (sixth batch): `cmd_winsnap` (12) cleared —
+> 644 → 632 across 237 → 236 functions. Pinned by `kshell::self_test` rung 73.
+>
+> Half of this function was the set/query conflation the fifth batch named, now
+> confirmed as the dominant shape in the settings commands rather than a
+> `cmd_vdesktop` quirk: **six** of the twelve sites — `enabled`, `preview`,
+> `corner`, `thirds`, `edge`, `animation` — reported the current value in
+> response to a word the user meant as a set. `wsnap enabled of` (one `f`)
+> printed `Snapping: true` and exited 0. Note that it printed the value the
+> user was trying to *change away from*, so the output reads as confirmation
+> of the opposite of the request. Two spellings produced it: a `_ =>` catch-all
+> after the `on`/`off` arms, and `if let Some(x) = …parse() … else { query }`.
+> Both are now `match parts.get(1) { None => query, Some(word) => … }`, so
+> absence still queries and a present word is either understood or refused.
+>
+> The shape unique to this command is **geometry**. `addzone` takes four
+> percentages and each defaulted to 0, so one mistyped field
+> (`addzone lay z 0 0 5oo 500`) built a zone of zero area and reported
+> `Zone 'z' added to 'lay'` — indistinguishable from a correct run, and
+> invisible until the layout is applied and a window disappears into a 0×0
+> rectangle. A guessed *dimension* is worse than a guessed *id* in one
+> specific way: an id usually names something that does not exist, and the
+> command then says so; a zero dimension is always valid input to the layer
+> below, so nothing downstream can object.
+>
+> Two sites worth separating from the other ten:
+>
+> * `wsnap remove abc` — **no guard at all**, the same shape as `vd unpin` in
+>   the fifth batch. It dropped window 0's tracking state and announced
+>   `Removed tracking for window 0`, exit 0. This is the third batch in a row
+>   to turn one up, so the "ledger is a lower bound" note below is not a
+>   one-off caveat: the missing-guard shape has no `unwrap_or` for the gate's
+>   regex to match, and only reading finds it.
+> * `wsnap screen` already had a `w > 0 && h > 0` guard and already exited 1 —
+>   the *status* was right. What it could not do is name the word: a mistyped
+>   width, an omitted one, and an honest `screen 0 0` all printed the same
+>   synopsis. It now names the unreadable word, and answers `screen 0 0`
+>   separately with `a screen must be at least 1x1`. A correct exit status is
+>   not the same as a usable diagnostic, and the gate cannot tell them apart.
+>
+> `snap`'s position operand was likewise already refused, but anonymously
+> (`Usage: wsnap snap <wid> <left|right|…>`); it now says which word it could
+> not read, with the alternatives on a second line.
+>
+> **Burn-down log.** 2026-08-26 (fifth batch): `cmd_vdesktop` (18) cleared —
+> 662 → 644 across 238 → 237 functions. Pinned by `kshell::self_test` rung 72.
+>
+> The guessed *id* here is the shape the earlier batches already covered. What
+> is new is three arms where the guess turned a **set into a query**, so a
+> mistyped operand produced a reply that was true, useful, and about something
+> else:
+>
+> * `vd visible abc` — `unwrap_or(vdesktop::current())` listed the *current*
+>   desktop's windows, under its own heading. Nothing in the reply suggested
+>   the operand had been discarded.
+> * `vd anim slid` — set nothing and printed `Animation: slide
+>   (none/slide/fade/overview)`, which is verbatim the answer to `vd anim`. The
+>   typo and the query were the same output.
+> * `vd wrap zzz` — the catch-all `_ =>` arm answered `Wrap: false`.
+>
+> All three keep their absent-operand behaviour, which is documented and
+> intended; only the present-but-unreadable case is now refused. That is the
+> distinction `optional_num` exists for, and `visible` is its first use outside
+> the numeric cases.
+>
+> Two further sites the *ledger cannot count*, found by reading rather than by
+> the gate — the second such pair in two batches, which is now a pattern worth
+> stating: **the ledger's figure is a lower bound.** `vd unpin abc` had no
+> guard at all, so it unpinned window 0 and announced `Unpinned window 0` with
+> status 0 while the window the user meant stayed pinned. And `vd wp <id>` for
+> a desktop that does not exist fell out of an `if let` chain with no `else`,
+> printing *nothing* and exiting 0 — which reads as "this desktop has no
+> wallpaper".
+>
+> **Burn-down log.** 2026-08-25 (fourth batch): `cmd_partmgr` (21) cleared —
+> the largest remaining entry — 683 → 662 across 239 → 238 functions. Pinned
+> by `kshell::self_test` rung 71.
+>
+> This one matters for *what it names*: disks and partitions, the one place in
+> the shell where acting on the wrong object is not undone by retyping the
+> command. Three shapes turned up that the earlier batches had not:
+>
+> * **A guess that was reported as a completed operation.** `pmgr create 1 abc
+>   100` read the start offset as 0 and put the partition on top of the
+>   partition table, then printed `Partition #3 created (100MB unformatted)` —
+>   which is exactly what a correct run prints.
+> * **A guess that answered a query successfully and wrongly.** `pmgr parts
+>   abc` guessed disk 0 and printed `No partitions on disk #0` with status 0.
+>   A missing disk and a mistyped disk gave the same answer, and both looked
+>   like an empty one.
+> * **A boolean read as "anything that is not `off`".** `let v =
+>   parts.get(4).copied() != Some("off");` made `OFF`, `0`, `false` and every
+>   typo of `off` mean **on** — so a user clearing a boot flag set it, and the
+>   shell reported `Flag boot = true`. This is the 22nd site in the function
+>   and the one the ledger could not count, because it is not a `parse()` call
+>   at all. It is the same shape as the 21 `matches!(…, "on" | "true" | "yes" |
+>   "1")` sites still outstanding (see the boolean sweep below), and the first
+>   evidence that the ledger's count is a *lower* bound on this class.
+>
+> Two operands were deliberately **not** made required. `pmgr label <d> <p>`
+> and `pmgr mount <d> <p>` with the trailing word absent clear the label and
+> the mount point — a real operation, and the only way to express it, because
+> `split_whitespace` cannot yield an empty word. §600 is about words that could
+> not be *read*, not words that were not typed. Both now report `Label cleared`
+> / `Mount point cleared` rather than `Label: ` with nothing after it, so the
+> two outcomes cannot be confused in a transcript.
+>
+> **Burn-down log.** 2026-08-25 (third batch): `cmd_colorpicker` (23) cleared —
+> the single largest entry in the ledger — 706 → 683 across 240 → 239
+> functions. Pinned by `kshell::self_test` rung 69.
+>
+> This one is worth recording for *what* was being guessed. `cpick open
+> #gggggg` did not refuse the colour: `Color::from_hex` returned `None`, the
+> `unwrap_or` substituted black, and the shell answered `Picker #3 opened
+> (#000000)`. That reply is indistinguishable from the reply to `cpick open`
+> with no colour at all, which documents black as its default — so the one
+> case the user could not tell apart from success was the failure. The fix
+> keeps the *absent* default (it is documented and intended) and refuses only
+> the *unreadable* word, which is the distinction the whole §600 rule turns on.
+>
+> Two further shapes went with it. `cpick palrm <pal> 1o` deleted swatch **0**
+> — a real swatch, the first one — and said `Removed color`; a mistyped index
+> destroyed a colour the user could see, and told them it had done what they
+> asked. And `cpick model <id>` was conflated with `cpick model <id> rbg`: one
+> `else` served both the question *what are the models?* and the answer
+> *`rbg` is not one of them*, printing the list and exiting **0** either way,
+> so a transposition was reported as a successful answer to a question that
+> had not been asked. Split, as the 33 other conflated arms were.
+>
+> The six per-width helpers this backlog had accumulated (`required_u32`,
+> `required_u64`, `required_i32`, `optional_u32`, `optional_u64`) were
+> collapsed into generic `required_num<T>` / `optional_num<T>` immediately
+> before this batch; see `design-decisions.md` §603 for why, and for the
+> survey of the remaining backlog that settled it.
 
 > **The denominator moved, and not because anything regressed.** 2026-08-25:
 > the gate was matching its regex against a *line*, and `cargo fmt` — not the
@@ -80909,8 +81267,9 @@ file` all still work — so the rung cannot pass by having broken the options.
 > measured under the old, line-granular gate and is therefore an undercount of
 > what those batches actually left behind; they are kept verbatim because the
 > *work* they describe was real and is still done. The running total is
-> restated above against the true denominator: **706 remain across 240
-> functions**, and the 94 sites the log below records as fixed bring the known
+> restated above against the true denominator: **706 remained across 240
+> functions** at the moment the gate was corrected (the header carries the
+> live figure), and the 94 sites the log below records as fixed bring the known
 > total to 800 — not 334. (Whether those 94 batches also swept up wrapped-form
 > siblings that the old gate never listed is unknowable, so 800 is stated as
 > the floor it is.) No function's count went down when the gate was corrected,
@@ -82046,6 +82405,111 @@ that reported clean the whole time.
 
 ---
 
+## `A-KSHELL-THE-USAGE-GATE-KNEW-FIVE-WORDS-AND-A-SYNOPSIS-NEED-USE-NONE-OF-THEM` (lane A, 2026-08-25) — **FIXED** 2026-08-25, all 57 sites resolved
+
+**In short:** the gate that checks "if a command complains about what you typed,
+it must also report failure" decided what counted as a complaint by looking for
+five words — `Usage:`, `Unknown`, `Unrecognised`, `Invalid`, `Use:`. A message
+that says the same thing without any of them was invisible to it. Typing
+`pmgr zznosuchsub` printed the list of real subcommands and then exited 0;
+`cam privacy 1 zzmode` printed `Modes: open, prompt, disabled` and exited 0.
+57 sites hid there. To a user those read exactly like refusals. To a script
+they read as success.
+
+**Fourth instance of one bug, and the first that is not about line
+granularity.** The three before it were all "counted by the line what should
+have been counted by a statement or a column walk." This one is the same
+*shape* of error one level up: the gate was complete over the thing it could
+name, and the thing it could name was not the thing it was for.
+
+| # | What the gate was actually complete over | What it was for | Hidden |
+|---|---|---|---|
+| 1 | `{`/`}` depth counted per line, where `} else {` nets to zero | a character-column walk (`walk_block`) | 195 |
+| 2 | a regex spanning `.parse().ok().unwrap_or(…)` on one line | a statement (`statements`) | 466 |
+| 3 | a regex spanning `shell_println!(` and its first argument on one line | a statement | 192 |
+| 4 | **messages containing one of five words** | **diagnostics** | **57** |
+
+**How it was found.** Not by an audit — by reading `cmd_partmgr` to start the
+*next* guessed-value burn-down and noticing that its catch-all arm prints
+`partmgr: disks/adddisk/rmdisk/table/…` and falls out with no status, while the
+usage gate was reporting clean. Instance 3 was found the same way, from the same
+command. An anomaly noticed in passing has now beaten a deliberate audit twice,
+which is worth remembering: the gates are read far more often than they are
+re-derived, and a green gate is not evidence about what it does not look at.
+
+**The 15 slash-form commands are one author-batch.** `power`, `display`,
+`vdesktop`, `keylayout`, `screenshot`, `a11y`, `ime`, `netindicator`, `winsnap`,
+`colorpicker`, `cursorsettings`, `kbsettings`, `detailcols`, `partmgr`,
+`locale` — dispatched from *consecutive* lines 7369–7383. They share a
+convention nothing else in the file uses: one line naming every subcommand
+separated by slashes, no `Usage:` prefix. That is why the miss is clustered
+rather than scattered, and why widening the trigger by one shape recovered all
+fifteen at once.
+
+**Fix.**
+
+* `scripts/check-usage-status.py`'s `USAGE` gained a second alternative for the
+  enumeration shape: `Label: a/b/c` or `Label: a, b, c` with at least three
+  members. Two structural rules keep help *bodies* out, both established by
+  measurement rather than by taste — a naive version of this trigger fired on
+  65 ordinary help lines:
+  * the list must begin the message after at most a **single-word label**, so
+    an indented `"  arrange <sort>   Auto-arrange (name/size/type/date)"` is
+    not a match;
+  * the label is **one word**, so `"cut -d/-f/-c  Extract columns"` is read as
+    the flag list it is, not as a label.
+* The 57 were triaged by hand into five shapes, not fixed mechanically:
+  * **15** slash-synopsis catch-alls, now ending in `end_help_arm(cmd, sub)` —
+    which sets 1 only for a subcommand that was not itself a request for help.
+  * **6** help-body catch-alls whose only enumerations are trailing
+    `Foo: a, b, c` lines (`autostart`, `schedtune`, `mmtune`, `vpn`, `dyndns`,
+    `loginscreen`), same fix.
+  * **18** value-list refusals that knew the word was unusable, printed the
+    alternatives, and returned success. Each now names the unusable word —
+    ``cam: privacy: `zzmode' is not a mode`` — and sets 1. Naming it matters:
+    the list alone does not say *which* of several operands was rejected.
+  * **2** `cmd_sysdiag` arms that already failed but set the status between the
+    complaint and the list explaining it. Reordered, as `cmd_overlay` and
+    `cmd_container_network` were in instance 3.
+  * **2** genuinely correct sites added to `ALLOWED` with reasons: `cmd_profile`
+    (bare `profile` reports the current profiles and then names the ones that
+    exist — a query, guarded by `arg.is_empty()`) and `cmd_colorpicker model`
+    (the `parts.get(2)` else-branch is asking what the models are; its sibling
+    branch prints the same list under a refusal and does set 1).
+* `cmd_schedtune` and `cmd_mmtune` were fixed **structurally rather than
+  allowlisted.** Their help bodies live in a nested `#[inline(never)] fn case()`
+  whose block the walk cannot leave, so the `end_help_arm` sitting outside it
+  was invisible — the same situation `cmd_firewall` and `cmd_container` carry as
+  exemptions. Passing `sub` into `case` and making `end_help_arm` its last
+  statement removes ten findings without adding ten `ALLOWED` entries. Removing
+  an exemption beats documenting one; the two older ones should be converted the
+  same way when they are next touched.
+* `kshell::self_test` rung 70 covers one command per shape, each refusal paired
+  with a control that runs the same command with a usable operand — because the
+  failure mode of *this* fix is to make a correct invocation start reporting
+  failure. The rung also re-checks that bare `pmgr`, bare `stune` and bare
+  `deskicons arrange` still succeed, since three of the five shapes work by
+  adding a status to an arm that also serves the no-argument case.
+
+**What is still not covered (Stage 2).** The trigger is now complete over
+messages that *enumerate*, but a catch-all arm can print a help body with no
+enumeration at all and still fall out with no status. A survey of all 163
+catch-all arms that print without setting a status found roughly 88 such
+help-body arms, plus a third shape that must not be treated like the others:
+*default-action* arms (`cmd_alloc_trace`, `cmd_irqstorm`, `cmd_filepicker`,
+`cmd_startmenu`, `cmd_ipc_stat`) where the catch-all does the command's default
+work rather than complaining, and where `end_help_arm` would be wrong. A
+structural trigger — "a catch-all containing ≥3 prints" — was tried and
+rejected for conflating exactly those two. The remaining work needs the
+scrutinee and command name determined by hand for the 10 arms with no detectable
+`match` scrutinee and the 41 with no `"<name> — …"` first help line.
+
+**Severity.** Moderate, and the same as instance 3: no correctness consequence
+inside the kernel, but a command that complains and exits 0 tells `&&` and
+`set -e` that it worked. 57 more of those, on commands including a partition
+manager whose subcommands create and delete partitions.
+
+---
 ## `C-BACKUP-AN-EXCLUDE-PATTERN-CAN-HANG-THE-BACKUP` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26
 
 **In short:** `backup create --exclude '**a'` never finished. It did not fail

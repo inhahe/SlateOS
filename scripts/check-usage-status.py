@@ -125,6 +125,20 @@ ALLOWED = {
         "same shape, found by check-query-status.py: bare `quota` reports whether "
         "enforcement is on, and the synopsis under it says how to change that",
 
+    # The same shape again, found by the enumeration trigger rather than by the
+    # word `Usage`. Both are the *query* half of a pair whose typo half was
+    # split out and does fail; listing the alternatives is the answer here, not
+    # a complaint.
+    ("cmd_profile", "Available: desktop, server, dev, gaming"):
+        "bare `profile` reports the current scheduler and memory profiles and "
+        "then names the ones that exist; guarded by `arg.is_empty()`, so a "
+        "mistyped profile takes the `_` arm below, which does fail",
+    ("cmd_colorpicker", "Models: rgb, hsv, hsl, hex, cmyk"):
+        "the `parts.get(2)` else-branch: `cpick model <id>` is asking what the "
+        "models are. Its sibling branch -- `cpick model <id> rbg` -- prints the "
+        "same list under a refusal and sets 1; the two were one arm until the "
+        "cmd_colorpicker sweep split them",
+
     # This one was invisible to the check until `strip_comments` was added: the
     # `--help` arm carried the note `// No set_exit(1): --help succeeded at what
     # it was asked`, and the checker read the `set_exit(1)` *inside that comment*
@@ -257,9 +271,33 @@ KNOWN_CONFLATED = {}
 # `cmd_memcg` predates this and is in ALLOWED); the other four must start the
 # string, which is what separates a diagnostic from an indented report field.
 # See the docstring for why both rules are structural rather than allowlisted.
+#
+# The second alternative is the *enumeration* shape, added after the five words
+# above missed 57 sites that say the same thing without using any of them:
+#
+#     shell_println!("Modes: open, prompt, disabled");
+#     shell_println!("partmgr: disks/adddisk/rmdisk/table/parts/create/...");
+#
+# A message that lists three or more alternatives is telling the user what they
+# could have said instead, which is only ever said about something that could
+# not be used. `Use:` was already in the list for exactly this reason -- it was
+# added for `cmd_quota`'s "Unknown subcommand '{}'. Use: on, off, set" -- so the
+# vocabulary was already reaching for the shape and catching one spelling of it.
+#
+# Two structural rules keep help *bodies* out, both of which fall out of the
+# same principle as the `Unknown`/`Invalid` rule above -- a diagnostic starts
+# the string it is printed in:
+#
+#   * the list must start the message, after a `Word: ` label at most. A help
+#     body's lines are indented (`"  arrange <sort>   Auto-arrange (name/size/
+#     type/date)"`) and so do not match. Without this the trigger fires on 65
+#     ordinary help lines.
+#   * the label is a single word. `"cut -d/-f/-c  Extract columns"` has a
+#     hyphenated flag list, not a label.
 USAGE = re.compile(
     r'(?:console_println!|shell_println!)\s*\(\s*"'
-    r'(?:\s*[Uu]sage\b|Unknown\b|Unrecogni[sz]ed\b|Invalid\b|Use:)'
+    r'(?:(?:\s*[Uu]sage\b|Unknown\b|Unrecogni[sz]ed\b|Invalid\b|Use:)'
+    r'|(?:[A-Za-z][A-Za-z0-9_ -]*:\s*[a-z0-9_-]+(?:(?:/|,\s*)[a-z0-9_|<>-]+){2,}))'
 )
 # The macro call on its own, without the literal. `USAGE` is matched against a
 # whole statement, whose text has had its newlines collapsed, so the column of

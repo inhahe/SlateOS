@@ -233,7 +233,6 @@ cmd_widgets 6
 cmd_wifiscan 2
 cmd_windowrules 2
 cmd_writeback 2
-cmd_zramstat 6
 dispatch 1
 eval_test 2
 expand_braces_token 1

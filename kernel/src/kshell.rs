@@ -99899,11 +99899,31 @@ fn cmd_zramstat(args: &str) {
             shell_println!("zramstat: initialized");
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("zram1");
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(2_000_000_000);
+            // Both operands define the device being created, so both are
+            // required — the §607 read-the-brackets rule is overridden here for
+            // the same reason batch 28 overrode it for `kstack register`, and
+            // the two cases generalise: *an operand that says what a created
+            // object IS has no defensible default, because the default would be
+            // asserting a fact about a device nobody described.* `disk_size` is
+            // printed in the `devices` table as `disk=`, which an operator reads
+            // as configuration, not as a shell's opinion.
+            //
+            // The name guess was worse than merely invented: it was internally
+            // inconsistent with the record it created. Ids come from `next_id`,
+            // which starts at 0, so the very first `zramstat create` produced
+            // *device 0 named "zram1"* — and the module's own self-test names
+            // its fixture `zram0`, so the shell disagreed with the module about
+            // the same device's name. A wrong name is not a wrong cell here:
+            // the name is what distinguishes one zram device from another.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("zramstat: {}: missing device name", sub);
+                set_exit(1);
+                return;
+            };
+            let Some(size) = required_num::<u64>(&parts, 2, "zramstat", sub, "disk size in bytes")
+            else {
+                return;
+            };
             match zramstat::create_device(name, size) {
                 Ok(id) => shell_println!("zramstat: created {} ({}B) → id {}", name, size, id),
                 Err(e) => {
@@ -99913,10 +99933,16 @@ fn cmd_zramstat(args: &str) {
             }
         }
         "remove" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // The guessed 0 was reliably a *hit*, not a miss. `create_device`
+            // hands out ids from `next_id`, counting up from 0, so device 0 is
+            // whichever device was made first — it exists whenever anything
+            // exists. `NotFound`, the safety net every other guessed id in this
+            // burn-down eventually trips, could not fire here. And `remove` is
+            // destructive: it drops the device and every counter it accumulated,
+            // then prints `removed 0` as success.
+            let Some(id) = required_num::<u32>(&parts, 1, "zramstat", sub, "device id") else {
+                return;
+            };
             match zramstat::remove_device(id) {
                 Ok(()) => shell_println!("zramstat: removed {}", id),
                 Err(e) => {
@@ -99926,18 +99952,37 @@ fn cmd_zramstat(args: &str) {
             }
         }
         "write" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let orig = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
-            let compr = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(2048);
+            // `compr` is a denominator: both `devices` and
+            // `compression_ratio_x100` compute `orig * 100 / compr`, so a guess
+            // does not produce a wrong row, it rescales the ratio column an
+            // operator reads as a measurement. That is batch 28's override
+            // exactly, so `[compr]` became `<compr>`.
+            //
+            // The pair of defaults was the sharpest part. 4096/2048 is exactly
+            // 2.00x — the number a healthy zram is supposed to show — so a
+            // mistyped write did not look anomalous, it looked like evidence
+            // the compressor was working. That is the `cputhr` row again: *the
+            // guessed default is always the reassuring value.* 4096 is also the
+            // wrong page size for this OS, which uses 16 KiB pages, so the
+            // "obviously right" figure was right about a different machine.
+            //
+            // `orig` additionally drives a *classification*, not just a
+            // magnitude: `record_write` counts the write as a zero page when
+            // `orig_bytes == 0`, so an unreadable size could file a write under
+            // the wrong kind as well as the wrong amount.
+            let Some(id) = required_num::<u32>(&parts, 1, "zramstat", sub, "device id") else {
+                return;
+            };
+            let Some(orig) =
+                required_num::<u64>(&parts, 2, "zramstat", sub, "uncompressed size in bytes")
+            else {
+                return;
+            };
+            let Some(compr) =
+                required_num::<u64>(&parts, 3, "zramstat", sub, "compressed size in bytes")
+            else {
+                return;
+            };
             match zramstat::record_write(id, orig, compr) {
                 Ok(()) => {
                     shell_println!("zramstat: write dev={} orig={} compr={}", id, orig, compr)
@@ -99949,12 +99994,41 @@ fn cmd_zramstat(args: &str) {
             }
         }
         "read" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "zramstat", sub, "device id") else {
+                return;
+            };
             match zramstat::record_read(id) {
                 Ok(()) => shell_println!("zramstat: read dev={}", id),
+                Err(e) => {
+                    shell_println!("zramstat: error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        // `zramstat` had no `discard` subcommand, so `mem_used` could only ever
+        // grow from the shell: `record_discard` is the one operation that
+        // returns memory to the pool, it is fully exercised by the module's own
+        // self-test, and nothing outside that test called it. The batch-26/27
+        // generalisation once more — a module whose only caller is an
+        // interactive command is missing exactly the operation no test needed —
+        // and as in batch 30 the missing one is structural rather than
+        // cosmetic. Here it is the *destructive* half of the accounting, whose
+        // absence made the `mem=` column monotonic by construction.
+        "discard" => {
+            // `bytes` is subtracted: `mem_used = mem_used.saturating_sub(bytes)`.
+            // A guess would corrupt the accumulator in the destructive
+            // direction, and the saturation can clamp it to zero, which destroys
+            // the evidence that anything was mis-subtracted — mmapstat's
+            // `unmap` row (batch 29), reached here before a default was ever
+            // written rather than after.
+            let Some(id) = required_num::<u32>(&parts, 1, "zramstat", sub, "device id") else {
+                return;
+            };
+            let Some(bytes) = required_num::<u64>(&parts, 2, "zramstat", sub, "byte count") else {
+                return;
+            };
+            match zramstat::record_discard(id, bytes) {
+                Ok(()) => shell_println!("zramstat: discard dev={} bytes={}", id, bytes),
                 Err(e) => {
                     shell_println!("zramstat: error: {:?}", e);
                     set_exit(1);
@@ -100001,10 +100075,15 @@ fn cmd_zramstat(args: &str) {
         }
         "test" => zramstat::self_test(),
         _ => {
-            shell_println!("Usage: zramstat <init|create|remove|write|read|devices|stats|test>");
-            shell_println!("  create <name> [size]           — create ZRAM device");
-            shell_println!("  write <dev_id> [orig] [compr]  — record compressed write");
-            set_exit(1);
+            shell_println!(
+                "Usage: zramstat <init|create|remove|write|read|discard|devices|stats|test>"
+            );
+            shell_println!("  create <name> <size>           — create ZRAM device, size in bytes");
+            shell_println!("  remove <dev_id>                — delete a device and its counters");
+            shell_println!("  write <dev_id> <orig> <compr>  — record compressed write");
+            shell_println!("  read <dev_id>                  — record a read");
+            shell_println!("  discard <dev_id> <bytes>       — record a discard (frees mem)");
+            end_help_arm("zramstat", sub);
         }
     }
 }

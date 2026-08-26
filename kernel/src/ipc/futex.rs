@@ -112,10 +112,17 @@ fn current_addr_space() -> u64 {
 // fail.  Dropping them is the whole error policy for this file's accounting.
 
 /// The pid to attribute a futex operation to, or 0 for a kernel task.
+///
+/// Deliberately delegates to [`current_user_pid`] rather than repeating the
+/// `owner_process(current_task_id()).unwrap_or(0)` lookup, which is what this
+/// originally did.  `ipc::waiters` says plainly why, next to that function: two
+/// copies of one rule give someone the chance to "fix" one alone, and
+/// `BUG-PIPE-SINGLE-WAITER-SLOT` is what that looks like when it happens.  The
+/// narrowing to `u32` is this function's own business — `fs::futexstat` keys
+/// its per-process table on `u32` — and is where the two legitimately differ.
 fn accounting_pid() -> u32 {
-    let task_id = sched::current_task_id();
     #[allow(clippy::cast_possible_truncation)]
-    let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0) as u32;
+    let pid = current_user_pid() as u32;
     pid
 }
 

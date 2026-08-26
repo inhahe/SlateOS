@@ -81304,6 +81304,29 @@ offers at all. They keep appearing together because both come from the same
 habit — writing the arm that shows the feature working — but they are counted
 separately and cleared separately.
 
+**If you wire a registrar at boot, check it runs AFTER the self-test.** The
+obvious wiring for a `register_*` mutator is to call it from the owning
+subsystem's `init()`. That is right in principle and silently wrong in most
+cases, because these `self_test`s begin *and end* by resetting their table —
+which destroys rows a real subsystem registered earlier, not just the test's own
+fixtures. `main.rs` line numbers decide it, and they mostly go the wrong way:
+
+| registrar | self-test | result if wired naively |
+|---|---|---|
+| `net::init()` — main.rs:1311 | `fs::netdev::self_test()` — main.rs:4459 | row wiped, table empty for the boot |
+| `numa::init()` — main.rs:6324 | `fs::numastat::self_test()` — main.rs:4185 | survives (registrar runs later) |
+
+So before writing `fs::foo::register_x()` into a subsystem's `init`, grep both
+line numbers in `main.rs`. If the registrar loses, the options are: move the
+call to a later boot step; have the self-test restore rather than wipe (as
+`fs::associations::self_test` already does — it snapshots `stats()` and does not
+reset, which is why `register_defaults()` on the line above it survives); or
+project at read time and register nothing, which is what `netdev` and
+`pagecache` do and is usually best when the subsystem already keeps the numbers.
+This is design-decisions.md §612's accepted liability showing up in the very
+next task; it has not bitten anything yet because nothing has been wired the
+naive way.
+
 **Burn-down log.** Count at the head of this entry is
 `scripts/find-unreachable-mutators.py`'s, not hand arithmetic.
 

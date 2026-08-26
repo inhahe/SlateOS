@@ -23,6 +23,28 @@
 # as an ordinary failure.  A status a caller cannot know about is a status the
 # caller cannot handle.
 #
+# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 1500 SECONDS:
+#
+#   python scripts/run-timeout.py --poll 30 1500 ./scripts/boot-test.sh
+#
+# This script runs QEMU under its *own* timeout, 900s by default (--timeout).
+# An outer budget also has to cover the pre-build gates and the kernel build,
+# so an outer 900 is strictly the smaller window and the inner timeout can
+# never fire.  That is not a harmless duplication: the inner timeout is the
+# diagnostic one -- it reports SYSTEM HANG, dumps the guest's state, and reads
+# the faulting RIP back over the HMP monitor.  run-timeout's expiry gives exit
+# 124 and a killed process tree: no RIP, no task table, no marker saying where
+# it stopped.  So an outer budget at or below the inner one silently turns
+# every genuine boot hang into an anonymous kill, on exactly the runs where the
+# instrumentation matters most.
+#
+# Measured 2026-08-25: gates + a cold-cache clippy recompile + build took 530s,
+# leaving 370s of a 900s outer budget for a boot that reaches BOOT_OK at
+# 370-405s.  A healthy guest was killed mid-diagnostics.  1500 = 900 inner +
+# 600 headroom.  Being generous costs nothing here: run-timeout's real job is
+# tearing down the whole process tree, grandchildren included, and that is
+# independent of the budget.  See known-issues.md -> Lesson 50.
+#
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
 #   ./scripts/boot-test.sh --no-build   # skip build (still re-stages target/!)

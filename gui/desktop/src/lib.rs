@@ -865,6 +865,14 @@ pub struct DesktopShell {
     /// to have opened it. [`close_start_menu`](Self::close_start_menu) is what
     /// keeps the two in step.
     pub power_menu_open: bool,
+    /// Whether the card listing every keyboard shortcut is showing.
+    ///
+    /// A plain `bool` rather than a widget with state of its own, because the
+    /// card has none: [`hotkeys::render_settings_panel`] draws it from
+    /// [`hotkeys`](Self::hotkeys) every frame, so what it shows is whatever the
+    /// registry says right now — a shortcut rebound while the card is up is
+    /// redrawn under its new chord without anyone telling the card.
+    pub shortcut_card_open: bool,
     /// The programs this desktop can start, shared with the search launcher so
     /// that the two front ends cannot offer different applications.
     pub apps: Vec<AppEntry>,
@@ -1262,6 +1270,7 @@ impl DesktopShell {
             start_menu_scroll: 0,
             start_menu_wheel: wheel::Accumulator::default(),
             power_menu_open: false,
+            shortcut_card_open: false,
             apps: launcher::builtin_app_database(),
             alt_tab_active: false,
             alt_tab_index: 0,
@@ -1670,6 +1679,12 @@ impl DesktopShell {
             self.close_start_menu();
         } else {
             self.start_menu_open = true;
+            // The card is centred and the menu rises from the corner, so the two
+            // do not overlap — but the card is dismissed anyway, because it is
+            // opened to be *read* and a user who has gone to the start menu has
+            // stopped reading it. Symmetrical with `toggle_shortcut_card`, which
+            // closes this menu.
+            self.shortcut_card_open = false;
             self.start_menu_scroll = 0;
             // The offset is being rewound, so the fraction that was pushing it
             // must be rewound too — otherwise a menu opened just after a
@@ -2954,6 +2969,15 @@ impl DesktopShell {
                 self.toggle_notifications();
                 HotkeyOutcome::consumed()
             }
+            // Consumed unconditionally, for the same reason as the three above.
+            // The card is also the one surface that can be *closed* by the
+            // chord that lists it, which is why it must not fall through: a
+            // Super+/ that reached the focused window while the card was up
+            // would leave the user unable to shut what they opened.
+            HotkeyAction::ToggleShortcutCard => {
+                self.toggle_shortcut_card();
+                HotkeyOutcome::consumed()
+            }
             HotkeyAction::RestoreOrMinimize => {
                 // Which of the two it is depends on the state the *compositor*
                 // last reported, not on anything the shell decided: Super+Down
@@ -3841,6 +3865,7 @@ impl DesktopShell {
         // taskbar at once is a state the user cannot have asked for.
         self.start_menu_open = false;
         self.power_menu_open = false;
+        self.shortcut_card_open = false;
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3874,7 +3899,31 @@ impl DesktopShell {
         self.start_menu_open = false;
         self.power_menu_open = false;
         self.calendar.set_visible(false);
+        // The pane's scrim dims the whole screen behind it, so a card left open
+        // under it would be a card the user cannot read.
+        self.shortcut_card_open = false;
         self.notifications.show();
+    }
+
+    /// Open the card listing every shortcut, or close it if it is already open.
+    ///
+    /// Clears the taskbar's own panels for the same reason
+    /// [`toggle_notifications`](Self::toggle_notifications) does — two panels
+    /// over one desktop at once is a state the user cannot have asked for —
+    /// but deliberately leaves the *overview* and the zone overlay alone: those
+    /// are full-screen surfaces driven by their own chords, and a user who
+    /// opens the card to find out what the overview's chord is should not have
+    /// the overview shut in the act of looking it up.
+    pub fn toggle_shortcut_card(&mut self) {
+        if self.shortcut_card_open {
+            self.shortcut_card_open = false;
+            return;
+        }
+        self.start_menu_open = false;
+        self.power_menu_open = false;
+        self.calendar.set_visible(false);
+        self.notifications.hide();
+        self.shortcut_card_open = true;
     }
 
     /// Post a notification, opening nothing.
@@ -4060,6 +4109,7 @@ impl DesktopShell {
             || self.snap.is_overlay_visible()
             || self.overview.visible
             || self.run_dialog.is_visible()
+            || self.shortcut_card_open
     }
 
     /// Close whatever popup is open. Returns whether anything was.
@@ -4084,6 +4134,7 @@ impl DesktopShell {
         // opened it, and a user who does not remember what that was is left
         // looking at a screen they cannot dismiss.
         self.overview.hide();
+        self.shortcut_card_open = false;
         // Guarded, unlike every other line here. `RunDialog::hide` posts a
         // `Closed` event unconditionally, and this function is called on every
         // Escape and on every opening of the box itself — so an unguarded call
@@ -4224,6 +4275,50 @@ impl DesktopShell {
             &Palette::from_settings(&self.appearance),
             self.screen_width as f32,
             self.notification_pane_height(),
+        ));
+        Some(tree)
+    }
+
+    /// Render the card listing every shortcut, if it is open.
+    ///
+    /// Centred on the display rather than anchored to the taskbar: it is a
+    /// reference the user reads, not a control they act on, and the taskbar
+    /// corner is a long way from where their eyes are.
+    ///
+    /// The size comes from [`hotkeys::settings_panel_size`] — the same function
+    /// the renderer itself uses, given the same height budget — so the card is
+    /// centred on its real size however many bindings the user has added, and
+    /// folds into a second column rather than off the bottom of the screen.
+    #[must_use]
+    pub fn render_shortcut_card(&self) -> Option<RenderTree> {
+        if !self.shortcut_card_open {
+            return None;
+        }
+        // The screen, less a margin at top and bottom: a card that reaches the
+        // display's edges reads as a mode the desktop has entered rather than as
+        // a sheet laid over it, and the shadow it draws has nowhere to fall.
+        const MARGIN: f32 = 48.0;
+        let screen_w = self.screen_width as f32;
+        let screen_h = self.screen_height as f32;
+        // Bound once and handed to both calls below, because they are only
+        // guaranteed to agree about the column count if they are given the same
+        // budget — the two functions say so in their own docs.
+        let budget = (screen_h - MARGIN * 2.0).max(MARGIN);
+        let (width, height) = hotkeys::settings_panel_size(&self.hotkeys, budget);
+        // Clamped at zero so a display narrower or shorter than the card puts
+        // its top-left corner on screen rather than off it: a card that
+        // overflows is one the user can still read the start of, whereas one
+        // centred at a negative origin is one whose header is gone.
+        let x = ((screen_w - width) / 2.0).max(0.0);
+        let y = ((screen_h - height) / 2.0).max(0.0);
+        let mut tree = RenderTree::new();
+        tree.commands.extend(hotkeys::render_settings_panel(
+            &self.hotkeys,
+            &Palette::from_settings(&self.appearance),
+            x,
+            y,
+            None,
+            budget,
         ));
         Some(tree)
     }
@@ -4893,6 +4988,114 @@ mod window_manager_tests {
         assert!(
             !shell.any_popup_open(),
             "the condition outlived the popups it names"
+        );
+    }
+
+    /// The whole point of the card: a chord opens it, the same chord closes it,
+    /// and it is drawn only while it is open.
+    ///
+    /// Pressed through `handle_hotkey` rather than by setting the flag, because
+    /// the flag was never the part that was missing — `render_settings_panel`
+    /// existed and worked for months with nothing able to reach it.
+    #[test]
+    fn the_shortcut_card_opens_and_closes_on_its_own_chord() {
+        let mut shell = shell();
+        assert!(
+            shell.render_shortcut_card().is_none(),
+            "the card is drawn before anyone asked for it"
+        );
+
+        let chord = press(Key::Slash, super_only());
+        let out = shell.handle_hotkey(&chord);
+        assert!(
+            out.consumed,
+            "Super+/ fell through to the focused window, which will be typed a \
+             slash it did not ask for"
+        );
+        assert!(shell.shortcut_card_open);
+        assert!(
+            shell.render_shortcut_card().is_some(),
+            "the card is open and draws nothing"
+        );
+        assert!(
+            shell.any_popup_open(),
+            "the card is open but Escape would not be grabbed, so it cannot be \
+             closed from inside an application"
+        );
+
+        assert!(shell.handle_hotkey(&chord).consumed);
+        assert!(
+            !shell.shortcut_card_open,
+            "the second press did not close it"
+        );
+        assert!(shell.render_shortcut_card().is_none());
+    }
+
+    /// The card is placed on the screen it is drawn on, not off the edge of it.
+    #[test]
+    fn the_shortcut_card_is_centred_on_the_display() {
+        let shell_wide = {
+            let mut s = shell();
+            s.shortcut_card_open = true;
+            s
+        };
+        let tree = shell_wide.render_shortcut_card().expect("the card is open");
+        let Some(guitk::render::RenderCommand::FillRect {
+            x,
+            y,
+            width,
+            height,
+            ..
+        }) = tree
+            .commands
+            .iter()
+            .find(|c| matches!(c, guitk::render::RenderCommand::FillRect { .. }))
+        else {
+            panic!("the card drew no background");
+        };
+        assert!(*x >= 0.0 && *y >= 0.0, "the card starts off the screen");
+        let (screen_w, screen_h) = (
+            f32::from(u16::try_from(shell_wide.screen_width).unwrap_or(u16::MAX)),
+            f32::from(u16::try_from(shell_wide.screen_height).unwrap_or(u16::MAX)),
+        );
+        // Centred means the two margins match, which is a stronger statement
+        // than "on screen" and the one that actually breaks if the size the
+        // placement used and the size the drawing used ever diverge.
+        assert!(
+            (*x - (screen_w - width) / 2.0).abs() < 0.5,
+            "left margin {x} is not half of the leftover {}",
+            screen_w - width
+        );
+        assert!(
+            (*y - (screen_h - height) / 2.0).abs() < 0.5,
+            "top margin {y} is not half of the leftover {}",
+            screen_h - height
+        );
+    }
+
+    /// Opening the card puts the taskbar's panels away, and opening one of them
+    /// puts the card away. Both directions, because only one of them was
+    /// obvious to write.
+    #[test]
+    fn the_card_and_the_taskbar_panels_are_not_open_at_once() {
+        let mut shell = shell();
+        shell.start_menu_open = true;
+        shell.toggle_shortcut_card();
+        assert!(shell.shortcut_card_open);
+        assert!(!shell.start_menu_open, "the start menu survived the card");
+
+        shell.toggle_start_menu();
+        assert!(shell.start_menu_open);
+        assert!(
+            !shell.shortcut_card_open,
+            "the card survived the start menu"
+        );
+
+        shell.toggle_shortcut_card();
+        shell.toggle_notifications();
+        assert!(
+            !shell.shortcut_card_open,
+            "the card is left under the notification pane's scrim, which dims it"
         );
     }
 

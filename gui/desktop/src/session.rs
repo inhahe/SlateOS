@@ -685,6 +685,14 @@ impl<T: Transport> ShellSession<T> {
                 // the three above is a statement of the invariant rather than a
                 // case that arises.
                 self.shell.render_zone_overlay(),
+                // Over both of the full-screen overlays above, because both dim
+                // what is behind them and a reference card read through a scrim
+                // is a reference card the user opened for nothing — and neither
+                // one closes the card, so this is a case that genuinely arises
+                // rather than an invariant. Under Alt-Tab for the same reason
+                // the menus are: Alt+Tab leaves the card open, and the switcher
+                // is modal while it is up.
+                self.shell.render_shortcut_card(),
                 self.shell.render_alt_tab(),
                 // Last of all, over Alt-Tab too, and for the opposite reason to
                 // the overview: the pane's scrim dims what is *behind* it, and
@@ -743,6 +751,7 @@ impl<T: Transport> ShellSession<T> {
             || self.shell.snap.is_overlay_visible()
             || self.shell.overview.visible
             || self.shell.run_dialog.is_visible()
+            || self.shell.shortcut_card_open
     }
 
     /// Handle everything waiting, without blocking. Reports whether anything

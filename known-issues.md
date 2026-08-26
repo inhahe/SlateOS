@@ -84839,7 +84839,29 @@ ignored is worse than a control that says it is not available yet.
 *seventeen* of seventeen did nothing. This is the state after wiring five of
 them up.
 
-## `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` (lane C, 2026-08-26)
+## `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` (lane C, 2026-08-26) — **RESOLVED 2026-08-26**
+
+**Resolution.** Piece 1 below is done. `HotkeyAction::ToggleShortcutCard` exists,
+`Super+/` is its default binding (and is listed on the card, so the card teaches
+its own chord), `DesktopShell::shortcut_card_open` holds the state,
+`render_shortcut_card()` centres the panel on the display, and
+`SessionRunner::paint_chrome` draws it — over the overview and the zone overlay,
+which dim what is behind them, and under Alt-Tab, which is modal. It joins
+`any_popup_open`/`dismiss_popups`, so Escape closes it and the Escape grab is
+reconciled for it like every other popup.
+
+Fixing the door exposed a second defect the card had all along, fixed in the same
+change: **the card did not fit on the screen.** Twenty-five bindings at 38 units
+a row came to 1,010 units of list plus chrome — 1,086 tall on a 1,080-line
+display — so the last rows were drawn past the bottom edge with nothing on the
+card to say they existed. `hotkeys::panel_layout` now folds the list into as many
+columns as it takes to fit the height the caller can spare; a card that fits is
+left at one column. See `design-decisions.md` §572.
+
+Piece 2 — **rebinding from the card** — is *not* done and is now tracked on its
+own as `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` below.
+
+---
 
 **In short:** the desktop can draw a "Keyboard Shortcuts" card — a list of every
 chord and what it does, styled, scrollable-height, with the selected row
@@ -84879,3 +84901,44 @@ minimum:
 
 Until then the renderer is dead code that passes its tests, which is the state
 this project has repeatedly found to be worse than absent code: it looks done.
+
+## `TD-C-THE-SHORTCUT-CARD-IS-READ-ONLY` (lane C, 2026-08-26)
+
+**In short:** you can now open the card that lists every keyboard shortcut
+(`Super+/`), but you cannot change a shortcut from it. The shortcuts *are*
+changeable — there is a text configuration file format for them, and the code
+that reads and writes it works — so the only way to move a shortcut is to edit
+that file by hand, which no desktop user is going to do. Every other desktop lets
+you click a shortcut and press the new keys.
+
+**Where it lives.** `gui/desktop/src/hotkeys.rs`. Almost all the parts exist:
+
+| Part | State |
+|---|---|
+| `render_settings_panel`'s `selected_index` — draws one row highlighted | done, and drawn with `None` by `DesktopShell::render_shortcut_card` |
+| `HotkeyRegistry::conflicts_with` — "that chord already does X" | done, tested |
+| `HotkeyConfig::from_registry(...).save()` / `load` — the file format | done, tested, round-trips every action |
+| Moving the selection with the arrow keys | missing |
+| A *capture mode* — "press the chord you want now", where the next keystroke is read as data rather than run as a shortcut | missing, and is the real work |
+| Anywhere on disk to save to | missing — nothing in the shell reads or writes a settings file yet |
+
+**What the proper fix looks like.** The capture mode is the part that needs
+thought, because it inverts the shell's whole input rule: while it is on, the
+shell must *not* run the chord the user presses, and must not let the compositor
+run it either — including chords the shell has grabbed globally, and including
+Escape, which has to mean "cancel" rather than "close the card". A
+`shortcut_capture: Option<usize>` on `DesktopShell` naming the row being rebound,
+checked at the top of `handle_hotkey` before `bound_action`, is the shape; the
+new binding then goes in via `HotkeyRegistry::register`, whose `Err(Conflict)` is
+what the card shows instead of applying it.
+
+The grabs also have to be re-reconciled after any change: the set of chords the
+shell holds is derived from the registry (`global_chords`), so a rebind must
+ungrab the old chord and grab the new one, exactly as
+`SessionRunner::reconcile_escape_grab` already does for the conditional ones.
+That is the piece most likely to be forgotten, and forgetting it means the
+rebound shortcut works until the session restarts.
+
+**If it is never fixed:** the shortcuts stay at their defaults for every user in
+practice. Nothing breaks; the card is still worth having as a reference. This is
+a feature gap, not a bug.

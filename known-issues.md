@@ -83899,3 +83899,48 @@ the register→park window for the core protocol) is actually on the path
 boot, so the log quoted above no longer exists on disk. The excerpt in this
 entry is the whole of the surviving record — which is the argument for quoting
 generously here rather than referring to a file.
+
+---
+
+## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **open**, tech debt
+
+**In short:** `diskquota` can limit two things: how many *bytes* a user may
+store, and how many *files*. The byte half works. The file half is a prop —
+`diskquota files alice user 100 200` accepts the numbers, stores them, prints a
+confirmation, and nothing anywhere ever looks at them again. A user given a
+200-file limit can create any number of files.
+
+**Where.** `kernel/src/fs/diskquota.rs`. The fields exist
+(`QuotaEntry::soft_limit_files`, `hard_limit_files`, lines ~83–84) and are
+written in exactly two places — the `u64::MAX` seed for a newly created entry
+(~195–196) and `set_file_limits` (~218–219). A tree-wide grep for
+`limit_files` returns no reader outside this file, and inside it there is none
+either: `QuotaEntry::status()` compares `bytes_used` against the byte limits
+only, and `check_quota` likewise tests `new_usage > entry.hard_limit_bytes`.
+
+The usage side is *also* live and equally unconsulted: `update_usage` maintains
+`entry.file_count` (~272–274), so the kernel dutifully tracks a running file
+count and dutifully stores a ceiling for it, and never once compares the two.
+
+**Why it is worth an entry rather than a shrug.** This is not a stub that
+announces itself. `set_file_limits` returns `KernelResult<()>` and reports
+`NotFound` when there is no such quota entry, so it fails in exactly the
+situation a real implementation would, which makes it look implemented. The
+shell prints `File limits for user 'alice': soft=100 hard=200` — a success line
+naming the numbers. Everything about the interface says the limit took effect.
+
+**The proper fix** is to enforce it, not to remove it: extend `status()` to
+return the worse of the byte and file verdicts, and give `check_quota` a
+file-count counterpart (or a `files: u64` parameter) so a write that would
+create a file is tested against `hard_limit_files` the way its bytes are tested
+against `hard_limit_bytes`. The grace-period machinery already keyed off the
+soft byte limit should apply to the soft file limit on the same terms.
+
+**Until then, do not let the D1 burn-down overstate the damage in this arm.**
+When `cmd_diskquota`'s guessed-value sites are fixed, the `files` subcommand's
+guessed `0` is a *latent* fault, not an active one: it records a limit that is
+wrong and that nothing currently enforces. It becomes an active lockout the
+moment the enforcement above is written. The `set` arm's guessed `0` is a live
+lockout today, because the byte path is real.
+
+**Not a regression.** True since `set_file_limits` was written.

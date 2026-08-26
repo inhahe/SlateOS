@@ -40940,13 +40940,51 @@ fn required_id(parts: &[&str], cmd: &str, sub: &str, noun: &str) -> Option<u64> 
 /// `fstune blocksize 3 4o96` (letter O) set the block size to **zero** and said
 /// "Block size set to 0". Zero is not a plausible reading of any word the user
 /// typed here; it is the shape of a value chosen because none could be read.
-fn required_u32(parts: &[&str], idx: usize, cmd: &str, sub: &str, noun: &str) -> Option<u32> {
+///
+/// # Why this is generic when its three predecessors were not
+///
+/// This began as `required_u32`, `required_u64` and `required_i32`, three
+/// copies differing only in the width they parsed, on the reasoning — written
+/// into `required_u64`'s own doc comment — that "a `T: FromStr` bound would
+/// pull `core::str::FromStr` into a signature that every call site would then
+/// have to name." That was simply wrong: the bound lives *here*, and a caller
+/// writes `required_num(&parts, 2, "cpick", "rgb", "red channel")` with `T`
+/// inferred from wherever the value is going.
+///
+/// What made the cost concrete was counting the remaining backlog. The
+/// `…parse().ok().unwrap_or(…)` sites left in this file parse **nine**
+/// distinct types — `u32` (279 sites), `u64` (159), `usize` (60), `u8` (21),
+/// `u16` (16), `i32` (14), `i64` (9), `i8` (1), and 221 more whose type is
+/// inferred. Finishing the burn-down with a per-width family meant writing ten
+/// further functions (`required_usize`, `required_u8`, … and their `optional_`
+/// twins) that would differ from these by one token each. One generic covers
+/// every width that exists and every width that will.
+///
+/// `required_id` deliberately did *not* fold in: it is not this function at
+/// index 1. It names the operand as an *id* in its diagnostic ("`abc' is not a
+/// session id"), which says which id-space the word was judged against — a
+/// different message, not a different width.
+///
+/// # Choose `T` from what the operand means, not from what looks safe
+///
+/// The signed widths are not an afterthought. Monitor positions are the case
+/// that forced one: a desktop's origin is wherever the primary display is, so a
+/// secondary display to its *left* has a negative `x`, and reaching for `u32`
+/// here would refuse exactly the coordinates that are correct — a refusal is
+/// only an improvement over a guess if it refuses the right words.
+fn required_num<T: core::str::FromStr>(
+    parts: &[&str],
+    idx: usize,
+    cmd: &str,
+    sub: &str,
+    noun: &str,
+) -> Option<T> {
     let Some(word) = parts.get(idx) else {
         shell_println!("{}: {}: missing {}", cmd, sub, noun);
         set_exit(1);
         return None;
     };
-    let Ok(v) = word.parse::<u32>() else {
+    let Ok(v) = word.parse::<T>() else {
         shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
         set_exit(1);
         return None;
@@ -40968,83 +41006,28 @@ fn required_u32(parts: &[&str], idx: usize, cmd: &str, sub: &str, noun: &str) ->
 /// like a successful set, right down to a plausible-looking size in the output.
 ///
 /// Returns `None` only for the refusal, so callers use the same
-/// `let Some(v) = … else { return; }` shape as [`required_u32`].
-fn optional_u32(
+/// `let Some(v) = … else { return; }` shape as [`required_num`].
+///
+/// The `reslimit` commands are the sharpest case in the whole family, and the
+/// reason the distinction is not academic: their limits use `0` as the sentinel
+/// for *unlimited*, so `…parse().ok().unwrap_or(0)` turned a mistyped limit
+/// into **no limit at all** — the exact inverse of what the operator asked for,
+/// reported as success.
+///
+/// Generic for the reason given on [`required_num`]: the widths this had to
+/// cover were about to outnumber the functions written to cover them.
+fn optional_num<T: core::str::FromStr>(
     parts: &[&str],
     idx: usize,
     cmd: &str,
     sub: &str,
     noun: &str,
-    default: u32,
-) -> Option<u32> {
+    default: T,
+) -> Option<T> {
     let Some(word) = parts.get(idx) else {
         return Some(default);
     };
-    let Ok(v) = word.parse::<u32>() else {
-        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
-        set_exit(1);
-        return None;
-    };
-    Some(v)
-}
-
-/// The [`required_u32`] rule for a 64-bit operand.
-///
-/// Separate from `required_u32` only because kshell has no generic numeric
-/// parse helper and a `T: FromStr` bound would pull `core::str::FromStr` into a
-/// signature that every call site would then have to name.
-fn required_u64(parts: &[&str], idx: usize, cmd: &str, sub: &str, noun: &str) -> Option<u64> {
-    let Some(word) = parts.get(idx) else {
-        shell_println!("{}: {}: missing {}", cmd, sub, noun);
-        set_exit(1);
-        return None;
-    };
-    let Ok(v) = word.parse::<u64>() else {
-        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
-        set_exit(1);
-        return None;
-    };
-    Some(v)
-}
-
-/// The [`optional_u32`] rule for a 64-bit operand.
-///
-/// The `reslimit` commands are why this exists, and they are the sharpest case
-/// in the whole family: their limits use `0` as the sentinel for *unlimited*,
-/// so `…parse().ok().unwrap_or(0)` turned a mistyped limit into **no limit at
-/// all** — the exact inverse of what the operator asked for, reported as
-/// success.
-fn optional_u64(
-    parts: &[&str],
-    idx: usize,
-    cmd: &str,
-    sub: &str,
-    noun: &str,
-    default: u64,
-) -> Option<u64> {
-    let Some(word) = parts.get(idx) else {
-        return Some(default);
-    };
-    let Ok(v) = word.parse::<u64>() else {
-        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
-        set_exit(1);
-        return None;
-    };
-    Some(v)
-}
-
-/// The [`required_u32`] rule for an operand that may be negative.
-///
-/// Monitor positions are the case that needs it: a desktop's origin is wherever
-/// the primary display is, so a secondary display to its left has a negative
-/// `x`, and `parse::<u32>()` would refuse the very coordinates that are correct.
-fn required_i32(parts: &[&str], idx: usize, cmd: &str, sub: &str, noun: &str) -> Option<i32> {
-    let Some(word) = parts.get(idx) else {
-        shell_println!("{}: {}: missing {}", cmd, sub, noun);
-        set_exit(1);
-        return None;
-    };
-    let Ok(v) = word.parse::<i32>() else {
+    let Ok(v) = word.parse::<T>() else {
         shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
         set_exit(1);
         return None;
@@ -41230,7 +41213,7 @@ fn cmd_fstune(args: &str) {
             let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
                 return;
             };
-            let Some(sz) = required_u32(&parts, 2, "fstune", sub, "block size") else {
+            let Some(sz) = required_num(&parts, 2, "fstune", sub, "block size") else {
                 return;
             };
             match fstune::set_block_size(id, sz) {
@@ -41272,7 +41255,7 @@ fn cmd_fstune(args: &str) {
             let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
                 return;
             };
-            let Some(secs) = required_u32(&parts, 2, "fstune", sub, "commit interval in seconds")
+            let Some(secs) = required_num(&parts, 2, "fstune", sub, "commit interval in seconds")
             else {
                 return;
             };
@@ -41288,7 +41271,7 @@ fn cmd_fstune(args: &str) {
             let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
                 return;
             };
-            let Some(pct) = required_u32(&parts, 2, "fstune", sub, "reserved percentage") else {
+            let Some(pct) = required_num(&parts, 2, "fstune", sub, "reserved percentage") else {
                 return;
             };
             match fstune::set_reserved_pct(id, pct) {
@@ -41303,7 +41286,7 @@ fn cmd_fstune(args: &str) {
             let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
                 return;
             };
-            let Some(ratio) = required_u32(&parts, 2, "fstune", sub, "inode ratio") else {
+            let Some(ratio) = required_num(&parts, 2, "fstune", sub, "inode ratio") else {
                 return;
             };
             match fstune::set_inode_ratio(id, ratio) {
@@ -41690,7 +41673,7 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "threshold" => {
-            let Some(days) = optional_u32(&parts, 1, "certmgr", sub, "number of days", 0) else {
+            let Some(days) = optional_num(&parts, 1, "certmgr", sub, "number of days", 0) else {
                 return;
             };
             if days == 0 {
@@ -41933,7 +41916,7 @@ fn cmd_installer(args: &str) {
             let Some(id) = required_id(&parts, "installer", sub, "session") else {
                 return;
             };
-            let Some(dpi) = optional_u32(&parts, 2, "installer", sub, "DPI", 96) else {
+            let Some(dpi) = optional_num(&parts, 2, "installer", sub, "DPI", 96) else {
                 return;
             };
             match installer::detect_and_set_scaling(id, dpi) {
@@ -41976,7 +41959,7 @@ fn cmd_installer(args: &str) {
                 return;
             };
             let disk = parts.get(2).copied().unwrap_or("/dev/sda");
-            let Some(boot) = optional_u32(&parts, 3, "installer", sub, "boot size in MiB", 1024)
+            let Some(boot) = optional_num(&parts, 3, "installer", sub, "boot size in MiB", 1024)
             else {
                 return;
             };
@@ -42588,7 +42571,7 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "size" => {
-            let Some(pt) = optional_u32(&parts, 1, "fontmgr", sub, "size in points", 0) else {
+            let Some(pt) = optional_num(&parts, 1, "fontmgr", sub, "size in points", 0) else {
                 return;
             };
             if pt == 0 {
@@ -42639,7 +42622,7 @@ fn cmd_fontmgr(args: &str) {
             shell_println!("Antialiasing set");
         }
         "dpi" => {
-            let Some(dpi) = optional_u32(&parts, 1, "fontmgr", sub, "DPI", 0) else {
+            let Some(dpi) = optional_num(&parts, 1, "fontmgr", sub, "DPI", 0) else {
                 return;
             };
             if dpi == 0 {
@@ -52339,13 +52322,13 @@ fn cmd_monitors(args: &str) {
                 // The old defaults were a *plausible* monitor -- 1920x1080@60 --
                 // so a mistyped size produced a monitor that looked deliberate
                 // and was not the one asked for.
-                let Some(w) = required_u32(&parts, 4, "monitors", sub, "width in pixels") else {
+                let Some(w) = required_num(&parts, 4, "monitors", sub, "width in pixels") else {
                     return;
                 };
-                let Some(h) = required_u32(&parts, 5, "monitors", sub, "height in pixels") else {
+                let Some(h) = required_num(&parts, 5, "monitors", sub, "height in pixels") else {
                     return;
                 };
-                let Some(hz) = required_u32(&parts, 6, "monitors", sub, "refresh rate in Hz")
+                let Some(hz) = required_num(&parts, 6, "monitors", sub, "refresh rate in Hz")
                 else {
                     return;
                 };
@@ -52382,16 +52365,16 @@ fn cmd_monitors(args: &str) {
         "mode" | "res" => {
             // monitors mode <id> <w> <h> [hz]
             if parts.len() >= 4 {
-                let Some(id) = required_u32(&parts, 1, "monitors", sub, "monitor ID") else {
+                let Some(id) = required_num(&parts, 1, "monitors", sub, "monitor ID") else {
                     return;
                 };
-                let Some(w) = required_u32(&parts, 2, "monitors", sub, "width in pixels") else {
+                let Some(w) = required_num(&parts, 2, "monitors", sub, "width in pixels") else {
                     return;
                 };
-                let Some(h) = required_u32(&parts, 3, "monitors", sub, "height in pixels") else {
+                let Some(h) = required_num(&parts, 3, "monitors", sub, "height in pixels") else {
                     return;
                 };
-                let Some(hz) = optional_u32(&parts, 4, "monitors", sub, "refresh rate in Hz", 60)
+                let Some(hz) = optional_num(&parts, 4, "monitors", sub, "refresh rate in Hz", 60)
                 else {
                     return;
                 };
@@ -52409,13 +52392,13 @@ fn cmd_monitors(args: &str) {
         }
         "pos" | "position" => {
             if parts.len() >= 4 {
-                let Some(id) = required_u32(&parts, 1, "monitors", sub, "monitor ID") else {
+                let Some(id) = required_num(&parts, 1, "monitors", sub, "monitor ID") else {
                     return;
                 };
-                let Some(x) = required_i32(&parts, 2, "monitors", sub, "coordinate") else {
+                let Some(x) = required_num(&parts, 2, "monitors", sub, "coordinate") else {
                     return;
                 };
-                let Some(y) = required_i32(&parts, 3, "monitors", sub, "coordinate") else {
+                let Some(y) = required_num(&parts, 3, "monitors", sub, "coordinate") else {
                     return;
                 };
                 match monitors::set_position(id, x, y) {
@@ -52432,10 +52415,10 @@ fn cmd_monitors(args: &str) {
         }
         "scale" => {
             if parts.len() >= 3 {
-                let Some(id) = required_u32(&parts, 1, "monitors", sub, "monitor ID") else {
+                let Some(id) = required_num(&parts, 1, "monitors", sub, "monitor ID") else {
                     return;
                 };
-                let Some(pct) = required_u32(&parts, 2, "monitors", sub, "percentage") else {
+                let Some(pct) = required_num(&parts, 2, "monitors", sub, "percentage") else {
                     return;
                 };
                 match monitors::set_scale(id, pct) {
@@ -52452,7 +52435,7 @@ fn cmd_monitors(args: &str) {
         }
         "rotate" => {
             if parts.len() >= 3 {
-                let Some(id) = required_u32(&parts, 1, "monitors", sub, "monitor ID") else {
+                let Some(id) = required_num(&parts, 1, "monitors", sub, "monitor ID") else {
                     return;
                 };
                 let rot = match parts[2] {
@@ -60078,7 +60061,7 @@ fn cmd_reslimit(args: &str) {
                 // create the group at the top of the tree -- outside whatever
                 // group the operator meant to nest it under, and so outside
                 // that group's limits.
-                let Some(parent) = optional_u32(&parts, 2, "reslimit", sub, "group ID", 0) else {
+                let Some(parent) = optional_num(&parts, 2, "reslimit", sub, "group ID", 0) else {
                     return;
                 };
                 match reslimit::create_group(name, parent) {
@@ -60159,11 +60142,20 @@ fn cmd_reslimit(args: &str) {
                     // old `.parse().ok().unwrap_or(0)` turned `setmem 5 abc`
                     // into "unlimited", the precise opposite of the request,
                     // and reported it as success.
-                    let Some(max_mib) = required_u64(&parts, 2, "reslimit", sub, "size in MiB")
+                    // Turbofished because these two are the only operands in
+                    // the file whose value never reaches a typed destination:
+                    // both are multiplied out to bytes here and the *product*
+                    // is what `reslimit` sees, so nothing downstream pins the
+                    // width. `u64` is not a widening for safety's sake -- a
+                    // limit in MiB times 1024*1024 overflows `u32` at 4 GiB,
+                    // which is an ordinary memory limit to ask for.
+                    let Some(max_mib) =
+                        required_num::<u64>(&parts, 2, "reslimit", sub, "size in MiB")
                     else {
                         return;
                     };
-                    let Some(soft_mib) = optional_u64(&parts, 3, "reslimit", sub, "size in MiB", 0)
+                    let Some(soft_mib) =
+                        optional_num::<u64>(&parts, 3, "reslimit", sub, "size in MiB", 0)
                     else {
                         return;
                     };
@@ -60208,11 +60200,11 @@ fn cmd_reslimit(args: &str) {
                 if let Ok(gid) = gid_str.parse::<u32>() {
                     // `0` means unlimited, so an unreadable percentage used to
                     // lift the CPU cap entirely rather than being refused.
-                    let Some(max_pct) = required_u64(&parts, 2, "reslimit", sub, "percentage")
+                    let Some(max_pct) = required_num(&parts, 2, "reslimit", sub, "percentage")
                     else {
                         return;
                     };
-                    let Some(weight) = optional_u32(&parts, 3, "reslimit", sub, "weight", 100)
+                    let Some(weight) = optional_num(&parts, 3, "reslimit", sub, "weight", 100)
                     else {
                         return;
                     };
@@ -60245,11 +60237,17 @@ fn cmd_reslimit(args: &str) {
                 if let Ok(gid) = gid_str.parse::<u32>() {
                     // `0` means unlimited, so an unreadable rate used to remove
                     // the I/O cap instead of being refused.
-                    let Some(read_mbps) = required_u64(&parts, 2, "reslimit", sub, "rate in Mbps")
+                    //
+                    // Turbofished for the same reason as `setmem` above: the
+                    // rate itself never reaches a typed destination, only the
+                    // product `rate * 1_000_000` does.
+                    let Some(read_mbps) =
+                        required_num::<u64>(&parts, 2, "reslimit", sub, "rate in Mbps")
                     else {
                         return;
                     };
-                    let Some(write_mbps) = required_u64(&parts, 3, "reslimit", sub, "rate in Mbps")
+                    let Some(write_mbps) =
+                        required_num::<u64>(&parts, 3, "reslimit", sub, "rate in Mbps")
                     else {
                         return;
                     };
@@ -60307,14 +60305,14 @@ fn cmd_reslimit(args: &str) {
                 if let Ok(gid) = gid_str.parse::<u32>() {
                     // `0` means unlimited, so a mistyped count used to remove the
                     // very limit the operator was setting.
-                    let Some(max_procs) = required_u64(&parts, 2, "reslimit", sub, "count") else {
+                    let Some(max_procs) = required_num(&parts, 2, "reslimit", sub, "count") else {
                         return;
                     };
-                    let Some(max_threads) = required_u64(&parts, 3, "reslimit", sub, "count")
+                    let Some(max_threads) = required_num(&parts, 3, "reslimit", sub, "count")
                     else {
                         return;
                     };
-                    let Some(max_files) = required_u64(&parts, 4, "reslimit", sub, "count") else {
+                    let Some(max_files) = required_num(&parts, 4, "reslimit", sub, "count") else {
                         return;
                     };
                     let limits = reslimit::ProcessLimits {
@@ -71430,7 +71428,7 @@ fn cmd_brightness(args: &str) {
             } else {
                 (None, 1)
             };
-            let Some(level) = required_u32(&parts, level_idx, "bright", sub, "percentage") else {
+            let Some(level) = required_num(&parts, level_idx, "bright", sub, "percentage") else {
                 return;
             };
             // Guessing here was the same defect twice over: `bright set 1 abc`
@@ -71439,7 +71437,7 @@ fn cmd_brightness(args: &str) {
             let id = match id_idx {
                 None => 1,
                 Some(i) => {
-                    let Some(v) = required_u32(&parts, i, "bright", sub, "display ID") else {
+                    let Some(v) = required_num(&parts, i, "bright", sub, "display ID") else {
                         return;
                     };
                     v
@@ -82772,7 +82770,7 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+            let Some(split_id) = required_num(&parts, 1, "splitview", sub, "split ID") else {
                 return;
             };
             // `and_then(parse().ok())` collapsed "no window was named" and "the
@@ -82781,7 +82779,7 @@ fn cmd_splitview(args: &str) {
             let win_id = match parts.get(2) {
                 None => None,
                 Some(_) => {
-                    let Some(id) = required_u32(&parts, 2, "splitview", sub, "window ID") else {
+                    let Some(id) = required_num(&parts, 2, "splitview", sub, "window ID") else {
                         return;
                     };
                     Some(id)
@@ -82801,10 +82799,10 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+            let Some(split_id) = required_num(&parts, 1, "splitview", sub, "split ID") else {
                 return;
             };
-            let Some(pane_id) = required_u32(&parts, 2, "splitview", sub, "pane ID") else {
+            let Some(pane_id) = required_num(&parts, 2, "splitview", sub, "pane ID") else {
                 return;
             };
             match splitview::remove_pane(split_id, pane_id) {
@@ -82821,13 +82819,13 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+            let Some(split_id) = required_num(&parts, 1, "splitview", sub, "split ID") else {
                 return;
             };
-            let Some(pane_id) = required_u32(&parts, 2, "splitview", sub, "pane ID") else {
+            let Some(pane_id) = required_num(&parts, 2, "splitview", sub, "pane ID") else {
                 return;
             };
-            let Some(ratio) = required_u32(&parts, 3, "splitview", sub, "percentage") else {
+            let Some(ratio) = required_num(&parts, 3, "splitview", sub, "percentage") else {
                 return;
             };
             match splitview::resize_pane(split_id, pane_id, ratio) {
@@ -82844,10 +82842,10 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+            let Some(split_id) = required_num(&parts, 1, "splitview", sub, "split ID") else {
                 return;
             };
-            let Some(pane_id) = required_u32(&parts, 2, "splitview", sub, "pane ID") else {
+            let Some(pane_id) = required_num(&parts, 2, "splitview", sub, "pane ID") else {
                 return;
             };
             match splitview::focus_pane(split_id, pane_id) {
@@ -82864,7 +82862,7 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+            let Some(split_id) = required_num(&parts, 1, "splitview", sub, "split ID") else {
                 return;
             };
             // The old `if == "v" { V } else { H }` made every word that was not
@@ -106819,10 +106817,10 @@ fn cmd_userns(args: &str) {
             // 0 is the root namespace and UID 0 is root -- so a mistyped word
             // here used to hand the new namespace *more* authority than was
             // asked for, and say it had succeeded.
-            let Some(parent) = optional_u32(&parts, 1, "userns", cmd, "namespace ID", 0) else {
+            let Some(parent) = optional_num(&parts, 1, "userns", cmd, "namespace ID", 0) else {
                 return;
             };
-            let Some(owner) = optional_u32(&parts, 2, "userns", cmd, "UID", 0) else {
+            let Some(owner) = optional_num(&parts, 2, "userns", cmd, "UID", 0) else {
                 return;
             };
             match userns::create(parent, owner) {
@@ -106867,16 +106865,16 @@ fn cmd_userns(args: &str) {
             // A mistyped `outer` used to become 0, which is root's UID in the
             // parent namespace: the mapping the operator got was the one
             // mapping they must never get, and it was reported as success.
-            let Some(ns) = required_u32(&parts, 1, "userns", cmd, "namespace ID") else {
+            let Some(ns) = required_num(&parts, 1, "userns", cmd, "namespace ID") else {
                 return;
             };
-            let Some(inner) = required_u32(&parts, 2, "userns", cmd, "UID") else {
+            let Some(inner) = required_num(&parts, 2, "userns", cmd, "UID") else {
                 return;
             };
-            let Some(outer) = required_u32(&parts, 3, "userns", cmd, "UID") else {
+            let Some(outer) = required_num(&parts, 3, "userns", cmd, "UID") else {
                 return;
             };
-            let Some(count) = required_u32(&parts, 4, "userns", cmd, "count") else {
+            let Some(count) = required_num(&parts, 4, "userns", cmd, "count") else {
                 return;
             };
             match userns::add_uid_mapping(ns, inner, outer, count) {
@@ -106903,16 +106901,16 @@ fn cmd_userns(args: &str) {
             }
             // As for `uidmap`: a mistyped `outer` used to become 0, which is
             // root's GID in the parent namespace.
-            let Some(ns) = required_u32(&parts, 1, "userns", cmd, "namespace ID") else {
+            let Some(ns) = required_num(&parts, 1, "userns", cmd, "namespace ID") else {
                 return;
             };
-            let Some(inner) = required_u32(&parts, 2, "userns", cmd, "GID") else {
+            let Some(inner) = required_num(&parts, 2, "userns", cmd, "GID") else {
                 return;
             };
-            let Some(outer) = required_u32(&parts, 3, "userns", cmd, "GID") else {
+            let Some(outer) = required_num(&parts, 3, "userns", cmd, "GID") else {
                 return;
             };
-            let Some(count) = required_u32(&parts, 4, "userns", cmd, "count") else {
+            let Some(count) = required_num(&parts, 4, "userns", cmd, "count") else {
                 return;
             };
             match userns::add_gid_mapping(ns, inner, outer, count) {

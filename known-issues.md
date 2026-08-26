@@ -68012,21 +68012,54 @@ module path, outside tests and bare re-exports. A `pub` item must be named to
 be used, so a "no" is sound — which is what makes this answerable at module
 scale when the function-level question (`scan-unwired.py`) is not.
 
-**21 island modules, 39,060 lines, out of 200 library modules scanned.** The
-largest, and the reason the number is worth writing down:
+**57 island modules, 113,132 lines, out of 200 library modules scanned** — and
+**39 of the 57 are in `gui/desktop`, a crate whose `lib.rs` declares 59.**
+
+*(Corrected the same day. The first run of the instrument said 21 / 39,060,
+and that was wrong three separate times over: an associated `fn` sharing a
+free item's spelling, an item name matched against a same-named type in a lane
+that has never heard of this crate, and an identifier inside a string literal
+each alibi'd a slice of the list. All three were found by disbelieving a
+clearance and checking the module by hand; see commit `26f8eecd5`. The
+lesson generalises past this script: **a scan of this kind is not finished
+when it runs, it is finished when its clearances survive being disbelieved.**
+Do not cite the 21.)*
+
+The 39-of-59 figure is worth pausing on. The paragraphs above reached "four of
+its fifty-seven modules are drawn" by hand-counting `pub fn render` call
+sites — a completely different method, asking a narrower question. The two
+agree: four modules drawn, thirty-nine with no caller of any kind. That
+agreement is the best evidence either number is right.
+
+The largest islands:
 
 | Module | Lines | What is in it |
 |---|---|---|
+| `gui/toolkit/src/modal.rs` | 4,630 | modal dialog / sheet infrastructure |
+| `gui/desktop/src/network_settings.rs` | 4,172 | the whole network settings page |
+| `gui/desktop/src/osd.rs` | 3,457 | volume/brightness/lock on-screen display |
 | `gui/toolkit/src/svg.rs` | 3,393 | an SVG path/transform/colour parser |
 | `gui/desktop/src/notif_pane.rs` | 3,374 | the notification pane and quick settings |
 | `gui/toolkit/src/menubar.rs` | 3,337 | the menu bar widget |
-| `gui/desktop/src/default_apps.rs` | 2,314 | default-application settings |
-| `gui/desktop/src/a11y.rs` | 2,292 | magnifier, high contrast, sticky/filter/mouse keys |
-| `gui/desktop/src/widgets.rs` | 2,276 | the desktop widget grid |
-| `gui/desktop/src/blur.rs` | 2,224 | the blur/acrylic renderer |
-| `apps/sysinfo/src/hwquery.rs` | 2,163 | the hardware-query provider chain |
-| `gui/desktop/src/window_peek.rs` | 2,154 | taskbar thumbnail previews |
-| `gui/desktop/src/run_dialog.rs` | 2,012 | the Run dialog |
+| `gui/desktop/src/touchpad.rs` | 2,841 | touchpad gestures and settings |
+| `gui/desktop/src/window_rules.rs` | 2,605 | per-application window placement rules |
+| `gui/desktop/src/backup_settings.rs` | 2,591 | backup settings page |
+| `gui/desktop/src/notification_settings.rs` | 2,539 | notification settings page |
+| `apps/procexplorer/src/features.rs` | 2,517 | process-explorer feature set |
+| `apps/imageviewer/src/video.rs` | 2,436 | video playback in the image viewer |
+| `gui/desktop/src/hotkeys.rs` | 2,431 | global hotkey binding |
+| `gui/desktop/src/login_screen.rs` | 2,417 | the login screen |
+
+Two smaller entries are worth naming because they are a *different* failure
+from "written but not yet wired":
+
+- `apps/explorer/src/main.rs` writes `mod columns; mod dropzone; mod thumbs;`
+  and then never mentions any of the three again — 5,611 lines compiled into
+  the binary by an explicit declaration and reachable from nothing.
+- `gui/compositor/src/server.rs` (1,334) reaches `lib.rs` only through
+  `pub use server::{Disconnect, Server, ServerStats};`, and no file in the
+  tree consumes any of the three names. A re-export is plumbing, not a
+  caller; it is exactly the shape that makes an island look connected.
 
 **Three of these are duplication, not merely absence** — and that is the part
 that bears on the decision in `open-questions.md` → C-Q6:
@@ -68038,10 +68071,20 @@ that bears on the decision in `open-questions.md` → C-Q6:
 - `gui/desktop/src/default_apps.rs` (2,314) and
   `apps/settings/src/associations.rs` (1,748) both model file-type
   associations, and **neither is reachable**. Deleting one does not fix this.
-- `gui/toolkit/src/context_ext.rs` and `gui/desktop/src/context_ext.rs` are
-  two files of the same name in two crates sharing three names
-  (`ContextMenuExtension`, `ExtensionId`, `build_context_menu`); the toolkit
-  copy is the island.
+- `gui/toolkit/src/context_ext.rs` (1,605) and `gui/desktop/src/context_ext.rs`
+  (2,043) are two files of the same name in two crates sharing four names
+  (`ContextMenuExtension`, `ExtensionId`, `build_context_menu`,
+  `render_context_menu`), and **neither is reachable** — the desktop copy was
+  the module whose false clearance exposed the `member_names` hole. They are
+  not even the same design: the toolkit's `ExtensionId` is a newtype
+  `pub struct ExtensionId(u64)`, the desktop's is `pub type ExtensionId = u64`.
+  The toolkit copy has the lazy-loading and timeout machinery
+  (`TimeoutPolicy`, `LoadingEntry`, `check_timeouts`, `loading_placeholder`)
+  the desktop copy lacks entirely; the desktop copy has the rendering and
+  targeting machinery (`render_context_menu`, `TargetKind`, `ContextTarget`,
+  `MenuPosition`, `ExtensionSettingsUI`) the toolkit copy lacks. Between them
+  they are one feature, and there is a **third** implementation of the same
+  subject in lane A's `kernel/src/fs/contextmenu.rs`.
 
 **And a sub-finding the module scan does not itself report:** six shell
 modules serialise settings that nothing ever stores.

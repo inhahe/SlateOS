@@ -907,8 +907,17 @@ only by its own unit tests. Full detail is in `known-issues.md` →
 **Measured 2026-08-25, and it is worse than "two copies".** A new scan
 (`scripts/scan-orphan-modules.py`) asks, for every module in my tree, whether
 *any* other file in the repository so much as names one of the things it
-defines. Twenty-one modules — **39,060 lines** — are named by nothing. Three
-findings in that list change what this question is asking:
+defines. **Fifty-seven modules — 113,132 lines — are named by nothing, and
+thirty-nine of them are in the shell**, a crate that declares fifty-nine. (The
+scan first reported 21; three separate ways of accidentally crediting a module
+with a caller it does not have were found and fixed the same day, each by
+hand-checking a module the scan had cleared. 57 is the corrected figure.)
+
+That the shell has 39 modules with no caller, arrived at mechanically, and
+"the shell paints four of its fifty-seven modules", arrived at by hand two
+days earlier, are the same fact counted two ways.
+
+Three findings in that list change what this question is asking:
 
 - **The shell duplicates itself, not just the app.**
   `gui/desktop/src/a11y.rs` (2,292 lines: a screen magnifier, four

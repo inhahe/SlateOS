@@ -36751,7 +36751,8 @@ fn cmd_a11y(args: &str) {
             }
         }
         "contrast" => match toggle_arg(&parts, 1, "a11y", sub) {
-            None => return,
+            // `toggle_arg` has already named the word and set the status.
+            None => {}
             Some(Toggle::Query) => {
                 shell_println!("High contrast: {}", a11y::config().high_contrast);
             }
@@ -36761,7 +36762,8 @@ fn cmd_a11y(args: &str) {
             }
         },
         "motion" => match toggle_arg(&parts, 1, "a11y", sub) {
-            None => return,
+            // `toggle_arg` has already named the word and set the status.
+            None => {}
             Some(Toggle::Query) => {
                 shell_println!("Reduce motion: {}", a11y::config().reduce_motion);
             }
@@ -36771,7 +36773,8 @@ fn cmd_a11y(args: &str) {
             }
         },
         "reader" => match toggle_arg(&parts, 1, "a11y", sub) {
-            None => return,
+            // `toggle_arg` has already named the word and set the status.
+            None => {}
             Some(Toggle::Query) => {
                 shell_println!("Screen reader: {}", a11y::config().screen_reader_active);
             }
@@ -36791,7 +36794,8 @@ fn cmd_a11y(args: &str) {
             }
         },
         "sticky" => match toggle_arg(&parts, 1, "a11y", sub) {
-            None => return,
+            // `toggle_arg` has already named the word and set the status.
+            None => {}
             Some(Toggle::Query) => {
                 shell_println!("Sticky keys: {}", a11y::config().sticky_keys);
             }
@@ -36801,7 +36805,8 @@ fn cmd_a11y(args: &str) {
             }
         },
         "mousekeys" => match toggle_arg(&parts, 1, "a11y", sub) {
-            None => return,
+            // `toggle_arg` has already named the word and set the status.
+            None => {}
             Some(Toggle::Query) => {
                 shell_println!("Mouse keys: {}", a11y::config().mouse_keys);
             }
@@ -36821,7 +36826,8 @@ fn cmd_a11y(args: &str) {
             }
         },
         "captions" => match toggle_arg(&parts, 1, "a11y", sub) {
-            None => return,
+            // `toggle_arg` has already named the word and set the status.
+            None => {}
             Some(Toggle::Query) => {
                 shell_println!("Captions: {}", a11y::config().captions);
             }

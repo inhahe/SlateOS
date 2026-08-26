@@ -80600,8 +80600,25 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **240 of 334 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **706 of 800 remain**
 
+> **The denominator moved, and not because anything regressed.** 2026-08-25:
+> the gate was matching its regex against a *line*, and `cargo fmt` — not the
+> author — decides whether one of these chains fits on one. Matching against a
+> statement instead found **466 more sites of the identical shape**, all of
+> which were in the shell the whole time. Every figure in the log below was
+> measured under the old, line-granular gate and is therefore an undercount of
+> what those batches actually left behind; they are kept verbatim because the
+> *work* they describe was real and is still done. The running total is
+> restated above against the true denominator: **706 remain across 240
+> functions**, and the 94 sites the log below records as fixed bring the known
+> total to 800 — not 334. (Whether those 94 batches also swept up wrapped-form
+> siblings that the old gate never listed is unknowable, so 800 is stated as
+> the floor it is.) No function's count went down when the gate was corrected,
+> which is the check that this is the gate seeing more rather than a
+> re-attribution of what it already saw. See
+> `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`.
+>
 > **Burn-down log.** 2026-08-25 (second batch): `cmd_monitors` (13),
 > `cmd_userns` (10), `cmd_reslimit` (10) and `cmd_splitview` (9) cleared —
 > 42 sites, four more ledger lines deleted, 282 → 240 across 114 → 110
@@ -81114,7 +81131,53 @@ predates it.
 
 ---
 
-## `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR` (lane A, 2026-08-25) — **open**, 472 hidden sites measured
+## `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR` (lane A, 2026-08-25) — **FIXED** 2026-08-25 (the gate); the 706-site backlog it revealed is now carried honestly
+
+> **Resolution.** The blind spot is closed. `check-recursive-locks.py` — the
+> directory's one self-tested Rust scanner — gained `statements(code, struct)`,
+> which yields each statement-sized span with its newlines collapsed, so a
+> regex spanning method calls matches the wrapped and unwrapped spellings
+> alike. `check-option-refusal.py` now runs D1 and D2 over that instead of over
+> `lines`.
+>
+> The predicted figure held: **240 → 706**, i.e. 466 sites that had been in the
+> shell all along and were invisible because rustfmt had wrapped their chain.
+> The estimate above said "about 712"; it was made by gluing a statement
+> starting at *every* line, which double-counts a wrapped chain once per line
+> it occupies. 706 is the measured number.
+>
+> **No function's count went down**, which is the check that this is purely
+> additive — the gate is seeing more, not re-attributing what it already saw.
+> `scripts/option-refusal-ledger.txt` was regenerated wholesale: 110 functions
+> → 240, and its header now records why its known-issues key names a figure a
+> third of the truth (renaming the key would break every reference to it).
+>
+> Eight self-test cases guard the span walk, each one answered wrongly by a
+> line-granular splitter: the wrapped chain; the unwrapped chain, which must
+> produce the *same* span or the blind spot has only moved; a `(` inside a
+> string literal (counting it makes the depth drift up and never return — that
+> mistake, made in the first draft, collapsed 100698 spans into 1068 and 706
+> findings into 2); a `;` inside a literal; sibling match arms, which must not
+> glue, or a `.parse()` in one and an `.unwrap_or()` in the next would match a
+> chain that is not in the source; an argument comma, which must not split; a
+> closure body, which must stay with its chain; and the crediting of a span to
+> its first line.
+>
+> **The burn-down itself is not done** — 706 sites across 240 functions are
+> carried in the ledger, where they can only shrink. That work continues under
+> `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+> What is fixed here is the measurement: the number in the ledger is now the
+> number in the shell.
+>
+> **The lesson, which is the same one as the entry above it, one granularity
+> up.** That one counted braces by the line and hid 195 findings; this one
+> counted statements by the line and hid 466. Both were *silent*, because a
+> gate that undercounts prints a smaller number and reads as progress. Three
+> counters in `scripts/` remain line-granular and are correct — the rule that
+> separates them is now written into `walk_block`'s and `statements`'
+> docstrings: a walk over a *balanced* region is safe by the line; a walk that
+> must see depth go *negative*, or a regex that spans a construct **rustfmt is
+> free to wrap**, is not.
 
 **In short:** the shell has a known, deliberately-counted backlog of places
 where it invents a value for a word it could not read — `bright set 1 abc`

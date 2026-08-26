@@ -9689,6 +9689,75 @@ impl Shell {
         (total_ms / 1000, (total_ms % 1000) as u32)
     }
 
+    /// bash's `timeval_to_cpu` (`lib/sh/timeval.c`): `((user + sys) * 10000) /
+    /// real`, in hundredths of a percent, done in fixed point on two
+    /// `timeval`s rather than in floating point.
+    ///
+    /// The shape is worth reproducing rather than approximating, because the
+    /// truncation is observable. The first loop shifts one decimal digit at a
+    /// time out of `tv_usec` and into `tv_sec`, six times, which leaves each
+    /// side as a plain **microsecond** count — bash's `%P` is therefore a
+    /// microsecond ratio, not a millisecond one, which is why `time :` reports
+    /// a percentage at all when `%3R`, `%3U` and `%3S` all read `0.000`. The
+    /// second loop scales the numerator up by the four digits of `10000`,
+    /// switching to scaling the *denominator* down once the numerator would
+    /// pass `10^8`, so that the product cannot overflow a 32-bit `time_t`.
+    ///
+    /// **It does not clamp at 100%**, however much the arithmetic looks like a
+    /// percentage: bash's clamp is `#if 0`'d out (`execute_cmd.c:1281-1286`),
+    /// so a parallel pipeline really does report `385.42`. Measured, bash
+    /// 5.2.21 (glibc), four background loops on this machine:
+    ///
+    /// ```text
+    /// [R=0.456][U=1.574][S=0.182][P=385.42]
+    /// ```
+    ///
+    /// A `real` under a microsecond divides by a zero denominator, which bash
+    /// answers with 0 rather than trapping; so does this.
+    fn timeval_to_cpu(real: f64, user: f64, sys: f64) -> i64 {
+        // A `timeval`, as `(tv_sec, tv_usec)`. Negative and NaN durations are
+        // no clock's output and would only make the fixed point meaningless.
+        fn tv(v: f64) -> (i64, i64) {
+            if v.is_nan() || v <= 0.0 {
+                return (0, 0);
+            }
+            // `as` truncates toward zero and saturates, so a duration past the
+            // age of the universe cannot wrap into a negative one.
+            let us = (v * 1_000_000.0) as i64;
+            (us / 1_000_000, us % 1_000_000)
+        }
+        let (rs, ru) = tv(real);
+        let (uts, utu) = tv(user);
+        let (sts, stu) = tv(sys);
+        // `addtimeval`: carry the microseconds at a whole second.
+        let (mut n_s, mut n_u) = (uts.saturating_add(sts), utu.saturating_add(stu));
+        if n_u >= 1_000_000 {
+            n_u -= 1_000_000;
+            n_s = n_s.saturating_add(1);
+        }
+        let (mut d_s, mut d_u) = (rs, ru);
+        // Six digits: `tv_sec` now holds the whole duration in microseconds.
+        for _ in 0..6 {
+            if n_s > 99_999_999 || d_s > 99_999_999 {
+                break;
+            }
+            n_s = n_s.saturating_mul(10).saturating_add(n_u / 100_000);
+            n_u = n_u.saturating_mul(10) % 1_000_000;
+            d_s = d_s.saturating_mul(10).saturating_add(d_u / 100_000);
+            d_u = d_u.saturating_mul(10) % 1_000_000;
+        }
+        // The four digits of the 10000 scale, taken off the denominator once
+        // the numerator has no room left for them.
+        for _ in 0..4 {
+            if n_s < 100_000_000 {
+                n_s = n_s.saturating_mul(10);
+            } else {
+                d_s /= 10;
+            }
+        }
+        if d_s == 0 { 0 } else { n_s / d_s }
+    }
+
     /// bash's `mkfmt`: `SECS[.FFF]` at `prec` places, or `NmSECS.FFFs` when the
     /// `l` (length-extender) modifier asked for minutes.
     ///
@@ -9739,21 +9808,18 @@ impl Shell {
     /// is a `builtin_error`, not a `report_error`). The character reported is
     /// whatever `*s` was, so a format ending mid-directive names the NUL.
     ///
-    /// The CPU figures come from [`Shell::cpu_used`], which is real on Windows
-    /// and zero elsewhere for want of the host accounting — see TD-OILS10.
+    /// The CPU figures come from [`Shell::cpu_used`]. `%P` is the ratio between
+    /// them and the elapsed time, computed by [`Shell::timeval_to_cpu`] the way
+    /// bash computes it — at microsecond precision, and without the 100% clamp
+    /// bash's source has but does not compile.
     fn render_time_report(&mut self, fmt: BStr<'_>, real: f64, user: f64, sys: f64) -> Option<Str> {
         let (rs, rsf) = Self::time_parts(real);
         let (us, usf) = Self::time_parts(user);
         let (ss, ssf) = Self::time_parts(sys);
-        // Hundredths of a percent of the wall-clock span spent on the CPU,
-        // capped at 100% the way bash caps it.
-        let cpu = if rs == 0 && rsf == 0 {
-            0
-        } else {
-            let cpu_ms = (us + ss) * 1000 + u64::from(usf + ssf);
-            let real_ms = rs * 1000 + u64::from(rsf);
-            (cpu_ms * 10000 / real_ms).min(10000)
-        };
+        // Hundredths of a percent of the wall-clock span spent on the CPU. Not
+        // capped at 100%: bash's clamp is `#if 0`'d out, so a pipeline that
+        // used four cores really does report `385.42`.
+        let cpu = Self::timeval_to_cpu(real, user, sys);
 
         let mut out = Str::new();
         let mut i = 0usize;
@@ -9771,12 +9837,12 @@ impl Shell {
                     i += 2;
                 }
                 Some(b'P') => {
-                    out.extend_from_slice(&Self::mkfmt(
-                        2,
-                        false,
-                        cpu / 100,
-                        (cpu % 100) as u32 * 10,
-                    ));
+                    // bash's `sum = cpu / 100; sum_frac = (cpu % 100) * 10`.
+                    // `cpu` is a ratio of two non-negative durations, so both
+                    // halves are non-negative and the widening cannot fail.
+                    let whole = u64::try_from(cpu / 100).unwrap_or(0);
+                    let frac = u32::try_from(cpu % 100).unwrap_or(0) * 10;
+                    out.extend_from_slice(&Self::mkfmt(2, false, whole, frac));
                     i += 2;
                 }
                 _ => {
@@ -94380,7 +94446,9 @@ st=1
         assert_eq!(render("a%%b\tc", 0.5).as_deref(), Some("a%b\tc\n"));
         assert_eq!(render("%", 0.5).as_deref(), Some("%\n"));
         assert_eq!(render("", 0.5).as_deref(), Some("\n"));
-        // User and system are zero until TD-OILS10; `%P` follows them.
+        // This helper hands the report no CPU time at all, so `%P` is 0.00
+        // above and the two CPU directives are zero here. The real ratio has
+        // its own test — see `the_cpu_percentage_is_a_microsecond_ratio…`.
         assert_eq!(render("%0U %0S %2U", 0.5).as_deref(), Some("0 0 0.00\n"));
 
         // A bad directive suppresses the whole report, including the part
@@ -94400,6 +94468,56 @@ st=1
             run("TIMEFORMAT='%5'; { time :; } 2>&1").0,
             "osh: TIMEFORMAT: `\0': invalid format character\n"
         );
+    }
+
+    /// `%P` is bash's `timeval_to_cpu`, which is neither a millisecond ratio
+    /// nor a percentage clamped at 100 — both of which this shell used to
+    /// assume, and both of which are visibly wrong against bash 5.2.21.
+    #[test]
+    fn the_cpu_percentage_is_a_microsecond_ratio_and_is_not_clamped_at_100() {
+        let render = |real: f64, user: f64, sys: f64| {
+            let mut sh = new_shell();
+            sh.render_time_report(b"%P", real, user, sys)
+                .map(|r| String::from_utf8_lossy(&r).trim_end().to_string())
+        };
+        // Measured, bash 5.2.21 (glibc), four background CPU loops:
+        //     [R=0.456][U=1.574][S=0.182][P=385.42]
+        // A clamp would have made that 100.00, and bash's clamp is `#if 0`'d
+        // out (`execute_cmd.c:1281-1286`). The figure reproduced here is
+        // 385.08 rather than 385.42 only because the three readings above are
+        // `%3R`/`%3U`/`%3S` — rounded to milliseconds — while bash divided the
+        // microseconds behind them; 385.42 needs a real of 0.45608 s, which is
+        // inside 0.456's rounding. What is being pinned is the algorithm and
+        // the absence of the cap, not the third decimal place of one sample.
+        assert_eq!(render(0.456, 1.574, 0.182).as_deref(), Some("385.08"));
+        assert!(Shell::timeval_to_cpu(0.456, 1.574, 0.182) > 10000);
+        // The precision is microseconds, not milliseconds: `time :` spends
+        // hundreds of microseconds, which every one of `%3R`, `%3U` and `%3S`
+        // renders as `0.000` while `%P` still reports a ratio. Measured, the
+        // same bash, over eight runs of `{ time : ; }`: 66.66, 75.00, 100.00,
+        // 150.00 — small integer ratios of a sub-millisecond span.
+        assert_eq!(render(0.000_4, 0.000_3, 0.0).as_deref(), Some("75.00"));
+        assert_eq!(render(0.000_3, 0.000_2, 0.0).as_deref(), Some("66.66"));
+        assert_eq!(render(0.000_2, 0.000_2, 0.000_1).as_deref(), Some("150.00"));
+        // Truncation, not rounding, and the two halves of bash's `sum` /
+        // `sum_frac` split: 1/3 is 3333 hundredths of a percent.
+        assert_eq!(render(3.0, 1.0, 0.0).as_deref(), Some("33.33"));
+        assert_eq!(render(1.0, 1.0, 0.0).as_deref(), Some("100.00"));
+        // A span too short to have a microsecond in it divides by zero, which
+        // bash answers with 0 rather than trapping.
+        assert_eq!(render(0.0, 1.0, 1.0).as_deref(), Some("0.00"));
+        assert_eq!(Shell::timeval_to_cpu(0.000_000_4, 1.0, 0.0), 0);
+        // Neither a negative duration nor a NaN is any clock's output, and
+        // neither may turn the fixed point into nonsense.
+        assert_eq!(Shell::timeval_to_cpu(-1.0, 1.0, 0.0), 0);
+        assert_eq!(Shell::timeval_to_cpu(f64::NAN, f64::NAN, f64::NAN), 0);
+        assert_eq!(Shell::timeval_to_cpu(1.0, -1.0, -1.0), 0);
+        // A duration long enough to exhaust the numerator's headroom scales
+        // the denominator down instead, which keeps the ratio and cannot
+        // overflow. Half of a two-hour span is still 50%.
+        assert_eq!(render(7200.0, 3600.0, 0.0).as_deref(), Some("50.00"));
+        // A duration no clock will ever produce must saturate, not wrap.
+        assert!(render(f64::MAX, f64::MAX, 0.0).is_some());
     }
 
     #[test]

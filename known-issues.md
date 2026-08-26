@@ -87031,3 +87031,100 @@ test did not.
 *measurement of bash*, never from what osh does or from what the C source
 appears to imply. Where a claim cannot be measured, say so in the file. The two
 above cost nothing to check — one `bash -c` each — and both were wrong.
+
+## osh: a special redirection filename must re-open fd N's file, not dup fd N
+
+**Status:** open (found 2026-08-26 while triaging
+`the-status-of-a-fatal-expansion-abort-belongs-to-whoever-caught-it`).
+
+`interp.rs::resolve_special_redirect` resolves `/dev/stdin`, `/dev/stdout`,
+`/dev/stderr` and `/dev/fd/N` into the *dup* of descriptor N, and says so:
+
+```rust
+    /// See [`special_redirect_fd`] for the names. `read` picks the input side:
+    /// `< /dev/fd/3` shares fd 3's cursor exactly like `<&3`, while
+    /// `> /dev/fd/3` writes to it like `>&3`.
+```
+
+That claim is false, and it is false on *both* hosts — so it is not one of the
+MSYS artifacts this migration has been turning up, just an unmeasured
+assumption. bash does not special-case these names at all when the host
+provides `/dev/fd` (`HAVE_DEV_FD`): it calls plain `open()` and lets the kernel
+resolve the path, which yields a **new file description positioned at 0**, not a
+second reference to the existing one. Measured, bash 5.2, glibc and MSYS
+identical, against `t2.sh` = `echo A\necho B`:
+
+```text
+                                                         bash          osh
+exec 3< t2.sh; read -u 3 l; cat < /dev/fd/3              echo A|echo B  echo B
+exec 3< t2.sh; read -u 3 l; cat <&3                      echo B         echo B
+{ read -r l; cat < /dev/stdin; } < t2.sh                 echo A|echo B  echo B
+exec 3< t2.sh; read -u 3 l; cat < /dev/fd/3 >/dev/null
+  ; read -u 3 m; echo "m=[$m]"                           m=[echo B]     m=[]
+```
+
+The last line is the half that a dup can never reproduce: after the re-open the
+shell's *own* cursor on fd 3 is exactly where `read` left it, because the two
+descriptions are independent. Under `<&3` it is at end of file (`m=[]`), which
+is what osh produces for both.
+
+The write side is wrong in the more damaging direction — `>` on a re-opened
+path carries `O_TRUNC`:
+
+```text
+exec 3> w1;  echo AAAA >&3; echo B >  /dev/fd/3; …; cat w1   bash B/          osh AAAA/B/
+exec 3>> w3; echo AAAA >&3; echo B >> /dev/fd/3; …; cat w3   bash AAAA/B/     osh AAAA/B/AAAA/B/
+```
+
+so osh keeps data that bash discards, and the append case additionally doubles
+its output.
+
+The same root cause is why `source` is wrong: `builtin_source` opens its
+operand as a *host* path (`std::fs::read(self.host_path(path))`,
+interp.rs:54582), so `/dev/stdin` reaches the process's real fd 0 rather than
+the shell's modelled one. Measured with `printf 'echo REAL\n' |` feeding the
+shell's ambient stdin:
+
+```text
+                                              bash                         osh
+source /dev/stdin < t3.sh                     THREE                        REAL
+source /dev/stdin <<< "echo A"                A                            REAL
+source /dev/stderr 2< t3.sh                   THREE                        hangs (rc=124)
+source /dev/stdout 1< t3.sh                   THREE + write error, st=1    hangs
+exec 3< t3.sh; source /dev/fd/3 3<&-          No such file or directory,1  THREE
+source /dev/stdin < dd     (dd a directory)   …: is a directory, st=1      REAL, st=0
+source /dev/stdin <&-                         No such file or directory,1  REAL, st=0
+{ read -r l; source /dev/stdin; } < t2.sh     A|B  (rewinds)               REAL
+printf 'echo A\necho B\n' | { read -r l
+  ; source /dev/stdin; }                      B    (pipe, no rewind)       REAL
+printf 'echo FROMFILE\n' > o3
+  ; source /dev/stdout >> o3                  sources it — o3 doubles      hangs
+```
+
+`/dev/fd/N` for N >= 3 is right on Linux today only by accident: Rust's first
+`File::open` tends to land on host fd 3, so the host path resolves to the same
+file. It is wrong on Windows, wrong on SlateOS, and wrong on Linux the moment
+the descriptor is closed for the command (`3<&-`).
+
+**The rule both sides need.** Opening a special filename means: find the file
+behind the shell's *modelled* descriptor N and open it afresh with the
+redirect's own mode. Consequences, all measured above:
+
+| fd N's binding | opening the special path yields |
+|---|---|
+| a seekable file | an independent description at offset 0; `>` truncates, `>>` appends |
+| a pipe | the same pipe — no rewind is possible, so reading continues |
+| a here-document / here-string | bash's temp file, i.e. the whole document from 0 |
+| write-only (fd 1 over a file) | still readable — `source /dev/stdout >> f` sources `f` |
+| unbound or closed (`<&-`) | `<path>: No such file or directory`, status 1 |
+| a directory | `<path>: is a directory`, status 1 |
+
+**Fix.** One resolver used by both `resolve_special_redirect` and
+`builtin_source`, replacing the dup. The handles osh models are real host
+descriptors, so the faithful re-open is the one the kernel would do —
+`/proc/self/fd/<raw>` on Unix, `GetFinalPathNameByHandleW` + re-open on
+Windows — with `InputSrc::Bytes` re-read from index 0 for the here-document
+case and the closed/unbound/directory shapes mapped to the diagnostics above.
+Recording the origin path on the handle instead would be simpler but diverges
+for the `exec 3< f; rm f; cat < /dev/fd/3` idiom, which bash serves from the
+still-open inode.

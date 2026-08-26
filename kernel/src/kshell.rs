@@ -99080,11 +99080,20 @@ fn cmd_mmapstat(args: &str) {
             shell_println!("mmapstat: initialized");
         }
         "register" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let name = parts.get(2).copied().unwrap_or("unnamed");
+            // The name was already documented as required (`register <pid>
+            // <name>`) and defaulted anyway. It is a guessed *word* rather than
+            // a guessed number, so the ledger never counted it, but it is the
+            // same defect: `mmapstat register 7` created pid 7 called
+            // "unnamed", and the `procs` table then has a process whose name is
+            // the one thing that would have identified it.
+            let Some(pid) = required_num::<u32>(&parts, 1, "mmapstat", sub, "pid") else {
+                return;
+            };
+            let Some(name) = parts.get(2).copied() else {
+                shell_println!("mmapstat: {}: missing process name", sub);
+                set_exit(1);
+                return;
+            };
             match mmapstat::register_process(pid, name) {
                 Ok(()) => shell_println!("mmapstat: registered pid {} '{}'", pid, name),
                 Err(e) => {
@@ -99094,22 +99103,41 @@ fn cmd_mmapstat(args: &str) {
             }
         }
         "map" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
-            let mt = match parts.get(3).copied().unwrap_or("anon") {
-                "anon" => mmapstat::MapType::Anonymous,
-                "file" => mmapstat::MapType::File,
-                "shared_anon" => mmapstat::MapType::SharedAnon,
-                "shared_file" => mmapstat::MapType::SharedFile,
-                "stack" => mmapstat::MapType::Stack,
-                "vdso" => mmapstat::MapType::Vdso,
-                _ => mmapstat::MapType::Anonymous,
+            let Some(pid) = required_num::<u32>(&parts, 1, "mmapstat", sub, "pid") else {
+                return;
+            };
+            // 4096 was the worst guess available: this OS's page is 16 KiB
+            // (mm/mod.rs — every frame is four contiguous 4 KiB hardware
+            // pages), so the old default was the canonical page size of a
+            // *different* system. That is what made it invisible — it reads as
+            // correct to anyone who has ever called mmap, and is wrong here by
+            // a factor of four. It also feeds `total_bytes`, so the error does
+            // not stay in one cell.
+            let Some(size) = required_num::<u64>(&parts, 2, "mmapstat", sub, "size in bytes")
+            else {
+                return;
+            };
+            // Absent means anonymous, which is a documented default; present
+            // but unreadable is a refusal. The old `_ =>` arm could not tell
+            // those apart, so `mmapstat map 7 16384 fille` recorded an
+            // *anonymous* mapping and printed `type=anon` — a report that is
+            // wrong about the one field the operand existed to set.
+            let mt = match parts.get(3).copied() {
+                None | Some("anon") => mmapstat::MapType::Anonymous,
+                Some("file") => mmapstat::MapType::File,
+                Some("shared_anon") => mmapstat::MapType::SharedAnon,
+                Some("shared_file") => mmapstat::MapType::SharedFile,
+                Some("stack") => mmapstat::MapType::Stack,
+                Some("vdso") => mmapstat::MapType::Vdso,
+                Some(other) => {
+                    shell_println!(
+                        "mmapstat: {}: `{}' is not a map type (anon|file|shared_anon|shared_file|stack|vdso)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match mmapstat::record_map(pid, size, mt) {
                 Ok(()) => shell_println!(
@@ -99125,14 +99153,20 @@ fn cmd_mmapstat(args: &str) {
             }
         }
         "unmap" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let size = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            // The sharpest of the six. `record_unmap` does
+            // `total_bytes = total_bytes.saturating_sub(size)`, so a guessed
+            // size corrupts the accumulator in the *destructive* direction —
+            // and the saturation can clamp it to zero, which destroys the
+            // evidence that anything was mis-subtracted. With the old 4096 on
+            // a 16 KiB-page system, unmapping one page left 12288 bytes
+            // credited against the process for the rest of the boot.
+            let Some(pid) = required_num::<u32>(&parts, 1, "mmapstat", sub, "pid") else {
+                return;
+            };
+            let Some(size) = required_num::<u64>(&parts, 2, "mmapstat", sub, "size in bytes")
+            else {
+                return;
+            };
             match mmapstat::record_unmap(pid, size) {
                 Ok(()) => shell_println!("mmapstat: unmap pid={} size={}", pid, size),
                 Err(e) => {
@@ -99142,10 +99176,9 @@ fn cmd_mmapstat(args: &str) {
             }
         }
         "protect" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_num::<u32>(&parts, 1, "mmapstat", sub, "pid") else {
+                return;
+            };
             match mmapstat::record_protect(pid) {
                 Ok(()) => shell_println!("mmapstat: protect pid={}", pid),
                 Err(e) => {
@@ -99191,13 +99224,13 @@ fn cmd_mmapstat(args: &str) {
             shell_println!(
                 "Usage: mmapstat <init|register|map|unmap|protect|types|procs|stats|test>"
             );
-            shell_println!("  register <pid> <name>         — register process");
+            shell_println!("  register <pid> <name>          — register process");
             shell_println!(
-                "  map <pid> [size] [type]        — record mmap (type: anon|file|shared_anon|shared_file|stack|vdso)"
+                "  map <pid> <size> [type]        — record mmap (type: anon|file|shared_anon|shared_file|stack|vdso; default anon)"
             );
-            shell_println!("  unmap <pid> [size]             — record munmap");
+            shell_println!("  unmap <pid> <size>             — record munmap");
             shell_println!("  protect <pid>                  — record mprotect");
-            set_exit(1);
+            end_help_arm("mmapstat", sub);
         }
     }
 }

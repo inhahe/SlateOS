@@ -81306,8 +81306,51 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **463 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **457 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (twenty-ninth batch): `cmd_mmapstat` (6, plus
+> two uncounted) cleared — 463 → 457 across 214 → 213 functions. Not pinned by
+> a rung; nothing asserts on `mmapstat` output.
+>
+> **In short:** `mmapstat` records how much memory each process has mapped.
+> Where it could not read a number it used **pid 0** and a **4096-byte** size.
+> 4096 is the page size of Linux on x86 — it is *not* this OS's, which uses
+> 16 KiB pages. So the default was the right answer to the same question asked
+> about a different computer, which is exactly why nobody would look twice at
+> it.
+>
+> **This confirms batch 28's row rather than adding one.** `mmapstat`'s
+> `init_defaults` also seeds an **empty** table, so `register`'s guessed pid 0
+> manufactures the process that `map`, `unmap` and `protect`'s guessed pid 0s
+> then find. Two independent modules, same structure — mutually-corroborating
+> guesses are a property of the *shape* (an empty registry plus a
+> register-then-record command set), not a coincidence in `kstack`. That makes
+> it worth stating as a rule:
+>
+> > **Where a command can both create a record and write to one, a guessed
+> > key is worse than a guessed value, because the create path forges the
+> > receipt the write path checks.** The usual safety net — "a bad id gets
+> > `NotFound`" — is exactly what stops working.
+>
+> Two things `kstack` did not have:
+>
+> * **`record_unmap` subtracts.** It does
+>   `total_bytes = total_bytes.saturating_sub(size)`, so the guess corrupts an
+>   accumulator in the *destructive* direction, and the saturation can clamp it
+>   to zero — destroying the evidence that anything was mis-subtracted. On a
+>   16 KiB-page system, unmapping "one page" guessed as 4096 stranded 12288
+>   bytes against the process for the rest of the boot.
+> * **Two uncounted non-numeric guesses**, the same "plus one uncounted"
+>   pattern batch 27 set precedent for. `register`'s name fell back to
+>   `"unnamed"` despite the usage line already calling it required — so the
+>   `procs` table could hold a process whose name is the one field that would
+>   have identified it. And `map`'s type had a `_ =>` arm collapsing onto
+>   `Anonymous`, so `mmapstat map 7 16384 fille` recorded an anonymous mapping
+>   and printed `type=anon`: a report that is wrong about the single field the
+>   operand exists to set. The type operand keeps its documented default when
+>   *absent* and is refused when present-and-unreadable — `optional_num`'s
+>   distinction, in enum clothing.
+>
 > **Burn-down log.** 2026-08-26 (twenty-eighth batch): `cmd_kstack` (6) cleared
 > — 469 → 463 across 215 → 214 functions. Not pinned by a rung: no self-test
 > asserts on `kstack` output, which is itself the reason the guesses survived

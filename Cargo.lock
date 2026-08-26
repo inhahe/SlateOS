@@ -2835,6 +2835,7 @@ name = "devicemanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -6737,9 +6738,15 @@ dependencies = [
 name = "lockscreen"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "guitk",
+ "oswindow",
+ "posix",
  "pwkdf",
+ "scratchdir",
  "sha2",
+ "tzrules",
+ "userdb",
 ]
 
 [[package]]

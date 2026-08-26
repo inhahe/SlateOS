@@ -26,7 +26,12 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::Response;
 use pwkdf::{KdfError, KdfParams, PasswordVerifier};
+
+use std::path::Path;
+use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -1030,6 +1035,88 @@ impl LockScreen {
         self.date = Some(date);
     }
 
+    /// Set the displayed clock and date from a UTC instant.
+    ///
+    /// This is what makes the clock a clock. Until it existed, `time` was set
+    /// once in [`LockScreen::new`] to a hard-coded 12:00:00 and `set_time` had
+    /// no caller anywhere in the tree, so the lock screen showed noon forever —
+    /// with the seconds field, when enabled, frozen at `:00`. The screen a user
+    /// meets after stepping away from the machine is the single worst place for
+    /// a plausible-looking wrong number, because a wrong clock there is
+    /// indistinguishable from a machine that has been sitting untouched.
+    ///
+    /// **Pure, and separated from the wall-clock read on purpose.** Everything
+    /// above it can be asserted only if the instant comes in as an argument;
+    /// [`LockScreen::refresh_clock`] is the one place that asks the system what
+    /// time it is. Same split, and for the same reason, as the desktop's
+    /// `current_clock_string` / `clock_string_at`.
+    ///
+    /// # Zone
+    ///
+    /// UTC, said out loud. There is no per-process zone to read yet
+    /// (`known-issues.md` → `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), and every
+    /// lane-C surface that renders an instant is in the same position and marks
+    /// itself with an explicit `Tz::utc()` so that `rg 'Tz::utc' apps/ gui/`
+    /// finds all of them at once. Going through `lookup().gmtoff` rather than
+    /// writing `secs % 86_400` is what makes this a one-line change when a real
+    /// zone arrives — and `% 86_400` is itself the exact bug the taskbar clock
+    /// shipped: correct-looking, and five hours out.
+    pub fn set_time_from_utc(&mut self, utc_secs: i64) {
+        let zone = tzrules::Tz::utc();
+        let local = utc_secs.saturating_add(i64::from(zone.lookup(utc_secs).gmtoff));
+
+        // `rem_euclid`, not `%`: a pre-1970 instant with `%` gives a negative
+        // remainder, which is not a time of day at all. It cannot arrive from
+        // `SystemTime::now`, but this function's argument is not required to.
+        let secs_into_day = local.rem_euclid(86_400);
+        // Each division is bounded by the line above, so none of these casts
+        // can lose anything: 0..86_400 / 3600 is 0..24, and the two remainders
+        // are 0..60. `TimeOfDay::new` rejects out-of-range values anyway, and
+        // a rejection here would leave the previous reading standing rather
+        // than show a wrong one.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (h, m, s) = (
+            (secs_into_day / 3600) as u8,
+            ((secs_into_day / 60) % 60) as u8,
+            (secs_into_day % 60) as u8,
+        );
+        if let Some(time) = TimeOfDay::new(h, m, s) {
+            self.time = time;
+        }
+
+        // The civil date comes from `guitk::date`, which is the toolkit's one
+        // calendar. A tenth private `days_in_month` in this file is a tenth
+        // thing for the user to catch disagreeing with `date`.
+        let day = guitk::date::Date::from_unix_utc(local);
+        let (year, month, dom) = day.ymd();
+        self.date = Some(DateInfo {
+            weekday: day.weekday().name().to_string(),
+            month: guitk::date::month_name(month).to_string(),
+            // Both fit by construction -- `ymd` yields a 1..=31 day, and a year
+            // beyond u16 needs an instant ~63000 years out. `try_from` with a
+            // saturating fallback rather than `as`, so the impossible case is
+            // an obviously-wrong date rather than a silently wrapped one.
+            day: u8::try_from(dom).unwrap_or(u8::MAX),
+            year: u16::try_from(year).unwrap_or(u16::MAX),
+        });
+    }
+
+    /// Set the clock from the system's idea of now.
+    ///
+    /// The only impure half of the pair above, and the only thing in this file
+    /// that reads the wall clock. Called once per tick from
+    /// [`oswindow::app::App::on_event`].
+    ///
+    /// A clock that cannot be read leaves the previous reading standing rather
+    /// than resetting to the epoch: a stale time is wrong by however long the
+    /// clock has been broken, where 1970 is wrong by fifty years and looks like
+    /// a different failure entirely.
+    fn refresh_clock(&mut self) {
+        if let Ok(since_epoch) = SystemTime::now().duration_since(UNIX_EPOCH) {
+            self.set_time_from_utc(i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX));
+        }
+    }
+
     /// Switch to the password entry view.
     pub fn enter_password_mode(&mut self) {
         self.state = LockScreenState::PasswordEntry;
@@ -1874,11 +1961,333 @@ fn hit_test(px: f32, py: f32, rect: &Rect) -> bool {
 }
 
 // ============================================================================
-// Entry point (placeholder — the real entry will integrate with the
-// compositor via IPC).
+// The production authority
 // ============================================================================
 
-fn main() {}
+/// [`PasswordAuthority`] backed by the system's real credential stores.
+///
+/// This is what [`PasswordValidator`] was scaffolding *for*. The trait's own
+/// doc says the screen must hold "a connection, not a hash", and until this
+/// existed the only implementor was one that holds a hash — so a real `main`
+/// had a choice between shipping the machine's verifier inside the process most
+/// likely to be attacked, or passing `None`, which is
+/// [`AuthOutcome::Unusable`] on every attempt: a screen that locks a session
+/// nothing can ever unlock.
+///
+/// [`authlib`] is neither. It is the crate whose entire purpose is to be the
+/// one place SlateOS answers "is this the user's password?", it reads the
+/// stores rather than caching them, and it carries the shared faillock tally
+/// so that failures here count against failures at `su` and `login`. It is not
+/// yet the `libservicebus` connection the trait describes — the process still
+/// reads the store itself, so it still needs to be able to — but it removes
+/// the second copy of the *policy*, which is the half that was dangerous:
+/// design-decisions §329 is three hashers that disagreed about what a stored
+/// entry means.
+///
+/// # The mapping is total and one-for-one
+///
+/// [`AuthOutcome`] was written against [`authlib::Outcome`] — same six
+/// variants, same meanings, documented in terms of each other. The `match`
+/// below is therefore exhaustive by construction rather than by a wildcard: if
+/// `authlib` ever grows a seventh verdict, this file must decide what the
+/// screen does about it, which is exactly the moment someone should be made to
+/// think.
+#[derive(Debug)]
+pub struct SystemAuthority {
+    /// Held across attempts, not rebuilt per guess. A rate limit rebuilt for
+    /// every guess is not a rate limit — see [`PasswordAuthority`]'s note on
+    /// `&mut self`, which exists for precisely this implementor.
+    inner: authlib::Authenticator,
+}
+
+impl SystemAuthority {
+    /// A verifier over the system's real stores and the system's shared tally.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: authlib::Authenticator::new(),
+        }
+    }
+
+    /// A verifier over stores at given paths, counting failures in memory only.
+    ///
+    /// For tests, and for a chroot. Deliberately does *not* share the system
+    /// tally: a test must not be able to delay a real user by running.
+    #[must_use]
+    pub fn with_stores(users_yaml: &Path, shadow: &Path) -> Self {
+        Self {
+            inner: authlib::Authenticator::with_stores(users_yaml, shadow),
+        }
+    }
+
+    /// Translate one `authlib` verdict into this screen's vocabulary.
+    ///
+    /// Free function rather than a `From` impl because both types are named
+    /// `Outcome`-ish and a silent coercion between two six-variant enums with
+    /// the same shape is the kind of thing that survives a variant being
+    /// reordered.
+    #[must_use]
+    const fn translate(outcome: authlib::Outcome) -> AuthOutcome {
+        match outcome {
+            authlib::Outcome::Accepted => AuthOutcome::Accepted,
+            authlib::Outcome::Rejected => AuthOutcome::Rejected,
+            authlib::Outcome::Locked => AuthOutcome::Locked,
+            authlib::Outcome::NoPassword => AuthOutcome::NoPassword,
+            authlib::Outcome::Unusable => AuthOutcome::Unusable,
+            authlib::Outcome::RateLimited { retry_after_secs } => {
+                AuthOutcome::RateLimited { retry_after_secs }
+            }
+        }
+    }
+}
+
+impl Default for SystemAuthority {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PasswordAuthority for SystemAuthority {
+    fn authenticate(&mut self, username: &str, password: &[u8]) -> AuthOutcome {
+        Self::translate(self.inner.authenticate(username, password))
+    }
+}
+
+// ============================================================================
+// The production user list
+// ============================================================================
+
+/// The uids that belong to people rather than to the system.
+///
+/// `login.defs`' conventional `UID_MIN`/`UID_MAX`, and the range `useradd`
+/// allocates from. A lock screen that lists `daemon` and `nobody` is not merely
+/// untidy: every name on it is a name an attacker standing at the machine gets
+/// for free.
+///
+/// The *upper* bound is the half that is easy to leave out and wrong to. `nobody`
+/// is conventionally uid 65534 — above the range, not below it — so a bare
+/// `uid >= 1000` filter drops `daemon` and keeps `nobody`, which is the account
+/// the filter most obviously exists to hide.
+const HUMAN_UIDS: core::ops::RangeInclusive<u32> = 1000..=60_000;
+
+/// Whether `username` has a password that must be typed.
+///
+/// # Why this is fail-*closed*, and why that matters more than it looks
+///
+/// [`LockScreen::submit_password`] short-circuits on `!has_password` and
+/// returns [`AuthOutcome::NoPassword`], which [`LockScreen::unlocks_for`]
+/// currently accepts. So this function returning `false` **opens the screen
+/// without asking the authority anything at all**. It is not a display hint;
+/// it is a decision about who gets in.
+///
+/// That is a live hazard rather than a theoretical one, because the natural
+/// implementation gets it exactly backwards. `/etc/shadow` is owned by root and
+/// readable by nobody else, and this screen runs as the logged-in user — so the
+/// obvious `shadow::lookup(...).is_some_and(|e| !e.password_hash.is_empty())`
+/// answers `false` on every correctly-configured machine, and the lock screen
+/// opens on the first Enter. Absence of evidence about a password must never be
+/// read as evidence of absence.
+///
+/// So the store is consulted, and *only a positive reading that the entry is
+/// empty* returns `false`. Anything else — unreadable file, unknown user,
+/// missing store, locked account — returns `true`, which costs a passwordless
+/// account nothing except a prompt it can answer, and costs an unreadable store
+/// nothing except that the authority gets asked. The authority is the one that
+/// actually knows: `authlib` returns its own `NoPassword` for a genuinely empty
+/// entry, from a process that can read the file.
+///
+/// The store precedence mirrors `authlib`'s private `resolve` on purpose —
+/// native database first, `shadow(5)` second — so that the account this screen
+/// says has no password is the same account `authlib` would say that about. The
+/// one deliberate divergence is the final `None`, where `resolve` says "unknown
+/// user" and this says "assume a password".
+fn account_has_password(users_yaml: &Path, shadow: &Path, username: &str) -> bool {
+    if let Ok(db) = userdb::UserDb::load(users_yaml)
+        && let Some(record) = db.find(username)
+    {
+        return record_has_password(record);
+    }
+    match authlib::shadow::lookup(shadow, username) {
+        Some(entry) => !entry.password_hash.is_empty(),
+        None => true,
+    }
+}
+
+/// The native-database half of [`account_has_password`], for a caller that has
+/// already loaded the database.
+///
+/// Split out rather than written twice so that [`system_users`] does not reopen
+/// and reparse `users.yaml` once per account — but mostly so that there is one
+/// statement of the policy. Two copies of "does this account have a password?"
+/// is two copies of a rule that decides who gets in.
+fn record_has_password(record: &userdb::Record) -> bool {
+    // A locked account keeps its hash so that unlocking restores the old
+    // password. It has one; it just will not open. Prompt for it, and let the
+    // authority say `Locked`.
+    if record.is_locked() {
+        return true;
+    }
+    !record
+        .get(userdb::field::PASSWORD_HASH)
+        .unwrap_or_default()
+        .is_empty()
+}
+
+/// The people this machine will offer to unlock for.
+///
+/// Read from the same store the authority resolves against, so a name on the
+/// screen is a name that can be answered for. System accounts are filtered out
+/// by [`HUMAN_UIDS`]; a record with no readable uid is *kept*, because a
+/// hand-edited `users.yaml` that omits the field describes a person far more
+/// often than it describes a daemon, and dropping the machine's only account is
+/// a worse failure than listing one extra.
+///
+/// Locked accounts stay on the list. Hiding them would make an administrator's
+/// `usermod -L` look like the account had been deleted, and the person standing
+/// at the screen learns nothing from its absence that they do not learn from
+/// being refused.
+///
+/// An empty result is handed to [`UserList`] as-is; its placeholder
+/// (`user`/`User`, with `has_password: true`) is the right answer for a machine
+/// whose user database cannot be read — a prompt that refuses everything, not
+/// an open door.
+fn system_users(users_yaml: &Path) -> Vec<UserInfo> {
+    let Ok(db) = userdb::UserDb::load(users_yaml) else {
+        // No native database to enumerate. `shadow(5)` is not a substitute:
+        // it is the *password* store, so listing it would put every system
+        // account on the screen with nothing to filter them by.
+        return Vec::new();
+    };
+    db.records()
+        .iter()
+        .filter(|record| record.uid().is_none_or(|uid| HUMAN_UIDS.contains(&uid)))
+        .filter_map(|record| {
+            let username = record.username()?;
+            let display = record.display_name().unwrap_or_else(|| username.clone());
+            // The record is in hand, so the answer comes from it directly.
+            // There is no `shadow` fallback here and there must not be:
+            // `authlib`'s `resolve` stops at the native database once it finds
+            // the user, so a record found here is a record `shadow(5)` will
+            // never be consulted about.
+            Some(UserInfo::new(
+                &username,
+                &display,
+                record_has_password(record),
+            ))
+        })
+        .collect()
+}
+
+// ============================================================================
+// Window integration
+// ============================================================================
+
+/// How often the screen is redrawn while something is visibly moving.
+///
+/// The shake animation and the lockout countdown both change on a scale a
+/// person can see; 60 Hz is what makes the shake a shake rather than a jump.
+const ANIMATION_TICK: Duration = Duration::from_millis(16);
+
+/// How often the screen is redrawn when only the clock is advancing.
+///
+/// One second, not one minute, even when [`LockScreenConfig::show_clock_seconds`]
+/// is off: the minute has to turn over *on* the minute, and a 60-second timer
+/// started at an arbitrary moment turns it over up to 59 seconds late. A clock
+/// that is a minute wrong on a lock screen is indistinguishable from a machine
+/// that has been sitting untouched, which is the one reading it must never
+/// give.
+const CLOCK_TICK: Duration = Duration::from_secs(1);
+
+impl oswindow::app::App for LockScreen {
+    fn title(&self) -> String {
+        String::from("Lock Screen")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are positive compile-time constants well inside u32"
+        )]
+        (SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32)
+    }
+
+    /// Not resizable. A lock screen covers the display; a user who could drag
+    /// its corner could drag the desktop out from behind it.
+    fn resizable(&self) -> bool {
+        false
+    }
+
+    /// Never `None`. The clock always advances, so there is always something
+    /// for a tick to do — that is the whole distinction `check-tick-wiring.py`
+    /// exists to enforce, and the five applications in `known-issues.md`
+    /// lesson 47 that shipped frozen state with a passing suite all failed it
+    /// by returning `None` from a window that measures time.
+    fn tick_interval(&self) -> Option<Duration> {
+        if self.shake.is_active() || self.lockout.is_active() {
+            Some(ANIMATION_TICK)
+        } else {
+            Some(CLOCK_TICK)
+        }
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        // The one production caller of the impure wall-clock read. Placed here
+        // rather than inside `handle_tick` so that the existing tick tests --
+        // which drive animations by feeding synthetic elapsed times -- keep
+        // measuring only what they set up.
+        if matches!(event, Event::Tick { .. }) {
+            self.refresh_clock();
+        }
+
+        let result = self.handle_event(event);
+
+        // Collected after *every* event, not only after a key press: the flag
+        // authorises exactly one unlock and `take_unlock_request` clears it, so
+        // an event that raised it and was not collected would leave the
+        // authorisation sitting there for whoever walks up next.
+        if self.take_unlock_request() {
+            return Response::Exit;
+        }
+
+        match result {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Believe the size that was granted, not the one that was asked for.
+        // The first frame goes out before any `Event::Resize`, and every hit
+        // test on this screen reads these two fields -- so a render that kept
+        // 1920x1080 on an 800x600 window would draw the password field in one
+        // place and accept clicks for it in another.
+        self.screen_width = width;
+        self.screen_height = height;
+        LockScreen::render(self)
+    }
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+fn main() -> ExitCode {
+    // Only the native database is enumerated; `SystemAuthority` still consults
+    // `/etc/shadow` when it answers, because `authlib` does. See `system_users`.
+    let users_yaml = Path::new(authlib::DEFAULT_USERS_YAML);
+
+    let mut screen = LockScreen::new(
+        system_users(users_yaml),
+        LockScreenConfig::default(),
+        Some(Box::new(SystemAuthority::new())),
+    );
+    // Before the first frame, so the clock's opening reading is the real time
+    // rather than the 12:00:00 `LockScreen::new` seeds it with.
+    screen.refresh_clock();
+
+    oswindow::app::launch("lockscreen", &mut screen)
+}
 
 // ============================================================================
 // Tests
@@ -1900,9 +2309,31 @@ mod tests {
 
     use super::*;
     use std::cell::RefCell;
+    use std::path::PathBuf;
     use std::rc::Rc;
 
     // -- Helper factories --
+
+    /// Type `password` a character at a time, the way a person does.
+    ///
+    /// Not `password_buffer = ...`: [`LockScreen::type_char`] refuses while a
+    /// lockout is running and caps the length, and a test that writes the
+    /// field directly is a test that cannot see either.
+    fn type_password(ls: &mut LockScreen, password: &str) {
+        for ch in password.chars() {
+            ls.type_char(ch);
+        }
+    }
+
+    /// A press of the Enter key.
+    fn enter() -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Enter,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
 
     fn single_user_lockscreen() -> LockScreen {
         let user = UserInfo::new("alice", "Alice Johnson", true).with_hint("Name of your cat");
@@ -2977,5 +3408,391 @@ mod tests {
         let ls = LockScreen::new(vec![], LockScreenConfig::default(), None);
         assert_eq!(ls.users.len(), 1);
         assert_eq!(ls.active_user().username, "user");
+    }
+
+    // ------------------------------------------------------------------
+    // The clock
+    //
+    // Every one of these is a value that was previously unobservable,
+    // because until `set_time_from_utc` existed the screen showed the
+    // 12:00:00 that `LockScreen::new` seeds and nothing ever moved it.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn the_clock_reads_the_instant_it_is_given() {
+        let mut ls = single_user_lockscreen();
+        // 2026-08-26T13:45:07Z. Chosen with a non-zero seconds field: the
+        // frozen clock this replaces was frozen at `:00`, so any test whose
+        // instant lands on a whole minute cannot tell the two apart.
+        ls.set_time_from_utc(1_787_751_907);
+        assert_eq!(ls.time.hour, 13);
+        assert_eq!(ls.time.minute, 45);
+        assert_eq!(ls.time.second, 7);
+
+        let date = ls.date.as_ref().expect("a date was set");
+        assert_eq!(date.year, 2026);
+        assert_eq!(date.month, "August");
+        assert_eq!(date.day, 26);
+        assert_eq!(date.weekday, "Wednesday");
+    }
+
+    #[test]
+    fn the_clock_reads_midnight_as_midnight_not_as_twenty_four() {
+        let mut ls = single_user_lockscreen();
+        // 2026-01-01T00:00:00Z.
+        ls.set_time_from_utc(1_767_225_600);
+        assert_eq!((ls.time.hour, ls.time.minute, ls.time.second), (0, 0, 0));
+        let date = ls.date.as_ref().expect("a date was set");
+        assert_eq!((date.year, date.day), (2026, 1));
+        assert_eq!(date.month, "January");
+    }
+
+    #[test]
+    fn a_pre_epoch_instant_is_still_a_time_of_day() {
+        let mut ls = single_user_lockscreen();
+        // 1969-12-31T23:59:59Z, one second before the epoch. With `%` the
+        // remainder is -1 and the hour is 0 -- a plausible-looking wrong
+        // number, which is the failure mode this screen can least afford.
+        ls.set_time_from_utc(-1);
+        assert_eq!((ls.time.hour, ls.time.minute, ls.time.second), (23, 59, 59));
+        let date = ls.date.as_ref().expect("a date was set");
+        assert_eq!((date.year, date.day), (1969, 31));
+        assert_eq!(date.month, "December");
+    }
+
+    #[test]
+    fn the_wall_clock_read_moves_the_displayed_time_off_its_seeded_noon() {
+        // The one assertion that catches the original bug in its own terms:
+        // construct a screen, do what `main` does, and check the clock is no
+        // longer the hard-coded 12:00:00. It can only fail spuriously in the
+        // one second per day when it genuinely is noon UTC, which is why the
+        // three tests above pin the arithmetic and this one pins the wiring.
+        let mut ls = single_user_lockscreen();
+        assert_eq!((ls.time.hour, ls.time.minute, ls.time.second), (12, 0, 0));
+        ls.refresh_clock();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the host clock is after 1970");
+        let expected = (now.as_secs() % 86_400) / 3600;
+        assert_eq!(u64::from(ls.time.hour), expected);
+        assert!(ls.date.is_some(), "a refresh sets the date too");
+    }
+
+    // ------------------------------------------------------------------
+    // Window integration
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn render_believes_the_size_it_is_given_not_the_one_it_asked_for() {
+        use oswindow::app::App as _;
+
+        let mut ls = single_user_lockscreen();
+        assert_ne!(
+            ls.initial_size(),
+            (800, 600),
+            "the granted size must differ from the requested one, or this \
+             test proves nothing"
+        );
+        // Named through the trait: `LockScreen` has an inherent `render`
+        // taking no size, and `ls.render(...)` would not compile against it.
+        let tree = oswindow::app::App::render(&mut ls, 800.0, 600.0);
+        assert_eq!(ls.screen_width, 800.0);
+        assert_eq!(ls.screen_height, 600.0);
+        assert!(!tree.commands.is_empty());
+        // And the geometry the hit tests read moved with it: the submit
+        // button is centred on the granted width, not on 1920.
+        assert!(ls.center_x() < 500.0);
+    }
+
+    #[test]
+    fn a_window_that_shows_a_clock_never_stops_ticking() {
+        use oswindow::app::App as _;
+
+        let mut ls = single_user_lockscreen();
+        assert_eq!(ls.tick_interval(), Some(CLOCK_TICK));
+
+        // A failed guess starts the shake, which needs frames a person can
+        // see rather than one a second.
+        ls.state = LockScreenState::PasswordEntry;
+        type_password(&mut ls, "wrong");
+        assert_eq!(ls.submit_password(), AuthOutcome::Rejected);
+        assert_eq!(ls.tick_interval(), Some(ANIMATION_TICK));
+    }
+
+    #[test]
+    fn an_event_the_screen_ignores_does_not_ask_for_a_frame() {
+        use oswindow::app::App as _;
+
+        let mut ls = single_user_lockscreen();
+        // `handle_event` ignores everything that is not a key, a mouse
+        // event, a tick or a resize.
+        assert_eq!(ls.on_event(&Event::FocusIn), Response::Idle);
+        assert_eq!(
+            ls.on_event(&Event::Resize {
+                width: 900,
+                height: 600
+            }),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn a_tick_advances_the_clock_through_the_event_loop() {
+        use oswindow::app::App as _;
+
+        let mut ls = single_user_lockscreen();
+        assert_eq!((ls.time.hour, ls.time.minute, ls.time.second), (12, 0, 0));
+        assert_eq!(
+            ls.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Redraw
+        );
+        assert!(
+            ls.date.is_some(),
+            "the tick arm is the one production caller of the wall-clock read"
+        );
+    }
+
+    #[test]
+    fn a_correct_password_closes_the_window() {
+        use oswindow::app::App as _;
+
+        let mut ls = single_user_lockscreen();
+        ls.state = LockScreenState::PasswordEntry;
+        type_password(&mut ls, "correcthorse");
+        let response = ls.on_event(&enter());
+        assert_eq!(response, Response::Exit);
+        assert!(
+            !ls.take_unlock_request(),
+            "the authorisation is spent, not left standing for the next person"
+        );
+    }
+
+    #[test]
+    fn a_wrong_password_does_not_close_the_window() {
+        use oswindow::app::App as _;
+
+        let mut ls = single_user_lockscreen();
+        ls.state = LockScreenState::PasswordEntry;
+        type_password(&mut ls, "hunter2");
+        let response = ls.on_event(&enter());
+        assert_eq!(response, Response::Redraw);
+    }
+
+    // ------------------------------------------------------------------
+    // The production authority and the production user list
+    // ------------------------------------------------------------------
+
+    /// A `$6$` entry for `password`, computed with the hasher `authlib` will
+    /// recompute it with rather than pasted as a literal.
+    fn stored_entry(password: &str) -> String {
+        let mut setting_buf = posix::crypt::buf();
+        let setting =
+            posix::crypt::setting_into(posix::crypt::Method::Sha512, b"lockscrn", &mut setting_buf)
+                .expect("setting")
+                .to_string();
+        let mut hash_buf = posix::crypt::buf();
+        posix::crypt::hash_into(password.as_bytes(), setting.as_bytes(), &mut hash_buf)
+            .expect("hash")
+            .to_string()
+    }
+
+    /// A scratch directory holding a `users.yaml` with the given body, and a
+    /// path to a shadow file that deliberately does not exist.
+    fn store_with(body: &str) -> (scratchdir::ScratchDir, PathBuf, PathBuf) {
+        let dir = scratchdir::ScratchDir::new("lockscreen");
+        let users_yaml = dir.path("users.yaml");
+        std::fs::write(&users_yaml, format!("users:\n{body}")).expect("write users.yaml");
+        let shadow = dir.path("shadow-does-not-exist");
+        (dir, users_yaml, shadow)
+    }
+
+    #[test]
+    fn every_authlib_verdict_has_a_screen_verdict() {
+        // Written out rather than looped so that the compiler's exhaustiveness
+        // check on `translate` and this list have to be changed together.
+        for (from, to) in [
+            (authlib::Outcome::Accepted, AuthOutcome::Accepted),
+            (authlib::Outcome::Rejected, AuthOutcome::Rejected),
+            (authlib::Outcome::Locked, AuthOutcome::Locked),
+            (authlib::Outcome::NoPassword, AuthOutcome::NoPassword),
+            (authlib::Outcome::Unusable, AuthOutcome::Unusable),
+            (
+                authlib::Outcome::RateLimited {
+                    retry_after_secs: 42,
+                },
+                AuthOutcome::RateLimited {
+                    retry_after_secs: 42,
+                },
+            ),
+        ] {
+            assert_eq!(SystemAuthority::translate(from), to, "translating {from:?}");
+        }
+    }
+
+    #[test]
+    fn the_real_authority_opens_the_screen_for_the_real_password() {
+        let entry = stored_entry("correct horse");
+        let (_dir, users_yaml, shadow) = store_with(&format!(
+            "  - uid: 1000\n    username: alice\n    display_name: Alice\n    \
+             password_hash: {entry}\n"
+        ));
+
+        let users = system_users(&users_yaml);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "alice");
+        assert_eq!(users[0].display_name, "Alice");
+        assert!(users[0].has_password);
+
+        let mut ls = LockScreen::new(
+            users,
+            LockScreenConfig::default(),
+            Some(Box::new(SystemAuthority::with_stores(&users_yaml, &shadow))),
+        );
+        ls.state = LockScreenState::PasswordEntry;
+        type_password(&mut ls, "nope");
+        assert_eq!(ls.submit_password(), AuthOutcome::Rejected);
+        assert!(!ls.take_unlock_request());
+
+        type_password(&mut ls, "correct horse");
+        assert_eq!(ls.submit_password(), AuthOutcome::Accepted);
+        assert!(ls.take_unlock_request());
+    }
+
+    #[test]
+    fn a_locked_account_is_listed_and_refused() {
+        let entry = stored_entry("correct horse");
+        let (_dir, users_yaml, shadow) = store_with(&format!(
+            "  - uid: 1000\n    username: alice\n    locked: true\n    \
+             password_hash: {entry}\n"
+        ));
+
+        let users = system_users(&users_yaml);
+        assert_eq!(users.len(), 1, "a locked account stays on the list");
+        assert!(
+            users[0].has_password,
+            "a locked account keeps its hash, so it is prompted for"
+        );
+
+        let mut ls = LockScreen::new(
+            users,
+            LockScreenConfig::default(),
+            Some(Box::new(SystemAuthority::with_stores(&users_yaml, &shadow))),
+        );
+        ls.state = LockScreenState::PasswordEntry;
+        type_password(&mut ls, "correct horse");
+        assert_eq!(ls.submit_password(), AuthOutcome::Locked);
+        assert!(!ls.take_unlock_request());
+    }
+
+    #[test]
+    fn system_accounts_are_not_offered() {
+        let (_dir, users_yaml, _shadow) = store_with(
+            "  - uid: 1\n    username: daemon\n\
+             \x20 - uid: 65534\n    username: nobody\n\
+             \x20 - uid: 1000\n    username: alice\n",
+        );
+        let names: Vec<String> = system_users(&users_yaml)
+            .into_iter()
+            .map(|u| u.username)
+            .collect();
+        // `nobody` is above the range, not below it: a bare `uid >= 1000`
+        // filter would keep the one account this test most wants gone.
+        assert_eq!(names, vec!["alice".to_string()]);
+    }
+
+    #[test]
+    fn a_record_without_a_uid_is_kept() {
+        // A hand-edited `users.yaml` that omits the field describes a person
+        // far more often than a daemon, and dropping the machine's only
+        // account is a worse failure than listing one extra.
+        let (_dir, users_yaml, _shadow) =
+            store_with("  - username: alice\n    display_name: Alice\n");
+        let users = system_users(&users_yaml);
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].username, "alice");
+    }
+
+    #[test]
+    fn a_display_name_falls_back_to_the_username() {
+        let (_dir, users_yaml, _shadow) = store_with("  - uid: 1000\n    username: alice\n");
+        let users = system_users(&users_yaml);
+        assert_eq!(users[0].display_name, "alice");
+        assert_eq!(users[0].initials, "A");
+    }
+
+    // -- The fail-closed rule --
+
+    #[test]
+    fn an_unreadable_store_does_not_mean_there_is_no_password() {
+        // This is the one that matters. `/etc/shadow` is root-owned and this
+        // screen runs as the logged-in user, so "cannot read the store" is
+        // the *normal* case on a correctly-configured machine -- and
+        // `submit_password` short-circuits `!has_password` straight to
+        // `NoPassword`, which `unlocks_for` accepts. Reading an unreadable
+        // store as "no password" opens the lock screen on the first Enter.
+        let dir = scratchdir::ScratchDir::new("lockscreen");
+        let users_yaml = dir.path("no-such-users.yaml");
+        let shadow = dir.path("no-such-shadow");
+        assert!(!users_yaml.exists() && !shadow.exists());
+
+        assert!(account_has_password(&users_yaml, &shadow, "alice"));
+
+        // End to end, through the screen: a machine whose stores cannot be
+        // read must refuse, not admit.
+        let mut ls = LockScreen::new(
+            vec![UserInfo::new(
+                "alice",
+                "Alice",
+                account_has_password(&users_yaml, &shadow, "alice"),
+            )],
+            LockScreenConfig::default(),
+            Some(Box::new(SystemAuthority::with_stores(&users_yaml, &shadow))),
+        );
+        ls.state = LockScreenState::PasswordEntry;
+        type_password(&mut ls, "anything at all");
+        assert_eq!(ls.submit_password(), AuthOutcome::Rejected);
+        assert!(!ls.take_unlock_request());
+    }
+
+    #[test]
+    fn an_unknown_user_is_assumed_to_have_a_password() {
+        let (_dir, users_yaml, shadow) = store_with("  - uid: 1000\n    username: alice\n");
+        assert!(account_has_password(&users_yaml, &shadow, "bob"));
+    }
+
+    #[test]
+    fn an_empty_stored_entry_is_the_one_way_to_read_no_password() {
+        let (_dir, users_yaml, shadow) =
+            store_with("  - uid: 1000\n    username: alice\n    password_hash:\n");
+        assert!(!account_has_password(&users_yaml, &shadow, "alice"));
+    }
+
+    #[test]
+    fn the_shadow_file_answers_when_the_native_store_does_not() {
+        let dir = scratchdir::ScratchDir::new("lockscreen");
+        let users_yaml = dir.path("no-such-users.yaml");
+        let shadow = dir.path("shadow");
+        let entry = stored_entry("correct horse");
+        std::fs::write(&shadow, format!("alice:{entry}:19000:0:99999:7:::\n")).expect("write");
+
+        assert!(account_has_password(&users_yaml, &shadow, "alice"));
+
+        let mut ls = LockScreen::new(
+            vec![UserInfo::new("alice", "Alice", true)],
+            LockScreenConfig::default(),
+            Some(Box::new(SystemAuthority::with_stores(&users_yaml, &shadow))),
+        );
+        ls.state = LockScreenState::PasswordEntry;
+        type_password(&mut ls, "correct horse");
+        assert_eq!(ls.submit_password(), AuthOutcome::Accepted);
+    }
+
+    #[test]
+    fn an_empty_shadow_password_field_reads_as_no_password() {
+        let dir = scratchdir::ScratchDir::new("lockscreen");
+        let users_yaml = dir.path("no-such-users.yaml");
+        let shadow = dir.path("shadow");
+        std::fs::write(&shadow, "alice::19000:0:99999:7:::\n").expect("write");
+        assert!(!account_has_password(&users_yaml, &shadow, "alice"));
     }
 }

@@ -81109,8 +81109,74 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **451 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **445 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (thirty-first batch): `cmd_zramstat` (6, plus
+> one uncounted) cleared — 451 → 445 across 212 → 211 functions. Not pinned by
+> a rung; nothing asserts on `zramstat` shell output. Predicted by the batch-29
+> screen, like batch 30.
+>
+> **In short:** `zramstat` tracks compressed swap — RAM used as a swap device,
+> with the pages squeezed on the way in. Where it could not read a number it
+> used **device 0**, a **2 GB** disk size, and for a write, **4096 bytes in,
+> 2048 out**. Three things here were not in earlier batches.
+>
+> * **The guessed id was a hit, not a miss.** Every previous batch's guessed id
+>   was eventually caught by `NotFound` — the wrong key usually names nothing.
+>   Not here: `create_device` hands out ids from `next_id`, counting up from 0,
+>   so **device 0 is whichever device was created first**, and it exists
+>   whenever anything exists. This is the complement of batch 29's rule rather
+>   than an instance of it:
+>
+>   > **Where ids are assigned sequentially from zero, a guessed id needs no
+>   > forged receipt — it lands on the oldest real record.** The safety net is
+>   > not weakened, as in batch 29; it is simply never reached.
+>
+>   That matters most for `remove`, which is destructive: a mistyped id deleted
+>   the first device and every counter it had accumulated, and printed
+>   `removed 0` as success.
+> * **The guessed pair was the reassuring answer.** 4096/2048 is exactly
+>   **2.00x**, which is what a healthy zram is supposed to show. A mistyped
+>   write therefore did not read as anomalous — it read as evidence the
+>   compressor was working. That is the `cputhr` row (*the guessed default is
+>   always the reassuring value*) landing on a ratio rather than a rate. And
+>   4096 is the wrong page size for this OS, which uses 16 KiB pages, so it was
+>   also batch 29's borrowed-from-Linux mistake a second time. `compr` is the
+>   denominator of that ratio in both `devices` and `compression_ratio_x100`,
+>   so `[compr]` became `<compr>` under batch 28's §607 override. `orig`
+>   additionally selects a *classification* — `record_write` files the write as
+>   a zero page when `orig_bytes == 0` — so an unreadable size could put a
+>   write in the wrong category as well as at the wrong magnitude.
+> * **The uncounted name guess contradicted the record it created.** `create`
+>   fell back to the name `"zram1"` while the id counter starts at 0, so the
+>   first `zramstat create` produced **device 0 named "zram1"** — and the
+>   module's own self-test names its fixture `zram0`, so the shell and the
+>   module disagreed about what to call the same device. A wrong name is not a
+>   wrong cell in a device table; the name is the thing that distinguishes one
+>   device from another.
+>
+> **The §607 override now has a rule instead of two precedents.** Batch 28
+> promoted `[size]` to `<size>` because it was a denominator; this batch also
+> promoted `create`'s `[size]`, which is *not* one. What both actually share:
+>
+> > **An operand that says what a created object IS has no defensible default**,
+> > because the default asserts a fact about a device nobody described. Ratios
+> > and capacities are read as configuration, not as the shell's opinion.
+>
+> So `create`/`register` subcommands take required operands regardless of
+> brackets, and the mechanical read-the-brackets rule continues to govern
+> everything else.
+>
+> **A missing subcommand again, and again a structural one.** `zramstat` had no
+> `discard` arm, so `record_discard` — the only operation that returns memory
+> to the pool — was reachable only from the module's own self-test, and the
+> shell's `mem=` column was **monotonic by construction**. Batch 26/27's
+> generalisation for the third batch running; as in batch 30 the missing
+> operation was not cosmetic. Added, with its `bytes` operand required, since
+> `mem_used.saturating_sub(bytes)` corrupts in the destructive direction and
+> the saturation can clamp to zero — mmapstat's `unmap` row, reached here
+> before a default was ever written rather than after.
+>
 > **Burn-down log.** 2026-08-26 (thirtieth batch): `cmd_rqstat` (6) cleared —
 > 457 → 451 across 213 → 212 functions. Not pinned by a rung; nothing asserts
 > on `rqstat` shell output. Batch 29's rule was used as a *screen* rather than

@@ -80600,7 +80600,35 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **706 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **683 of 800 remain**
+
+> **Burn-down log.** 2026-08-25 (third batch): `cmd_colorpicker` (23) cleared —
+> the single largest entry in the ledger — 706 → 683 across 240 → 239
+> functions. Pinned by `kshell::self_test` rung 69.
+>
+> This one is worth recording for *what* was being guessed. `cpick open
+> #gggggg` did not refuse the colour: `Color::from_hex` returned `None`, the
+> `unwrap_or` substituted black, and the shell answered `Picker #3 opened
+> (#000000)`. That reply is indistinguishable from the reply to `cpick open`
+> with no colour at all, which documents black as its default — so the one
+> case the user could not tell apart from success was the failure. The fix
+> keeps the *absent* default (it is documented and intended) and refuses only
+> the *unreadable* word, which is the distinction the whole §600 rule turns on.
+>
+> Two further shapes went with it. `cpick palrm <pal> 1o` deleted swatch **0**
+> — a real swatch, the first one — and said `Removed color`; a mistyped index
+> destroyed a colour the user could see, and told them it had done what they
+> asked. And `cpick model <id>` was conflated with `cpick model <id> rbg`: one
+> `else` served both the question *what are the models?* and the answer
+> *`rbg` is not one of them*, printing the list and exiting **0** either way,
+> so a transposition was reported as a successful answer to a question that
+> had not been asked. Split, as the 33 other conflated arms were.
+>
+> The six per-width helpers this backlog had accumulated (`required_u32`,
+> `required_u64`, `required_i32`, `optional_u32`, `optional_u64`) were
+> collapsed into generic `required_num<T>` / `optional_num<T>` immediately
+> before this batch; see `design-decisions.md` §603 for why, and for the
+> survey of the remaining backlog that settled it.
 
 > **The denominator moved, and not because anything regressed.** 2026-08-25:
 > the gate was matching its regex against a *line*, and `cargo fmt` — not the
@@ -80610,8 +80638,9 @@ file` all still work — so the rung cannot pass by having broken the options.
 > measured under the old, line-granular gate and is therefore an undercount of
 > what those batches actually left behind; they are kept verbatim because the
 > *work* they describe was real and is still done. The running total is
-> restated above against the true denominator: **706 remain across 240
-> functions**, and the 94 sites the log below records as fixed bring the known
+> restated above against the true denominator: **706 remained across 240
+> functions** at the moment the gate was corrected (the header carries the
+> live figure), and the 94 sites the log below records as fixed bring the known
 > total to 800 — not 334. (Whether those 94 batches also swept up wrapped-form
 > siblings that the old gate never listed is unknowable, so 800 is stated as
 > the floor it is.) No function's count went down when the gate was corrected,

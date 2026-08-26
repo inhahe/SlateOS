@@ -58,7 +58,6 @@ cmd_cgroupfs 3
 cmd_cliphistory 1
 cmd_clipsync 2
 cmd_clocksrc 1
-cmd_colorpicker 23
 cmd_colortemp 7
 cmd_compstat 1
 cmd_coredump 5

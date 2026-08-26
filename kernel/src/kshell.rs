@@ -16311,6 +16311,123 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 69: a colour, a coordinate and a swatch index are refused, not guessed"
+    );
+    // `cmd_colorpicker` was the largest single entry in the guessed-value
+    // ledger: 23 sites, every one `…parse().ok().unwrap_or(0)`. It is worth a
+    // rung of its own because a *colour* is the case where a guessed value is
+    // hardest to notice — a wrong colour is still a colour, and the command
+    // printed the value it had substituted, so the output agreed with itself.
+    {
+        // A picker is opened first so the ids below name something real; its
+        // number is not assumed, only that opening one succeeds.
+        let out = capture_command("cpick open #336699");
+        assert_output_contains("a readable colour opens a picker", &out, b"opened");
+        assert_eq!(last_exit(), 0, "cpick open: a readable colour succeeds");
+
+        // `#gggggg` is six hex-shaped characters that are not hex. It used to
+        // open a *black* picker and report "(#000000)", which is exactly what
+        // asking for black looks like.
+        let out = capture_command("cpick open #gggggg");
+        assert_output_contains(
+            "cpick refuses a colour it cannot read",
+            &out,
+            b"is not a colour",
+        );
+        assert_eq!(last_exit(), 1, "cpick open: an unreadable colour errors");
+        assert_output_lacks(
+            "and does not also claim to have opened a picker",
+            &out,
+            b"opened",
+        );
+
+        // Omitting the colour still means black. The refusal above is only
+        // correct if it did not take the documented default away.
+        let out = capture_command("cpick open");
+        assert_output_lacks(
+            "bare `cpick open` is still the documented black default",
+            &out,
+            b"is not a colour",
+        );
+        assert_eq!(last_exit(), 0, "bare `cpick open` succeeds");
+
+        // A channel. `12o` (letter O) became 0, so green went to black while
+        // red and blue took the values asked for -- a plausible colour, and the
+        // echoed "rgb(255,0,0)" matched what was stored.
+        let out = capture_command("cpick rgb 1 255 12o 0");
+        assert_output_contains(
+            "cpick refuses a colour channel it cannot read",
+            &out,
+            b"is not a green channel",
+        );
+        assert_eq!(last_exit(), 1, "cpick rgb: an unreadable channel errors");
+
+        let out = capture_command("cpick rgb 1 255 128 0");
+        assert_output_lacks(
+            "a readable channel is not refused as unreadable",
+            &out,
+            b"is not a green channel",
+        );
+
+        // The picker id itself. Every one of the eleven subcommands taking one
+        // read it as `unwrap_or(0)`, so a mistyped id edited picker 0 -- a
+        // different picker than the one the user had in mind, which is the
+        // dangerous half of the rule (design-decisions.md §600).
+        let out = capture_command("cpick get zz");
+        assert_output_contains(
+            "cpick refuses a picker id it cannot read",
+            &out,
+            b"is not a picker id",
+        );
+        assert_eq!(last_exit(), 1, "cpick get: an unreadable picker id errors");
+
+        // A screen coordinate, where the guess was self-consistent: `40o`
+        // became 0, the top-left pixel was sampled, and the report said
+        // "Sampled (0,300)" -- naming the coordinate it had invented.
+        let out = capture_command("cpick sample 40o 300");
+        assert_output_contains(
+            "cpick refuses a coordinate it cannot read",
+            &out,
+            b"is not a x coordinate",
+        );
+        assert_eq!(last_exit(), 1, "cpick sample: an unreadable x errors");
+        assert_output_lacks("and reports no sample", &out, b"Sampled");
+
+        // A destructive index. 0 is a real swatch -- the first -- so a mistyped
+        // index deleted the wrong colour and reported the deletion as done.
+        let _ = capture_command("cpick mkpal selftestpal");
+        assert_eq!(last_exit(), 0, "a palette can be created for the test");
+        let out = capture_command("cpick palrm selftestpal 1o");
+        assert_output_contains(
+            "cpick refuses a swatch index it cannot read",
+            &out,
+            b"is not a colour index",
+        );
+        assert_eq!(last_exit(), 1, "cpick palrm: an unreadable index errors");
+        assert_output_lacks("and removes nothing", &out, b"Removed color");
+        let _ = capture_command("cpick rmpal selftestpal");
+
+        // The conflated arm: `cpick model <id>` asks what the models are and
+        // `cpick model <id> rbg` names one that does not exist. Both used to
+        // print the list and exit 0.
+        let out = capture_command("cpick model 1 rbg");
+        assert_output_contains(
+            "cpick refuses a colour model it does not know",
+            &out,
+            b"is not a colour model",
+        );
+        assert_eq!(last_exit(), 1, "cpick model: an unknown model errors");
+
+        let out = capture_command("cpick model 1");
+        assert_output_contains(
+            "and asking with no model still lists them",
+            &out,
+            b"Models:",
+        );
+        assert_eq!(last_exit(), 0, "listing the models is not a complaint");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -36383,8 +36500,22 @@ fn cmd_colorpicker(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "open" => {
-            let hex = parts.get(1).copied().unwrap_or("#000000");
-            let c = colorpicker::Color::from_hex(hex).unwrap_or(colorpicker::Color::rgb(0, 0, 0));
+            // Omitting the colour altogether means black, and that is
+            // documented. Typing one that cannot be read used to mean black
+            // too -- `cpick open #gggggg` opened a black picker and reported
+            // "Picker #3 opened (#000000)", which is indistinguishable from
+            // having asked for black. Only the absent case keeps the default.
+            let c = match parts.get(1) {
+                None => colorpicker::Color::rgb(0, 0, 0),
+                Some(word) => {
+                    let Some(c) = colorpicker::Color::from_hex(word) else {
+                        shell_println!("cpick: open: `{}' is not a colour", word);
+                        set_exit(1);
+                        return;
+                    };
+                    c
+                }
+            };
             let alpha = parts.get(2).copied() == Some("alpha");
             match colorpicker::open_picker(c, alpha) {
                 Ok(id) => shell_println!("Picker #{} opened ({})", id, c.to_hex()),
@@ -36395,13 +36526,23 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "rgb" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let r = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
-            let g = parts.get(3).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
-            let b = parts.get(4).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+            // Every channel defaulted to 0 and the picker id defaulted to 0
+            // too, so `cpick rgb 3 255 12o 0` (letter O) set green to black on
+            // picker 3 and printed "rgb(255,0,0)" as if that had been asked
+            // for. A colour is exactly the kind of value where a wrong one is
+            // still a plausible one.
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
+            let Some(r) = required_num(&parts, 2, "cpick", sub, "red channel (0-255)") else {
+                return;
+            };
+            let Some(g) = required_num(&parts, 3, "cpick", sub, "green channel (0-255)") else {
+                return;
+            };
+            let Some(b) = required_num(&parts, 4, "cpick", sub, "blue channel (0-255)") else {
+                return;
+            };
             match colorpicker::set_rgb(pid, r, g, b) {
                 Ok(()) => shell_println!("#{}: rgb({},{},{})", pid, r, g, b),
                 Err(e) => {
@@ -36411,16 +36552,18 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "hsv" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let h = parts
-                .get(2)
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(0);
-            let s_val = parts.get(3).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
-            let v = parts.get(4).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
+            let Some(h) = required_num(&parts, 2, "cpick", sub, "hue in degrees") else {
+                return;
+            };
+            let Some(s_val) = required_num(&parts, 3, "cpick", sub, "saturation (0-100)") else {
+                return;
+            };
+            let Some(v) = required_num(&parts, 4, "cpick", sub, "value (0-100)") else {
+                return;
+            };
             match colorpicker::set_hsv(pid, h, s_val, v) {
                 Ok(()) => shell_println!("#{}: hsv({},{},{})", pid, h, s_val, v),
                 Err(e) => {
@@ -36430,16 +36573,18 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "hsl" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let h = parts
-                .get(2)
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or(0);
-            let s_val = parts.get(3).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
-            let l = parts.get(4).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
+            let Some(h) = required_num(&parts, 2, "cpick", sub, "hue in degrees") else {
+                return;
+            };
+            let Some(s_val) = required_num(&parts, 3, "cpick", sub, "saturation (0-100)") else {
+                return;
+            };
+            let Some(l) = required_num(&parts, 4, "cpick", sub, "lightness (0-100)") else {
+                return;
+            };
             match colorpicker::set_hsl(pid, h, s_val, l) {
                 Ok(()) => shell_println!("#{}: hsl({},{},{})", pid, h, s_val, l),
                 Err(e) => {
@@ -36449,10 +36594,11 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "hex" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // The colour word itself is left to `set_hex`, which validates it
+            // and returns an error -- so only the picker id was being guessed.
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
             let hex = parts.get(2).copied().unwrap_or("");
             match colorpicker::set_hex(pid, hex) {
                 Ok(()) => shell_println!("#{}: {}", pid, hex),
@@ -36463,14 +36609,18 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "alpha" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let a = parts
-                .get(2)
-                .and_then(|s| s.parse::<u8>().ok())
-                .unwrap_or(255);
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
+            // 255 stays the default for an *omitted* alpha -- "no transparency
+            // asked for" reads as fully opaque. It is no longer the answer to a
+            // word that could not be read, which is the case that mattered:
+            // `cpick alpha 3 5o` (letter O) made the colour fully opaque and
+            // said `alpha=255`, the opposite end of the range from the 50 the
+            // user was reaching for.
+            let Some(a) = optional_num(&parts, 2, "cpick", sub, "alpha (0-255)", 255u8) else {
+                return;
+            };
             match colorpicker::set_alpha(pid, a) {
                 Ok(()) => shell_println!("#{}: alpha={}", pid, a),
                 Err(e) => {
@@ -36480,30 +36630,36 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "model" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let m = parts
-                .get(2)
-                .and_then(|s| colorpicker::ColorModel::from_str(s));
-            if let Some(m) = m {
-                match colorpicker::set_model(pid, m) {
-                    Ok(()) => shell_println!("#{}: model={}", pid, m.label()),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
+            // One `else` served two callers: `cpick model 3`, which is asking
+            // what the models are, and `cpick model 3 rbg` (transposed), which
+            // is naming one that does not exist. Both got the list and exit 0,
+            // so a typo was reported as a successful answer to a question the
+            // user had not asked. Split, as the 33 other conflated arms were.
+            let Some(word) = parts.get(2) else {
                 shell_println!("Models: rgb, hsv, hsl, hex, cmyk");
+                return;
+            };
+            let Some(m) = colorpicker::ColorModel::from_str(word) else {
+                shell_println!("cpick: {}: `{}' is not a colour model", sub, word);
+                shell_println!("Models: rgb, hsv, hsl, hex, cmyk");
+                set_exit(1);
+                return;
+            };
+            match colorpicker::set_model(pid, m) {
+                Ok(()) => shell_println!("#{}: model={}", pid, m.label()),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "get" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
             match colorpicker::get_picker(pid) {
                 Ok(p) => {
                     let (h, s, v) = p.color.to_hsv();
@@ -36532,10 +36688,9 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "revert" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
             match colorpicker::revert(pid) {
                 Ok(c) => shell_println!("#{}: reverted to {}", pid, c.to_hex()),
                 Err(e) => {
@@ -36545,10 +36700,9 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "confirm" | "ok" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
             match colorpicker::confirm(pid) {
                 Ok(c) => shell_println!("Selected: {}", c.to_hex()),
                 Err(e) => {
@@ -36558,10 +36712,9 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "cancel" => {
-            let pid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(pid) = required_id(&parts, "cpick", sub, "picker") else {
+                return;
+            };
             match colorpicker::cancel(pid) {
                 Ok(()) => shell_println!("Picker #{} cancelled", pid),
                 Err(e) => {
@@ -36571,14 +36724,16 @@ fn cmd_colorpicker(args: &str) {
             }
         }
         "sample" => {
-            let x = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let y = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // Both coordinates defaulted to 0, so `cpick sample 40o 300`
+            // sampled the top-left pixel of the screen and reported it as
+            // "Sampled (0,300)" -- the printed coordinate agreed with the
+            // colour, which is exactly what made the wrong answer look right.
+            let Some(x) = required_num(&parts, 1, "cpick", sub, "x coordinate") else {
+                return;
+            };
+            let Some(y) = required_num(&parts, 2, "cpick", sub, "y coordinate") else {
+                return;
+            };
             let c = colorpicker::sample_screen(x, y);
             shell_println!("Sampled ({},{}): {}", x, y, c.to_hex());
         }
@@ -36635,10 +36790,13 @@ fn cmd_colorpicker(args: &str) {
         }
         "palrm" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let idx = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
+            // The index names *which colour to delete*, and 0 is a real one --
+            // the first. So `cpick palrm brand 1o` deleted the wrong swatch and
+            // said "Removed color #0 from 'brand'". A destructive operation is
+            // the last place a default belongs.
+            let Some(idx) = required_num(&parts, 2, "cpick", sub, "colour index") else {
+                return;
+            };
             match colorpicker::palette_remove(name, idx) {
                 Ok(()) => shell_println!("Removed color #{} from '{}'", idx, name),
                 Err(e) => {

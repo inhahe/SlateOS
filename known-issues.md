@@ -81109,7 +81109,73 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **522 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **515 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twentieth batch): `cmd_shmem` (7) cleared —
+> 522 → 515 across 223 → 222 functions. Pinned by `kshell::self_test` rung 88.
+>
+> **The mildest severity in the burn-down, and the one that shows what the
+> counted ledger is actually counting.** Every other batch has been able to name
+> damage: a wrong object acted on, a number nobody measured filed as fact, a
+> guess that meant the negation of what was typed. `shmem` has none of that.
+> All seven sites guessed `0` and then, on the very next line, tested for `0`
+> and bailed — so **the guessed value never reached the subsystem**. No state
+> was written, nothing was corrupted, nothing was invented.
+>
+> What was destroyed is only the diagnosis, and all of it. `0` was doing two
+> jobs: it was the guess *and* it was the marker for "invalid". That collapses
+> three different mistakes onto one answer:
+>
+> | Typed | The mistake | What the shell said |
+> |---|---|---|
+> | `shmem create foo` | the size is **missing** | `Usage: shmem create <name> <size>` |
+> | `shmem create foo 1O24` | the size is **mistyped** (letter O) | `Usage: shmem create <name> <size>` |
+> | `shmem create foo 0` | the size is **readable and invalid** | `Usage: shmem create <name> <size>` |
+>
+> A synopsis is a specific claim: *you got the form wrong*. In rows two and
+> three the form was right. The operator is told to re-read a syntax line that
+> already matches what they typed, while the actual fault — one character, or a
+> value the subsystem will not accept — goes unmentioned. That is the sixth
+> severity row, **conflation**: not a wrong action, but one answer standing in
+> for three questions, and it is the answer to none of them.
+>
+> `shmem attach` is the same defect with a second edge. It takes two numbers,
+> and `shmem attach 1O 3` and `shmem attach 3 1O` printed the *identical* line —
+> so the message did not even narrow which of the two words was the problem.
+> They are now `` `1O' is not a region id `` and `` `1O' is not a process id ``.
+>
+> **The `delete 0` sentinel was dropped, not reworded.** Region ids are
+> allocated from 1 (`init_defaults` seeds `next_id: 1` in
+> `kernel/src/fs/shmem.rs`), so `delete 0` finds nothing
+> and `shmem::delete` answers `NotFound` — which is true, and is the same answer
+> `delete 999` gets. A shell-side rule singling out zero would invent a
+> distinction the id space does not have. Zero was only ever special *because it
+> was the guess*; once the guess is gone the special case has no reason to
+> exist. This is the general shape to look for in the remaining batches: a
+> sentinel test that looks like validation is often just the guess's shadow.
+>
+> **Why the checker could not have found this by shape.** `cmd_blkread`
+> (rung 86, eighteenth batch) had a structurally identical guess-then-test-the-
+> guess pair, and D1 did not flag it, because there the parse sat behind a
+> function boundary the statement-level regex cannot cross. The two batches
+> together are the argument for the ledger being keyed by *function* rather than
+> by pattern: the checker finds the sites it can see, and the count is what
+> keeps the ones it cannot from being forgotten.
+>
+> Rung 88 pins all three answers as distinct, both `attach` orders as distinct,
+> and carries a control — `shmem create zzrung88 1024` still succeeds — so the
+> three refusals cannot be passing by having simply broken `create`.
+>
+> **§604 note.** Two assertions in the first draft of rung 88 were
+> `assert_output_lacks(.., b"Usage: shmem create")` and the same for `delete`.
+> The wording gate rejected both as unfireable, and was right: after the fix
+> that text exists nowhere in `cmd_shmem`, so the needle matched no format
+> string and a misspelling of it would have passed forever. Both were replaced
+> rather than weakened — one by a comment (the guarantee is structural: the arm
+> cannot print a synopsis it no longer contains, which is stronger than a
+> runtime check), one by a positive `contains b"Error:"`, which is fixed text in
+> the arm's own `shell_println!` and asserts something the absence could not —
+> that the word reached `shmem::delete` and the *subsystem* answered.
 
 > **Burn-down log.** 2026-08-26 (nineteenth batch): `cmd_cputhr` (7) cleared —
 > 529 → 522 across 224 → 223 functions. Pinned by `kshell::self_test` rung 87.

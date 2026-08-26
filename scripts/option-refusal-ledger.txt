@@ -198,7 +198,6 @@ cmd_secureerase 1
 cmd_seq 2
 cmd_service_limits 4
 cmd_sharesheet 1
-cmd_shmem 7
 cmd_signalq 6
 cmd_slabstat 1
 cmd_snaplayout 1

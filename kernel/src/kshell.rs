@@ -18458,6 +18458,109 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("cputhr temp 0 65000");
     }
 
+    serial_println!(
+        "  kshell::self_test 88: one sentinel served as the guess and as the invalidity marker, so \
+         three different mistakes got one answer"
+    );
+    // `shmem` is the mildest severity in the burn-down: every site guessed `0`
+    // and then immediately tested for `0`, so the guess never reached the
+    // subsystem and no state was ever corrupted. Only the diagnosis was lost —
+    // but all of it, because `0` was doing two jobs. Omitted, unreadable and
+    // readable-but-invalid all collapsed onto `Usage: …`, which asserts the user
+    // got the *form* wrong when the form was right and one character was not.
+    {
+        // Absent, unreadable and invalid-but-readable are three answers now.
+        let out = capture_command("shmem create zzrung88");
+        assert_output_contains(
+            "an omitted size is reported as missing",
+            &out,
+            b"shmem: create: missing size in bytes",
+        );
+        assert_eq!(last_exit(), 1, "a missing size errors");
+
+        let out = capture_command("shmem create zzrung88 1O24");
+        assert_output_contains(
+            "an unreadable size names the word",
+            &out,
+            b"`1O24' is not a size in bytes",
+        );
+        // There is deliberately no `lacks b"Usage: shmem create"` here. The
+        // wording gate rejected one, and rightly: that text no longer exists
+        // anywhere in `cmd_shmem`, so the needle could not be checked against
+        // any format string and a misspelling of it would have passed forever.
+        // The guarantee is now structural rather than asserted — the synopsis
+        // cannot be printed in answer to a typo because the arm no longer
+        // contains it — which is stronger than a runtime check, and the
+        // `contains` above already pins what *is* printed.
+        assert_eq!(last_exit(), 1, "an unreadable size errors");
+
+        let out = capture_command("shmem create zzrung88 0");
+        assert_output_contains(
+            "a readable zero is refused for being zero, not for being unreadable",
+            &out,
+            b"size must be greater than zero",
+        );
+        assert_eq!(last_exit(), 1, "a zero size errors");
+
+        // The control: the same line with the size spelled correctly works, so
+        // the three refusals above cannot be passing by having broken `create`.
+        let out = capture_command("shmem create zzrung88 1024");
+        assert_output_contains(
+            "while a readable size creates the region",
+            &out,
+            b"Created shared region #",
+        );
+        assert_eq!(last_exit(), 0, "`shmem create` succeeds");
+
+        // Two operands, which the old guard could not tell apart: both orders
+        // produced the identical synopsis. They are different messages now.
+        let out = capture_command("shmem attach 1O 3");
+        assert_output_contains(
+            "an unreadable region id is named as a region id",
+            &out,
+            b"`1O' is not a region id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable region id errors");
+
+        let out = capture_command("shmem attach 3 1O");
+        assert_output_contains(
+            "and an unreadable pid in the same command is named as a process id",
+            &out,
+            b"`1O' is not a process id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable pid errors");
+
+        // `delete 0` keeps no special shell-side rule: ids start at 1, so zero
+        // is simply absent and the subsystem says so — the same answer any other
+        // absent id gets. Zero was only ever special because it was the guess.
+        //
+        // Asserted positively rather than as a `lacks b"Usage: shmem delete"`.
+        // The wording gate rejected that form and was right to: the synopsis no
+        // longer exists anywhere in `cmd_shmem`, so the needle matched no format
+        // string and a misspelling of it would have passed forever. `Error:` is
+        // fixed text in the arm's own `shell_println!("Error: {:?}", e)`, which
+        // is what makes it checkable — and it says something the absence could
+        // not, namely that the word reached `shmem::delete` and the *subsystem*
+        // answered, rather than the shell short-circuiting on a sentinel.
+        let out = capture_command("shmem delete 0");
+        assert_output_contains(
+            "a readable zero id is answered by the subsystem, not by the shell's syntax",
+            &out,
+            b"Error:",
+        );
+        assert_eq!(last_exit(), 1, "deleting a nonexistent region errors");
+
+        // The help arm must still behave as rung 67's shapes require: bare
+        // `shmem` is a request for help, not a complaint.
+        let out = capture_command("shmem");
+        assert_output_lacks(
+            "and bare `shmem` still asks for help rather than erroring",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 0, "bare `shmem` is output, not a complaint");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -94198,11 +94301,40 @@ fn cmd_shmem(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            let size_str = parts.get(2).copied().unwrap_or("0");
-            let size = size_str.parse::<u64>().unwrap_or(0);
-            if name.is_empty() || size == 0 {
-                shell_println!("Usage: shmem create <name> <size>");
+            // `shmem` is the mildest severity in this whole burn-down, and the
+            // reason is worth stating: **the guessed value was never used.**
+            // Every one of these seven sites guessed `0` and then immediately
+            // tested for `0` and printed the synopsis, so no state was corrupted
+            // and no measurement was invented. What was destroyed is only the
+            // diagnosis — and all of it.
+            //
+            // `shmem create foo 1O24` answered `Usage: shmem create <name>
+            // <size>`, which tells the user the *form* was wrong. The form was
+            // right; one character was wrong. Worse, `shmem create foo`,
+            // `shmem create foo 1O24` and `shmem create foo 0` were three
+            // different mistakes — omitted, unreadable, and readable-but-invalid
+            // — and the sentinel collapsed all three onto one answer, because
+            // `0` served as both the guess and the invalidity marker.
+            //
+            // This is the same shape as `cmd_blkread` (rung 86), with one
+            // difference that says something about the gate rather than the
+            // code: there the parse sat behind a function boundary and D1 could
+            // not see it, so it had to be found by hand; here the parse and the
+            // substitution share a statement, so it was counted all along.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("shmem: create: missing name");
+                set_exit(1);
+                return;
+            };
+            let Some(size) = required_num::<u64>(&parts, 2, "shmem", sub, "size in bytes") else {
+                return;
+            };
+            // A readable zero is a different mistake from an unreadable word and
+            // now gets a different answer. `shmem::create` rejects it too
+            // (`InvalidArgument`, shmem.rs:152), so nothing is being invented
+            // here — only said in words rather than as an opaque enum.
+            if size == 0 {
+                shell_println!("shmem: create: size must be greater than zero");
                 set_exit(1);
                 return;
             }
@@ -94216,13 +94348,17 @@ fn cmd_shmem(args: &str) {
             }
         }
         "delete" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: shmem delete <id>");
-                set_exit(1);
+            // The `id == 0` sentinel is dropped rather than reworded. Region ids
+            // are allocated from 1 (`init_defaults` seeds `next_id: 1`), so
+            // `delete 0` finds nothing
+            // and `shmem::delete` already answers `NotFound` — which is true,
+            // and is the same answer `delete 999` gets. Keeping a shell-side
+            // rule that singles out zero would invent a distinction the id space
+            // does not have; the only reason `0` was special was that it used to
+            // be the guess.
+            let Some(id) = required_num::<u32>(&parts, 1, "shmem", sub, "region id") else {
                 return;
-            }
+            };
             shmem::init_defaults();
             match shmem::delete(id) {
                 Ok(()) => shell_println!("Deleted region #{}", id),
@@ -94233,15 +94369,16 @@ fn cmd_shmem(args: &str) {
             }
         }
         "attach" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let pid_str = parts.get(2).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if id == 0 || pid == 0 {
-                shell_println!("Usage: shmem attach <id> <pid>");
-                set_exit(1);
+            // Two operands, and the old guard could not say which of them it was
+            // complaining about: `shmem attach 3 1O` and `shmem attach 1O 3`
+            // produced the identical synopsis. `required_num` names the word and
+            // the operand, so the two are now different messages.
+            let Some(id) = required_num::<u32>(&parts, 1, "shmem", sub, "region id") else {
                 return;
-            }
+            };
+            let Some(pid) = required_num::<u32>(&parts, 2, "shmem", sub, "process id") else {
+                return;
+            };
             shmem::init_defaults();
             match shmem::attach(id, pid) {
                 Ok(()) => shell_println!("Attached PID {} to region #{}", pid, id),
@@ -94252,15 +94389,12 @@ fn cmd_shmem(args: &str) {
             }
         }
         "detach" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let pid_str = parts.get(2).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if id == 0 || pid == 0 {
-                shell_println!("Usage: shmem detach <id> <pid>");
-                set_exit(1);
+            let Some(id) = required_num::<u32>(&parts, 1, "shmem", sub, "region id") else {
                 return;
-            }
+            };
+            let Some(pid) = required_num::<u32>(&parts, 2, "shmem", sub, "process id") else {
+                return;
+            };
             shmem::init_defaults();
             match shmem::detach(id, pid) {
                 Ok(()) => shell_println!("Detached PID {} from region #{}", pid, id),
@@ -94271,13 +94405,13 @@ fn cmd_shmem(args: &str) {
             }
         }
         "pid" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 {
-                shell_println!("Usage: shmem pid <pid>");
-                set_exit(1);
+            // A query, not a mutation: `regions_for_pid` on a pid with nothing
+            // attached returns an empty list, which is the honest answer for
+            // pid 0 as much as for pid 4242. Nothing is lost by letting a
+            // readable number through.
+            let Some(pid) = required_num::<u32>(&parts, 1, "shmem", sub, "process id") else {
                 return;
-            }
+            };
             shmem::init_defaults();
             let regs = shmem::regions_for_pid(pid);
             shell_println!("Regions for PID {} ({}):", pid, regs.len());

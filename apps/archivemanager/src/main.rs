@@ -18,6 +18,7 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -1396,46 +1397,6 @@ const MIN_HEIGHT: f32 = 260.0;
 // Geometry, targets, and the frame that carries both
 // ============================================================================
 
-/// An axis-aligned rectangle in window coordinates.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Rect {
-    #[must_use]
-    pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
-        Self { x, y, w, h }
-    }
-
-    /// Whether `(px, py)` is inside this rectangle.
-    ///
-    /// Half-open on both axes — the right and bottom edges belong to whatever
-    /// is next. Two rows that share a boundary pixel would otherwise both
-    /// claim it, and which one won would depend on the order they happened to
-    /// be recorded in.
-    #[must_use]
-    pub fn contains(&self, px: f32, py: f32) -> bool {
-        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
-    }
-
-    /// The overlap between two rectangles, or `None` if they do not overlap.
-    #[must_use]
-    fn intersect(&self, other: &Rect) -> Option<Rect> {
-        let x = self.x.max(other.x);
-        let y = self.y.max(other.y);
-        let right = (self.x + self.w).min(other.x + other.w);
-        let bottom = (self.y + self.h).min(other.y + other.h);
-        if right <= x || bottom <= y {
-            return None;
-        }
-        Some(Rect::new(x, y, right - x, bottom - y))
-    }
-}
-
 /// The seven buttons along the toolbar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolbarAction {
@@ -1516,93 +1477,20 @@ pub enum Target {
 
 /// A frame being drawn.
 ///
-/// The renderer records the box it paints for every control as it paints it,
-/// so the hit-test can be *the renderer*: run it, then read the boxes back.
-/// The alternative — a `Layout` struct that measures everything a second time
-/// — is two transcriptions of the same arithmetic, and the one that is wrong
-/// is whichever one you are not currently reading.
-pub struct Frame {
-    /// The commands to hand to the compositor.
-    pub tree: RenderTree,
-    /// Every clickable box recorded this frame, in paint order.
-    hits: Vec<(Target, Rect)>,
-    /// The active clip stack, mirroring `PushClip`/`PopClip` in `tree`.
-    clips: Vec<Rect>,
-    /// The size this frame is being drawn at.
-    width: f32,
-    height: f32,
-}
+/// Rendering and hit-testing are the *same walk* — see [`guitk::frame`] for why,
+/// and for how the clip around the file list and the sidebar decides what is
+/// actually clickable. This alias is here so the renderers below can keep
+/// saying `&mut Frame` without repeating the target type on every signature.
+pub type Frame = guitk::frame::Frame<Target>;
 
-impl Frame {
-    fn new(width: f32, height: f32) -> Self {
-        Self {
-            tree: RenderTree::new(),
-            hits: Vec::new(),
-            clips: Vec::new(),
-            width: width.max(MIN_WIDTH),
-            height: height.max(MIN_HEIGHT),
-        }
-    }
-
-    /// Record a draw command, tracking clips as they are pushed and popped.
-    fn push(&mut self, command: RenderCommand) {
-        match &command {
-            RenderCommand::PushClip {
-                x,
-                y,
-                width,
-                height,
-            } => {
-                let rect = Rect::new(*x, *y, *width, *height);
-                // A nested clip can only shrink the visible region, never grow
-                // it, so the effective clip is the intersection with the one
-                // already in force.
-                let effective = match self.clips.last() {
-                    Some(outer) => outer.intersect(&rect),
-                    None => Some(rect),
-                };
-                self.clips
-                    .push(effective.unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)));
-            }
-            RenderCommand::PopClip => {
-                self.clips.pop();
-            }
-            _ => {}
-        }
-        self.tree.push(command);
-    }
-
-    /// Record that `target` occupies `rect`.
-    ///
-    /// The rect is trimmed to the clip in force, and dropped entirely if it
-    /// falls outside: a row scrolled half off the top of the list is only
-    /// clickable on the half that is actually on screen. Recording the whole
-    /// row would make the invisible half of it steal clicks from whatever is
-    /// painted above the list.
-    fn hit(&mut self, target: Target, rect: Rect) {
-        let visible = match self.clips.last() {
-            Some(clip) => match clip.intersect(&rect) {
-                Some(r) => r,
-                None => return,
-            },
-            None => rect,
-        };
-        self.hits.push((target, visible));
-    }
-
-    /// The topmost control at `(x, y)`, if any.
-    ///
-    /// Back to front, because later commands paint over earlier ones: the
-    /// drag overlay covers the file list, so it must also intercept its
-    /// clicks.
-    #[must_use]
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<Target> {
-        self.hits
-            .iter()
-            .rev()
-            .find(|(_, rect)| rect.contains(x, y))
-            .map(|(target, _)| *target)
-    }
+/// A frame sized for a window of `width` by `height`, never smaller than the
+/// minimum the layout is designed for.
+///
+/// Below that the sidebar and the file list overlap, so the renderer draws the
+/// smallest sensible layout and lets it clip rather than producing negative
+/// column widths.
+fn new_frame(width: f32, height: f32) -> Frame {
+    Frame::new(width.max(MIN_WIDTH), height.max(MIN_HEIGHT))
 }
 
 // ============================================================================
@@ -2476,7 +2364,7 @@ pub fn render_drag_overlay(
 /// is no way for what the user sees and what the user can click to disagree.
 #[must_use]
 pub fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
-    let mut frame = Frame::new(width, height);
+    let mut frame = new_frame(width, height);
     let w = frame.width;
     let h = frame.height;
 
@@ -2548,7 +2436,7 @@ pub fn build_frame(state: &AppState, width: f32, height: f32) -> Frame {
 #[must_use]
 pub fn render_frame(state: &AppState) -> Vec<RenderCommand> {
     build_frame(state, state.window_width, state.window_height)
-        .tree
+        .into_tree()
         .commands
 }
 
@@ -3202,7 +3090,7 @@ impl App for AppState {
         // opening frame at the default size whatever the window really is.
         self.window_width = width;
         self.window_height = height;
-        build_frame(self, width, height).tree
+        build_frame(self, width, height).into_tree()
     }
 }
 
@@ -4491,7 +4379,7 @@ mod tests {
         let mut frame = Frame::new(800.0, 600.0);
         let h = render_toolbar(&state, &mut frame, 0.0, 800.0);
         assert_eq!(h, 40.0);
-        assert!(!frame.tree.commands.is_empty());
+        assert!(!frame.commands().is_empty());
     }
 
     #[test]
@@ -4500,7 +4388,7 @@ mod tests {
         let mut frame = Frame::new(800.0, 600.0);
         let h = render_path_bar(&state, &mut frame, 0.0, 800.0);
         assert_eq!(h, 32.0);
-        assert!(!frame.tree.commands.is_empty());
+        assert!(!frame.commands().is_empty());
     }
 
     #[test]
@@ -4512,7 +4400,7 @@ mod tests {
         let mut frame = Frame::new(800.0, 600.0);
         let w = render_sidebar(&state, &mut frame, 0.0, 400.0);
         assert_eq!(w, 0.0);
-        assert!(frame.tree.commands.is_empty());
+        assert!(frame.commands().is_empty());
     }
 
     #[test]
@@ -4524,7 +4412,7 @@ mod tests {
         let mut frame = Frame::new(800.0, 600.0);
         let w = render_sidebar(&state, &mut frame, 0.0, 400.0);
         assert!(w > 0.0);
-        assert!(!frame.tree.commands.is_empty());
+        assert!(!frame.commands().is_empty());
     }
 
     // --- Sample data test ---
@@ -4582,7 +4470,7 @@ mod tests {
     fn centre_of(state: &AppState, pred: impl Fn(&Target) -> bool, what: &str) -> (f32, f32) {
         let frame = build_frame(state, SIZE.0, SIZE.1);
         let (_, rect) = frame
-            .hits
+            .hits()
             .iter()
             .find(|(t, _)| pred(t))
             .unwrap_or_else(|| panic!("no {what} was drawn"));
@@ -4671,7 +4559,7 @@ mod tests {
         let mut state = loaded();
         let frame = build_frame(&state, SIZE.0, SIZE.1);
         let (target, rect) = frame
-            .hits
+            .hits()
             .iter()
             .find(|(t, _)| matches!(t, Target::FileRow(_)))
             .expect("no file row was drawn");
@@ -4697,7 +4585,7 @@ mod tests {
         let mut state = loaded();
         let frame = build_frame(&state, SIZE.0, SIZE.1);
         let (target, rect) = frame
-            .hits
+            .hits()
             .iter()
             .find(|(t, _)| matches!(t, Target::FileRow(_)))
             .expect("no file row was drawn");
@@ -4748,7 +4636,7 @@ mod tests {
             .map(|e| e.id)
             .expect("the sample archive has a directory");
         let (_, rect) = frame
-            .hits
+            .hits()
             .iter()
             .find(|(t, _)| matches!(t, Target::FileRow(id) if *id == dir_id))
             .expect("the directory row was not drawn");
@@ -4811,7 +4699,7 @@ mod tests {
         let frame = build_frame(&state, SIZE.0, SIZE.1);
         let rows = state.tree_rows();
         let (target, rect) = frame
-            .hits
+            .hits()
             .iter()
             .find(|(t, _)| matches!(t, Target::TreeRow(i) if rows.get(*i).is_some_and(|r| !r.path.is_empty())))
             .expect("no directory row in the tree");
@@ -4866,7 +4754,7 @@ mod tests {
         let mut state = loaded();
         let frame = build_frame(&state, SIZE.0, SIZE.1);
         let (target, rect) = frame
-            .hits
+            .hits()
             .iter()
             .find(|(t, _)| matches!(t, Target::FileRow(_)))
             .expect("no file row");
@@ -4990,7 +4878,7 @@ mod tests {
         let frame = build_frame(&state, SIZE.0, SIZE.1);
         assert!(
             !frame
-                .hits
+                .hits()
                 .iter()
                 .any(|(t, _)| matches!(t, Target::TreeRow(_)))
         );
@@ -5131,7 +5019,7 @@ mod tests {
         state.list_scroll_y = 100.0;
         let frame = build_frame(&state, SIZE.0, SIZE.1);
         let (top, _) = state.content_band(SIZE.1);
-        for (target, rect) in &frame.hits {
+        for (target, rect) in frame.hits() {
             if matches!(target, Target::FileRow(_)) {
                 assert!(
                     rect.y >= top + HEADER_H - 0.01,
@@ -5148,7 +5036,7 @@ mod tests {
         let mut state = loaded();
         let frame = build_frame(&state, SIZE.0, SIZE.1);
         let (target, rect) = frame
-            .hits
+            .hits()
             .iter()
             .find(|(t, _)| matches!(t, Target::FileRow(_)))
             .expect("no file row");
@@ -5321,7 +5209,7 @@ mod tests {
         let frame = build_frame(&state, SIZE.0, SIZE.1);
         for action in ToolbarAction::all() {
             let found = frame
-                .hits
+                .hits()
                 .iter()
                 .any(|(t, _)| matches!(t, Target::Toolbar(a) if a == action));
             assert!(found, "{} has no hit box", action.label());
@@ -5330,12 +5218,17 @@ mod tests {
 
     #[test]
     fn a_narrow_window_still_records_boxes_inside_itself() {
-        // `Frame::new` clamps to a minimum, so a window dragged smaller than
+        // `new_frame` clamps to a minimum, so a window dragged smaller than
         // the layout can survive does not produce controls at negative
         // coordinates or boxes wider than the window.
         let state = loaded();
         let frame = build_frame(&state, 100.0, 100.0);
-        for (target, rect) in &frame.hits {
+        assert_eq!(
+            (frame.width, frame.height),
+            (MIN_WIDTH, MIN_HEIGHT),
+            "the clamp is what the rest of this test rests on"
+        );
+        for (target, rect) in frame.hits() {
             assert!(rect.x >= 0.0 && rect.y >= 0.0, "{target:?} at {rect:?}");
             assert!(rect.w > 0.0 && rect.h > 0.0, "{target:?} is empty");
         }

@@ -81109,7 +81109,7 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 520 of 1940
+## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 516 of 1940
 
 **In short:** the kernel has ~430 small modules that each keep a table of numbers
 and print it — how much swap is compressed, which signals a process has blocked,
@@ -81174,6 +81174,43 @@ invent an operand they could not read; this one is about operations no command
 offers at all. They keep appearing together because both come from the same
 habit — writing the arm that shows the feature working — but they are counted
 separately and cleared separately.
+
+**Burn-down log.** Count at the head of this entry is
+`scripts/find-unreachable-mutators.py`'s, not hand arithmetic.
+
+| date | module | 520 → | what changed |
+|---|---|---|---|
+| 2026-08-26 | `futexstat` | 516 | category 3, the sharpest instance found so far. `procfs.rs` publishes `futexstat::stats()` and `hotspots(10)` under `/proc`, and the `futexstat` shell command prints the same table — while all four of `record_wait` / `record_wake` / `record_timeout` / `record_contention` were unreachable. So `/proc`'s futex hotspot list was permanently empty and its wait/wake/timeout totals permanently zero, on a kernel whose futex implementation works. A reader takes that as *measured* zero contention. Fixed by wiring the four recorders into `kernel/src/ipc/futex.rs` at the real blocking and waking points. |
+
+The futexstat fix is worth reading before doing the next category-3 module,
+because it ran into the constraint that shapes all of them: **you usually cannot
+put the accounting call beside the existing counter.** `ipc::stats::futex_*` are
+plain relaxed atomics and every one of their call sites bumps them while
+`FUTEX_TABLE` is held; `fs::futexstat` keeps a `Vec` behind a spin lock, so the
+same placement would take a second lock inside the futex table's critical
+section and invert a lock order (`scripts/check-recursive-locks.py` is the live
+gate for that). The wiring therefore went in as four named `note_*` helpers with
+a module note saying they must only be called from outside the lock, placed at
+the points that are provably outside it: after the enqueue block in
+`futex_wait_bitset` and `futex_wait_bitset_timeout`, after the wake loop in
+`futex_wake_bitset` and `requeue_inner`.
+
+Two smaller judgment calls recorded there, in case a later reader disagrees:
+`requeue_inner` attributes its wake to `addr1` only, because the requeued tasks
+are still blocked (now on `addr2`) and so are not a wake of anything; and the
+`timeout_ns == 0` non-blocking "try" return is not counted as a wait *or* a
+timeout, because it never enqueued and never blocked, so counting it would
+report contention that did not happen.
+
+**Still unwired in that file, deliberately:** `futex_wait_multiple` and the
+priority-inheritance paths (`lock_pi_inner`, `futex_wait_requeue_pi`,
+`futex_cmp_requeue_pi`), whose `ipc::stats::futex_*` sites sit at roughly lines
+461, 630, 2363 and 2666. They are not instrumented because their enclosing lock
+scope was not read closely enough to prove a call would be outside
+`FUTEX_TABLE`, and a wrong answer there is a lock-order inversion rather than a
+wrong number. The consequence while they stay unwired is bounded and known:
+`/proc`'s futex table under-counts PI and multi-wait contention, rather than
+reporting zero for everything.
 
 **Not a regression.** True of each module since it was written.
 

@@ -52,6 +52,25 @@ pair inside it have no caller at all.  That is the function-level question and
 `scan-unwired.py`'s, not this one's; an absent module here is not a clean bill
 of health for the module.
 
+**Usage.**
+
+    python scripts/scan-orphan-modules.py            # the full report
+    python scripts/scan-orphan-modules.py --check     # ratchet: fail on a NEW island
+    python scripts/scan-orphan-modules.py --pin       # rewrite the baseline
+
+Exit codes: `0` nothing new, `1` at least one unpinned island (listed), `2` the
+check could not run -- a bad argument, a missing baseline, or a working
+directory with no modules in it.  Two is never confused with zero, because a
+gate that cannot fire must not look like a gate that passed.
+
+`--check` is a **ratchet, not a clean-tree test**: the 57 already found are
+pinned in `scripts/orphan-modules-baseline.txt` and the gate is silent about
+them.  What it refuses is a *new* one.  That is the useful shape while the
+existing debt is blocked on an operator decision (`open-questions.md` ->
+C-Q6): the pile cannot be paid down today, and it also cannot grow.  Removing
+a line is always welcome and the run says so; adding one is a decision that
+has to be made in a commit message where somebody can see it.
+
 **What it deliberately does not count as a mention.**  A bare re-export
 (`pub use power::PowerManager;`) is plumbing, not a caller: it widens the
 item's visibility without anyone having used it, and counting it would make
@@ -274,7 +293,52 @@ def public_items(lines):
     return items
 
 
+BASELINE = pathlib.Path("scripts/orphan-modules-baseline.txt")
+
+BASELINE_HEADER = """\
+# Islands pinned by scripts/scan-orphan-modules.py --check.
+#
+# Each line is a library module under lane C's roots that defines top-level
+# public items which no other file in the repository names.  57 of them, 113k
+# lines, were found the day this file was created; the list is a debt ledger,
+# not an allow-list, and the only edit it should ever receive is a deletion.
+#
+# `--check` fails on a module that is an island and is NOT listed here.  That
+# is the whole point: the count may fall, never rise.  A new module lands
+# wired up or it does not land.  When you connect one, delete its line
+# (`--pin` rewrites the file, but read the diff -- a --pin that ADDS a line is
+# the failure this gate exists to prevent, committed by hand).
+#
+# Being on this list is not absolution.  See known-issues.md ->
+# TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
+# largest entries are blocked on open-questions.md -> C-Q6, which decides
+# whether the shell's settings pages survive at all.
+"""
+
+
+def read_baseline():
+    """The pinned island set, or None if the file is absent."""
+    if not BASELINE.is_file():
+        return None
+    out = set()
+    for line in BASELINE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            out.add(line)
+    return out
+
+
 def main():
+    argv = sys.argv[1:]
+    mode = "report"
+    for a in argv:
+        if a in ("--check", "--pin"):
+            mode = a[2:]
+        else:
+            print(f"unknown argument: {a}", file=sys.stderr)
+            print(__doc__, file=sys.stderr)
+            return 2
+
     base = pathlib.Path(".")
     roots = list(ROOTS)
     roots += [p.name for p in base.iterdir() if p.is_dir() and p.name.startswith("net")]
@@ -298,8 +362,10 @@ def main():
                 candidates[f] = (items, len(lines))
 
     if not candidates:
-        print("no candidate modules found -- wrong working directory?")
-        return 1
+        # Exit 2, not 1: a check that cannot run must never be
+        # indistinguishable from a check that passed.
+        print("no candidate modules found -- wrong working directory?", file=sys.stderr)
+        return 2
 
     # One pass over the whole repository, counting which candidate item names
     # are mentioned by some file other than the one that defines them.
@@ -493,6 +559,53 @@ def main():
         islands.append((length, f, items, test_only, ambiguous))
 
     islands.sort(key=lambda r: (r[3], r[0]), reverse=True)
+
+    # The ledger counts hard islands only.  A test-only helper is a complete
+    # and benign explanation, and pinning those would make the gate fire on a
+    # module that is behaving exactly as intended.
+    hard_paths = {f.as_posix() for _, f, _, test_only, _ in islands if not test_only}
+
+    if mode == "pin":
+        body = "\n".join(sorted(hard_paths))
+        BASELINE.parent.mkdir(parents=True, exist_ok=True)
+        BASELINE.write_text(BASELINE_HEADER + body + "\n", encoding="utf-8")
+        print(f"pinned {len(hard_paths)} island(s) to {BASELINE.as_posix()}")
+        return 0
+
+    if mode == "check":
+        pinned = read_baseline()
+        if pinned is None:
+            print(
+                f"{BASELINE.as_posix()} is missing -- run --pin to create it",
+                file=sys.stderr,
+            )
+            return 2
+        added = sorted(hard_paths - pinned)
+        healed = sorted(pinned - hard_paths)
+        for p in healed:
+            print(f"reached now, drop from the baseline: {p}")
+        if added:
+            print(
+                f"\n{len(added)} module(s) define public items that nothing"
+                " outside them names:"
+            )
+            for p in added:
+                print(f"  {p}")
+            print(
+                "\nA module with no caller is not a feature; `cargo build` cannot"
+                "\nwarn about a `pub` item and the test suite reports it green."
+                "\nWire it up, delete it, or -- if you are knowingly deferring --"
+                "\nadd it to the baseline in the same commit, with the reason in"
+                "\nthe commit message.  Full report: run with no arguments."
+            )
+            return 1
+        print(
+            f"no new islands ({len(hard_paths)} pinned"
+            + (f", {len(healed)} now reached" if healed else "")
+            + ")"
+        )
+        return 0
+
     for length, f, items, test_only, ambiguous in islands:
         names = sorted(items, key=lambda n: items[n])
         shown = ", ".join(names[:6]) + (", ..." if len(names) > 6 else "")

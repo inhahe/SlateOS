@@ -1,0 +1,74 @@
+# Islands pinned by scripts/scan-orphan-modules.py --check.
+#
+# Each line is a library module under lane C's roots that defines top-level
+# public items which no other file in the repository names.  57 of them, 113k
+# lines, were found the day this file was created; the list is a debt ledger,
+# not an allow-list, and the only edit it should ever receive is a deletion.
+#
+# `--check` fails on a module that is an island and is NOT listed here.  That
+# is the whole point: the count may fall, never rise.  A new module lands
+# wired up or it does not land.  When you connect one, delete its line
+# (`--pin` rewrites the file, but read the diff -- a --pin that ADDS a line is
+# the failure this gate exists to prevent, committed by hand).
+#
+# Being on this list is not absolution.  See known-issues.md ->
+# TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
+# largest entries are blocked on open-questions.md -> C-Q6, which decides
+# whether the shell's settings pages survive at all.
+apps/explorer/src/columns.rs
+apps/explorer/src/dropzone.rs
+apps/explorer/src/thumbs.rs
+apps/imageviewer/src/video.rs
+apps/installer/src/grub.rs
+apps/procexplorer/src/features.rs
+apps/settings/src/associations.rs
+apps/sysinfo/src/hwquery.rs
+gui/compositor/src/server.rs
+gui/desktop/src/a11y.rs
+gui/desktop/src/about.rs
+gui/desktop/src/backup_settings.rs
+gui/desktop/src/bluetooth.rs
+gui/desktop/src/blur.rs
+gui/desktop/src/clipboard_viewer.rs
+gui/desktop/src/context_ext.rs
+gui/desktop/src/default_apps.rs
+gui/desktop/src/device_settings.rs
+gui/desktop/src/display_settings.rs
+gui/desktop/src/file_drop.rs
+gui/desktop/src/focus_assist.rs
+gui/desktop/src/hotkeys.rs
+gui/desktop/src/icons.rs
+gui/desktop/src/input_method.rs
+gui/desktop/src/language_settings.rs
+gui/desktop/src/login_screen.rs
+gui/desktop/src/mouse_settings.rs
+gui/desktop/src/multimon.rs
+gui/desktop/src/network_indicator.rs
+gui/desktop/src/network_settings.rs
+gui/desktop/src/notif_pane.rs
+gui/desktop/src/notification_settings.rs
+gui/desktop/src/osd.rs
+gui/desktop/src/power_settings.rs
+gui/desktop/src/print_manager.rs
+gui/desktop/src/resmon.rs
+gui/desktop/src/run_dialog.rs
+gui/desktop/src/screen_capture.rs
+gui/desktop/src/startup_settings.rs
+gui/desktop/src/storage_settings.rs
+gui/desktop/src/taskbar_autohide.rs
+gui/desktop/src/touchpad.rs
+gui/desktop/src/tray_dnd.rs
+gui/desktop/src/widgets.rs
+gui/desktop/src/window_peek.rs
+gui/desktop/src/window_rules.rs
+gui/remote/src/reader.rs
+gui/toolkit/src/context_ext.rs
+gui/toolkit/src/filetypes.rs
+gui/toolkit/src/menubar.rs
+gui/toolkit/src/modal.rs
+gui/toolkit/src/pathbar.rs
+gui/toolkit/src/signal.rs
+gui/toolkit/src/svg.rs
+netproto/src/arp.rs
+netproto/src/dhcp.rs
+netproto/src/icmp.rs

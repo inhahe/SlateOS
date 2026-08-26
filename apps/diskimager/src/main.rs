@@ -52,11 +52,14 @@ use guitk::text;
 use guitk::widget::{Widget, WidgetId, WidgetTree};
 use guitk::{scroll_window, wheel};
 
+use oswindow::app::Response;
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::time::UNIX_EPOCH;
+use std::process::ExitCode;
+use std::time::{Duration, UNIX_EPOCH};
 
 // ============================================================================
 // Catppuccin Mocha color palette
@@ -4524,23 +4527,98 @@ fn read_le_u16(data: &[u8], offset: usize) -> u16 {
 // Main entry point
 // ============================================================================
 
-fn main() {
-    let mut app = DiskImagerApp::new();
-    let mut rt = RenderTree::new();
+impl oswindow::app::App for DiskImagerApp {
+    fn title(&self) -> String {
+        String::from("Disk Imager")
+    }
 
-    // Initial render
-    app.render(&mut rt);
+    fn initial_size(&self) -> (u32, u32) {
+        (960, 680)
+    }
 
-    // Event loop (simplified — in production this is driven by the
-    // compositor's event dispatch).
-    let resize_event = Event::Resize {
-        width: 960,
-        height: 680,
-    };
-    app.handle_event(&resize_event);
+    /// The clock runs only while something is actually moving.
+    ///
+    /// Two things need it, and each stops needing it on its own:
+    ///
+    /// * `job` — the streaming transfer. This is the one that matters: the pump
+    ///   moves one chunk per tick, so an app that asked for no clock would open
+    ///   both files, report the operation as running, and never move a byte.
+    ///   That is a failure this program has already had in another form (see
+    ///   `known-issues.md`, the entry on its mock layer), and it is why the
+    ///   condition is `self.job` rather than `self.operation`: `operation` is
+    ///   what the status bar says, and a status bar is not a reason to hold a
+    ///   clock.
+    /// * the confirmation's fade, which must keep animating to finish appearing
+    ///   and — more importantly — to finish *disappearing*, since the overlay
+    ///   clears itself inside its own tick.
+    ///
+    /// `is_animating` rather than `is_active` on purpose. A confirmation sitting
+    /// fully faded in, waiting for a human to click Write, is exactly the state
+    /// that waits longest, and asking for 60 ticks a second through it would
+    /// hold the whole desktop awake for as long as the user hesitated.
+    ///
+    /// 16 ms is a floor, not a promise: the harness may deliver late, which is
+    /// why `advance` accumulates the `elapsed_ms` it is handed instead of
+    /// assuming this value. It used to assume it, and reported a transfer speed
+    /// inflated by the ratio of the whole copy's duration to one frame's.
+    fn tick_interval(&self) -> Option<Duration> {
+        let fading = self
+            .confirm_dialog
+            .as_ref()
+            .is_some_and(AlertDialog::is_animating);
+        if self.job.is_some() || fading {
+            Some(Duration::from_millis(16))
+        } else {
+            None
+        }
+    }
 
-    rt.clear();
-    app.render(&mut rt);
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            // A tick is 60 a second, so this arm does the work to answer
+            // honestly: a chunk that moved changed the progress bar, and a
+            // fading overlay changed the scrim, but a tick that did neither
+            // must not cost a frame.
+            Event::Tick { .. } => {
+                let before = self.progress.bytes_done;
+                let was_running = self.job.is_some();
+                let fading = self
+                    .confirm_dialog
+                    .as_ref()
+                    .is_some_and(AlertDialog::is_animating);
+                self.handle_event(event);
+                if fading || self.progress.bytes_done != before || was_running != self.job.is_some()
+                {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            // Everything else arrives at human speed -- a key, a click, a wheel
+            // notch -- so an occasional wasted frame costs nothing, and working
+            // out whether this particular one changed anything would cost more
+            // than the frame does.
+            _ => match self.handle_event(event) {
+                EventResult::Consumed => Response::Redraw,
+                EventResult::Ignored => Response::Idle,
+            },
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the compositor last reported, not the one that was asked
+        // for: a frame drawn at the old geometry is a visibly stretched or
+        // clipped window for one refresh.
+        self.window_width = width;
+        self.window_height = height;
+        let mut rt = RenderTree::new();
+        DiskImagerApp::render(self, &mut rt);
+        rt
+    }
+}
+
+fn main() -> ExitCode {
+    oswindow::app::launch("diskimager", &mut DiskImagerApp::new())
 }
 
 // ============================================================================
@@ -6450,6 +6528,102 @@ removable=true
         assert_eq!(
             app.status_message,
             "Cannot refresh while an operation is running"
+        );
+    }
+
+    #[test]
+    fn the_clock_runs_only_while_something_is_moving() {
+        // The pump moves one chunk per tick, so an app that asked for no clock
+        // would open both files, report the operation as running, and never
+        // move a byte -- lesson 47's shape, in a program that has already had
+        // its own version of it.
+        use oswindow::app::App as _;
+        let (mut app, _scratch) = app_ready_to_write();
+        assert!(app.tick_interval().is_none(), "asked for a clock at rest");
+
+        app.start_write()
+            .expect("the scratch image and device exist");
+        assert!(
+            app.tick_interval().is_some(),
+            "a running write got no clock, so it would never move a byte"
+        );
+
+        run_to_completion(&mut app);
+        assert!(app.job.is_none());
+        assert!(
+            app.tick_interval().is_none(),
+            "kept the desktop awake after the write finished"
+        );
+    }
+
+    #[test]
+    fn the_confirmation_keeps_the_clock_only_while_it_fades() {
+        // `is_animating`, not `is_active`. A confirmation sitting fully faded
+        // in, waiting for a human to click Write, is the state that waits
+        // longest -- and the compositor cannot park while any window has a
+        // deadline armed.
+        use oswindow::app::App as _;
+        let (mut app, _scratch) = app_ready_to_write();
+        app.active_tab = MainTab::Write;
+        assert!(app.confirm_write(), "nothing to confirm");
+        assert!(
+            app.tick_interval().is_some(),
+            "a dialog that has not finished appearing needs a clock"
+        );
+
+        for _ in 0..100 {
+            app.handle_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        assert!(
+            app.confirm_dialog
+                .as_ref()
+                .is_some_and(AlertDialog::is_active),
+            "the dialog put itself away"
+        );
+        assert!(
+            app.tick_interval().is_none(),
+            "held the clock through a dialog that had stopped moving"
+        );
+    }
+
+    #[test]
+    fn a_tick_that_moved_nothing_does_not_cost_a_frame() {
+        // A tick is 60 a second. Returning `Redraw` unconditionally is the easy
+        // mistake and costs a full frame every time the clock happens to be on
+        // for some other reason.
+        use oswindow::app::App as _;
+        let (mut app, _scratch) = app_ready_to_write();
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Idle,
+            "an idle tick asked for a frame"
+        );
+
+        app.start_write()
+            .expect("the scratch image and device exist");
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Redraw,
+            "a chunk moved and the progress bar was not redrawn"
+        );
+    }
+
+    #[test]
+    fn the_window_is_drawn_at_the_size_the_compositor_reported() {
+        // A frame drawn at the old geometry is a visibly stretched or clipped
+        // window for one refresh, so `render` takes the size it is handed
+        // rather than the one `initial_size` asked for.
+        use oswindow::app::App;
+        let mut app = DiskImagerApp::new();
+        let rt = App::render(&mut app, 1440.0, 900.0);
+        assert!((app.window_width - 1440.0).abs() < 0.01);
+        assert!((app.window_height - 900.0).abs() < 0.01);
+        assert!(!rt.commands.is_empty(), "the resized frame drew nothing");
+        // The toolbar's button follows the width it was given, which is the
+        // observable half of the same fact.
+        assert!(
+            (app.toolbar_layout().refresh_x - (1440.0 - 128.0 - 12.0)).abs() < 0.01,
+            "the toolbar was laid out at the old width"
         );
     }
 

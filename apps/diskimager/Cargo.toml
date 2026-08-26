@@ -5,6 +5,10 @@ edition = "2024"
 description = "SlateOS Disk Imager / ISO Tool — create, write, browse, and verify disk images"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window and the event loop. The app names `oswindow`, never `guiremote` --
+# an application should no more name the display protocol than a Unix program
+# names the socket layer.
+oswindow = { path = "../../gui/window" }
 # The three checksums this app offers. It used to "support" all three by
 # seeding each one's published initial values and then computing
 # `state[i % 8] = state[i % 8] * 31 + byte` for every one of them, so the

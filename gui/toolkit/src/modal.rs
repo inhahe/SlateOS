@@ -482,6 +482,29 @@ impl ModalOverlay {
         self.opacity >= 1.0
     }
 
+    /// Whether the fade is still moving, and a clock is therefore still needed.
+    ///
+    /// This is the question `oswindow::app::App::tick_interval` asks, and it has
+    /// to be asked of the overlay because nothing else knows the answer. An
+    /// application that instead ticked for as long as the dialog was *active*
+    /// would hold the whole desktop awake for as long as a confirmation sat on
+    /// screen waiting to be clicked — the compositor cannot park while any
+    /// window has a deadline armed, and a modal waiting on a human is exactly
+    /// the case that waits longest.
+    ///
+    /// True in one case where the opacity has already arrived: fading *out*.
+    /// The overlay clears `active` inside [`tick`](Self::tick), so a fade-out
+    /// that has reached zero still needs one more tick to finish putting itself
+    /// away — and an app that stopped its clock a frame early would leave a
+    /// fully transparent overlay `active` forever, swallowing every click that
+    /// landed on the window behind it.
+    #[must_use]
+    pub fn is_animating(&self) -> bool {
+        self.active
+            && ((self.opacity - self.target_opacity).abs() > f32::EPSILON
+                || self.target_opacity <= 0.0)
+    }
+
     /// Set the content rectangle (the area that the dialog occupies).
     ///
     /// Every dialog calls this from its own `render`, with the rectangle it has
@@ -699,6 +722,16 @@ impl AlertDialog {
     /// Whether the dialog is currently active.
     pub fn is_active(&self) -> bool {
         self.overlay.active
+    }
+
+    /// Whether the dialog's fade is still moving, and a clock is still needed.
+    ///
+    /// What an application's `tick_interval` should ask, rather than
+    /// [`is_active`](Self::is_active) — see
+    /// [`ModalOverlay::is_animating`] for why the difference matters.
+    #[must_use]
+    pub fn is_animating(&self) -> bool {
+        self.overlay.is_animating()
     }
 
     /// Get the result (if the dialog has been dismissed or a button pressed).
@@ -3415,6 +3448,75 @@ mod tests {
         }
         assert!(overlay.is_fully_hidden());
         assert!(!overlay.active);
+    }
+
+    #[test]
+    fn an_overlay_needs_a_clock_only_while_it_is_moving() {
+        // What an app's `tick_interval` asks. A dialog sitting fully faded in,
+        // waiting for a human to click, is the state that waits longest -- and
+        // an app that ticked for as long as the dialog was *active* would hold
+        // the whole desktop awake for as long as the user hesitated.
+        let mut overlay = ModalOverlay::new();
+        assert!(
+            !overlay.is_animating(),
+            "an inactive overlay wanted a clock"
+        );
+
+        overlay.show();
+        assert!(overlay.is_animating(), "a fading-in overlay got no clock");
+
+        for _ in 0..300 {
+            overlay.tick(1);
+        }
+        assert!(overlay.is_fully_visible());
+        assert!(
+            !overlay.is_animating(),
+            "held the clock through a settled overlay"
+        );
+    }
+
+    #[test]
+    fn an_overlay_dismissed_before_its_first_frame_still_needs_a_tick() {
+        // The overlay clears `active` inside its own `tick`, so "the opacity has
+        // arrived" is not the same as "there is nothing left to do". Show a
+        // dialog and dismiss it before a single frame has been drawn -- Escape
+        // on a confirmation the user never meant to open -- and it is left
+        // `active` at zero opacity with nothing to fade. Judging by opacity
+        // alone would stop the clock there, and a fully transparent overlay
+        // would stay active forever, swallowing every click that landed on the
+        // window behind it.
+        let mut overlay = ModalOverlay::new();
+        overlay.show();
+        overlay.hide();
+
+        assert_eq!(overlay.opacity, 0.0);
+        assert_eq!(overlay.target_opacity, 0.0);
+        assert!(overlay.active, "nothing to put away, so nothing to test");
+        assert!(
+            overlay.is_animating(),
+            "stopped the clock with an active overlay still to be put away"
+        );
+
+        overlay.tick(1);
+        assert!(!overlay.active);
+        assert!(!overlay.is_animating());
+    }
+
+    #[test]
+    fn a_dialog_forwards_the_question_to_its_overlay() {
+        let mut dialog = AlertDialog::info("Title", "Message");
+        assert!(!dialog.is_animating());
+        dialog.show();
+        assert!(dialog.is_active());
+        assert!(dialog.is_animating());
+        for _ in 0..300 {
+            dialog.tick(1);
+        }
+        assert!(dialog.is_active(), "the dialog put itself away");
+        assert!(
+            !dialog.is_animating(),
+            "a settled dialog still wants a clock"
+        );
     }
 
     #[test]

@@ -16428,6 +16428,135 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "listing the models is not a complaint");
     }
 
+    serial_println!(
+        "  kshell::self_test 70: a list of alternatives is a diagnostic even without the word"
+    );
+    // The fourth blind spot in `scripts/check-usage-status.py`: its trigger was
+    // a list of five words -- `Usage:`, `Unknown`, `Unrecognised`, `Invalid`,
+    // `Use:` -- so it was complete over *messages containing those words*
+    // rather than over *diagnostics*. A message that enumerates the
+    // alternatives without using any of them ("partmgr: disks/adddisk/...",
+    // "Modes: open, prompt, disabled") reads to a user exactly like a refusal
+    // and read to the gate like prose. 57 sites hid there. The rungs below
+    // cover one instance of each shape the triage found, each paired with a
+    // control that must still succeed -- because the failure mode of this fix
+    // is to make a *correct* invocation start reporting failure.
+    {
+        // Shape 1: the slash synopsis. All fifteen of these are dispatched from
+        // consecutive lines, one author-batch with its own convention: a single
+        // line naming every subcommand separated by slashes, and nothing else.
+        let out = capture_command("pmgr zznosuchsub");
+        assert_output_contains(
+            "partmgr says which subcommand it did not know",
+            &out,
+            b"unknown subcommand 'zznosuchsub'",
+        );
+        assert_eq!(last_exit(), 1, "partmgr: an unknown subcommand errors");
+
+        let out = capture_command("pmgr");
+        assert_output_contains("bare partmgr still lists its subcommands", &out, b"adddisk");
+        assert_output_lacks(
+            "and bare partmgr is not called an unknown subcommand",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 0, "bare partmgr succeeds");
+
+        // Shape 2: a full help body whose only enumerations are trailing
+        // "Foo: a, b, c" lines.
+        let out = capture_command("autostart zznosuchsub");
+        assert_output_contains(
+            "autostart says which subcommand it did not know",
+            &out,
+            b"unknown subcommand 'zznosuchsub'",
+        );
+        assert_eq!(last_exit(), 1, "autostart: an unknown subcommand errors");
+
+        // Shape 3: the same, but the help body lives in a nested `fn case()`,
+        // which is why the gate could not see the `end_help_arm` that used to
+        // sit outside it. The fix moved the call *into* `case`, so this rung is
+        // also the check that it is still reached.
+        let out = capture_command("stune zznosuchsub");
+        assert_output_contains(
+            "schedtune says which subcommand it did not know",
+            &out,
+            b"unknown subcommand 'zznosuchsub'",
+        );
+        assert_eq!(last_exit(), 1, "schedtune: an unknown subcommand errors");
+
+        let out = capture_command("stune");
+        assert_output_contains("bare schedtune still prints its help", &out, b"Workloads:");
+        assert_eq!(last_exit(), 0, "bare schedtune succeeds");
+
+        // Shape 4: a value-list refusal -- the arm knows the word is unusable,
+        // printed the alternatives, and then reported success. Four of the
+        // eighteen, chosen for spread across the file and for taking their
+        // value at a different argument position each time.
+        let out = capture_command("cam privacy 1 zzmode");
+        assert_output_contains(
+            "cam names the privacy mode it could not use",
+            &out,
+            b"`zzmode' is not a mode",
+        );
+        assert_eq!(last_exit(), 1, "cam privacy: an unknown mode errors");
+
+        let out = capture_command("tile layout 1 zzlayout");
+        assert_output_contains(
+            "tile names the layout it could not use",
+            &out,
+            b"`zzlayout' is not a layout",
+        );
+        assert_eq!(last_exit(), 1, "tile layout: an unknown layout errors");
+
+        let out = capture_command("slock method zzmethod");
+        assert_output_contains(
+            "slock names the auth method it could not use",
+            &out,
+            b"`zzmethod' is not an auth method",
+        );
+        assert_eq!(last_exit(), 1, "slock method: an unknown method errors");
+        assert_output_lacks("and changes nothing", &out, b"Auth method");
+
+        let out = capture_command("deskicons arrange zzsort");
+        assert_output_contains(
+            "deskicons names the sort key it could not use",
+            &out,
+            b"`zzsort' is not a sort key",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "deskicons arrange: an unknown sort key errors"
+        );
+        assert_output_lacks("and arranges nothing", &out, b"Icons arranged");
+
+        // The control for shape 4: `arrange` with no key at all is documented
+        // to sort by name, so the refusal above must not have taken the
+        // default away.
+        let out = capture_command("deskicons arrange");
+        assert_output_lacks(
+            "bare `deskicons arrange` keeps its documented default",
+            &out,
+            b"is not a sort key",
+        );
+
+        // Shape 5: `sysdiag` already failed, but printed `set_exit(1)` between
+        // the complaint and the list explaining it, so the list read as output
+        // of the next thing rather than as part of the refusal.
+        let out = capture_command("sysdiag run zzcat");
+        assert_output_contains(
+            "sysdiag names the category it did not know",
+            &out,
+            b"Unknown category: zzcat",
+        );
+        assert_output_contains(
+            "and lists the categories that exist",
+            &out,
+            b"Categories: network",
+        );
+        assert_eq!(last_exit(), 1, "sysdiag run: an unknown category errors");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -29278,7 +29407,9 @@ fn cmd_deskicons(args: &str) {
                 "type" => crate::fs::deskicons::SortBy::Type,
                 "date" => crate::fs::deskicons::SortBy::DateModified,
                 _ => {
+                    shell_println!("deskicons: arrange: `{}' is not a sort key", sort_str);
                     shell_println!("Sort options: name, size, type, date");
+                    set_exit(1);
                     return;
                 }
             };
@@ -34094,6 +34225,7 @@ fn cmd_power(args: &str) {
             shell_println!(
                 "power: profile/button/lid/screenoff/sleepafter/battery/lowbat/critical/idle/autosaver/brightness/cpulimit/simbat/show/test/stats/reset"
             );
+            end_help_arm("power", sub);
         }
     }
 }
@@ -34418,6 +34550,7 @@ fn cmd_display(args: &str) {
             shell_println!(
                 "display: add/remove/addmode/get/list/mode/res/confirm/revert/pending/scale/autoscale/pos/orient/primary/enable/disable/test/stats/reset"
             );
+            end_help_arm("display", sub);
         }
     }
 }
@@ -34824,6 +34957,7 @@ fn cmd_vdesktop(args: &str) {
             shell_println!(
                 "vdesktop: create/remove/rename/get/list/switch/next/prev/current/addwin/rmwin/movewin/where/visible/pin/unpin/pinned/wp/anim/wrap/init/reorder/test/stats/reset"
             );
+            end_help_arm("vdesktop", sub);
         }
     }
 }
@@ -35049,6 +35183,7 @@ fn cmd_keylayout(args: &str) {
             shell_println!(
                 "keylayout: create/remove/list/get/use/active/remap/unmap/disable/enable/translate/init/test/stats/reset"
             );
+            end_help_arm("keylayout", sub);
         }
     }
 }
@@ -35349,6 +35484,7 @@ fn cmd_screenshot(args: &str) {
             shell_println!(
                 "screenshot: full/window/region/monitor/get/history/recent/delete/clear/dir/pattern/format/quality/cursor/sound/delay/clipboard/init/test/stats/reset"
             );
+            end_help_arm("screenshot", sub);
         }
     }
 }
@@ -35712,6 +35848,7 @@ fn cmd_a11y(args: &str) {
             shell_println!(
                 "a11y: regtool/unregtool/tools/regelem/rmelem/focus/focused/elems/hit/inject/announce/pending/contrast/motion/reader/fontscale/sticky/mousekeys/cursor/captions/show/test/stats/reset"
             );
+            end_help_arm("a11y", sub);
         }
     }
 }
@@ -35935,6 +36072,7 @@ fn cmd_ime(args: &str) {
             shell_println!(
                 "ime: register/unregister/list/use/active/cycle/type/commit/cancel/comp/emoji/pick/picker/init/test/stats/reset"
             );
+            end_help_arm("ime", sub);
         }
     }
 }
@@ -36213,6 +36351,7 @@ fn cmd_netindicator(args: &str) {
             shell_println!(
                 "netindicator: addif/rmif/state/ip/speed/list/status/scan/wifi/report/connect/disconnect/save/forget/profiles/airplane/dns/test/stats/reset"
             );
+            end_help_arm("netindicator", sub);
         }
     }
 }
@@ -36489,6 +36628,7 @@ fn cmd_winsnap(args: &str) {
             shell_println!(
                 "winsnap: snap/unsnap/state/detect/remove/layouts/addlayout/rmlayout/addzone/enabled/edge/preview/animation/corner/thirds/screen/config/init/test/stats/reset"
             );
+            end_help_arm("winsnap", sub);
         }
     }
 }
@@ -36877,6 +37017,7 @@ fn cmd_colorpicker(args: &str) {
             shell_println!(
                 "colorpicker: open/rgb/hsv/hsl/hex/alpha/model/get/revert/confirm/cancel/sample/recent/mkpal/rmpal/paladd/palrm/palettes/convert/init/test/stats/reset"
             );
+            end_help_arm("colorpicker", sub);
         }
     }
 }
@@ -37183,6 +37324,7 @@ fn cmd_cursorsettings(args: &str) {
             shell_println!(
                 "cursor: speed/accel/accelfactor/buttons/dblclick/scroll/natural/size/trail/locate/hidetyping/theme/themes/addtheme/rmtheme/addcursor/lookup/shapes/show/init/test/stats/reset"
             );
+            end_help_arm("cursor", sub);
         }
     }
 }
@@ -37548,6 +37690,7 @@ fn cmd_kbsettings(args: &str) {
             shell_println!(
                 "kbsettings: preset/delay/rate/numlock/capslock/sticky/filter/toggle/bounce/compose/altgr/override/rmoverride/overrides/mkprofile/rmprofile/useprofile/profiles/show/init/test/stats/reset"
             );
+            end_help_arm("kbsettings", sub);
         }
     }
 }
@@ -37750,6 +37893,7 @@ fn cmd_detailcols(args: &str) {
             shell_println!(
                 "detailcols: list/get/register/unregister/bind/unbind/bindings/query/userset/userclear/userlist/init/test/stats/reset"
             );
+            end_help_arm("detailcols", sub);
         }
     }
 }
@@ -38078,6 +38222,7 @@ fn cmd_partmgr(args: &str) {
             shell_println!(
                 "partmgr: disks/adddisk/rmdisk/table/parts/create/delete/resize/format/label/flag/mount/free/test/stats/reset"
             );
+            end_help_arm("partmgr", sub);
         }
     }
 }
@@ -38332,6 +38477,7 @@ fn cmd_locale(args: &str) {
             shell_println!(
                 "locale: lang/fallback/region/number/currency/date/datesep/time/firstday/measure/tz/paper/langs/tzlist/show/init/test/stats/reset"
             );
+            end_help_arm("locale", sub);
         }
     }
 }
@@ -43304,6 +43450,7 @@ fn cmd_autostart(args: &str) {
             shell_println!("Conditions: always, ac, network, firstlogin");
             shell_println!("Impact: low, medium, high, unknown");
             shell_println!("Alias: astart");
+            end_help_arm("autostart", sub);
         }
     }
 }
@@ -43814,7 +43961,7 @@ fn cmd_schedtune(args: &str) {
         },
         _ => {
             #[inline(never)]
-            fn case() {
+            fn case(sub: &str) {
                 shell_println!("schedtune — scheduler tuning parameters");
                 shell_println!();
                 shell_println!("Subcommands:");
@@ -43842,8 +43989,9 @@ fn cmd_schedtune(args: &str) {
                 shell_println!("Preempt: none, voluntary, full, realtime");
                 shell_println!("Balance: steal, push, hybrid, pinned");
                 shell_println!("Alias: stune");
+                end_help_arm("schedtune", sub);
             }
-            case();
+            case(sub);
         }
     }
 }
@@ -44438,7 +44586,7 @@ fn cmd_mmtune(args: &str) {
         },
         _ => {
             #[inline(never)]
-            fn case() {
+            fn case(sub: &str) {
                 shell_println!("mmtune — memory management tuning parameters");
                 shell_println!();
                 shell_println!("Subcommands:");
@@ -44470,8 +44618,9 @@ fn cmd_mmtune(args: &str) {
                 shell_println!("Compaction: off, light, background, aggressive");
                 shell_println!("Reclaim: lru, clock, mglru, workingset");
                 shell_println!("Alias: mtune");
+                end_help_arm("mmtune", sub);
             }
-            case();
+            case(sub);
         }
     }
 }
@@ -45474,6 +45623,7 @@ fn cmd_vpn(args: &str) {
             shell_println!();
             shell_println!("Protocols: openvpn, wireguard, ipsec, l2tp, pptp, ssh");
             shell_println!("Auth: userpass, cert, psk, token");
+            end_help_arm("vpn", sub);
         }
     }
 }
@@ -45824,6 +45974,7 @@ fn cmd_dyndns(args: &str) {
             shell_println!();
             shell_println!("Providers: dynu, noip, duckdns, cloudflare, freedns, custom");
             shell_println!("Alias: ddns");
+            end_help_arm("dyndns", sub);
         }
     }
 }
@@ -46050,6 +46201,7 @@ fn cmd_loginscreen(args: &str) {
             shell_println!("Clock: tl, tc, tr, bl, bc, br, hidden");
             shell_println!("Userlist: all, recent, text, hidden");
             shell_println!("Alias: logscr");
+            end_help_arm("loginscreen", sub);
         }
     }
 }
@@ -47371,7 +47523,9 @@ fn cmd_netsettings(args: &str) {
                         "manual" | "static" => netsettings::IpMethod::Manual,
                         "off" | "disabled" => netsettings::IpMethod::Disabled,
                         _ => {
+                            shell_println!("netsettings: ipv4: `{}' is not a method", parts[2]);
                             shell_println!("Method: auto, manual, off");
+                            set_exit(1);
                             return;
                         }
                     };
@@ -47403,7 +47557,9 @@ fn cmd_netsettings(args: &str) {
                         "manual" | "static" => netsettings::IpMethod::Manual,
                         "off" | "disabled" => netsettings::IpMethod::Disabled,
                         _ => {
+                            shell_println!("netsettings: ipv6: `{}' is not a method", parts[2]);
                             shell_println!("Method: auto, manual, off");
+                            set_exit(1);
                             return;
                         }
                     };
@@ -49057,10 +49213,10 @@ fn cmd_sysdiag(args: &str) {
                     }
                 } else {
                     shell_println!("Unknown category: {}", cname);
-                    set_exit(1);
                     shell_println!(
                         "Categories: network, storage, memory, services, boot, security"
                     );
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Running full system diagnostics...");
@@ -49157,10 +49313,10 @@ fn cmd_sysdiag(args: &str) {
                     }
                 } else {
                     shell_println!("Unknown category: {}", cname);
-                    set_exit(1);
                     shell_println!(
                         "Categories: network, storage, memory, services, boot, security"
                     );
+                    set_exit(1);
                 }
             } else {
                 shell_println!("Usage: diag category <name>");
@@ -70047,7 +70203,9 @@ fn cmd_webcam(args: &str) {
                     "prompt" => webcam::PrivacySetting::PromptRequired,
                     "disabled" | "off" => webcam::PrivacySetting::Disabled,
                     _ => {
+                        shell_println!("cam: privacy: `{}' is not a mode", mode);
                         shell_println!("Modes: open, prompt, disabled");
+                        set_exit(1);
                         return;
                     }
                 };
@@ -70583,9 +70741,11 @@ fn cmd_mobilelink(args: &str) {
                     "photos" => mobilelink::LinkFeature::PhotoStream,
                     "battery" => mobilelink::LinkFeature::BatteryStatus,
                     _ => {
+                        shell_println!("mlink: feature: `{}' is not a feature", feat);
                         shell_println!(
                             "Features: notif, sms, calls, files, clipboard, photos, battery"
                         );
+                        set_exit(1);
                         return;
                     }
                 };
@@ -70720,7 +70880,9 @@ fn cmd_screenlock(args: &str) {
                 "smartcard" | "sc" => screenlock::AuthMethod::SmartCard,
                 "none" => screenlock::AuthMethod::None,
                 _ => {
+                    shell_println!("slock: method: `{}' is not an auth method", m);
                     shell_println!("Methods: password, pin, fingerprint, face, smartcard, none");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71196,7 +71358,9 @@ fn cmd_wintiling(args: &str) {
                 "monocle" | "max" => wintiling::TilingLayout::Monocle,
                 "3col" | "three" => wintiling::TilingLayout::ThreeColumn,
                 _ => {
+                    shell_println!("tile: layout: `{}' is not a layout", layout_str);
                     shell_println!("Layouts: float, hsplit, vsplit, master, grid, monocle, 3col");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71467,7 +71631,11 @@ fn cmd_peninput(args: &str) {
                         peninput::report_move(pen_id, x, y, p, 0, 0).ok();
                         shell_println!("Moved to ({},{}).", x, y);
                     }
-                    _ => shell_println!("Actions: proxin, proxout, contact, release, move"),
+                    _ => {
+                        shell_println!("pen: sim: `{}' is not an action", action);
+                        shell_println!("Actions: proxin, proxout, contact, release, move");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -71654,7 +71822,9 @@ fn cmd_brightness(args: &str) {
                 "auto" | "automatic" => brightness::BrightnessMode::Automatic,
                 "battery" | "saver" => brightness::BrightnessMode::BatterySaver,
                 _ => {
+                    shell_println!("brightness: mode: `{}' is not a mode", mode_str);
                     shell_println!("Modes: manual, auto, battery");
+                    set_exit(1);
                     return;
                 }
             };
@@ -71931,7 +72101,9 @@ fn cmd_volumeosd(args: &str) {
                 "bottom" | "bc" => volumeosd::OsdPosition::BottomCenter,
                 "bl" => volumeosd::OsdPosition::BottomLeft,
                 _ => {
+                    shell_println!("volumeosd: position: `{}' is not a position", pos_str);
                     shell_println!("Positions: top, tr, center, bottom, bl");
+                    set_exit(1);
                     return;
                 }
             };
@@ -75485,16 +75657,20 @@ fn cmd_hotcorners(args: &str) {
             let corner = match parse_corner(corner_name) {
                 Some(c) => c,
                 None => {
+                    shell_println!("hotcorners: set: `{}' is not a corner", corner_name);
                     shell_println!("Corner: tl, tr, bl, br");
+                    set_exit(1);
                     return;
                 }
             };
             let action = match parse_corner_action(action_name) {
                 Some(a) => a,
                 None => {
+                    shell_println!("hotcorners: set: `{}' is not an action", action_name);
                     shell_println!(
                         "Actions: none, windows, desktop, screensaver, lock, notifications, quicksettings, next, prev, launcher, disable"
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -75990,7 +76166,9 @@ fn cmd_haptfeedback(args: &str) {
                 "touchscreen" | "ts" => haptfeedback::DeviceType::Touchscreen,
                 "stylus" | "pen" => haptfeedback::DeviceType::Stylus,
                 _ => {
+                    shell_println!("haptic: add: `{}' is not a device type", dtype_str);
                     shell_println!("Types: trackpad, controller, touchscreen, stylus");
+                    set_exit(1);
                     return;
                 }
             };
@@ -76041,18 +76219,22 @@ fn cmd_haptfeedback(args: &str) {
             let event = match parse_haptic_event(event_name) {
                 Some(e) => e,
                 None => {
+                    shell_println!("haptic: pattern: `{}' is not an event", event_name);
                     shell_println!(
                         "Events: click, doubleclick, longpress, swipe, scroll, selection, dragstart, dragend, error, success, warning, keypress"
                     );
+                    set_exit(1);
                     return;
                 }
             };
             let pattern = match parse_haptic_pattern(pattern_name) {
                 Some(p) => p,
                 None => {
+                    shell_println!("haptic: pattern: `{}' is not a pattern", pattern_name);
                     shell_println!(
                         "Patterns: none, tap, doubletap, buzz, impact, rumble, rising, falling, heartbeat"
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -76596,9 +76778,11 @@ fn cmd_inputmethod(args: &str) {
                 "translit" => inputmethod::EngineType::Transliteration,
                 "handwriting" | "hw" => inputmethod::EngineType::Handwriting,
                 _ => {
+                    shell_println!("inputmethod: `{}' is not an engine type", type_str);
                     shell_println!(
                         "Types: direct, pinyin, wubi, japanese, hangul, translit, handwriting"
                     );
+                    set_exit(1);
                     return;
                 }
             };
@@ -76812,9 +76996,11 @@ fn cmd_storagesense(args: &str) {
                 let cat = match parse_cleanup_category(cat_name) {
                     Some(c) => c,
                     None => {
+                        shell_println!("storagesense: `{}' is not a category", cat_name);
                         shell_println!(
                             "Categories: temp, recycle, downloads, thumbs, syscache, logs, browser, packages, updates"
                         );
+                        set_exit(1);
                         return;
                     }
                 };
@@ -77114,7 +77300,9 @@ fn cmd_recentsearch(args: &str) {
                 "web" => recentsearch::SearchSource::WebSearch,
                 "help" => recentsearch::SearchSource::HelpSearch,
                 _ => {
+                    shell_println!("recentsearch: `{}' is not a source", source_str);
                     shell_println!("Sources: files, settings, apps, run, web, help");
+                    set_exit(1);
                     return;
                 }
             };

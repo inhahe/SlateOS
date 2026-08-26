@@ -84818,7 +84818,7 @@ rss_pages + cache_pages` directly.
 
 ---
 
-## `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN` (lane A, 2026-08-26) — **open**
+## `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN` (lane A, 2026-08-26) — **fixed 2026-08-26**
 
 **In short:** `cgmem create` takes a memory ceiling, and every charge checks
 whether the cgroup has gone over it. The result of that check is written to a
@@ -84869,3 +84869,40 @@ since a column that is always zero misinforms. Do not leave it printed and
 unwritten.
 
 **Not a regression.** True since the module was written.
+
+**Fixed.** Both ends, in one change.
+
+*The reported-and-not-measured end.* `record_swap(cg_id, pages, swap_in)` now
+exists: `swap_in` false adds to `swap_pages` (pages left memory for swap),
+`swap_in` true subtracts, saturating at zero so a swap-in larger than the
+recorded swap-out clamps rather than wrapping to `u64::MAX`. It is reachable
+from the shell as `cgmem swap <cg_id> <pages> [out|in]`, with `out` as the
+bracketed default — that being the only direction that can be first, since pages
+cannot come back in before they went out. It deliberately does *not* move the
+pages out of `rss_pages`/`cache_pages`, because only the caller knows which
+bucket they came from and inferring one would be §600's guessed-value shape; the
+caller pairs it with `record_uncharge`.
+
+*The measured-and-not-reported end.* `high_events` is now printed by
+`cgmem list` as `high={}` between `swap=` and `oom=`, and a new
+`total_high_events` aggregate is carried in `State`, bumped alongside the
+per-cgroup counter in `record_charge`, and returned by `stats()` — which widened
+from a 5-tuple to `(cgroups, charges, uncharges, ooms, high, ops)`. Both
+`cmd_cgmem stats` and `/proc/cgmem` print it as `High events:`.
+
+*Why this ordering matters beyond tidiness.* Surfacing `high_events` is what
+makes the twenty-fifth burn-down batch's `cmd_cgmem create` limit-guess
+falsifiable. Before this change a guessed policy ceiling had no observable
+consequence anywhere in the system, so the burn-down entry looked harmless — it
+was not harmless, it was *queued*, waiting for this fix to arm it. Both were
+therefore done together.
+
+*Tests.* `cgmem::self_test` grew from 9 to 10 tests. Test 1 now destructures the
+6-tuple and asserts `high == 0` at init; test 8 asserts `high == 1` after test
+6's deliberate over-limit charge; new test 10 (`swap_cg`) asserts `swap_pages ==
+25` after out-40/in-15, asserts the clamp to 0 after an over-large swap-in, and
+asserts `record_swap` on a nonexistent cgroup is an `Err`. Shell rung 93 asserts
+the `high=0` column is present in `cgmem list` output.
+
+*Design decision.* The delete-the-field alternative and why completing it won
+are recorded as `design-decisions.md` §608.

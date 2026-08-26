@@ -19215,7 +19215,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_contains(
             "the refused ceiling, page counts and buckets left the cgroup exactly as created",
             &out,
-            b"usage=0/500 rss=0 cache=0 swap=0 oom=0",
+            b"usage=0/500 rss=0 cache=0 swap=0 high=0 oom=0",
         );
         // And the tallies, which are the part no un-charge could ever repair.
         let out = capture_command("cgmem stats");
@@ -102815,7 +102815,7 @@ fn cmd_cgmem(args: &str) {
                     format!("{}", c.limit_pages)
                 };
                 shell_println!(
-                    "  [{}] {:<10} usage={}/{} rss={} cache={} swap={} oom={}",
+                    "  [{}] {:<10} usage={}/{} rss={} cache={} swap={} high={} oom={}",
                     c.cg_id,
                     c.name,
                     c.usage_pages,
@@ -102823,26 +102823,67 @@ fn cmd_cgmem(args: &str) {
                     c.rss_pages,
                     c.cache_pages,
                     c.swap_pages,
+                    c.high_events,
                     c.oom_kills
                 );
             }
         }
+        "swap" => {
+            let Some(id) = required_num::<u32>(&parts, 1, "cgmem", sub, "cgroup id") else {
+                return;
+            };
+            let Some(pages) = required_num::<u64>(&parts, 2, "cgmem", sub, "page count") else {
+                return;
+            };
+            // `out` is the default because that is the direction which creates
+            // the state being reported: pages only come back *in* if they went
+            // out first, so `swap 1 40` with no direction is the only reading
+            // that cannot describe an impossible history. Bracketed in the
+            // usage line, so an absent word keeps that default and only a word
+            // that is present and unreadable is refused (§607).
+            let swap_in = match parts.get(3).copied() {
+                None | Some("out") => false,
+                Some("in") => true,
+                Some(word) => {
+                    shell_println!("cgmem: swap: `{}' is not in or out", word);
+                    set_exit(1);
+                    return;
+                }
+            };
+            match cgmem::record_swap(id, pages, swap_in) {
+                Ok(()) => shell_println!(
+                    "cgmem: swapped {} {} pages for cg {}",
+                    if swap_in { "in" } else { "out" },
+                    pages,
+                    id
+                ),
+                Err(e) => {
+                    shell_println!("cgmem: swap error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
         "stats" => {
-            let (cgroups, charges, uncharges, ooms, ops) = cgmem::stats();
+            let (cgroups, charges, uncharges, ooms, high, ops) = cgmem::stats();
             shell_println!(
-                "Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  Ops: {}",
+                "Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  High events: {}  Ops: {}",
                 cgroups,
                 charges,
                 uncharges,
                 ooms,
+                high,
                 ops
             );
         }
         "test" => cgmem::self_test(),
         _ => {
-            shell_println!("Usage: cgmem <init|create|remove|charge|uncharge|list|stats|test>");
+            shell_println!(
+                "Usage: cgmem <init|create|remove|charge|uncharge|swap|list|stats|test>"
+            );
             shell_println!("  create <name> <limit_pages>        — create cgroup");
             shell_println!("  charge <cg_id> <pages> [rss|cache]");
+            shell_println!("  uncharge <cg_id> <pages> [rss|cache]");
+            shell_println!("  swap <cg_id> <pages> [out|in]      — out is the default");
             set_exit(1);
         }
     }

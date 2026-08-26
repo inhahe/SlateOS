@@ -42,11 +42,20 @@ pub struct CgroupMemStats {
     pub usage_pages: u64,
     pub rss_pages: u64,
     pub cache_pages: u64,
+    /// Pages currently in swap. Written only by [`record_swap`].
     pub swap_pages: u64,
     pub charges: u64,
     pub uncharges: u64,
     pub oom_kills: u64,
-    pub high_events: u64, // Times usage exceeded high watermark
+    /// Times a charge left `usage_pages` above `limit_pages`.
+    ///
+    /// This is the *only* consequence of the ceiling supplied to [`create`]:
+    /// nothing rejects a charge that exceeds it. Until it was surfaced, the
+    /// counter was incremented by [`record_charge`] and read by nothing outside
+    /// this module's own self-test, which meant a cgroup could sit permanently
+    /// over its limit with no reader anywhere able to say so. See
+    /// `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`.
+    pub high_events: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +70,7 @@ struct State {
     total_charges: u64,
     total_uncharges: u64,
     total_oom_kills: u64,
+    total_high_events: u64,
     ops: u64,
 }
 
@@ -107,6 +117,7 @@ pub fn init_defaults() {
         total_charges: 0,
         total_uncharges: 0,
         total_oom_kills: 0,
+        total_high_events: 0,
         ops: 0,
     });
 }
@@ -166,6 +177,7 @@ pub fn record_charge(cg_id: u32, pages: u64, is_cache: bool) -> KernelResult<()>
         c.charges += 1;
         if c.usage_pages > c.limit_pages {
             c.high_events += 1;
+            state.total_high_events += 1;
         }
         state.total_charges += 1;
         Ok(())
@@ -223,6 +235,38 @@ pub fn record_uncharge(cg_id: u32, pages: u64, is_cache: bool) -> KernelResult<(
     })
 }
 
+/// Record pages moving to or from swap.
+///
+/// `swap_in` false means pages were swapped *out* — they leave memory for swap,
+/// so `swap_pages` rises and the resident buckets are untouched (the caller
+/// reports the memory side with [`record_uncharge`], since only that caller
+/// knows which bucket the pages came from). `swap_in` true means they came back
+/// and `swap_pages` falls, clamped at zero.
+///
+/// This function exists because `swap_pages` was a field written by nothing.
+/// `create` set it to 0 and no code path ever assigned it again, yet both
+/// `cgmem list` and `/proc/cgmem` printed it on every line — so every cgroup
+/// the system had ever displayed reported `swap=0`, not because nothing was
+/// swapped but because nothing could ever make it say otherwise. A statistic
+/// that is structurally constant is worse than an absent one: it reads as
+/// evidence. The alternative was to delete the field and its two columns; see
+/// `design-decisions.md` §608 for why completing it won.
+pub fn record_swap(cg_id: u32, pages: u64, swap_in: bool) -> KernelResult<()> {
+    with_state(|state| {
+        let c = state
+            .cgroups
+            .iter_mut()
+            .find(|c| c.cg_id == cg_id)
+            .ok_or(KernelError::NotFound)?;
+        if swap_in {
+            c.swap_pages = c.swap_pages.saturating_sub(pages);
+        } else {
+            c.swap_pages = c.swap_pages.saturating_add(pages);
+        }
+        Ok(())
+    })
+}
+
 /// Record an OOM kill in a cgroup.
 pub fn record_oom(cg_id: u32) -> KernelResult<()> {
     with_state(|state| {
@@ -245,8 +289,14 @@ pub fn per_cgroup() -> Vec<CgroupMemStats> {
         .map_or(Vec::new(), |s| s.cgroups.clone())
 }
 
-/// Statistics: (cgroup_count, total_charges, total_uncharges, total_oom_kills, ops).
-pub fn stats() -> (usize, u64, u64, u64, u64) {
+/// Statistics: (cgroup_count, total_charges, total_uncharges, total_oom_kills,
+/// total_high_events, ops).
+///
+/// `total_high_events` was added when [`CgroupMemStats::high_events`] was
+/// surfaced: a system-wide count of "a charge left some cgroup over its
+/// ceiling" is the one number that makes the ceilings supplied to [`create`]
+/// visible at a glance, rather than requiring a walk of every cgroup.
+pub fn stats() -> (usize, u64, u64, u64, u64, u64) {
     let guard = STATE.lock();
     match guard.as_ref() {
         Some(s) => (
@@ -254,9 +304,10 @@ pub fn stats() -> (usize, u64, u64, u64, u64) {
             s.total_charges,
             s.total_uncharges,
             s.total_oom_kills,
+            s.total_high_events,
             s.ops,
         ),
-        None => (0, 0, 0, 0, 0),
+        None => (0, 0, 0, 0, 0, 0),
     }
 }
 
@@ -273,16 +324,16 @@ pub fn self_test() {
 
     // 1: Empty defaults — no fabricated cgroups, all totals zero.
     assert_eq!(per_cgroup().len(), 0);
-    let (cg0, charges0, uncharges0, ooms0, _) = stats();
-    assert_eq!((cg0, charges0, uncharges0, ooms0), (0, 0, 0, 0));
-    crate::serial_println!("  [1/9] empty defaults: OK");
+    let (cg0, charges0, uncharges0, ooms0, high0, _) = stats();
+    assert_eq!((cg0, charges0, uncharges0, ooms0, high0), (0, 0, 0, 0, 0));
+    crate::serial_println!("  [1/10] empty defaults: OK");
 
     // 2: Create — ids monotonic starting at 1; unknown-id charge errors.
     let id = create("test_cg", 10_000).expect("create");
     assert_eq!(id, 1);
     assert_eq!(per_cgroup().len(), 1);
     assert!(record_charge(99, 1, false).is_err());
-    crate::serial_println!("  [2/9] create: OK");
+    crate::serial_println!("  [2/10] create: OK");
 
     // 3: Charge RSS — usage and rss tracked, cache untouched.
     record_charge(id, 100, false).expect("charge_rss");
@@ -293,7 +344,7 @@ pub fn self_test() {
     assert_eq!(c.usage_pages, 100);
     assert_eq!(c.rss_pages, 100);
     assert_eq!(c.cache_pages, 0);
-    crate::serial_println!("  [3/9] charge rss: OK");
+    crate::serial_println!("  [3/10] charge rss: OK");
 
     // 4: Charge cache — separate bucket, usage is the sum.
     record_charge(id, 50, true).expect("charge_cache");
@@ -303,7 +354,7 @@ pub fn self_test() {
         .expect("cg");
     assert_eq!(c.cache_pages, 50);
     assert_eq!(c.usage_pages, 150);
-    crate::serial_println!("  [4/9] charge cache: OK");
+    crate::serial_println!("  [4/10] charge cache: OK");
 
     // 5: Uncharge RSS — usage and rss drop, cache unaffected.
     record_uncharge(id, 30, false).expect("uncharge");
@@ -314,7 +365,7 @@ pub fn self_test() {
     assert_eq!(c.rss_pages, 70);
     assert_eq!(c.cache_pages, 50);
     assert_eq!(c.usage_pages, 120);
-    crate::serial_println!("  [5/9] uncharge: OK");
+    crate::serial_println!("  [5/10] uncharge: OK");
 
     // 6: High-event detection when usage exceeds the page limit.
     let id2 = create("small_cg", 10).expect("create2");
@@ -333,24 +384,27 @@ pub fn self_test() {
             .oom_kills,
         1
     );
-    crate::serial_println!("  [6/9] high event + oom: OK");
+    crate::serial_println!("  [6/10] high event + oom: OK");
 
     // 7: Remove — gone, and double-remove errors.
     remove(id).expect("remove");
     remove(id2).expect("remove2");
     assert_eq!(per_cgroup().len(), 0);
     assert!(remove(id).is_err());
-    crate::serial_println!("  [7/9] remove: OK");
+    crate::serial_println!("  [7/10] remove: OK");
 
     // 8: Stats reflect only the real activity above (3 charges, 1 uncharge,
     //    1 OOM; both cgroups removed).
-    let (cgroups, charges, uncharges, ooms, ops) = stats();
+    let (cgroups, charges, uncharges, ooms, high, ops) = stats();
     assert_eq!(cgroups, 0);
     assert_eq!(charges, 3);
     assert_eq!(uncharges, 1);
     assert_eq!(ooms, 1);
+    // Exactly one charge above a ceiling: test 6's 25 pages into a 10-page
+    // cgroup. The other two charges were inside `test_cg`'s 10000-page limit.
+    assert_eq!(high, 1);
     assert!(ops > 0);
-    crate::serial_println!("  [8/9] stats: OK");
+    crate::serial_println!("  [8/10] stats: OK");
 
     // 9: Un-charging more than a bucket holds keeps `usage == rss + cache`.
     //
@@ -380,9 +434,35 @@ pub fn self_test() {
         .expect("cg3");
     assert_eq!((c.usage_pages, c.rss_pages, c.cache_pages), (0, 0, 0));
     remove(id3).expect("remove3");
-    crate::serial_println!("  [9/9] uncharge clamps to the bucket: OK");
+    crate::serial_println!("  [9/10] uncharge clamps to the bucket: OK");
+
+    // 10: `swap_pages` can actually be written.
+    //
+    //     Until `record_swap` existed, this field was set to 0 by `create` and
+    //     assigned by nothing, while both `cgmem list` and `/proc/cgmem`
+    //     printed it on every line — so `swap=0` was not a measurement, it was
+    //     a constant wearing a measurement's clothes.
+    let id4 = create("swap_cg", 10_000).expect("create4");
+    record_swap(id4, 40, false).expect("swap_out");
+    record_swap(id4, 15, true).expect("swap_in");
+    let c = per_cgroup()
+        .into_iter()
+        .find(|c| c.cg_id == id4)
+        .expect("cg4");
+    assert_eq!(c.swap_pages, 25);
+    // Swapping in more than is out floors at zero rather than wrapping; the
+    // resident buckets are the caller's business, so they stay untouched.
+    record_swap(id4, 999, true).expect("swap_in_over");
+    let c = per_cgroup()
+        .into_iter()
+        .find(|c| c.cg_id == id4)
+        .expect("cg4");
+    assert_eq!((c.swap_pages, c.usage_pages, c.rss_pages), (0, 0, 0));
+    assert!(record_swap(99, 1, false).is_err());
+    remove(id4).expect("remove4");
+    crate::serial_println!("  [10/10] swap accounting is writable: OK");
 
     // Leave no residue in the live state.
     *STATE.lock() = None;
-    crate::serial_println!("cgmem::self_test() — all 9 tests passed");
+    crate::serial_println!("cgmem::self_test() — all 10 tests passed");
 }

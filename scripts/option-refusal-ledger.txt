@@ -43,7 +43,6 @@ cmd_audit 2
 cmd_authbroker 1
 cmd_autostart 1
 cmd_backupsched 2
-cmd_battery 1
 cmd_bluetooth 1
 cmd_bootcfg 1
 cmd_bpfstat 4
@@ -92,7 +91,7 @@ cmd_fault_inject 3
 cmd_fdtable 6
 cmd_filelock 1
 cmd_filerules 1
-cmd_fileshare 2
+cmd_fileshare 1
 cmd_filetransfer 2
 cmd_filevault 1
 cmd_findex 1
@@ -214,7 +213,7 @@ cmd_strings 2
 cmd_surroundsound 3
 cmd_svcstart 2
 cmd_swapact 6
-cmd_swapcfg 2
+cmd_swapcfg 1
 cmd_sysanimations 1
 cmd_syslog 1
 cmd_sysresource 4

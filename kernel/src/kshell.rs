@@ -17546,6 +17546,139 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "`a11y announce high …` succeeds");
     }
 
+    serial_println!(
+        "  kshell::self_test 79: one vocabulary for on and off, and a word outside it is refused \
+         rather than taken for `off'"
+    );
+    // The boolean sweep: 21 sites across 16 commands that read an on/off operand
+    // with `matches!(word, "on" | "true" | …)`.
+    //
+    // `matches!` cannot express "I did not understand you" — it has exactly two
+    // outputs and both of them are answers — so every unreadable word became
+    // `false`. That is not a neutral failure. `false` is the permissive side of
+    // most of these settings, so the shell failed consistently toward *less*
+    // protection: `reslimit enforce` stopped enforcing, `datausage limit block`
+    // stopped blocking, `kernelbuild auto` stopped rebuilding, each reporting
+    // the setting as applied and exiting 0.
+    //
+    // It was made worse by drift. The idiom had been copied into 21 places and
+    // five different vocabularies had grown among them, the sharpest split being
+    // `1`: seven sites accepted it and six others, printing the identical
+    // `Usage: … <on|off>` line, did not — so a user who learned from
+    // `bootcfg activity 1` that `1` means on got, from
+    // `datausage limit block home 1`, a data cap silently switched off.
+    //
+    // All 21 now go through `toggle_word`, which is the single place that
+    // decides which words mean what, via `required_toggle` (no query form) or
+    // `toggle_arg` (§605, has one).
+    {
+        // The controls run against `bootcfg activity`, chosen deliberately:
+        // `bootcfg::set_boot_activity` is an unconditional `Ok(())` with no
+        // subsystem init behind it, so these assertions cannot fail for the
+        // reason §604 records — a rung that asserts a success line against a
+        // subsystem a fresh boot has not initialised.
+        let out = capture_command("bootcfg activity on");
+        assert_output_contains("a toggle still sets", &out, b"Boot activity listing: on");
+        assert_eq!(last_exit(), 0, "`bootcfg activity on` succeeds");
+
+        let out = capture_command("bootcfg activity off");
+        assert_output_contains("and still clears", &out, b"Boot activity listing: off");
+        assert_eq!(last_exit(), 0, "`bootcfg activity off` succeeds");
+
+        // `enabled` was *not* in this command's old vocabulary, so it used to
+        // mean off. This is the assertion that the vocabularies really were
+        // unified rather than merely deduplicated.
+        let out = capture_command("bootcfg activity enabled");
+        assert_output_contains(
+            "a word from another site's vocabulary now works here too",
+            &out,
+            b"Boot activity listing: on",
+        );
+        assert_eq!(last_exit(), 0, "`bootcfg activity enabled` succeeds");
+
+        let out = capture_command("bootcfg activity 1");
+        assert_output_contains("and so does `1'", &out, b"Boot activity listing: on");
+        assert_eq!(last_exit(), 0, "`bootcfg activity 1` succeeds");
+
+        // Absence and unreadability are now different events with different
+        // messages; `matches!` could distinguish neither from `off`.
+        let out = capture_command("bootcfg activity");
+        assert_output_contains(
+            "an omitted toggle is reported as missing",
+            &out,
+            b"missing on or off",
+        );
+        assert_eq!(last_exit(), 1, "a bare `bootcfg activity` errors");
+
+        let out = capture_command("bootcfg activity onn");
+        assert_output_contains(
+            "and a misspelt one is named",
+            &out,
+            b"`onn' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "`bootcfg activity onn` errors");
+        assert_output_lacks(
+            "and the setting is not changed behind the refusal",
+            &out,
+            b"Boot activity listing",
+        );
+
+        // The three settings whose guessed `false` mattered most. These run
+        // against ids that do not exist, which is deliberate: the refusal is
+        // emitted before the subsystem is called, so the assertion tests the
+        // word-reading without depending on any state a fresh boot may lack.
+        let out = capture_command("reslimit enforce 1 zzon");
+        assert_output_contains(
+            "enforcement is not silently disabled",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable enforce toggle errors");
+        assert_output_lacks("and enforcement is not reported set", &out, b"Enforcement");
+
+        let out = capture_command("datausage limit block zzhome zzon");
+        assert_output_contains(
+            "a data cap is not silently unblocked",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable block toggle errors");
+        assert_output_lacks("and blocking is not reported set", &out, b"Block-on-exceed");
+
+        let out = capture_command("kernelbuild auto zzcomp zzon");
+        assert_output_contains(
+            "auto-rebuild is not silently disabled",
+            &out,
+            b"`zzon' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable auto toggle errors");
+        assert_output_lacks("and rebuilding is not reported set", &out, b"Auto-rebuild");
+
+        // `share guest` carried three defects in one statement — guessed id,
+        // guessed toggle, discarded error — and the id is read first, so this
+        // also pins the order the operands are judged in.
+        let out = capture_command("share guest 1O on");
+        assert_output_contains(
+            "a share id is named before the toggle is judged",
+            &out,
+            b"`1O' is not a share id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable share id errors");
+        assert_output_lacks("and no share is reported changed", &out, b"guest=");
+
+        // `batt ac` keeps its own sentence because it accepts two words the
+        // shared vocabulary does not, and a refusal naming a narrower
+        // vocabulary than the command accepts would send the reader to stop
+        // using a word that works.
+        let out = capture_command("batt ac zzon");
+        assert_output_contains(
+            "a command with extra words says so when it refuses",
+            &out,
+            b"`zzon' is not on or off (or connected or disconnected)",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable ac state errors");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -40008,29 +40141,26 @@ fn cmd_useracct(args: &str) {
         "autologin" => {
             #[inline(never)]
             fn case(parts: &[&str]) {
-                if parts.len() < 3 {
-                    shell_println!("Usage: useracct autologin <uid> <on|off>");
-                    set_exit(1);
-                } else {
-                    match parts[1].parse::<u64>() {
-                        Ok(uid) => {
-                            let on = matches!(parts[2], "on" | "true" | "yes" | "1");
-                            match useracct::set_auto_login(uid, on) {
-                                Ok(()) => shell_println!(
-                                    "Auto-login {} for uid={}",
-                                    if on { "enabled" } else { "disabled" },
-                                    uid
-                                ),
-                                Err(e) => {
-                                    shell_println!("Error: {:?}", e);
-                                    set_exit(1);
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            shell_println!("Invalid uid");
-                            set_exit(1);
-                        }
+                // The uid is read first so that `useracct autologin abc on`
+                // complains about `abc' rather than about a toggle that is
+                // perfectly fine -- a diagnostic naming the wrong operand sends
+                // the reader to the wrong end of their command line.
+                let Some(uid) = required_num::<u64>(parts, 1, "useracct", "autologin", "uid")
+                else {
+                    return;
+                };
+                let Some(on) = required_toggle(parts, 2, "useracct", "autologin") else {
+                    return;
+                };
+                match useracct::set_auto_login(uid, on) {
+                    Ok(()) => shell_println!(
+                        "Auto-login {} for uid={}",
+                        if on { "enabled" } else { "disabled" },
+                        uid
+                    ),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
                     }
                 }
             }
@@ -40515,10 +40645,18 @@ fn cmd_progmgr(args: &str) {
                     );
                     set_exit(1);
                 } else {
+                    // Note the index: the guard above admits exactly-4 parts, so
+                    // `val` was `parts.get(4)…unwrap_or("")` -- an *omitted*
+                    // value became the empty string, which no `matches!` arm
+                    // accepts, so it became `false` and was reported as set.
+                    // `progmgr notifcfg app nm show` therefore turned the
+                    // notification off and said `Set show=false`.
                     let val = parts.get(4).copied().unwrap_or("");
                     match parts[3] {
                         "show" => {
-                            let v = matches!(val, "on" | "true" | "yes" | "1");
+                            let Some(v) = required_toggle(parts, 4, "progmgr", "show") else {
+                                return;
+                            };
                             match progmgr::set_notification_config(
                                 parts[1],
                                 parts[2],
@@ -40560,7 +40698,9 @@ fn cmd_progmgr(args: &str) {
                             }
                         }
                         "banner" => {
-                            let v = matches!(val, "on" | "true" | "yes" | "1");
+                            let Some(v) = required_toggle(parts, 4, "progmgr", "banner") else {
+                                return;
+                            };
                             match progmgr::set_notification_config(
                                 parts[1],
                                 parts[2],
@@ -40579,7 +40719,9 @@ fn cmd_progmgr(args: &str) {
                             }
                         }
                         "lock" => {
-                            let v = matches!(val, "on" | "true" | "yes" | "1");
+                            let Some(v) = required_toggle(parts, 4, "progmgr", "lock") else {
+                                return;
+                            };
                             match progmgr::set_notification_config(
                                 parts[1],
                                 parts[2],
@@ -41520,30 +41662,22 @@ fn cmd_osreset(args: &str) {
             }
         }
         "appinc" => {
-            if parts.len() < 4 {
-                shell_println!("Usage: osreset appinc <plan_id> <app_id> <on|off>");
+            let Some(pid) = required_num::<u64>(&parts, 1, "osreset", "appinc", "plan id") else {
+                return;
+            };
+            let Some(app) = parts.get(2) else {
+                shell_println!("osreset: appinc: missing app id");
                 set_exit(1);
-            } else {
-                match parts[1].parse::<u64>() {
-                    Ok(pid) => {
-                        let inc = matches!(parts[3], "on" | "yes" | "true" | "1");
-                        match osreset::set_app_include(pid, parts[2], inc) {
-                            Ok(()) => shell_println!(
-                                "Set app '{}' include={} in plan {}",
-                                parts[2],
-                                inc,
-                                pid
-                            ),
-                            Err(e) => {
-                                shell_println!("Error: {:?}", e);
-                                set_exit(1);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        shell_println!("Invalid plan id");
-                        set_exit(1);
-                    }
+                return;
+            };
+            let Some(inc) = required_toggle(&parts, 3, "osreset", "appinc") else {
+                return;
+            };
+            match osreset::set_app_include(pid, app, inc) {
+                Ok(()) => shell_println!("Set app '{}' include={} in plan {}", app, inc, pid),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -41917,19 +42051,16 @@ fn cmd_bootcfg(args: &str) {
             }
         }
         "activity" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: bootcfg activity <on|off>");
-                set_exit(1);
-            } else {
-                let on = matches!(parts[1], "on" | "true" | "yes" | "1");
-                match bootcfg::set_boot_activity(on) {
-                    Ok(()) => {
-                        shell_println!("Boot activity listing: {}", if on { "on" } else { "off" })
-                    }
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "bootcfg", "activity") else {
+                return;
+            };
+            match bootcfg::set_boot_activity(on) {
+                Ok(()) => {
+                    shell_println!("Boot activity listing: {}", if on { "on" } else { "off" })
+                }
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -42263,27 +42394,33 @@ fn cmd_swapcfg(args: &str) {
             }
         },
         "zswap" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: swapcfg zswap <on|off> <algorithm> [max_pool_%]");
+            let Some(on) = required_toggle(&parts, 1, "swapcfg", "zswap") else {
+                return;
+            };
+            let Some(algo) = parts.get(2) else {
+                shell_println!("swapcfg: zswap: missing algorithm");
                 set_exit(1);
-            } else {
-                let on = matches!(parts[1], "on" | "true" | "yes");
-                let algo = parts[2];
-                let pct = parts
-                    .get(3)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(20);
-                match swapcfg::set_zswap(on, algo, pct) {
-                    Ok(()) => shell_println!(
-                        "zswap: {} algorithm={} pool={}%",
-                        if on { "enabled" } else { "disabled" },
-                        algo,
-                        pct
-                    ),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            };
+            // The pool percentage is genuinely optional -- 20% is the documented
+            // default -- but `…parse().ok().unwrap_or(20)` extended that default
+            // to a *mistyped* percentage too, so `zswap on lzo 5o` silently
+            // built a 20% pool and printed `pool=20%`. Absent still means 20;
+            // unreadable is now refused.
+            let Some(pct) = optional_num::<u32>(&parts, 3, "swapcfg", "zswap", "percentage", 20)
+            else {
+                return;
+            };
+            match swapcfg::set_zswap(on, algo, pct) {
+                Ok(()) => shell_println!(
+                    "zswap: {} algorithm={} pool={}%",
+                    if on { "enabled" } else { "disabled" },
+                    algo,
+                    pct
+                ),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -42565,15 +42702,69 @@ fn toggle_arg(parts: &[&str], idx: usize, cmd: &str, sub: &str) -> Option<Toggle
     let Some(word) = parts.get(idx) else {
         return Some(Toggle::Query);
     };
-    match *word {
-        "on" | "true" | "yes" | "1" | "enable" | "enabled" => Some(Toggle::Set(true)),
-        "off" | "false" | "no" | "0" | "disable" | "disabled" => Some(Toggle::Set(false)),
-        other => {
-            shell_println!("{}: {}: `{}' is not on or off", cmd, sub, other);
-            set_exit(1);
-            None
-        }
+    let Some(v) = toggle_word(word) else {
+        shell_println!("{}: {}: `{}' is not on or off", cmd, sub, word);
+        set_exit(1);
+        return None;
+    };
+    Some(Toggle::Set(v))
+}
+
+/// The one place that decides which words mean true and which mean false.
+///
+/// It exists because the shell had **five** different answers to that question.
+/// Grepping the boolean operands turned up `"on" | "true" | "yes" | "1"`,
+/// `"on" | "true" | "yes"`, `"on" | "yes" | "true"`,
+/// `"on" | "yes" | "true" | "enable"` and `"on" | "true" | "connected"`, spread
+/// over 21 sites — the ordinary fate of an idiom that is copied rather than
+/// called.
+///
+/// The drift was not cosmetic. Seven of those sites print `Usage: … <on|off>`
+/// and accept `1`; six others print the same line and do not, and since every
+/// one of them was written as `matches!(word, …)`, the unrecognised `1` did not
+/// fail — it evaluated to `false`. So a user who learned from `bootcfg activity
+/// 1` that `1` works got, from the identically-documented `datausage limit
+/// block home 1`, a data cap silently switched **off**.
+///
+/// Note which way that points. `matches!` cannot express "I did not understand
+/// you"; its only two outputs are the two the caller wanted, so every
+/// unreadable word became `false`, and `false` is the permissive side of most
+/// of these settings — enforcement off, blocking off, auto-rebuild off. The
+/// failure mode was not random, it was consistently toward less protection.
+fn toggle_word(word: &str) -> Option<bool> {
+    match word {
+        "on" | "true" | "yes" | "1" | "enable" | "enabled" => Some(true),
+        "off" | "false" | "no" | "0" | "disable" | "disabled" => Some(false),
+        _ => None,
     }
+}
+
+/// The `on`/`off` operand of a setting that has no query form — read, or
+/// refused with a diagnostic naming the word.
+///
+/// [`toggle_arg`]'s sibling, for the arms whose usage line reads
+/// `<cmd> <sub> <on|off>` rather than `[on|off]`: there is nothing sensible to
+/// do with an absent operand, so absence is an error here rather than a query.
+///
+/// It replaces the `if parts.len() < N { "Usage: …" }` guard as well as the
+/// `matches!`, and that is deliberate. A synopsis answers "what is the syntax",
+/// which is the wrong question for a user who typed the syntax correctly and
+/// misspelled one word: it makes them re-read a line they already got right,
+/// and never mentions the word that was actually rejected. Naming the word is
+/// what §600 is for, and `missing on or off` is the same shape as
+/// [`required_id`]'s `missing window id`.
+fn required_toggle(parts: &[&str], idx: usize, cmd: &str, sub: &str) -> Option<bool> {
+    let Some(word) = parts.get(idx) else {
+        shell_println!("{}: {}: missing on or off", cmd, sub);
+        set_exit(1);
+        return None;
+    };
+    let Some(v) = toggle_word(word) else {
+        shell_println!("{}: {}: `{}' is not on or off", cmd, sub, word);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
 }
 
 /// `fstune` — filesystem tuning profiles and parameters.
@@ -47618,21 +47809,27 @@ fn cmd_appnotify(args: &str) {
             }
         }
         "critical" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: appnotify critical <app-id> <on|off>");
+            let Some(app) = parts.get(1) else {
+                shell_println!("appnotify: critical: missing app id");
                 set_exit(1);
-            } else {
-                let allow = matches!(parts[2], "on" | "yes" | "true");
-                match appnotify::set_allow_critical(parts[1], allow) {
-                    Ok(()) => shell_println!(
-                        "Critical {} for {}",
-                        if allow { "allowed" } else { "denied" },
-                        parts[1]
-                    ),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            };
+            // `matches!` here pointed at *denied*: this setting governs whether an
+            // app may bypass Do Not Disturb, and every word it could not read --
+            // including the `1` that six sibling commands accept -- silently
+            // resolved to `false`.
+            let Some(allow) = required_toggle(&parts, 2, "appnotify", "critical") else {
+                return;
+            };
+            match appnotify::set_allow_critical(app, allow) {
+                Ok(()) => shell_println!(
+                    "Critical {} for {}",
+                    if allow { "allowed" } else { "denied" },
+                    app
+                ),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -47657,21 +47854,23 @@ fn cmd_appnotify(args: &str) {
             }
         }
         "group" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: appnotify group <app-id> <on|off>");
+            let Some(app) = parts.get(1) else {
+                shell_println!("appnotify: group: missing app id");
                 set_exit(1);
-            } else {
-                let g = matches!(parts[2], "on" | "yes" | "true");
-                match appnotify::set_group(parts[1], g) {
-                    Ok(()) => shell_println!(
-                        "Grouping {} for {}",
-                        if g { "enabled" } else { "disabled" },
-                        parts[1]
-                    ),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            };
+            let Some(g) = required_toggle(&parts, 2, "appnotify", "group") else {
+                return;
+            };
+            match appnotify::set_group(app, g) {
+                Ok(()) => shell_println!(
+                    "Grouping {} for {}",
+                    if g { "enabled" } else { "disabled" },
+                    app
+                ),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -48067,21 +48266,27 @@ fn cmd_kernelbuild(args: &str) {
             }
         }
         "auto" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: kernelbuild auto <component-id> <on|off>");
+            let Some(comp) = parts.get(1) else {
+                shell_println!("kernelbuild: auto: missing component id");
                 set_exit(1);
-            } else {
-                let on = matches!(parts[2], "on" | "yes" | "true");
-                match kernelbuild::set_auto_rebuild(parts[1], on) {
-                    Ok(()) => shell_println!(
-                        "Auto-rebuild {} for {}",
-                        if on { "enabled" } else { "disabled" },
-                        parts[1]
-                    ),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            };
+            // One of the two sites §605 was written about: `kernelbuild auto
+            // <id> 1` was not in this arm's vocabulary, so it meant *off*, and
+            // the component silently stopped being rebuilt while the command
+            // reported a successful setting.
+            let Some(on) = required_toggle(&parts, 2, "kernelbuild", "auto") else {
+                return;
+            };
+            match kernelbuild::set_auto_rebuild(comp, on) {
+                Ok(()) => shell_println!(
+                    "Auto-rebuild {} for {}",
+                    if on { "enabled" } else { "disabled" },
+                    comp
+                ),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -48296,36 +48501,26 @@ fn cmd_wakesensor(args: &str) {
             }
         }
         "camera" | "cam" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: wakesensor camera <on|off>");
-                set_exit(1);
-            } else {
-                let on = matches!(parts[1], "on" | "yes" | "true" | "enable");
-                match wakesensor::set_sensor_enabled(wakesensor::SensorType::Camera, on) {
-                    Ok(()) => {
-                        shell_println!("Camera wake {}", if on { "enabled" } else { "disabled" })
-                    }
-                    Err(e) => {
-                        shell_println!("Error: {:?} (consent required?)", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "wakesensor", "camera") else {
+                return;
+            };
+            match wakesensor::set_sensor_enabled(wakesensor::SensorType::Camera, on) {
+                Ok(()) => shell_println!("Camera wake {}", if on { "enabled" } else { "disabled" }),
+                Err(e) => {
+                    shell_println!("Error: {:?} (consent required?)", e);
+                    set_exit(1);
                 }
             }
         }
         "mic" | "microphone" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: wakesensor mic <on|off>");
-                set_exit(1);
-            } else {
-                let on = matches!(parts[1], "on" | "yes" | "true" | "enable");
-                match wakesensor::set_sensor_enabled(wakesensor::SensorType::Microphone, on) {
-                    Ok(()) => {
-                        shell_println!("Mic wake {}", if on { "enabled" } else { "disabled" })
-                    }
-                    Err(e) => {
-                        shell_println!("Error: {:?} (consent required?)", e);
-                        set_exit(1);
-                    }
+            let Some(on) = required_toggle(&parts, 1, "wakesensor", "mic") else {
+                return;
+            };
+            match wakesensor::set_sensor_enabled(wakesensor::SensorType::Microphone, on) {
+                Ok(()) => shell_println!("Mic wake {}", if on { "enabled" } else { "disabled" }),
+                Err(e) => {
+                    shell_println!("Error: {:?} (consent required?)", e);
+                    set_exit(1);
                 }
             }
         }
@@ -50890,8 +51085,19 @@ fn cmd_nightlight(args: &str) {
             }
         }
         "override" => {
-            let active = parts.get(1).copied().unwrap_or("on");
-            let active = matches!(active, "on" | "true" | "yes");
+            // The two-step `unwrap_or("on")` then `matches!` read as "default to
+            // on", and did for an *absent* word -- but an unreadable one fell
+            // through the same `matches!` to `false`, so `nlight override xyz`
+            // printed `Manual override: OFF`, the exact opposite of the default
+            // it appears to be defending. Absence still means on; a word that is
+            // present is now either understood or refused.
+            let Some(t) = toggle_arg(&parts, 1, "nlight", "override") else {
+                return;
+            };
+            let active = match t {
+                Toggle::Query => true,
+                Toggle::Set(v) => v,
+            };
             match nightlight::set_manual_override(active) {
                 Ok(()) => shell_println!("Manual override: {}", if active { "ON" } else { "OFF" }),
                 Err(e) => {
@@ -51170,9 +51376,11 @@ fn cmd_tasksched(args: &str) {
         "day" => {
             #[inline(never)]
             fn case(parts: &[&str]) {
-                if let (Some(id_str), Some(day_str), Some(val)) =
-                    (parts.get(1), parts.get(2), parts.get(3))
-                {
+                // Index 3 is no longer fetched here: `required_toggle` reports
+                // its own absence, and more precisely than the shared synopsis
+                // below, which cannot say *which* of the three operands is the
+                // one you left out.
+                if let (Some(id_str), Some(day_str)) = (parts.get(1), parts.get(2)) {
                     if let Ok(id) = id_str.parse::<u64>() {
                         let day_num = match *day_str {
                             "sun" | "0" => Some(0usize),
@@ -51185,7 +51393,9 @@ fn cmd_tasksched(args: &str) {
                             _ => None,
                         };
                         if let Some(d) = day_num {
-                            let enabled = matches!(*val, "on" | "true" | "yes" | "1");
+                            let Some(enabled) = required_toggle(parts, 3, "schtask", "day") else {
+                                return;
+                            };
                             match tasksched::set_weekday(id, d, enabled) {
                                 Ok(()) => {
                                     shell_println!("Task #{} weekday {} = {}", id, day_str, enabled)
@@ -52910,19 +53120,28 @@ fn cmd_datausage(args: &str) {
                 }
                 Some("block") => {
                     // datausage limit block <name> <on|off>
-                    if parts.len() >= 4 {
-                        let name = parts[2];
-                        let block = matches!(parts[3], "on" | "yes" | "true");
-                        match datausage::set_block_on_exceed(name, block) {
-                            Ok(()) => shell_println!("Block-on-exceed for '{}': {}", name, block),
-                            Err(e) => {
-                                shell_println!("Error: {:?}", e);
-                                set_exit(1);
-                            }
-                        }
-                    } else {
-                        shell_println!("Usage: datausage limit block <name> <on|off>");
+                    //
+                    // The site §605 was written about. This arm's `matches!` did
+                    // not list `1`, but six other commands' did, so a user who
+                    // had learned that `1` means on got `block=false` here --
+                    // the data cap switched off, reported as
+                    // `Block-on-exceed for 'home': false`, exit 0. The setting
+                    // that stops a metered connection running up a bill is
+                    // exactly the wrong one to fail permissively.
+                    let Some(name) = parts.get(2) else {
+                        shell_println!("datausage: block: missing limit name");
                         set_exit(1);
+                        return;
+                    };
+                    let Some(block) = required_toggle(&parts, 3, "datausage", "block") else {
+                        return;
+                    };
+                    match datausage::set_block_on_exceed(name, block) {
+                        Ok(()) => shell_println!("Block-on-exceed for '{}': {}", name, block),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
                     }
                 }
                 Some("alert") => {
@@ -54953,14 +55172,24 @@ fn cmd_fileshare(args: &str) {
             }
         }
         "guest" => {
-            if parts.len() >= 3 {
-                let id: u32 = parts[1].parse().unwrap_or(0);
-                let allowed = matches!(parts[2], "on" | "yes" | "true");
-                let _ = fileshare::set_guest_access(id, allowed);
-                shell_println!("Share #{}: guest={}", id, allowed);
-            } else {
-                shell_println!("Usage: share guest <id> <on|off>");
-                set_exit(1);
+            // Three defects in one statement, and they compounded: the id was
+            // guessed as 0, the toggle was guessed as false, and the result was
+            // discarded with `let _ =` under an unconditional success line. So
+            // `share guest 1O on` (letter O) printed `Share #0: guest=false`
+            // having changed nothing at all -- a sentence in which every number
+            // is invented and the verb is a lie.
+            let Some(id) = required_num::<u32>(&parts, 1, "share", "guest", "share id") else {
+                return;
+            };
+            let Some(allowed) = required_toggle(&parts, 2, "share", "guest") else {
+                return;
+            };
+            match fileshare::set_guest_access(id, allowed) {
+                Ok(()) => shell_println!("Share #{}: guest={}", id, allowed),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "connect" => {
@@ -56338,12 +56567,9 @@ fn cmd_crashreport(args: &str) {
             }
         }
         "autosubmit" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: crash autosubmit <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "crash", "autosubmit") else {
                 return;
-            }
-            let on = matches!(parts[1], "on" | "true" | "yes" | "1");
+            };
             match crashreport::set_auto_submit(on) {
                 Ok(()) => {
                     shell_println!("Auto-submit {}.", if on { "enabled" } else { "disabled" })
@@ -58129,12 +58355,9 @@ fn cmd_restorepoint(args: &str) {
             }
         }
         "auto" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: rpoint auto <on|off>");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "rpoint", "auto") else {
                 return;
-            }
-            let on = matches!(parts[1], "on" | "true" | "yes");
+            };
             match restorepoint::set_auto_create(on) {
                 Ok(()) => {
                     shell_println!("Auto-create {}.", if on { "enabled" } else { "disabled" })
@@ -58259,12 +58482,34 @@ fn cmd_battery(args: &str) {
             }
         }
         "ac" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: batt ac <on|off>");
+            let Some(word) = parts.get(1) else {
+                shell_println!("batt: ac: missing on or off");
                 set_exit(1);
                 return;
-            }
-            let on = matches!(parts[1], "on" | "true" | "connected");
+            };
+            // This is the one arm that cannot just call `required_toggle`, and
+            // the reason is the diagnostic rather than the parsing. `connected`
+            // and `disconnected` are this command's own words for the two
+            // states -- a battery command reads better with them -- so a
+            // refusal saying only "is not on or off" would name a vocabulary
+            // narrower than what is actually accepted, and send the user to
+            // stop using a word that works. It shares `toggle_word`, which is
+            // the part worth sharing, and keeps its own sentence.
+            let on = match *word {
+                "connected" => true,
+                "disconnected" => false,
+                other => {
+                    let Some(v) = toggle_word(other) else {
+                        shell_println!(
+                            "batt: ac: `{}' is not on or off (or connected or disconnected)",
+                            other
+                        );
+                        set_exit(1);
+                        return;
+                    };
+                    v
+                }
+            };
             match battery::set_ac_connected(on) {
                 Ok(()) => shell_println!(
                     "AC power: {}",
@@ -58336,16 +58581,16 @@ fn cmd_battery(args: &str) {
             }
         }
         "limit" => {
-            if parts.len() < 2 {
-                shell_println!("Usage: batt limit <on|off> [pct]");
-                set_exit(1);
+            let Some(on) = required_toggle(&parts, 1, "batt", "limit") else {
                 return;
-            }
-            let on = matches!(parts[1], "on" | "true" | "yes");
-            let pct: u8 = if parts.len() > 2 {
-                parts[2].parse().unwrap_or(80)
-            } else {
-                80
+            };
+            // 80 is the documented default for an omitted percentage and stays
+            // that; what changes is that a *mistyped* one no longer becomes 80
+            // too. `batt limit on 9O` used to set the limit to 80% and print
+            // `Charge limit: on (80%)`, which is a plausible enough line to
+            // read straight past.
+            let Some(pct) = optional_num::<u8>(&parts, 2, "batt", "limit", "percentage", 80) else {
+                return;
             };
             match battery::set_charge_limit(on, pct) {
                 Ok(()) => {
@@ -61903,9 +62148,16 @@ fn cmd_reslimit(args: &str) {
             }
         }
         "enforce" => {
-            if let (Some(gid_str), Some(val)) = (parts.get(1), parts.get(2)) {
+            if let Some(gid_str) = parts.get(1) {
                 if let Ok(gid) = gid_str.parse::<u32>() {
-                    let on = matches!(*val, "on" | "true" | "yes" | "1");
+                    // The most consequential of the 21: this is the switch that
+                    // decides whether a resource group's limits are applied at
+                    // all, and every word `matches!` could not read turned it
+                    // off while printing `Enforcement disabled for group N` as
+                    // though that had been asked for.
+                    let Some(on) = required_toggle(&parts, 2, "reslimit", "enforce") else {
+                        return;
+                    };
                     match reslimit::set_enforce(gid, on) {
                         Ok(()) => shell_println!(
                             "Enforcement {} for group {}",

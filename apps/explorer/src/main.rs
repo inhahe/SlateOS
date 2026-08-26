@@ -37,8 +37,11 @@ use fileops::{
     ConflictPolicy, ErrorPolicy, FileOpEvent, FileOperation, OperationExecutor, OperationPlan,
     OperationSummary, RecycleBin, UndoStack,
 };
+use thumbs::{
+    ThumbCategory, ThumbConfig, Thumbnail, ThumbnailCache, ThumbnailGenerator, ThumbnailRequest,
+};
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -165,6 +168,36 @@ const ROW_H: f32 = 22.0;
 /// Width reserved to the left of the first column for the entry's type icon.
 const ICON_GUTTER: f32 = 28.0;
 
+/// Width of one icon-view cell.
+const ICON_CELL_W: f32 = 96.0;
+
+/// Height of one icon-view cell: the thumbnail box, the gap, and two lines of
+/// name beneath it.
+const ICON_CELL_H: f32 = 108.0;
+
+/// Side of the square a thumbnail is fitted into, inside its cell.
+const ICON_THUMB_SIZE: f32 = 64.0;
+
+/// Font size of the name label under an icon-view thumbnail.
+const ICON_LABEL_SIZE: f32 = 11.0;
+
+/// Height of one list-view row: taller than a detail row because it carries a
+/// small thumbnail rather than a glyph.
+const LIST_ROW_H: f32 = 32.0;
+
+/// Side of the square thumbnail at the left of a list-view row.
+const LIST_THUMB_SIZE: f32 = 24.0;
+
+/// How many thumbnails [`ExplorerState::pump_thumbnails`] generates per call
+/// when the caller does not say.
+///
+/// Generation is synchronous, so this is a frame-budget knob rather than a
+/// throughput one: a folder of ten thousand files must not stall the first
+/// frame while every one of them is decoded. Eight is roughly one screenful of
+/// icon cells per frame, which fills the visible grid within a few frames of
+/// arriving and leaves the rest to trickle in behind the scroll.
+const THUMB_BATCH_DEFAULT: usize = 8;
+
 /// Sort criteria.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SortBy {
@@ -254,6 +287,38 @@ pub struct ExplorerState {
     /// images grows a Dimensions column and a folder of source grows Language
     /// and Lines without the user asking.
     pub columns: ColumnManager,
+    /// Generated thumbnails, keyed by path + mtime + size.
+    ///
+    /// Read from [`Self::render`] through [`ThumbnailCache::peek`], never
+    /// through `get`: drawing a frame must not be allowed to reorder the LRU,
+    /// or scrolling a folder larger than the cache would make eviction follow
+    /// the last frame drawn rather than the user's attention. (`render` takes
+    /// `&self`, so `get` is not reachable from it in any case — the two facts
+    /// are the same fact.)
+    pub thumbs: ThumbnailCache,
+    /// Pending thumbnail work, drained a few entries at a time by
+    /// [`Self::pump_thumbnails`].
+    pub thumb_gen: ThumbnailGenerator,
+    /// Size and colours new thumbnails are generated at.
+    pub thumb_config: ThumbConfig,
+    /// Thumbnails generated but not yet handed to the compositor.
+    ///
+    /// Drained by [`Self::take_pending_uploads`]. The explorer cannot register
+    /// an image itself — it is a client, and the upload is the host's call to
+    /// make — so this is the handoff point rather than a place a compositor
+    /// call would go.
+    pending_uploads: Vec<(u64, Thumbnail)>,
+    /// Image ids the host has confirmed the compositor holds pixels for.
+    ///
+    /// The icon view emits a [`RenderCommand::Image`](guitk::render::RenderCommand::Image)
+    /// only for an id in this set, and draws the placeholder otherwise. Without
+    /// it a thumbnail that had been *generated* but not yet *uploaded* would
+    /// draw as `thumbs::render_thumbnail`'s frame with nothing inside it — an
+    /// empty white box with a border — because an unregistered id draws nothing
+    /// and does so silently. Degrading to the placeholder instead means the
+    /// view is correct at every stage, including the stage where there is no
+    /// compositor connection at all.
+    uploaded: HashSet<u64>,
 }
 
 impl ExplorerState {
@@ -280,6 +345,11 @@ impl ExplorerState {
             undo: UndoStack::new(),
             recycle: RecycleBin::default_location(),
             columns: ColumnManager::with_defaults(),
+            thumbs: ThumbnailCache::default_capacity(),
+            thumb_gen: ThumbnailGenerator::with_default_disk_cache(),
+            thumb_config: ThumbConfig::default(),
+            pending_uploads: Vec::new(),
+            uploaded: HashSet::new(),
         };
         state.sync_sort_indicator();
         state.load_directory();
@@ -412,6 +482,121 @@ impl ExplorerState {
         self.sort_entries();
         self.update_status();
         detect_columns(&mut self.columns, &self.entries);
+        self.queue_thumbnails();
+    }
+
+    // ======================================================================
+    // Thumbnails
+    // ======================================================================
+
+    /// Whether the current view actually shows thumbnails.
+    ///
+    /// The detail view draws a glyph per row and never a picture, so generating
+    /// thumbnails for it would decode every file in the folder to produce
+    /// pixels nothing draws. Queueing is gated on this rather than on the
+    /// generator being empty, so switching *into* an icon view fills the queue
+    /// and switching out of one empties it.
+    const fn view_wants_thumbnails(&self) -> bool {
+        matches!(self.view_mode, ViewMode::Icons | ViewMode::List)
+    }
+
+    /// Queue a thumbnail for every entry the current view will draw one for.
+    ///
+    /// Cancels whatever was pending first. A directory change makes every
+    /// outstanding request point at a file the user has navigated away from,
+    /// and generating those would delay the ones now on screen behind a queue
+    /// of work whose results go straight into the cache's eviction path.
+    ///
+    /// Entries already in the cache are not re-queued: the key carries mtime
+    /// and size, so a hit is a hit on *this* version of the file, and a miss
+    /// after an edit is automatic.
+    pub fn queue_thumbnails(&mut self) {
+        self.thumb_gen.cancel_all();
+        if !self.view_wants_thumbnails() {
+            return;
+        }
+        for entry in &self.entries {
+            let mtime = mtime_secs(entry.modified);
+            if self.thumbs.peek(&entry.path, mtime, entry.size).is_some() {
+                continue;
+            }
+            self.thumb_gen.push(ThumbnailRequest {
+                path: entry.path.clone(),
+                mtime,
+                size: entry.size,
+                config: self.thumb_config.clone(),
+            });
+        }
+    }
+
+    /// Generate up to `batch` queued thumbnails and file the results.
+    ///
+    /// Returns how many were generated. Call it once per frame, or on idle;
+    /// generation is synchronous, so the batch size is the frame budget.
+    ///
+    /// Each result lands in two places: the cache, which is what the renderer
+    /// reads, and the pending-upload list drained by
+    /// [`Self::take_pending_uploads`], which is what the host must hand to the
+    /// compositor before the picture can actually appear. The two are separate
+    /// because a thumbnail that exists is not a thumbnail that can be drawn.
+    pub fn pump_thumbnails(&mut self, batch: usize) -> usize {
+        let generated = self.thumb_gen.process_batch(batch);
+        for (req, thumb) in self.thumb_gen.take_completed() {
+            self.pending_uploads
+                .push((thumbs::thumbnail_image_id(&thumb), thumb.clone()));
+            self.thumbs.insert(&req.path, req.mtime, req.size, thumb);
+        }
+        generated
+    }
+
+    /// [`Self::pump_thumbnails`] at the default per-frame budget.
+    pub fn pump_thumbnails_default(&mut self) -> usize {
+        self.pump_thumbnails(THUMB_BATCH_DEFAULT)
+    }
+
+    /// Take the thumbnails waiting to be registered with the compositor.
+    ///
+    /// Draining does *not* mark them uploaded: the caller registers each one
+    /// and reports the ones that succeeded through [`Self::mark_uploaded`]. An
+    /// upload that fails must leave the entry drawing its placeholder rather
+    /// than an empty frame, which is exactly what not marking it achieves.
+    pub fn take_pending_uploads(&mut self) -> Vec<(u64, Thumbnail)> {
+        std::mem::take(&mut self.pending_uploads)
+    }
+
+    /// Record that the compositor now holds pixels for `image_id`.
+    pub fn mark_uploaded(&mut self, image_id: u64) {
+        self.uploaded.insert(image_id);
+    }
+
+    /// Record that the compositor no longer holds pixels for `image_id`.
+    ///
+    /// The counterpart of [`Self::mark_uploaded`], for a host that unregisters
+    /// an image to reclaim memory. The entry falls back to its placeholder on
+    /// the next frame instead of drawing an empty frame.
+    pub fn mark_dropped(&mut self, image_id: u64) -> bool {
+        self.uploaded.remove(&image_id)
+    }
+
+    /// Number of image ids the compositor is believed to hold.
+    #[must_use]
+    pub fn uploaded_count(&self) -> usize {
+        self.uploaded.len()
+    }
+
+    /// The thumbnail to draw for `entry`, if one is both generated and
+    /// uploaded.
+    ///
+    /// Both conditions, not either: a generated-but-not-uploaded thumbnail
+    /// would draw as an empty white box, because the compositor discards an
+    /// `Image` command naming an id it does not hold and says nothing about it.
+    fn drawable_thumb(&self, entry: &FileEntry) -> Option<&Thumbnail> {
+        let thumb = self
+            .thumbs
+            .peek(&entry.path, mtime_secs(entry.modified), entry.size)?;
+        self.uploaded
+            .contains(&thumbs::thumbnail_image_id(thumb))
+            .then_some(thumb)
     }
 
     /// The detail view's cells for one entry, in active-column order.
@@ -966,8 +1151,143 @@ impl ExplorerState {
         let list_w = self.window_width as f32 - self.sidebar_width;
         let list_h = self.window_height as f32 - 64.0 - 24.0;
 
-        if self.view_mode == ViewMode::Details {
-            self.render_details(tree, list_x, list_y, list_w, list_h);
+        match self.view_mode {
+            ViewMode::Details => self.render_details(tree, list_x, list_y, list_w, list_h),
+            ViewMode::Icons => self.render_icons(tree, list_x, list_y, list_w, list_h),
+            ViewMode::List => self.render_list(tree, list_x, list_y, list_w, list_h),
+        }
+    }
+
+    /// The icon view: a grid of thumbnail cells, each captioned with its name.
+    ///
+    /// Every cell draws *something* at every stage. A file whose thumbnail has
+    /// been generated and uploaded gets the picture; one that is still queued,
+    /// or generated but not yet registered with the compositor, gets the
+    /// category placeholder, which is built from primitives and needs nothing
+    /// from the compositor at all. There is deliberately no fourth state where
+    /// the cell is blank: an `Image` command naming an id the compositor does
+    /// not hold draws nothing and reports nothing, so a view that emitted one
+    /// optimistically would show an empty white frame with no way to tell
+    /// whether the file was undrawable or the upload had simply not happened.
+    fn render_icons(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+        // At least one column, however narrow the pane: a zero here would make
+        // the row index a division by zero, and a pane too narrow for a cell
+        // should clip one cell rather than draw none.
+        let cols = ((w / ICON_CELL_W) as usize).max(1);
+        let visible_rows = (h / ICON_CELL_H).max(0.0) as usize;
+        let visible_cells = visible_rows.saturating_mul(cols);
+
+        tree.translate(x, y);
+        // The grid is clipped to the pane, not merely truncated to whole rows:
+        // a partial row at the bottom should be cut off mid-cell, as a scrolled
+        // list is, rather than vanish.
+        tree.clip(0.0, 0.0, w, h);
+
+        for (i, entry) in self.entries.iter().take(visible_cells).enumerate() {
+            // `cols` is at least 1 by the `max` above, so neither `None` arm
+            // is reachable — but writing the division as fallible keeps the
+            // loop free of an operation whose safety the reader has to prove
+            // from a line thirty above it.
+            let cx = i.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W;
+            let cy = i.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H;
+
+            if entry.selected {
+                tree.fill_rounded_rect(
+                    cx + 2.0,
+                    cy + 2.0,
+                    ICON_CELL_W - 4.0,
+                    ICON_CELL_H - 4.0,
+                    Color::from_hex(0xCCE8FF),
+                    guitk::style::CornerRadii::all(4.0),
+                );
+            }
+
+            // Centre the thumbnail box horizontally in the cell; the caption
+            // sits under it, using the cell's full width.
+            let tx = cx + (ICON_CELL_W - ICON_THUMB_SIZE) / 2.0;
+            let ty = cy + 8.0;
+            self.push_thumb(tree, entry, tx, ty, ICON_THUMB_SIZE);
+
+            let label_y = ty + ICON_THUMB_SIZE + 6.0;
+            let name_color = if entry.is_dir {
+                Color::from_hex(0x0066CC)
+            } else {
+                Color::BLACK
+            };
+            // Elided rather than clipped: a name cut mid-word with no mark is
+            // read as the whole name, which is how one file gets mistaken for
+            // another whose name it is a prefix of.
+            tree.text_in(
+                cx + 4.0,
+                label_y,
+                ICON_CELL_W - 8.0,
+                &entry.name,
+                name_color,
+                ICON_LABEL_SIZE,
+            );
+        }
+
+        tree.unclip();
+        tree.untranslate();
+    }
+
+    /// The list view: one row per entry, a small thumbnail and the name.
+    ///
+    /// Distinct from the detail view in what it *omits* — no header, no
+    /// columns, no size or date — and from the icon view in that it is one
+    /// column, so a long name has the whole pane to be legible in. The
+    /// thumbnail follows the same generated-and-uploaded rule as the icon
+    /// view's; see [`Self::render_icons`].
+    fn render_list(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+        let visible_rows = (h / LIST_ROW_H).max(0.0) as usize;
+
+        tree.translate(x, y);
+        tree.clip(0.0, 0.0, w, h);
+
+        for (i, entry) in self.entries.iter().take(visible_rows).enumerate() {
+            let ry = i as f32 * LIST_ROW_H;
+
+            if entry.selected {
+                tree.fill_rect(0.0, ry, w, LIST_ROW_H, Color::from_hex(0xCCE8FF));
+            } else if i % 2 == 1 {
+                tree.fill_rect(0.0, ry, w, LIST_ROW_H, Color::from_hex(0xFAFAFA));
+            }
+
+            let ty = ry + (LIST_ROW_H - LIST_THUMB_SIZE) / 2.0;
+            self.push_thumb(tree, entry, 6.0, ty, LIST_THUMB_SIZE);
+
+            let name_x = 6.0 + LIST_THUMB_SIZE + 8.0;
+            let name_color = if entry.is_dir {
+                Color::from_hex(0x0066CC)
+            } else {
+                Color::BLACK
+            };
+            tree.text_in(
+                name_x,
+                ry + (LIST_ROW_H - 13.0) / 2.0,
+                (w - name_x - 8.0).max(0.0),
+                &entry.name,
+                name_color,
+                13.0,
+            );
+        }
+
+        tree.unclip();
+        tree.untranslate();
+    }
+
+    /// Emit one entry's thumbnail, or its placeholder if there is not one that
+    /// can be drawn.
+    ///
+    /// The single place the choice is made, so the icon and list views cannot
+    /// disagree about when a picture is safe to emit.
+    fn push_thumb(&self, tree: &mut RenderTree, entry: &FileEntry, x: f32, y: f32, size: f32) {
+        let cmds = match self.drawable_thumb(entry) {
+            Some(thumb) => thumbs::render_thumbnail(thumb, x, y, size),
+            None => thumbs::render_placeholder(entry_category(entry), None, x, y, size),
+        };
+        for cmd in cmds {
+            tree.push(cmd);
         }
     }
 
@@ -1060,8 +1380,18 @@ impl ExplorerState {
         self.sort_entries();
     }
 
+    /// Switch view modes, re-deriving what thumbnail work the new mode needs.
+    ///
+    /// Switching *into* a picture view fills the queue for a directory that was
+    /// loaded while the detail view was up; switching *out* of one empties it,
+    /// so a folder of ten thousand files stops decoding the moment the user
+    /// stops looking at the pictures.
     pub fn set_view_mode(&mut self, mode: ViewMode) {
+        if self.view_mode == mode {
+            return;
+        }
         self.view_mode = mode;
+        self.queue_thumbnails();
     }
 
     pub fn toggle_hidden(&mut self) {
@@ -1076,6 +1406,45 @@ impl ExplorerState {
 
 fn format_size(bytes: u64) -> String {
     guitk::bytes::iec(bytes)
+}
+
+/// A listing entry's modification time as whole seconds since the epoch, for
+/// use as part of a thumbnail cache key.
+///
+/// A file with no readable mtime keys as 0. That is a *stable* key, not a
+/// missing one, which is what matters here: the alternative — refusing to
+/// cache it — would re-decode the file on every frame it was visible. It costs
+/// a stale thumbnail for a file whose mtime cannot be read *and* whose size
+/// never changes, which the disk cache already accepts for the same reason.
+fn mtime_secs(modified: Option<SystemTime>) -> u64 {
+    modified
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The placeholder category for a listing entry.
+///
+/// Derived from the entry's already-known [`FileType`] rather than by handing
+/// its extension back to [`ThumbCategory::from_extension`]: the listing has
+/// classified it once, the two tables agree on every category they share, and
+/// routing through the string would mean a name that is not valid UTF-8 loses
+/// its icon for no reason.
+const fn entry_category(entry: &FileEntry) -> ThumbCategory {
+    match entry.file_type {
+        FileType::Directory => ThumbCategory::Folder,
+        FileType::Image => ThumbCategory::Image,
+        FileType::Text | FileType::Code => ThumbCategory::Text,
+        FileType::Audio => ThumbCategory::Audio,
+        FileType::Video => ThumbCategory::Video,
+        FileType::Archive => ThumbCategory::Archive,
+        FileType::Executable => ThumbCategory::Executable,
+        // The listing's Document covers PDF along with office formats; the
+        // thumbnail side has a PDF category and nothing broader, and a red
+        // document badge is closer to right for a .docx than the blank
+        // Unknown page is.
+        FileType::Document => ThumbCategory::Pdf,
+        FileType::Unknown => ThumbCategory::Unknown,
+    }
 }
 
 /// Re-derive the active column set from what the directory actually holds.
@@ -1236,10 +1605,19 @@ mod tests {
     }
 
     /// Build a state rooted at `dir` without touching the real home directory,
-    /// and with a recycle bin that also lives under `dir`.
+    /// and with a recycle bin and thumbnail cache that also live under `dir`.
+    ///
+    /// The thumbnail generator is redirected deliberately: the production
+    /// default writes to `~/.cache/thumbs`, and a test suite that generated
+    /// into a developer's real cache would both pollute it and read entries
+    /// from it, so the same test would pass or fail depending on what the
+    /// developer had browsed.
     fn state_at(dir: &Path) -> ExplorerState {
         let mut state = ExplorerState::new(dir);
         state.recycle = RecycleBin::new(dir.join(".recycle"), Duration::from_secs(3600));
+        state.thumb_gen =
+            ThumbnailGenerator::with_disk_cache(thumbs::DiskCache::new(dir.join(".thumbs")));
+        state.queue_thumbnails();
         state
     }
 
@@ -1814,5 +2192,256 @@ mod tests {
             (Some(ColumnId::SIZE), SortOrder::Descending)
         );
         assert_eq!(state.sort_dir, SortDir::Descending);
+    }
+
+    // ------------------------------------------------------------------
+    // Icon and list views
+    // ------------------------------------------------------------------
+
+    /// Every `image_id` the tree asks the compositor to draw, in emission
+    /// order.
+    fn image_ids(tree: &RenderTree) -> Vec<u64> {
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::Image { image_id, .. } => Some(*image_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `y` of the first `Text` command drawing exactly `name`.
+    fn text_y(tree: &RenderTree, name: &str) -> Option<f32> {
+        tree.commands.iter().find_map(|c| match c {
+            guitk::render::RenderCommand::Text { y, text, .. } if text == name => Some(*y),
+            _ => None,
+        })
+    }
+
+    /// Drive the whole pipeline to its resting state: generate every queued
+    /// thumbnail, then acknowledge every upload as the host would.
+    fn settle_thumbnails(state: &mut ExplorerState) {
+        while state.pump_thumbnails_default() > 0 {}
+        for (id, _) in state.take_pending_uploads() {
+            state.mark_uploaded(id);
+        }
+    }
+
+    fn dir_of(label: &str, names: &[&str]) -> ScratchDir {
+        let scratch = temp_dir(label);
+        for name in names {
+            write(&scratch.dir().join(name), "content of a test file");
+        }
+        scratch
+    }
+
+    /// The icon view used to render an empty pane, because `render_file_list`
+    /// only ever drew the detail case. Whatever else the three views disagree
+    /// about, all three must put the file's name on the screen.
+    #[test]
+    fn every_view_mode_draws_the_files_name() {
+        let scratch = dir_of("view_all_modes", &["alpha.txt", "beta.txt"]);
+        let mut state = state_at(scratch.dir());
+
+        for mode in [ViewMode::Details, ViewMode::Icons, ViewMode::List] {
+            state.set_view_mode(mode);
+            let drawn = texts(&state.render());
+            assert!(
+                drawn.iter().any(|s| s == "alpha.txt"),
+                "{mode:?} drew no name for alpha.txt: {drawn:?}"
+            );
+        }
+    }
+
+    /// The gate that keeps the icon view honest. A thumbnail passes through
+    /// three states — queued, generated, uploaded — and only the last one may
+    /// produce an `Image` command, because the compositor discards a command
+    /// naming an id it does not hold and says nothing about it. Emitting early
+    /// would draw an empty white frame with a border and no way to tell why.
+    #[test]
+    fn a_thumbnail_is_not_drawn_until_the_compositor_has_its_pixels() {
+        let scratch = dir_of("view_upload_gate", &["a.txt", "b.txt", "c.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::Icons);
+
+        assert!(
+            image_ids(&state.render()).is_empty(),
+            "queued but not generated: nothing to draw yet"
+        );
+
+        while state.pump_thumbnails_default() > 0 {}
+        assert!(
+            image_ids(&state.render()).is_empty(),
+            "generated is not drawable; the compositor has no pixels yet"
+        );
+
+        let uploads = state.take_pending_uploads();
+        assert_eq!(uploads.len(), 3, "one upload per entry");
+        assert!(
+            image_ids(&state.render()).is_empty(),
+            "taking an upload is a promise to register it, not proof that it \
+             worked; a failed registration must keep the placeholder"
+        );
+
+        for (id, _) in &uploads {
+            state.mark_uploaded(*id);
+        }
+        assert_eq!(
+            image_ids(&state.render()).len(),
+            3,
+            "acknowledged uploads finally draw"
+        );
+    }
+
+    /// The reverse edge. A host that reclaims memory by unregistering an image
+    /// must get the placeholder back, not an empty frame.
+    #[test]
+    fn dropping_an_image_returns_the_entry_to_its_placeholder() {
+        let scratch = dir_of("view_drop", &["a.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::Icons);
+        settle_thumbnails(&mut state);
+
+        let ids = image_ids(&state.render());
+        assert_eq!(ids.len(), 1);
+
+        assert!(state.mark_dropped(ids[0]), "the id was held");
+        assert!(!state.mark_dropped(ids[0]), "and is not held twice");
+        assert!(
+            image_ids(&state.render()).is_empty(),
+            "an unregistered image must fall back to its placeholder"
+        );
+        assert_eq!(state.uploaded_count(), 0);
+    }
+
+    /// The list view draws smaller pictures in a different layout, but it must
+    /// not have its own opinion about when a picture is safe to emit —
+    /// `push_thumb` is the single decision point precisely so the two cannot
+    /// drift apart.
+    #[test]
+    fn the_list_view_gates_its_thumbnails_the_same_way() {
+        let scratch = dir_of("view_list_gate", &["a.txt", "b.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::List);
+
+        while state.pump_thumbnails_default() > 0 {}
+        assert!(image_ids(&state.render()).is_empty());
+
+        settle_thumbnails(&mut state);
+        assert_eq!(image_ids(&state.render()).len(), 2);
+    }
+
+    /// The detail view draws a glyph per row and never a picture, so decoding
+    /// every file in the folder for it would be pure waste. Queueing follows
+    /// the view, both ways.
+    #[test]
+    fn the_detail_view_queues_no_thumbnail_work() {
+        let scratch = dir_of("view_details_idle", &["a.txt", "b.txt"]);
+        let mut state = state_at(scratch.dir());
+
+        assert_eq!(state.view_mode, ViewMode::Details);
+        assert_eq!(state.thumb_gen.pending_count(), 0);
+        assert_eq!(state.pump_thumbnails_default(), 0);
+
+        state.set_view_mode(ViewMode::Icons);
+        assert_eq!(
+            state.thumb_gen.pending_count(),
+            2,
+            "switching into a picture view fills the queue"
+        );
+
+        state.set_view_mode(ViewMode::Details);
+        assert_eq!(
+            state.thumb_gen.pending_count(),
+            0,
+            "switching out of one empties it"
+        );
+    }
+
+    /// Every outstanding request after a directory change points at a file the
+    /// user has navigated away from. Generating them would delay the ones now
+    /// on screen behind work whose results go straight into the eviction path.
+    #[test]
+    fn changing_directory_cancels_the_old_directorys_thumbnails() {
+        let scratch = dir_of("view_nav_cancel", &["a.txt", "b.txt", "c.txt"]);
+        let root = scratch.dir().to_path_buf();
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).expect("sub");
+        write(&sub.join("only.txt"), "x");
+
+        let mut state = state_at(&root);
+        state.set_view_mode(ViewMode::Icons);
+        assert_eq!(
+            state.thumb_gen.pending_count(),
+            4,
+            "three files and one directory"
+        );
+
+        state.navigate_to(&sub);
+        assert_eq!(
+            state.thumb_gen.pending_count(),
+            1,
+            "only the new directory's single entry is queued"
+        );
+    }
+
+    /// A cache hit is a hit on *this* version of the file — the key carries
+    /// mtime and size — so re-queueing one is work with a known answer.
+    #[test]
+    fn a_cached_thumbnail_is_not_queued_again() {
+        let scratch = dir_of("view_no_requeue", &["a.txt", "b.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::Icons);
+        settle_thumbnails(&mut state);
+
+        assert_eq!(state.thumbs.len(), 2);
+        state.queue_thumbnails();
+        assert_eq!(
+            state.thumb_gen.pending_count(),
+            0,
+            "both entries are already cached"
+        );
+
+        // An edit changes size and mtime, so the key misses and the entry is
+        // queued again without anyone having to invalidate anything.
+        write(
+            &scratch.dir().join("a.txt"),
+            "a much longer body than before",
+        );
+        state.load_directory();
+        assert_eq!(state.thumb_gen.pending_count(), 1);
+    }
+
+    /// The grid wraps at the pane width, and a pane too narrow for even one
+    /// cell must clip a single column rather than divide by zero.
+    #[test]
+    fn the_icon_grid_wraps_and_survives_a_pane_narrower_than_a_cell() {
+        let scratch = dir_of("view_grid_wrap", &["a.txt", "b.txt", "c.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::Icons);
+
+        // Sidebar plus two cells' worth of pane: exactly two columns.
+        state.window_width = state.sidebar_width as u32 + (ICON_CELL_W as u32) * 2;
+        let tree = state.render();
+        let (ya, yb, yc) = (
+            text_y(&tree, "a.txt").expect("a"),
+            text_y(&tree, "b.txt").expect("b"),
+            text_y(&tree, "c.txt").expect("c"),
+        );
+        assert!((ya - yb).abs() < f32::EPSILON, "a and b share a row");
+        assert!(yc > yb, "c wrapped onto the next row: {yc} vs {yb}");
+        assert!(
+            (yc - ya - ICON_CELL_H).abs() < 0.001,
+            "exactly one cell height down: {yc} - {ya}"
+        );
+
+        // Narrower than one cell. One column, clipped — not zero columns, and
+        // not a panic.
+        state.window_width = state.sidebar_width as u32 + 10;
+        let tree = state.render();
+        assert!(
+            text_y(&tree, "a.txt").is_some(),
+            "a pane too narrow for a cell still draws the first one"
+        );
     }
 }

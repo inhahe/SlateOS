@@ -68165,6 +68165,50 @@ it sits.
   `thumbs.rs` has an obvious home — `ViewMode::Icons` currently renders an
   empty pane, because `render_file_list` only ever drew the `Details` case.
 
+- **2026-08-25 — `apps/explorer/src/thumbs.rs` (1,980 lines) is reached.**
+  `render_file_list` is now a three-arm match: `ViewMode::Icons` draws a
+  wrapping grid of captioned cells and `ViewMode::List` a single column of
+  rows, both through one `push_thumb` so the two cannot drift apart in the one
+  decision that matters. Queueing follows the view — switching into a picture
+  view fills the queue, switching out empties it — so a folder of ten thousand
+  files stops decoding the moment the user stops looking at the pictures.
+
+  Wiring it turned up the same shape of defect one level deeper, and this time
+  in the *compositor*: `RenderCommand::Image` had three emitters and a backend
+  arm that was a bare `// stub for now`. That is fixed separately (§554,
+  `ImageAsset`), and its consequence shapes the explorer's design here — an
+  `Image` naming an id the compositor does not hold draws nothing and reports
+  nothing, so a thumbnail must be both **generated** and **registered** before
+  a command may name it. `ExplorerState` therefore tracks the two states
+  separately: `pump_thumbnails` files a result into the cache *and* a pending-
+  upload list, `take_pending_uploads` hands them to the host, and only
+  `mark_uploaded` makes an entry drawable. An upload that fails, or an image
+  the host later drops, falls back to the primitive-only placeholder rather
+  than to an empty white frame nobody can diagnose.
+
+  Two defects in `thumbs.rs` itself had to be fixed first:
+  - **The generator never touched the disk cache.** `DiskCache` was complete
+    and unreachable: `process_batch` called `generate_thumbnail` and nothing
+    else, so a restart re-decoded every file. `ThumbnailGenerator` now owns an
+    optional `DiskCache` and consults it before generating, populates it after.
+  - **The disk cache could not tell two sizes apart.** Its filename was
+    `{hash(path, mtime)}.thumb`, with no record of the size cap the entry was
+    made at, so a 256px view was served a 64px entry. Fixing it by comparing
+    the *stored dimensions* against the cap does not work — `fit_dimensions`
+    does not upscale, so a source smaller than the cap yields the same
+    dimensions at every cap and every small thumbnail would look stale
+    forever. The cap is part of the key instead: `{hash:016x}-{cap}.thumb`,
+    with `purge_stale` matching on the hash prefix so a live file keeps its
+    entries at *every* cap.
+
+  The in-memory cache gained `peek(&self, …)` beside the promoting
+  `get(&mut self, …)`. A renderer reading the cache on every frame must not
+  reorder it, or eviction becomes "whatever was last on screen" rather than
+  "whatever was last wanted"; `render` taking `&self` is the same guarantee
+  spelled by the compiler.
+
+  Still pinned from this app: `dropzone.rs` (1,259).
+
 ## TD-B-FIVE-COPIES-OF-THE-FILE-TYPE-HALF-OF-A-MODE-WORD (lane B, 2026-08-22) — RESOLVED 2026-08-22
 
 **In short:** A file's *mode* is one integer holding two unrelated things: what

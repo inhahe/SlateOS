@@ -16,7 +16,6 @@
 # largest entries are blocked on open-questions.md -> C-Q6, which decides
 # whether the shell's settings pages survive at all.
 apps/explorer/src/dropzone.rs
-apps/explorer/src/thumbs.rs
 apps/imageviewer/src/video.rs
 apps/installer/src/grub.rs
 apps/procexplorer/src/features.rs

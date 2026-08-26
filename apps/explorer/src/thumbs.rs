@@ -120,17 +120,25 @@ fn into_thumbnail(canvas: Canvas, source_path: &Path, source_mtime: u64) -> Thum
 ///
 /// If any component changes the old entry will not match, giving automatic
 /// invalidation when a file is modified.
+///
+/// The path is a `PathBuf`, not a `String`, for the same reason
+/// [`Thumbnail::source_path`] is: a caller holding a `Path` can only reach a
+/// `String` through `to_string_lossy`, and two names differing only in bytes
+/// that are not UTF-8 collapse to one key — so one file is shown the other's
+/// thumbnail. The disk cache was fixed for this; the in-memory cache sitting
+/// in front of it had the identical hole, and a caller passing a lossy string
+/// to both would have hit the memory one first.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CacheKey {
-    path: String,
+    path: PathBuf,
     mtime: u64,
     size: u64,
 }
 
 impl CacheKey {
-    fn new(path: &str, mtime: u64, size: u64) -> Self {
+    fn new(path: impl AsRef<Path>, mtime: u64, size: u64) -> Self {
         Self {
-            path: path.to_owned(),
+            path: path.as_ref().to_path_buf(),
             mtime,
             size,
         }
@@ -182,7 +190,7 @@ impl ThumbnailCache {
 
     /// Look up a thumbnail.  Returns `None` on miss.  On hit the entry is
     /// promoted to most-recently-used.
-    pub fn get(&mut self, path: &str, mtime: u64, size: u64) -> Option<&Thumbnail> {
+    pub fn get(&mut self, path: impl AsRef<Path>, mtime: u64, size: u64) -> Option<&Thumbnail> {
         let key = CacheKey::new(path, mtime, size);
         if self.map.contains_key(&key) {
             self.promote(&key);
@@ -192,8 +200,19 @@ impl ThumbnailCache {
         }
     }
 
+    /// Look up a thumbnail **without** promoting it.
+    ///
+    /// This is what a renderer wants. Drawing a frame must not be able to
+    /// change which entries survive eviction: with [`Self::get`], scrolling a
+    /// folder of ten thousand files past a five-hundred-entry cache would make
+    /// eviction order follow the last frame drawn rather than the user's
+    /// actual attention, and a renderer holding `&self` cannot call it anyway.
+    pub fn peek(&self, path: impl AsRef<Path>, mtime: u64, size: u64) -> Option<&Thumbnail> {
+        self.map.get(&CacheKey::new(path, mtime, size))
+    }
+
     /// Insert (or replace) a thumbnail.  Evicts the LRU entry when full.
-    pub fn insert(&mut self, path: &str, mtime: u64, size: u64, thumb: Thumbnail) {
+    pub fn insert(&mut self, path: impl AsRef<Path>, mtime: u64, size: u64, thumb: Thumbnail) {
         let key = CacheKey::new(path, mtime, size);
 
         // If updating an existing entry, remove the old order position.
@@ -208,7 +227,8 @@ impl ThumbnailCache {
     }
 
     /// Remove all entries whose path matches `path` (regardless of mtime/size).
-    pub fn invalidate(&mut self, path: &str) {
+    pub fn invalidate(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
         let keys_to_remove: Vec<CacheKey> = self
             .map
             .keys()
@@ -955,11 +975,27 @@ pub struct ThumbnailRequest {
 /// [`take_completed`].
 ///
 /// When the directory changes, call [`cancel_all`] to clear the pending queue.
+///
+/// # The disk cache belongs here
+///
+/// A generator built with [`with_disk_cache`](Self::with_disk_cache) reads the
+/// cache before generating and writes it after. That layering lives inside the
+/// generator rather than at the call site because "how a thumbnail comes into
+/// being" is the one thing this type is for: a caller that had to remember to
+/// probe the disk first would be a caller that could forget, and the cost of
+/// forgetting is re-decoding every file in the folder on every restart —
+/// silently, since the result is correct either way.
 pub struct ThumbnailGenerator {
     /// Pending requests (FIFO).
     pending: VecDeque<ThumbnailRequest>,
     /// Completed thumbnails ready for the caller.
     completed: Vec<(ThumbnailRequest, Thumbnail)>,
+    /// Where a generated thumbnail is kept across restarts, if anywhere.
+    ///
+    /// `None` is a working configuration, not a degraded one: a session with no
+    /// home directory, or a test that must not touch the user's cache,
+    /// generates every time and is otherwise identical.
+    disk: Option<DiskCache>,
 }
 
 impl ThumbnailGenerator {
@@ -967,7 +1003,31 @@ impl ThumbnailGenerator {
         Self {
             pending: VecDeque::new(),
             completed: Vec::new(),
+            disk: None,
         }
+    }
+
+    /// A generator that persists what it makes, and reuses what it finds.
+    #[must_use]
+    pub fn with_disk_cache(disk: DiskCache) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            completed: Vec::new(),
+            disk: Some(disk),
+        }
+    }
+
+    /// A generator backed by the default cache directory, or an unbacked one
+    /// if there is no home directory to put it in.
+    #[must_use]
+    pub fn with_default_disk_cache() -> Self {
+        DiskCache::default_location().map_or_else(Self::new, Self::with_disk_cache)
+    }
+
+    /// The disk cache this generator reads and writes, if it has one.
+    #[must_use]
+    pub const fn disk_cache(&self) -> Option<&DiskCache> {
+        self.disk.as_ref()
     }
 
     /// Queue a thumbnail generation request.
@@ -987,7 +1047,18 @@ impl ThumbnailGenerator {
 
     /// Process up to `batch_size` pending requests synchronously.
     ///
-    /// Returns the number of thumbnails generated this call.
+    /// Returns the number of requests retired this call — whether each one was
+    /// read from the disk cache or generated afresh, since to the caller
+    /// budgeting a frame the two are the same unit of work retired, and it is
+    /// the *queue* draining that the number is used to watch.
+    ///
+    /// The disk lookup is keyed on the request's [`ThumbConfig::size`] as well
+    /// as its path and mtime, so a user who changes the thumbnail size gets
+    /// regeneration rather than yesterday's smaller picture scaled up.
+    ///
+    /// A failed save is ignored deliberately. The thumbnail is in hand and the
+    /// view is about to draw it; a full or read-only cache directory is a
+    /// reason to regenerate next time, not a reason to fail now.
     pub fn process_batch(&mut self, batch_size: usize) -> usize {
         let mut processed = 0;
         for _ in 0..batch_size {
@@ -995,7 +1066,21 @@ impl ThumbnailGenerator {
                 Some(r) => r,
                 None => break,
             };
-            let thumb = generate_thumbnail(&req.path, &req.config);
+            let cap = req.config.size;
+            let cached = self
+                .disk
+                .as_ref()
+                .and_then(|d| d.load(&req.path, req.mtime, cap));
+            let thumb = match cached {
+                Some(t) => t,
+                None => {
+                    let t = generate_thumbnail(&req.path, &req.config);
+                    if let Some(disk) = self.disk.as_ref() {
+                        let _ = disk.save(&t, cap);
+                    }
+                    t
+                }
+            };
             self.completed.push((req, thumb));
             processed += 1;
         }
@@ -1048,15 +1133,23 @@ impl DiskCache {
         fs::create_dir_all(&self.cache_dir)
     }
 
-    /// Compute the cache filename for a given path and mtime.
-    fn cache_filename(&self, path: &Path, mtime: u64) -> PathBuf {
+    /// Compute the cache filename for a given path, mtime and size cap.
+    ///
+    /// The cap is part of the name, not merely of the contents, because
+    /// [`fit_dimensions`] does not upscale: a 20x20 source yields a 20x20
+    /// thumbnail at *every* cap, so the stored dimensions cannot be compared
+    /// against the cap in force to tell a valid entry from a stale one. Keyed
+    /// on the cap, a size change simply misses and regenerates, and entries at
+    /// the old cap are collected by [`Self::purge_stale`] rather than served.
+    fn cache_filename(&self, path: &Path, mtime: u64, cap: u32) -> PathBuf {
         let hash = simple_hash(path, mtime);
-        self.cache_dir.join(format!("{hash:016x}.thumb"))
+        self.cache_dir.join(format!("{hash:016x}-{cap}.thumb"))
     }
 
-    /// Try to load a cached thumbnail from disk.
-    pub fn load(&self, path: &Path, mtime: u64) -> Option<Thumbnail> {
-        let file_path = self.cache_filename(path, mtime);
+    /// Try to load a cached thumbnail from disk, made at the `cap` now in
+    /// force.
+    pub fn load(&self, path: &Path, mtime: u64, cap: u32) -> Option<Thumbnail> {
+        let file_path = self.cache_filename(path, mtime, cap);
         let data = fs::read(&file_path).ok()?;
 
         // Format: [width: 4 LE][height: 4 LE][ARGB pixel data...]
@@ -1076,10 +1169,11 @@ impl DiskCache {
         ))
     }
 
-    /// Save a thumbnail to the disk cache.
-    pub fn save(&self, thumb: &Thumbnail) -> std::io::Result<()> {
+    /// Save a thumbnail to the disk cache, recorded as having been made at
+    /// `cap`.
+    pub fn save(&self, thumb: &Thumbnail, cap: u32) -> std::io::Result<()> {
         self.ensure_dir()?;
-        let file_path = self.cache_filename(&thumb.source_path, thumb.source_mtime);
+        let file_path = self.cache_filename(&thumb.source_path, thumb.source_mtime, cap);
 
         let mut data = Vec::with_capacity(8 + thumb.pixels.len());
         data.extend_from_slice(&thumb.width.to_le_bytes());
@@ -1088,9 +1182,9 @@ impl DiskCache {
         fs::write(file_path, &data)
     }
 
-    /// Remove the cached thumbnail for a specific path/mtime.
-    pub fn remove(&self, path: &Path, mtime: u64) {
-        let file_path = self.cache_filename(path, mtime);
+    /// Remove the cached thumbnail for a specific path/mtime/cap.
+    pub fn remove(&self, path: &Path, mtime: u64, cap: u32) {
+        let file_path = self.cache_filename(path, mtime, cap);
         let _ = fs::remove_file(file_path); // Intentionally ignoring error: file may not exist.
     }
 
@@ -1108,32 +1202,49 @@ impl DiskCache {
         Ok(())
     }
 
-    /// Purge entries whose source file no longer exists.
+    /// Purge entries whose source file no longer exists at the recorded mtime.
     ///
     /// Since the cache filename is a hash (not the original path), this method
     /// requires scanning the in-memory cache for paths.  Pass the set of
     /// known-valid source paths; anything in the cache directory that doesn't
     /// correspond to a valid entry is removed.
+    ///
+    /// Matching is on the *hash* part of the name, not the whole of it, so a
+    /// live file's entries are kept at every size cap they were made at rather
+    /// than only at the one currently in force. A cap change should cost a
+    /// regeneration, not a purge of every other size a second window might
+    /// still be drawing from.
     pub fn purge_stale(&self, valid_entries: &HashMap<PathBuf, u64>) -> std::io::Result<()> {
         if !self.cache_dir.is_dir() {
             return Ok(());
         }
 
-        let valid_filenames: std::collections::HashSet<String> = valid_entries
+        let valid_prefixes: std::collections::HashSet<String> = valid_entries
             .iter()
-            .map(|(path, mtime)| format!("{:016x}.thumb", simple_hash(path, *mtime)))
+            .map(|(path, mtime)| format!("{:016x}", simple_hash(path, *mtime)))
             .collect();
 
         for entry in fs::read_dir(&self.cache_dir)? {
             let entry = entry?;
-            // Compared as bytes. Every name we write is `{hash:016x}.thumb`, so
-            // a name that is not UTF-8 is not one of ours; rendering it lossily
-            // first could make it *look* like one of ours and get it deleted.
+            // Compared as bytes. Every name we write is
+            // `{hash:016x}-{cap}.thumb`, so a name that is not UTF-8 is not one
+            // of ours; rendering it lossily first could make it *look* like one
+            // of ours and get it deleted.
             let raw = entry.file_name();
             let name = raw.as_encoded_bytes();
-            if name.ends_with(b".thumb")
-                && !valid_filenames.iter().any(|valid| valid.as_bytes() == name)
-            {
+            if !name.ends_with(b".thumb") {
+                continue;
+            }
+            // The hash is the fixed-width run before the first `-`. A name of
+            // ours always has one; a `.thumb` file that does not is not ours
+            // and is left alone, for the same reason the UTF-8 case is.
+            let Some(sep) = name.iter().position(|&b| b == b'-') else {
+                continue;
+            };
+            let Some(prefix) = name.get(..sep) else {
+                continue;
+            };
+            if !valid_prefixes.iter().any(|v| v.as_bytes() == prefix) {
                 let _ = fs::remove_file(entry.path()); // Best-effort removal.
             }
         }
@@ -1416,6 +1527,77 @@ mod tests {
 
         assert!(cache.get("a", 1, 10).is_some()); // promoted, still there
         assert!(cache.get("b", 2, 20).is_none()); // evicted
+    }
+
+    /// The renderer reads the cache on every frame, so if reading promoted, the
+    /// eviction order would be "whatever was last on screen" rather than
+    /// "whatever was last *wanted*" — and a file scrolled past would outlive
+    /// one the user actually opened. `peek` exists to make that impossible;
+    /// `render` taking `&self` is the same fact enforced by the compiler.
+    #[test]
+    fn peeking_does_not_promote_so_drawing_cannot_reorder_the_cache() {
+        let mut cache = ThumbnailCache::new(3);
+        cache.insert("a", 1, 10, make_test_thumb("a", 10));
+        cache.insert("b", 2, 20, make_test_thumb("b", 10));
+        cache.insert("c", 3, 30, make_test_thumb("c", 10));
+
+        // The one difference from `cache_promotes_on_get`.
+        assert!(cache.peek("a", 1, 10).is_some());
+        cache.insert("d", 4, 40, make_test_thumb("d", 10));
+
+        assert!(
+            cache.peek("a", 1, 10).is_none(),
+            "still the LRU, so evicted"
+        );
+        assert!(cache.peek("b", 2, 20).is_some());
+    }
+
+    /// `to_string_lossy` maps every undecodable unit to the same replacement
+    /// character, so two distinct filenames that differ only in such units
+    /// would share one cache key — and one file would be shown the other's
+    /// picture. The key is a `PathBuf` for exactly this reason.
+    ///
+    /// The sibling
+    /// `two_names_differing_only_in_undecodable_units_do_not_share_a_cache_filename`
+    /// asserts the same property of the *disk* cache, which keys on
+    /// [`simple_hash`] rather than on `PathBuf`'s own `Hash`; neither implies
+    /// the other.
+    #[test]
+    fn two_names_that_lossy_conversion_would_merge_stay_distinct_in_memory() {
+        let (one, two) = undecodable_pair();
+        assert_eq!(
+            one.to_string_lossy(),
+            two.to_string_lossy(),
+            "the premise: these collapse to the same string"
+        );
+        assert_ne!(one, two, "but they are different paths");
+
+        let mut cache = ThumbnailCache::new(4);
+        cache.insert(&one, 7, 70, make_test_thumb("one", 10));
+        cache.insert(&two, 7, 70, make_test_thumb("two", 12));
+
+        assert_eq!(cache.len(), 2, "two files, two entries");
+        assert_eq!(cache.peek(&one, 7, 70).expect("one").width, 10);
+        assert_eq!(cache.peek(&two, 7, 70).expect("two").width, 12);
+    }
+
+    /// Two paths that are different byte-for-byte but identical after a lossy
+    /// UTF-8 conversion. Built in memory, never created on disk: the cache is a
+    /// pure map, and the filesystems this must be correct on are not all
+    /// willing to create such a name.
+    #[cfg(unix)]
+    fn undecodable_pair() -> (PathBuf, PathBuf) {
+        use std::os::unix::ffi::OsStrExt;
+        let make = |b: u8| PathBuf::from(std::ffi::OsStr::from_bytes(&[b'x', b]));
+        (make(0xE9), make(0xEA))
+    }
+
+    #[cfg(windows)]
+    fn undecodable_pair() -> (PathBuf, PathBuf) {
+        use std::os::windows::ffi::OsStringExt;
+        // Unpaired surrogates: valid UTF-16 code units, no UTF-8 spelling.
+        let make = |u: u16| PathBuf::from(std::ffi::OsString::from_wide(&[u16::from(b'x'), u]));
+        (make(0xD800), make(0xD801))
     }
 
     #[test]
@@ -1802,32 +1984,13 @@ mod tests {
     /// two distinct files hashed to one cache filename and the explorer showed
     /// one of them the other's thumbnail.
     ///
-    /// Unix-only: a Windows `OsString` cannot hold either of these paths, and
-    /// our target is `target-family = ["unix"]`.
-    #[cfg(unix)]
+    /// The pair itself is built per-family by [`undecodable_pair`], so this
+    /// runs on the Windows test host as well as on the real target — a
+    /// regression asserted only on a platform we cannot execute is not
+    /// asserted.
     #[test]
-    fn two_names_differing_only_in_undecodable_bytes_do_not_share_a_cache_entry() {
-        use std::os::unix::ffi::OsStrExt;
-        let a = Path::new(std::ffi::OsStr::from_bytes(b"/foo/x\xE9.png"));
-        let b = Path::new(std::ffi::OsStr::from_bytes(b"/foo/x\xFF.png"));
-        assert_ne!(a, b, "the two paths are genuinely different files");
-        assert_ne!(
-            simple_hash(a, 100),
-            simple_hash(b, 100),
-            "and must not share a cache filename"
-        );
-    }
-
-    /// The same property, expressed in the one form the Windows test host can
-    /// represent: an unpaired surrogate is a legal `OsString` that
-    /// `to_string_lossy` maps to U+FFFD. Without this the regression above is
-    /// asserted only on a target we cannot execute here.
-    #[cfg(windows)]
-    #[test]
-    fn two_names_differing_only_in_undecodable_units_do_not_share_a_cache_entry() {
-        use std::os::windows::ffi::OsStringExt;
-        let a = PathBuf::from(std::ffi::OsString::from_wide(&[0x2F, 0xD800]));
-        let b = PathBuf::from(std::ffi::OsString::from_wide(&[0x2F, 0xD801]));
+    fn two_names_differing_only_in_undecodable_units_do_not_share_a_cache_filename() {
+        let (a, b) = undecodable_pair();
         assert_ne!(a, b, "the two paths are genuinely different files");
         assert_eq!(
             a.to_string_lossy(),
@@ -1937,10 +2100,10 @@ mod tests {
         cache.ensure_dir().unwrap();
 
         let thumb = make_test_thumb("test_disk.png", 4);
-        cache.save(&thumb).unwrap();
+        cache.save(&thumb, 128).unwrap();
 
         let loaded = cache
-            .load(Path::new("test_disk.png"), thumb.source_mtime)
+            .load(Path::new("test_disk.png"), thumb.source_mtime, 128)
             .unwrap();
         assert_eq!(loaded.width, thumb.width);
         assert_eq!(loaded.height, thumb.height);
@@ -1954,14 +2117,136 @@ mod tests {
         cache.ensure_dir().unwrap();
 
         let thumb = make_test_thumb("miss.png", 4);
-        cache.save(&thumb).unwrap();
+        cache.save(&thumb, 128).unwrap();
 
         // Different mtime => cache miss.
         assert!(
             cache
-                .load(Path::new("miss.png"), thumb.source_mtime + 1)
+                .load(Path::new("miss.png"), thumb.source_mtime + 1, 128)
                 .is_none()
         );
+    }
+
+    /// The cap is part of the key because [`fit_dimensions`] does not upscale:
+    /// a source smaller than the cap yields a thumbnail of the *source's* size
+    /// at every cap, so the stored dimensions cannot say which cap it was made
+    /// at. Keyed only on path and mtime, raising the thumbnail size would serve
+    /// the old small picture for as long as the file went unmodified.
+    #[test]
+    fn a_cached_thumbnail_is_not_served_at_a_size_it_was_not_made_at() {
+        let scratch = ScratchDir::new("thumbs_test_disk_cap");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+
+        // A 4x4 thumbnail: smaller than either cap, so its dimensions are the
+        // same whichever cap made it. This is the case the old key got wrong.
+        let thumb = make_test_thumb("cap.png", 4);
+        cache.save(&thumb, 64).unwrap();
+
+        assert!(
+            cache
+                .load(Path::new("cap.png"), thumb.source_mtime, 64)
+                .is_some(),
+            "the cap it was made at hits"
+        );
+        assert!(
+            cache
+                .load(Path::new("cap.png"), thumb.source_mtime, 256)
+                .is_none(),
+            "a different cap must miss and regenerate"
+        );
+    }
+
+    /// Purging is keyed on the hash alone, so a live file keeps its entries at
+    /// every cap. A purge that matched whole filenames would delete the sizes
+    /// the caller did not happen to name.
+    #[test]
+    fn purging_keeps_a_live_files_other_sizes() {
+        let scratch = ScratchDir::new("thumbs_test_purge_caps");
+        let cache = DiskCache::new(scratch.dir().to_path_buf());
+        cache.ensure_dir().unwrap();
+
+        let live = make_test_thumb("live.png", 4);
+        cache.save(&live, 64).unwrap();
+        cache.save(&live, 256).unwrap();
+        let dead = make_test_thumb("dead.png", 4);
+        cache.save(&dead, 64).unwrap();
+
+        let mut valid = HashMap::new();
+        valid.insert(live.source_path.clone(), live.source_mtime);
+        cache.purge_stale(&valid).unwrap();
+
+        assert!(
+            cache
+                .load(Path::new("live.png"), live.source_mtime, 64)
+                .is_some()
+        );
+        assert!(
+            cache
+                .load(Path::new("live.png"), live.source_mtime, 256)
+                .is_some()
+        );
+        assert!(
+            cache
+                .load(Path::new("dead.png"), dead.source_mtime, 64)
+                .is_none(),
+            "a file no longer in the listing is collected"
+        );
+    }
+
+    /// A generator with a disk cache reuses what it wrote instead of decoding
+    /// the file again. Asserted through the cache directory rather than through
+    /// a timing measurement: the *observable* difference is that a file appears
+    /// there, and that a second run of the same request produces the same
+    /// pixels without the source having to still exist.
+    #[test]
+    fn a_generator_with_a_disk_cache_reuses_what_it_wrote() {
+        let scratch = ScratchDir::new("thumbs_test_gen_disk");
+        let source = scratch.dir().join("note.txt");
+        fs::write(&source, b"hello").unwrap();
+        let mtime = file_mtime(&source).unwrap_or(0);
+
+        let cache_dir = scratch.dir().join("cache");
+        let mut tg = ThumbnailGenerator::with_disk_cache(DiskCache::new(cache_dir.clone()));
+        assert!(tg.disk_cache().is_some());
+
+        let req = ThumbnailRequest {
+            path: source.clone(),
+            mtime,
+            size: 5,
+            config: ThumbConfig::default(),
+        };
+        tg.push(req.clone());
+        assert_eq!(tg.process_batch(4), 1);
+        let first = tg.take_completed().pop().expect("one result").1;
+
+        let written: Vec<_> = fs::read_dir(&cache_dir).unwrap().flatten().collect();
+        assert_eq!(written.len(), 1, "generating wrote exactly one cache file");
+
+        // Delete the source. A second request can now only be satisfied from
+        // the cache, so identical pixels prove the cache was the one consulted.
+        fs::remove_file(&source).unwrap();
+        tg.push(req);
+        assert_eq!(tg.process_batch(4), 1);
+        let second = tg.take_completed().pop().expect("one result").1;
+        assert_eq!(second.width, first.width);
+        assert_eq!(second.height, first.height);
+        assert_eq!(second.pixels, first.pixels);
+    }
+
+    /// The unbacked generator is a working configuration, not a broken one.
+    #[test]
+    fn a_generator_without_a_disk_cache_still_generates() {
+        let mut tg = ThumbnailGenerator::new();
+        assert!(tg.disk_cache().is_none());
+        tg.push(ThumbnailRequest {
+            path: PathBuf::from("/nonexistent/x.txt"),
+            mtime: 0,
+            size: 0,
+            config: ThumbConfig::default(),
+        });
+        assert_eq!(tg.process_batch(1), 1);
+        assert_eq!(tg.take_completed().len(), 1);
     }
 
     // -- Helper -------------------------------------------------------------

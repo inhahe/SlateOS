@@ -81019,3 +81019,54 @@ was not merely documented-and-hoped-for, it holds at every call the boot path
 makes, and now a future call that breaks it says so instead of hanging.
 
 ---
+
+## TD-B-SED-TEST-FIXTURES-SHARE-ONE-PATH — three `sed` tests build fixtures at a fixed temp path, so two concurrent runs clobber each other (lane B's tree; filed by lane C, 2026-08-25) — **open**
+
+**Not lane C's to fix** — `userspace/coreutils/src/bin/sed.rs` is lane B's.
+Filed as `requests/c-b-sed-test-fixtures-share-one-path-across-processes.md`;
+recorded here because it fails the *workspace* gate, which
+`TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING` makes mandatory for
+every lane, so the next lane to hit it should find this rather than re-derive
+it.
+
+**Symptom.** `cargo test --workspace` fails with
+
+```
+thread 'tests::capital_r_takes_one_line_per_cycle_from_a_shared_position'
+panicked at userspace\coreutils\src\bin\sed.rs:4728:9:
+assertion `left == right` failed
+  left: "1\n2\n"
+ right: "1\nA\n2\nB\n"
+```
+
+and passes on the next run of the same commit with nothing changed.
+
+**Mechanism.** Three tests name their fixture directory with no per-process
+component — `sed-w-test` (4696), `sed-r-test` (4721), `sed-wz-test` (4822),
+all under `std::env::temp_dir()`. `fs::write` truncates before it writes, so a
+second process running the same binary empties the include file inside the
+window where the first has opened it and not yet read. `Action::ReadLine`
+treats `Ok(0)` as a deliberate silent no-op — correct for `sed`, and precisely
+what turns a clobbered fixture into a wrong answer with no diagnostic.
+
+**Two lessons, both general.**
+
+1. **A fixture path with no per-process component is a shared mutable global.**
+   It looks local because it is written inside the test. Concurrency between
+   *processes* is invisible to `cargo test`'s own thread scheduling, so the
+   usual "tests run in parallel" reasoning does not reach it, and the collision
+   only appears when someone runs the suite twice at once — which on this
+   project is normal, since three lanes and an operator share one machine.
+2. **A silent-by-design no-op in the code under test erases the evidence its own
+   tests need.** `R` is *right* to say nothing about a short file. But that
+   makes "the fixture was destroyed" and "the feature is broken" produce byte-
+   identical output, so the failure points at the wrong file. The cheap remedy
+   is for the test to assert its fixture immediately after writing it, so a
+   corrupted one is reported as a corrupted fixture. Worth copying anywhere a
+   test feeds a file to code that treats an empty read as a legitimate answer.
+
+**Suggested fix** (lane B's call; spelled out in the request): suffix each
+directory with `std::process::id()`, remove the directory rather than just the
+files, and assert the fixture's contents before the first run.
+
+---

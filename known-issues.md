@@ -80987,8 +80987,81 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **581 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **569 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (thirteenth batch): `cmd_focusassist` (9)
+> cleared — 578 → 569 across 230 → 229 functions. Pinned by
+> `kshell::self_test` rung 80.
+>
+> Eight of the nine were the familiar `unwrap_or(0)` sentinel, but `mode`,
+> `addapp`, `rmapp` and `addsched` each ran *one* `if a == 0 || b.is_empty()`
+> guard over two-to-four operands and answered it with one synopsis. That is a
+> distinct defect from the sentinel and worth naming separately: even when the
+> guard correctly decides that something is wrong, it has thrown away which
+> operand it was, so the user is handed the syntax of a line they already typed
+> correctly. Split into per-operand `missing …` lines.
+>
+> The ninth is the reason the batch got a rung. `focusassist on [id]` is
+> *documented* to default to profile 1, so `…parse().ok().unwrap_or(1)` read
+> like the documentation rather than like a guess — this is the shape most
+> likely to survive review. It does not survive use: `focusassist on 2o`
+> silenced every notification under profile 1 and then printed profile 1's
+> name back, which a reader takes as confirmation of what they asked for. Every
+> earlier batch tested `optional_num` against a default that was a *sentinel*
+> (`0` for unlimited, absence for query), where the wrongness is visible in the
+> output. This is the first assertion that the distinction also holds when the
+> default is a value the user could plausibly have meant.
+>
+> Three uncounted defects rode along, all of them §600's *other* prohibited
+> shape — a word read and silently dropped, which the ledger does not count:
+>
+> * **`focusassist addsched … 1,Tue,9`** built a Monday-only schedule. The day
+>   list was `if let Ok(n) = part.parse() { if n < 7 { … } }` — two conditions,
+>   no `else` on either — so an unreadable day and an out-of-range one were both
+>   discarded in silence and the command reported success. Two thirds of the
+>   request vanished without a word.
+> * **`focusassist addsched zznap 25:70 26:00 1`** was accepted and stored. The
+>   time parser checked that both halves were integers and not that either was a
+>   time, so it produced a schedule that could never fire — a silent no-op with a
+>   success line, discoverable only by waiting for it not to happen.
+> * **`autofs` / `autogame` / `autopres`** did three wrong things in eight lines
+>   each: they accepted a narrower vocabulary than the rest of the shell (`true`,
+>   `enable`, `1` all refused here and accepted elsewhere), answered both an
+>   omitted operand and a misspelt one with the same synopsis, and discarded
+>   `set_auto_*`'s `Result` under an unconditional success line — so a failed
+>   write still printed `Auto fullscreen: ON`.
+>
+> **Burn-down log.** 2026-08-26 (twelfth batch): the boolean sweep — 21 sites
+> across 16 commands, of which 3 were counted (`cmd_battery`, `cmd_fileshare`,
+> `cmd_swapcfg`) — 581 → 578 across 231 → 230 functions. Pinned by
+> `kshell::self_test` rung 79.
+>
+> This batch was organised by *shape* rather than by command, because the shape
+> had been copied faster than any per-command sweep could catch it:
+> `matches!(word, "on" | "true" | …)`. `matches!` has exactly two outputs and
+> both of them are answers, so it cannot express "I did not understand you" —
+> every unreadable word became `false`.
+>
+> That is not a neutral failure. `false` is the permissive side of most of these
+> settings, so the shell failed *consistently toward less protection*:
+> `reslimit enforce` stopped enforcing, `datausage limit block` stopped
+> blocking, `kernelbuild auto` stopped rebuilding — each reporting the setting
+> as applied and exiting 0.
+>
+> Drift made it reachable. Five different vocabularies had grown across the 21
+> sites, the sharpest split being `1`: seven sites accepted it and six others,
+> printing the *identical* `Usage: … <on|off>` line, did not. So a user who
+> learned from `bootcfg activity 1` that `1` means on got, from
+> `datausage limit block home 1`, a data cap silently switched off — taught the
+> wrong lesson by documentation that was word-for-word the same in both places.
+>
+> The fix is `toggle_word`, the single place that decides which words mean what,
+> reached through `required_toggle` (no query form; absence is an error) or
+> `toggle_arg` (§605, has one). `batt ac` keeps its own diagnostic because it
+> accepts two words the shared vocabulary does not, and a refusal naming a
+> narrower vocabulary than the command accepts would teach a reader to stop
+> using a word that works.
+>
 > **Burn-down log.** 2026-08-26 (eleventh batch): `cmd_a11y` (10) cleared —
 > 591 → 581 across 232 → 231 functions. Pinned by `kshell::self_test` rung 78.
 >

@@ -80688,8 +80688,94 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **621 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **581 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (eleventh batch): `cmd_a11y` (10) cleared —
+> 591 → 581 across 232 → 231 functions. Pinned by `kshell::self_test` rung 78.
+>
+> Six of the ten were the set/query conflation, which makes this the third
+> consecutive settings command dominated by it — it is now clearly the default
+> failure of the shape rather than a quirk of any one command. So this batch
+> stopped fixing instances and built the helper: `toggle_arg` returns
+> `Option<Toggle>` where `Toggle` is `Query` or `Set(bool)`, so absence — and
+> only absence — selects the query. See §605; the reason it needs three
+> outcomes rather than two is that "no word" and "a word I could not read" are
+> the two situations the bug consists of confusing, and an `Option<bool>`
+> return has nowhere to put the difference.
+>
+> Four sites the ledger cannot count, and they are a good sample of why the
+> counted number is a floor rather than a total:
+>
+> * **`a11y regelem 1 buton Save`** registered a *generic* element and said so.
+>   An unknown role fell through a `_ =>` to a default role, so the element
+>   existed, was announced, and had the wrong semantics — the screen reader
+>   would describe a button as a plain element for the life of the process.
+> * **`a11y announce alrt`** did two wrong things at once: it downgraded the
+>   priority to `normal` and it ate the word, so the *message* announced was
+>   whatever followed. Now refused, and the refusal enumerates
+>   `Priorities: low, normal, high, alert`.
+> * **`a11y inject key F1`** injected scancode 0. There is no sentinel to key
+>   on here, which is the general lesson: `required_num` is needed even where a
+>   zero-check would appear to work, because 0 is a legitimate scancode.
+> * **Seven `.ok()` / `let _ =` discards** across `inject`, `set_font_scale` and
+>   the toggles, each reporting success for an operation that had failed.
+>
+> **Burn-down log.** 2026-08-26 (tenth batch): `cmd_filepicker` (10) cleared —
+> 601 → 591 across 233 → 232 functions. Pinned by `kshell::self_test` rung 77.
+>
+> The least interesting batch so far, and worth logging for exactly that
+> reason: all ten sites were the *same* line — a dialog id read with
+> `unwrap_or(0)` — repeated across ten arms, and dialog 0 is never a live
+> dialog, so every one of them acted on nothing and reported success. Ten
+> hand-edits of an identical line is how a transcription error gets in, so the
+> conversion was done by a one-shot script that asserted its own arity (exactly
+> ten matches, or abort) and was then deleted. Keeping such a script would
+> imply it is a tool; it is a proof that a mechanical edit was mechanical.
+>
+> The one judgement call: `nav`, `select` and `filename` take a path after the
+> id, and the path guard was previously fused with the id guard, so a missing
+> path was reported as a missing id. They are now split, because the two
+> mistakes need different messages to be actionable.
+>
+> **Burn-down log.** 2026-08-26 (ninth batch): `cmd_peninput` (10) cleared —
+> 611 → 601 across 234 → 233 functions. Pinned by `kshell::self_test` rung 76.
+>
+> Contains one instance of each of the four failure modes the family has
+> turned up, which makes it the best single worked example in this entry:
+>
+> * **Silence.** `pen rm abc` — inner `if let Ok(id)` with no `else` — printed
+>   nothing and exited 0.
+> * **A sentinel that cannot do the job.** `sim` used `unwrap_or(0)` guarded by
+>   `if pen_id == 0 { synopsis }`. That looks like validation and is not: it
+>   cannot tell an *omitted* operand from a *mistyped* one, and the synopsis it
+>   prints never names the offending word, so the user is told the syntax of a
+>   command they typed correctly.
+> * **No sentinel available.** `pen map 3 x click` bound button **0**, and 0 is
+>   a real button, so no guard of that shape could have caught it.
+> * **A guessed enum.** `register` accepted any word as a pen type.
+>
+> This batch also produced the article bug behind §606. The rung asserted
+> `` `4o96' is not an x coordinate `` and the wording gate refused it, because
+> `optional_num` hard-coded `a` and the kernel could only say `a x coordinate`.
+> Fixed here by renaming the noun to "horizontal coordinate" — a fix that is
+> better English but does not generalise, which is what motivated `article_for`
+> two batches later.
+>
+> **Burn-down log.** 2026-08-26 (eighth batch): `cmd_screenshot` (10) cleared —
+> 621 → 611 across 235 → 234 functions. Pinned by `kshell::self_test` rung 75.
+>
+> Region and window captures read their geometry with `unwrap_or`, so
+> `scap region 0 0 8oo 600` captured an 0×600 region and reported a successful
+> capture. Same shape as `wsnap addzone` in the sixth batch: a geometry operand
+> is a field in a set, and one bad field yields a degenerate result that the
+> command has no reason to think is wrong.
+>
+> Two `ALLOWED` entries were added to the wording gate in this batch
+> (`("scap", b"(1920x1080)")` and `("scap", b"(800x600)")`): the resolution is
+> assembled with `{}x{}` from values the gate cannot constant-fold, so it
+> cannot see that the literal is producible. Recorded because an allow-list
+> entry is a small hole in a gate and should never be added silently.
+>
 > **Burn-down log.** 2026-08-26 (seventh batch): `cmd_wintiling` (11) cleared —
 > 632 → 621 across 236 → 235 functions. Pinned by `kshell::self_test` rung 74.
 >

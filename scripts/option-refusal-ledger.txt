@@ -97,7 +97,6 @@ cmd_filevault 1
 cmd_findex 1
 cmd_firewall 4
 cmd_fnotify 1
-cmd_focusassist 9
 cmd_focussession 1
 cmd_fontpreview 3
 cmd_fsbench 5

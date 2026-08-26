@@ -17679,6 +17679,132 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 1, "an unreadable ac state errors");
     }
 
+    serial_println!(
+        "  kshell::self_test 80: an operand with a documented default still refuses a word it \
+         cannot read, and a list refuses the entries it used to drop"
+    );
+    // `focusassist` held nine guessed-value sites, but the reason it is worth a
+    // rung of its own is that it contains the two cases the earlier batches did
+    // not separate cleanly.
+    //
+    // The first is a default that is *not* a sentinel. `focusassist on [id]` is
+    // documented to mean profile 1 when the id is omitted, so `unwrap_or(1)`
+    // looked like the documentation rather than a bug — but it also silenced
+    // every notification under profile 1 when the id was merely mistyped, and
+    // then printed profile 1's name back, which reads as confirmation. The
+    // distinction `optional_num` draws (absent is the default, unreadable is a
+    // refusal) is the entire fix, and this is the first place it is asserted
+    // against a default a user could plausibly have meant.
+    //
+    // The second is §600's *other* prohibited shape, which the counted ledger
+    // does not track: a word read and silently dropped. `addsched`'s day list
+    // ran `if let Ok(n) = part.parse() { if n < 7 { … } }`, two conditions with
+    // no else between them, so `1,Tue,9` built a Monday-only schedule and said
+    // nothing about the two thirds it had discarded.
+    {
+        // `focusassist` is one of the subsystems behind a `with_state` that
+        // returns `NotSupported` until initialised (§604), so the success
+        // controls below have to initialise it first. `init_defaults` returns
+        // early when the state already exists, so this is safe to repeat.
+        let _ = capture_command("focusassist init");
+
+        // The documented default still applies when the operand is absent.
+        let out = capture_command("focusassist on");
+        assert_output_contains(
+            "an omitted profile id still means profile 1",
+            &out,
+            b"Focus assist ON: Priority Only",
+        );
+        assert_eq!(last_exit(), 0, "`focusassist on` succeeds");
+        let _ = capture_command("focusassist off");
+
+        // …and no longer applies when the operand is present but unreadable.
+        let out = capture_command("focusassist on 2o");
+        assert_output_contains(
+            "but a mistyped one is named rather than rounded to it",
+            &out,
+            b"`2o' is not a profile id",
+        );
+        assert_eq!(last_exit(), 1, "`focusassist on 2o` errors");
+        assert_output_lacks(
+            "and nothing is silenced behind the refusal",
+            &out,
+            b"Focus assist ON",
+        );
+
+        // The `id == 0` sentinel could not tell an omitted id from a mistyped
+        // one, and answered both with a synopsis naming two operands — so it
+        // could not say which of the two was wrong either.
+        let out = capture_command("focusassist mode");
+        assert_output_contains(
+            "an omitted profile id is reported as missing",
+            &out,
+            b"missing profile id",
+        );
+        assert_eq!(last_exit(), 1, "a bare `focusassist mode` errors");
+
+        let out = capture_command("focusassist mode 1");
+        assert_output_contains(
+            "and an omitted mode names the mode, not the whole synopsis",
+            &out,
+            b"missing mode (priority, alarms or total)",
+        );
+        assert_eq!(last_exit(), 1, "`focusassist mode 1` errors");
+
+        // A time the clock cannot show used to be stored, producing a schedule
+        // that could never fire.
+        let out = capture_command("focusassist addsched zznap 25:70 26:00 1");
+        assert_output_contains(
+            "an impossible time of day is refused",
+            &out,
+            b"`25:70' is not a time of day",
+        );
+        assert_eq!(last_exit(), 1, "an out-of-range start time errors");
+        assert_output_lacks("and no schedule is created", &out, b"Created schedule");
+
+        // The silently-dropped list entries: one unreadable, one out of range.
+        let out = capture_command("focusassist addsched zznap 09:00 10:00 1 1,Tue");
+        assert_output_contains(
+            "a day the shell cannot read is named instead of dropped",
+            &out,
+            b"`Tue' is not a day number",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable day errors");
+        assert_output_lacks(
+            "and no partial schedule is created",
+            &out,
+            b"Created schedule",
+        );
+
+        let out = capture_command("focusassist addsched zznap 09:00 10:00 1 1,9");
+        assert_output_contains(
+            "and so is one that is readable but out of range",
+            &out,
+            b"day 9 is out of range (0-6, 0=Sun)",
+        );
+        assert_eq!(last_exit(), 1, "an out-of-range day errors");
+
+        // The three auto-trigger switches accepted a narrower vocabulary than
+        // the rest of the shell and discarded the store's error under an
+        // unconditional success line.
+        let out = capture_command("focusassist autofs enabled");
+        assert_output_contains(
+            "an auto-trigger accepts the shared vocabulary",
+            &out,
+            b"Auto fullscreen: ON",
+        );
+        assert_eq!(last_exit(), 0, "`focusassist autofs enabled` succeeds");
+
+        let out = capture_command("focusassist autogame onn");
+        assert_output_contains(
+            "and refuses a word outside it by name",
+            &out,
+            b"`onn' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "`focusassist autogame onn` errors");
+        assert_output_lacks("without reporting the switch set", &out, b"Auto gaming:");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -49818,10 +49944,16 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "on" => {
-            let profile_id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
+            // The synopsis says `on [id]` defaults to 1, so an *absent* id
+            // legitimately means profile 1 -- but an unreadable one never did.
+            // `focusassist on 2o` used to silence every notification under
+            // profile 1 and report profile 1's name back, which reads as
+            // confirmation of a request nobody made.
+            let Some(profile_id) =
+                optional_num::<u64>(&parts, 1, "focusassist", "on", "profile id", 1)
+            else {
+                return;
+            };
             match focusassist::activate(profile_id) {
                 Ok(()) => {
                     if let Some(p) = focusassist::active_profile() {
@@ -49886,13 +50018,15 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("");
-            let mode_str = parts.get(2).copied().unwrap_or("priority");
-            if name.is_empty() {
-                shell_println!("Usage: focusassist create <name> [priority|alarms|total]");
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("focusassist: create: missing profile name");
                 set_exit(1);
                 return;
-            }
+            };
+            // The mode really is optional and really does default to
+            // `priority`; the arm below already refuses a word it cannot read,
+            // so this `unwrap_or` stands for absence only.
+            let mode_str = parts.get(2).copied().unwrap_or("priority");
             let mode = match mode_str {
                 "priority" => focusassist::FocusMode::PriorityOnly,
                 "alarms" => focusassist::FocusMode::AlarmsOnly,
@@ -49912,15 +50046,10 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "remove" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: focusassist remove <profile_id>");
-                set_exit(1);
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "remove", "profile id")
+            else {
                 return;
-            }
+            };
             match focusassist::remove_profile(id) {
                 Ok(()) => shell_println!("Removed profile {}", id),
                 Err(e) => {
@@ -49930,16 +50059,19 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "mode" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let mode_str = parts.get(2).copied().unwrap_or("");
-            if id == 0 || mode_str.is_empty() {
-                shell_println!("Usage: focusassist mode <profile_id> <priority|alarms|total>");
+            // The old guard was `id == 0 || mode_str.is_empty()`, one synopsis
+            // for two different operands: it could not say which of the two you
+            // had left out, and a mistyped id reached it looking exactly like an
+            // omitted one.
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "mode", "profile id")
+            else {
+                return;
+            };
+            let Some(mode_str) = parts.get(2).copied() else {
+                shell_println!("focusassist: mode: missing mode (priority, alarms or total)");
                 set_exit(1);
                 return;
-            }
+            };
             let mode = match mode_str {
                 "priority" => focusassist::FocusMode::PriorityOnly,
                 "alarms" => focusassist::FocusMode::AlarmsOnly,
@@ -49959,16 +50091,15 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "addapp" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let app_id = parts.get(2).copied().unwrap_or("");
-            if id == 0 || app_id.is_empty() {
-                shell_println!("Usage: focusassist addapp <profile_id> <app_id>");
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "addapp", "profile id")
+            else {
+                return;
+            };
+            let Some(app_id) = parts.get(2).copied() else {
+                shell_println!("focusassist: addapp: missing app id");
                 set_exit(1);
                 return;
-            }
+            };
             match focusassist::add_priority_app(id, app_id) {
                 Ok(()) => shell_println!("Added '{}' to profile {} priority apps", app_id, id),
                 Err(e) => {
@@ -49978,16 +50109,15 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "rmapp" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let app_id = parts.get(2).copied().unwrap_or("");
-            if id == 0 || app_id.is_empty() {
-                shell_println!("Usage: focusassist rmapp <profile_id> <app_id>");
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "rmapp", "profile id")
+            else {
+                return;
+            };
+            let Some(app_id) = parts.get(2).copied() else {
+                shell_println!("focusassist: rmapp: missing app id");
                 set_exit(1);
                 return;
-            }
+            };
             match focusassist::remove_priority_app(id, app_id) {
                 Ok(()) => shell_println!("Removed '{}' from profile {} priority apps", app_id, id),
                 Err(e) => {
@@ -49997,15 +50127,10 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "apps" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: focusassist apps <profile_id>");
-                set_exit(1);
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "apps", "profile id")
+            else {
                 return;
-            }
+            };
             match focusassist::priority_apps(id) {
                 Ok(apps) => {
                     if apps.is_empty() {
@@ -50024,15 +50149,10 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "reply" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: focusassist reply <profile_id> [message]");
-                set_exit(1);
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "reply", "profile id")
+            else {
                 return;
-            }
+            };
             let msg = if parts.len() > 2 {
                 Some(parts[2..].join(" "))
             } else {
@@ -50105,32 +50225,47 @@ fn cmd_focusassist(args: &str) {
         }
         "addsched" => {
             // focusassist addsched <name> <start_hh:mm> <end_hh:mm> <profile_id> [days]
-            let name = parts.get(1).copied().unwrap_or("");
-            let start = parts.get(2).copied().unwrap_or("");
-            let end = parts.get(3).copied().unwrap_or("");
-            let pid = parts
-                .get(4)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if name.is_empty() || start.is_empty() || end.is_empty() || pid == 0 {
-                shell_println!(
-                    "Usage: focusassist addsched <name> <HH:MM> <HH:MM> <profile_id> [days]"
-                );
-                shell_println!("  days: comma-separated 0-6 (0=Sun). Default: all days.");
+            // One synopsis stood in for four operands, so it could never say
+            // which one was wrong -- and a mistyped profile id arrived at it in
+            // the same shape as an omitted one.
+            let missing = |noun: &str| {
+                shell_println!("focusassist: addsched: missing {}", noun);
                 set_exit(1);
+            };
+            let Some(name) = parts.get(1).copied() else {
+                missing("schedule name");
                 return;
-            }
+            };
+            let Some(start) = parts.get(2).copied() else {
+                missing("start time (HH:MM)");
+                return;
+            };
+            let Some(end) = parts.get(3).copied() else {
+                missing("end time (HH:MM)");
+                return;
+            };
+            let Some(pid) = required_num::<u64>(&parts, 4, "focusassist", "addsched", "profile id")
+            else {
+                return;
+            };
             let parse_time = |t: &str| -> Option<(u8, u8)> {
                 let p: Vec<&str> = t.split(':').collect();
                 if p.len() != 2 {
                     return None;
                 }
-                Some((p[0].parse().ok()?, p[1].parse().ok()?))
+                let (h, m): (u8, u8) = (p[0].parse().ok()?, p[1].parse().ok()?);
+                // A time the clock cannot show is not a time. Without this,
+                // `25:70` was accepted and stored, and the schedule it made
+                // could never fire.
+                if h > 23 || m > 59 {
+                    return None;
+                }
+                Some((h, m))
             };
             let (sh, sm) = match parse_time(start) {
                 Some(t) => t,
                 None => {
-                    shell_println!("Invalid start time");
+                    shell_println!("focusassist: addsched: `{}' is not a time of day", start);
                     set_exit(1);
                     return;
                 }
@@ -50138,7 +50273,7 @@ fn cmd_focusassist(args: &str) {
             let (eh, em) = match parse_time(end) {
                 Some(t) => t,
                 None => {
-                    shell_println!("Invalid end time");
+                    shell_println!("focusassist: addsched: `{}' is not a time of day", end);
                     set_exit(1);
                     return;
                 }
@@ -50147,11 +50282,24 @@ fn cmd_focusassist(args: &str) {
             if let Some(d) = parts.get(5) {
                 days = [false; 7];
                 for part in d.split(',') {
-                    if let Ok(n) = part.parse::<usize>() {
-                        if n < 7 {
-                            days[n] = true;
-                        }
-                    }
+                    // Both arms of this used to fall through in silence: an
+                    // unreadable day and an out-of-range one were each dropped,
+                    // so `--days 1,Tue,9` created a Monday-only schedule and
+                    // said nothing about the two thirds it had thrown away.
+                    let Ok(n) = part.parse::<usize>() else {
+                        shell_println!("focusassist: addsched: `{}' is not a day number", part);
+                        set_exit(1);
+                        return;
+                    };
+                    let Some(slot) = days.get_mut(n) else {
+                        shell_println!(
+                            "focusassist: addsched: day {} is out of range (0-6, 0=Sun)",
+                            n
+                        );
+                        set_exit(1);
+                        return;
+                    };
+                    *slot = true;
                 }
             }
             match focusassist::add_schedule(name, days, sh, sm, eh, em, pid) {
@@ -50163,15 +50311,10 @@ fn cmd_focusassist(args: &str) {
             }
         }
         "rmsched" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: focusassist rmsched <schedule_id>");
-                set_exit(1);
+            let Some(id) = required_num::<u64>(&parts, 1, "focusassist", "rmsched", "schedule id")
+            else {
                 return;
-            }
+            };
             match focusassist::remove_schedule(id) {
                 Ok(()) => shell_println!("Removed schedule {}", id),
                 Err(e) => {
@@ -50180,53 +50323,46 @@ fn cmd_focusassist(args: &str) {
                 }
             }
         }
+        // These three shared a shape that refused the right words for the wrong
+        // reason: the `_ =>` arm caught an omitted operand and a misspelt one
+        // alike and answered both with a synopsis, which tells a user who typed
+        // `autofs onn` only that the syntax is `<on|off>` -- which is what they
+        // typed. They also accepted a narrower vocabulary than the rest of the
+        // shell (`true`/`enable`/`1` were refused here and accepted elsewhere),
+        // and each discarded the store's `Result` under an unconditional
+        // success line, so a failed write still printed `Auto fullscreen: ON`.
         "autofs" => {
-            let val = parts.get(1).copied().unwrap_or("");
-            match val {
-                "on" => {
-                    let _ = focusassist::set_auto_fullscreen(true);
-                    shell_println!("Auto fullscreen: ON");
-                }
-                "off" => {
-                    let _ = focusassist::set_auto_fullscreen(false);
-                    shell_println!("Auto fullscreen: OFF");
-                }
-                _ => {
-                    shell_println!("Usage: focusassist autofs <on|off>");
+            let Some(v) = required_toggle(&parts, 1, "focusassist", "autofs") else {
+                return;
+            };
+            match focusassist::set_auto_fullscreen(v) {
+                Ok(()) => shell_println!("Auto fullscreen: {}", if v { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
                     set_exit(1);
                 }
             }
         }
         "autogame" => {
-            let val = parts.get(1).copied().unwrap_or("");
-            match val {
-                "on" => {
-                    let _ = focusassist::set_auto_gaming(true);
-                    shell_println!("Auto gaming: ON");
-                }
-                "off" => {
-                    let _ = focusassist::set_auto_gaming(false);
-                    shell_println!("Auto gaming: OFF");
-                }
-                _ => {
-                    shell_println!("Usage: focusassist autogame <on|off>");
+            let Some(v) = required_toggle(&parts, 1, "focusassist", "autogame") else {
+                return;
+            };
+            match focusassist::set_auto_gaming(v) {
+                Ok(()) => shell_println!("Auto gaming: {}", if v { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
                     set_exit(1);
                 }
             }
         }
         "autopres" => {
-            let val = parts.get(1).copied().unwrap_or("");
-            match val {
-                "on" => {
-                    let _ = focusassist::set_auto_presentation(true);
-                    shell_println!("Auto presentation: ON");
-                }
-                "off" => {
-                    let _ = focusassist::set_auto_presentation(false);
-                    shell_println!("Auto presentation: OFF");
-                }
-                _ => {
-                    shell_println!("Usage: focusassist autopres <on|off>");
+            let Some(v) = required_toggle(&parts, 1, "focusassist", "autopres") else {
+                return;
+            };
+            match focusassist::set_auto_presentation(v) {
+                Ok(()) => shell_println!("Auto presentation: {}", if v { "ON" } else { "OFF" }),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
                     set_exit(1);
                 }
             }

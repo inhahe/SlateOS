@@ -171,7 +171,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // --- 3: several entries, including a directory and a binary payload --
     {
-        let originals = vec![
+        let originals = [
             (b"a.txt".to_vec(), b"first".to_vec(), false),
             (b"dir/".to_vec(), Vec::new(), true),
             (b"dir/b.txt".to_vec(), b"second".to_vec(), false),

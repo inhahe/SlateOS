@@ -371,11 +371,22 @@ impl<T> Frame<T> {
         &self.hits
     }
 
-    /// The box recorded for the first target satisfying `pred`, or `None`.
+    /// The box recorded for the topmost target satisfying `pred`, or `None`.
+    ///
+    /// **Back to front, exactly like [`hit_test`](Self::hit_test)**, and for
+    /// the same reason: a control can be drawn more than once in a frame — a
+    /// Connect button in the toolbar *and* on the panel it belongs to — and
+    /// the copy painted last is the copy a click reaches. Searching front to
+    /// back would hand a test the coordinates of the buried copy, so aiming a
+    /// click at the returned rect would activate a *different* control than
+    /// the one that was asked for, and the test would report on whichever one
+    /// it happened to hit. Two answers to "where is this control" must not
+    /// disagree, which is the whole premise of this module.
     #[must_use]
     pub fn rect_of(&self, pred: impl Fn(&T) -> bool) -> Option<Rect> {
         self.hits
             .iter()
+            .rev()
             .find(|(target, _)| pred(target))
             .map(|(_, rect)| *rect)
     }

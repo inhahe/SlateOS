@@ -46,6 +46,7 @@ pub mod menu;
 pub mod menubar;
 pub mod modal;
 pub mod pathbar;
+pub mod probe;
 pub mod ratio;
 pub mod render;
 /// Random numbers — see [`randrange`] for the whole story.

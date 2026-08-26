@@ -21,19 +21,35 @@
 //! ```
 //!
 //! The UI layer (`CleanupUI`) ties these together inside a render loop driven
-//! by the guitk `RenderTree` / `RenderCommand` primitives.
+//! by the guitk `RenderTree` primitives, and `main` hands that UI to
+//! `oswindow::app::launch`, which owns the window and the event loop.
+//!
+//! # Where the clickable rectangles come from
+//!
+//! [`Layout`] computes every rectangle the user can hit, once, from the window
+//! size — and both the renderer and [`CleanupUI::handle_event`] read it. That is
+//! not tidiness. Until 2026-08-26 this program had a renderer that computed its
+//! geometry inline and **no event handling at all**, so there was nothing for
+//! the geometry to disagree with. Adding a hit-test that recomputed those
+//! numbers would have created two copies of them, and the failure mode of two
+//! copies is a button that is drawn in one place and clicked in another — which
+//! nothing in the test suite would catch, because each side is self-consistent.
+//! One source, read twice.
 
 #![allow(dead_code)]
 
-#[allow(unused_imports)]
 use guitk::color::Color;
-#[allow(unused_imports)]
+use guitk::event::{Event, EventResult, Key, MouseButton, MouseEvent, MouseEventKind};
+use guitk::modal::{AlertDialog, DialogResult};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-#[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
 
+use oswindow::app::Response;
+
 use std::collections::BTreeMap;
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -67,6 +83,16 @@ const BUTTON_HEIGHT: f32 = 32.0;
 const CORNER_RADIUS: f32 = 6.0;
 const CHECKBOX_SIZE: f32 = 16.0;
 const PROGRESS_HEIGHT: f32 = 8.0;
+
+/// Where a scan starts when the user presses "Scan" rather than a test.
+///
+/// One entry, and it is the filesystem root, because [`CleanupScanner::scan`]
+/// treats each base as a *prefix* rather than a directory to walk: it joins
+/// `"tmp"`, `"var/log"` and the rest onto every base, so a base of `"/"`
+/// produces exactly `/tmp` and `/var/log`. The list is a slice rather than a
+/// constant path so that a test — or, later, a per-user scan — can pass its own
+/// roots to the same function the button calls, instead of a parallel one.
+const DEFAULT_SCAN_ROOTS: [&str; 1] = ["/"];
 
 // ============================================================================
 // CleanupCategory
@@ -448,12 +474,7 @@ impl CleanupPlan {
 
     /// Filter the plan to only safe items.
     pub fn safe_only(&self) -> Self {
-        let items: Vec<CleanupItem> = self
-            .items
-            .iter()
-            .filter(|i| i.is_safe)
-            .cloned()
-            .collect();
+        let items: Vec<CleanupItem> = self.items.iter().filter(|i| i.is_safe).cloned().collect();
         let total: u64 = items.iter().map(|i| i.estimated_size_bytes).sum();
         Self {
             selected_categories: self.selected_categories.clone(),
@@ -476,6 +497,17 @@ pub struct CleanupResult {
     pub bytes_freed: u64,
     /// Errors encountered (path -> error message).
     pub errors: Vec<(String, String)>,
+    /// Whether these numbers describe files that were actually removed, or
+    /// only files that *would* have been.
+    ///
+    /// This bit exists because today it is always `true` — see
+    /// [`CleanupExecutor::deletes_for_real`] — and a results screen reading
+    /// "Space freed: 1.4 GiB" after nothing was touched is not a cosmetic
+    /// problem. It is a program lying to a user about their disk, and the user
+    /// finds out when the disk is still full. Carrying the fact in the result
+    /// rather than in the renderer means the history log records it too, so a
+    /// row written today cannot later be mistaken for a real cleanup.
+    pub simulated: bool,
 }
 
 impl CleanupResult {
@@ -484,6 +516,7 @@ impl CleanupResult {
             files_deleted: 0,
             bytes_freed: 0,
             errors: Vec::new(),
+            simulated: true,
         }
     }
 
@@ -512,15 +545,35 @@ impl Default for CleanupResult {
 pub struct CleanupExecutor;
 
 impl CleanupExecutor {
-    /// Execute the plan, deleting files.  Returns a result summary.
+    /// Whether [`Self::execute`] actually removes anything.
     ///
-    /// In a real deployment this would call VFS `unlink` / `rmdir` for each
-    /// item.  The current implementation simulates successful deletion.
+    /// `false`, and the UI reads this rather than assuming: the confirmation
+    /// asks to *simulate* rather than to delete, and the results screen says
+    /// plainly that the disk is unchanged. When the real deleter lands, this
+    /// becomes `true` in one place and every piece of wording follows.
+    ///
+    /// It is a function rather than a comment because the wording has to change
+    /// with the behaviour, and a comment cannot make that happen. See
+    /// `known-issues.md` → `TD-C-DISKCLEANUP-DELETES-NOTHING`.
+    #[must_use]
+    pub const fn deletes_for_real() -> bool {
+        false
+    }
+
+    /// Execute the plan.  Returns a result summary.
+    ///
+    /// Today this only counts: [`Self::deletes_for_real`] is `false`, so the
+    /// result comes back with `simulated: true` and nothing on disk is touched.
+    /// A real implementation calls VFS `unlink` / `rmdir` for each item and
+    /// records the per-path failures in `errors` — which is why `errors` is
+    /// already in the shape it is, even though it can only be empty now.
     pub fn execute(plan: &CleanupPlan) -> CleanupResult {
         let mut result = CleanupResult::new();
+        result.simulated = !Self::deletes_for_real();
         for item in &plan.items {
-            // Simulate deletion -- a real implementation would call
-            // `std::fs::remove_file` or the VFS equivalent here.
+            // A real implementation would call `std::fs::remove_file` or the
+            // VFS equivalent here, and push a `(path, message)` onto `errors`
+            // when it refused.
             result.files_deleted = result.files_deleted.saturating_add(1);
             result.bytes_freed = result.bytes_freed.saturating_add(item.estimated_size_bytes);
         }
@@ -669,6 +722,138 @@ impl CleanupHistory {
 // CleanupUI — view state
 // ============================================================================
 
+/// A rectangle in window coordinates: `(x, y, width, height)`.
+type Rect = (f32, f32, f32, f32);
+
+/// Is `(px, py)` inside `rect`?
+///
+/// Half-open on the far edges, so two rectangles that share a boundary cannot
+/// both claim the same pixel.
+fn hits(rect: Rect, px: f32, py: f32) -> bool {
+    let (x, y, w, h) = rect;
+    px >= x && px < x + w && py >= y && py < y + h
+}
+
+/// Every rectangle the user can click, derived from the window size.
+///
+/// Both the renderer and the hit-test read this, and that is the whole point —
+/// see the module docs. A method here is the *only* place a clickable
+/// rectangle's numbers are written down.
+#[derive(Clone, Copy, Debug)]
+pub struct Layout {
+    width: f32,
+    height: f32,
+}
+
+impl Layout {
+    /// Lay out for a window of this size.
+    #[must_use]
+    pub const fn new(width: f32, height: f32) -> Self {
+        Self { width, height }
+    }
+
+    /// The window width this layout was computed for.
+    #[must_use]
+    pub const fn width(&self) -> f32 {
+        self.width
+    }
+
+    /// The window height this layout was computed for.
+    #[must_use]
+    pub const fn height(&self) -> f32 {
+        self.height
+    }
+
+    /// The vertical span between the header and the footer.
+    #[must_use]
+    pub fn content(&self) -> Rect {
+        (
+            0.0,
+            HEADER_HEIGHT,
+            self.width,
+            self.height - HEADER_HEIGHT - FOOTER_HEIGHT,
+        )
+    }
+
+    /// The full-width strip for category `index`, or `None` if it falls below
+    /// the content area.
+    ///
+    /// Returning `None` rather than a clipped rectangle is deliberate: the
+    /// renderer draws nothing for a row past the bottom, so the hit-test must
+    /// find nothing there either. A row that is scrolled out of view but still
+    /// clickable is the exact bug this shared layout exists to prevent.
+    #[must_use]
+    pub fn category_row(&self, index: usize) -> Option<Rect> {
+        let (_, top, _, content_h) = self.content();
+        #[allow(clippy::cast_precision_loss)]
+        let y = top + (index as f32) * ROW_HEIGHT;
+        if y >= top + content_h {
+            return None;
+        }
+        Some((0.0, y, self.width, ROW_HEIGHT))
+    }
+
+    /// The checkbox within category row `index`.
+    ///
+    /// Widened to the whole row height vertically and given a margin
+    /// horizontally: a 16-pixel square is a hard target for a mouse and an
+    /// impossible one for a finger, and the toggle is the app's primary verb.
+    #[must_use]
+    pub fn category_checkbox(&self, index: usize) -> Option<Rect> {
+        let (_, y, _, _) = self.category_row(index)?;
+        Some((0.0, y, PADDING * 2.0 + CHECKBOX_SIZE, ROW_HEIGHT))
+    }
+
+    /// The "View" link at the right of category row `index`.
+    #[must_use]
+    pub fn category_view_link(&self, index: usize) -> Option<Rect> {
+        let (_, y, _, _) = self.category_row(index)?;
+        let w = 30.0 + PADDING;
+        Some((self.width - w, y, w, ROW_HEIGHT))
+    }
+
+    /// The footer strip.
+    #[must_use]
+    pub fn footer(&self) -> Rect {
+        (0.0, self.height - FOOTER_HEIGHT, self.width, FOOTER_HEIGHT)
+    }
+
+    /// A button of the standard size, `slot` places from the right edge of the
+    /// footer (0 is rightmost).
+    #[must_use]
+    fn footer_button_from_right(&self, slot: f32) -> Rect {
+        let y = self.height - FOOTER_HEIGHT + (FOOTER_HEIGHT - BUTTON_HEIGHT) / 2.0;
+        let x = self.width - PADDING - BUTTON_WIDTH - slot * (PADDING + BUTTON_WIDTH);
+        (x, y, BUTTON_WIDTH, BUTTON_HEIGHT)
+    }
+
+    /// The "Clean Up" button — rightmost in the footer.
+    #[must_use]
+    pub fn clean_button(&self) -> Rect {
+        self.footer_button_from_right(0.0)
+    }
+
+    /// The "Scan" button — immediately left of "Clean Up".
+    #[must_use]
+    pub fn scan_button(&self) -> Rect {
+        self.footer_button_from_right(1.0)
+    }
+
+    /// The "Done" button on the results screen.
+    #[must_use]
+    pub fn done_button(&self) -> Rect {
+        self.footer_button_from_right(0.0)
+    }
+
+    /// The "Back" button on the file-preview screen — left-aligned, unlike the
+    /// others, because it moves backwards rather than forwards.
+    #[must_use]
+    pub fn back_button(&self) -> Rect {
+        let y = self.height - FOOTER_HEIGHT + (FOOTER_HEIGHT - BUTTON_HEIGHT) / 2.0;
+        (PADDING, y, BUTTON_WIDTH, BUTTON_HEIGHT)
+    }
+}
+
 /// Which screen the UI is currently showing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiScreen {
@@ -680,8 +865,6 @@ pub enum UiScreen {
     Progress,
     /// Cleanup finished -- showing results summary.
     Results,
-    /// Confirmation dialog before executing cleanup.
-    ConfirmDialog,
 }
 
 /// Complete UI state for the disk cleanup application.
@@ -706,6 +889,21 @@ pub struct CleanupUI {
     pub history: CleanupHistory,
     /// Scheduled cleanup config (if set).
     pub schedule: Option<ScheduledCleanup>,
+    /// The confirmation, while one is up.
+    ///
+    /// An overlay rather than a [`UiScreen`] variant, which is what it used to
+    /// be. The old `render` already had to special-case it — "draw the category
+    /// list, *then* the dialog on top" — which is the shape of an overlay
+    /// wearing a screen's clothes. More importantly it was hand-rolled: its own
+    /// scrim, its own box, its own two buttons, its own geometry. That is the
+    /// fourth such dialog this tree grew and the fourth to be replaced by
+    /// [`AlertDialog`], which does its own hit-testing, its own focus and its
+    /// own fade, and cannot disagree with itself about where its buttons are.
+    pub confirm: Option<AlertDialog>,
+    /// Window width the compositor last reported.
+    pub width: f32,
+    /// Window height the compositor last reported.
+    pub height: f32,
 }
 
 impl CleanupUI {
@@ -726,7 +924,16 @@ impl CleanupUI {
             preview_category: None,
             history: CleanupHistory::new(),
             schedule: None,
+            confirm: None,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
         }
+    }
+
+    /// The clickable geometry for the size the compositor last reported.
+    #[must_use]
+    pub const fn layout(&self) -> Layout {
+        Layout::new(self.width, self.height)
     }
 
     // -- actions ------------------------------------------------------------
@@ -765,8 +972,12 @@ impl CleanupUI {
         self.scanner.scan(base_paths);
         self.category_sizes.clear();
         for item in self.scanner.items() {
-            *self.category_sizes.entry(item.category).or_insert(0) +=
-                item.estimated_size_bytes;
+            let total = self.category_sizes.entry(item.category).or_insert(0);
+            // Saturating rather than `+=`: the sizes come from a filesystem
+            // scan, so their sum is not something this function gets to assume
+            // fits. A wrapped total would report a nearly-full disk as nearly
+            // empty, which is the one number this program exists to get right.
+            *total = total.saturating_add(item.estimated_size_bytes);
         }
         self.scan_complete = true;
     }
@@ -808,14 +1019,50 @@ impl CleanupUI {
         self.preview_category = None;
     }
 
-    /// Show the confirmation dialog.
+    /// Put up the confirmation for the current selection.
+    ///
+    /// The message names the count and the size because those are the two
+    /// things a person needs to decide with, and this dialog deletes files: the
+    /// button says "Delete", not "OK", and it is styled destructively so that
+    /// the irreversible choice does not look like the safe one.
     pub fn show_confirm(&mut self) {
-        self.screen = UiScreen::ConfirmDialog;
+        let cats = self.selected_categories();
+        let message = format!(
+            "Delete files from {} {}?\nEstimated space freed: {}",
+            cats.len(),
+            if cats.len() == 1 {
+                "category"
+            } else {
+                "categories"
+            },
+            format_size(self.selected_savings()),
+        );
+        let mut dialog = AlertDialog::destructive("Confirm Cleanup", &message, "Delete");
+        dialog.show();
+        self.confirm = Some(dialog);
     }
 
-    /// Cancel the confirmation dialog and go back.
+    /// Take the confirmation down without acting on it.
     pub fn cancel_confirm(&mut self) {
+        self.confirm = None;
         self.screen = UiScreen::CategoryList;
+    }
+
+    /// Is a confirmation up?
+    #[must_use]
+    pub fn is_confirming(&self) -> bool {
+        self.confirm.is_some()
+    }
+
+    /// Whether the "Clean Up" button will do anything.
+    ///
+    /// A scan must have happened and something must be selected. The renderer
+    /// greys the button out when this is false and the hit-test refuses it for
+    /// the same reason — one predicate, so the button cannot look disabled and
+    /// act enabled.
+    #[must_use]
+    pub fn can_clean(&self) -> bool {
+        self.scan_complete && !self.selected_categories().is_empty()
     }
 
     /// Total estimated savings from selected categories.
@@ -826,14 +1073,197 @@ impl CleanupUI {
             .sum()
     }
 
+    // -- event handling -----------------------------------------------------
+
+    /// Route one event from the window.
+    ///
+    /// Returns [`EventResult::Ignored`] for anything that changed nothing, so
+    /// that the caller can decline to repaint. A tick arrives sixty times a
+    /// second; answering "consumed" to all of them would hold the compositor
+    /// redrawing this window forever.
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // A tick drives the confirmation's fade, and it has to keep arriving
+        // while the dialog is up or the fade freezes half-done.
+        if let (Event::Tick { elapsed_ms }, Some(dialog)) = (event, self.confirm.as_mut()) {
+            dialog.tick(*elapsed_ms);
+            return EventResult::Consumed;
+        }
+
+        // An open confirmation takes every key and every click. A toolkit
+        // dialog does its own hit-testing and its own focus handling and the
+        // two cannot be split apart here -- and a confirmation that let a click
+        // through to the list underneath would let the user change the very
+        // selection the dialog is quoting back at them.
+        if self.confirm.is_some() && matches!(event, Event::Key(_) | Event::Mouse(_)) {
+            return self.handle_confirm_event(event);
+        }
+
+        match event {
+            Event::Resize { width, height } => {
+                #[allow(clippy::cast_precision_loss)]
+                {
+                    self.width = *width as f32;
+                    self.height = *height as f32;
+                }
+                EventResult::Consumed
+            }
+            Event::Key(key) if key.pressed => self.handle_key(key.key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Give an event to the open confirmation and act on its answer.
+    fn handle_confirm_event(&mut self, event: &Event) -> EventResult {
+        let Some(dialog) = self.confirm.as_mut() else {
+            return EventResult::Ignored;
+        };
+        let consumed = dialog.handle_event(event);
+        let Some(result) = dialog.result() else {
+            return consumed;
+        };
+        // `Cancel` is the button and `Dismissed` is Escape or a click on the
+        // scrim; both mean no. Only `Ok` -- which is what the destructive
+        // button reports, whatever verb it is wearing -- means yes.
+        let accepted = *result == DialogResult::Ok;
+        self.confirm = None;
+        if accepted {
+            self.execute_cleanup();
+        } else {
+            self.screen = UiScreen::CategoryList;
+        }
+        EventResult::Consumed
+    }
+
+    /// Keyboard shortcuts for the screen that is up.
+    fn handle_key(&mut self, key: Key) -> EventResult {
+        match (self.screen, key) {
+            // Escape backs out of wherever you are, one level at a time. On the
+            // category list there is nothing to back out of, so it is ignored
+            // rather than consumed -- the window manager may want it.
+            (UiScreen::FilePreview, Key::Escape) => {
+                self.back_to_list();
+                EventResult::Consumed
+            }
+            (UiScreen::Results, Key::Escape | Key::Enter) => {
+                self.back_to_list();
+                EventResult::Consumed
+            }
+            (UiScreen::CategoryList, Key::A) => {
+                // Select-all and its inverse, on the key every list in the
+                // system uses for it.
+                self.select_all();
+                EventResult::Consumed
+            }
+            (UiScreen::CategoryList, Key::D) => {
+                self.deselect_all();
+                EventResult::Consumed
+            }
+            (UiScreen::CategoryList, Key::Enter) if self.can_clean() => {
+                self.show_confirm();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Hit-test a mouse event against [`Layout`].
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        // Press, not release: this app has no drag, and matching on press is
+        // what makes a click feel immediate.
+        if !matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
+        }
+        let lay = self.layout();
+        let (x, y) = (mouse.x, mouse.y);
+
+        match self.screen {
+            UiScreen::CategoryList => self.click_category_list(&lay, x, y),
+            UiScreen::FilePreview => {
+                if hits(lay.back_button(), x, y) {
+                    self.back_to_list();
+                    return EventResult::Consumed;
+                }
+                EventResult::Ignored
+            }
+            UiScreen::Results => {
+                if hits(lay.done_button(), x, y) {
+                    self.back_to_list();
+                    return EventResult::Consumed;
+                }
+                EventResult::Ignored
+            }
+            // A cleanup in flight has nothing to click. Cancelling one is a
+            // real feature and not one this app can honestly offer yet: the
+            // executor deletes synchronously, so there is no moment between
+            // files at which a cancel could be observed. Left out rather than
+            // drawn and ignored -- a Cancel button that does nothing is worse
+            // than no Cancel button.
+            UiScreen::Progress => EventResult::Ignored,
+        }
+    }
+
+    /// The category list's own hit-test: checkboxes, "View" links, footer.
+    fn click_category_list(&mut self, lay: &Layout, x: f32, y: f32) -> EventResult {
+        if hits(lay.scan_button(), x, y) {
+            self.run_scan(&DEFAULT_SCAN_ROOTS);
+            return EventResult::Consumed;
+        }
+        if hits(lay.clean_button(), x, y) {
+            // Refused rather than consumed when there is nothing to clean, so
+            // that a click on a greyed-out button does not cost a repaint. The
+            // predicate is the same one the renderer greys it with.
+            if !self.can_clean() {
+                return EventResult::Ignored;
+            }
+            self.show_confirm();
+            return EventResult::Consumed;
+        }
+
+        for (i, cat) in CleanupCategory::ALL.iter().enumerate() {
+            let Some(row) = lay.category_row(i) else {
+                break;
+            };
+            if !hits(row, x, y) {
+                continue;
+            }
+            // The "View" link is tested before the row, because it sits inside
+            // it: whichever is checked first wins the overlap.
+            let size = self.category_sizes.get(cat).copied().unwrap_or(0);
+            let has_view = self.scan_complete && size > 0;
+            if has_view
+                && let Some(link) = lay.category_view_link(i)
+                && hits(link, x, y)
+            {
+                self.show_preview(*cat);
+                return EventResult::Consumed;
+            }
+            // Anywhere else on the row toggles it. Restricting the toggle to
+            // the 16-pixel checkbox would be technically defensible and
+            // miserable to use; the row is the target, as it is in every file
+            // list in the system.
+            self.toggle_category(*cat);
+            return EventResult::Consumed;
+        }
+
+        EventResult::Ignored
+    }
+
     // -- rendering ----------------------------------------------------------
 
-    /// Render the entire UI to a list of `RenderCommand`s.
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// Draw the whole UI at the given window size.
+    ///
+    /// `&mut self` because [`AlertDialog::render`] is `&mut`: it lays its
+    /// buttons out as it draws and *remembers* where it put them, which is
+    /// exactly what makes its hit-test agree with its picture. The alternative
+    /// is the arrangement this program had until 2026-08-26 — a `&self`
+    /// renderer with the dialog's geometry written out by hand, and a second
+    /// copy of those numbers wherever the clicks were going to be handled.
+    pub fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        let mut tree = RenderTree::new();
 
         // Window background.
-        cmds.push(RenderCommand::FillRect {
+        tree.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -842,75 +1272,80 @@ impl CleanupUI {
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
+        let lay = Layout::new(width, height);
         match self.screen {
-            UiScreen::CategoryList => self.render_category_list(&mut cmds, width, height),
-            UiScreen::FilePreview => self.render_file_preview(&mut cmds, width, height),
-            UiScreen::Progress => self.render_progress(&mut cmds, width, height),
-            UiScreen::Results => self.render_results(&mut cmds, width, height),
-            UiScreen::ConfirmDialog => {
-                // Render the list underneath, then the dialog overlay.
-                self.render_category_list(&mut cmds, width, height);
-                self.render_confirm_dialog(&mut cmds, width, height);
-            }
+            UiScreen::CategoryList => self.render_category_list(&mut tree, &lay),
+            UiScreen::FilePreview => self.render_file_preview(&mut tree, &lay),
+            UiScreen::Progress => self.render_progress(&mut tree, &lay),
+            UiScreen::Results => self.render_results(&mut tree, &lay),
         }
 
-        cmds
+        // The confirmation goes last, over whichever screen was showing. It
+        // draws its own scrim, so nothing above has to know it is there --
+        // which is the difference between an overlay and the screen variant
+        // this used to be, where every other screen had to be taught that
+        // "confirming" was a state it could be in.
+        if let Some(dialog) = self.confirm.as_mut() {
+            dialog.render(width, height, &mut tree);
+        }
+
+        tree
     }
 
     // -- render sub-screens -------------------------------------------------
 
-    fn render_category_list(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        height: f32,
-    ) {
+    fn render_category_list(&self, tree: &mut RenderTree, lay: &Layout) {
         // Header.
-        self.render_header(cmds, width, "Disk Cleanup");
+        self.render_header(tree, lay, "Disk Cleanup");
 
         // Category rows.
-        let content_top = HEADER_HEIGHT;
-        let content_height = height - HEADER_HEIGHT - FOOTER_HEIGHT;
-
-        cmds.push(RenderCommand::PushClip {
-            x: 0.0,
-            y: content_top,
-            width,
-            height: content_height,
+        let (cx, cy, cw, ch) = lay.content();
+        tree.push(RenderCommand::PushClip {
+            x: cx,
+            y: cy,
+            width: cw,
+            height: ch,
         });
 
         for (i, cat) in CleanupCategory::ALL.iter().enumerate() {
-            let y = content_top + (i as f32) * ROW_HEIGHT;
-            if y > content_top + content_height {
+            // `category_row` is `None` past the bottom of the content area, and
+            // the hit-test asks the same method: a row nobody can see is a row
+            // nobody can click.
+            if lay.category_row(i).is_none() {
                 break;
             }
             let checked = self.selected.get(cat).copied().unwrap_or(false);
             let size = self.category_sizes.get(cat).copied().unwrap_or(0);
-            self.render_category_row(cmds, y, width, *cat, checked, size);
+            self.render_category_row(tree, lay, i, *cat, checked, size);
         }
 
-        cmds.push(RenderCommand::PopClip);
+        tree.push(RenderCommand::PopClip);
 
         // Footer with scan/clean buttons.
-        self.render_footer(cmds, width, height);
+        self.render_footer(tree, lay);
     }
 
     fn render_category_row(
         &self,
-        cmds: &mut Vec<RenderCommand>,
-        y: f32,
-        width: f32,
+        tree: &mut RenderTree,
+        lay: &Layout,
+        index: usize,
         cat: CleanupCategory,
         checked: bool,
         size_bytes: u64,
     ) {
+        let (Some(row), Some(box_hit), Some(link)) = (
+            lay.category_row(index),
+            lay.category_checkbox(index),
+            lay.category_view_link(index),
+        ) else {
+            return;
+        };
+        let (_, y, width, _) = row;
+
         // Alternating row background.
-        let cat_index = CleanupCategory::ALL
-            .iter()
-            .position(|c| *c == cat)
-            .unwrap_or(0);
-        if cat_index % 2 == 0 {
-            cmds.push(RenderCommand::FillRect {
+        if index.is_multiple_of(2) {
+            tree.push(RenderCommand::FillRect {
                 x: 0.0,
                 y,
                 width,
@@ -920,11 +1355,16 @@ impl CleanupUI {
             });
         }
 
-        let cx = PADDING;
-        let cy = y + (ROW_HEIGHT - CHECKBOX_SIZE) / 2.0;
+        // The drawn square, centred inside the *hit* rectangle rather than
+        // placed at its own coordinates. The hit rectangle is deliberately
+        // larger -- a 16-pixel square is a hard target for a mouse and an
+        // impossible one for a finger -- and centring the picture in it is what
+        // keeps "where it looks" and "where it works" the same edit.
+        let cx = box_hit.0 + (box_hit.2 - CHECKBOX_SIZE) / 2.0;
+        let cy = box_hit.1 + (box_hit.3 - CHECKBOX_SIZE) / 2.0;
 
         // Checkbox outline.
-        cmds.push(RenderCommand::StrokeRect {
+        tree.push(RenderCommand::StrokeRect {
             x: cx,
             y: cy,
             width: CHECKBOX_SIZE,
@@ -936,7 +1376,7 @@ impl CleanupUI {
 
         // Checkbox fill if checked.
         if checked {
-            cmds.push(RenderCommand::FillRect {
+            tree.push(RenderCommand::FillRect {
                 x: cx + 3.0,
                 y: cy + 3.0,
                 width: CHECKBOX_SIZE - 6.0,
@@ -947,7 +1387,7 @@ impl CleanupUI {
         }
 
         // Category name.
-        cmds.push(RenderCommand::Text {
+        tree.push(RenderCommand::Text {
             x: cx + CHECKBOX_SIZE + 10.0,
             y: y + 6.0,
             text: cat.display_name().to_string(),
@@ -959,7 +1399,7 @@ impl CleanupUI {
         });
 
         // Description (smaller, dimmer).
-        cmds.push(RenderCommand::Text {
+        tree.push(RenderCommand::Text {
             x: cx + CHECKBOX_SIZE + 10.0,
             y: y + 20.0,
             text: cat.description().to_string(),
@@ -973,11 +1413,15 @@ impl CleanupUI {
         // Size estimate (right-aligned).
         if self.scan_complete {
             let size_text = format_size(size_bytes);
-            cmds.push(RenderCommand::Text {
+            tree.push(RenderCommand::Text {
                 x: width - 120.0,
                 y: y + 10.0,
                 text: size_text,
-                color: if size_bytes > 0 { COLOR_YELLOW } else { COLOR_SUBTEXT },
+                color: if size_bytes > 0 {
+                    COLOR_YELLOW
+                } else {
+                    COLOR_SUBTEXT
+                },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(110.0),
@@ -985,11 +1429,14 @@ impl CleanupUI {
             });
         }
 
-        // "View" link (far right).
+        // "View" link (far right). Drawn only when there is something to view,
+        // and `click_category_list` tests the same condition before accepting a
+        // click on it -- an invisible link that still worked would make the row
+        // toggle for most of its width and do something else near the edge.
         if self.scan_complete && size_bytes > 0 {
-            cmds.push(RenderCommand::Text {
-                x: width - PADDING - 30.0,
-                y: y + 10.0,
+            tree.push(RenderCommand::Text {
+                x: link.0,
+                y: link.1 + (link.3 - FONT_SIZE_SMALL) / 2.0,
                 text: String::from("View"),
                 color: COLOR_BLUE,
                 font_size: FONT_SIZE_SMALL,
@@ -1000,13 +1447,9 @@ impl CleanupUI {
         }
     }
 
-    fn render_header(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        title: &str,
-    ) {
-        cmds.push(RenderCommand::FillRect {
+    fn render_header(&self, tree: &mut RenderTree, lay: &Layout, title: &str) {
+        let width = lay.width();
+        tree.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
@@ -1020,7 +1463,7 @@ impl CleanupUI {
             },
         });
 
-        cmds.push(RenderCommand::Text {
+        tree.push(RenderCommand::Text {
             x: PADDING,
             y: (HEADER_HEIGHT - FONT_SIZE_HEADING) / 2.0,
             text: title.to_string(),
@@ -1032,19 +1475,18 @@ impl CleanupUI {
         });
     }
 
-    fn render_footer(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        height: f32,
-    ) {
-        let y = height - FOOTER_HEIGHT;
-
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+    /// The bar across the bottom, without anything on it.
+    ///
+    /// Separate because all three screens that have a footer draw the same
+    /// strip and then put different things on it; it used to be copied into
+    /// each of them, with the corner radii spelled out three times.
+    fn render_footer_strip(&self, tree: &mut RenderTree, lay: &Layout) {
+        let (x, y, width, height) = lay.footer();
+        tree.push(RenderCommand::FillRect {
+            x,
             y,
             width,
-            height: FOOTER_HEIGHT,
+            height,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii {
                 top_left: 0.0,
@@ -1053,12 +1495,18 @@ impl CleanupUI {
                 bottom_right: CORNER_RADIUS,
             },
         });
+    }
+
+    fn render_footer(&self, tree: &mut RenderTree, lay: &Layout) {
+        self.render_footer_strip(tree, lay);
+
+        let (_, y, width, _) = lay.footer();
 
         // Total savings label (left side).
         if self.scan_complete {
             let savings = self.selected_savings();
             let label = format!("Selected: {}", format_size(savings));
-            cmds.push(RenderCommand::Text {
+            tree.push(RenderCommand::Text {
                 x: PADDING,
                 y: y + (FOOTER_HEIGHT - FONT_SIZE) / 2.0,
                 text: label,
@@ -1070,35 +1518,29 @@ impl CleanupUI {
             });
         }
 
-        // Buttons (right side).
-        let btn_y = y + (FOOTER_HEIGHT - BUTTON_HEIGHT) / 2.0;
-        let clean_x = width - PADDING - BUTTON_WIDTH;
-        let scan_x = clean_x - PADDING - BUTTON_WIDTH;
+        self.render_button(tree, lay.scan_button(), "Scan", COLOR_BLUE);
 
-        // Scan button.
-        self.render_button(cmds, scan_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT, "Scan", COLOR_BLUE);
-
-        // Clean up button.
-        let clean_enabled = self.scan_complete && !self.selected_categories().is_empty();
-        let clean_color = if clean_enabled { COLOR_GREEN } else { COLOR_SURFACE1 };
-        self.render_button(cmds, clean_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT, "Clean Up", clean_color);
+        // `can_clean` decides both the colour and whether the click is
+        // accepted, so the button cannot look disabled and act enabled. Two
+        // predicates for one state is how that happens, and it is invisible to
+        // a test that only ever asks one of them.
+        let clean_color = if self.can_clean() {
+            COLOR_GREEN
+        } else {
+            COLOR_SURFACE1
+        };
+        self.render_button(tree, lay.clean_button(), "Clean Up", clean_color);
     }
 
-    // 8 args mirror the (cmds, x, y, w, h, label, bg) button signature used
-    // elsewhere in the app's render layer; struct-bundling would only shift
-    // the verbosity to the call site.
-    #[allow(clippy::too_many_arguments)]
-    fn render_button(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        label: &str,
-        bg: Color,
-    ) {
-        cmds.push(RenderCommand::FillRect {
+    /// Draw a button filling `rect`.
+    ///
+    /// Takes the rectangle rather than four numbers so that every call site is
+    /// forced to name a [`Layout`] method — which is the same method the
+    /// hit-test names. A signature of `(x, y, w, h)` invites a caller to
+    /// compute them, and a caller that computes them is the second copy.
+    fn render_button(&self, tree: &mut RenderTree, rect: Rect, label: &str, bg: Color) {
+        let (x, y, w, h) = rect;
+        tree.push(RenderCommand::FillRect {
             x,
             y,
             width: w,
@@ -1110,7 +1552,7 @@ impl CleanupUI {
         let text_x = text::center_x(label, x + w / 2.0, FONT_SIZE, FontWeightHint::Bold);
         let text_y = y + (h - FONT_SIZE) / 2.0;
 
-        cmds.push(RenderCommand::Text {
+        tree.push(RenderCommand::Text {
             x: text_x,
             y: text_y,
             text: label.to_string(),
@@ -1122,23 +1564,16 @@ impl CleanupUI {
         });
     }
 
-    fn render_file_preview(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        height: f32,
-    ) {
-        let cat = match self.preview_category {
-            Some(c) => c,
-            None => {
-                // Should not happen, but degrade gracefully.
-                self.render_category_list(cmds, width, height);
-                return;
-            }
+    fn render_file_preview(&self, tree: &mut RenderTree, lay: &Layout) {
+        let (width, height) = (lay.width(), lay.height());
+        let Some(cat) = self.preview_category else {
+            // Should not happen, but degrade gracefully.
+            self.render_category_list(tree, lay);
+            return;
         };
 
         let title = format!("Files: {}", cat.display_name());
-        self.render_header(cmds, width, &title);
+        self.render_header(tree, lay, &title);
 
         let content_top = HEADER_HEIGHT + PADDING;
         let items: Vec<&CleanupItem> = self
@@ -1149,7 +1584,7 @@ impl CleanupUI {
             .collect();
 
         if items.is_empty() {
-            cmds.push(RenderCommand::Text {
+            tree.push(RenderCommand::Text {
                 x: PADDING,
                 y: content_top,
                 text: String::from("No items found for this category."),
@@ -1167,7 +1602,7 @@ impl CleanupUI {
                 }
 
                 // Path.
-                cmds.push(RenderCommand::Text {
+                tree.push(RenderCommand::Text {
                     x: PADDING,
                     y,
                     text: item.path.clone(),
@@ -1179,7 +1614,7 @@ impl CleanupUI {
                 });
 
                 // Size.
-                cmds.push(RenderCommand::Text {
+                tree.push(RenderCommand::Text {
                     x: width - 120.0,
                     y,
                     text: format_size(item.estimated_size_bytes),
@@ -1193,7 +1628,7 @@ impl CleanupUI {
                 // Safety indicator.
                 let safety_text = if item.is_safe { "Safe" } else { "Caution" };
                 let safety_color = if item.is_safe { COLOR_GREEN } else { COLOR_RED };
-                cmds.push(RenderCommand::Text {
+                tree.push(RenderCommand::Text {
                     x: width - PADDING - 50.0,
                     y,
                     text: safety_text.to_string(),
@@ -1207,45 +1642,20 @@ impl CleanupUI {
         }
 
         // Back button at bottom.
-        let btn_y = height - FOOTER_HEIGHT + (FOOTER_HEIGHT - BUTTON_HEIGHT) / 2.0;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: height - FOOTER_HEIGHT,
-            width,
-            height: FOOTER_HEIGHT,
-            color: COLOR_SURFACE0,
-            corner_radii: CornerRadii {
-                top_left: 0.0,
-                top_right: 0.0,
-                bottom_left: CORNER_RADIUS,
-                bottom_right: CORNER_RADIUS,
-            },
-        });
-        self.render_button(
-            cmds,
-            PADDING,
-            btn_y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            "Back",
-            COLOR_BLUE,
-        );
+        self.render_footer_strip(tree, lay);
+        self.render_button(tree, lay.back_button(), "Back", COLOR_BLUE);
     }
 
-    fn render_progress(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        height: f32,
-    ) {
-        self.render_header(cmds, width, "Cleaning Up...");
+    fn render_progress(&self, tree: &mut RenderTree, lay: &Layout) {
+        let (width, height) = (lay.width(), lay.height());
+        self.render_header(tree, lay, "Cleaning Up...");
 
         let center_y = height / 2.0 - 30.0;
 
         // Progress label.
         let pct = (self.progress * 100.0).min(100.0);
         let label = format!("{pct:.0}% complete");
-        cmds.push(RenderCommand::Text {
+        tree.push(RenderCommand::Text {
             x: PADDING,
             y: center_y,
             text: label,
@@ -1259,7 +1669,7 @@ impl CleanupUI {
         // Progress bar track.
         let bar_y = center_y + 24.0;
         let bar_width = width - PADDING * 2.0;
-        cmds.push(RenderCommand::FillRect {
+        tree.push(RenderCommand::FillRect {
             x: PADDING,
             y: bar_y,
             width: bar_width,
@@ -1271,7 +1681,7 @@ impl CleanupUI {
         // Progress bar fill.
         let fill_width = bar_width * self.progress.clamp(0.0, 1.0);
         if fill_width > 0.0 {
-            cmds.push(RenderCommand::FillRect {
+            tree.push(RenderCommand::FillRect {
                 x: PADDING,
                 y: bar_y,
                 width: fill_width,
@@ -1282,26 +1692,47 @@ impl CleanupUI {
         }
     }
 
-    fn render_results(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        height: f32,
-    ) {
-        self.render_header(cmds, width, "Cleanup Complete");
+    fn render_results(&self, tree: &mut RenderTree, lay: &Layout) {
+        let width = lay.width();
+        let title = if self.last_result.as_ref().is_some_and(|r| r.simulated) {
+            "Cleanup Preview"
+        } else {
+            "Cleanup Complete"
+        };
+        self.render_header(tree, lay, title);
 
-        let result = match &self.last_result {
-            Some(r) => r,
-            None => return,
+        let Some(result) = self.last_result.as_ref() else {
+            return;
         };
 
         let mut y = HEADER_HEIGHT + PADDING * 2.0;
 
+        // Said first, in the warning colour, and above the numbers it qualifies
+        // -- a disclaimer under a bold green "Space freed: 1.4 GiB" is a
+        // disclaimer nobody reads.
+        if result.simulated {
+            tree.push(RenderCommand::Text {
+                x: PADDING,
+                y,
+                text: String::from("Preview only -- no files were deleted."),
+                color: COLOR_YELLOW,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(width - PADDING * 2.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+            y += 24.0;
+        }
+
         // Files deleted.
-        cmds.push(RenderCommand::Text {
+        tree.push(RenderCommand::Text {
             x: PADDING,
             y,
-            text: format!("Files deleted: {}", result.files_deleted),
+            text: if result.simulated {
+                format!("Files that would be deleted: {}", result.files_deleted)
+            } else {
+                format!("Files deleted: {}", result.files_deleted)
+            },
             color: COLOR_TEXT,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -1311,11 +1742,24 @@ impl CleanupUI {
         y += 24.0;
 
         // Space freed.
-        cmds.push(RenderCommand::Text {
+        tree.push(RenderCommand::Text {
             x: PADDING,
             y,
-            text: format!("Space freed: {}", format_size(result.bytes_freed)),
-            color: COLOR_GREEN,
+            text: if result.simulated {
+                format!(
+                    "Space that would be freed: {}",
+                    format_size(result.bytes_freed)
+                )
+            } else {
+                format!("Space freed: {}", format_size(result.bytes_freed))
+            },
+            // Green means "done, and good". A preview is neither, so it gets
+            // the same neutral colour as the count above it.
+            color: if result.simulated {
+                COLOR_TEXT
+            } else {
+                COLOR_GREEN
+            },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),
@@ -1325,7 +1769,7 @@ impl CleanupUI {
 
         // Errors (if any).
         if !result.errors.is_empty() {
-            cmds.push(RenderCommand::Text {
+            tree.push(RenderCommand::Text {
                 x: PADDING,
                 y,
                 text: format!("Errors: {}", result.error_count()),
@@ -1338,7 +1782,7 @@ impl CleanupUI {
             y += 20.0;
 
             for (path, msg) in &result.errors {
-                cmds.push(RenderCommand::Text {
+                tree.push(RenderCommand::Text {
                     x: PADDING * 2.0,
                     y,
                     text: format!("{path}: {msg}"),
@@ -1355,11 +1799,11 @@ impl CleanupUI {
         // History summary.
         y += 16.0;
         let total_freed = self.history.total_bytes_freed();
-        cmds.push(RenderCommand::Text {
+        tree.push(RenderCommand::Text {
             x: PADDING,
             y,
             text: format!(
-                "Total freed across {} cleanups: {}",
+                "Total across {} cleanups: {}",
                 self.history.count(),
                 format_size(total_freed)
             ),
@@ -1371,126 +1815,8 @@ impl CleanupUI {
         });
 
         // Done button.
-        let btn_y = height - FOOTER_HEIGHT + (FOOTER_HEIGHT - BUTTON_HEIGHT) / 2.0;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: height - FOOTER_HEIGHT,
-            width,
-            height: FOOTER_HEIGHT,
-            color: COLOR_SURFACE0,
-            corner_radii: CornerRadii {
-                top_left: 0.0,
-                top_right: 0.0,
-                bottom_left: CORNER_RADIUS,
-                bottom_right: CORNER_RADIUS,
-            },
-        });
-        self.render_button(
-            cmds,
-            width - PADDING - BUTTON_WIDTH,
-            btn_y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            "Done",
-            COLOR_BLUE,
-        );
-    }
-
-    fn render_confirm_dialog(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        width: f32,
-        height: f32,
-    ) {
-        // Semi-transparent overlay.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            color: Color::rgba(0, 0, 0, 160),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Dialog box.
-        let dialog_w: f32 = 360.0;
-        let dialog_h: f32 = 180.0;
-        let dx = (width - dialog_w) / 2.0;
-        let dy = (height - dialog_h) / 2.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dialog_w,
-            height: dialog_h,
-            color: COLOR_SURFACE0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-
-        cmds.push(RenderCommand::StrokeRect {
-            x: dx,
-            y: dy,
-            width: dialog_w,
-            height: dialog_h,
-            color: COLOR_SURFACE1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-
-        // Title.
-        cmds.push(RenderCommand::Text {
-            x: dx + PADDING,
-            y: dy + PADDING,
-            text: String::from("Confirm Cleanup"),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE_HEADING,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(dialog_w - PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Summary.
-        let cats = self.selected_categories();
-        let savings = self.selected_savings();
-        let summary = format!(
-            "Delete files from {} categories?\nEstimated space freed: {}",
-            cats.len(),
-            format_size(savings)
-        );
-        cmds.push(RenderCommand::Text {
-            x: dx + PADDING,
-            y: dy + 48.0,
-            text: summary,
-            color: COLOR_SUBTEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_w - PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Buttons.
-        let btn_y = dy + dialog_h - BUTTON_HEIGHT - PADDING;
-        let cancel_x = dx + dialog_w - PADDING - BUTTON_WIDTH;
-        let confirm_x = cancel_x - PADDING - BUTTON_WIDTH;
-
-        self.render_button(
-            cmds,
-            confirm_x,
-            btn_y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            "Delete",
-            COLOR_RED,
-        );
-        self.render_button(
-            cmds,
-            cancel_x,
-            btn_y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            "Cancel",
-            COLOR_SURFACE1,
-        );
+        self.render_footer_strip(tree, lay);
+        self.render_button(tree, lay.done_button(), "Done", COLOR_BLUE);
     }
 }
 
@@ -1532,7 +1858,78 @@ fn format_size(bytes: u64) -> String {
 // Entry point
 // ============================================================================
 
-fn main() {}
+impl oswindow::app::App for CleanupUI {
+    fn title(&self) -> String {
+        String::from("Disk Cleanup")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // `as` rather than `try_into`: both constants are small positive
+        // literals a few lines above, so the conversion cannot fail and a
+        // fallible one would only add a branch nothing can take.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// The clock runs only while the confirmation is fading.
+    ///
+    /// `is_animating`, not `is_active`, and the distinction is the whole point:
+    /// a confirmation sitting fully faded in, waiting for a human to decide
+    /// whether to delete their files, is the *longest-lived* state this program
+    /// has. Asking for 60 ticks a second through it would hold the compositor
+    /// awake for as long as the user hesitated — which, for a dialog whose
+    /// whole job is to make someone stop and think, could be minutes.
+    ///
+    /// Nothing else here needs a clock. The scan and the cleanup both run to
+    /// completion inside the click that starts them; when they become real work
+    /// that must be pumped a chunk at a time, this method gains a second
+    /// condition, exactly as `diskimager`'s did.
+    fn tick_interval(&self) -> Option<Duration> {
+        if self.confirm.as_ref().is_some_and(AlertDialog::is_animating) {
+            Some(Duration::from_millis(16))
+        } else {
+            None
+        }
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match *event {
+            // A tick arrives 60 times a second, and the only thing that can
+            // change on one is the fade. Answering `Redraw` unconditionally
+            // would keep the compositor compositing forever.
+            Event::Tick { .. } => {
+                let fading = self.confirm.as_ref().is_some_and(AlertDialog::is_animating);
+                let _ = self.handle_event(event);
+                if fading {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+            // Everything else arrives at human speed, so an occasional wasted
+            // frame costs less than working out whether it was wasted.
+            _ => match self.handle_event(event) {
+                EventResult::Consumed => Response::Redraw,
+                EventResult::Ignored => Response::Idle,
+            },
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Record what the compositor granted before drawing to it. The first
+        // frame is submitted before any `Event::Resize` arrives, so a renderer
+        // that trusted `self.width` alone would draw its first picture at the
+        // requested size rather than the given one -- and put the footer
+        // buttons somewhere the hit-test would not look.
+        self.width = width;
+        self.height = height;
+        CleanupUI::render(self, width, height)
+    }
+}
+
+fn main() -> ExitCode {
+    oswindow::app::launch("diskcleanup", &mut CleanupUI::new())
+}
 
 // ============================================================================
 // Tests
@@ -1540,6 +1937,17 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // -- CleanupCategory tests ----------------------------------------------
@@ -1867,6 +2275,7 @@ mod tests {
             files_deleted: 5,
             bytes_freed: 10_000,
             errors: Vec::new(),
+            simulated: false,
         };
         history.record(1_700_000_000, &result, &[CleanupCategory::TempFiles]);
 
@@ -1887,11 +2296,13 @@ mod tests {
             files_deleted: 3,
             bytes_freed: 5_000,
             errors: Vec::new(),
+            simulated: false,
         };
         let r2 = CleanupResult {
             files_deleted: 7,
             bytes_freed: 15_000,
             errors: vec![("x".into(), "err".into())],
+            simulated: false,
         };
 
         history.record(100, &r1, &[CleanupCategory::TempFiles]);
@@ -1919,10 +2330,20 @@ mod tests {
     fn test_ui_toggle_category() {
         let mut ui = CleanupUI::new();
         ui.toggle_category(CleanupCategory::TempFiles);
-        assert!(ui.selected.get(&CleanupCategory::TempFiles).copied().unwrap_or(false));
+        assert!(
+            ui.selected
+                .get(&CleanupCategory::TempFiles)
+                .copied()
+                .unwrap_or(false)
+        );
 
         ui.toggle_category(CleanupCategory::TempFiles);
-        assert!(!ui.selected.get(&CleanupCategory::TempFiles).copied().unwrap_or(true));
+        assert!(
+            !ui.selected
+                .get(&CleanupCategory::TempFiles)
+                .copied()
+                .unwrap_or(true)
+        );
     }
 
     #[test]
@@ -2009,9 +2430,14 @@ mod tests {
     fn test_ui_confirm_dialog_flow() {
         let mut ui = CleanupUI::new();
         ui.show_confirm();
-        assert_eq!(ui.screen, UiScreen::ConfirmDialog);
+        assert!(ui.is_confirming());
+        // The confirmation is an overlay, so the screen underneath is
+        // unchanged -- that is the whole difference from the `UiScreen`
+        // variant this replaced.
+        assert_eq!(ui.screen, UiScreen::CategoryList);
 
         ui.cancel_confirm();
+        assert!(!ui.is_confirming());
         assert_eq!(ui.screen, UiScreen::CategoryList);
     }
 
@@ -2019,7 +2445,7 @@ mod tests {
 
     #[test]
     fn test_render_category_list_produces_commands() {
-        let ui = CleanupUI::new();
+        let mut ui = CleanupUI::new();
         let cmds = ui.render(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert!(!cmds.is_empty());
     }
@@ -2041,17 +2467,25 @@ mod tests {
             files_deleted: 3,
             bytes_freed: 8192,
             errors: Vec::new(),
+            simulated: false,
         });
         let cmds = ui.render(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert!(!cmds.is_empty());
     }
 
     #[test]
-    fn test_render_confirm_dialog() {
+    fn test_render_confirm_dialog_draws_over_the_list() {
         let mut ui = CleanupUI::new();
-        ui.screen = UiScreen::ConfirmDialog;
-        let cmds = ui.render(WINDOW_WIDTH, WINDOW_HEIGHT);
-        assert!(!cmds.is_empty());
+        let plain = ui.render(WINDOW_WIDTH, WINDOW_HEIGHT).len();
+        ui.show_confirm();
+        let with_dialog = ui.render(WINDOW_WIDTH, WINDOW_HEIGHT).len();
+        // Strictly more, not merely non-empty: the old assertion passed for a
+        // dialog that drew nothing at all, because the list underneath it was
+        // already producing commands.
+        assert!(
+            with_dialog > plain,
+            "dialog added no commands: {plain} -> {with_dialog}"
+        );
     }
 
     #[test]
@@ -2072,6 +2506,300 @@ mod tests {
         ui.show_preview(CleanupCategory::BrowserCache);
         let cmds = ui.render(WINDOW_WIDTH, WINDOW_HEIGHT);
         assert!(!cmds.is_empty());
+    }
+
+    // -- Event wiring tests -------------------------------------------------
+    //
+    // Until 2026-08-26 this program had no `handle_event` at all, so none of
+    // these could have existed: every test above drives the UI by calling its
+    // methods directly, which is exactly the arrangement in which a window can
+    // pass its whole suite while being completely inert. What is checked here
+    // is the seam -- that a click at a *coordinate* reaches the method -- and
+    // that the coordinate comes from the same `Layout` the renderer drew at.
+
+    /// A left-button press at `(x, y)`.
+    fn click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// An unmodified key press.
+    fn press(key: Key) -> Event {
+        Event::Key(guitk::event::KeyEvent {
+            key,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// The centre of a rectangle, which is where a test should aim: an edge is
+    /// where two rectangles disagree, and this is not the test for that.
+    fn centre(rect: Rect) -> (f32, f32) {
+        let (x, y, w, h) = rect;
+        (x + w / 2.0, y + h / 2.0)
+    }
+
+    #[test]
+    fn test_click_on_scan_button_scans() {
+        let mut ui = CleanupUI::new();
+        assert!(!ui.scan_complete);
+        let (x, y) = centre(ui.layout().scan_button());
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        assert!(ui.scan_complete);
+        assert!(!ui.category_sizes.is_empty());
+    }
+
+    #[test]
+    fn test_click_on_a_row_toggles_it() {
+        let mut ui = CleanupUI::new();
+        let lay = ui.layout();
+        let row = lay.category_row(0).expect("first row is on screen");
+        let cat = CleanupCategory::ALL[0];
+        assert!(!ui.selected[&cat]);
+
+        let (x, y) = centre(row);
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        assert!(ui.selected[&cat]);
+
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        assert!(!ui.selected[&cat]);
+    }
+
+    #[test]
+    fn test_click_on_the_checkbox_toggles_the_same_row() {
+        // The checkbox rectangle is wider than the drawn square, and the whole
+        // row toggles anyway; what matters is that the two agree about *which*
+        // row, which they can only do by both coming from `Layout`.
+        let mut ui = CleanupUI::new();
+        let lay = ui.layout();
+        let (x, y) = centre(lay.category_checkbox(2).expect("third row is on screen"));
+        ui.handle_event(&click(x, y));
+        assert!(ui.selected[&CleanupCategory::ALL[2]]);
+    }
+
+    #[test]
+    fn test_click_on_greyed_out_clean_button_is_ignored() {
+        // Nothing scanned and nothing selected, so the renderer greys it. The
+        // hit-test must refuse it for the same reason -- a button that looks
+        // disabled and acts enabled is the bug this shares a predicate to
+        // avoid.
+        let mut ui = CleanupUI::new();
+        assert!(!ui.can_clean());
+        let (x, y) = centre(ui.layout().clean_button());
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Ignored);
+        assert!(!ui.is_confirming());
+    }
+
+    #[test]
+    fn test_click_on_live_clean_button_confirms_first() {
+        let mut ui = CleanupUI::new();
+        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        ui.select_all();
+        assert!(ui.can_clean());
+
+        let (x, y) = centre(ui.layout().clean_button());
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        // Confirmed, not done: the click must not delete anything on its own.
+        assert!(ui.is_confirming());
+        assert!(ui.last_result.is_none());
+    }
+
+    #[test]
+    fn test_confirmation_swallows_clicks_meant_for_the_list() {
+        // The dialog quotes the selection back at the user. A click that got
+        // past it could change that selection while it was on screen, so that
+        // the user authorised one thing and a different thing happened.
+        let mut ui = CleanupUI::new();
+        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        ui.select_all();
+        ui.show_confirm();
+
+        let before = ui.selected.clone();
+        let (x, y) = centre(ui.layout().category_row(0).expect("row is on screen"));
+        ui.handle_event(&click(x, y));
+        assert_eq!(ui.selected, before, "a click reached the list underneath");
+    }
+
+    /// A UI whose scan found `bytes` in `cat`, and its index.
+    ///
+    /// Built by hand rather than by calling `run_scan`, because the real
+    /// scanner reports **zero bytes for every category** -- it records the
+    /// directories as placeholder items and never asks how big they are. See
+    /// `known-issues.md` -> `TD-C-DISKCLEANUP-DELETES-NOTHING`. A test that
+    /// went through `run_scan` could therefore never reach the size-dependent
+    /// half of the UI, which is most of it.
+    fn scanned(cat: CleanupCategory, bytes: u64) -> (CleanupUI, usize) {
+        let mut ui = CleanupUI::new();
+        ui.scanner
+            .set_items(vec![CleanupItem::new("/tmp/a", cat).with_size(bytes)]);
+        ui.scan_complete = true;
+        ui.category_sizes.insert(cat, bytes);
+        let index = CleanupCategory::ALL
+            .iter()
+            .position(|c| *c == cat)
+            .expect("every category is in ALL");
+        (ui, index)
+    }
+
+    #[test]
+    fn test_view_link_opens_the_preview_and_the_rest_of_the_row_does_not() {
+        let (mut ui, index) = scanned(CleanupCategory::TempFiles, 4096);
+        let lay = ui.layout();
+
+        let (lx, ly) = centre(lay.category_view_link(index).expect("row is on screen"));
+        assert_eq!(ui.handle_event(&click(lx, ly)), EventResult::Consumed);
+        assert_eq!(ui.screen, UiScreen::FilePreview);
+        assert_eq!(ui.preview_category, Some(CleanupCategory::ALL[index]));
+
+        // Escape comes back, and the row's left-hand side toggles rather than
+        // navigating.
+        assert_eq!(ui.handle_event(&press(Key::Escape)), EventResult::Consumed);
+        assert_eq!(ui.screen, UiScreen::CategoryList);
+        let (rx, ry) = centre(lay.category_checkbox(index).expect("row is on screen"));
+        ui.handle_event(&click(rx, ry));
+        assert_eq!(ui.screen, UiScreen::CategoryList);
+        assert!(ui.selected[&CleanupCategory::ALL[index]]);
+    }
+
+    #[test]
+    fn test_select_all_and_deselect_all_keys() {
+        let mut ui = CleanupUI::new();
+        assert_eq!(ui.handle_event(&press(Key::A)), EventResult::Consumed);
+        assert_eq!(ui.selected_categories().len(), CleanupCategory::ALL.len());
+        assert_eq!(ui.handle_event(&press(Key::D)), EventResult::Consumed);
+        assert!(ui.selected_categories().is_empty());
+    }
+
+    #[test]
+    fn test_escape_on_the_category_list_is_left_for_the_window_manager() {
+        let mut ui = CleanupUI::new();
+        assert_eq!(ui.handle_event(&press(Key::Escape)), EventResult::Ignored);
+    }
+
+    #[test]
+    fn test_resize_moves_the_footer_buttons() {
+        // The proof that the hit-test reads the *reported* size rather than the
+        // constant: a click where the button used to be must stop working, and
+        // a click where it now is must start.
+        let mut ui = CleanupUI::new();
+        let old = centre(ui.layout().scan_button());
+        ui.handle_event(&Event::Resize {
+            width: 900,
+            height: 700,
+        });
+        let new = centre(ui.layout().scan_button());
+        assert!(
+            (old.0 - new.0).abs() > 1.0 || (old.1 - new.1).abs() > 1.0,
+            "layout did not follow the resize"
+        );
+        assert_eq!(ui.handle_event(&click(old.0, old.1)), EventResult::Ignored);
+        assert_eq!(ui.handle_event(&click(new.0, new.1)), EventResult::Consumed);
+        assert!(ui.scan_complete);
+    }
+
+    #[test]
+    fn test_a_tick_with_no_dialog_is_ignored() {
+        // Sixty a second. Consuming them would hold the compositor redrawing
+        // this window for as long as it was open.
+        let mut ui = CleanupUI::new();
+        assert_eq!(
+            ui.handle_event(&Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored
+        );
+    }
+
+    #[test]
+    fn test_accepting_the_confirmation_runs_the_cleanup() {
+        let mut ui = CleanupUI::new();
+        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        ui.select_all();
+        ui.show_confirm();
+
+        // Tab moves focus off Cancel and onto the destructive button; Enter
+        // then activates it. Both keystrokes are needed, and the next test is
+        // why.
+        ui.handle_event(&press(Key::Tab));
+        ui.handle_event(&press(Key::Enter));
+        assert!(!ui.is_confirming());
+        assert_eq!(ui.screen, UiScreen::Results);
+        let result = ui.last_result.as_ref().expect("a result was recorded");
+        // And it says so: nothing was deleted, and the screen must not claim
+        // otherwise. See `known-issues.md` -> TD-C-DISKCLEANUP-DELETES-NOTHING.
+        assert!(result.simulated);
+    }
+
+    #[test]
+    fn test_enter_alone_does_not_delete() {
+        // A destructive dialog focuses Cancel, not Delete -- see
+        // `ButtonSet::destructive_cancel`. Enter is what gets hit reflexively
+        // when a dialog appears unexpectedly, and a user who has not finished
+        // reading this one must not thereby empty their disk. Asserted here
+        // rather than trusted, because it is a property of *this* dialog that a
+        // later change to its button set could silently reverse.
+        let mut ui = CleanupUI::new();
+        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        ui.select_all();
+        ui.show_confirm();
+
+        ui.handle_event(&press(Key::Enter));
+        assert!(!ui.is_confirming());
+        assert_eq!(ui.screen, UiScreen::CategoryList);
+        assert!(ui.last_result.is_none());
+    }
+
+    #[test]
+    fn test_dismissing_the_confirmation_deletes_nothing() {
+        let mut ui = CleanupUI::new();
+        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        ui.select_all();
+        ui.show_confirm();
+
+        ui.handle_event(&press(Key::Escape));
+        assert!(!ui.is_confirming());
+        assert_eq!(ui.screen, UiScreen::CategoryList);
+        assert!(ui.last_result.is_none());
+    }
+
+    #[test]
+    fn test_rows_past_the_bottom_are_neither_drawn_nor_clickable() {
+        // A window too short for nine rows. The renderer stops at the fold
+        // because `category_row` returns `None`; the hit-test must stop at the
+        // same index, or a row nobody can see would still toggle.
+        let lay = Layout::new(
+            WINDOW_WIDTH,
+            HEADER_HEIGHT + FOOTER_HEIGHT + ROW_HEIGHT * 2.5,
+        );
+        assert!(lay.category_row(0).is_some());
+        assert!(lay.category_row(2).is_some());
+        assert!(lay.category_row(3).is_none());
+        assert!(lay.category_view_link(3).is_none());
+        assert!(lay.category_checkbox(3).is_none());
+    }
+
+    #[test]
+    fn test_done_button_returns_to_the_list() {
+        let mut ui = CleanupUI::new();
+        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        ui.select_all();
+        ui.execute_cleanup();
+        assert_eq!(ui.screen, UiScreen::Results);
+
+        let (x, y) = centre(ui.layout().done_button());
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        assert_eq!(ui.screen, UiScreen::CategoryList);
+    }
+
+    #[test]
+    fn test_back_button_leaves_the_preview() {
+        let mut ui = CleanupUI::new();
+        ui.show_preview(CleanupCategory::TempFiles);
+        let (x, y) = centre(ui.layout().back_button());
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        assert_eq!(ui.screen, UiScreen::CategoryList);
     }
 
     // -- Utility function tests ---------------------------------------------

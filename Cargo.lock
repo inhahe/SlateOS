@@ -2792,6 +2792,7 @@ dependencies = [
  "appearance",
  "guiremote",
  "guitk",
+ "imagecodec",
  "inputsettings",
  "keylayout",
  "oswindow",

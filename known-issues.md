@@ -82315,10 +82315,47 @@ agreed with ours exactly. The suite also truncates every real file at every
 length and flips a bit in every byte of every one, asserting only that nothing
 unwinds.
 
-**What is left.** Wire the five callers below to it. `gui/desktop` is the only
-one reachable today — it already depends on `oswindow`, which is what carries an
-upload to the compositor; `apps/explorer` and `apps/imageviewer` do not yet, so
-they need that dependency before they can upload anything they decode.
+**What is left.** Wire the remaining callers below to it.
+
+**Wired so far — the wallpaper (2026-08-26).**
+`ShellSession::refresh_wallpaper_image` (`gui/desktop/src/session.rs`) runs at
+the top of every `paint_background`, reads the file `WallpaperManager` names,
+decodes it and uploads it under the id the render tree is about to draw. The
+manager itself is untouched and still performs no I/O — that is what keeps its
+two thousand lines of tests runnable with no filesystem — and the session is the
+layer that owns the connection, so that is where the read belongs. Behaviour
+worth knowing:
+
+- It does nothing on all but the first paint after a change: it remembers the
+  `(image id, path)` pair it last acted on, and the id is freshly allocated by
+  every `set_image` and every slideshow step, which is exactly the signal
+  needed. Without that, a full-screen `.png` would be re-read and re-inflated on
+  every mouse click that caused a repaint.
+- A slideshow step **drops the old id before uploading the new one**, so the
+  link's per-connection image budget is never charged for two full-screen
+  pictures at once. Uploading first would make a budget that fits one wallpaper
+  refuse every slide after the first.
+- A file that cannot be read, cannot be decoded, or is refused by the compositor
+  sets `ShellSession::wallpaper_error()` and **does not fail the repaint**: the
+  wallpaper's colour underlay still paints and so does the taskbar. A shell that
+  refused to draw its chrome because a `.png` was corrupt would be strictly
+  worse than a plain background. Every *other* connection error still propagates
+  — a dead socket is not a wallpaper problem.
+- The failed pair is remembered too, so a corrupt wallpaper is attempted once
+  rather than on every repaint.
+- Eight tests in `gui/desktop/src/session/tests.rs` cover it, driven against the
+  offline `oswindow::testing` compositor and reading the sibling crate's real
+  libpng-written fixtures rather than a copy of them.
+
+Nothing yet reads `wallpaper_error()` — no surface shows it to the user. That is
+the next small piece: a notification, or a line in the wallpaper settings panel.
+
+**Still unwired.** `apps/explorer` (thumbnails) and `apps/imageviewer` (both the
+still and the video path). Neither depends on `oswindow` yet, which is what
+carries an upload to the compositor, so they need that dependency before they
+can upload anything they decode — and `imageviewer` additionally still
+synthesises a grey checkerboard in `Image::load` instead of opening the file.
+`gui/toolkit/src/grid.rs` takes the caller's id and is correct as it stands.
 
 **Original entry follows.**
 

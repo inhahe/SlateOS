@@ -76,11 +76,14 @@ use std::time::{Duration, Instant};
 pub mod app;
 
 use guiremote::client::{ClientError, Connection, Transport};
-use guiremote::control::{CursorShape, DisplayInfo, RequestBody, ResponseBody, WindowSpec};
+use guiremote::control::{
+    BufferFormat, CursorShape, DisplayInfo, RequestBody, ResponseBody, WindowSpec,
+};
 
 pub use guiremote::client::{ClientError as ConnectionError, Transport as ConnectionTransport};
 pub use guiremote::control::{
-    CursorShape as Cursor, DisplayInfo as Display, Layer, ShellControlAction, WindowSpec as Spec,
+    BufferFormat as PixelFormat, CursorShape as Cursor, DisplayInfo as Display, Layer,
+    ShellControlAction, WindowSpec as Spec,
 };
 /// What a shell learns about the windows it does not own. See
 /// [`EventLoop::watch_desktop`].
@@ -490,6 +493,70 @@ impl<T: Transport> WindowHandle<'_, T> {
         self.events.confirm(RequestBody::SetCursor {
             window: self.id,
             shape,
+        })
+    }
+
+    /// Give the compositor pixels, to be drawn later by
+    /// [`RenderCommand::Image`] naming `image_id`.
+    ///
+    /// Uploading is separate from drawing because a protocol that carried the
+    /// pixels along with the draw would re-send a megabyte sixty times a second
+    /// to keep a still picture on screen. Upload once, draw every frame; a
+    /// wallpaper is uploaded when the user picks it and never again.
+    ///
+    /// `image_id` is the *caller's* number, not the compositor's, and it is
+    /// scoped to this window: two windows may both use id 1 for different
+    /// pictures. Uploading over an id that already exists replaces it, which is
+    /// what makes a slideshow one upload per slide rather than an id leak.
+    ///
+    /// `bytes` is `stride`-per-row, which may exceed `width * 4` — a caller
+    /// cropping a region out of a larger buffer passes the larger stride rather
+    /// than repacking. [`imagecodec`] never pads, so a decoded picture passes
+    /// `width * 4`.
+    ///
+    /// [`imagecodec`]: https://docs.rs/imagecodec
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A refusal means the geometry does not
+    /// describe the bytes, or this link has reached the compositor's per-link
+    /// image budget — and in either case *nothing changed*: no partial image is
+    /// stored, and any previous image under this id is still the one that
+    /// draws.
+    pub fn upload_image(
+        &mut self,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    ) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::UploadImage {
+            window: self.id,
+            image_id,
+            width,
+            height,
+            stride,
+            format,
+            bytes,
+        })
+    }
+
+    /// Release an uploaded image, giving its bytes back to this link's budget.
+    ///
+    /// Dropping an id that was never uploaded succeeds: "there is no such
+    /// image" and "there is no longer such an image" are the same state, and a
+    /// caller cleaning up should not have to remember which of the two it is
+    /// in.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn drop_image(&mut self, image_id: u64) -> Result<(), Error<T>> {
+        self.events.confirm(RequestBody::DropImage {
+            window: self.id,
+            image_id,
         })
     }
 }

@@ -64,7 +64,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use appearance::Palette;
 use guitk::event::{Event, MouseEvent};
 use guitk::render::RenderTree;
-use oswindow::{ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, Spec};
+use oswindow::{
+    ConnectionError, ConnectionTransport as Transport, Error, EventLoop, Layer, PixelFormat, Spec,
+};
 
 use crate::animations::{AnimationManager, WindowAnimation};
 use crate::wallpaper::WallpaperManager;
@@ -180,6 +182,29 @@ pub struct ShellSession<T: Transport> {
     /// the loop parks with no bound at all, which is what keeps an idle desktop
     /// idle.
     animations: AnimationManager,
+    /// The picture the background surface was last *asked* to hold, as the
+    /// wallpaper's image id and the path it was read from.
+    ///
+    /// Both halves are needed. The id alone would not notice a user who edited
+    /// the file in place and asked for the same wallpaper again; the path alone
+    /// would not notice that [`WallpaperManager`] has issued a fresh id, which
+    /// it does on every `set_image` and every slideshow step, and an upload
+    /// under the *old* id would leave the new one naming nothing.
+    ///
+    /// "Asked to hold" rather than "holds", because a failed attempt is
+    /// recorded here too — paired with a `wallpaper_error` that says so. That
+    /// is deliberate: `paint_background` runs on every repaint, so a pair that
+    /// was *not* remembered on failure would re-read and re-inflate a corrupt
+    /// full-screen `.png` on every mouse click.
+    wallpaper_image: Option<(u64, String)>,
+    /// Why the wallpaper file could not be shown, if it could not.
+    ///
+    /// Kept rather than returned, because failing to show a wallpaper is not a
+    /// reason to fail a repaint: the background mode still paints its colour
+    /// underlay, and a shell that refused to draw its taskbar because a `.png`
+    /// was corrupt would be a worse outcome than a plain background. See
+    /// [`wallpaper_error`](Self::wallpaper_error).
+    wallpaper_error: Option<String>,
 }
 
 impl<T: Transport> ShellSession<T> {
@@ -256,6 +281,8 @@ impl<T: Transport> ShellSession<T> {
             running: false,
             launches: Vec::new(),
             animations: AnimationManager::new(),
+            wallpaper_image: None,
+            wallpaper_error: None,
         };
         session.repaint()?;
         Ok(session)
@@ -333,6 +360,12 @@ impl<T: Transport> ShellSession<T> {
     ///
     /// As [`EventLoop::submit`].
     pub fn paint_background(&mut self) -> Result<(), Error<T>> {
+        // Before the picture, the pixels the picture refers to. `render_image`
+        // emits an `Image` command naming `current_image_id`, and the
+        // compositor draws *nothing, silently* for an id it has never been
+        // given bytes for — so an upload that has not happened is a wallpaper
+        // that does not appear and says nothing about why.
+        self.refresh_wallpaper_image()?;
         let width = self.shell.screen_width as f32;
         let height = self.shell.screen_height as f32;
         // The same zone the taskbar clock reads in — see
@@ -349,6 +382,126 @@ impl<T: Transport> ShellSession<T> {
             .extend(self.wallpaper.get_render_commands(&p, width, height, day));
         self.events
             .submit(self.background.window, &self.background.localize(&tree))
+    }
+
+    /// Why the wallpaper is not on screen, if it is not.
+    ///
+    /// `None` covers both "the picture is up" and "no picture was asked for" —
+    /// a solid-colour or gradient background is not a failure, and a caller
+    /// that wanted to distinguish the two would be asking the wrong object:
+    /// [`WallpaperManager::mode`] is what says whether an image was wanted.
+    ///
+    /// The string names the path, because the interesting failures are all
+    /// about *which* file: a slideshow directory with one truncated frame in it
+    /// reports that frame, and a wallpaper carried over from another machine
+    /// reports the path that no longer exists.
+    pub fn wallpaper_error(&self) -> Option<&str> {
+        self.wallpaper_error.as_deref()
+    }
+
+    /// Make sure the compositor holds the pixels that the background surface's
+    /// `Image` command is about to name.
+    ///
+    /// [`WallpaperManager`] performs no I/O by design — that is what keeps its
+    /// tests runnable with no filesystem — so it allocates an image id and
+    /// emits a command naming it, and something else has to put bytes under
+    /// that id. This is that something else, and it lives here rather than in
+    /// the manager because this is the layer that owns the connection.
+    ///
+    /// Called on every `paint_background` and almost always does nothing: the
+    /// `(id, path)` pair it remembers is unchanged, so there is no read, no
+    /// decode and no upload. It does work exactly when the wallpaper actually
+    /// changed, which is what the id was allocated to signal.
+    fn refresh_wallpaper_image(&mut self) -> Result<(), Error<T>> {
+        let id = self.wallpaper.current_image_id();
+        let want = self.wallpaper.current_image_path().map(str::to_owned);
+
+        // An id of zero means "no picture": `render_image` emits no `Image`
+        // command at all, so anything still uploaded is unreachable and costs
+        // the link's image budget for nothing.
+        let Some(path) = want.filter(|_| id != 0) else {
+            self.release_wallpaper_image()?;
+            self.wallpaper_error = None;
+            return Ok(());
+        };
+
+        if self
+            .wallpaper_image
+            .as_ref()
+            .is_some_and(|(had, from)| *had == id && *from == path)
+        {
+            return Ok(());
+        }
+
+        // Released before the read rather than after the upload. The old
+        // picture is already unreachable — the render tree names the new id —
+        // and holding it across a decode is what would make a slideshow of
+        // full-screen images charge the link's budget for two at once, so a
+        // budget that fits the wallpaper would still refuse the next slide.
+        self.release_wallpaper_image()?;
+        self.wallpaper_image = Some((id, path.clone()));
+
+        let decoded = std::fs::read(&path)
+            .map_err(|e| format!("{path}: {e}"))
+            .and_then(|bytes| {
+                // The default limit is the compositor's own buffer ceiling, so
+                // a picture refused here is one the compositor would have
+                // refused anyway — and refusing it from the header costs a
+                // header rather than a decompressed framebuffer.
+                imagecodec::decode(&bytes, imagecodec::Limits::default())
+                    .map_err(|e| format!("{path}: {e}"))
+            });
+        let image = match decoded {
+            Ok(image) => image,
+            Err(why) => {
+                self.wallpaper_error = Some(why);
+                return Ok(());
+            }
+        };
+
+        let (width, height, stride) = (image.width, image.height, image.stride());
+        let bytes = image.to_argb_bytes();
+        let Some(mut handle) = self.events.window_mut(self.background.window) else {
+            // Unreachable in a live session: the background surface is created
+            // in `start` and never closed. Handled rather than unwrapped
+            // because "the compositor cannot lose my window" is an assumption
+            // about the other end of a socket, and this crate does not get to
+            // make those.
+            self.wallpaper_error = Some(format!("{path}: the background surface is gone"));
+            return Ok(());
+        };
+        match handle.upload_image(id, width, height, stride, PixelFormat::Argb8888, bytes) {
+            Ok(()) => {
+                self.wallpaper_error = None;
+                Ok(())
+            }
+            // A refusal is the compositor saying "not this picture" — too big
+            // for the link's image budget, most likely — and is exactly as
+            // survivable as a corrupt file: the colour underlay still paints.
+            // Every other error says the connection itself is unusable, and
+            // those propagate, because the `submit` two lines later would fail
+            // the same way and swallowing them here would only delay it.
+            Err(ConnectionError::Refused(why)) => {
+                self.wallpaper_error = Some(format!("{path}: {why}"));
+                Ok(())
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Give back whatever the background surface is holding, if anything.
+    ///
+    /// Dropping an id that was never successfully uploaded is not an error —
+    /// see [`oswindow::WindowHandle::drop_image`] — which is what lets this be
+    /// called without first asking whether the last attempt worked.
+    fn release_wallpaper_image(&mut self) -> Result<(), Error<T>> {
+        let Some((id, _)) = self.wallpaper_image.take() else {
+            return Ok(());
+        };
+        if let Some(mut handle) = self.events.window_mut(self.background.window) {
+            handle.drop_image(id)?;
+        }
+        Ok(())
     }
 
     /// Paint the taskbar, and the menus if any are open.

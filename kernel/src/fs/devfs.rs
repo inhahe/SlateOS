@@ -900,18 +900,53 @@ pub fn self_test() -> KernelResult<()> {
 
     let mut fs = DevFs::new();
 
-    // Test root readdir.  The root holds every node whose path has no slash.
-    let expect_root = DEV_NODES.iter().filter(|n| n.parent().is_empty()).count();
+    // Test root readdir.  The root holds every node whose path has no slash,
+    // plus one per registered block device.
+    //
+    // Asserted as a *composition* rather than as a total, which is the lesson
+    // this assertion taught the moment block devices landed: it compared
+    // against the fixed-node count alone, so the first QEMU boot with four real
+    // block devices registered failed with "19 entries, expected 15" -- a
+    // correct complaint about a listing that was entirely correct.  A total is
+    // only as stable as the least stable thing it sums, and the number of disks
+    // attached to a machine is not stable at all.  Counting the two populations
+    // separately says what is actually meant, and cannot be falsified by
+    // plugging in a drive.
+    let expect_fixed = DEV_NODES.iter().filter(|n| n.parent().is_empty()).count();
     let entries = fs.readdir(Path::new("/"))?;
-    if entries.len() != expect_root {
+    let (blocks, fixed): (Vec<_>, Vec<_>) = entries
+        .iter()
+        .partition(|e| e.entry_type == EntryType::BlockDevice);
+    if fixed.len() != expect_fixed {
         serial_println!(
-            "[devfs]   FAIL: readdir returned {} entries, expected {}",
-            entries.len(),
-            expect_root
+            "[devfs]   FAIL: readdir returned {} non-block entries, expected {}",
+            fixed.len(),
+            expect_fixed
         );
         return Err(KernelError::InternalError);
     }
-    serial_println!("[devfs]   readdir /: {} entries OK", entries.len());
+    // Every block entry must name a device that is really registered.  This is
+    // the direction a count cannot check: a stale node, or one invented by a
+    // bug in `children_of`, keeps the total right while naming nothing.
+    for e in &blocks {
+        let listed = e.name.as_path().as_bytes();
+        let found = core::str::from_utf8(listed)
+            .ok()
+            .and_then(crate::blkdev::info)
+            .is_some();
+        if !found {
+            serial_println!(
+                "[devfs]   FAIL: /{} is listed but no such block device exists",
+                e.name.as_path().display()
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[devfs]   readdir /: {} fixed + {} block device(s) OK",
+        fixed.len(),
+        blocks.len()
+    );
 
     // Test stat on root.
     let root_stat = fs.stat(Path::new("/"))?;

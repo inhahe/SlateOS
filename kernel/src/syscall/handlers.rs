@@ -8677,6 +8677,7 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
             crate::fs::EntryType::Symlink => 3u8,
             crate::fs::EntryType::VolumeLabel => continue,
             crate::fs::EntryType::CharDevice => 4u8,
+            crate::fs::EntryType::BlockDevice => 5u8,
         };
 
         let base = packed.len();
@@ -8853,6 +8854,10 @@ fn encode_fs_stat_result(meta: &crate::fs::FileMeta) -> [u8; FS_STAT_RESULT_LEN]
         crate::fs::EntryType::VolumeLabel => 2u8,
         crate::fs::EntryType::Symlink => 3u8,
         crate::fs::EntryType::CharDevice => 4u8,
+        // 5 is new with block device nodes. It is appended rather than
+        // inserted because these bytes are ABI: an older binary that does not
+        // know 5 must still read 0..=4 as it always did.
+        crate::fs::EntryType::BlockDevice => 5u8,
     };
 
     // Each field is written through `get_mut`, so a future change to
@@ -10003,6 +10008,7 @@ pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
                 crate::fs::EntryType::VolumeLabel => 2,
                 crate::fs::EntryType::Symlink => 3,
                 crate::fs::EntryType::CharDevice => 4,
+                crate::fs::EntryType::BlockDevice => 5,
             }],
         );
         // [9..16] and [62..64] stay zero: the array starts zeroed.
@@ -10905,6 +10911,7 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
                         crate::fs::vfs::EntryType::VolumeLabel => 2,
                         crate::fs::vfs::EntryType::Symlink => 3,
                         crate::fs::vfs::EntryType::CharDevice => 4,
+                        crate::fs::vfs::EntryType::BlockDevice => 5,
                     };
                 }
                 pos = pos.saturating_add(1);

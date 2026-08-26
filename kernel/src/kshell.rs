@@ -16138,13 +16138,21 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
         // `bright set [display_id] <level>` is the one synopsis here whose
         // *optional* operand comes first. Reading `parts[1]` as the display
-        // made the documented one-word form print its own usage line, so the
-        // regression assertion is the absence of that line.
+        // made the documented one-word form fall into the arity guard instead
+        // of working. The guard used to be spelled as the absence of `Usage:`,
+        // which stopped meaning anything the moment this arm was converted to
+        // `required_num` and began saying `missing percentage` instead -- so it
+        // is spelled here as the presence of the sentence a working run prints.
         let out = capture_command("bright set 50");
-        assert_output_lacks(
+        assert_output_contains(
             "`bright set <level>` is the documented one-word form and must work",
             &out,
-            b"Usage:",
+            b"Brightness \xe2\x86\x92 50%",
+        );
+        assert_output_lacks(
+            "and the level must not be read as the display id",
+            &out,
+            b"missing percentage",
         );
 
         let out = capture_command("bright set");
@@ -16883,7 +16891,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"`abc' is not a window id",
         );
         assert_eq!(last_exit(), 1, "wsnap snap: an unreadable id errors");
-        assert_output_lacks("and snaps nothing", &out, b"Left half");
+        // The witness of the bug is the success sentence for the window the
+        // guess picked. It has to be the sentence `cmd_winsnap` prints *today*:
+        // this read `b"Left half"` until the position started being named by
+        // `SnapPosition::label()`, which spells it `left`, and an assertion
+        // naming wording no code owns is a guard that cannot fire.
+        assert_output_lacks("and snaps nothing", &out, b"Window 0 \xe2\x86\x92 left");
 
         // The position was already refused, but anonymously -- it printed a
         // synopsis without naming the word that could not be read.

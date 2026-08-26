@@ -186,6 +186,16 @@ def main() -> int:
     # Matches boot-test.sh's invocation: debug profile (its default), short
     # format.  A different profile would lint a different cfg and could pass
     # here while failing there.
+    #
+    # `-p kernel` covers the root leaf crates too (`crc32`, `deflate`, `sha2`,
+    # `ziparchive`, ...), even though every line of the log below is a
+    # `kernel\...` path.  Cargo does not print warnings for non-primary
+    # packages; it does surface their errors, which is what this gate checks.
+    # Verified by planting a deny-level lint in `ziparchive` and watching this
+    # command exit 101 naming it -- see boot-test.sh's check_kernel_clippy for
+    # the full note.  Do not "fix" the apparent gap by adding `-p` flags: the
+    # crates are dependencies of `kernel` in the same invocation and are built
+    # in that role regardless of being named.
     rc, out = _run([cargo, "clippy", "-p", "kernel", "--message-format=short"])
 
     # Kept, not discarded.  The ~18,000 pedantic-level lines are the known

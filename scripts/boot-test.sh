@@ -3248,6 +3248,29 @@ fi
 # in this kernel, so linting debug while shipping release would leave a hole of
 # precisely the size of the difference.  The gate checks what the run builds.
 #
+# `-p kernel` DOES COVER THE ROOT LEAF CRATES.  Worth stating outright, because
+# the log below looks exactly as though it does not: every one of its ~18,000
+# lines is a `kernel\...` path, and `crc32`, `deflate`, `sha2`, `netipc`,
+# `netring`, `tzrules` and `ziparchive` contribute none.  That is cargo
+# declining to *print* warnings for non-primary packages, not clippy declining
+# to run on them.  Errors are not suppressed the same way.
+#
+# Verified 2026-08-26 by planting a deny-level `clippy::needless_return` in
+# `ziparchive/src/lib.rs` and running this gate's exact command: it exited 101
+# and named `ziparchive\src\lib.rs:112:5`.  Nothing else establishes this --
+# a clean log is equally consistent with "linted and clean" and "never linted",
+# and those two differ by every shared parser of untrusted input in the tree.
+#
+# Two corollaries, both of which cost an hour to learn:
+#   - Adding `-p ziparchive` here changes nothing.  Tested with a cold cache;
+#     the crate is a dependency of `kernel` in the same invocation, so it is
+#     built in that role regardless of also being named.
+#   - The absence of *warnings* from those crates is real but is not this
+#     gate's business: the noisy pedantic lints (`cast_possible_truncation` and
+#     friends) are `allow` at workspace scope, and these crates are small and
+#     genuinely near-clean.  Their pedantic backlog is simply not visible here.
+#     To see it, lint one on its own: `cargo clippy -p deflate`.
+#
 # Skipped under --no-build: that mode boots an already-built kernel, so there is
 # no new source for the gate to have an opinion about, and 113 s buys nothing.
 check_kernel_clippy() {

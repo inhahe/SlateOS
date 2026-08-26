@@ -38561,19 +38561,46 @@ impl Shell {
         bytes::bytes_to_path(&self.resolve_str(path))
     }
 
-    /// The program path to hand to `Command::new`.
+    /// The program path to hand to `Command::new` for a word nothing was found
+    /// for — the word itself, since only the OS can now say why it will not run.
     ///
-    /// A name containing a separator is a path and resolves against this
-    /// shell's directory; a bare name is left alone so the OS runs its own
-    /// `$PATH` search. Resolving here rather than relying on `Command::current_dir`
-    /// is required on the Windows host, where `CreateProcess` looks a relative
-    /// application name up against the *calling* process's directory rather
-    /// than the one handed to the child.
+    /// See [`Shell::program_image`] for why the *host* is the only reason a
+    /// relative one is ever rewritten.
     fn resolve_program(&self, name: BStr<'_>) -> Str {
-        if name.contains(&b'/') || name.contains(&b'\\') {
+        if cfg!(windows) && word_is_path(name) {
             self.resolve_str(name)
         } else {
             name.to_vec()
+        }
+    }
+
+    /// The image path to hand `Command::new` for a file the lookup did find,
+    /// spelled the way the *child* should see it.
+    ///
+    /// bash `execve`s exactly the string its search produced: a relative `$PATH`
+    /// entry yields a relative image path, and a word that spelled a path goes
+    /// over as typed. That string is not private to the shell — the kernel hands
+    /// it to a `#!` interpreter as that interpreter's first argument — so
+    /// absolutising it rewrites an argument the script can see. Measured, bash
+    /// 5.2.21: `./show.sh` with `#!./pf.exe [%s]\n` prints `[./show.sh]`, where
+    /// osh printed `[/tmp/…/show.sh]`.
+    ///
+    /// Nothing is lost by leaving it relative, because the child is given
+    /// [`Shell::cwd`] as its working directory (every caller of
+    /// [`Shell::external_command`] sets it) and resolves the path against the
+    /// same directory the shell resolved it against.
+    ///
+    /// The Windows development host cannot be left to do that: `CreateProcess`
+    /// looks a relative application name up against the *calling* process's
+    /// directory rather than the one handed to the child, so there the path must
+    /// be resolved before the spawn. What the child then sees of it is that
+    /// host's business regardless — there is no argv to hand over and the
+    /// runtime underneath rebuilds one (see [`Shell::push_child_args`]).
+    fn program_image(&self, path: BStr<'_>) -> Str {
+        if cfg!(windows) {
+            self.host_path(path)
+        } else {
+            map_device_path(path).to_vec()
         }
     }
 
@@ -38640,14 +38667,15 @@ impl Shell {
                 (program, a)
             }
             _ => (
-                // A `$PATH` hit is spelled the way `$PATH` spelled it — possibly
-                // relative to the *shell's* directory, which is not the
-                // process's — so the image to launch is that hit resolved. A
-                // word nothing was found for goes over as typed, for the OS to
-                // look up ([`Shell::resolve_program`]).
+                // A `$PATH` hit is spelled the way `$PATH` spelled it, and is
+                // launched in that spelling — the child is given the shell's
+                // directory to resolve it against, and a `#!` interpreter is
+                // handed the spelling itself ([`Shell::program_image`]). A word
+                // nothing was found for goes over as typed, for the OS to look
+                // up ([`Shell::resolve_program`]).
                 resolved.map_or_else(
                     || self.resolve_program(word),
-                    |p| self.host_path(&bytes::path_to_bytes(p)),
+                    |p| self.program_image(&bytes::path_to_bytes(p)),
                 ),
                 args.to_vec(),
             ),

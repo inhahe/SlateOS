@@ -894,6 +894,48 @@ impl<T: Transport> EventLoop<T> {
         self.conn.set_window_workspace(window, desktop)
     }
 
+    /// Claim a keyboard chord, so that it arrives here wherever the focus is.
+    ///
+    /// The third of the shell privileges, with
+    /// [`watch_desktop`](Self::watch_desktop) and
+    /// [`control_window`](Self::control_window), and the one that makes the
+    /// other two reachable: a switcher you can only summon while the switcher
+    /// already has the keyboard is a switcher nobody can summon.
+    ///
+    /// `window` is one of this loop's own — the grabbed presses arrive as
+    /// [`Event::Key`] against it, exactly as if it were focused, and closing it
+    /// releases the chord. What is claimed is the whole chord: Alt+Tab is not
+    /// Tab, and grabbing the one leaves the other alone.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`]. A refusal means the window is not this
+    /// loop's, or some other window already holds the chord — grabs are first
+    /// come, first served, and there is no way to take one from its holder.
+    pub fn grab_key(
+        &mut self,
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> Result<(), Error<T>> {
+        self.conn.grab_key(window, key, modifiers)
+    }
+
+    /// Give a claimed chord back to the focused window.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_key`](Self::grab_key). Releasing a chord this window did not
+    /// hold is not one: only releasing another window's is.
+    pub fn ungrab_key(
+        &mut self,
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> Result<(), Error<T>> {
+        self.conn.ungrab_key(window, key, modifiers)
+    }
+
     /// Tell the compositor the user's appearance settings have changed on disk.
     ///
     /// For the one application that edits them — Settings — to call *after* it

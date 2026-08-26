@@ -218,6 +218,21 @@ macro_rules! key_table {
                 _ => None,
             }
         }
+
+        /// Every key this protocol can name, in wire-code order.
+        ///
+        /// [`Key::Unknown`] is absent: it is not a key but a hole for the ones
+        /// this table does not have, and it carries a raw code rather than a
+        /// name.
+        ///
+        /// Public, unlike the two codecs, because "what keys are there?" is a
+        /// question callers outside this crate legitimately ask and cannot
+        /// answer for themselves — an enum has no iterator. The shell uses it to
+        /// check that every chord its binding table answers is a chord it also
+        /// claims from the compositor, which is a sweep over the whole
+        /// vocabulary or it is nothing. Generated from the same list as the
+        /// codecs above, so it cannot fall behind one.
+        pub const ALL_KEYS: &[Key] = &[$(Key::$variant,)*];
     };
 }
 

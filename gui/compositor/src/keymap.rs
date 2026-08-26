@@ -496,6 +496,35 @@ impl ModifierState {
         (self.left_shift || self.right_shift) != self.caps_lock
     }
 
+    /// The scancodes of the modifier keys currently held that contribute to
+    /// `wanted` — the physical keys that formed a chord.
+    ///
+    /// [`modifiers`](Self::modifiers) collapses the two sides into four
+    /// booleans, which is the right answer for a client asking "was Ctrl
+    /// held?" and the wrong one here: what a caller wants is the *key* whose
+    /// release will end the gesture, and "Alt" is two keys. Both are returned
+    /// when both are down, because the user who is holding both has not
+    /// finished until they let go of both.
+    ///
+    /// Returned as a fixed array rather than a `Vec` because this runs on the
+    /// keystroke path; the caller flattens away the `None`s.
+    #[must_use]
+    pub const fn held_keys_for(self, wanted: Modifiers) -> [Option<u32>; 8] {
+        const fn pick(held: bool, wanted: bool, scancode: u32) -> Option<u32> {
+            if held && wanted { Some(scancode) } else { None }
+        }
+        [
+            pick(self.left_shift, wanted.shift, 0x2A),
+            pick(self.right_shift, wanted.shift, 0x36),
+            pick(self.left_ctrl, wanted.ctrl, 0x1D),
+            pick(self.right_ctrl, wanted.ctrl, 0xE01D),
+            pick(self.left_alt, wanted.alt, 0x38),
+            pick(self.right_alt, wanted.alt, 0xE038),
+            pick(self.left_super, wanted.super_key, 0xE05B),
+            pick(self.right_super, wanted.super_key, 0xE05C),
+        ]
+    }
+
     /// Release everything held.
     ///
     /// Called when the compositor loses the input device or the session is

@@ -83442,3 +83442,27 @@ tested at the unit level, and appears to work, while being unreachable in
 practice. Two have already been added in this state (the media keys, and the
 notification-pane toggle). Anything gated behind a keystroke — an on-screen
 volume overlay, for instance — cannot be finished until this is.
+
+**Resolved (2026-08-26).** Built as described above, in two commits: the
+mechanism, then the shell wiring that uses it. `Compositor::handle_key` now
+consults a chord-keyed grab table after resolving the keystroke into a chord and
+before the focused-window lookup, `GrabKey`/`UngrabKey` ride the client protocol
+behind `require_shell` (`CONTROL_VERSION` 1 to 2), grabs die with the window that
+took them — including via `Server::reclaim`, so a *crashed* shell gives Alt+Tab
+back — and `ShellSession::start` claims all seventeen of the desktop's chords
+against the panel window, with Escape grabbed and ungrabbed as popups open and
+close. Two details the plan above did not anticipate, both now in
+`design-decisions.md` 565:
+
+- A grabbed chord's **release** does not match the grab (Alt+Tab held while Tab
+  is let go sends a bare `Tab` up), so the target is remembered per *scancode*,
+  the only thing identical between a press and its release.
+- Alt+Tab commits on the **Alt release**, which nobody grabs. The modifier keys
+  that formed a grabbed chord now owe their release to the grabber as well —
+  *in addition to* the focused window, never instead of it, since that window saw
+  the press and must not be left with a stuck Alt.
+
+The shell's grab list is checked against `DesktopAction::for_chord` in both
+directions by test, sweeping the entire key vocabulary, so a binding added
+without a grab — a shortcut silently dead in every window but one — fails the
+build rather than shipping.

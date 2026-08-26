@@ -177,6 +177,70 @@ fn the_shell_asks_to_be_told_about_windows_it_does_not_own() {
     );
 }
 
+/// Without this the shell hears a shortcut only while it is itself focused,
+/// which for a taskbar is almost never — and Alt+Tab, which exists to be pressed
+/// from inside another window, never at all. The grab list is checked against
+/// the binding table elsewhere; what is checked here is that the session asks
+/// for it, on a surface that stays mapped.
+#[test]
+fn the_shell_claims_its_shortcuts_before_it_starts_listening() {
+    let (session, desktop) = session();
+    let panel = session.panel().window();
+    let seen = &desktop.borrow().seen;
+    for &(key, modifiers) in DesktopShell::global_chords() {
+        assert!(
+            seen.iter().any(|r| r.body
+                == RequestBody::GrabKey {
+                    window: panel,
+                    key,
+                    modifiers
+                }),
+            "{key:?} with {modifiers:?} is bound but never claimed, so it is dead \
+             in every window but the shell's own"
+        );
+    }
+}
+
+/// Escape is the one chord held conditionally: a permanent grab takes the key
+/// from every dialog on the desktop, and no grab means a menu opened with the
+/// mouse cannot be closed with the keyboard.
+#[test]
+fn escape_is_claimed_while_a_menu_is_open_and_given_back_after() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let (key, modifiers) = DesktopShell::conditional_chord();
+    let grab = RequestBody::GrabKey {
+        window: panel,
+        key,
+        modifiers,
+    };
+    let ungrab = RequestBody::UngrabKey {
+        window: panel,
+        key,
+        modifiers,
+    };
+    assert!(
+        !desktop.borrow().seen.iter().any(|r| r.body == grab),
+        "Escape was taken from the whole desktop before anything was open"
+    );
+
+    let start = centre(session.shell().start_button_rect());
+    press_at(&desktop, session.panel(), start.0, start.1);
+    session.pump().expect("pump");
+    assert!(session.shell().start_menu_open);
+    assert!(
+        desktop.borrow().seen.iter().any(|r| r.body == grab),
+        "the start menu is open and Escape still goes to whoever has the keyboard"
+    );
+
+    session.shell_mut().dismiss_popups();
+    session.pump().expect("pump");
+    assert!(
+        desktop.borrow().seen.iter().any(|r| r.body == ungrab),
+        "the menu closed and the shell kept Escape"
+    );
+}
+
 #[test]
 fn the_menu_surface_is_unmapped_while_no_menu_is_open() {
     let (mut session, desktop) = session();

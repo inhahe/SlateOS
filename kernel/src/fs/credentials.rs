@@ -485,6 +485,16 @@ pub fn lookup_autofill(app_id: &str, field_type: &str) -> KernelResult<(String, 
     Ok((cred.username.clone(), cred.secret.clone()))
 }
 
+/// List every autofill rule, across all apps.
+///
+/// The unfiltered counterpart of [`list_autofill`]. `cred autofill` with no app
+/// named is a request for exactly this and had nothing to call: the shell
+/// fetched the *credential* list instead, discarded it with `let _ = all`, and
+/// printed only a hint -- a listing that never listed.
+pub fn list_all_autofill() -> Vec<AutofillRule> {
+    STORE.lock().autofill.clone()
+}
+
 /// List autofill rules for an app.
 pub fn list_autofill(app_id: &str) -> Vec<AutofillRule> {
     STORE

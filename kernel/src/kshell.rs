@@ -16058,6 +16058,118 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 67: a usage complaint reports failure, and a synopsis does not"
+    );
+    {
+        // 192 subcommands printed `Usage: ...` for a missing operand and then
+        // exited 0. They were invisible to `check-usage-status.py` because it
+        // counted braces one line at a time, and the shape they all share is
+        //
+        //     if parts.len() < 2 { <usage> } else { .. set_exit(1) .. }
+        //
+        // where `} else {` nets to zero by the line, so the gate's walk read
+        // the *else* branch's status as the *if* branch's. See
+        // A-KSHELL-THE-USAGE-GATE-WALKS-STRAIGHT-THROUGH-} else {.
+        //
+        // A sample rather than all 192: the gate is what proves completeness,
+        // and it now sees every one of them. What a rung adds that the gate
+        // cannot is the run-time half -- that the status actually reaches the
+        // caller. So the sample is chosen to cover each *guard shape* the gate
+        // groups them by, one per shape, because a shape is what a future
+        // regression would break at once.
+        //
+        // Each is paired with a control naming an operand that does not exist.
+        // The control must not print a synopsis: it proves the command still
+        // gets past its arity guard and fails for the real reason, so the rung
+        // cannot pass by having broken the command outright.
+        let arity_cases: &[(&str, &str)] = &[
+            // `parts.len() < N`, the 111-site majority, at N = 2, 3 and 5.
+            ("useracct remove", "useracct remove 4294967295"),
+            ("scriptlang addext", "scriptlang addext 999999 .zz"),
+            (
+                "kernelbuild register",
+                "kernelbuild register zz n kernel /zz",
+            ),
+            // An emptiness test on a word pulled out with `unwrap_or("")`.
+            ("soundmixer rmdev", "soundmixer rmdev nosuchdevice"),
+            ("cred get", "cred get nosuchapp nosuchsvc"),
+            // `if <id> == 0`, where the zero is `unwrap_or(0)`'s and so means
+            // both "absent" and "unreadable".
+            ("vd remove", "vd remove 999999"),
+            ("tile add", "tile add 999999"),
+            // The `} else if` form: the branch the gate mis-read is followed
+            // by a chain rather than a plain `else`.
+            ("netsettings dns", "netsettings dns nosuchif auto"),
+            ("perfmon dismiss", "perfmon dismiss 999999"),
+        ];
+        for (bare, control) in arity_cases {
+            let out = capture_command(bare);
+            assert_output_contains("a missing operand is reported", &out, b"Usage:");
+            assert_eq!(last_exit(), 1, "a usage complaint must report failure");
+
+            let out = capture_command(control);
+            assert_output_lacks("naming the operand clears the arity guard", &out, b"Usage:");
+        }
+
+        // `bright set [display_id] <level>` is the one synopsis here whose
+        // *optional* operand comes first. Reading `parts[1]` as the display
+        // made the documented one-word form print its own usage line, so the
+        // regression assertion is the absence of that line.
+        let out = capture_command("bright set 50");
+        assert_output_lacks(
+            "`bright set <level>` is the documented one-word form and must work",
+            &out,
+            b"Usage:",
+        );
+
+        let out = capture_command("bright set");
+        assert_output_contains(
+            "no level at all is still missing",
+            &out,
+            b"missing percentage",
+        );
+        assert_eq!(last_exit(), 1, "bright set: a missing level errors");
+
+        // And the guess that lived under it: `abc` parsed to 0, which
+        // `set_brightness` clamps and stores, so the backlight went off and
+        // the shell said `Brightness -> 0%` and exited 0.
+        let out = capture_command("bright set 999 abc");
+        assert_output_contains(
+            "an unreadable level is refused, not read as zero",
+            &out,
+            b"is not a percentage",
+        );
+        assert_eq!(last_exit(), 1, "bright set: an unreadable level errors");
+
+        // The other direction, which is what `check-query-status.py` guards:
+        // a command reached only by asking must not report failure for
+        // answering. Bare `lockdep` prints its synopsis *as* its output.
+        let out = capture_command("lockdep");
+        assert_output_contains(
+            "bare `lockdep` prints its synopsis",
+            &out,
+            b"Usage: lockdep",
+        );
+        assert_eq!(last_exit(), 0, "bare `lockdep` is output, not a complaint");
+
+        // Bare `cred autofill` is a listing, and it was a listing that never
+        // listed: it fetched the *credential* list, dropped it with
+        // `let _ = all`, and printed only its two hint lines. Asserting on
+        // those hints would therefore have passed against the broken version,
+        // so the rung adds a rule of its own and looks for *that* -- the only
+        // evidence that a listing happened -- then removes it again.
+        let _ = capture_command("cred autofill selftestapp password selftestsvc");
+        let out = capture_command("cred autofill");
+        assert_output_contains(
+            "bare `cred autofill` lists the rule that was just added",
+            &out,
+            b"selftestapp",
+        );
+        assert_eq!(last_exit(), 0, "a listing is not a complaint");
+        let _ = capture_command("cred rmautofill selftestapp password");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -33351,11 +33463,32 @@ fn cmd_credentials(args: &str) {
             let field = parts.get(2).copied().unwrap_or("");
             let svc = parts.get(3).copied().unwrap_or("");
             if app.is_empty() {
-                // List all autofill rules.
-                let all = credentials::list_all();
+                // Bare `cred autofill` lists every rule, which is what the
+                // comment here always claimed. It did not: it called
+                // `list_all()` -- the *credential* list, not the autofill one
+                // -- threw the result away with `let _ = all`, and printed the
+                // two hint lines alone. A listing that never listed, and the
+                // `let _` is what kept the compiler quiet about it.
+                let rules = credentials::list_all_autofill();
+                if rules.is_empty() {
+                    shell_println!("No autofill rules");
+                } else {
+                    shell_println!("{:16} {:16} {:24} {}", "APP", "FIELD", "SERVICE", "AUTO");
+                    for r in &rules {
+                        shell_println!(
+                            "{:16} {:16} {:24} {}",
+                            r.app_id,
+                            r.field_type,
+                            r.service,
+                            if r.auto { "yes" } else { "prompt" }
+                        );
+                    }
+                }
+                // Hints under a successful answer, not a complaint: the
+                // listing above is the output, so the status stays zero. Same
+                // shape as `elog echo` -- see check-usage-status.py's ALLOWED.
                 shell_println!("Use: cred autofill <app> to list rules for an app");
                 shell_println!("     cred autofill <app> <field> <service> [auto]  to add a rule");
-                let _ = all;
             } else if field.is_empty() {
                 let rules = credentials::list_autofill(app);
                 if rules.is_empty() {
@@ -71074,23 +71207,38 @@ fn cmd_brightness(args: &str) {
             }
         }
         "set" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let level = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            if level == 0 && parts.get(2).is_none() {
-                shell_println!("Usage: bright set [display_id] <level>");
+            // `bright set [display_id] <level>` is the rare synopsis whose
+            // *optional* operand comes first, so the operand count is what
+            // says which is which: one word is the level, two are the display
+            // and then the level.  Reading `parts[1]` as the display
+            // unconditionally made the documented one-word form -- the form
+            // anyone with a single screen would type -- fall into the arity
+            // guard and print its own usage line instead of working.
+            let (id_idx, level_idx) = if parts.len() >= 3 {
+                (Some(1), 2)
             } else {
-                match brightness::set_brightness(id, level) {
-                    Ok(()) => shell_println!("Brightness → {}%", level),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                (None, 1)
+            };
+            let Some(level) = required_u32(&parts, level_idx, "bright", sub, "percentage") else {
+                return;
+            };
+            // Guessing here was the same defect twice over: `bright set 1 abc`
+            // read as level 0 and turned the backlight *off*, then said
+            // `Brightness → 0%` and exited 0.
+            let id = match id_idx {
+                None => 1,
+                Some(i) => {
+                    let Some(v) = required_u32(&parts, i, "bright", sub, "display ID") else {
+                        return;
+                    };
+                    v
+                }
+            };
+            match brightness::set_brightness(id, level) {
+                Ok(()) => shell_println!("Brightness → {}%", level),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }

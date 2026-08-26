@@ -81109,6 +81109,76 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
+## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 520 of 1940
+
+**In short:** the kernel has ~430 small modules that each keep a table of numbers
+and print it — how much swap is compressed, which signals a process has blocked,
+how much memory a control group is using. **520 of the functions that change
+those numbers cannot be called by anything**, because the only code that
+mentions them is the module they live in. The visible effect is not a missing
+feature. It is that a column which should be able to go *down* can only ever go
+*up*, and a counter that cannot fall does not look like a gap — it looks like
+data.
+
+Measured by `scripts/find-unreachable-mutators.py` (reporting tool, always exits
+0): **520 mutators with no caller outside their own module, across 222 modules,
+out of 1940 mutators in 428 files** — about 27%. A function called only by its
+own `self_test` counts as unreachable, and that is the important case: the test
+proves the code works, which is exactly why the gap survives review.
+
+**How it was found.** Not by looking for it. Four consecutive batches of the
+`kshell` guessed-value burn-down each surfaced the same extra defect on the way
+past:
+
+| batch | module | unreachable operation | what that made monotonic |
+|---|---|---|---|
+| 30 | `rqstat` | `register_cpu` | every other subcommand returned `NotFound`, always |
+| 31 | `zramstat` | `record_discard` | `mem_used` could only rise |
+| 32 | `signalq` | `unblock` | `blocked_mask` could only gain bits |
+
+Three in a row is what prompted measuring the population, and the measurement
+says it is systemic rather than a property of those three.
+
+**The cause is consistent, and it explains the shape of the gap.** These
+modules' shell arms were written to *demonstrate* a feature, and demonstrating
+means showing a counter go up. The operation that brings it back down — the
+discard, the unblock, the release, the `remove_*` — has no demonstration value,
+so it was never wired to anything. That is why the unreachable set is so heavily
+weighted toward `set_*` and the un-doing verbs rather than being a random 27%.
+
+**Why it matters more than "dead code".** Three separate consequences, in
+increasing order of harm:
+
+1. The operation is untested against a real caller. The self-test exercises it
+   in isolation with fixtures it built itself.
+2. The number the module reports is *wrong in a specific direction* — always
+   the accumulating one — and nothing in the output says a whole class of
+   transition is missing.
+3. Where the module is meant to be fed by a real subsystem (`netdev::record_rx`,
+   `numastat::record_local_alloc`, `pagecache::record_hit`), an unreachable
+   recorder means the table is not merely incomplete but **empty of the thing it
+   exists to count**, while still printing totals of zero as though zero were
+   measured.
+
+**The proper fix is per-module and is a burn-down, not a patch.** For each
+module, decide which of the two it is: an accounting table a *subsystem* should
+be feeding — in which case wire the call site in the subsystem, which is the
+real fix and the valuable one — or a table only the shell drives, in which case
+add the missing subcommand as batches 30–32 did. Do not "fix" it by deleting the
+function: the function is usually right and the caller is what is missing, and
+deleting it would remove the evidence that a number is unfed.
+
+**Do not confuse this with the guessed-value ledger**
+(`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-…`). That one is about commands that
+invent an operand they could not read; this one is about operations no command
+offers at all. They keep appearing together because both come from the same
+habit — writing the arm that shows the feature working — but they are counted
+separately and cleared separately.
+
+**Not a regression.** True of each module since it was written.
+
+---
+
 ## `A-SIGNALQ-BLOCK-MASKS-A-DIFFERENT-SIGNAL-THAN-SEND-SENDS` (lane A, 2026-08-26) — **fixed 2026-08-26**
 
 **In short:** the kernel shell's `signalq` command can send a signal to a

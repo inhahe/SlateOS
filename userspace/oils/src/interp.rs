@@ -68670,8 +68670,9 @@ struct StrftimeCtx<'a> {
 
 /// Parse an integer `printf` argument with C/bash `strtoimax` semantics and
 /// report whether it was fully valid. Leading whitespace and an optional sign
-/// are skipped; a `0x`/`0X` prefix selects hex, a leading `0` selects octal,
-/// otherwise decimal. The value is the leading run of valid digits (bash uses
+/// are skipped; a `0x`/`0X` prefix selects hex, a `0b`/`0B` prefix binary, a
+/// `0` followed by a *digit* octal, otherwise decimal. The value is the leading
+/// run of valid digits (bash uses
 /// that partial value even when it warns). The returned `Option` is `None` when
 /// the whole argument was consumed, or `Some(kind)` — the bash diagnostic tail
 /// (`"invalid number"` / `"invalid octal number"` / `"invalid hex number"`) —
@@ -68727,9 +68728,23 @@ fn parse_printf_int_checked(s: &[u8]) -> PrintfInt {
         .or_else(|| body.strip_prefix(b"0X"))
     {
         (16u32, h)
+    } else if let Some(b) = body
+        .strip_prefix(b"0b")
+        .or_else(|| body.strip_prefix(b"0B"))
+    {
+        // C23's binary literal, which glibc gave base-0 `strtol`/`strtoimax` in
+        // 2.38. It is not bash's own — bash's arithmetic still refuses `0b101`
+        // ("value too great for base") — it arrives only because `printf` reads
+        // its integer arguments through libc rather than through `evalexp`.
+        // Measured against bash 5.2.21 on glibc 2.39: `printf '%d' 0b101` is 5,
+        // for every integer conversion and for a `%*d` width alike. A libc
+        // without it reads the same word as a `0` with junk behind it; matching
+        // the modern one is matching every current Linux bash.
+        (2u32, b)
     } else if body.first() == Some(&b'0') && body.get(1).is_some_and(u8::is_ascii_digit) {
-        // Octal only when a digit follows the `0` (`08`, `019`); a `0` followed
-        // by a letter (`0b101`) is decimal-with-junk.
+        // Octal only when a digit follows the `0` (`08`, `019`). `00b1` lands
+        // here rather than in the binary arm above, since the second byte is a
+        // digit: octal `0` with `b1` left over.
         (8u32, body.get(1..).unwrap_or_default())
     } else {
         (10u32, body)
@@ -78175,6 +78190,49 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             assert_eq!(out, format!("{want}\n"), "{word}");
             assert_eq!(st, 1, "{word}");
         }
+    }
+
+    #[test]
+    fn printf_reads_the_binary_literal_base_zero_strtoimax_reads() {
+        // C23's binary form, which glibc gave base-0 `strtoimax` in 2.38. It
+        // reaches `printf` only because the integer conversions read their
+        // argument through libc; bash's own arithmetic still refuses it.
+        for c in ["d", "i", "u", "o", "x", "X"] {
+            assert_eq!(run(&format!("printf '%{c}\\n' 0b101")).0, "5\n", "%{c}");
+        }
+        assert_eq!(run("printf '%d\\n' 0B101").0, "5\n");
+        assert_eq!(run("printf '%d\\n' -0b101").0, "-5\n");
+        assert_eq!(run("printf '%d\\n' ' 0b101'").0, "5\n");
+        assert_eq!(run("printf '%d\\n' 0b0").0, "0\n");
+        // A width taken from an argument goes through the same reader.
+        assert_eq!(run("printf '[%*d]\\n' 0b101 7").0, "[    7]\n");
+        // Where it stops it keeps the prefix, as every other base does. The
+        // message names no base: `sh_invalidnum` sees `0` then a non-digit
+        // that is not a lower-case `x`.
+        for (word, want) in [("0b", "0"), ("0b2", "0"), ("0b_1", "0"), ("0b101z", "5")] {
+            let (out, st) = run(&format!("printf '%d\\n' '{word}' 2>/dev/null"));
+            assert_eq!(out, format!("{want}\n"), "{word}");
+            assert_eq!(st, 1, "{word}");
+            let err = run(&format!("printf '%d\\n' '{word}' 2>&1 >/dev/null")).0;
+            assert_eq!(
+                err,
+                format!("osh: printf: {word}: invalid number\n"),
+                "{word}"
+            );
+        }
+        // The second byte decides: `00b1` is an octal `0` with junk, and a `0x`
+        // still wins outright over the `b` inside it.
+        assert_eq!(run("printf '%d\\n' 00b1 2>/dev/null").0, "0\n");
+        assert_eq!(
+            run("printf '%d\\n' 00b1 2>&1 >/dev/null").0,
+            "osh: printf: 00b1: invalid octal number\n"
+        );
+        assert_eq!(run("printf '%d\\n' 0x0b1").0, "177\n");
+        // `strtod` has no binary form at all, so the float side reads a `0`
+        // with junk behind it — value 0, and a status.
+        let (out, st) = run("printf '%f\\n' 0b101 2>/dev/null");
+        assert_eq!(out, "0.000000\n");
+        assert_eq!(st, 1);
     }
 
     #[test]

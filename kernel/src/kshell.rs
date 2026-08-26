@@ -123408,7 +123408,14 @@ fn cmd_diag() {
     );
 
     // --- Exceptions ---
-    let exc_total: u64 = crate::idt::vector_counts().iter().sum();
+    // Vectors 0–31 only.  This summed the whole array until hardware vectors
+    // started being counted, at which point "Exceptions: total=" would silently
+    // have become "every interrupt since boot" -- and since the timer alone
+    // fires ~1000 times a second, the `> 100` HIGH indicator below would have
+    // latched within the first second of uptime and never cleared again.  The
+    // old code was not so much wrong as unfalsifiable: correct only for as long
+    // as the array it summed happened to hold nothing but exceptions.
+    let exc_total: u64 = crate::idt::vector_counts().iter().take(32).sum();
     let pf_count = crate::idt::vector_count(14);
     let non_pf_exceptions = exc_total.saturating_sub(pf_count);
     let status_exc = if non_pf_exceptions > 100 {
@@ -123568,12 +123575,7 @@ fn cmd_exceptions() {
         if count == 0 {
             continue;
         }
-        let name = if i < 32 {
-            idt::EXCEPTION_NAMES[i]
-        } else {
-            "IRQ"
-        };
-        shell_println!("{:<6} {:<32} {:>12}", i, name, count);
+        shell_println!("{:<6} {:<32} {:>12}", i, idt::vector_name(i), count);
     }
 
     // Summary line.
@@ -123612,11 +123614,7 @@ fn cmd_exclog() {
         if entry.tick == 0 {
             continue;
         }
-        let name = if (entry.vector as usize) < 32 {
-            idt::EXCEPTION_NAMES[entry.vector as usize]
-        } else {
-            "IRQ"
-        };
+        let name = idt::vector_name(entry.vector as usize);
         shell_println!(
             "{:<8} {:<5} {:<4} {:#018x} {:#018x}",
             entry.tick,
@@ -127719,23 +127717,20 @@ fn cmd_irqrate() {
     shell_println!("  Vec  Name                    Rate");
     shell_println!("  ---  ----                    ----");
 
+    // Iterate the array rather than a hardcoded bound.  This read `0..48` back
+    // when the array was 48 long; the two are now free to disagree, and the
+    // literal would have hidden every vector past 47 -- which is all of the
+    // IOAPIC's upper inputs plus both IPIs and the spurious vector.  Zero-rate
+    // vectors are skipped below, so widening the walk does not widen the output:
+    // it shows exactly the vectors that are actually live.
     let mut any = false;
-    for i in 0..48 {
-        let rate_x10 = rates.rates_x10[i];
+    for (i, &rate_x10) in rates.rates_x10.iter().enumerate() {
         if rate_x10 == 0 {
             continue;
         }
         any = true;
 
-        let name = if i < 32 {
-            crate::idt::EXCEPTION_NAMES[i]
-        } else {
-            match i {
-                32 => "APIC Timer",
-                33..=47 => "Device IRQ",
-                _ => "Unknown",
-            }
-        };
+        let name = crate::idt::vector_name(i);
 
         #[allow(clippy::arithmetic_side_effects)]
         let whole = rate_x10 / 10;

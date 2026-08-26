@@ -44,6 +44,32 @@ const TEXT_PREVIEW_MAX_LINES: usize = 20;
 /// Maximum bytes to read when sniffing a text file for preview.
 const TEXT_PREVIEW_MAX_BYTES: usize = 4096;
 
+/// Most pixels a source picture may have before the thumbnailer declines to
+/// decode it and falls back to the aspect-ratio swatch.
+///
+/// Deliberately well below `imagecodec::Limits::DEFAULT_MAX_PIXELS` (7680×4320,
+/// the compositor's own buffer ceiling), because the two are bounding different
+/// things. That ceiling asks "could this be a wallpaper?" — one picture, chosen
+/// by the user, decoded when they choose it. This one asks "should a directory
+/// listing decode this?", and a directory listing decodes whatever is in the
+/// directory, without being asked, while the user waits for the folder to open.
+///
+/// 24 megapixels is a 6000×4000 full-frame photograph, which is what the
+/// overwhelming majority of picture files on a desktop actually are. The cost
+/// of the ones above it is a swatch — exactly what *every* PNG got before this
+/// crate could decode at all — so nothing regresses at the boundary.
+///
+/// **Why a cap is needed at all**, and what would remove it: `imagecodec` has
+/// no scaled or partial decode, so producing a 128×128 thumbnail costs a
+/// full-size decode. At this cap the transient peak is roughly 190 MB (the
+/// inflate output and the pixel buffer are both live inside `decode`), held for
+/// the milliseconds between decoding one picture and downscaling it, and one at
+/// a time because generation is sequential. A decoder that box-filtered *during*
+/// scanline reconstruction would never materialise the full picture and this
+/// constant could go away. See known-issues.md
+/// `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE`.
+const DEFAULT_MAX_SOURCE_PIXELS: u64 = 24_000_000;
+
 /// Number of child items to show in a folder thumbnail grid (2x2).
 const FOLDER_PREVIEW_ITEMS: usize = 4;
 
@@ -306,18 +332,20 @@ fn parse_bmp_dimensions(data: &[u8]) -> Option<ImageDimensions> {
 
 /// Parse PNG header to extract dimensions.
 ///
-/// PNG files start with the 8-byte magic `\x89PNG\r\n\x1A\n`, followed by the
-/// IHDR chunk whose data starts at offset 16 (width BE u32, height BE u32).
+/// Delegated to the decoder rather than read here. This used to be two
+/// `u32_be_at` calls at offsets 16 and 20 — the right offsets for a *valid*
+/// PNG, and unchecked for everything else, so a file that began with the eight
+/// magic bytes and then went wrong reported whatever integers happened to sit
+/// there. `imagecodec::png::dimensions` reads the IHDR as a chunk: it checks
+/// the length field, the chunk type, the CRC's presence, and the bit
+/// depth/colour-type combination, so a size it returns is one the picture
+/// actually has.
+///
+/// It also means the icon view cannot disagree with the image viewer about how
+/// big a picture is, which is the same argument that put the decoder in one
+/// crate rather than one per caller (design-decisions.md §555).
 fn parse_png_dimensions(data: &[u8]) -> Option<ImageDimensions> {
-    if data.len() < 24 {
-        return None;
-    }
-    let magic: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    if data.get(0..8)? != magic {
-        return None;
-    }
-    let width = byteread::u32_be_at(data, 16)?;
-    let height = byteread::u32_be_at(data, 20)?;
+    let (width, height) = imagecodec::png::dimensions(data).ok()?;
     if width == 0 || height == 0 {
         return None;
     }
@@ -454,6 +482,15 @@ pub struct ThumbConfig {
     pub bg_color: Color,
     /// Text color for previews and labels.
     pub text_color: Color,
+    /// Most pixels a source picture may have before it is declined rather than
+    /// decoded. See [`DEFAULT_MAX_SOURCE_PIXELS`] for why this is not simply
+    /// the decoder's own default.
+    ///
+    /// Configurable rather than a constant because the right answer depends on
+    /// the machine: a workstation opening a photographer's directory can afford
+    /// what a low-memory device cannot, and the failure mode of guessing high
+    /// is an out-of-memory kill of the file manager.
+    pub max_source_pixels: u64,
 }
 
 impl Default for ThumbConfig {
@@ -462,6 +499,7 @@ impl Default for ThumbConfig {
             size: DEFAULT_THUMB_SIZE,
             bg_color: Color::rgb(245, 245, 245),
             text_color: Color::rgb(100, 100, 100),
+            max_source_pixels: DEFAULT_MAX_SOURCE_PIXELS,
         }
     }
 }
@@ -558,11 +596,15 @@ pub fn generate_thumbnail(path: &Path, config: &ThumbConfig) -> Thumbnail {
 
 /// Generate a thumbnail from an image file (BMP/PNG/GIF/JPEG).
 ///
-/// Reads enough of the file header to determine dimensions, then generates a
-/// filled rectangle of the image's accent color scaled to the thumbnail size.
-/// Full decode + downscale is used when the raw pixel data is available (BMP);
-/// for compressed formats (PNG/JPEG/GIF) we produce a placeholder with the
-/// correct aspect ratio since we lack a full decoder in this crate.
+/// Three outcomes, in preference order: the picture itself, downscaled; an
+/// aspect-ratio-correct colour swatch, for a format no decoder here reads; and
+/// the category placeholder, for a file whose header says nothing at all.
+///
+/// The middle one used to be the outcome for *every* compressed format,
+/// including PNG, which is what `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE
+/// -ID-NAMES-NOTHING` was about: only uncompressed BMP had a real thumbnail,
+/// and a directory of photographs was a grid of identical green rectangles
+/// differing only in shape.
 fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Thumbnail {
     let header = match read_file_header(path, 1024) {
         Some(h) => h,
@@ -574,15 +616,25 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
         None => return generate_default_thumbnail(path, ThumbCategory::Image, config, mtime),
     };
 
-    // For BMP we can attempt to read raw pixel data (uncompressed 32-bit).
-    if header.starts_with(b"BM")
-        && let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime)
-    {
+    // Dispatched on the signature rather than tried in turn, because either
+    // branch reads the whole file: offering the file to a decoder that will
+    // reject it on its first eight bytes still costs the read that got those
+    // eight bytes there.
+    if header.starts_with(b"BM") {
+        // BMP is the one format `imagecodec` does not read, and the one this
+        // module already decoded: uncompressed 24/32-bit, straight out of the
+        // file with no decompressor in the way.
+        if let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime) {
+            return thumb;
+        }
+    } else if let Some(thumb) = try_decoded_thumbnail(path, dims, config, mtime) {
         return thumb;
     }
 
-    // For other formats: create an aspect-ratio-correct color swatch since we
-    // don't have a full decoder.  The swatch color is derived from the format.
+    // Nothing decoded it: an aspect-ratio-correct colour swatch, which is at
+    // least honest about the shape of the picture. Today this is GIF, JPEG,
+    // SVG, WebP and ICO — and any PNG above `max_source_pixels`, or one that is
+    // corrupt.
     let (tw, th) = fit_dimensions(dims.width, dims.height, config.size);
     let size = config.size;
     let mut canvas = Canvas::transparent(size, size);
@@ -596,6 +648,84 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
     canvas.fill_rect(off_x, off_y, tw, th, ThumbCategory::Image.accent_color());
 
     into_thumbnail(canvas, path, mtime)
+}
+
+/// Decode the picture properly and downscale it, for the formats `imagecodec`
+/// reads (today: PNG).
+///
+/// `None` — never an error — for a picture too large, a file that is not a
+/// format the decoder claims, or one that is corrupt. All three are the same
+/// thing from a directory listing's point of view: this entry does not get a
+/// picture, and the caller's swatch is what it gets instead. A file manager
+/// that reported a decode failure per file would produce a wall of dialogs for
+/// one bad download.
+///
+/// `dims` is the header's answer and is used only to decline early; the
+/// decoder's own answer is what the canvas is built from. They agree for
+/// anything that decodes, since `imagecodec` sizes its buffers from the same
+/// header — but the check has to happen before the decode, which is the whole
+/// point of having it.
+fn try_decoded_thumbnail(
+    path: &Path,
+    dims: ImageDimensions,
+    config: &ThumbConfig,
+    mtime: u64,
+) -> Option<Thumbnail> {
+    // Checked against the header we already have, before the file is read at
+    // all. `imagecodec` would refuse the same picture from its own header a
+    // moment later, but that moment costs a full read of a file that may be
+    // hundreds of megabytes.
+    let source_pixels = u64::from(dims.width).checked_mul(u64::from(dims.height))?;
+    if source_pixels > config.max_source_pixels {
+        return None;
+    }
+
+    let data = fs::read(path).ok()?;
+    let limits = imagecodec::Limits {
+        max_pixels: config.max_source_pixels,
+        // The decompressed *byte* ceiling, kept in the same proportion the
+        // crate's own default uses (16 bytes per pixel), which is what a
+        // 16-bit-per-sample RGBA image costs before it is reduced to the
+        // 4-bytes-per-pixel output. Deriving it from `max_pixels` rather than
+        // repeating a number keeps the two from drifting apart.
+        max_decompressed_bytes: usize::try_from(config.max_source_pixels.saturating_mul(16))
+            .unwrap_or(usize::MAX),
+    };
+    let image = imagecodec::decode(&data, limits).ok()?;
+    // Dropped before the pixel buffer is converted: for a 24-megapixel PNG this
+    // is tens of megabytes of compressed data with no further reader, and the
+    // conversion below is the peak of this function.
+    drop(data);
+
+    let (width, height) = (image.width, image.height);
+    // Consuming the decoded pixels rather than borrowing them, so the picture
+    // exists in one buffer and not two. `Image::to_argb_bytes` would have made
+    // a third: a `Vec<u8>` between the `Vec<u32>` the decoder produced and the
+    // `Vec<Color>` a canvas holds, all three full-size and all three alive at
+    // once.
+    let pixels: Vec<Color> = image.pixels.into_iter().map(argb_to_color).collect();
+    let canvas = Canvas::from_pixels(width, height, pixels)?;
+
+    Some(into_thumbnail(
+        box_filter_downscale(&canvas, config.size),
+        path,
+        mtime,
+    ))
+}
+
+/// One `0xAARRGGBB` word, as the toolkit's colour.
+///
+/// The decoder's output format is the compositor's storage format, which is a
+/// packed word; the toolkit's is four fields. Neither is wrong and the
+/// conversion is a shift, but it is written once here rather than inline so
+/// that a future channel-order question has one place to be asked.
+const fn argb_to_color(px: u32) -> Color {
+    Color::rgba(
+        ((px >> 16) & 0xFF) as u8,
+        ((px >> 8) & 0xFF) as u8,
+        (px & 0xFF) as u8,
+        ((px >> 24) & 0xFF) as u8,
+    )
 }
 
 /// Attempt to create a real thumbnail from an uncompressed 32-bit BMP.
@@ -1864,15 +1994,192 @@ mod tests {
 
     #[test]
     fn parse_png_valid() {
+        // A genuine PNG rather than a 24-byte stub with the size poked into
+        // it. The size now comes back through `imagecodec::png::dimensions`,
+        // which reads the IHDR *as a chunk* -- its length, its type, its CRC,
+        // and the bit depth and colour type after the size -- so a stub whose
+        // remaining fields are zero is not a picture and reports nothing. That
+        // is the decoder being right, not the test being unlucky: a file the
+        // decoder would refuse should not be listed with a size.
+        let dims = parse_png_dimensions(&imagecodec::testing::png_gradient(640, 480)).unwrap();
+        assert_eq!(dims.width, 640);
+        assert_eq!(dims.height, 480);
+    }
+
+    /// A file that begins with the PNG signature but is not a PNG has no
+    /// dimensions to report. Before the decoder went in, the eight-byte
+    /// signature plus two big-endian numbers at a fixed offset were the whole
+    /// check, so any 24 bytes starting `\x89PNG` claimed to be a picture of
+    /// whatever size those bytes happened to spell.
+    #[test]
+    fn a_png_signature_over_rubbish_has_no_dimensions() {
         let mut header = vec![0u8; 24];
         header[0..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]);
-        // Width at offset 16, height at offset 20 (BE u32).
         header[16..20].copy_from_slice(&640u32.to_be_bytes());
         header[20..24].copy_from_slice(&480u32.to_be_bytes());
 
-        let dims = parse_png_dimensions(&header).unwrap();
-        assert_eq!(dims.width, 640);
-        assert_eq!(dims.height, 480);
+        assert!(parse_png_dimensions(&header).is_none());
+    }
+
+    // -- Decoding a real picture --------------------------------------------
+
+    /// One pixel of a finished thumbnail.
+    ///
+    /// Goes back through `Canvas` rather than indexing `Thumbnail::pixels`
+    /// directly, so the test reads the byte order out of the same function
+    /// [`into_thumbnail`] wrote it with. A test that restated `[a, r, g, b]`
+    /// in its own words would keep passing if both ends were swapped together.
+    fn thumb_pixel(thumb: &Thumbnail, x: u32, y: u32) -> Color {
+        Canvas::from_argb(thumb.width, thumb.height, &thumb.pixels)
+            .expect("a thumbnail's buffer always matches its dimensions")
+            .get(x, y)
+            .expect("coordinate inside the thumbnail")
+    }
+
+    /// A picture whose left half is red and whose right half is blue, so that
+    /// "was this decoded?" and "was it decoded the right way round?" are
+    /// separate answers. A gradient would show the first and hide the second.
+    fn write_two_tone_png(path: &Path, width: u32, height: u32) {
+        let bytes = imagecodec::testing::png_rgba(width, height, |x, _| {
+            if x < width / 2 {
+                [0xFF, 0x00, 0x00, 0xFF]
+            } else {
+                [0x00, 0x00, 0xFF, 0xFF]
+            }
+        });
+        fs::write(path, bytes).unwrap();
+    }
+
+    /// The debt this whole change is about: a `.png` used to thumbnail as a
+    /// flat green rectangle of the right shape and nothing else, because
+    /// nothing in the tree decoded a compressed picture. A directory of
+    /// photographs was a grid of identical rectangles.
+    ///
+    /// Three things are asserted, and the first two are the ones a wrong
+    /// decode would still satisfy on its own: the thumbnail has the *source's*
+    /// aspect ratio rather than the swatch's square canvas, the halves are the
+    /// colours the file has and are on the sides the file put them, and the
+    /// placeholder green appears nowhere at all.
+    #[test]
+    fn a_png_thumbnails_to_the_picture_and_not_a_coloured_rectangle() {
+        let scratch = ScratchDir::new("thumbs_test_png_decode");
+        let path = scratch.path("two-tone.png");
+        write_two_tone_png(&path, 200, 100);
+
+        let config = ThumbConfig::default();
+        let thumb = generate_thumbnail(&path, &config);
+
+        // 200x100 into a 128 box is 128x64. The swatch path would have
+        // produced a 128x128 canvas with a rectangle centred in it, so the
+        // height alone separates the two outcomes.
+        assert_eq!((thumb.width, thumb.height), (128, 64));
+
+        let left = thumb_pixel(&thumb, 20, 32);
+        let right = thumb_pixel(&thumb, 108, 32);
+        assert_eq!((left.r, left.g, left.b), (0xFF, 0x00, 0x00), "left half");
+        assert_eq!(
+            (right.r, right.g, right.b),
+            (0x00, 0x00, 0xFF),
+            "right half"
+        );
+
+        let accent = ThumbCategory::Image.accent_color();
+        let canvas = Canvas::from_argb(thumb.width, thumb.height, &thumb.pixels).unwrap();
+        for y in 0..thumb.height {
+            for x in 0..thumb.width {
+                assert_ne!(
+                    canvas.get(x, y).unwrap(),
+                    accent,
+                    "placeholder green at ({x}, {y}) — this is still a swatch"
+                );
+            }
+        }
+    }
+
+    /// Alpha comes through as the file wrote it. The decoder emits straight
+    /// (non-premultiplied) alpha and the toolkit's `Color` stores it in its own
+    /// field; a conversion that folded alpha into the colour channels would
+    /// leave a translucent red looking like a dark opaque red, which is exactly
+    /// the mistake that is invisible on the fully-opaque pictures every other
+    /// test here uses.
+    #[test]
+    fn a_translucent_picture_keeps_its_alpha_through_the_thumbnail() {
+        let scratch = ScratchDir::new("thumbs_test_png_alpha");
+        let path = scratch.path("translucent.png");
+        fs::write(
+            &path,
+            imagecodec::testing::png_rgba(64, 64, |_, _| [0xFF, 0x00, 0x00, 0x80]),
+        )
+        .unwrap();
+
+        let thumb = generate_thumbnail(&path, &ThumbConfig::default());
+        let px = thumb_pixel(&thumb, 32, 32);
+        assert_eq!((px.r, px.g, px.b, px.a), (0xFF, 0x00, 0x00, 0x80));
+    }
+
+    /// A picture bigger than the cap is declined *from its header*, without the
+    /// file being read — a directory listing decodes whatever is in it while
+    /// the user waits, so the cost of one absurd file is paid by everything
+    /// after it. The entry keeps the swatch it always had, which is why raising
+    /// or lowering the cap cannot regress anything.
+    #[test]
+    fn a_picture_over_the_source_cap_keeps_the_swatch() {
+        let scratch = ScratchDir::new("thumbs_test_png_too_big");
+        let path = scratch.path("huge.png");
+        write_two_tone_png(&path, 200, 100);
+
+        let config = ThumbConfig {
+            max_source_pixels: 10_000, // 200x100 is twice this.
+            ..ThumbConfig::default()
+        };
+        let thumb = generate_thumbnail(&path, &config);
+
+        // The swatch is drawn on a full square canvas, whatever the picture's
+        // shape; the rectangle inside it is what carries the aspect ratio.
+        assert_eq!((thumb.width, thumb.height), (config.size, config.size));
+        assert_eq!(
+            thumb_pixel(&thumb, config.size / 2, config.size / 2),
+            ThumbCategory::Image.accent_color()
+        );
+    }
+
+    /// A truncated download still has a readable IHDR, so it still reports a
+    /// size — and then fails halfway through its pixel data. A file manager
+    /// walking a directory must survive that quietly: the entry gets the swatch
+    /// and the listing carries on. Reporting it would mean a dialog per bad
+    /// file, and panicking would mean one bad file closing the file manager.
+    #[test]
+    fn a_truncated_png_is_a_swatch_and_not_a_panic() {
+        let scratch = ScratchDir::new("thumbs_test_png_truncated");
+        let path = scratch.path("half.png");
+        let full = imagecodec::testing::png_gradient(200, 100);
+        fs::write(&path, &full[..full.len() / 2]).unwrap();
+
+        let config = ThumbConfig::default();
+        let thumb = generate_thumbnail(&path, &config);
+
+        assert_eq!((thumb.width, thumb.height), (config.size, config.size));
+        assert_eq!(
+            thumb_pixel(&thumb, config.size / 2, config.size / 2),
+            ThumbCategory::Image.accent_color()
+        );
+    }
+
+    /// A file whose bytes are not a picture at all, under a name that says it
+    /// is. `parse_image_dimensions` finds no header it recognises, so this
+    /// never reaches the decoder — it is the third outcome, the category
+    /// placeholder, and the test exists to pin the boundary between it and the
+    /// swatch.
+    #[test]
+    fn a_png_extension_over_arbitrary_bytes_falls_all_the_way_to_the_placeholder() {
+        let scratch = ScratchDir::new("thumbs_test_png_not_a_picture");
+        let path = scratch.path("lies.png");
+        fs::write(&path, b"this is a text file wearing a hat").unwrap();
+
+        let config = ThumbConfig::default();
+        let thumb = generate_thumbnail(&path, &config);
+        assert_eq!((thumb.width, thumb.height), (config.size, config.size));
+        assert!(thumb.is_valid());
     }
 
     #[test]

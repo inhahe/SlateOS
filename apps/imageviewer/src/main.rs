@@ -1964,12 +1964,7 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::float_cmp,
-        // The PNG fixture below computes a CRC-32 and an Adler-32, both of
-        // which are defined in terms of wrapping and modular arithmetic. A
-        // `checked_add` on a checksum accumulator would be noise around a sum
-        // that is *supposed* to fold.
-        clippy::arithmetic_side_effects
+        clippy::float_cmp
     )]
 
     use super::*;
@@ -2676,93 +2671,14 @@ mod tests {
     /// weaken the tests — a viewer whose whole test suite runs on files no
     /// decoder accepts is the position this crate is being moved out of.
     ///
-    /// Deflate's *stored* block type is what makes this short: it is a length,
-    /// its complement and the bytes, so no compressor is needed. The two
-    /// checksums are the parts a decoder actually verifies, and both are a few
-    /// lines.
+    /// The encoder that produces it lives in `imagecodec`, next to the decoder
+    /// that has to read it, because `apps/explorer` needed the same thing and
+    /// a `#[cfg(test)]` helper cannot be shared across a crate boundary even
+    /// in principle. The gradient is the one this module always used — red
+    /// follows *x*, green follows *y*, blue a constant `0x40`, opaque — so the
+    /// pixel assertions below are unchanged by the move.
     fn png_bytes(w: u32, h: u32) -> Vec<u8> {
-        // Filter byte 0 ("None") per row, then RGBA. A recognisable gradient
-        // rather than a flat colour, so a test that asserts on pixels can tell
-        // a decoded picture from a blank one.
-        let mut raw = Vec::new();
-        for y in 0..h {
-            raw.push(0u8);
-            for x in 0..w {
-                raw.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, 0x40, 0xFF]);
-            }
-        }
-
-        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        let mut ihdr = Vec::new();
-        ihdr.extend_from_slice(&w.to_be_bytes());
-        ihdr.extend_from_slice(&h.to_be_bytes());
-        // bit depth 8, colour type 6 (RGBA), deflate, adaptive filtering, no
-        // interlace.
-        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
-        push_chunk(&mut png, b"IHDR", &ihdr);
-        push_chunk(&mut png, b"IDAT", &zlib_stored(&raw));
-        push_chunk(&mut png, b"IEND", &[]);
-        png
-    }
-
-    /// Length, type, payload, CRC — the shape of every PNG chunk.
-    fn push_chunk(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
-        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        out.extend_from_slice(kind);
-        out.extend_from_slice(payload);
-        let mut crc_over = kind.to_vec();
-        crc_over.extend_from_slice(payload);
-        out.extend_from_slice(&crc32(&crc_over).to_be_bytes());
-    }
-
-    /// A zlib stream carrying `data` verbatim in stored deflate blocks.
-    fn zlib_stored(data: &[u8]) -> Vec<u8> {
-        // CMF 0x78 (deflate, 32 KiB window), FLG 0x01 — chosen so the two-byte
-        // header is a multiple of 31, which is what a decoder checks.
-        let mut out = vec![0x78, 0x01];
-        // A stored block's length field is 16 bits, so a picture larger than
-        // 64 KiB of raw bytes takes several. Empty input still needs one block,
-        // or the stream ends with no final-block marker.
-        let mut chunks = data.chunks(0xFFFF).peekable();
-        if data.is_empty() {
-            out.extend_from_slice(&[1, 0, 0, 0xFF, 0xFF]);
-        }
-        while let Some(chunk) = chunks.next() {
-            out.push(u8::from(chunks.peek().is_none()));
-            let len = chunk.len() as u16;
-            out.extend_from_slice(&len.to_le_bytes());
-            out.extend_from_slice(&(!len).to_le_bytes());
-            out.extend_from_slice(chunk);
-        }
-        out.extend_from_slice(&adler32(data).to_be_bytes());
-        out
-    }
-
-    /// The PNG chunk checksum. Computed bit by bit rather than from a table:
-    /// a table would be a second thing to get right for no gain in a fixture.
-    fn crc32(data: &[u8]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
-        for &byte in data {
-            crc ^= u32::from(byte);
-            for _ in 0..8 {
-                crc = if crc & 1 == 1 {
-                    (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        !crc
-    }
-
-    /// The zlib stream checksum.
-    fn adler32(data: &[u8]) -> u32 {
-        let (mut a, mut b) = (1u32, 0u32);
-        for &byte in data {
-            a = (a + u32::from(byte)) % 65521;
-            b = (b + a) % 65521;
-        }
-        (b << 16) | a
+        imagecodec::testing::png_gradient(w, h)
     }
 
     /// The bug: `display_image` assigned into `image_info` field by field and

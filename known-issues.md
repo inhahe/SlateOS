@@ -82469,3 +82469,87 @@ decoder is an attack surface in the same way the wire decoder is:
 **How you would notice.** Set a wallpaper in Settings: the desktop stays the
 background colour. Open a folder of photographs in the file manager: every icon
 is the generic file glyph. Neither reports an error.
+
+---
+
+## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26)
+
+**In short:** to draw a 128×128 preview of a photograph, the file manager
+decodes the photograph at full size first and then shrinks it. A 24-megapixel
+picture is about 190 MB of memory for a fraction of a second, to produce 64 KB
+of preview. It works, and it is bounded — there is a cap, above which the entry
+simply keeps the plain coloured rectangle it always had — but the cap exists
+only because the decode is wasteful, and a picture *above* the cap gets no
+preview even though nothing about it is wrong.
+
+**Where it lives.** `apps/explorer/src/thumbs.rs` →
+`try_decoded_thumbnail`, which calls `imagecodec::decode` and then
+`box_filter_downscale`. The cap is `DEFAULT_MAX_SOURCE_PIXELS` (24 million —
+a 6000×4000 full-frame photograph), surfaced as `ThumbConfig::max_source_pixels`
+so a low-memory machine can lower it.
+
+**Why it costs what it does.** `imagecodec::decode` has no scaled or partial
+mode: it holds the compressed `IDAT` copy, the inflated scanline buffer
+(`w × h × bytes-per-pixel + h`) and the finished `Vec<u32>` at once, and returns
+the last of those at the file's own size. The thumbnailer then converts that
+into a `Canvas` and box-filters it down. The conversion is written to consume
+the decoder's buffer rather than borrow it (`into_iter().map(...).collect()`
+instead of `to_argb_bytes()`), and the compressed data is dropped before it, so
+the thumbnailer's own overhead is about as low as it can be *given a full-size
+decode*. The full-size decode is the cost.
+
+**Not urgent, and why.** Thumbnail generation is sequential — one file at a
+time — so the peak is one picture's worth, not a directory's. The cap keeps
+that peak bounded by a number the machine's owner can choose. Nothing crashes
+and nothing regresses at the boundary.
+
+**What the proper fix is.** A scaled decode in `imagecodec`: box-filter *during*
+scanline reconstruction, accumulating into a destination-sized buffer as rows
+come out of the inflater, so peak memory is the row buffer plus the thumbnail
+rather than the whole picture. PNG makes this easy in the non-interlaced case
+because rows arrive in order; Adam7 needs the full-size buffer anyway, since its
+passes are scattered, so that path would keep the current behaviour. With it,
+`max_source_pixels` can go away entirely and every picture gets a preview.
+
+**How you would notice.** Open a directory of 100-megapixel scans in the icon
+view: they show the plain green rectangle rather than a preview, while the
+6000×4000 photographs beside them show properly. Nothing reports why.
+
+---
+
+## `TD-C-EXPLORER-DOES-ARITHMETIC-ON-UNCHECKED-VALUES` (lane C, 2026-08-26)
+
+**In short:** the file manager has 33 places where it adds, multiplies or
+subtracts without checking for overflow, and the project's own lint
+(`clippy::arithmetic_side_effects`) warns about every one of them on every
+build. Most are on values the program itself controls and are fine in practice;
+some are on numbers that came out of a file's header, which is where this kind
+of thing becomes a way to make a program misbehave with a crafted file. Nobody
+has been through them to sort the two groups.
+
+**Where it lives.** `apps/explorer/src/` — `thumbs.rs` (16 sites), `fileops.rs`
+(11), `columns.rs` (6). `cargo clippy -p explorer --all-targets` lists them all.
+The ones inside `parse_jpeg_dimensions` (`thumbs.rs` ~389–427) are the ones that
+matter most: `pos += seg_len` and the `pos + 7 > data.len()` bounds checks walk
+a JPEG's marker chain using lengths the *file* supplies, so an overflow there
+turns a bounds check into a check that passes.
+
+**Why it has not been fixed.** It predates this lane's current work and is not
+caused by it; the decoder wiring added no new sites. Fixing it well means
+deciding per site whether the right answer is `checked_*` and an early return,
+`saturating_*`, or a comment explaining why the value cannot overflow — which is
+33 small judgements, not one sweep.
+
+**What the proper fix is.** Work the list, site by site. For the JPEG parser,
+prefer `byteread`'s bounded accessors (already a dependency, already used by the
+BMP path) over hand-rolled offset arithmetic; for the layout code in
+`columns.rs`, `saturating_*` is almost always right because a widget position
+that saturates draws wrong and a widget position that wraps draws somewhere
+absurd. Where a value genuinely cannot overflow, say so in a comment rather than
+allowing the lint file-wide — a blanket `#![allow]` is what turns 33 known sites
+into an unknown number.
+
+**How you would notice.** You would not, as a user, until a malformed JPEG in a
+directory made the file manager read the wrong bytes. As a developer, every
+`cargo clippy -p explorer` prints 33 warnings, which is enough noise to hide the
+34th when someone adds it.

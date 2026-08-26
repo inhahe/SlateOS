@@ -20920,6 +20920,7 @@ fn ls_list_dir(
                 crate::fs::EntryType::Symlink => 'l',
                 crate::fs::EntryType::VolumeLabel => 'v',
                 crate::fs::EntryType::CharDevice => 'c',
+                crate::fs::EntryType::BlockDevice => 'b',
             };
 
             if let Some(Some(meta)) = metas.get(i) {
@@ -20989,6 +20990,7 @@ fn ls_list_dir(
                 crate::fs::EntryType::Symlink => "<LINK>   ",
                 crate::fs::EntryType::VolumeLabel => "<VOL>    ",
                 crate::fs::EntryType::CharDevice => "<CHR>    ",
+                crate::fs::EntryType::BlockDevice => "<BLK>    ",
             };
             let size_str = if human_sizes {
                 alloc::format!("{:>8}", format_size_human(entry.size))
@@ -21239,6 +21241,7 @@ fn cmd_stat(args: &str) {
                 crate::fs::EntryType::Symlink => "symbolic link",
                 crate::fs::EntryType::VolumeLabel => "volume label",
                 crate::fs::EntryType::CharDevice => "character special file",
+                crate::fs::EntryType::BlockDevice => "block special file",
             };
             shell_println!("  File: {}", path.display());
             shell_println!(
@@ -30880,6 +30883,7 @@ fn cmd_lsplus(args: &str) {
                     crate::fs::EntryType::Symlink => "LINK",
                     crate::fs::EntryType::VolumeLabel => "VOL ",
                     crate::fs::EntryType::CharDevice => "CHR ",
+                    crate::fs::EntryType::BlockDevice => "BLK ",
                 };
                 let size = entry.meta.as_ref().map_or(0, |m| m.size);
                 shell_println!("  {:4} {:>10} {}", type_str, size, entry.name.display());
@@ -106351,8 +106355,11 @@ fn cmd_file(args: &str) {
             }
         }
         crate::fs::EntryType::File => {
-            // Heuristic: /dev/* entries with size 0 are character specials
-            // (the VFS doesn't have a CharDevice entry type).
+            // Heuristic, and now only a fallback: devfs reports its device
+            // nodes as `CharDevice`/`BlockDevice`, which the arms below and
+            // above handle exactly. What is left here are the utility files
+            // (`/dev/null`, `/dev/zero`, …), which devfs genuinely does type
+            // as regular files and which are character specials on Linux.
             if path.starts_with("/dev/") && entry.size == 0 {
                 shell_println!("{}: character special", path.display());
             } else {
@@ -106379,6 +106386,13 @@ fn cmd_file(args: &str) {
         }
         crate::fs::EntryType::CharDevice => {
             shell_println!("{}: character special", path.display());
+        }
+        crate::fs::EntryType::BlockDevice => {
+            // The size is the whole point of naming it here: it is the one
+            // device node whose size is a real number, and `file` on a disk
+            // that reads back as 0 bytes is how you find out a driver never
+            // reported its geometry.
+            shell_println!("{}: block special, {} bytes", path.display(), entry.size);
         }
     }
 }
@@ -106880,7 +106894,10 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, tally: &mut FindT
                 crate::fs::EntryType::Directory => "/",
                 crate::fs::EntryType::Symlink => "@",
                 crate::fs::EntryType::VolumeLabel => "*",
-                crate::fs::EntryType::CharDevice => "",
+                // Neither device kind gets a suffix: `ls -F` marks what a
+                // name can be *done with* (entered, followed), and a device
+                // node is neither.
+                crate::fs::EntryType::CharDevice | crate::fs::EntryType::BlockDevice => "",
             };
             shell_println!("{}{}", child_path.display(), type_str);
             tally.matches = tally.matches.saturating_add(1);
@@ -108217,6 +108234,7 @@ fn cmd_lsp(args: &str) {
                         crate::fs::vfs::EntryType::Symlink => "LINK",
                         crate::fs::vfs::EntryType::VolumeLabel => "VOL",
                         crate::fs::vfs::EntryType::CharDevice => "CHR",
+                        crate::fs::vfs::EntryType::BlockDevice => "BLK",
                     };
                     shell_println!("{:<5} {:<8} {}", type_str, entry.size, entry.name.display(),);
                 }

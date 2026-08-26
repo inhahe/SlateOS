@@ -87223,6 +87223,339 @@ test did not.
 appears to imply. Where a claim cannot be measured, say so in the file. The two
 above cost nothing to check — one `bash -c` each — and both were wrong.
 
+## osh: a special redirection filename must re-open fd N's file, not dup fd N
+
+**Status:** fixed 2026-08-26 (found the same day while triaging
+`the-status-of-a-fatal-expansion-abort-belongs-to-whoever-caught-it`). The
+`source` half landed in `0f3dfac29`; the redirect half, and the two structural
+blind spots it exposed, are described at the end of this entry.
+
+`interp.rs::resolve_special_redirect` resolves `/dev/stdin`, `/dev/stdout`,
+`/dev/stderr` and `/dev/fd/N` into the *dup* of descriptor N, and says so:
+
+```rust
+    /// See [`special_redirect_fd`] for the names. `read` picks the input side:
+    /// `< /dev/fd/3` shares fd 3's cursor exactly like `<&3`, while
+    /// `> /dev/fd/3` writes to it like `>&3`.
+```
+
+That claim is false, and it is false on *both* hosts — so it is not one of the
+MSYS artifacts this migration has been turning up, just an unmeasured
+assumption. bash does not special-case these names at all when the host
+provides `/dev/fd` (`HAVE_DEV_FD`): it calls plain `open()` and lets the kernel
+resolve the path, which yields a **new file description positioned at 0**, not a
+second reference to the existing one. Measured, bash 5.2, glibc and MSYS
+identical, against `t2.sh` = `echo A\necho B`:
+
+```text
+                                                         bash          osh
+exec 3< t2.sh; read -u 3 l; cat < /dev/fd/3              echo A|echo B  echo B
+exec 3< t2.sh; read -u 3 l; cat <&3                      echo B         echo B
+{ read -r l; cat < /dev/stdin; } < t2.sh                 echo A|echo B  echo B
+exec 3< t2.sh; read -u 3 l; cat < /dev/fd/3 >/dev/null
+  ; read -u 3 m; echo "m=[$m]"                           m=[echo B]     m=[]
+```
+
+The last line is the half that a dup can never reproduce: after the re-open the
+shell's *own* cursor on fd 3 is exactly where `read` left it, because the two
+descriptions are independent. Under `<&3` it is at end of file (`m=[]`), which
+is what osh produces for both.
+
+The write side is wrong in the more damaging direction — `>` on a re-opened
+path carries `O_TRUNC`:
+
+```text
+exec 3> w1;  echo AAAA >&3; echo B >  /dev/fd/3; …; cat w1   bash B/          osh AAAA/B/
+exec 3>> w3; echo AAAA >&3; echo B >> /dev/fd/3; …; cat w3   bash AAAA/B/     osh AAAA/B/AAAA/B/
+```
+
+so osh keeps data that bash discards, and the append case additionally doubles
+its output.
+
+The same root cause is why `source` is wrong: `builtin_source` opens its
+operand as a *host* path (`std::fs::read(self.host_path(path))`,
+interp.rs:54582), so `/dev/stdin` reaches the process's real fd 0 rather than
+the shell's modelled one. Measured with `printf 'echo REAL\n' |` feeding the
+shell's ambient stdin:
+
+```text
+                                              bash                         osh
+source /dev/stdin < t3.sh                     THREE                        REAL
+source /dev/stdin <<< "echo A"                A                            REAL
+source /dev/stderr 2< t3.sh                   THREE                        hangs (rc=124)
+source /dev/stdout 1< t3.sh                   THREE + write error, st=1    hangs
+exec 3< t3.sh; source /dev/fd/3 3<&-          No such file or directory,1  THREE
+source /dev/stdin < dd     (dd a directory)   …: is a directory, st=1      REAL, st=0
+source /dev/stdin <&-                         No such file or directory,1  REAL, st=0
+{ read -r l; source /dev/stdin; } < t2.sh     A|B  (rewinds)               REAL
+printf 'echo A\necho B\n' | { read -r l
+  ; source /dev/stdin; }                      B    (pipe, no rewind)       REAL
+printf 'echo FROMFILE\n' > o3
+  ; source /dev/stdout >> o3                  sources it — o3 doubles      hangs
+```
+
+`/dev/fd/N` for N >= 3 is right on Linux today only by accident: Rust's first
+`File::open` tends to land on host fd 3, so the host path resolves to the same
+file. It is wrong on Windows, wrong on SlateOS, and wrong on Linux the moment
+the descriptor is closed for the command (`3<&-`).
+
+**The rule both sides need.** Opening a special filename means: find the file
+behind the shell's *modelled* descriptor N and open it afresh with the
+redirect's own mode. Consequences, all measured above:
+
+| fd N's binding | opening the special path yields |
+|---|---|
+| a seekable file | an independent description at offset 0; `>` truncates, `>>` appends |
+| a pipe | the same pipe — no rewind is possible, so reading continues |
+| a here-document / here-string | **this row was wrong** — it is a *pipe* at or below 64 KiB and a temp file above, and only the temp file rewinds. Corrected and measured in "a here-document over 64 KiB is a temp file, which `/dev/stdin` re-opens from the start", below. |
+| write-only (fd 1 over a file) | still readable — `source /dev/stdout >> f` sources `f` |
+| unbound or closed (`<&-`) | `<path>: No such file or directory`, status 1 |
+| a directory | `<path>: is a directory`, status 1 |
+
+**Fix.** One resolver used by both `resolve_special_redirect` and
+`builtin_source`, replacing the dup. The handles osh models are real host
+descriptors, so the faithful re-open is the one the kernel would do —
+`/proc/self/fd/<raw>` on Unix, `GetFinalPathNameByHandleW` + re-open on
+Windows — with `InputSrc::Bytes` re-read from index 0 for the here-document
+case and the closed/unbound/directory shapes mapped to the diagnostics above.
+Recording the origin path on the handle instead would be simpler but diverges
+for the `exec 3< f; rm f; cat < /dev/fd/3` idiom, which bash serves from the
+still-open inode.
+
+### How it was fixed
+
+`/proc/self/fd/<raw>` is not merely *a* way to re-open the descriptor's file —
+it is literally what `/dev/fd` is a symlink to, so substituting it and letting
+the ordinary open proceed **inherits** every one of the six behaviours in the
+table above rather than emulating them. `O_TRUNC`, `>>`, `set -C` having a real
+file to protect, the descriptor's access mode not constraining the redirect,
+the live inode behind an unlinked path, and the fresh offset all fall out for
+free. So the shape of the fix is *substitute the path and fall through*:
+`resolve_special_redirect` now returns a path to open, and the callers open it
+exactly as they would have opened the word the user wrote.
+
+Two consequences of that shape needed structure of their own:
+
+- **The word the user wrote is what a diagnostic must name.** `>` on a
+  protected file has to say `/dev/fd/3: cannot overwrite existing file`, never
+  `/proc/self/fd/3: …`. `noclobber_check`, `open_input_source` and
+  `open_output_target` therefore take the original word alongside the path to
+  open.
+- **`/proc/self/fd/N` names a file only while fd N is open.** Some of the
+  descriptors answered here are made on the spot — a snapshot of a pipeline
+  stage's pipe, a dup of the real stdout — so returning the path alone let the
+  handle drop at the end of the resolver and the caller's `open` fail with
+  `ENOENT`. Measured: `{ echo hi > /dev/stdout; } | sed` died exactly that way.
+  `struct Reopen { path, _keep: Option<Arc<File>> }` ties the two lifetimes
+  together.
+
+### Two blind spots the fix exposed, both now closed
+
+Neither was introduced by this change; both were latent and only became
+visible once the special names started asking the shell "what *is* fd N here?"
+in earnest.
+
+**Redirect resolution could not see the command's own stdin.** A `RedirPlan` is
+built from the redirect list alone, so when nothing in the list and no `exec`
+had touched fd 0, the resolver had nothing left to consult and fell back to the
+*process's* fd 0 — the harness's pipe, not the command's. `AmbientStdin`
+(`Process` / `Fd(InputFd)` / `Opaque`) is now recorded on the plan when it is
+built, so fd 0 resolves to what the command was actually handed. The `Opaque`
+arm — a pipeline stage's reader, which has no name and no rewind — deliberately
+falls through to the dup, because that is what bash's re-open of a pipe yields
+anyway.
+
+**The write side had the same hole, one number over, and it was worse.**
+`write_special_src` fell back to `host_reopen_path(1)` / `(2)`: the process's
+descriptors. Inside a command substitution fd 1 is a capture buffer, in a
+pipeline stage it is the stage's pipe, and a scoped `2>` lives on
+`stderr_stack` — naming `/proc/self/fd/1` walked straight past all three and
+wrote to the terminal. `x=$(echo hi > /dev/stdout)` printed `hi` and left `x`
+empty. The fix reuses `alias_write_fd(n, out)`, which already answers "what is
+fd `n` *here*" for `N>&n` and already knows about `exec_stdout_shadowing`,
+`Out::Capture`, `Out::Pipe` and `snapshot_std_fd`; fd 2 additionally consults
+`stderr_target_at`. Writing a second, parallel answer would have been the
+mistake.
+
+### Verified
+
+`tests/corpus/redirect-dev-fd.sh` was rewritten around the open-not-dup
+contract — the old file asserted the dup reading in its header *and* in a probe
+(`"and it is a dup, so noclobber has no file to protect"`), both false — and
+now probes all six differences. A 28-probe scratch suite run side by side with
+glibc bash matches on 26; the two exceptions involve no special filename at all
+and are the separate pipeline-stage-stdin defect recorded below.
+
+## osh: a `read` in a pipeline stage swallows the rest of the pipe
+
+**Status:** fixed 2026-08-26 (found the same day while verifying the
+special-redirection-filename fix; **not** caused by it — it reproduced with no
+special filename involved). The fix went wider than the one proposed below, and
+took two neighbouring defects with it — see *"What was actually done"* at the
+end. Regression case:
+`userspace/oils/tests/corpus/a-pipeline-stages-fd-0-is-an-ordinary-descriptor.sh`.
+
+After `read` consumes a line from a pipeline stage's stdin, any *later command*
+in that same stage sees EOF. Measured, bash 5.2.21 vs osh, glibc:
+
+```text
+                                                    bash        osh
+printf 'A\nB\n' | { read -r l; /bin/cat; }          B           (nothing)
+printf 'A\nB\n' | { read -r l; cat; }               B           (nothing)
+printf 'A\nB\n' | { read -r l; sed 's/^/x/'; }      xB          (nothing)
+printf 'A\nB\n' | { read -r l; head -1; }           B           (nothing)
+printf 'A\nB\nC\n' | { read -r l; /bin/cat; }       B|C         (nothing)
+printf 'P1\nP2\n' | { exec 3<&0; read -u 3 l
+  ; cat < /dev/fd/3; }                              P2          (nothing)
+```
+
+Two neighbouring cases are *right*, which localises it precisely: two
+successive `read`s work (`l=A m=B`), and so does `while read`. Both of those
+stay inside the shell. Only handing the descriptor to a **child** loses data.
+
+**Cause.** `StdinSrc::pipe` (interp.rs:3200) wraps the pipe's read end in
+`io::BufReader::new(r)` — the default 8 KiB buffer. `read_record` peeks through
+`fill_buf`, which drains up to 8 KiB of the pipe into that buffer; the child
+then inherits the raw fd (`try_clone`, interp.rs:25933) and finds it already
+empty. The bytes are not lost, they are sitting in the shell's buffer where
+nothing will ever hand them back — a pipe has no `seek` to give them back with.
+
+The shortcut is already acknowledged in a comment at the `try_clone` site
+("Bytes already buffered by an earlier in-stage `read` are not replayed — a
+rare edge case"), but `read header; cat` is not a rare idiom, and bash gets it
+right.
+
+**Fix.** The rule this needs is one osh has already written down, one type over.
+`FileInput::build` (interp.rs:2506) sizes its buffer from seekability —
+`FILE_INPUT_READAHEAD` when the descriptor can seek, **1 byte when it cannot** —
+precisely because "without it `sync` cannot give the unconsumed remainder back,
+so there must not be one." A pipe can never seek, so `StdinSrc::pipe` must use
+`io::BufReader::with_capacity(1, r)`. That is also what bash does: `zsyncfd`
+reads unseekable input one byte at a time so the descriptor is left exactly
+after the delimiter. The cost — one `read(2)` per byte for `cmd | while read` —
+is the same cost bash pays, and correctness here is the point of the exercise.
+
+`take` (mapfile) and `read_to_end` are unaffected: both consume to EOF, and
+`BufReader` overrides `read_to_end` to drain its buffer and then delegate.
+
+**What was actually done.** Shrinking the buffer would have fixed the symptom
+and left the cause, which was not the buffer size but the fact that a pipeline
+stage's fd 0 was held as a *shape of its own* — `StdinSrc::Pipe`, a
+`RefCell<BufReader<PipeReader>>` — rather than as an ordinary input descriptor.
+Three defects followed from that one fact, and only the first is the one this
+entry was filed for:
+
+1. The stranded read-ahead above.
+2. **`exec 3<&0` in a pipeline stage was a silent no-op.** The fd-0 lookup
+   (`clone_input_fd`) only knows about `InputFd`s, so it found nothing to
+   duplicate and fell back to the empty stream it gives an unbound stdin:
+   `printf 'A\nB\n' | { exec 3<&0; read -u 3 l; }` left `l` empty with rc 0
+   where bash reads `A`. The transient form `{ read -r l <&3; } 3<&0` had the
+   same hole, through `plan_stdin_fd`.
+3. **`/dev/stdin` on a pipe was answered by draining the pipe** into a byte
+   snapshot rather than re-opening the descriptor.
+
+So `StdinSrc::Pipe` was deleted outright. `StdinSrc::pipe` now builds
+`StdinSrc::Fd(file_input(pipe_reader_into_file(r)))`, i.e. an
+`InputSrc::File(FileInput)` over a pipe-derived `File` — at which point
+`FileInput::build`'s existing seekability rule supplies the one-byte buffer for
+free, a child gets a duplicate positioned where the shell is, and `/dev/stdin`
+is a genuine `/proc/self/fd` re-open. Two supporting changes fell out:
+
+* `FileInput` gained a `seekable` field and a `readable_now()`, so `read -t 0`
+  still distinguishes a seekable file (always ready) from a live descriptor
+  (must be probed) now that the distinction is no longer visible in the enum's
+  shape. `pipe_reader_readable_now(&PipeReader)` became
+  `file_readable_now(&File)`.
+* `AmbientStdin` lost its `Opaque` variant (a stage's fd 0 is an
+  `AmbientStdin::Fd` like any other) and gained a reader, `Shell::dup_input_fd`,
+  which resolves fd 0 against the ambient rather than the `exec`-installed
+  table. Both dup paths — persistent (`apply_persistent_dup_in`) and transient
+  (`plan_stdin_fd`) — go through it, which is what closes defect 2.
+
+The comment conceding the shortcut ("Bytes already buffered by an earlier
+in-stage `read` are not replayed — a rare edge case") is gone with the code it
+described.
+
+One divergence in this area remains, and is **not** part of this: osh models
+fds ≥ 3 in user space and does not pass them to children, so
+`printf 'A\nB\n' | { exec 3<&0; ls -l /proc/self/fd/3; }` still fails where
+bash succeeds. That is the separately-tracked user-space-fd-table limitation.
+
+## osh: a here-document over 64 KiB is a temp file, which `/dev/stdin` re-opens from the start
+
+**Status:** open (found 2026-08-26, same session; a corner of the
+special-redirection-filename work that was left unmatched deliberately).
+
+Since bash 5.1 a here-document is **not** always a temp file. bash writes it
+down a *pipe* when it fits in the pipe buffer and spills to a temp file only
+when it does not — and the two re-open differently, because a pipe cannot
+rewind and a file can. Measured, bash 5.2.21, with
+`{ read a; read b < /dev/stdin; echo "a=${#a} b=${#b}"; }` over a document
+whose first line is `n` bytes and whose second is `second`:
+
+```text
+document total   bash              osh
+<= 65536         b=6   (no rewind) b=6   — matches
+>  65536         b=n   (rewinds)   b=6   — diverges
+```
+
+The boundary is exact and was bisected: a total of 65536 bytes is a pipe, 65537
+is a temp file. That is the pipe capacity, not a bash constant to guess at.
+
+osh models every here-document as an `InputSrc::Bytes` snapshot and always
+continues from the cursor, so it is right below the boundary and wrong above
+it. The false comment that used to sit on the `InputSrc::Bytes` arm of
+`Shell::input_special_src` — "bash's here-documents are temp files, which a
+re-open reads from the start" — asserted the opposite of the measurement and
+has been replaced with it.
+
+**Fix.** Split on the snapshot's length at the point the re-open is resolved:
+above the pipe capacity hand back the whole buffer (a rewind), at or below it
+hand back the remainder. The threshold should be read from the host rather than
+hardcoded, since it is the pipe capacity.
+
+**Why it was not fixed with the rest.** It is a behaviour of *here-document
+storage*, not of the special filenames, and touching how here-documents are
+held is a change with its own blast radius. The measurement is recorded here so
+the fix does not have to rediscover the boundary.
+
+## osh: a shell started with fd 0 closed sees `/dev/null` there, where bash sees nothing
+
+**Status:** open, and arguably **won't fix** — recorded so it is not
+rediscovered as a defect. Found 2026-08-26.
+
+```text
+$ bash --norc -c 'read l < /dev/stdin <<< x; echo "[$l]"' <&-
+bash: /dev/stdin: No such file or directory
+[]
+$ osh  --norc -c 'read l < /dev/stdin <<< x; echo "[$l]"' <&-
+[x]
+```
+
+The cause is not in osh's code at all. Rust's standard library sanitises the
+standard descriptors before `main` runs: if fd 0, 1 or 2 is closed at `exec`,
+it opens `/dev/null` onto it, so that a program which later opens a file cannot
+have it silently become "stdout". Inspecting the fd table shows it plainly —
+with fd 0 closed at exec, bash's fd 0 is absent while osh's is `/dev/null`.
+
+Every *shell-modelled* closed descriptor is handled correctly and matches bash
+exactly, which is the case that actually occurs in scripts:
+
+```text
+{ read l < /dev/stdin; echo "[$l]"; } <&-        both: /dev/stdin: No such file or directory
+exec 0<&-; { read l < /dev/stdin; ... }          both: /dev/stdin: No such file or directory
+{ cat < /dev/stdin; } <&-; echo "st=$?"          both: … + st=1
+exec 3<&-; cat < /dev/fd/3; echo "st=$?"         both: /dev/fd/3: … + st=1
+```
+
+Only the *invocation* form — the shell process itself started with fd 0
+already closed — differs. Matching bash would mean defeating std's guard, and
+by the time `main` runs the distinction is gone: `/dev/null` on fd 0 looks the
+same whether std put it there or the caller did. Detecting it would require a
+pre-`main` constructor in `.init_array`, which trades a real safety property
+for a corner case no script can reach.
+
 ---
 
 ## `C-LOCKSCREEN-HAD-NO-WINDOW-NO-CLOCK-AND-NO-WAY-TO-CHECK-A-PASSWORD` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26
@@ -87837,6 +88170,83 @@ path and deserves its own change and its own benchmark.
 
 **Not a regression.** True since the IOAPIC device vectors were installed.
 
+### Addendum, 2026-08-26 — a choke point, and a landmine in the display side
+
+Two findings from reading the consumers before implementing. Both change the
+plan above materially, so they are recorded here rather than discovered again
+halfway through the edit.
+
+**1. Step 1 should be one call, not five.** The list above — `isr_timer`,
+`handle_device_irq`, the two IPI ISRs, `isr_spurious` — is not where the count
+belongs. `idt.rs`'s `dispatch_vector` is a single function that *every* hardware
+vector already funnels through:
+
+```rust
+extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
+    match vector {
+        32 => crate::apic::handle_timer_irq(frame_ref, 0),
+        251 => crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0),
+        252 => crate::apic::handle_reschedule_irq(frame_ref, 0),
+        255 => crate::apic::handle_spurious_irq(frame_ref, 0),
+        v @ 33..=56 => { ... crate::ioapic::handle_device_irq(irq); }
+        _ => {}
+    }
+}
+```
+
+So `count_vector(vector as usize)` at the top of it covers 32, 33–56, 251, 252
+and 255 in one line — and, more to the point, covers whatever vector is added
+next *without anyone remembering to*. This is the same argument that decided the
+block-device capability gate in `devfs`: one call at the point every caller
+passes through beats a call each caller must not forget. Prefer it. The
+five-site version in step 1 is strictly worse and should not be implemented.
+
+Note the ordering constraint that comes with it: the count must be taken
+*before* the `match`, not inside each arm, or the `_ => {}` arm — an interrupt
+on an installed-but-unhandled vector, which is exactly the event worth
+counting — stays invisible.
+
+**2. Fixing the count breaks `kshell`'s exception health line.** At
+`kernel/src/kshell.rs:123411`:
+
+```rust
+let exc_total: u64 = crate::idt::vector_counts().iter().sum();
+```
+
+printed as `"Exceptions: total="`, with a companion
+`if non_pf_exceptions > 100 { "HIGH" }` indicator. That label is accurate
+**only because nothing currently counts hardware vectors.** The moment step 1
+lands, every timer tick — millions of them — folds into a figure labelled
+"Exceptions", and the HIGH indicator pins on within the first second of uptime
+and never clears.
+
+This is the asymmetry that makes the fix one careful commit rather than a
+one-liner: the same change flips `kstat.rs:159` and `kcounters.rs:279` from
+wrong to right, and flips this line from right to wrong. `exc_total` must be
+narrowed to `vector_counts().iter().take(32).sum()` **in the same commit**, not
+in a follow-up — a commit that is correct on its own terms and leaves a
+permanently-red health indicator behind it is worse than no commit.
+
+**Also in the same blast radius**, all in `kshell.rs`:
+
+| site | what is wrong | why it matters after the fix |
+|---|---|---|
+| `cmd_irqrate` (127706) | hardcodes `for i in 0..48` | 48–56, 251, 252, 255 never print |
+| `cmd_irqrate` | `33..=47 => "Device IRQ"` | IOAPIC maps 33–**56**, so 48–56 print "Unknown" |
+| `cmd_irqrate` | `rates.rates_x10[i]` / `EXCEPTION_NAMES[i]` with `[]` | widening `VECTOR_STATS_SIZE` makes the two arrays different lengths; index them with `.get()` |
+| `cmd_exceptions` (123556) | names every `i >= 32` as just `"IRQ"` | the whole point of counting them is telling them apart |
+| `kcounters.rs:288` | `irq_counts[32]` with `[]` | fine today, but `.get(32).copied().unwrap_or(0)` costs nothing and cannot panic |
+
+`cmd_irqrate` already skips zero-rate vectors, so widening the loop will not
+flood its output — it will show exactly the vectors that are actually live.
+
+**Sizing note.** Widening `VECTOR_STATS_SIZE` 48 → 256 makes `InterruptRates`
+(`rates_x10: [u64; VECTOR_STATS_SIZE]`) a ~2 KB by-value return. Acceptable:
+`vector_rates()` is called only from a hand-run diagnostic command, never from
+an interrupt path.
+
+---
+
 ## C-NETMANAGER-HAD-NO-WINDOW-AND-NO-EVENT-HANDLER-AT-ALL (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
 
 **In short:** the Network Manager — the program you open to pick a Wi-Fi
@@ -88228,3 +88638,261 @@ which the same rework has to fix; this entry is the caller waiting on both.
 **Until then:** Export says where it wrote, Import says how many profiles it
 read and names the first failure if a block was malformed, and both refuse
 clearly (`"Cannot export: $HOME is not set"`) rather than failing silently.
+
+## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26)
+
+**In short:** `kernel/src/kcounters.rs` has two halves — a registry that
+subsystems are meant to add counters to, and a hardcoded aggregator that reads
+existing atomics directly. The registry half has **zero registrants**: nothing
+in the tree invokes `define_counter!`, so `snapshot()` returns an empty vector
+on every call and `count()` returns 0, permanently. The `counters` shell command
+concatenates that empty list onto the aggregator's real one, so it prints a
+healthy-looking table and nothing ever reveals that half the module contributes
+nothing.
+
+**The dead surface**, all in `kernel/src/kcounters.rs`, all with no callers
+anywhere in the repository:
+
+| item | line | state |
+|---|---|---|
+| `define_counter!` | 161 | never invoked; only the doc examples at 22-23 |
+| `counter_inc!` | 176 | never invoked; only the doc example at 26 |
+| `counter_add!` | 184 | never invoked; only the doc example at 29 |
+| `CounterDesc` | 50 | constructed only by `define_counter!` |
+| `register()` | 93 | `pub unsafe fn`, no callers |
+| `seal()` | 105 | no callers, so `REGISTRATION_DONE` is never set |
+| `Registry` / `MAX_COUNTERS` (64) | 47-75 | array of 64 `None`, never written |
+
+**Why it is worse than plain dead code.** `kshell.rs:124919` (`cmd_counters`)
+does:
+
+```rust
+let builtin = crate::kcounters::builtin_snapshot();   // real values
+let registered = crate::kcounters::snapshot();        // always empty
+let all = builtin.iter().chain(registered.iter()) ... // looks complete
+```
+
+`builtin_snapshot()` supplies genuine data, so the command's output is correct
+and useful — which is exactly what stops anyone noticing. The empty half is
+masked by the live half. Compare the tick-wiring gate's lesson: state that is
+never advanced shows a plausible zero rather than an obvious absence, and a
+plausible zero is not reportable by any test that only asks "did it print
+something sensible?". The command's own doc comment leads with the dead half
+("Shows all registered counters ... plus built-in counters"), which is the
+reverse of what it actually does.
+
+Note `register()` is an `unsafe fn` with a `# Safety` contract about
+single-threaded boot ordering that has never had a caller — so the contract has
+never been exercised or reviewed against a real call site.
+
+**The tree has already chosen, in writing.** `builtin_snapshot()`'s own doc
+comment (line ~197) says it pulls from subsystem atomics *"rather than requiring
+every subsystem to use our macro"*. So the bypass was a deliberate decision; what
+was not done is removing the mechanism it bypassed. That is what makes this tech
+debt rather than an open design question.
+
+**The proper fix** — delete the registry half, keeping the aggregator:
+
+1. Remove `CounterDesc`, `Registry`, `MAX_COUNTERS`, `REGISTRY`,
+   `REGISTRATION_DONE`, `register()`, `seal()`, `snapshot()`, `count()`, and the
+   three macros. This also removes two `static mut` accesses and one `unsafe fn`
+   from the kernel, which is a security-surface reduction, not just tidying.
+2. Simplify `cmd_counters` to read `builtin_snapshot()` alone and fix its doc
+   comment to describe what it does.
+3. Rewrite the module `//!` doc, whose entire usage example (lines 22-29) is of
+   the deleted API.
+
+Keeping `counter_inc!`/`counter_add!` is tempting since they are harmless
+one-liners, but they are `fetch_add(1, Relaxed)` spelled longer, and leaving two
+macros behind as the residue of a deleted subsystem invites someone to reach for
+the registry that no longer exists.
+
+**If instead the registry should live**, the fix is the opposite and larger:
+migrate the ~20 hardcoded pulls in `builtin_snapshot()` onto `define_counter!`
+and call `seal()` from boot. That is a real option — a registry scales to
+subsystems this file does not know about, whereas the aggregator must be edited
+for every new counter — but nobody has wanted it in the time the module has
+existed, and an unused generalisation that costs a `static mut` is not free.
+
+**How it was found.** Looking for real counters to project into `/proc`-style
+files (the same search that produced the `netdev` and `irqstat` entries above);
+`kcounters` looked like a rich source until the registry turned out to be empty.
+
+**Not a regression.** True since the module was written — it has never had a
+registrant.
+
+---
+
+## `A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES` (lane A, 2026-08-26)
+
+**In short:** `stat("/dev/null")` reports `S_IFREG` — a regular file — instead
+of `S_IFCHR`, a character device. Eleven of the twelve nodes at the devfs root
+are declared with `DevNode::file`, so `ls -l /dev/null` shows `-rw-rw-rw-`
+rather than `crw-rw-rw-`, and the standard shell test `[ -c /dev/null ]` is
+false. The devices *work* — reads and writes do the right thing — so nothing
+fails loudly; only the type is wrong.
+
+**The affected nodes**, all in `DEV_NODES` at `kernel/src/fs/devfs.rs:215`:
+
+| node | declared | should be |
+|---|---|---|
+| `null`, `zero`, `full`, `random`, `urandom` | `file` | `chr` |
+| `console`, `tty` | `file` | `chr` |
+| `stdin`, `stdout`, `stderr` | `file` | `chr` (Linux makes these symlinks to `/proc/self/fd/N`; `chr` is the closer of the two available answers) |
+| `kmsg` | `file` | `chr` |
+| `uptime` | `file` | **stays `file`** — it is a text file, and the only one here that genuinely is one |
+
+The nested nodes are already correct: `input/event0`, `input/event1`,
+`dri/card0`, `dri/renderD128` and the three `snd/*` are `DevNode::chr`.
+
+**The tree already knows why this matters** — it just never applied the
+reasoning at the root. `syscall/linux.rs:19852`, on the `CharDevice` arm of
+`meta_mode_bits`:
+
+```
+// The point of the variant: libinput refuses a node that is not
+// S_ISCHR, and libdrm and ALSA make the same check.
+```
+
+That is exactly the argument for `null` and `tty` as well; the variant was
+added for the device *directories* and the root nodes were left as they were.
+
+**Why it is worth fixing rather than shrugging at.** `[ -c /dev/null ]` and
+`[ -c /dev/tty ]` are ordinary idioms in configure scripts and shell libraries,
+and a program that special-cases a character device to avoid seeking, buffering
+or truncating will take the regular-file path on all eleven. The failure is
+quiet in the same way the others in this file are: the node behaves correctly
+when used, so only code that *asks what it is* gets a wrong answer, and that
+code usually responds by silently choosing a different strategy rather than by
+erroring.
+
+**Care needed — this is not a one-word change.** `EntryType` is load-bearing in
+routing, not only in `stat`:
+
+1. `Vfs::read_at_routed` page-caches only `EntryType::File` with a stable
+   inode. Retyping these to `CharDevice` removes them from the page cache —
+   which is *correct* (a device must not be cached; that is the property that
+   makes block nodes safe for verify-after-write) but it is a behaviour change
+   on the read path and needs checking, not assuming.
+2. `container.rs` merges `CharDevice | BlockDevice` into an arm that refuses
+   `read_file`, so an archive walk does not descend into a device. `/dev/null`
+   moving into that arm changes what a recursive walk does with it.
+3. `kshell`'s `ls -F`, `file`, and long-listing arms all switch on the type, as
+   does `d_type` in `getdents64`.
+4. `devfs`'s own self-tests assert entry types in several places.
+
+**The proper fix:** change the eleven declarations, leave `uptime` alone, then
+walk each of the four sites above and confirm the new routing is the intended
+one — in particular re-run the devfs and container self-tests, which is where a
+wrong answer will show up first.
+
+**How it was found.** A block-device self-test asserted that registering a disk
+named `null` could not shadow `/dev/null`, and expected the survivor to stat as
+`CharDevice`. It stats as `File`. The anti-shadowing property held; the
+expectation was wrong, and it was wrong because the node is mistyped. That rung
+now asserts "the disk did not win" instead of pinning the neighbouring value.
+
+**Not a regression.** True since devfs was written.
+
+---
+
+## `A-IRQBALANCE-CAN-NEVER-BALANCE-FOR-TWO-INDEPENDENT-REASONS` (lane A, 2026-08-26)
+
+**In short:** the interrupt balancer — `kernel/src/irqbalance.rs`, ~500 lines of
+greedy bin-packing that is supposed to spread device interrupts across CPUs —
+has never moved a single interrupt, and cannot. Its `balance()` pass takes an
+early `return` on every invocation, for **two separate reasons, either of which
+alone is sufficient.** Its self-test prints `[irqbalance] Self-test PASSED` on
+every boot.
+
+**Reason 1 — no IRQ is ever marked active.** `balance()` skips any IRQ whose
+`state.active` flag is false:
+
+```rust
+for (i, state) in IRQ_STATES.iter().enumerate() {
+    if !state.active.load(Ordering::Relaxed) { continue; }      // always taken
+```
+
+The only thing that sets that flag is `notify_irq()`, whose doc says *"call from
+ISR path"*. It has **no callers on any ISR path** — the only two calls in the
+repository are at `irqbalance.rs:465` and `:490`, both inside the module's own
+`self_test`. So the loop body never executes in production and `active_count`
+stays 0.
+
+**Reason 2 — the counts it would read are all zero.** Even with the flag set,
+the rate comes from:
+
+```rust
+let vector = i + 32;
+let current = vector_counts.get(vector).copied().unwrap_or(0);
+let delta = current.saturating_sub(last);
+if delta >= MIN_RATE_THRESHOLD  // = 10
+```
+
+`idt::vector_counts()` is only ever incremented by `count_vector()`, which is
+called exclusively from the CPU **exception** handlers. `dispatch_vector()` —
+the one function every hardware interrupt passes through — never calls it (see
+`A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS` above). So every
+vector at 32 and up reads 0 forever, `delta` is 0, and 0 is never `>= 10`.
+
+Then:
+
+```rust
+if active_count == 0 {
+    BALANCE_OPS.fetch_add(1, Ordering::Relaxed);
+    return; // Nothing to balance.
+}
+```
+
+`BALANCE_OPS` still increments, so `irqbalance` stats report a healthy and
+rising number of balance passes. Every one of them did nothing.
+
+**Why no test caught it — and it is the lesson already written down in this
+tree.** `self_test`'s Test 4 is:
+
+```rust
+assert!(!IRQ_STATES[10].active.load(Ordering::Relaxed));
+notify_irq(10);
+assert!(IRQ_STATES[10].active.load(Ordering::Relaxed));
+```
+
+It calls `notify_irq` itself and checks the flag moved. That verifies the
+setter, and is structurally incapable of detecting that nothing else in the
+kernel ever calls it. `check-tick-wiring.py`'s own failure text says this in as
+many words: *"write the regression test through handle_event, never against the
+advancing function: a test that calls tick() directly cannot tell a wired app
+from an unwired one, which is how all five of these shipped green."* This is the
+same shape one subsystem over, and it is worth noting that the existing gate
+cannot see it — that gate asks about `Event::Tick` in GUI apps specifically, not
+about kernel ISR wiring.
+
+**The proper fix**, and both halves are required — fixing one leaves the
+balancer just as dead:
+
+1. Call `count_vector(vector as usize)` at the top of `idt::dispatch_vector`,
+   and widen `VECTOR_STATS_SIZE` from 48 to 256 so vectors 251/252/255 are not
+   silently dropped by the `.get()`. This is the other known-issue entry and
+   fixes reason 2 for every consumer at once (`kstat`, `kcounters`, `irqstat`,
+   `irqrate`) because `dispatch_vector` is the single choke point.
+2. Call `irqbalance::notify_irq(irq)` from `ioapic::handle_device_irq`, which is
+   where the ISR path actually knows the IRQ number. That fixes reason 1.
+3. Then write the regression test **through the dispatch path**, not through
+   `notify_irq` — otherwise the replacement test has the same blind spot as the
+   one it replaces.
+
+**Do not "fix" this by lowering `MIN_RATE_THRESHOLD`.** The threshold is not the
+bug; it is the only thing that would stop a balancer fed real data from
+migrating an IRQ that fired twice. It becomes load-bearing the moment reason 2
+is fixed.
+
+**Open question once it works.** Nobody has ever observed this algorithm running
+against real counts, so its behaviour is entirely untested in the sense that
+matters — greedy bin-packing that migrates an interrupt every pass would be
+worse than not balancing at all. Expect to need a damping/hysteresis rule, and
+measure before trusting it.
+
+**How it was found.** Tracing the consumers of `idt::vector_counts()` while
+scoping the `dispatch_vector` counting fix; `irqbalance` turned out to be the
+consumer with real consequences rather than display ones.
+
+**Not a regression.** True since the module was written.

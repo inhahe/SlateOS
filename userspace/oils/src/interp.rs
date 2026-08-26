@@ -102,7 +102,6 @@ use bstr::ByteSlice;
 use tzrules::{Tz, TzFile, TzInfo};
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -2482,6 +2481,10 @@ struct FileInput {
     /// Whether this descriptor's OS position can be observed without going
     /// through [`FileInput::share`] — see [`FileInput::observable`].
     observable: bool,
+    /// Whether the descriptor can seek. Decides the read-ahead in
+    /// [`FileInput::build`], and answers `read -t 0`: a seekable file is always
+    /// ready, where a pipe or a terminal has to be asked.
+    seekable: bool,
 }
 
 impl FileInput {
@@ -2517,7 +2520,18 @@ impl FileInput {
             pos: 0,
             len: 0,
             observable,
+            seekable,
         }
+    }
+
+    /// `read -t 0`: would a read from this descriptor proceed without blocking?
+    ///
+    /// A seekable file is always ready — at EOF included, which is what bash
+    /// answers for an empty file. Anything else is a live object and has to be
+    /// asked: bytes already in the read-ahead count first (they are the shell's
+    /// even if the OS has handed them over), then the host probe.
+    fn readable_now(&self) -> bool {
+        self.seekable || self.pos < self.len || file_readable_now(&self.file)
     }
 
     /// Give the OS offset back the bytes this reader has read ahead but not yet
@@ -3177,16 +3191,12 @@ enum StdinSrc {
     /// Inherit the shell's real stdin.
     Inherit,
     /// Read from a shared, position-tracking open descriptor — a real file for
-    /// `< file`, a byte snapshot for a here-doc or here-string. Sharing is what
-    /// makes repeated `read` calls (`while read …; done < file`) consume
-    /// successive lines rather than restarting from the beginning, and what
-    /// makes a subshell's or a child's consumption visible afterwards.
+    /// `< file`, a byte snapshot for a here-doc or here-string, the read end of
+    /// an upstream stage's pipe. Sharing is what makes repeated `read` calls
+    /// (`while read …; done < file`) consume successive lines rather than
+    /// restarting from the beginning, and what makes a subshell's or a child's
+    /// consumption visible afterwards.
     Fd(InputFd),
-    /// Read from the read end of an OS pipe fed by a concurrent upstream stage.
-    /// Wrapped in a `BufReader`/`RefCell` so line-oriented `read` builtins can
-    /// consume successive lines from the stream (interior mutability behind the
-    /// `&StdinSrc` shared borrow, matching [`StdinSrc::Fd`]).
-    Pipe(RefCell<io::BufReader<io::PipeReader>>),
 }
 
 impl StdinSrc {
@@ -3196,24 +3206,43 @@ impl StdinSrc {
         StdinSrc::Fd(bytes_input(bytes))
     }
 
-    /// Build a source over the read end of an OS pipe.
+    /// Build a source over the read end of an OS pipe — a pipeline stage's fd 0.
+    ///
+    /// **An ordinary input descriptor, not a shape of its own.** A pipe read end
+    /// used to be held apart, as its own `BufReader`, and every difference that
+    /// followed from that was a bug:
+    ///
+    /// * `exec 3<&0` found nothing to duplicate, because the fd-0 lookup only
+    ///   knows about [`InputFd`]s. `printf 'A\nB\n' | { exec 3<&0; read -u 3 l; }`
+    ///   bound fd 3 to an empty stream where bash binds the pipe.
+    /// * A default 8 KiB read-ahead over a descriptor that cannot seek discarded
+    ///   whatever it had pulled in: `printf 'A\nB\n' | { read -r l; cat; }`
+    ///   printed nothing where bash prints `B`. [`FileInput::build`] already
+    ///   drops to a one-byte buffer for exactly this reason — read-ahead is only
+    ///   safe when the remainder can be seeked back — and bash reaches the same
+    ///   place from the same direction, `zsyncfd` reading unseekable input a byte
+    ///   at a time so the descriptor is left just past the delimiter.
+    /// * A child was handed a *fresh* clone of the read end rather than the
+    ///   shell's position, and `/dev/stdin` had to be answered by draining the
+    ///   pipe into a byte snapshot rather than re-opening it.
+    ///
+    /// As an `InputFd` all three are simply the behaviour every other input
+    /// descriptor already has.
     fn pipe(r: io::PipeReader) -> StdinSrc {
-        StdinSrc::Pipe(RefCell::new(io::BufReader::new(r)))
+        StdinSrc::Fd(file_input(pipe_reader_into_file(r)))
     }
 
     /// A second handle on the same input, for a reader that outlives this one —
     /// the counterpart of [`Out::share`].
     ///
     /// A background job that inherits fd 0 keeps reading after the command that
-    /// started it has returned, so it needs a handle it can own. An open
-    /// descriptor is shared outright (both parties advance one offset, as two
-    /// processes sharing an fd do); a pipe's read end is duplicated, which is
-    /// literally what `fork` does to it.
+    /// started it has returned, so it needs a handle it can own. The descriptor
+    /// is shared outright: both parties advance one position, as two processes
+    /// sharing an open file description do.
     fn share(&self) -> io::Result<StdinSrc> {
         Ok(match self {
             StdinSrc::Inherit => StdinSrc::Inherit,
             StdinSrc::Fd(c) => StdinSrc::Fd(Arc::clone(c)),
-            StdinSrc::Pipe(r) => StdinSrc::pipe(r.borrow().get_ref().try_clone()?),
         })
     }
 }
@@ -9980,12 +10009,16 @@ impl Shell {
     ///
     /// The result is an owned [`HeadIn`] (`None` meaning "inherit").
     ///
-    /// A **real file** is handed over as a duplicate descriptor, which is what
-    /// bash's fork does: the stage shares the shell's open file description, so
+    /// A **real descriptor** — a file, or the read end of an enclosing
+    /// pipeline's pipe — is handed over as a duplicate, which is what bash's
+    /// fork does: the stage shares the shell's open file description, so
     /// `{ head -n 1 | cat; head -n 1; } < f` prints the first two lines rather
-    /// than the first one twice. A **snapshot** has no descriptor to duplicate,
-    /// so its remaining bytes are pushed down a fresh OS pipe by a short-lived
-    /// writer thread — a thread rather than an inline `write_all` because the
+    /// than the first one twice, and the duplicate is positioned where the shell
+    /// is, so an unbounded upstream like `yes` streams rather than being drained.
+    ///
+    /// A **snapshot** has no descriptor to duplicate, so its remaining bytes are
+    /// pushed down a fresh OS pipe by a short-lived writer thread — a thread
+    /// rather than an inline `write_all` because the
     /// bytes can exceed the pipe buffer, which would deadlock against a reader
     /// that has not started yet. Draining it advances the source, so a later
     /// `read` in the enclosing command does not replay those bytes.
@@ -9998,17 +10031,6 @@ impl Shell {
     /// script's own input rather than `f`. Only a genuinely unbound fd 0 is
     /// `None`, and that is the case `Stdio::inherit()` is right for.
     fn pipeline_head_stdin(&mut self, stdin: &StdinSrc) -> Option<HeadIn> {
-        // A clone of the read end, so the head stage streams rather than
-        // buffering (an unbounded upstream like `yes` must not be drained).
-        if let StdinSrc::Pipe(r) = stdin {
-            return match r.borrow().get_ref().try_clone() {
-                Ok(rp) => Some(HeadIn::Pipe(rp)),
-                Err(e) => {
-                    self.perrln(&format!("pipe: {e}"));
-                    None
-                }
-            };
-        }
         let cursor = match stdin {
             StdinSrc::Fd(c) => Some(Arc::clone(c)),
             _ => self.exec_stdin.as_ref().map(Arc::clone),
@@ -12120,7 +12142,7 @@ impl Shell {
         } else {
             VarfdScope::Command
         };
-        let plan = match self.resolve_redirect_list(redirects, out, scope) {
+        let plan = match self.resolve_redirect_list(redirects, out, scope, stdin) {
             Ok(p) => p,
             Err(fail) => {
                 // A fatal expansion error in one of the words is not a
@@ -20977,7 +20999,7 @@ impl Shell {
             // effects and error status match bash. A redirect failure overrides
             // the assignment's status but does not undo the assignment itself.
             if !sc.redirects.is_empty() {
-                match self.resolve_null_redirects(&sc.redirects, out) {
+                match self.resolve_null_redirects(&sc.redirects, out, stdin) {
                     // Resolution itself created/truncated every output target,
                     // so a null command needs nothing further here.
                     Ok(_) => {}
@@ -21137,7 +21159,7 @@ impl Shell {
         // (`exec cmd …`, and the rare `command exec`/`builtin exec` re-dispatch,
         // still go through the plan-based path below.)
         if argv.len() == 1 && argv[0] == b"exec" && !sc.redirects.is_empty() {
-            let rc = self.apply_exec_redirects(&sc.redirects, out);
+            let rc = self.apply_exec_redirects(&sc.redirects, out, stdin);
             // `exec` redirects the shell itself, so a fatal expansion error in
             // one of the words leaves no child to confine it to: the shell dies
             // and the redirects after it are never reached.
@@ -21155,7 +21177,7 @@ impl Shell {
         }
 
         // Resolve redirections (targets are expanded now).
-        let redir = match self.resolve_redirects(&sc.redirects, out) {
+        let redir = match self.resolve_redirects(&sc.redirects, out, stdin) {
             Ok(r) => r,
             Err(fail) if fail.fatal => {
                 // Not a redirection failure but a fatal expansion error, which
@@ -21523,7 +21545,7 @@ impl Shell {
         let flow = if trap_exit.is_some() || entry_refused {
             Flow::Next
         } else if let Some(rs) = self.func_redirects.get(name).cloned() {
-            match self.resolve_redirects(&rs, out) {
+            match self.resolve_redirects(&rs, out, stdin) {
                 Ok(plan) => self
                     .exec_with_redirects(plan, out, stdin, |sh, o, s| sh.exec_program(&body, o, s)),
                 // A fatal expansion error in one of those words kills the shell:
@@ -24096,7 +24118,6 @@ impl Shell {
                 (Some(c), _) => Some(c),
                 (None, StdinSrc::Fd(c)) => Some(c),
                 (None, StdinSrc::Inherit) => self.exec_stdin.as_ref(),
-                (None, StdinSrc::Pipe(_)) => None,
             };
             match src {
                 Some(c) => match child_input(c) {
@@ -24118,28 +24139,10 @@ impl Shell {
                         closed = ClosedStd::STDIN;
                     }
                 },
-                None => match stdin {
-                    StdinSrc::Inherit | StdinSrc::Fd(_) => {
-                        cmd.stdin(Stdio::inherit());
-                    }
-                    StdinSrc::Pipe(r) => {
-                        // Hand the child a live clone of the upstream pipe read
-                        // end so it streams (buffering would deadlock an
-                        // unbounded producer like `yes`). Bytes already buffered
-                        // by an earlier in-stage `read` are not replayed — a rare
-                        // edge case (mixing `read` and an external in one stage).
-                        match r.borrow().get_ref().try_clone() {
-                            Ok(rp) => {
-                                cmd.stdin(Stdio::from(rp));
-                            }
-                            Err(e) => {
-                                self.perrln(&format!("pipe: {e}"));
-                                self.last_status = 1;
-                                return;
-                            }
-                        }
-                    }
-                },
+                // Nothing bound fd 0 at all, so the child inherits the shell's.
+                None => {
+                    cmd.stdin(Stdio::inherit());
+                }
             }
         }
 
@@ -25217,8 +25220,9 @@ impl Shell {
         r: &Redirect,
         fd: i32,
         out: &Out,
+        ambient: &AmbientStdin,
     ) -> Result<PersistentBind, Str> {
-        self.apply_persistent_redirect_inner(r, fd, out)
+        self.apply_persistent_redirect_inner(r, fd, out, ambient)
             .map_err(|e| varfd_error_subject(r, e))
     }
 
@@ -25231,6 +25235,7 @@ impl Shell {
         r: &Redirect,
         fd: i32,
         out: &Out,
+        ambient: &AmbientStdin,
     ) -> Result<PersistentBind, Str> {
         /// Expand a persistent redirect's *filename* target.
         ///
@@ -25257,12 +25262,17 @@ impl Shell {
         match r.op {
             RedirectOp::Read => {
                 let path = target!();
+                // `exec 3< /dev/fd/4`: an open of fd 4's file at a fresh offset,
+                // not a dup of fd 4 — see [`Shell::resolve_special_redirect`].
+                let mut open = Reopen::borrowed(path.clone());
                 if let Some(n) = special_redirect_fd(&path) {
-                    return self
-                        .persistent_special_dup(fd, &path, n, true, out)
-                        .map(|()| PersistentBind::Bound);
+                    match self.persistent_special_dup(fd, &path, n, true, out, ambient)? {
+                        SpecialRedirect::Duplicated => return Ok(PersistentBind::Bound),
+                        SpecialRedirect::Reopen(p) => open = p,
+                        SpecialRedirect::NotSpecial => {}
+                    }
                 }
-                let f = self.open_input_source(&path)?;
+                let f = self.open_input_source(&open.path, &path)?;
                 if fd == 0 {
                     self.exec_stdin = Some(f);
                     // `exec 0< f` reopens fd 0 read-only, dropping any write
@@ -25291,12 +25301,15 @@ impl Shell {
                 // file if absent, never truncate. Both halves are duplicates of
                 // the one open, so they share an OS file offset.
                 let path = target!();
+                let mut open = Reopen::borrowed(path.clone());
                 if let Some(n) = special_redirect_fd(&path) {
-                    return self
-                        .persistent_special_dup(fd, &path, n, fd == 0, out)
-                        .map(|()| PersistentBind::Bound);
+                    match self.persistent_special_dup(fd, &path, n, fd == 0, out, ambient)? {
+                        SpecialRedirect::Duplicated => return Ok(PersistentBind::Bound),
+                        SpecialRedirect::Reopen(p) => open = p,
+                        SpecialRedirect::NotSpecial => {}
+                    }
                 }
-                let (rd, wr) = open_rw_pair(&self.cwd, &path)
+                let (rd, wr) = open_rw_pair(&self.cwd, &open.path)
                     .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
                 // Every descriptor keeps *both* halves — one open, two
                 // duplicates, one shared offset — so `exec 0<> f; read a;
@@ -25343,13 +25356,16 @@ impl Shell {
             RedirectOp::WriteBoth | RedirectOp::AppendBoth => {
                 let target = target!();
                 let append = matches!(r.op, RedirectOp::AppendBoth);
+                let mut open = Reopen::borrowed(target.clone());
                 if let Some(n) = special_redirect_fd(&target) {
-                    return self
-                        .persistent_special_dup(fd, &target, n, false, out)
-                        .map(|()| PersistentBind::Bound);
+                    match self.persistent_special_dup(fd, &target, n, false, out, ambient)? {
+                        SpecialRedirect::Duplicated => return Ok(PersistentBind::Bound),
+                        SpecialRedirect::Reopen(p) => open = p,
+                        SpecialRedirect::NotSpecial => {}
+                    }
                 }
-                self.noclobber_check(&target, !append)?;
-                let f = open_out(&self.cwd, &target, append)
+                self.noclobber_check(&open.path, &target, !append)?;
+                let f = open_out(&self.cwd, &open.path, append)
                     .map_err(|e| bfmt![&target, b": ", io_error_message(&e)])?;
                 // `&> file` = `> file 2>&1`: fd 1 and fd 2 share one handle, and
                 // both lose whatever read half an earlier `exec 1< f` gave them.
@@ -25362,14 +25378,18 @@ impl Shell {
             RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                 let target = target!();
                 let append = matches!(r.op, RedirectOp::Append);
-                // A dup, not an open — so noclobber has no file to protect.
+                // An open of the descriptor's file, carrying `O_TRUNC` like any
+                // other `>` — so noclobber has a file to protect after all.
+                let mut open = Reopen::borrowed(target.clone());
                 if let Some(n) = special_redirect_fd(&target) {
-                    return self
-                        .persistent_special_dup(fd, &target, n, false, out)
-                        .map(|()| PersistentBind::Bound);
+                    match self.persistent_special_dup(fd, &target, n, false, out, ambient)? {
+                        SpecialRedirect::Duplicated => return Ok(PersistentBind::Bound),
+                        SpecialRedirect::Reopen(p) => open = p,
+                        SpecialRedirect::NotSpecial => {}
+                    }
                 }
-                self.noclobber_check(&target, matches!(r.op, RedirectOp::Write))?;
-                let f = open_out(&self.cwd, &target, append)
+                self.noclobber_check(&open.path, &target, matches!(r.op, RedirectOp::Write))?;
+                let f = open_out(&self.cwd, &open.path, append)
                     .map_err(|e| bfmt![&target, b": ", io_error_message(&e)])?;
                 let a = std::sync::Arc::new(f);
                 match fd {
@@ -25428,7 +25448,7 @@ impl Shell {
                 }
                 let Some(target) = expanded else {
                     return self
-                        .persistent_dup(&origin, fd, b"-", input, out)
+                        .persistent_dup(&origin, fd, b"-", input, out, ambient)
                         .map(|()| PersistentBind::Bound);
                 };
                 // A varfd dup saves the source to allocate the variable's own
@@ -25447,12 +25467,12 @@ impl Shell {
                     DupSaveNote::None
                 };
                 self.dup_save_note = Self::dup_save_note_for(&target, kind);
-                self.persistent_dup(&origin, fd, &target, input, out)?;
+                self.persistent_dup(&origin, fd, &target, input, out, ambient)?;
                 if moved.is_some()
                     && let DupWord::Fd(n) = Self::classify_dup_word(&target)
                     && n != fd
                 {
-                    self.persistent_dup(&origin, n, b"-", input, out)?;
+                    self.persistent_dup(&origin, n, b"-", input, out, ambient)?;
                 }
             }
         }
@@ -25470,11 +25490,12 @@ impl Shell {
         target: BStr<'_>,
         input: bool,
         out: &Out,
+        ambient: &AmbientStdin,
     ) -> Result<(), Str> {
         if input {
-            self.apply_persistent_dup_in(origin, fd, target, out)
+            self.apply_persistent_dup_in(origin, fd, target, out, ambient)
         } else {
-            self.apply_persistent_dup_out(origin, fd, target, out)
+            self.apply_persistent_dup_out(origin, fd, target, out, ambient)
         }
     }
 
@@ -25488,27 +25509,52 @@ impl Shell {
     /// `false`.
     ///
     /// Only a *regular* file is protected — `set -C; echo hi > /dev/null`
-    /// succeeds — and callers must resolve the special filenames
-    /// (`/dev/stdout`, `/dev/fd/N`) *before* this, because those are dups rather
-    /// than opens and so have no file for noclobber to guard.
-    fn noclobber_check(&self, target: BStr<'_>, truncating: bool) -> Result<(), Str> {
+    /// succeeds, and so does a `/dev/stdout` that is a pipe or a terminal.
+    ///
+    /// The check tests `target` but names `word` in the diagnostic. The two
+    /// differ only for a special redirection filename, which callers resolve
+    /// *before* this: it opens the file behind a descriptor, so there is a real
+    /// file to guard and it is not the word that names it. Measured —
+    /// `exec 3> n1; echo AAAA >&3; set -C; echo B > /dev/fd/3` is refused with
+    /// "/dev/fd/3: cannot overwrite existing file", `n1` being the file there is
+    /// to protect and `/dev/fd/3` the word to say it about.
+    fn noclobber_check(
+        &self,
+        target: BStr<'_>,
+        word: BStr<'_>,
+        truncating: bool,
+    ) -> Result<(), Str> {
         if truncating
             && self.noclobber
             && bytes::bytes_to_path(&self.host_path(target))
                 .metadata()
                 .is_ok_and(|m| m.is_file())
         {
-            return Err(bfmt![target, b": cannot overwrite existing file"]);
+            return Err(bfmt![word, b": cannot overwrite existing file"]);
         }
         Ok(())
     }
 
-    /// Apply a bash *special redirection filename* (`path`, naming descriptor
-    /// `n` — see [`special_redirect_fd`]) to the persistent fd table, as the dup
-    /// it stands for. `exec` walks the raw redirects rather than a [`RedirPlan`]
-    /// (order matters there), so it needs its own translation; the transient
-    /// path's is [`Shell::resolve_special_redirect`], which also explains why a
-    /// missing descriptor is reported against the path rather than the number.
+    /// [`Shell::plan_special_src`] against the shell's *persistent* fd table.
+    ///
+    /// `exec` walks the raw redirects rather than a [`RedirPlan`] — order
+    /// matters there — so the state a descriptor is in "at this point in the
+    /// list" is simply the shell's own, which is what an empty plan asks for.
+    /// The one thing the shell's own state does not hold is fd 0 when the
+    /// command was handed one (a pipeline stage's pipe), hence `ambient`.
+    fn exec_special_src(&self, n: i32, ambient: &AmbientStdin, out: &Out) -> SpecialSrc {
+        let mut plan = RedirPlan {
+            ambient_stdin: ambient.clone(),
+            ..RedirPlan::default()
+        };
+        self.plan_special_src(&mut plan, n, out)
+    }
+
+    /// Resolve a bash *special redirection filename* (`path`, naming descriptor
+    /// `n` — see [`special_redirect_fd`]) for `exec`. The transient path's
+    /// equivalent is [`Shell::resolve_special_redirect`], which explains both
+    /// why the answer is a path to *open* and why a missing descriptor is
+    /// reported against the path rather than the number.
     fn persistent_special_dup(
         &mut self,
         fd: i32,
@@ -25516,14 +25562,21 @@ impl Shell {
         n: i32,
         read: bool,
         out: &Out,
-    ) -> Result<(), Str> {
+        ambient: &AmbientStdin,
+    ) -> Result<SpecialRedirect, Str> {
+        match self.exec_special_src(n, ambient, out) {
+            SpecialSrc::Host(p) => return Ok(SpecialRedirect::Reopen(p)),
+            SpecialSrc::Closed => return Err(bfmt![path, b": No such file or directory"]),
+            SpecialSrc::Bytes(_) | SpecialSrc::Unavailable => {}
+        }
         let n = n.to_string().into_bytes();
         let res = if read {
-            self.apply_persistent_dup_in(&DupOrigin::SpecialPath, fd, &n, out)
+            self.apply_persistent_dup_in(&DupOrigin::SpecialPath, fd, &n, out, ambient)
         } else {
-            self.apply_persistent_dup_out(&DupOrigin::SpecialPath, fd, &n, out)
+            self.apply_persistent_dup_out(&DupOrigin::SpecialPath, fd, &n, out, ambient)
         };
-        res.map_err(|_| bfmt![path, b": No such file or directory"])
+        res.map(|()| SpecialRedirect::Duplicated)
+            .map_err(|_| bfmt![path, b": No such file or directory"])
     }
 
     /// Point persistent fd `fd` at output descriptor `target` (`exec M>&N`,
@@ -25540,6 +25593,7 @@ impl Shell {
         fd: i32,
         target: BStr<'_>,
         out: &Out,
+        ambient: &AmbientStdin,
     ) -> Result<(), Str> {
         match Self::classify_dup_word(target) {
             DupWord::Close => {
@@ -25579,7 +25633,7 @@ impl Shell {
                     // readable as well as writable, and `exec 0< f; exec 1>&0`
                     // leaves it readable and not writable.
                     1 | 2 => {
-                        let rd = self.exec_dup_read_half(n);
+                        let rd = self.exec_dup_read_half(n, ambient);
                         self.set_std_read_half(fd, Some(rd));
                         self.set_std_write_half(fd, src);
                     }
@@ -25600,7 +25654,7 @@ impl Shell {
                         // `exec 3< file; exec 4>&3` leaves fd 4 readable, and
                         // sharing fd 3's cursor — see [`ExtraFdOp::AliasFd`],
                         // which says the same for the transient path.
-                        let rd = self.exec_dup_read_half(n);
+                        let rd = self.exec_dup_read_half(n, ambient);
                         self.open_fds.insert(fd, rd);
                         self.coproc_read_fds.remove(&fd);
                     }
@@ -25610,13 +25664,18 @@ impl Shell {
                 // `exec >&file` (and `1>&$f`): both streams to the file. bash
                 // gets here by rewriting the instruction to `r_err_and_out`
                 // once the word is expanded, so from this point on it *is* the
-                // `&>` arm above — including the special filenames, which are
-                // dups rather than opens (`exec >& /dev/stderr`).
+                // `&>` arm above — including the special filenames, which open
+                // the descriptor's own file (`exec >& /dev/stderr`).
+                let mut open = Reopen::borrowed(target.to_vec());
                 if let Some(n) = special_redirect_fd(target) {
-                    return self.persistent_special_dup(fd, target, n, false, out);
+                    match self.persistent_special_dup(fd, target, n, false, out, ambient)? {
+                        SpecialRedirect::Duplicated => return Ok(()),
+                        SpecialRedirect::Reopen(p) => open = p,
+                        SpecialRedirect::NotSpecial => {}
+                    }
                 }
-                self.noclobber_check(target, true)?;
-                let f = open_out(&self.cwd, target, false)
+                self.noclobber_check(&open.path, target, true)?;
+                let f = open_out(&self.cwd, &open.path, false)
                     .map_err(|e| bfmt![target, b": ", io_error_message(&e)])?;
                 let a = WriteFd::File(std::sync::Arc::new(f));
                 self.exec_stdout = Some(a.clone());
@@ -25643,6 +25702,7 @@ impl Shell {
         fd: i32,
         target: BStr<'_>,
         out: &Out,
+        ambient: &AmbientStdin,
     ) -> Result<(), Str> {
         match Self::classify_dup_word(target) {
             DupWord::Close => {
@@ -25662,7 +25722,8 @@ impl Shell {
             // `exec 8< /dev/fd/8` is an open, so fd 8 must be there — but the
             // dup it stands for would still leave fd 8 exactly as it was.
             DupWord::Fd(n) if n == fd => {
-                if !self.coproc_read_fds.contains_key(&n) && self.clone_input_fd(n).is_none() {
+                if !self.coproc_read_fds.contains_key(&n) && self.dup_input_fd(n, ambient).is_none()
+                {
                     return Err(bfmt![
                         Self::dup_subject(origin, fd, 0, target),
                         b": Bad file descriptor"
@@ -25695,7 +25756,7 @@ impl Shell {
                 // names a write-only source, and bash makes that dup and lets
                 // the read through fd 3 fail. Only a descriptor with no half at
                 // all is refused here.
-                let read_half = self.clone_input_fd(n);
+                let read_half = self.dup_input_fd(n, ambient);
                 let write_half = self.exec_dup_source(n, out);
                 if read_half.is_none() && write_half.is_err() {
                     return Err(bfmt![
@@ -25762,8 +25823,9 @@ impl Shell {
     /// It does not answer whether fd `n` is open — [`Shell::exec_dup_source`]
     /// does, for both halves at once, and a source with neither is the one a
     /// dup is refused for.
-    fn exec_dup_read_half(&self, n: i32) -> InputFd {
-        self.clone_input_fd(n).unwrap_or_else(write_only_input)
+    fn exec_dup_read_half(&self, n: i32, ambient: &AmbientStdin) -> InputFd {
+        self.dup_input_fd(n, ambient)
+            .unwrap_or_else(write_only_input)
     }
 
     /// Bind — or unbind — the *read* half of standard write descriptor `fd`
@@ -25799,6 +25861,32 @@ impl Shell {
         }
     }
 
+    /// [`Shell::clone_input_fd`] with fd 0 resolved against the descriptor the
+    /// *command* was handed, which is what a `<&0` actually duplicates.
+    ///
+    /// The shell's own fd table does not hold a pipeline stage's fd 0: the
+    /// stage's input arrives as a [`StdinSrc`], not as an `exec`-installed
+    /// descriptor, so `clone_input_fd(0)` finds nothing and falls back to the
+    /// empty stream it gives an unbound stdin. Both dup paths were wrong for it
+    /// — `printf 'A\nB\n' | { exec 3<&0; read -u 3 l; }` and the same written
+    /// `{ read -r l <&3; } 3<&0` each bound fd 3 to nothing at all, a silent
+    /// no-op where bash duplicates the pipe. [`AmbientStdin`] is the missing
+    /// piece, and both paths already carry one.
+    fn dup_input_fd(&self, n: i32, ambient: &AmbientStdin) -> Option<InputFd> {
+        if n == 0
+            && self.exec_stdin.is_none()
+            && let AmbientStdin::Fd(c) = ambient
+        {
+            // A closed ambient fd 0 is not a descriptor to dup *from*, the same
+            // rule `clone_input_fd` applies to an `exec 0<&-`.
+            return match &*lock_input(c) {
+                InputSrc::Closed => None,
+                _ => Some(Arc::clone(c)),
+            };
+        }
+        self.clone_input_fd(n)
+    }
+
     /// Resolve input fd `n`'s current source for an input dup (`M<&N`). fd 0
     /// resolves to `exec_stdin` (falling back to an empty stream), fds ≥ 3 to
     /// the `open_fds` table. `None` for an unbound descriptor — the caller owns
@@ -25807,6 +25895,9 @@ impl Shell {
     ///
     /// The source is *shared*, not copied: a dup names one open file
     /// description, so reading through either descriptor advances both.
+    ///
+    /// A `<&0` wants [`Shell::dup_input_fd`] instead — this one cannot see the
+    /// fd 0 a *command* was handed, only the one an `exec` installed.
     fn clone_input_fd(&self, n: i32) -> Option<InputFd> {
         let cur = if n == 0 {
             self.exec_stdin.as_ref()
@@ -25824,6 +25915,294 @@ impl Shell {
             // of it does not error (bash's stdin would be the terminal).
             None if n == 0 => Some(bytes_input(Vec::new())),
             None => None,
+        }
+    }
+
+    /// The source behind one of the four special redirection filenames, for a
+    /// builtin that must *read* through it — see [`host_reopen_path`] for why
+    /// this is an open of fd `n`'s file and not a dup of fd `n`.
+    ///
+    /// The descriptor is the shell's *modelled* one, not the process's: what
+    /// `source /dev/stdin` reads is the fd 0 this very command was given, so
+    /// `source /dev/stdin <<< 'echo hi'` reads the here-string. Opening the host
+    /// path instead — which is what `source` did — reaches the process's real
+    /// fd 0, a different descriptor in every case where the two differ, and on
+    /// a `/dev/stdout` whose fd 1 is the harness's pipe it does not return.
+    fn special_read_src(
+        &self,
+        n: i32,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+        out: &Out,
+    ) -> SpecialSrc {
+        match n {
+            // fd 0 is whatever *this command's own* redirects made it, which is
+            // the walk [`Shell::read_records`] does and not simply `stdin`: a
+            // here-document is staged on the plan, so consulting `stdin` alone
+            // finds the shell's ambient input and sources that instead — which
+            // is the very bug this method exists to fix, one level in.
+            0 => {
+                if let Some(m) = redir.stdin_from_fd {
+                    // `source /dev/stdin <&3`: fd 0 is fd 3's description under
+                    // another name. A coproc's is a pipe with no file behind it.
+                    return if m == 0 || self.coproc_read_fds.contains_key(&m) {
+                        SpecialSrc::Unavailable
+                    } else {
+                        self.special_read_src(m, stdin, redir, out)
+                    };
+                }
+                if let Some(data) = &redir.stdin_data {
+                    return SpecialSrc::Bytes(data.clone());
+                }
+                if let Some(c) = &redir.stdin {
+                    return self.input_special_src(&lock_input(c), n, redir, out);
+                }
+                match stdin {
+                    // A pipeline stage's fd 0 is an ordinary descriptor here
+                    // too, and re-opening it through `/proc/self/fd` is the
+                    // right answer for one: a pipe re-opens as the same pipe,
+                    // with no rewind. Measured: `printf 'echo A\necho B\n' | {
+                    // read -r l; source /dev/stdin; }` prints `B` in bash, where
+                    // the same over a seekable fd 0 prints both lines.
+                    StdinSrc::Fd(c) => self.input_special_src(&lock_input(c), n, redir, out),
+                    StdinSrc::Inherit => match &self.exec_stdin {
+                        Some(cur) => self.input_special_src(&lock_input(cur), n, redir, out),
+                        // Nothing redirected it, so the shell's fd 0 *is* the
+                        // process's, and the kernel's name for it is the answer.
+                        None => match host_reopen_path(0) {
+                            Some(p) => SpecialSrc::Host(Reopen::borrowed(p)),
+                            None => SpecialSrc::Unavailable,
+                        },
+                    },
+                }
+            }
+            1 | 2 => {
+                let read = self.std_read_half(redir, n);
+                match self.input_special_src(&lock_input(&read), n, redir, out) {
+                    // The ordinary shape: a standard *write* descriptor has no
+                    // read half, so the file is named by the sink.
+                    SpecialSrc::Unavailable => self.write_special_src(n, redir, out),
+                    got => got,
+                }
+            }
+            _ => match self.plan_input_fd(redir, n) {
+                Some(c) => self.input_special_src(&lock_input(&c), n, redir, out),
+                // Not an open descriptor at all. bash opens the *path*, so the
+                // kernel's answer is `ENOENT` and not the `EBADF` a dup gives:
+                // `exec 3< f; source /dev/fd/3 3<&-` is
+                // `/dev/fd/3: No such file or directory`.
+                None => SpecialSrc::Closed,
+            },
+        }
+    }
+
+    /// [`Shell::special_read_src`] for a descriptor's read half.
+    fn input_special_src(
+        &self,
+        src: &InputSrc,
+        n: i32,
+        redir: &RedirPlan,
+        out: &Out,
+    ) -> SpecialSrc {
+        match src {
+            InputSrc::File(fi) => Self::handle_special_src(&fi.file),
+            // A snapshot has no file to re-open, so the bytes *are* the answer.
+            //
+            // Do not read "bash's here-documents are temp files, so this reads
+            // from the start" into that — it was written here as an assumption
+            // and it is wrong. Since bash 5.1 a here-document is written down a
+            // *pipe* when it fits in the pipe buffer and spills to a temp file
+            // only when it does not, and the two rewind differently. Measured,
+            // bash 5.2.21, `{ read a; read b < /dev/stdin; }` over a document
+            // of `n` bytes: n <= 65536 gives `b` the *second* line (a pipe
+            // cannot rewind), n > 65536 gives `b` the *first* one again. osh
+            // has no such split and always continues; see the known-issues
+            // entry "a here-document over 64 KiB is a temp file, which
+            // /dev/stdin re-opens from the start".
+            InputSrc::Bytes(c) => SpecialSrc::Bytes(c.get_ref().clone()),
+            InputSrc::Closed => SpecialSrc::Closed,
+            // Open, but with no read half — the file is still there to be
+            // opened, and the access mode of the descriptor does not enter into
+            // it: `exec 3> f; cat < /dev/fd/3` reads `f` in bash.
+            InputSrc::WriteOnly => self.write_special_src(n, redir, out),
+            InputSrc::Directory(h) => match h.as_ref().and_then(file_reopen_path) {
+                Some(p) => SpecialSrc::Host(Reopen::borrowed(p)),
+                // The host would not give a handle (Win32 refuses a directory
+                // without `FILE_FLAG_BACKUP_SEMANTICS`), so there is no path to
+                // re-open — but the answer is not in doubt.
+                None => SpecialSrc::Unavailable,
+            },
+        }
+    }
+
+    /// [`Shell::special_read_src`] for a descriptor's write half — the file is
+    /// the same one either half names, and the access mode of the descriptor
+    /// does not enter into which of them can name it.
+    fn write_special_src(&self, n: i32, redir: &RedirPlan, out: &Out) -> SpecialSrc {
+        self.write_special_src_via(n, redir, out, 0)
+    }
+
+    /// [`Shell::write_special_src`], carrying the number of `>&` hops already
+    /// followed so a plan that dups in a circle terminates.
+    fn write_special_src_via(&self, n: i32, redir: &RedirPlan, out: &Out, hops: u32) -> SpecialSrc {
+        // A `3>&1 1>&3` pair cannot arise from a well-formed list, but the plan
+        // is order-free and nothing here proves it; bound the walk rather than
+        // rely on that.
+        if hops > MAX_SPECIAL_DUP_HOPS {
+            return SpecialSrc::Unavailable;
+        }
+        // What *this* redirect list bound fd `n` to, before what an `exec`
+        // installed — the same precedence [`Shell::plan_input_fd`] applies to
+        // the read half, and for the same reason: the list is resolved left to
+        // right and its last mention of a descriptor wins.
+        if n >= 3
+            && let Some(op) = redir.extra_fds.iter().rev().find(|(f, _)| *f == n)
+        {
+            return match &op.1 {
+                ExtraFdOp::OutputFile(h) | ExtraFdOp::ReadWrite(_, h) => {
+                    Self::handle_special_src(h)
+                }
+                // A dup names its source's file, whichever half holds it.
+                ExtraFdOp::AliasFd { src, .. } => {
+                    self.write_special_src_via(*src, redir, out, hops + 1)
+                }
+                ExtraFdOp::Close => SpecialSrc::Closed,
+                // Read-only, so the read half already answered and this is
+                // only reached when it could not.
+                _ => SpecialSrc::Unavailable,
+            };
+        }
+        if n == 1 || n == 2 {
+            let (closed, to_fd, follow, handle) = if n == 1 {
+                let follow = redir.stdout_to_stderr.then_some(2);
+                (
+                    redir.stdout_closed,
+                    redir.stdout_to_fd,
+                    follow,
+                    redir.stdout_write.as_ref(),
+                )
+            } else {
+                let follow = redir.stderr_to_stdout.then_some(1);
+                (
+                    redir.stderr_closed,
+                    redir.stderr_to_fd,
+                    follow,
+                    redir.stderr_write.as_ref(),
+                )
+            };
+            if closed {
+                return SpecialSrc::Closed;
+            }
+            // The handle this list opened for the fd, which is the description
+            // bash would be re-opening through — and, for a `>`, one that has
+            // *already truncated* by the time a builtin's body asks. That is
+            // what makes bash's two answers differ: `source /dev/stdout > o1`
+            // sources nothing because `>` emptied `o1` first, while
+            // `source /dev/stdout >> o3` sources `o3` and then appends to it.
+            if let Some(h) = handle {
+                return Self::handle_special_src(h);
+            }
+            if let Some(m) = to_fd.or(follow) {
+                return self.write_special_src_via(m, redir, out, hops + 1);
+            }
+        }
+        // Nothing this list did, so fd `n` is whatever the *command* was handed.
+        // Which is not the process's descriptor of the same number: inside a
+        // command substitution fd 1 is a capture buffer, in a pipeline stage it
+        // is the stage's pipe, and a scoped `2>` is on the stderr stack. Naming
+        // `/proc/self/fd/1` there would walk straight past all three and write
+        // to the terminal — which is what `x=$(echo hi > /dev/stdout)` did.
+        // [`Shell::alias_write_fd`] already answers "what is fd `n` *here*",
+        // for `N>&n`, and the question is the same one.
+        if n == 2
+            && let Some(t) = self.stderr_target_at(self.stderr_stack.len())
+        {
+            return self.stderr_special_src(t, n, redir, out);
+        }
+        let held;
+        let w = match n {
+            1 => self.exec_stdout.as_ref(),
+            2 => self.exec_stderr.as_ref(),
+            _ => self.open_write_fds.get(&n),
+        };
+        let w = match w {
+            Some(w) => w,
+            None => match self.alias_write_fd(n, out) {
+                // A snapshot made for this question alone, so the answer has to
+                // keep it open — see [`Reopen`].
+                Ok(WriteFd::File(f)) => return Self::owned_special_src(f),
+                Ok(a) => {
+                    held = a;
+                    &held
+                }
+                Err(_) => return SpecialSrc::Unavailable,
+            },
+        };
+        self.write_fd_special_src(w, n, redir, out)
+    }
+
+    /// [`SpecialSrc`] for a [`WriteFd`] the shell holds for descriptor `n`.
+    fn write_fd_special_src(
+        &self,
+        w: &WriteFd,
+        n: i32,
+        redir: &RedirPlan,
+        out: &Out,
+    ) -> SpecialSrc {
+        match w {
+            WriteFd::File(f) => Self::handle_special_src(f),
+            // A command substitution's capture buffer is not a file. bash's is a
+            // pipe, and reading one nobody is writing blocks — which is what osh
+            // does too, by leaving this to the caller's own path.
+            WriteFd::Capture(_) => SpecialSrc::Unavailable,
+            WriteFd::ReadOnly(src) => match src {
+                Some(c) => self.input_special_src(&lock_input(c), n, redir, out),
+                None => SpecialSrc::Unavailable,
+            },
+            WriteFd::Closed => SpecialSrc::Closed,
+        }
+    }
+
+    /// [`SpecialSrc`] for fd 2 as a scoped [`StderrTarget`] binds it — the
+    /// `2>` of an enclosing compound command, which `exec_stderr` alone does
+    /// not see.
+    fn stderr_special_src(
+        &self,
+        t: &StderrTarget,
+        n: i32,
+        redir: &RedirPlan,
+        out: &Out,
+    ) -> SpecialSrc {
+        match t {
+            StderrTarget::File(f) | StderrTarget::WriteFd(f) => Self::handle_special_src(f),
+            StderrTarget::Pipe(w) => match pipe_writer_to_file(w) {
+                Ok(f) => Self::owned_special_src(Arc::new(f)),
+                Err(_) => SpecialSrc::Unavailable,
+            },
+            // As for [`WriteFd::Capture`]: a buffer is not a file.
+            StderrTarget::Buffer(_) => SpecialSrc::Unavailable,
+            StderrTarget::Discard(src) => match src {
+                Some(c) => self.input_special_src(&lock_input(c), n, redir, out),
+                None => SpecialSrc::Unavailable,
+            },
+            StderrTarget::Closed => SpecialSrc::Closed,
+        }
+    }
+
+    /// [`SpecialSrc`] for an open handle the shell holds.
+    fn handle_special_src(f: &File) -> SpecialSrc {
+        match file_reopen_path(f) {
+            Some(p) => SpecialSrc::Host(Reopen::borrowed(p)),
+            None => SpecialSrc::Unavailable,
+        }
+    }
+
+    /// [`Self::handle_special_src`] for a handle nothing else is holding — the
+    /// answer keeps it open. See [`Reopen`].
+    fn owned_special_src(f: Arc<File>) -> SpecialSrc {
+        match file_reopen_path(&f) {
+            Some(p) => SpecialSrc::Host(Reopen::owned(p, f)),
+            None => SpecialSrc::Unavailable,
         }
     }
 
@@ -25860,7 +26239,7 @@ impl Shell {
             }
             return Some(Arc::clone(c));
         }
-        self.clone_input_fd(0)
+        self.dup_input_fd(0, &plan.ambient_stdin)
     }
 
     /// The read half fd `n` (≥ 3) names *at this point in the redirect list*:
@@ -26228,8 +26607,9 @@ impl Shell {
         &mut self,
         redirs: &[Redirect],
         out: &Out,
+        stdin: &StdinSrc,
     ) -> Result<RedirPlan, Box<RedirFailure>> {
-        self.resolve_redirect_list(redirs, out, VarfdScope::Command)
+        self.resolve_redirect_list(redirs, out, VarfdScope::Command, stdin)
     }
 
     /// [`Shell::resolve_redirects`] for a *null* command — a redirect list with
@@ -26238,8 +26618,9 @@ impl Shell {
         &mut self,
         redirs: &[Redirect],
         out: &Out,
+        stdin: &StdinSrc,
     ) -> Result<RedirPlan, Box<RedirFailure>> {
-        self.resolve_redirect_list(redirs, out, VarfdScope::NullCommand)
+        self.resolve_redirect_list(redirs, out, VarfdScope::NullCommand, stdin)
     }
 
     /// Whether bash performs a *null* command's redirect list in a forked child
@@ -26336,8 +26717,12 @@ impl Shell {
         redirs: &[Redirect],
         out: &Out,
         scope: VarfdScope,
+        stdin: &StdinSrc,
     ) -> Result<RedirPlan, Box<RedirFailure>> {
-        let mut plan = RedirPlan::default();
+        let mut plan = RedirPlan {
+            ambient_stdin: AmbientStdin::of(stdin),
+            ..RedirPlan::default()
+        };
         let mut reserved: Vec<i32> = Vec::new();
         // The fd ≥ 3 bindings this list has staged, and how many of
         // `plan.extra_fds` they cover. A repeated fd is saved twice — once by
@@ -26835,12 +27220,15 @@ impl Shell {
                 // which case there is no descriptor to store or give back, and
                 // the close belongs in the plan so the command undoes it. See
                 // [`PersistentBind`].
-                if let PersistentBind::VarfdClose(n) = self.apply_persistent_redirect(r, fd, out)? {
+                let ambient = plan.ambient_stdin.clone();
+                if let PersistentBind::VarfdClose(n) =
+                    self.apply_persistent_redirect(r, fd, out, &ambient)?
+                {
                     let origin = DupOrigin::Word(r);
                     return if r.op == RedirectOp::DupIn {
-                        self.resolve_dup_in(&origin, n, b"-", plan)
+                        self.resolve_dup_in(&origin, n, b"-", plan, out)
                     } else {
-                        self.resolve_dup_out(&origin, n, b"-", plan)
+                        self.resolve_dup_out(&origin, n, b"-", plan, out)
                     };
                 }
                 if scope == VarfdScope::NullCommand {
@@ -26875,10 +27263,14 @@ impl Shell {
             match r.op {
                 RedirectOp::Read => {
                     let path = self.expand_redirect_target(&r.target, RedirWord::Filename)?;
-                    // `< /dev/stdin`, `< /dev/fd/N`: a dup, not an open.
-                    if self.resolve_special_redirect(fd, &path, true, plan)? {
-                        return Ok(());
-                    }
+                    // `< /dev/stdin`, `< /dev/fd/N`: an open of the file behind
+                    // the named descriptor, at a fresh offset — not a dup of the
+                    // descriptor. See [`Shell::resolve_special_redirect`].
+                    let open = match self.resolve_special_redirect(fd, &path, true, plan, out)? {
+                        SpecialRedirect::Duplicated => return Ok(()),
+                        SpecialRedirect::Reopen(p) => p,
+                        SpecialRedirect::NotSpecial => Reopen::borrowed(path.clone()),
+                    };
                     // bash opens the redirect *before* the command runs and
                     // reports a missing/unreadable file at redirection time —
                     // even for a builtin that never reads stdin (`true < x`,
@@ -26886,7 +27278,7 @@ impl Shell {
                     // diagnostic and gives every later reader of the descriptor
                     // the *same* open file description, which is what makes a
                     // child's consumption visible to the shell afterwards.
-                    let f = self.open_input_source(&path)?;
+                    let f = self.open_input_source(&open.path, &path)?;
                     match fd {
                         0 => {
                             plan.clear_stdin();
@@ -26915,12 +27307,16 @@ impl Shell {
                     // open now so a genuinely unopenable path (e.g. a directory,
                     // or a permission error) surfaces at redirection time.
                     let path = self.expand_redirect_target(&r.target, RedirWord::Filename)?;
-                    // `<> /dev/stdout` and friends dup the named descriptor; the
-                    // side that matters is the one the fd is read or written on.
-                    if self.resolve_special_redirect(fd, &path, fd == 0, plan)? {
-                        return Ok(());
-                    }
-                    let (rd, wr) = open_rw_pair(&self.cwd, &path)
+                    // `<> /dev/stdout` and friends open the file behind the named
+                    // descriptor. Should that be impossible, the fallback dup
+                    // needs a side, and it is the one the fd is read or written
+                    // on.
+                    let open = match self.resolve_special_redirect(fd, &path, fd == 0, plan, out)? {
+                        SpecialRedirect::Duplicated => return Ok(()),
+                        SpecialRedirect::Reopen(p) => p,
+                        SpecialRedirect::NotSpecial => Reopen::borrowed(path.clone()),
+                    };
+                    let (rd, wr) = open_rw_pair(&self.cwd, &open.path)
                         .map_err(|e| bfmt![&path, b": ", io_error_message(&e)])?;
                     if fd == 0 {
                         // Connect the file to stdin, reading from offset 0 (a
@@ -26975,16 +27371,19 @@ impl Shell {
                     // expanded; see [`Shell::resolve_dup_out`].
                     let target = self.expand_redirect_target(&r.target, RedirWord::Filename)?;
                     let append = matches!(r.op, RedirectOp::AppendBoth);
-                    // `&> /dev/stderr` is `> /dev/stderr 2>&1`: fd 1 dups fd 2,
-                    // which the output-dup resolver already expresses (fd 2 is
-                    // where it was, so nothing further is needed for it).
-                    if self.resolve_special_redirect(fd, &target, false, plan)? {
-                        return Ok(());
-                    }
+                    // `&> /dev/stderr` opens the file behind fd 2 — and, `&>`
+                    // being `> 2>&1`, fd 2 then follows fd 1 to it. Should the
+                    // file not be nameable, the fallback dup expresses the same
+                    // thing (fd 2 is where it was, so nothing further is needed).
+                    let open = match self.resolve_special_redirect(fd, &target, false, plan, out)? {
+                        SpecialRedirect::Duplicated => return Ok(()),
+                        SpecialRedirect::Reopen(p) => p,
+                        SpecialRedirect::NotSpecial => Reopen::borrowed(target.clone()),
+                    };
                     // `&>` truncates, so `set -C` guards it exactly as it guards
                     // the `>` it stands for; `&>>` appends and is exempt.
-                    self.noclobber_check(&target, !append)?;
-                    let h = open_output_target(&self.cwd, &target, append)?;
+                    self.noclobber_check(&open.path, &target, !append)?;
+                    let h = open_output_target(&self.cwd, &open.path, &target, append)?;
                     // Both fds now target the file: clear every competing dup so
                     // this (later) redirect wins over earlier `2>&1`/`>&N` forms.
                     plan.clear_stdout();
@@ -27001,18 +27400,24 @@ impl Shell {
                 RedirectOp::Write | RedirectOp::Clobber | RedirectOp::Append => {
                     let target = self.expand_redirect_target(&r.target, RedirWord::Filename)?;
                     let append = matches!(r.op, RedirectOp::Append);
-                    // `> /dev/stdout`, `> /dev/fd/N`: a dup, not an open — so it
-                    // is not a file for noclobber to protect either (`set -C;
-                    // echo hi > /dev/stdout` succeeds in bash). Checked first for
-                    // that reason.
-                    if self.resolve_special_redirect(fd, &target, false, plan)? {
-                        return Ok(());
-                    }
+                    // `> /dev/stdout`, `> /dev/fd/N`: an open of the file behind
+                    // the descriptor, carrying `O_TRUNC` like any other `>`.
+                    // Measured: `exec 3> w1; echo AAAA >&3; echo B > /dev/fd/3`
+                    // leaves `w1` holding only `B`, where the dup this used to do
+                    // left `AAAA` in front of it.
+                    let open = match self.resolve_special_redirect(fd, &target, false, plan, out)? {
+                        SpecialRedirect::Duplicated => return Ok(()),
+                        SpecialRedirect::Reopen(p) => p,
+                        SpecialRedirect::NotSpecial => Reopen::borrowed(target.clone()),
+                    };
                     // `>|` (Clobber) and `>>` (Append) always proceed. Checked
                     // *before* the open below, which would otherwise truncate the
-                    // very file noclobber exists to protect.
-                    self.noclobber_check(&target, matches!(r.op, RedirectOp::Write))?;
-                    let h = open_output_target(&self.cwd, &target, append)?;
+                    // very file noclobber exists to protect. A special filename
+                    // is checked here like any other, there being a real file
+                    // behind it: `set -C; echo B > /dev/fd/3` is refused when
+                    // fd 3's file exists.
+                    self.noclobber_check(&open.path, &target, matches!(r.op, RedirectOp::Write))?;
+                    let h = open_output_target(&self.cwd, &open.path, &target, append)?;
                     match fd {
                         2 => {
                             // An explicit `2>file` is an *independent* open, even
@@ -27053,9 +27458,9 @@ impl Shell {
                         // have been has no source, so there is nothing to note.
                         if moved.is_some() {
                             return if input {
-                                self.resolve_dup_in(&origin, fd, b"-", plan)
+                                self.resolve_dup_in(&origin, fd, b"-", plan, out)
                             } else {
-                                self.resolve_dup_out(&origin, fd, b"-", plan)
+                                self.resolve_dup_out(&origin, fd, b"-", plan, out)
                             };
                         }
                         return Err(bfmt![
@@ -27076,9 +27481,9 @@ impl Shell {
                             Self::dup_save_note_for(&target, DupSaveNote::WhenNotForked);
                     }
                     if input {
-                        self.resolve_dup_in(&origin, fd, &target, plan)?;
+                        self.resolve_dup_in(&origin, fd, &target, plan, out)?;
                     } else {
-                        self.resolve_dup_out(&origin, fd, &target, plan)?;
+                        self.resolve_dup_out(&origin, fd, &target, plan, out)?;
                     }
                     // Only a source that named a real descriptor is closed, and
                     // never when it is the redirector itself: bash's `3>&3-`
@@ -27089,9 +27494,9 @@ impl Shell {
                         && n != fd
                     {
                         if input {
-                            self.resolve_dup_in(&origin, n, b"-", plan)?;
+                            self.resolve_dup_in(&origin, n, b"-", plan, out)?;
                         } else {
-                            self.resolve_dup_out(&origin, n, b"-", plan)?;
+                            self.resolve_dup_out(&origin, n, b"-", plan, out)?;
                         }
                     }
                 }
@@ -27141,6 +27546,7 @@ impl Shell {
         fd: i32,
         target: BStr<'_>,
         plan: &mut RedirPlan,
+        out: &Out,
     ) -> Result<(), Str> {
         // `2>&1` → stderr follows stdout; `1>&2` → the reverse. When the
         // followed fd already targets a file, copy that file target directly;
@@ -27176,15 +27582,17 @@ impl Shell {
                 // same route — `do_redirection_internal` rewrites the
                 // instruction to `r_err_and_out` here, after the expansion. So
                 // it gets the special-filename check `&>` gets: `>& /dev/stderr`
-                // is a dup of fd 2, not an open of a path the host may not have.
+                // opens the file behind fd 2, not a path the host may not have.
                 // (No recursion: the resolver is re-entered with an all-digit
                 // target, which never reaches this branch.)
-                if self.resolve_special_redirect(fd, target, false, plan)? {
-                    return Ok(());
-                }
-                self.noclobber_check(target, true)?;
+                let open = match self.resolve_special_redirect(fd, target, false, plan, out)? {
+                    SpecialRedirect::Duplicated => return Ok(()),
+                    SpecialRedirect::Reopen(p) => p,
+                    SpecialRedirect::NotSpecial => Reopen::borrowed(target.to_vec()),
+                };
+                self.noclobber_check(&open.path, target, true)?;
+                let h = open_output_target(&self.cwd, &open.path, target, false)?;
                 let target = target.to_vec();
-                let h = open_output_target(&self.cwd, &target, false)?;
                 plan.clear_stdout();
                 plan.clear_stderr();
                 plan.stdout = Some((target.clone(), false));
@@ -27362,6 +27770,7 @@ impl Shell {
         fd: i32,
         target: BStr<'_>,
         plan: &mut RedirPlan,
+        out: &Out,
     ) -> Result<(), Str> {
         // `M<&N` — duplicate an *input* descriptor. `read <&3`, `cat <&$r`. The
         // dup shares the source cursor's offset (see `stdin_from_fd`), matching
@@ -27497,7 +27906,7 @@ impl Shell {
                 // that a source like `3< file` carries across comes with it.
                 // The source was validated above, so the only paths that code
                 // can take from here are the ones that bind fd 1 / fd 2.
-                self.resolve_dup_out(origin, fd, target, plan)?;
+                self.resolve_dup_out(origin, fd, target, plan, out)?;
             }
         } else if dup == DupWord::NotAFd {
             // A non-numeric input-dup target (`<&file`) is ambiguous — there is
@@ -27508,22 +27917,80 @@ impl Shell {
         Ok(())
     }
 
-    /// Intercept bash's *special redirection filenames*. Returns `true` when
-    /// `path` names a descriptor to duplicate rather than a file to open, having
-    /// resolved the redirect into `plan` as the equivalent dup; `false` for an
-    /// ordinary path, which the caller opens as usual.
+    /// The file behind fd `n` *at this point in the redirect list*, for one of
+    /// the four special redirection filenames to open — see [`host_reopen_path`]
+    /// for why an open and not a dup.
     ///
-    /// See [`special_redirect_fd`] for the names. `read` picks the input side:
-    /// `< /dev/fd/3` shares fd 3's cursor exactly like `<&3`, while
-    /// `> /dev/fd/3` writes to it like `>&3`.
+    /// The read half answers for every descriptor that has one, since that is
+    /// where osh keeps the handle; a write-only descriptor names the same file
+    /// from the other side. Which half is asked has nothing to do with which
+    /// direction the redirect goes: bash reads through a write-only fd and
+    /// writes through a read-only one, the file being the file either way.
+    fn plan_special_src(&self, plan: &mut RedirPlan, n: i32, out: &Out) -> SpecialSrc {
+        // Nothing in this list and nothing an `exec` installed has touched fd 0,
+        // so fd 0 is still whatever the *command* was given — which is the one
+        // thing about it the list cannot work out for itself, and is why
+        // [`AmbientStdin`] is recorded when the plan is built.
+        if n == 0
+            && plan.stdin_from_fd.is_none()
+            && plan.stdin_data.is_none()
+            && plan.stdin.is_none()
+            && self.exec_stdin.is_none()
+        {
+            return match plan.ambient_stdin.clone() {
+                // The command's fd 0 *is* the process's, so the host can name
+                // it — where `clone_input_fd` would answer with the empty
+                // stream it hands a dup of an unbound stdin.
+                AmbientStdin::Process => match host_reopen_path(0) {
+                    Some(p) => SpecialSrc::Host(Reopen::borrowed(p)),
+                    None => SpecialSrc::Unavailable,
+                },
+                // A pipeline stage's pipe arrives here too, and the re-open is
+                // right for it: `/dev/fd/0` on a pipe yields the same pipe,
+                // positioned where the reader left it.
+                AmbientStdin::Fd(c) => {
+                    let src = lock_input(&c);
+                    self.input_special_src(&src, n, plan, out)
+                }
+            };
+        }
+        match self.dup_read_half(plan, n) {
+            Some(c) => {
+                let src = lock_input(&c);
+                self.input_special_src(&src, n, plan, out)
+            }
+            // Not an open descriptor at all, and bash opens the *path*: the
+            // kernel's answer is ENOENT, not the EBADF a dup would give.
+            None => SpecialSrc::Closed,
+        }
+    }
+
+    /// Intercept bash's *special redirection filenames*. See
+    /// [`special_redirect_fd`] for the names and [`host_reopen_path`] for what
+    /// they mean: on a host with `/dev/fd` bash does not interpret them at all,
+    /// so `< /dev/fd/3` **opens fd 3's file afresh** rather than sharing fd 3's
+    /// description the way `<&3` does. The distinction is visible six ways —
+    /// the new description starts at offset 0 and leaves fd 3's own cursor
+    /// alone, `>` carries `O_TRUNC`, `set -C` has a file to protect, and the
+    /// access mode of fd 3 does not restrict the redirect — so it is answered
+    /// with a *path to open*, [`SpecialRedirect::Reopen`], which the caller
+    /// opens exactly as it would the word the user wrote. Every one of those
+    /// behaviours then falls out of the ordinary open rather than being
+    /// emulated.
+    ///
+    /// [`SpecialRedirect::Duplicated`] is the fallback for what cannot be named
+    /// that way — a host with no procfs, or a descriptor osh models in memory
+    /// (a here-document, a command substitution's capture buffer) — and is the
+    /// dup this always did, resolved into `plan`. `read` picks which resolver
+    /// does it: an input dup for `<`, an output dup for `>`.
     ///
     /// A missing descriptor is reported against the *path*, not the descriptor
     /// number: `> /dev/fd/9` with fd 9 unbound is "/dev/fd/9: No such file or
-    /// directory" in bash, because on a host that provides `/dev/fd` bash really
-    /// does open the path and the kernel really does return ENOENT. The dup
-    /// resolvers below phrase the same failure as "Bad file descriptor" (right
-    /// for a `>&9`, wrong for a filename), so their error is replaced here — the
-    /// only failure they can produce for an all-digits target.
+    /// directory" in bash, because it really does open the path and the kernel
+    /// really does return ENOENT. The dup resolvers phrase the same failure as
+    /// "Bad file descriptor" (right for a `>&9`, wrong for a filename), so their
+    /// error is replaced here — the only failure they can produce for an
+    /// all-digits target.
     ///
     /// The resolvers are told this is a filename ([`DupOrigin::SpecialPath`]),
     /// which is what keeps `7> /dev/fd/7` failing where `7>&7` succeeds: an
@@ -27534,18 +28001,24 @@ impl Shell {
         path: BStr<'_>,
         read: bool,
         plan: &mut RedirPlan,
-    ) -> Result<bool, Str> {
+        out: &Out,
+    ) -> Result<SpecialRedirect, Str> {
         let Some(n) = special_redirect_fd(path) else {
-            return Ok(false);
+            return Ok(SpecialRedirect::NotSpecial);
         };
+        match self.plan_special_src(plan, n, out) {
+            SpecialSrc::Host(p) => return Ok(SpecialRedirect::Reopen(p)),
+            SpecialSrc::Closed => return Err(bfmt![path, b": No such file or directory"]),
+            SpecialSrc::Bytes(_) | SpecialSrc::Unavailable => {}
+        }
         let n = n.to_string().into_bytes();
         let res = if read {
-            self.resolve_dup_in(&DupOrigin::SpecialPath, fd, &n, plan)
+            self.resolve_dup_in(&DupOrigin::SpecialPath, fd, &n, plan, out)
         } else {
-            self.resolve_dup_out(&DupOrigin::SpecialPath, fd, &n, plan)
+            self.resolve_dup_out(&DupOrigin::SpecialPath, fd, &n, plan, out)
         };
         match res {
-            Ok(()) => Ok(true),
+            Ok(()) => Ok(SpecialRedirect::Duplicated),
             Err(_) => Err(bfmt![path, b": No such file or directory"]),
         }
     }
@@ -27613,7 +28086,8 @@ impl Shell {
     /// returning an error code, so the undo list is discarded unrun and the
     /// prefix stands. `exec 4>s1 3>"/dev/null${z:-'$(fi)'}" 5>s2` leaves fd 4
     /// bound. That is the `break` below, which restores nothing.
-    fn apply_exec_redirects(&mut self, redirs: &[Redirect], out: &Out) -> i32 {
+    fn apply_exec_redirects(&mut self, redirs: &[Redirect], out: &Out, stdin: &StdinSrc) -> i32 {
+        let ambient = AmbientStdin::of(stdin);
         let saved = self.save_exec_fds();
         // The descriptors a `{name}` redirect allocated, which the undo leaves
         // alone: bash saves the redirector it just assigned and restores it to
@@ -27634,7 +28108,7 @@ impl Shell {
                     return 1;
                 }
             };
-            let bind = self.apply_persistent_redirect(r, fd, out);
+            let bind = self.apply_persistent_redirect(r, fd, out, &ambient);
             // The store into the variable comes after the bind, and only if it
             // succeeded — see [`Shell::commit_varfd`]. A word that turned the
             // redirect into a close allocated nothing to store: see
@@ -38307,7 +38781,7 @@ impl Shell {
                     self.eval_string(&joined, out, stdin)
                 }
             }
-            "source" | "." => self.builtin_source(args, name, out, stdin),
+            "source" | "." => self.builtin_source(args, name, out, stdin, redir),
             "type" => self.builtin_type(args, out, redir),
             "compgen" => self.builtin_compgen(args, out, redir),
             "complete" => self.builtin_complete(args, out, redir),
@@ -39193,7 +39667,12 @@ impl Shell {
     /// the open rather than after it because the development host would refuse
     /// the open outright; on a POSIX host it merely names the same descriptor a
     /// successful `open(2)` would have handed back.
-    fn open_input_source(&self, path: BStr<'_>) -> Result<InputFd, Str> {
+    ///
+    /// `path` is opened but `word` is named in any diagnostic. The two differ
+    /// only for a special redirection filename, which opens the file behind a
+    /// descriptor (`/proc/self/fd/3`) while every message still says what the
+    /// user wrote (`/dev/fd/3`).
+    fn open_input_source(&self, path: BStr<'_>, word: BStr<'_>) -> Result<InputFd, Str> {
         let resolved = self.host_path(path);
         let host = bytes::bytes_to_path(&resolved);
         if host.is_dir() {
@@ -39205,7 +39684,7 @@ impl Shell {
         }
         std::fs::File::open(&host)
             .map(file_input)
-            .map_err(|e| bfmt![path, b": ", io_error_message(&open_error(&host, e))])
+            .map_err(|e| bfmt![word, b": ", io_error_message(&open_error(&host, e))])
     }
 
     /// [`Shell::resolve`] as a string, for the callers that need to keep
@@ -54077,7 +54556,6 @@ impl Shell {
         }
         match stdin {
             StdinSrc::Fd(c) => take(&mut *lock_input(c), delim, max),
-            StdinSrc::Pipe(r) => take(&mut *r.borrow_mut(), delim, max),
             StdinSrc::Inherit => {
                 if let Some(cur) = &self.exec_stdin {
                     return take(&mut *lock_input(cur), delim, max);
@@ -54502,7 +54980,14 @@ impl Shell {
         0
     }
 
-    fn builtin_source(&mut self, args: &[Str], tag: &str, out: &mut Out, stdin: &StdinSrc) -> i32 {
+    fn builtin_source(
+        &mut self,
+        args: &[Str],
+        tag: &str,
+        out: &mut Out,
+        stdin: &StdinSrc,
+        redir: &RedirPlan,
+    ) -> i32 {
         // `source`/`.` take no options: a leading `-x`-style token is a usage
         // error (bash reports it with the invoking name — `.` or `source`).
         // `--` ends option processing and is skipped.
@@ -54558,6 +55043,30 @@ impl Shell {
             path.clone()
         };
         let path = &resolved;
+        // One of bash's four special redirection filenames names a *descriptor
+        // of this shell*, and opening it opens the file behind that descriptor
+        // — see [`host_reopen_path`]. Opening the operand as a host path, which
+        // is what this did, reaches the process's real fd instead: measured,
+        // `printf 'echo REAL\n' | osh -c 'source /dev/stdin < t3.sh'` sourced
+        // `REAL` where bash sources `t3.sh`, and `source /dev/stdout` did not
+        // return at all when fd 1 was the harness's pipe.
+        //
+        // The substitution is made here, before the directory check, so that
+        // `source /dev/stdin < dir` is refused with bash's "is a directory"
+        // rather than sourcing whatever the process's fd 0 held.
+        let mut host = Reopen::borrowed(self.host_path(path));
+        let mut snapshot = None;
+        let mut vanished = false;
+        if let Some(n) = special_redirect_fd(path) {
+            match self.special_read_src(n, stdin, redir, out) {
+                SpecialSrc::Host(p) => host = p,
+                SpecialSrc::Bytes(b) => snapshot = Some(b),
+                SpecialSrc::Closed => vanished = true,
+                // No procfs, or a sink with no file behind it. Left as the
+                // host-path open it has always been.
+                SpecialSrc::Unavailable => {}
+            }
+        }
         // A directory is refused before the read, with a message of its own —
         // labelled with the builtin and spelled with a lower-case "is", unlike
         // the `Is a directory` an open failure elsewhere reports. bash checks
@@ -54566,7 +55075,7 @@ impl Shell {
         // a non-interactive posix shell below. (A `$PATH` hit can never be one —
         // the search steps past directories — so this only ever catches the
         // operand as written.)
-        if bytes::bytes_to_path(&self.host_path(path)).is_dir() {
+        if snapshot.is_none() && !vanished && bytes::bytes_to_path(&host.path).is_dir() {
             self.berrln(&bfmt![
                 self.err_prefix(),
                 tag,
@@ -54579,7 +55088,15 @@ impl Shell {
         // The path is opened from its own bytes, so a script whose *name* is
         // not text still opens — and its contents are parsed as the bytes they
         // are, so a script may carry any byte a shell word may.
-        match std::fs::read(bytes::bytes_to_path(&self.host_path(path))) {
+        let contents = match snapshot {
+            Some(b) => Ok(b),
+            // A `<&-` descriptor is no file, and bash — which really does open
+            // the path — reports what the kernel says of a `/dev/fd/N` with no
+            // N behind it, not the "bad file descriptor" a dup would give.
+            None if vanished => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            None => std::fs::read(bytes::bytes_to_path(&host.path)),
+        };
+        match contents {
             Ok(src) => {
                 let saved = if args.len() > 1 {
                     let rest: Vec<Str> = args[1..].to_vec();
@@ -57534,6 +58051,9 @@ impl Shell {
     /// "ready" (bash returns 0 even for an empty file or at EOF). A live
     /// upstream pipe is ready only when it already holds buffered bytes; an
     /// interactive terminal with no pending keystroke is treated as would-block.
+    /// Which of the two a descriptor is, is decided by whether it can seek —
+    /// see [`FileInput::readable_now`], which is why a pipeline stage's fd 0
+    /// gets the pipe's answer even though it is an ordinary [`InputFd`].
     ///
     /// Known limitation: a pipe sitting exactly at EOF (writer closed, buffer
     /// drained) reports would-block here, where bash reports ready — a precise
@@ -57545,15 +58065,14 @@ impl Shell {
             return true;
         }
         match stdin {
-            StdinSrc::Fd(_) => true,
+            StdinSrc::Fd(c) => match &*lock_input(c) {
+                InputSrc::File(f) => f.readable_now(),
+                // Nothing here can block: a snapshot answers from memory, and a
+                // closed, write-only or directory descriptor answers with an
+                // error the moment it is read.
+                _ => true,
+            },
             StdinSrc::Inherit => self.exec_stdin.is_some() || stdin_readable_now(),
-            StdinSrc::Pipe(r) => {
-                let g = r.borrow();
-                // Bytes already pulled into the BufReader are unconditionally
-                // ready; otherwise probe the underlying OS pipe (data queued or
-                // writer-closed EOF ⇒ ready; empty live pipe ⇒ would block).
-                !g.buffer().is_empty() || pipe_reader_readable_now(g.get_ref())
-            }
         }
     }
 
@@ -57594,13 +58113,10 @@ impl Shell {
             StdinSrc::Fd(c) => {
                 // `io::Cursor` implements `BufRead`; `read_line` advances its
                 // position exactly past the consumed newline, so successive
-                // reads yield successive lines.
+                // reads yield successive lines. A streaming upstream stage is
+                // the same shape — a `FileInput` over the pipe read end, which
+                // yields successive lines as the producer writes them.
                 read_one_line(&mut *lock_input(c), raw)
-            }
-            StdinSrc::Pipe(r) => {
-                // Streaming upstream stage: the `BufReader` yields successive
-                // lines as the producer writes them.
-                read_one_line(&mut *r.borrow_mut(), raw)
             }
             StdinSrc::Inherit => {
                 // A persistent `exec < file` rebinds the shell's ambient fd 0.
@@ -57651,7 +58167,6 @@ impl Shell {
         }
         match stdin {
             StdinSrc::Fd(c) => read_record(&mut *lock_input(c), delim, nchars, exact, raw, true),
-            StdinSrc::Pipe(r) => read_record(&mut *r.borrow_mut(), delim, nchars, exact, raw, true),
             StdinSrc::Inherit => {
                 if let Some(cur) = &self.exec_stdin {
                     return read_record(&mut *lock_input(cur), delim, nchars, exact, raw, true);
@@ -58732,9 +59247,41 @@ struct VarfdUndo {
     var: Option<(String, VarSnapshot)>,
 }
 
+/// The shell's fd 0 as it stands *before* a redirect list is applied — the one
+/// thing about the command's environment the list cannot work out for itself,
+/// and the thing a `< /dev/stdin` in the list has to open.
+///
+/// A [`StdinSrc`] is not stored here directly because it is not `Clone` — an
+/// `Inherit` says only "the process's own", with no handle to carry. What the
+/// question needs is which of the two kinds it is, and for a bound descriptor
+/// the descriptor itself.
+#[derive(Debug, Clone, Default)]
+enum AmbientStdin {
+    /// The process's own fd 0 — the one the kernel will name back.
+    #[default]
+    Process,
+    /// A descriptor the shell holds: an `exec 0< f`, the `< f` of an enclosing
+    /// compound command, or the read end of an enclosing pipeline's pipe.
+    Fd(InputFd),
+}
+
+impl AmbientStdin {
+    /// The kind of a live stdin source.
+    fn of(stdin: &StdinSrc) -> AmbientStdin {
+        match stdin {
+            StdinSrc::Inherit => AmbientStdin::Process,
+            StdinSrc::Fd(c) => AmbientStdin::Fd(Arc::clone(c)),
+        }
+    }
+}
+
 /// Per-command redirection plan (expanded targets).
 #[derive(Debug, Clone, Default)]
 struct RedirPlan {
+    /// What fd 0 was before this list — see [`AmbientStdin`]. Recorded when the
+    /// plan is built rather than consulted later, because by the time the list
+    /// is applied the fd 0 it started from is gone.
+    ambient_stdin: AmbientStdin,
     /// `< file` / `<> file` on fd 0 — the descriptor opened when the redirect
     /// was applied, not the path. bash opens once, at redirection time, and
     /// every reader of fd 0 for the command's duration shares that one open
@@ -65210,6 +65757,143 @@ fn map_device_path(path: BStr<'_>) -> BStr<'_> {
     path
 }
 
+/// The host path that opens the *file* behind an already-open descriptor
+/// afresh, or `None` on a host that cannot name one.
+///
+/// This is what a bash *special redirection filename* actually means. bash does
+/// not interpret the four names at all on a host that provides `/dev/fd`
+/// (`HAVE_DEV_FD`): it calls plain `open()` and lets the kernel resolve the
+/// path, which yields a **new file description positioned at 0** — not a second
+/// reference to the existing one. Measured, bash 5.2, glibc and MSYS alike,
+/// against `t2.sh` = `echo A\necho B`:
+///
+/// ```text
+///   exec 3< t2.sh; read -u 3 l; cat < /dev/fd/3     echo A|echo B
+///   exec 3< t2.sh; read -u 3 l; cat <&3             echo B
+/// ```
+///
+/// and the shell's *own* cursor on fd 3 survives the first, where the dup
+/// consumes it. Three further consequences, all measured, all of which fall out
+/// of "it is an ordinary open" and none of which a dup can reproduce:
+/// `> /dev/fd/3` carries `O_TRUNC`; `set -C` refuses it when fd 3's file exists
+/// (`/dev/fd/3: cannot overwrite existing file`); and the *access mode* of the
+/// open descriptor is irrelevant — `echo x > /dev/fd/3` writes through a
+/// read-only fd 3, and `cat < /dev/fd/3` reads through a write-only one.
+///
+/// `/proc/self/fd/N` is the kernel's own name for that file, and it is the very
+/// path `/dev/fd` is a symlink to, so re-opening through it inherits every one
+/// of those behaviours exactly rather than emulating them: a pipe re-opens as
+/// the same pipe (no rewind — `printf 'A\nB\n' | { read l; cat < /dev/fd/0; }`
+/// gives `B`), and an unlinked file re-opens from its still-live inode, which a
+/// remembered pathname could not.
+///
+/// `None` — no procfs, or Windows — leaves the caller with the dup it has
+/// always done. That is the wrong answer for the cases above, but it is the
+/// answer osh gave everywhere before this and it is confined to hosts the shell
+/// is not targeting; SlateOS's procfs gains `self/fd` and takes this path.
+#[cfg(unix)]
+fn host_reopen_path(raw: i32) -> Option<Str> {
+    if raw < 0 {
+        return None;
+    }
+    static HAVE_PROC_FD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // One `stat` for the life of the process: a redirect list is walked often
+    // enough that asking the filesystem each time would be a syscall per `<`.
+    if !*HAVE_PROC_FD.get_or_init(|| std::path::Path::new("/proc/self/fd").is_dir()) {
+        return None;
+    }
+    Some(format!("/proc/self/fd/{raw}").into_bytes())
+}
+
+#[cfg(not(unix))]
+fn host_reopen_path(_raw: i32) -> Option<Str> {
+    None
+}
+
+/// How many `>&`/`<&` hops a walk looking for the file behind a descriptor will
+/// follow before giving up. A plan that dups in a circle cannot come from a
+/// well-formed redirect list, but the plan is order-free and carries no proof
+/// of that, so the walk is bounded rather than trusting it.
+const MAX_SPECIAL_DUP_HOPS: u32 = 32;
+
+/// [`host_reopen_path`] for an open file handle.
+#[cfg(unix)]
+fn file_reopen_path(f: &File) -> Option<Str> {
+    use std::os::fd::AsRawFd;
+    host_reopen_path(f.as_raw_fd())
+}
+
+#[cfg(not(unix))]
+fn file_reopen_path(_f: &File) -> Option<Str> {
+    None
+}
+
+/// A path that re-opens a descriptor's file, and the handle that keeps that
+/// path meaningful.
+///
+/// `/proc/self/fd/N` names a file only for as long as fd N is open, and some
+/// of the descriptors answered here are made on the spot — a snapshot of a
+/// pipeline stage's pipe, a dup of the real stdout. Handing back the path
+/// alone would let the handle drop at the end of the resolver and leave the
+/// caller's `open` with `ENOENT`; measured, `{ echo hi > /dev/stdout; } | sed`
+/// failed exactly that way. Carrying the handle alongside the path ties the
+/// two lifetimes together.
+#[derive(Debug)]
+struct Reopen {
+    path: Str,
+    /// `None` when the descriptor is one the shell owns anyway.
+    _keep: Option<Arc<File>>,
+}
+
+impl Reopen {
+    /// A path naming a descriptor with a life of its own.
+    fn borrowed(path: Str) -> Reopen {
+        Reopen { path, _keep: None }
+    }
+
+    /// A path naming `f`, which is kept open for as long as the answer lives.
+    fn owned(path: Str, f: Arc<File>) -> Reopen {
+        Reopen {
+            path,
+            _keep: Some(f),
+        }
+    }
+}
+
+/// What one of the four special redirection filenames turned out to name — see
+/// [`host_reopen_path`] for why it is an open and not a dup.
+#[derive(Debug)]
+enum SpecialSrc {
+    /// A host path that opens the same file afresh, at offset 0.
+    Host(Reopen),
+    /// A descriptor osh models in memory rather than as a host file — a
+    /// here-document, a here-string, a command substitution's capture buffer.
+    /// bash's equivalent is a temp file, which a re-open reads from the start,
+    /// so the whole snapshot is the faithful answer.
+    Bytes(Vec<u8>),
+    /// `<&-` left nothing behind: the kernel answers the path with `ENOENT`,
+    /// not the `EBADF` a dup of the same descriptor would give.
+    Closed,
+    /// Nothing this host can name — no procfs, or a sink with no file behind
+    /// it. The caller keeps whatever it did before.
+    Unavailable,
+}
+
+/// What [`Shell::resolve_special_redirect`] made of a redirect's target word.
+enum SpecialRedirect {
+    /// An ordinary path. The caller opens the word as written.
+    NotSpecial,
+    /// One of the four names, and the file behind the descriptor it names can
+    /// be opened at this path. The caller opens *this* and goes on exactly as
+    /// for an ordinary redirect — which is where `O_TRUNC`, `set -C`, append
+    /// and the fresh offset all come from — but keeps naming the word the user
+    /// wrote in any diagnostic.
+    Reopen(Reopen),
+    /// One of the four names, but nothing this host can open: already resolved
+    /// into the plan as the dup osh has always done. The caller is finished.
+    Duplicated,
+}
+
 /// The descriptor a bash *special redirection filename* duplicates, or `None`
 /// for an ordinary path.
 ///
@@ -65309,7 +65993,15 @@ fn nth_source_line(src: BStr<'_>, line: u32) -> Option<BStr<'_>> {
 /// non-existent, while `2>err > nodir/f` reports *into* `err`. It also gives
 /// no-output commands (`: > f`, `true 2> e`, a bare `> f`) the create/truncate
 /// bash performs for them.
-fn open_output_target(cwd: BStr<'_>, path: BStr<'_>, append: bool) -> Result<Arc<File>, Str> {
+///
+/// `path` is opened but `word` is named in any diagnostic — see
+/// [`Shell::open_input_source`] for why the two can differ.
+fn open_output_target(
+    cwd: BStr<'_>,
+    path: BStr<'_>,
+    word: BStr<'_>,
+    append: bool,
+) -> Result<Arc<File>, Str> {
     match open_out(cwd, path, append) {
         // The descriptor is handed back, not dropped: bash opens a redirect's
         // target exactly once, when the redirect is performed, and every later
@@ -65319,7 +66011,7 @@ fn open_output_target(cwd: BStr<'_>, path: BStr<'_>, append: bool) -> Result<Arc
         Ok(f) => Ok(Arc::new(f)),
         // The diagnostic names the path as the *user* wrote it, not the
         // cwd-resolved form bash never shows.
-        Err(e) => Err(bfmt![path, b": ", io_error_message(&e)]),
+        Err(e) => Err(bfmt![word, b": ", io_error_message(&e)]),
     }
 }
 
@@ -66105,11 +66797,16 @@ fn stdin_readable_now() -> bool {
     handle_readable_now(io::stdin().as_raw_handle())
 }
 
-/// `read -t 0`: does the upstream pipeline pipe hold data (or sit at EOF)?
+/// `read -t 0`: does an unseekable descriptor hold data (or sit at EOF)?
+///
+/// Asked of a `File` rather than a pipe read end because a pipeline stage's
+/// fd 0 is an ordinary input descriptor like any other — see [`StdinSrc::Fd`].
+/// `handle_readable_now` switches on the handle's type, so a FIFO, a console
+/// and a pipe are each asked the right question.
 #[cfg(windows)]
-fn pipe_reader_readable_now(r: &io::PipeReader) -> bool {
+fn file_readable_now(f: &File) -> bool {
     use std::os::windows::io::AsRawHandle;
-    handle_readable_now(r.as_raw_handle())
+    handle_readable_now(f.as_raw_handle())
 }
 
 /// Fallback readability probe for non-Windows targets (including SlateOS).
@@ -66123,10 +66820,10 @@ fn stdin_readable_now() -> bool {
 }
 
 /// Fallback: without a `poll(2)` peek, only bytes already buffered by the caller
-/// count as ready for an upstream pipe (a bare OS-pipe query is not yet wired
+/// count as ready for an unseekable descriptor (a bare fd query is not yet wired
 /// for non-Windows targets — see TD-OILS-READ-T0-POLL).
 #[cfg(not(windows))]
-fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
+fn file_readable_now(_f: &File) -> bool {
     false
 }
 
@@ -67973,8 +68670,9 @@ struct StrftimeCtx<'a> {
 
 /// Parse an integer `printf` argument with C/bash `strtoimax` semantics and
 /// report whether it was fully valid. Leading whitespace and an optional sign
-/// are skipped; a `0x`/`0X` prefix selects hex, a leading `0` selects octal,
-/// otherwise decimal. The value is the leading run of valid digits (bash uses
+/// are skipped; a `0x`/`0X` prefix selects hex, a `0b`/`0B` prefix binary, a
+/// `0` followed by a *digit* octal, otherwise decimal. The value is the leading
+/// run of valid digits (bash uses
 /// that partial value even when it warns). The returned `Option` is `None` when
 /// the whole argument was consumed, or `Some(kind)` — the bash diagnostic tail
 /// (`"invalid number"` / `"invalid octal number"` / `"invalid hex number"`) —
@@ -68030,9 +68728,23 @@ fn parse_printf_int_checked(s: &[u8]) -> PrintfInt {
         .or_else(|| body.strip_prefix(b"0X"))
     {
         (16u32, h)
+    } else if let Some(b) = body
+        .strip_prefix(b"0b")
+        .or_else(|| body.strip_prefix(b"0B"))
+    {
+        // C23's binary literal, which glibc gave base-0 `strtol`/`strtoimax` in
+        // 2.38. It is not bash's own — bash's arithmetic still refuses `0b101`
+        // ("value too great for base") — it arrives only because `printf` reads
+        // its integer arguments through libc rather than through `evalexp`.
+        // Measured against bash 5.2.21 on glibc 2.39: `printf '%d' 0b101` is 5,
+        // for every integer conversion and for a `%*d` width alike. A libc
+        // without it reads the same word as a `0` with junk behind it; matching
+        // the modern one is matching every current Linux bash.
+        (2u32, b)
     } else if body.first() == Some(&b'0') && body.get(1).is_some_and(u8::is_ascii_digit) {
-        // Octal only when a digit follows the `0` (`08`, `019`); a `0` followed
-        // by a letter (`0b101`) is decimal-with-junk.
+        // Octal only when a digit follows the `0` (`08`, `019`). `00b1` lands
+        // here rather than in the binary arm above, since the second byte is a
+        // digit: octal `0` with `b1` left over.
         (8u32, body.get(1..).unwrap_or_default())
     } else {
         (10u32, body)
@@ -77478,6 +78190,49 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
             assert_eq!(out, format!("{want}\n"), "{word}");
             assert_eq!(st, 1, "{word}");
         }
+    }
+
+    #[test]
+    fn printf_reads_the_binary_literal_base_zero_strtoimax_reads() {
+        // C23's binary form, which glibc gave base-0 `strtoimax` in 2.38. It
+        // reaches `printf` only because the integer conversions read their
+        // argument through libc; bash's own arithmetic still refuses it.
+        for c in ["d", "i", "u", "o", "x", "X"] {
+            assert_eq!(run(&format!("printf '%{c}\\n' 0b101")).0, "5\n", "%{c}");
+        }
+        assert_eq!(run("printf '%d\\n' 0B101").0, "5\n");
+        assert_eq!(run("printf '%d\\n' -0b101").0, "-5\n");
+        assert_eq!(run("printf '%d\\n' ' 0b101'").0, "5\n");
+        assert_eq!(run("printf '%d\\n' 0b0").0, "0\n");
+        // A width taken from an argument goes through the same reader.
+        assert_eq!(run("printf '[%*d]\\n' 0b101 7").0, "[    7]\n");
+        // Where it stops it keeps the prefix, as every other base does. The
+        // message names no base: `sh_invalidnum` sees `0` then a non-digit
+        // that is not a lower-case `x`.
+        for (word, want) in [("0b", "0"), ("0b2", "0"), ("0b_1", "0"), ("0b101z", "5")] {
+            let (out, st) = run(&format!("printf '%d\\n' '{word}' 2>/dev/null"));
+            assert_eq!(out, format!("{want}\n"), "{word}");
+            assert_eq!(st, 1, "{word}");
+            let err = run(&format!("printf '%d\\n' '{word}' 2>&1 >/dev/null")).0;
+            assert_eq!(
+                err,
+                format!("osh: printf: {word}: invalid number\n"),
+                "{word}"
+            );
+        }
+        // The second byte decides: `00b1` is an octal `0` with junk, and a `0x`
+        // still wins outright over the `b` inside it.
+        assert_eq!(run("printf '%d\\n' 00b1 2>/dev/null").0, "0\n");
+        assert_eq!(
+            run("printf '%d\\n' 00b1 2>&1 >/dev/null").0,
+            "osh: printf: 00b1: invalid octal number\n"
+        );
+        assert_eq!(run("printf '%d\\n' 0x0b1").0, "177\n");
+        // `strtod` has no binary form at all, so the float side reads a `0`
+        // with junk behind it — value 0, and a status.
+        let (out, st) = run("printf '%f\\n' 0b101 2>/dev/null");
+        assert_eq!(out, "0.000000\n");
+        assert_eq!(st, 1);
     }
 
     #[test]
@@ -105472,24 +106227,69 @@ st=1
     }
 
     #[test]
-    fn dev_fd_n_duplicates_that_descriptor() {
+    fn dev_fd_n_opens_that_descriptors_file() {
         assert_eq!(
             run_exec_redirect("exec 3> \"{FILE}\"\necho hi >/dev/fd/3\nexec 3>&-"),
             "hi\n"
         );
-        // The input side reads descriptor N, exactly like `<&3`.
         assert_eq!(
             run("{ read l </dev/fd/3; echo \"[$l]\"; } 3<<< 'from3'").0,
             "[from3]\n"
         );
     }
 
+    /// The half a dup cannot reproduce: the re-open is an independent
+    /// description, so it starts at 0 *and* leaves the shell's own cursor where
+    /// it was. Checked against a file the shell itself made, never the
+    /// harness's fd 0 — see
+    /// [`dev_stdin_names_fd0s_file_and_may_fail_to_open_it`].
     #[test]
-    fn dev_stdin_duplicates_fd0() {
-        // `< /dev/stdin` is `<&0`: a no-op that leaves fd 0 where it was, so a
-        // here-string applied to the same command still wins (last one applied).
-        assert_eq!(run("read l < /dev/stdin <<< 'x'; echo \"[$l]\"").0, "[x]\n");
-        assert_eq!(run("cat < /dev/stdin <<< 'y'").0, "y\n");
+    fn a_reopened_descriptor_starts_at_zero_and_does_not_move_the_shells_cursor() {
+        // `a` and `c` come from the shell's own fd 3, `b` from the re-open.
+        // Under `<&3` the re-open would carry the cursor and give `b` = `two`;
+        // it rewinds instead, and `c` is still `two` afterwards. Measured,
+        // bash 5.2.21. The last line overwrites the data file with the result,
+        // which is what `run_exec_redirect` reads back.
+        assert_eq!(
+            run_exec_redirect(
+                "printf 'one\\ntwo\\n' > \"{FILE}\"\n\
+                 exec 3< \"{FILE}\"; read -u 3 a\n\
+                 read b </dev/fd/3\n\
+                 read -u 3 c; exec 3<&-\n\
+                 printf '[%s][%s][%s]\\n' \"$a\" \"$b\" \"$c\" > \"{FILE}\""
+            ),
+            "[one][one][two]\n"
+        );
+    }
+
+    #[test]
+    fn dev_stdin_names_fd0s_file_and_may_fail_to_open_it() {
+        // Keep fd 0 on something the shell itself made. The ambient fd 0 is the
+        // *test harness's*, and re-opening it is not guaranteed to work — under
+        // `cargo test` it is the read end of a pipe, which this kernel refuses
+        // to re-open (`/dev/stdin: Permission denied`). bash fails identically
+        // there, so that is not a divergence to paper over; it is a reason the
+        // probe must not depend on the harness's descriptor.
+        assert_eq!(
+            run("{ read l < /dev/stdin; echo \"[$l]\"; } <<< 'x'").0,
+            "[x]\n"
+        );
+        // A here-document that fits in the pipe buffer *is* a pipe in bash, so
+        // the re-open continues rather than rewinding: `b` is the second line.
+        // Measured, bash 5.2.21 — see the `InputSrc::Bytes` arm of
+        // [`Shell::input_special_src`] for the 64 KiB boundary.
+        assert_eq!(
+            run("{ read a; read b < /dev/stdin; echo \"[$a][$b]\"; } <<< $'one\\ntwo'").0,
+            "[one][two]\n"
+        );
+        // With fd 0 closed the path has nothing behind it, and bash names the
+        // path rather than the descriptor.
+        let (o, st) = run("{ read l < /dev/stdin; } <&- 2>&1; echo \"rc=$?\"");
+        assert_eq!(st, 0);
+        assert!(
+            o.contains("/dev/stdin: No such file or directory"),
+            "diagnostic should name the path: {o:?}"
+        );
     }
 
     #[test]

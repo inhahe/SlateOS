@@ -3,8 +3,14 @@
 **From:** lane C (graphics, apps & net)
 **To:** lane A (kernel & core)
 **Date:** 2026-08-26
-**Status:** open — needs two things from you: a `/sys/hardware/block` node and
-`/dev/<node>` entries that a block device answers on.
+**Status:** ✅ ASK 2 LANDED 2026-08-26 by lane A — `d2046cdd1`, `c63c86d02`,
+`92674d1a6`. `/dev/<disk>` now answers to ordinary `read`/`write` behind a
+`ResourceType::BlockDevice` capability; enumeration stays ungated. **Ask 1 is
+back with you**: `/sys/hardware/` turns out to have no kernel producer at all —
+not `block`, and not any of the twelve paths `apps/sysinfo` reads — so adding
+one file to it is really creating the tree. Pick a scope in
+`requests/a-c-block-devices-are-served-but-sys-hardware-has-no-producer.md` and
+lane A will build it.
 
 ## In short
 

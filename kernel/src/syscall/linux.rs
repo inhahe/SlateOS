@@ -19830,6 +19830,7 @@ const STAT_SIZE: usize = 144;
 const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFCHR: u32 = 0o020000;
+const S_IFBLK: u32 = 0o060000;
 const S_IFIFO: u32 = 0o010000;
 const S_IFSOCK: u32 = 0o140000;
 const S_IFLNK: u32 = 0o120000;
@@ -19851,6 +19852,12 @@ fn meta_mode_bits(meta: &crate::fs::FileMeta) -> u32 {
         // The point of the variant: libinput refuses a node that is not
         // S_ISCHR, and libdrm and ALSA make the same check.
         crate::fs::EntryType::CharDevice => (S_IFCHR, 0o660),
+        // Same reasoning, higher stakes: a program about to write a disk image
+        // checks S_ISBLK on what it was handed, and a raw device reported as a
+        // regular file is one that check waves through. `0o660` is only the
+        // fallback for a filesystem that tracks no permissions -- devfs
+        // supplies its own, dropping the write bits for a read-only device.
+        crate::fs::EntryType::BlockDevice => (S_IFBLK, 0o660),
     };
     let perm = if meta.permissions == 0 {
         default_perm
@@ -43040,6 +43047,7 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
             crate::fs::EntryType::Symlink => 10,    // DT_LNK
             crate::fs::EntryType::VolumeLabel => 0, // DT_UNKNOWN
             crate::fs::EntryType::CharDevice => 2,  // DT_CHR
+            crate::fs::EntryType::BlockDevice => 6, // DT_BLK
         };
 
         out.extend_from_slice(&d_ino.to_le_bytes());

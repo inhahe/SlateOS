@@ -4446,6 +4446,7 @@ pub fn self_test() -> KernelResult<()> {
                     EntryType::Symlink => "LINK",
                     EntryType::VolumeLabel => "VOL ",
                     EntryType::CharDevice => "CHR ",
+                    EntryType::BlockDevice => "BLK ",
                 };
                 crate::serial_println!(
                     "[fat]     {} {:12} {} bytes",

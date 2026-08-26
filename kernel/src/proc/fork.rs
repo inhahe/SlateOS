@@ -374,10 +374,13 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         // NetRaw is a non-inheritable exclusive claim: a forked child must not
         // silently co-own the physical NIC.  It re-opens explicitly if needed.
         //
-        // SystemClock/PrivilegedPort/ResourceLimit are pure authority with no
-        // per-open object behind them, so there is nothing to refcount: the
-        // child inherits them through the cloned capability table exactly as it
-        // inherits PortIo, and duping them here would double-count nothing.
+        // SystemClock/PrivilegedPort/ResourceLimit/BlockDevice are pure
+        // authority with no per-open object behind them, so there is nothing to
+        // refcount: the child inherits them through the cloned capability table
+        // exactly as it inherits PortIo, and duping them here would double-count
+        // nothing.  (BlockDevice unlike NetRaw claims nothing exclusively — a
+        // disk is not a NIC, several openers is the normal case — so inheriting
+        // it costs the child nothing the parent had to give up.)
         ResourceType::Process
         | ResourceType::Thread
         | ResourceType::PortIo
@@ -389,6 +392,7 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         | ResourceType::SystemClock
         | ResourceType::PrivilegedPort
         | ResourceType::ResourceLimit
+        | ResourceType::BlockDevice
         | ResourceType::Namespace => Ok(None),
     }
 }

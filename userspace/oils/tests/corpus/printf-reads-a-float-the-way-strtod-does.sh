@@ -14,6 +14,14 @@
 # reported plainly, and a sign or a blank in front of the `0` hides the base
 # from the message the same way.
 #
+# The integer side reads its argument through `strtoimax` with base 0, which is
+# libc's business rather than bash's, and on a glibc of 2.38 or newer that base
+# includes C23's binary literal: `printf '%d' 0b101` is 5. It is emphatically
+# not a bash feature — bash's *arithmetic* refuses the same word ("value too
+# great for base") because that goes through `evalexp`, not through libc — and
+# `strtod` has no binary form at all, so `printf '%f' 0b101` is still a `0` with
+# junk behind it. `00b1` is octal `0` and not binary, the second byte deciding.
+#
 # A value with no digits — an infinity or a NaN — is spelled by the case of the
 # conversion letter alone, `nan`/`inf` against `NAN`/`INF`, and carries its sign
 # bit, so a negative NaN prints `-nan`.
@@ -38,28 +46,43 @@ for w in 0x 0X 0x. 0xg 0x_ 0x10zz 0x1p 0x1p+ 0x1pz 0x1p4z 0x10.8zz 0.x; do
 done
 
 echo "== 3. the same words as an integer conversion"
-for w in 0x10 0X10 0x3z 0X3z 012x 09x 00z -012x ' 0x3z' 0b101; do
+for w in 0x10 0X10 0x3z 0X3z 012x 09x 00z -012x ' 0x3z'; do
   printf '  -- [%s]\n' "$w"
   p 'printf "%d\n" "$w"'
 done
 
-echo "== 4. and the base the float side names"
+echo "== 4. the integer side alone knows C23's binary literal"
+for w in 0b101 0B101 -0b101 ' 0b101' 0b0 0b 0b2 0b_1 0b101z 0b101.5 00b1 0x0b1; do
+  printf '  -- [%s]\n' "$w"
+  p 'printf "%d\n" "$w"'
+done
+echo "--- every integer conversion, not just %d"
+for c in d i u o x X; do
+  printf "  %%$c: "
+  p "printf '%$c\\n' 0b101"
+done
+echo "--- including a width taken from an argument"
+p 'printf "[%*d]\n" 0b101 7'
+echo "--- but strtod has no binary form, so the float side does not"
+p 'printf "%f\n" 0b101'
+
+echo "== 5. and the base the float side names"
 for w in 012x 09x 00z 0X3z -012x 0.x; do
   printf '  -- [%s]\n' "$w"
   p 'printf "%f\n" "$w"'
 done
 
-echo "== 5. a value with no digits is spelled by the letter's case"
+echo "== 6. a value with no digits is spelled by the letter's case"
 for c in f F e E g G a A; do
   printf "  %%$c: "
   printf "%$c|%$c|%$c|%$c\n" nan -nan inf -inf
 done
 
-echo "== 6. …and neither precision nor a pad flag reaches it"
+echo "== 7. …and neither precision nor a pad flag reaches it"
 p 'printf "[%08f][%-8f][%8.3f][%+f][% f]\n" nan nan nan nan nan'
 p 'printf "[%08G][%#g][%.0e]\n" -inf inf inf'
 
-echo "== 7. the ordinary spellings still read as before"
+echo "== 8. the ordinary spellings still read as before"
 for w in 1.5 .5 5. -1.5 +1.5 1e3 1E3 1e-3 inf infinity INF nan 1.5e 1e .e3 infinit ''; do
   printf '  -- [%s]\n' "$w"
   p 'printf "%f\n" "$w"'

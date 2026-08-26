@@ -80987,8 +80987,43 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **569 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **560 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (fourteenth batch): `cmd_splice` (9) cleared —
+> 569 → 560 across 229 → 228 functions. Pinned by `kshell::self_test` rung 81.
+>
+> **This is the batch that changes what the entry is about.** Every one of the
+> thirteen before it guessed a *selector* — an id, a mode, a switch. The command
+> then acted on the wrong object, or on no object, and reported success. That is
+> bad, and it is recoverable: the thing the user meant is still sitting there
+> untouched, and the wrong thing can usually be put back.
+>
+> `cmd_splice` is the first place in this family where the guessed number is an
+> **address in a file the command is about to write to**.
+> `splice copy src dst 0 1O24 4096` — one mistyped character in the destination
+> offset, a capital O for a zero — fell to `unwrap_or(0)` and wrote four
+> kilobytes over the *beginning* of `dst`, then printed
+> `Copied 4096 bytes: src -> dst`. There is no id to re-look-up and no setting
+> to restore. The bytes that were at offset 0 are gone, and the only record of
+> the mistake is a success line.
+>
+> The four length operands are the same defect one step quieter.
+> `unwrap_or(1024 * 1024)` means an unreadable length asks for a megabyte, so
+> `splice copy a b 0 0 4O96` moved 256× what was asked for and reported the
+> megabyte back as the byte count — a number that is *accurate*, describing an
+> operation nobody requested.
+>
+> All nine are genuine optional operands with genuine documented defaults
+> (`[src_offset]`, `[len]`), so the fix is `optional_num` and not
+> `required_num`; making them required would fix the guess by breaking the
+> documented short form. See §607 for why that tradeoff was resolved the way it
+> was even here, where the guess is the destructive one.
+>
+> One uncounted defect went with them: all four transfers shared a single
+> `if parts.len() < 3 { "Usage: …" }` covering both paths, so the refusal knew
+> something was absent and had already discarded which. `splice_paths` now names
+> whichever of source and destination is the missing one.
+>
 > **Burn-down log.** 2026-08-26 (thirteenth batch): `cmd_focusassist` (9)
 > cleared — 578 → 569 across 230 → 229 functions. Pinned by
 > `kshell::self_test` rung 80.

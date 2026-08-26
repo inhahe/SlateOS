@@ -24,7 +24,7 @@ use guitk::wheel;
 mod video;
 
 use std::path::{Path, PathBuf};
-use std::process;
+use std::process::ExitCode;
 
 // ============================================================================
 // Constants
@@ -131,10 +131,14 @@ fn parse_bmp_dimensions(data: &[u8]) -> Option<(u32, u32)> {
 }
 
 fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    // PNG IHDR chunk: width at offset 16 (4 bytes BE), height at offset 20 (4 bytes BE)
-    let width = byteread::u32_be_at(data, 16)?;
-    let height = byteread::u32_be_at(data, 20)?;
-    Some((width, height))
+    // Delegated rather than read here. This used to be two `u32_be_at` calls at
+    // offsets 16 and 20 — the place a PNG's width and height *are*, if the file
+    // has an IHDR chunk there and it is intact. Neither was checked, so a
+    // truncated download reported whatever happened to sit at those offsets and
+    // the info panel showed a confident, invented size for a file that would
+    // never open. `imagecodec` checks the signature, the chunk name, the chunk
+    // length, the bit depth and the colour type before it answers.
+    imagecodec::dimensions(data).ok()
 }
 
 fn parse_jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
@@ -178,38 +182,46 @@ fn parse_gif_dimensions(data: &[u8]) -> Option<(u32, u32)> {
 // Image data
 // ============================================================================
 
-/// Decoded image pixel data (RGBA format).
+/// The picture currently on screen, as the compositor holds it.
+///
+/// This used to carry a grey checkerboard: `display_image` called
+/// `ImageData::placeholder` under a comment reading "in a real implementation,
+/// this would decode the image", so every photograph in the system opened as
+/// the same 16-pixel check pattern at the right *size*. The size came from the
+/// header, which is why nothing looked obviously broken and why the whole test
+/// suite passed over it.
 #[derive(Clone, Debug)]
 pub struct ImageData {
+    /// Width in pixels, as decoded — not as the header claimed.
     pub width: u32,
+    /// Height in pixels, as decoded.
     pub height: u32,
-    pub pixels: Vec<u8>, // RGBA, 4 bytes per pixel
-    pub image_id: u64,   // Registered with compositor for rendering
+    /// The number [`RenderCommand::Image`] names it by.
+    ///
+    /// The pixels themselves are deliberately *not* here. They are moved
+    /// straight into the upload queue and thence to the compositor, which is
+    /// the only place anything draws from; a retained copy would double the
+    /// viewer's memory for a 20-megapixel photograph — 80 MB in this form — to
+    /// serve a reader that does not exist.
+    pub image_id: u64,
 }
 
-impl ImageData {
-    /// Create a placeholder checkerboard image for testing.
-    pub fn placeholder(width: u32, height: u32, image_id: u64) -> Self {
-        let pixel_count = (width as usize).saturating_mul(height as usize);
-        let mut pixels = Vec::with_capacity(pixel_count.saturating_mul(4));
-        for y in 0..height {
-            for x in 0..width {
-                let checker = ((x / 16) + (y / 16)) % 2 == 0;
-                if checker {
-                    pixels.extend_from_slice(&[200, 200, 200, 255]);
-                } else {
-                    pixels.extend_from_slice(&[100, 100, 100, 255]);
-                }
-            }
-        }
-        Self {
-            width,
-            height,
-            pixels,
-            image_id,
-        }
-    }
-}
+/// The image id this viewer uses for whatever picture is on screen.
+///
+/// One fixed number rather than a per-file hash, and the difference is not
+/// cosmetic. A viewer that derived an id from the path would leave every
+/// picture it had ever shown resident in the compositor: nothing drops them,
+/// and paging through a directory of photographs would climb the connection's
+/// image budget until the compositor refused — at which point the *next*
+/// picture is the one that fails, for a reason that has nothing to do with it.
+///
+/// Re-registering an id replaces what is under it, and the budget is measured
+/// against what the link would hold *after* the upload, so one id also means
+/// the viewer never holds two full-size pictures at once. That is the same
+/// property `design-decisions.md` §557 achieves for the wallpaper by dropping
+/// before uploading, arrived at more cheaply because a viewer, unlike a
+/// slideshow of wallpapers, shows exactly one picture.
+const VIEWER_IMAGE_ID: u64 = 1;
 
 // ============================================================================
 // Transform state
@@ -504,6 +516,18 @@ pub struct ViewerState {
     /// which on a precision trackpad (a stream of 0.05-notch events) ran the
     /// zoom from minimum to maximum on a single flick of two fingers.
     zoom_wheel: wheel::Accumulator,
+
+    /// Pictures the compositor should start or stop holding, in order, not yet
+    /// sent.
+    ///
+    /// Queued rather than sent at the point of decode because `display_image`
+    /// has no connection and must not need one: every test in this file drives
+    /// the viewer with no compositor anywhere, and a loader that dialled a
+    /// display would make the whole suite either offline-and-untested or
+    /// online-and-fragile. `oswindow::app::drive` drains this through
+    /// [`App::take_images`] between the render and the frame, which is what
+    /// puts the pixels up before the frame that names them.
+    pending_images: Vec<oswindow::app::ImageChange>,
 }
 
 impl ViewerState {
@@ -532,6 +556,7 @@ impl ViewerState {
             drag_start_pan_y: 0.0,
             hovered_button: None,
             zoom_wheel: wheel::Accumulator::default(),
+            pending_images: Vec::new(),
         }
     }
 
@@ -594,9 +619,7 @@ impl ViewerState {
                 // must name this file — but with no image and no borrowed
                 // metadata beside it.
                 self.image_info = info;
-                self.current_image = None;
-                self.load_error = Some(format!("{}: {}", path.display(), e));
-                self.transform.reset();
+                self.fail_with(format!("{}: {}", path.display(), e));
                 return false;
             }
         };
@@ -612,24 +635,87 @@ impl ViewerState {
 
         let format = ImageFormat::detect(&data);
         info.format = Some(format);
+        // Read before the decode and from the header alone, because it is the
+        // only size available for a format this system can identify but not yet
+        // draw. A JPEG's dimensions in the info panel are worth having beside
+        // "JPEG images cannot be displayed yet"; they are what tells the user
+        // the file is the photograph they meant.
         if let Some((w, h)) = parse_dimensions(format, &data) {
             info.width = w;
             info.height = h;
         }
 
-        // In a real implementation, this would decode the image and
-        // register it with the compositor. For now, create placeholder.
-        let image_id = path_to_image_id(path);
-        let img_w = info.width.max(1);
-        let img_h = info.height.max(1);
+        let decoded = imagecodec::decode(&data, imagecodec::Limits::default());
+        let image = match decoded {
+            Ok(image) => image,
+            Err(why) => {
+                self.image_info = info;
+                self.fail_with(format!(
+                    "{}: {}",
+                    path.display(),
+                    decode_failure(format, &why)
+                ));
+                return false;
+            }
+        };
+
+        // The decoder's answer overrides the header's. They agree for any file
+        // that decoded at all — `imagecodec` allocates from the header — but
+        // saying so once here means nothing downstream has to know which of the
+        // two `fit_zoom` and the info panel are reading.
+        info.width = image.width;
+        info.height = image.height;
+
+        // Cleared, not appended to. Paging through a directory faster than the
+        // loop draws — holding an arrow key down, or a slideshow with a short
+        // interval — would otherwise queue every picture passed over and upload
+        // all of them before one frame, at a full photograph's worth of wire
+        // traffic per file nobody sees. Only the last one is ever drawn.
+        self.pending_images.clear();
+        self.pending_images
+            .push(oswindow::app::ImageChange::Upload {
+                id: VIEWER_IMAGE_ID,
+                width: image.width,
+                height: image.height,
+                stride: image.stride(),
+                format: oswindow::PixelFormat::Argb8888,
+                // Moved, not cloned. A 20-megapixel photograph is 80 MB in this
+                // form; a copy retained "in case something wants it" would
+                // double the viewer's footprint for a reader that does not
+                // exist. The compositor is where the pixels live once they are
+                // sent, and re-reading the file is how they would come back.
+                bytes: image.to_argb_bytes(),
+            });
 
         self.image_info = info;
-        self.current_image = Some(ImageData::placeholder(img_w, img_h, image_id));
+        self.current_image = Some(ImageData {
+            width: image.width,
+            height: image.height,
+            image_id: VIEWER_IMAGE_ID,
+        });
         self.load_error = None;
 
         // Reset transform for new image
         self.transform.reset();
         true
+    }
+
+    /// Record that there is no picture, and stop paying for the last one.
+    ///
+    /// The drop is the half that is easy to leave out and expensive to leave
+    /// out: with no picture, `render_image` emits no `Image` command at all, so
+    /// the pixels the compositor still holds under [`VIEWER_IMAGE_ID`] are
+    /// unreachable — and a viewer parked on an unopenable file would go on
+    /// charging the connection's image budget for a full-screen photograph
+    /// nobody can see.
+    fn fail_with(&mut self, reason: String) {
+        if self.current_image.take().is_some() {
+            self.pending_images.clear();
+            self.pending_images
+                .push(oswindow::app::ImageChange::Drop(VIEWER_IMAGE_ID));
+        }
+        self.load_error = Some(reason);
+        self.transform.reset();
     }
 
     /// Load the image file listing for a directory.
@@ -1707,14 +1793,29 @@ fn toolbar_buttons() -> Vec<ToolbarButton> {
 // Utility functions
 // ============================================================================
 
-/// Generate a stable image ID from a file path (simple hash).
-fn path_to_image_id(path: &Path) -> u64 {
-    let path_str = path.to_string_lossy();
-    let mut hash: u64 = 5381;
-    for byte in path_str.bytes() {
-        hash = hash.wrapping_mul(33).wrapping_add(byte as u64);
+/// Why a file that was read could not be shown, in the user's terms.
+///
+/// The decoder's own message is written for whoever has to fix the *file* —
+/// "not a picture format this system reads" — and is the wrong sentence for the
+/// commonest case by far, which is a perfectly ordinary JPEG that this system
+/// cannot decode yet. Those two are opposite diagnoses: one says the file is
+/// wrong, the other says the viewer is, and telling a user their holiday
+/// photograph is not a picture is the sort of confident wrong answer that sends
+/// people looking for a corrupt disk.
+///
+/// So the format that [`ImageFormat::detect`] recognised is folded in. It reads
+/// the signature independently of `imagecodec`, which is what lets the two
+/// disagree usefully: "these bytes begin like a JPEG" and "no decoder here
+/// claims them" together mean *unsupported*, not *unrecognised*.
+fn decode_failure(format: ImageFormat, why: &imagecodec::ImageError) -> String {
+    match (format, why) {
+        // A named format that no decoder claimed: not the file's fault.
+        (
+            ImageFormat::Bmp | ImageFormat::Jpeg | ImageFormat::Gif,
+            imagecodec::ImageError::UnknownFormat,
+        ) => format!("{} images cannot be displayed yet", format.name()),
+        _ => why.to_string(),
     }
-    hash
 }
 
 /// Check if a file extension represents a supported image format.
@@ -1723,48 +1824,130 @@ pub fn is_image_extension(ext: &str) -> bool {
 }
 
 // ============================================================================
+// The window
+// ============================================================================
+
+impl oswindow::app::App for ViewerState {
+    /// The file's name first, then the application's.
+    ///
+    /// That order is what a task bar full of windows needs: the strip of
+    /// buttons is elided from the right, so a viewer that led with its own name
+    /// would give every open picture the same visible label.
+    fn title(&self) -> String {
+        if self.image_info.filename.is_empty() {
+            String::from("Image Viewer")
+        } else {
+            format!("{} — Image Viewer", self.image_info.filename)
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // Truncating a size that was built from two integers a moment ago, and
+        // clamped so a negative or absurd float cannot become a nonsense
+        // request. The render vocabulary is `f32` throughout, so the cast has
+        // to happen somewhere.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (
+            self.window_width.clamp(1.0, 16384.0) as u32,
+            self.window_height.clamp(1.0, 16384.0) as u32,
+        )
+    }
+
+    /// A clock only while a slideshow is running.
+    ///
+    /// Consulted after every event, so starting a slideshow with F5 arms the
+    /// clock and stopping it disarms one — which is what stops a viewer left
+    /// open on one photograph from holding the whole desktop awake. The
+    /// interval is the slideshow's own, not a fixed frame rate: a five-second
+    /// slideshow that woke sixty times a second to discover that four seconds
+    /// remained would be 299 wake-ups spent on arithmetic.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        (self.slideshow.active && !self.slideshow.paused)
+            .then(|| std::time::Duration::from_millis(self.slideshow.interval.millis()))
+    }
+
+    fn on_event(&mut self, event: &Event) -> oswindow::app::Response {
+        if matches!(event, Event::CloseRequested) {
+            return oswindow::app::Response::Exit;
+        }
+        if self.handle_event(event) {
+            oswindow::app::Response::Redraw
+        } else {
+            oswindow::app::Response::Idle
+        }
+    }
+
+    fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
+        std::mem::take(&mut self.pending_images)
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the compositor last reported wins over the one the viewer
+        // remembers. They agree whenever a `Resize` event was delivered, and
+        // the case where they do not — the very first frame, drawn before any
+        // event has arrived — is exactly the one that would otherwise be drawn
+        // at the size this viewer *asked* for rather than the size it got.
+        self.window_width = width;
+        self.window_height = height;
+        render(self)
+    }
+}
+
+// ============================================================================
 // Application entry point
 // ============================================================================
 
-fn main() {
-    // Initialize viewer with a default window size
-    let mut state = ViewerState::new(1024.0, 768.0);
+fn main() -> ExitCode {
+    // Parsed rather than indexed, so `--display` reaches the connection and
+    // does not get mistaken for a file called `--display`. `rest` is this
+    // viewer's own argument list; `launch_with` is the entry point for an
+    // application that has taken its own arguments, `launch` the one for an
+    // application with none.
+    let args = match oswindow::app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("imageviewer: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if args.rest.len() > 1 {
+        // One window, one picture. A second file would silently be the one not
+        // shown, which is worse than saying so: the user would conclude the
+        // viewer had opened it and simply drawn the wrong one.
+        eprintln!(
+            "imageviewer: only one file at a time; open a directory's other images with the arrow keys"
+        );
+        return ExitCode::from(2);
+    }
 
-    // Parse command-line arguments for initial file
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(file_path) = args.get(1) {
+    let mut state = ViewerState::new(1024.0, 768.0);
+    if let Some(file_path) = args.rest.first() {
         let path = PathBuf::from(file_path);
-        // This used to be `if path.exists() { … }` with no `else`, so
-        // `imageviewer typo.jpg` printed nothing, showed an empty viewer and
-        // exited 0 — indistinguishable from `imageviewer` with no argument.
-        // Existence is not the question anyway; openability is, and only
-        // trying answers it. A file can disappear between the check and the
-        // open, and a file that exists can still be unreadable.
+        // Existence is not the question; openability is, and only trying
+        // answers it. A file can disappear between a check and an open, and a
+        // file that exists can still be unreadable or in a format this system
+        // cannot yet decode.
+        //
+        // A failure is reported here *and* shown in the window, rather than
+        // ending the process. It used to exit(1), which was right when there
+        // was no window at all — but a graphical viewer that refuses to appear
+        // leaves nothing to act on, and `open_file` rebuilds the directory
+        // listing whether or not the file opened, precisely so that the arrow
+        // key which reached a broken file can carry the user off it again. The
+        // stderr line is what a terminal user gets immediately; the canvas is
+        // what everyone else gets. See design-decisions.md §558.
         if !state.open_file(&path) {
             let reason = state
                 .load_error
                 .as_deref()
                 .unwrap_or("the file could not be read");
             eprintln!("imageviewer: {reason}");
-            process::exit(1);
         }
         // Auto-fit the first image
         state.fit_to_window();
     }
 
-    // In a real windowing environment, this would enter the event loop
-    // managed by the compositor/window manager. For now, render one frame
-    // to verify the rendering pipeline works.
-    let _frame = render(&state);
-
-    // Event loop placeholder — in practice, the compositor calls us with events
-    // and we return render trees each frame.
-    // loop {
-    //     let event = wait_for_event();
-    //     state.handle_event(&event);
-    //     let frame = render(&state);
-    //     submit_frame(frame);
-    // }
+    oswindow::app::launch_with("imageviewer", args.display.as_deref(), &mut state)
 }
 
 // ============================================================================
@@ -1781,7 +1964,12 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::float_cmp
+        clippy::float_cmp,
+        // The PNG fixture below computes a CRC-32 and an Adler-32, both of
+        // which are defined in terms of wrapping and modular arithmetic. A
+        // `checked_add` on a checksum accumulator would be noise around a sum
+        // that is *supposed* to fold.
+        clippy::arithmetic_side_effects
     )]
 
     use super::*;
@@ -1904,20 +2092,13 @@ mod tests {
 
     #[test]
     fn test_png_dimensions() {
-        // Minimal PNG with IHDR: width=800, height=600
-        let mut data = vec![0u8; 30];
-        // PNG signature
-        data[..8].copy_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
-        // IHDR length (13 bytes)
-        data[8..12].copy_from_slice(&13u32.to_be_bytes());
-        // "IHDR" chunk type
-        data[12..16].copy_from_slice(b"IHDR");
-        // Width at offset 16
-        data[16..20].copy_from_slice(&800u32.to_be_bytes());
-        // Height at offset 20
-        data[20..24].copy_from_slice(&600u32.to_be_bytes());
-
-        assert_eq!(parse_png_dimensions(&data), Some((800, 600)));
+        // A real PNG, not a hand-laid header. The size now comes back through
+        // `imagecodec::dimensions`, which reads the IHDR *as a chunk* -- length,
+        // type, and the fields after the size -- so a 30-byte stub with a zero
+        // bit depth is no longer a picture and would report nothing. Building
+        // the fixture the same way every other test here does keeps this test
+        // measuring what it says it measures.
+        assert_eq!(parse_png_dimensions(&png_bytes(800, 600)), Some((800, 600)));
     }
 
     #[test]
@@ -2072,7 +2253,11 @@ mod tests {
     #[test]
     fn test_render_with_image() {
         let mut state = ViewerState::new(800.0, 600.0);
-        state.current_image = Some(ImageData::placeholder(200, 150, 42));
+        state.current_image = Some(ImageData {
+            width: 200,
+            height: 150,
+            image_id: VIEWER_IMAGE_ID,
+        });
         state.image_info.width = 200;
         state.image_info.height = 150;
         state.image_info.filename = String::from("test.png");
@@ -2145,28 +2330,207 @@ mod tests {
         assert_eq!(state.current_index, 0);
     }
 
-    #[test]
-    fn test_path_to_image_id_deterministic() {
-        let path = Path::new("/home/user/photos/sunset.jpg");
-        let id1 = path_to_image_id(path);
-        let id2 = path_to_image_id(path);
-        assert_eq!(id1, id2);
+    // -----------------------------------------------------------------------
+    // Getting the picture to the compositor
+    // -----------------------------------------------------------------------
+
+    /// Every image request the viewer has queued but not yet sent, as
+    /// `("up"|"down", id, width, height, bytes)`.
+    fn queued(state: &ViewerState) -> Vec<(&'static str, u64, u32, u32, usize)> {
+        state
+            .pending_images
+            .iter()
+            .map(|c| match c {
+                oswindow::app::ImageChange::Upload {
+                    id,
+                    width,
+                    height,
+                    bytes,
+                    ..
+                } => ("up", *id, *width, *height, bytes.len()),
+                oswindow::app::ImageChange::Drop(id) => ("down", *id, 0, 0, 0),
+            })
+            .collect()
     }
 
+    /// The defect this whole change exists to close: a viewer that named an
+    /// image id and never put pixels under it drew *nothing*, and the id it
+    /// named came from a checkerboard it had synthesised itself.
     #[test]
-    fn test_path_to_image_id_different_paths() {
-        let p1 = Path::new("/a.png");
-        let p2 = Path::new("/b.png");
-        assert_ne!(path_to_image_id(p1), path_to_image_id(p2));
+    fn opening_a_picture_queues_its_pixels_for_the_compositor() {
+        let guard = scratch("queues-pixels");
+        let dir = guard.dir().to_path_buf();
+        let file = dir.join("photo.png");
+        std::fs::write(&file, png_bytes(9, 7)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&file), "the fixture PNG must decode");
+
+        assert_eq!(
+            queued(&state),
+            [("up", VIEWER_IMAGE_ID, 9, 7, 9 * 7 * 4)],
+            "the pixels must be queued, under the id the render tree names"
+        );
+        let image = state.current_image.as_ref().expect("a picture");
+        assert_eq!(image.image_id, VIEWER_IMAGE_ID);
     }
 
+    /// The bytes are the file's, not a pattern the viewer invented.
+    ///
+    /// `png_bytes` writes a gradient, so a decoder that silently produced a
+    /// flat buffer — or the old checkerboard — fails here. Asserting on the
+    /// *content* rather than only the length is the point: the previous code
+    /// produced exactly the right number of bytes.
     #[test]
-    fn test_placeholder_image() {
-        let img = ImageData::placeholder(16, 16, 1);
-        assert_eq!(img.width, 16);
-        assert_eq!(img.height, 16);
-        assert_eq!(img.pixels.len(), 16 * 16 * 4);
-        assert_eq!(img.image_id, 1);
+    fn the_pixels_are_the_files_own_and_not_a_pattern() {
+        let guard = scratch("real-pixels");
+        let dir = guard.dir().to_path_buf();
+        let file = dir.join("gradient.png");
+        std::fs::write(&file, png_bytes(4, 3)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&file));
+
+        let oswindow::app::ImageChange::Upload { bytes, stride, .. } = &state.pending_images[0]
+        else {
+            panic!("expected an upload");
+        };
+        assert_eq!(*stride, 4 * 4, "this decoder never pads");
+        // Row 1, pixel 2, as little-endian 0xAARRGGBB: the fixture writes
+        // (r, g, b, a) = (x, y, 0x40, 0xFF), so this is (2, 1, 0x40, 0xFF).
+        let (x, y, width) = (2usize, 1usize, 4usize);
+        let at = (y * width + x) * 4;
+        assert_eq!(
+            &bytes[at..at + 4],
+            &[0x40, 1, 2, 0xFF],
+            "b, g, r, a in memory order — the picture was not decoded"
+        );
+    }
+
+    /// One id for the picture on screen, not one per file.
+    ///
+    /// A per-path id would leave every photograph the user had paged through
+    /// resident in the compositor, since nothing drops them: the connection's
+    /// image budget would climb until some later, innocent picture was refused.
+    #[test]
+    fn paging_through_a_directory_reuses_one_image_id() {
+        let guard = scratch("one-id");
+        let dir = guard.dir().to_path_buf();
+        std::fs::write(dir.join("a.png"), png_bytes(4, 4)).expect("write a");
+        std::fs::write(dir.join("b.png"), png_bytes(6, 5)).expect("write b");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&dir.join("a.png")));
+        state.pending_images.clear();
+
+        state.next_image();
+        assert_eq!(
+            queued(&state),
+            [("up", VIEWER_IMAGE_ID, 6, 5, 6 * 5 * 4)],
+            "the second picture must replace the first rather than join it"
+        );
+    }
+
+    /// Paging faster than the loop draws must not upload every file passed
+    /// over: only the last one is ever seen, and a held-down arrow key across a
+    /// directory of photographs would otherwise be tens of megabytes of wire
+    /// traffic per frame.
+    #[test]
+    fn skipping_past_pictures_uploads_only_the_one_that_lands() {
+        let guard = scratch("supersede");
+        let dir = guard.dir().to_path_buf();
+        std::fs::write(dir.join("a.png"), png_bytes(4, 4)).expect("write a");
+        std::fs::write(dir.join("b.png"), png_bytes(6, 6)).expect("write b");
+        std::fs::write(dir.join("c.png"), png_bytes(8, 8)).expect("write c");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&dir.join("a.png")));
+        state.next_image();
+        state.next_image();
+
+        assert_eq!(
+            queued(&state),
+            [("up", VIEWER_IMAGE_ID, 8, 8, 8 * 8 * 4)],
+            "a, b and c were all queued; only c is drawn"
+        );
+    }
+
+    /// A viewer parked on a file it cannot show must stop paying for the one it
+    /// showed before. With no picture, `render_image` emits no `Image` command
+    /// at all, so the pixels the compositor still held would be unreachable and
+    /// still charged to the connection's image budget.
+    #[test]
+    fn a_file_that_will_not_open_gives_the_last_picture_back() {
+        let guard = scratch("drops-on-failure");
+        let dir = guard.dir().to_path_buf();
+        let good = dir.join("real.png");
+        std::fs::write(&good, png_bytes(8, 8)).expect("write png");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(state.open_file(&good));
+        state.pending_images.clear();
+
+        assert!(!state.open_file(&dir.join("gone.png")));
+        assert_eq!(
+            queued(&state),
+            [("down", VIEWER_IMAGE_ID, 0, 0, 0)],
+            "the unreachable picture must be released"
+        );
+    }
+
+    /// ...but only if there was one. A failure with nothing on screen has
+    /// nothing to give back, and a `Drop` sent regardless would be a round trip
+    /// per keystroke through a directory of files none of which open.
+    #[test]
+    fn a_failure_with_nothing_on_screen_asks_for_nothing() {
+        let guard = scratch("no-spurious-drop");
+        let dir = guard.dir().to_path_buf();
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(!state.open_file(&dir.join("never-existed.png")));
+        assert!(queued(&state).is_empty());
+    }
+
+    /// A format this system recognises but cannot decode must not be reported
+    /// as "not a picture". Those are opposite diagnoses — one blames the file,
+    /// the other the viewer — and telling a user their photograph is not a
+    /// picture sends them looking for a corrupt disk.
+    #[test]
+    fn an_undecodable_but_recognised_format_says_which_it_is() {
+        let guard = scratch("unsupported-format");
+        let dir = guard.dir().to_path_buf();
+        let jpeg = dir.join("holiday.jpg");
+        // A real JPEG signature, then a plausible APP0 segment: enough for
+        // `ImageFormat::detect`, and nothing this system can decode.
+        std::fs::write(&jpeg, [0xFF, 0xD8, 0xFF, 0xE0, 0, 16, b'J', b'F']).expect("write jpeg");
+
+        let mut state = ViewerState::new(800.0, 600.0);
+        assert!(!state.open_file(&jpeg));
+        let reason = state.load_error.as_deref().expect("a reason");
+        assert!(
+            reason.contains("JPEG images cannot be displayed yet"),
+            "the reason must name the format, not blame the file: {reason}"
+        );
+    }
+
+    /// A truncated PNG used to report a size: `parse_png_dimensions` read
+    /// offsets 16 and 20 with no check that an IHDR was there or intact, so the
+    /// info panel showed a confident, invented size for a file that would never
+    /// open.
+    #[test]
+    fn a_png_with_no_real_header_reports_no_size() {
+        // The signature, then bytes that would read as 0x01020304 by
+        // 0x05060708 at the old offsets.
+        let mut data = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        data.extend_from_slice(&[0, 0, 0, 13]);
+        data.extend_from_slice(b"IHDR");
+        data.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        assert_eq!(
+            parse_dimensions(ImageFormat::Png, &data),
+            None,
+            "a chunk that ends mid-header must not yield a size"
+        );
     }
 
     #[test]
@@ -2300,16 +2664,105 @@ mod tests {
         ScratchDir::new(&format!("slateos-imageviewer-{label}"))
     }
 
-    /// A minimal but genuine PNG header, enough for `ImageFormat::detect` and
-    /// `parse_dimensions` to read a size out of it.
+    /// A genuine, decodable 8-bit RGBA PNG of the given size.
+    ///
+    /// This used to stop after the IHDR fields — enough for
+    /// `ImageFormat::detect` to say "PNG" and for the old
+    /// `parse_png_dimensions` to read two integers out of offsets 16 and 20.
+    /// That was sufficient exactly because nothing decoded: the viewer took the
+    /// header's word for the size and drew a checkerboard. A fixture that a
+    /// real decoder rejects would now fail every test that opens a file, and
+    /// the *right* repair is to make the fixture a real picture rather than to
+    /// weaken the tests — a viewer whose whole test suite runs on files no
+    /// decoder accepts is the position this crate is being moved out of.
+    ///
+    /// Deflate's *stored* block type is what makes this short: it is a length,
+    /// its complement and the bytes, so no compressor is needed. The two
+    /// checksums are the parts a decoder actually verifies, and both are a few
+    /// lines.
     fn png_bytes(w: u32, h: u32) -> Vec<u8> {
-        let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        v.extend_from_slice(&[0, 0, 0, 13]); // IHDR length
-        v.extend_from_slice(b"IHDR");
-        v.extend_from_slice(&w.to_be_bytes());
-        v.extend_from_slice(&h.to_be_bytes());
-        v.extend_from_slice(&[8, 6, 0, 0, 0]); // bit depth, colour type, etc.
-        v
+        // Filter byte 0 ("None") per row, then RGBA. A recognisable gradient
+        // rather than a flat colour, so a test that asserts on pixels can tell
+        // a decoded picture from a blank one.
+        let mut raw = Vec::new();
+        for y in 0..h {
+            raw.push(0u8);
+            for x in 0..w {
+                raw.extend_from_slice(&[(x % 256) as u8, (y % 256) as u8, 0x40, 0xFF]);
+            }
+        }
+
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        // bit depth 8, colour type 6 (RGBA), deflate, adaptive filtering, no
+        // interlace.
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        push_chunk(&mut png, b"IHDR", &ihdr);
+        push_chunk(&mut png, b"IDAT", &zlib_stored(&raw));
+        push_chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    /// Length, type, payload, CRC — the shape of every PNG chunk.
+    fn push_chunk(out: &mut Vec<u8>, kind: &[u8; 4], payload: &[u8]) {
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        let mut crc_over = kind.to_vec();
+        crc_over.extend_from_slice(payload);
+        out.extend_from_slice(&crc32(&crc_over).to_be_bytes());
+    }
+
+    /// A zlib stream carrying `data` verbatim in stored deflate blocks.
+    fn zlib_stored(data: &[u8]) -> Vec<u8> {
+        // CMF 0x78 (deflate, 32 KiB window), FLG 0x01 — chosen so the two-byte
+        // header is a multiple of 31, which is what a decoder checks.
+        let mut out = vec![0x78, 0x01];
+        // A stored block's length field is 16 bits, so a picture larger than
+        // 64 KiB of raw bytes takes several. Empty input still needs one block,
+        // or the stream ends with no final-block marker.
+        let mut chunks = data.chunks(0xFFFF).peekable();
+        if data.is_empty() {
+            out.extend_from_slice(&[1, 0, 0, 0xFF, 0xFF]);
+        }
+        while let Some(chunk) = chunks.next() {
+            out.push(u8::from(chunks.peek().is_none()));
+            let len = chunk.len() as u16;
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&(!len).to_le_bytes());
+            out.extend_from_slice(chunk);
+        }
+        out.extend_from_slice(&adler32(data).to_be_bytes());
+        out
+    }
+
+    /// The PNG chunk checksum. Computed bit by bit rather than from a table:
+    /// a table would be a second thing to get right for no gain in a fixture.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// The zlib stream checksum.
+    fn adler32(data: &[u8]) -> u32 {
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in data {
+            a = (a + u32::from(byte)) % 65521;
+            b = (b + a) % 65521;
+        }
+        (b << 16) | a
     }
 
     /// The bug: `display_image` assigned into `image_info` field by field and

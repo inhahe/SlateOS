@@ -82279,14 +82279,16 @@ needs a third-party oracle: had the two been compared only to each other, all
 
 ---
 
-## `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING` (lane C, 2026-08-26) — **half fixed 2026-08-26: the decoder exists, the five callers are not wired to it yet**
+## `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING` (lane C, 2026-08-26) — **mostly fixed 2026-08-26: the decoder exists and the wallpaper and the image viewer use it; explorer thumbnails do not yet**
 
 **In short (update):** there is a PNG decoder now — `gui/imagecodec`, a
 dependency-free `no_std` crate that turns a `.png` on disk into the exact
 `0xAARRGGBB` pixels the compositor stores. The missing link in the table below
-is therefore no longer missing. What is still open is the *wiring*: none of the
-five callers listed further down has been changed to call it, so a wallpaper the
-user picks still does not appear. The entry stays open until they are.
+is therefore no longer missing. Two of the callers are wired to it: a wallpaper
+the user picks appears, and the image viewer shows the photograph you opened
+instead of a grey checkerboard. What remains is `apps/explorer`'s thumbnails,
+and the image viewer's own filmstrip, both of which need a bounded scheduler for
+decoding many files at once. The entry stays open until they are.
 
 **What was built.**
 
@@ -82315,7 +82317,8 @@ agreed with ours exactly. The suite also truncates every real file at every
 length and flips a bit in every byte of every one, asserting only that nothing
 unwinds.
 
-**What is left.** Wire the remaining callers below to it.
+**What is left.** Wire the remaining caller below to it — `apps/explorer`'s
+thumbnails, and the image viewer's filmstrip, which are the same problem.
 
 **Wired so far — the wallpaper (2026-08-26).**
 `ShellSession::refresh_wallpaper_image` (`gui/desktop/src/session.rs`) runs at
@@ -82350,11 +82353,62 @@ worth knowing:
 Nothing yet reads `wallpaper_error()` — no surface shows it to the user. That is
 the next small piece: a notification, or a line in the wallpaper settings panel.
 
-**Still unwired.** `apps/explorer` (thumbnails) and `apps/imageviewer` (both the
-still and the video path). Neither depends on `oswindow` yet, which is what
-carries an upload to the compositor, so they need that dependency before they
-can upload anything they decode — and `imageviewer` additionally still
-synthesises a grey checkerboard in `Image::load` instead of opening the file.
+**Wired so far — the image viewer (2026-08-26).**
+`apps/imageviewer` opened every photograph as the same 16-pixel grey
+checkerboard, with a comment in `display_image` reading "in a real
+implementation, this would decode the image". It now decodes the file and
+uploads the pixels. Getting there needed a piece that did not exist for *any*
+application, so this half of the fix is reusable by all ~140 of them:
+
+- **`App::take_images()`** (`gui/window/src/app.rs`) is the route an application
+  now has to the compositor's image store. `App::render` returns a `RenderTree`,
+  and a `RenderTree`'s `RenderCommand::Image` carries an image *id* and never
+  the pixels — so before this, an app implementing `App` had no way to upload at
+  any price, because it never sees a `WindowHandle`. The new method returns an
+  ordered `Vec<ImageChange>` (`Upload { id, width, height, stride, format,
+  bytes }` / `Drop(id)`) which the loop applies **after `render` and before the
+  frame is submitted**, so a picture queued while drawing reaches the compositor
+  ahead of the frame that names it. One ordered list rather than two methods
+  because drop-before-upload ordering is load-bearing (design-decisions.md
+  §557 — a slideshow that uploads first is charged for two full-screen pictures
+  at once). Drained per *frame*, not per event, unlike `take_reloads`; the
+  reasoning for the difference is at both methods and in §558.
+- **The viewer uses one image id for every file it opens** (`VIEWER_IMAGE_ID`),
+  replacing an id hashed from the path. Nothing evicts — the compositor holds
+  what it is given until the id is dropped — so per-path ids meant a session
+  paging through a directory accumulated every picture it had ever shown and was
+  eventually refused. Re-registering an id is a *replacement* in
+  `image_budget_refusal`'s arithmetic, so one id gives the never-hold-two
+  property for free.
+- **Failures are shown, not fatal.** A file that cannot be read or decoded drops
+  the picture, records the reason, and paints the existing "Cannot display this
+  image" state; `main` no longer exits when the file on the command line is
+  broken, so the window opens and the arrow keys carry the user off it.
+  `decode_failure` distinguishes "these bytes are not a picture" from "this is a
+  JPEG and no decoder claims it yet", using the viewer's own signature sniffing.
+- **`parse_png_dimensions` no longer reads two integers out of raw offsets 16
+  and 20** — a truncated download used to report whatever bytes sat there. It
+  delegates to `imagecodec::dimensions`, which validates the IHDR as a chunk.
+- Eight tests under "Getting the picture to the compositor", plus five in
+  `gui/window/src/app.rs` for the strap itself. The viewer's `png_bytes` test
+  fixture was upgraded from a bare 13-byte header to a real encoder (stored
+  deflate blocks, CRC-32, Adler-32), so the tests that already existed now run
+  against a genuine picture instead of a stub.
+
+**Still placeholder inside the viewer.** The filmstrip along the bottom
+(`render_thumbnail_strip`, ~line 1631) still draws a grey `FillRect` per entry
+under a comment reading "would use actual thumbnails". Decoding every file in a
+directory to fill it needs a bounded, off-the-draw-path scheduler and a
+per-thumbnail image id with an eviction rule — the same problem
+`apps/explorer` has, and it should be solved once for both rather than twice.
+The **video** path in `apps/imageviewer/src/video.rs` is also still frameless:
+`imagecodec` decodes stills only, and no MP4/Matroska video decoder exists.
+
+**Still unwired.** `apps/explorer` (thumbnails). It does not depend on
+`oswindow` yet, which is what carries an upload to the compositor, so it needs
+that dependency before it can upload anything it decodes; `thumbs.rs` ~1313 says
+outright that "the caller is responsible for registering the pixel data with the
+compositor under this ID" and no caller does.
 `gui/toolkit/src/grid.rs` takes the caller's id and is correct as it stands.
 
 **Original entry follows.**

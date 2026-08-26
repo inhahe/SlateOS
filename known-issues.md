@@ -81109,8 +81109,54 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **536 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **529 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (eighteenth batch): `cmd_brightness` (7) cleared
+> — 536 → 529 across 225 → 224 functions. Pinned by `kshell::self_test` rung 85.
+>
+> **The guess and the arity guard compound, and the result is a message that is
+> false in both halves.** `cmd_brightness`'s `set` arm was fixed for this in an
+> earlier batch and is quoted at the top of this entry; what was missed then is
+> that `mode [id] <type>` has the identical shape — the *optional* operand
+> first, so only the operand count says which word is which.
+>
+> `bright mode auto` is the form the command's own help text documents. It did
+> this:
+>
+> 1. `parts[1]` is read as the display id unconditionally, so `auto` is parsed
+>    as a number. It fails. `unwrap_or(1)` makes it display 1 — **and the word
+>    is now consumed.**
+> 2. The mode operand is looked for at `parts[2]`, which is absent, so it
+>    becomes `""`.
+> 3. The command answers ``brightness: mode: `' is not a mode``.
+>
+> Neither half of that sentence is true. The mode *was* supplied. The thing that
+> could not be read was a word the command had already decided was a display id.
+> And it quotes the empty string back at someone who typed exactly what the help
+> text told them to. This is the first site in the entry where the guess does not
+> merely cause a wrong action or a wrong explanation but **manufactures the
+> evidence for its own wrong explanation** — the emptiness the message complains
+> about was created two lines earlier by the guess.
+>
+> The lesson generalises to the rest of the ledger and is worth carrying into
+> triage: **wherever a synopsis brackets its *first* operand, the guess is
+> load-bearing for the arity check below it, and fixing the guess alone is not
+> enough** — the index has to be chosen by operand count first. Grep the
+> remaining functions for `[` appearing before `<` in their usage lines.
+>
+> The same batch removes three `.ok()`-then-report-success sites under
+> `mode`/`dim`/`undim`. `bright mode 9 auto` discarded the `NotFound` that said
+> nothing had been set and printed `Mode → Automatic` anyway. That is the
+> discarded-`Result` defect rather than the guessed-operand one, but it is the
+> same failure viewed from the other end of the statement — the guess invents an
+> input nobody supplied, and `.ok()` invents an outcome nobody got — so it is
+> fixed here rather than filed for later.
+>
+> `up`/`down` keep their documented defaults per §607 and the rung asserts they
+> still work. Before this, `bright up 1O` raised display **1** instead of display
+> 10 and printed a percentage that was perfectly true of a screen the user was
+> not looking at.
+>
 > **Burn-down log.** 2026-08-26 (seventeenth batch): `cmd_aiostat` (8) cleared —
 > 544 → 536 across 226 → 225 functions. Pinned by `kshell::self_test` rung 84.
 >

@@ -19091,6 +19091,161 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("colortemp schedule 1 1200 420 30");
     }
 
+    serial_println!(
+        "  kshell::self_test 93: a guessed ceiling, a tally with no inverse, and a bucket the \
+         total cannot tell you was wrong"
+    );
+    // Three shapes in one command, and each is a refinement of an earlier row
+    // rather than a repeat of it.
+    //
+    // The ids are the familiar misdiagnosis: `next_id` starts at 1 and `create`
+    // only ever hands out `next_id`, so the guessed 0 was unreachable and every
+    // typo came back `NotFound` — the cgroup exists, the word naming it could
+    // not be read, and the reader is sent to check `list`.
+    //
+    // The `create` limit is a *policy ceiling*, not a selector: it is the
+    // number every subsequent charge is compared against. And its damage is
+    // currently masked by a second defect — the comparison's only output is
+    // `high_events`, which nothing prints — so today a guessed ceiling is not
+    // merely undetected but unfalsifiable, and fixing that (which is the right
+    // thing to do) is exactly what would make this guess bite.
+    //
+    // The page counts are an accumulator with a *partial* inverse, which is its
+    // own category rather than a milder `ipcns`. `record_uncharge` can put
+    // `usage_pages` back, so the guess looks correctable; `charges` and
+    // `uncharges` are `+= 1` with nothing that decrements them, so the
+    // correction is itself recorded and the tally is permanently wrong.
+    {
+        // `cgmem::self_test` ends with `*STATE.lock() = None`, so the table is
+        // empty here and `init` seeds it with `next_id: 1`. No other rung
+        // touches `cgmem`, which is why the id below can be written as a
+        // literal; the `created` assertion is what makes that assumption fail
+        // loudly rather than silently testing some other cgroup.
+        let _ = capture_command("cgmem init");
+        let out = capture_command("cgmem create zzrung93 500");
+        assert_output_contains(
+            "a cgroup with a known ceiling is created for this rung",
+            &out,
+            b"created 'zzrung93' id=1 limit=500",
+        );
+        assert_eq!(last_exit(), 0, "`cgmem create' succeeds");
+
+        // The uncounted guess: a cgroup named `cg0`, built and given an id
+        // because no name was supplied.
+        let out = capture_command("cgmem create");
+        assert_output_contains(
+            "an omitted name is reported, not invented as `cg0'",
+            &out,
+            b"cgmem: create: missing cgroup name",
+        );
+        assert_eq!(last_exit(), 1, "a missing cgroup name errors");
+
+        // The ceiling. `cgmem create web 5OOOO` used to build a cgroup limited
+        // to 100000 pages — double what was asked for, echoed back as though
+        // chosen.
+        let out = capture_command("cgmem create zzbad 5OOOO");
+        assert_output_contains(
+            "an unreadable ceiling is named rather than replaced with 100000",
+            &out,
+            b"`5OOOO' is not a limit in pages",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable ceiling errors");
+
+        let out = capture_command("cgmem remove 1O");
+        assert_output_contains(
+            "an unreadable id is named rather than reported as a missing cgroup",
+            &out,
+            b"`1O' is not a cgroup id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `remove' errors");
+
+        let out = capture_command("cgmem charge 1O 5");
+        assert_output_contains(
+            "and the same id in `charge'",
+            &out,
+            b"`1O' is not a cgroup id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `charge' errors");
+
+        let out = capture_command("cgmem charge 1 5O");
+        assert_output_contains(
+            "an unreadable page count is named rather than charged as 1",
+            &out,
+            b"`5O' is not a page count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable page count errors");
+
+        // The bucket. `unwrap_or("rss") == "cache"` had no way to say it did
+        // not understand, so every spelling that was not exactly `cache`
+        // charged rss — invisibly, because `usage_pages` is the same either
+        // way and only the breakdown beside it differs.
+        let out = capture_command("cgmem charge 1 5 cach");
+        assert_output_contains(
+            "a mistyped memory kind is refused rather than silently meaning rss",
+            &out,
+            b"`cach' is not rss or cache",
+        );
+        assert_eq!(last_exit(), 1, "an unrecognised memory kind errors");
+
+        let out = capture_command("cgmem uncharge 1 5O");
+        assert_output_contains(
+            "an unreadable page count in `uncharge' is named too",
+            &out,
+            b"`5O' is not a page count",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "an unreadable page count in `uncharge' errors"
+        );
+
+        let out = capture_command("cgmem uncharge 1 5 cach");
+        assert_output_contains(
+            "and a mistyped kind on the side that can break the aggregate",
+            &out,
+            b"`cach' is not rss or cache",
+        );
+        assert_eq!(last_exit(), 1, "an unrecognised kind in `uncharge' errors");
+
+        // The severity pin. Eight refusals and the cgroup is untouched: the
+        // ceiling is the 500 that was asked for rather than a guessed 100000,
+        // no page count landed in either bucket, and the cgroup the refused
+        // `remove` named is still here to say so.
+        let out = capture_command("cgmem list");
+        assert_output_contains(
+            "the refused ceiling, page counts and buckets left the cgroup exactly as created",
+            &out,
+            b"usage=0/500 rss=0 cache=0 swap=0 oom=0",
+        );
+        // And the tallies, which are the part no un-charge could ever repair.
+        let out = capture_command("cgmem stats");
+        assert_output_contains(
+            "and nothing was tallied for the words the shell refused to read",
+            &out,
+            b"Charges: 0  Uncharges: 0  OOM kills: 0",
+        );
+
+        // The other half of §607: the kind is bracketed `[rss|cache]` in the
+        // usage line, so an *absent* word keeps its documented default. Only an
+        // unreadable one is refused.
+        let out = capture_command("cgmem charge 1 7");
+        assert_output_contains(
+            "an omitted memory kind still means rss",
+            &out,
+            b"charged 7 pages to cg 1",
+        );
+        assert_eq!(last_exit(), 0, "an omitted memory kind is not an error");
+        let out = capture_command("cgmem list");
+        assert_output_contains(
+            "and lands in rss rather than cache",
+            &out,
+            b"usage=7/500 rss=7 cache=0",
+        );
+
+        // Leave the table as this rung found it, so rung order cannot matter.
+        let _ = capture_command("cgmem remove 1");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -102503,6 +102658,43 @@ fn cmd_buddyinfo(args: &str) {
     }
 }
 
+/// The `[rss|cache]` operand of `cgmem charge` / `cgmem uncharge` — read, or
+/// refused with a diagnostic naming the word.
+///
+/// The operand is bracketed in the command's usage line, so an *absent* word
+/// keeps its documented default of `rss` (§607). Only a word that is present
+/// and not understood is an error.
+///
+/// It exists because the two call sites were written
+/// `parts.get(3).copied().unwrap_or("rss") == "cache"`, which is
+/// [`toggle_word`]'s `matches!` defect in a two-word alphabet: the expression
+/// has no way to say "I did not understand you", so every spelling that is not
+/// exactly `cache` evaluated to `rss`. `cgmem charge 1 500 cach` charged 500
+/// pages to the wrong bucket and reported success.
+///
+/// Two things make that worse than a mis-set flag. The first is that it is
+/// **invisible in the aggregate**: `record_charge` adds the pages to
+/// `usage_pages` either way, so `cgmem list`'s headline number is right and
+/// only the breakdown beside it is wrong — and the breakdown is precisely what
+/// distinguishes memory that can be reclaimed under pressure (`cache`) from
+/// memory that cannot (`rss`). The second is that on the un-charge side the
+/// wrong bucket does not merely misfile the pages, it breaks an invariant:
+/// `record_uncharge` floors the aggregate and the bucket with two independent
+/// `saturating_sub` calls, so un-charging `cache` from a cgroup holding none
+/// deflates `usage_pages` and nothing else. See
+/// `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY`.
+fn memory_kind_arg(parts: &[&str], idx: usize, sub: &str) -> Option<bool> {
+    match parts.get(idx).copied() {
+        None | Some("rss") => Some(false),
+        Some("cache") => Some(true),
+        Some(word) => {
+            shell_println!("cgmem: {}: `{}' is not rss or cache", sub, word);
+            set_exit(1);
+            None
+        }
+    }
+}
+
 /// `cgmem` / `cgm` — cgroup memory accounting.
 fn cmd_cgmem(args: &str) {
     use crate::fs::cgmem;
@@ -102515,11 +102707,32 @@ fn cmd_cgmem(args: &str) {
             shell_println!("cgmem: initialized");
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("cg0");
-            let limit = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(100_000);
+            // `create <name> <limit_pages>` in this command's own usage text,
+            // angle brackets on both, and both were implemented optional.
+            // Bare `cgmem create` built a real cgroup called `cg0` with a
+            // 100000-page ceiling and reported it as a success.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("cgmem: create: missing cgroup name");
+                set_exit(1);
+                return;
+            };
+            // The guess that is a *policy ceiling*, not a selector. Every
+            // charge compares `usage_pages` against this number, so a limit
+            // nobody chose is the threshold everything the cgroup ever does is
+            // measured against — and `cgmem create web 5OOOO` silently doubled
+            // the intended one.
+            //
+            // What makes it worse than it currently looks: the damage is
+            // masked by a *second* defect. The comparison's only output is
+            // `high_events`, which no command prints (see
+            // `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`),
+            // so today a wrong ceiling has no observable consequence at all —
+            // the guess is not merely undetected but unfalsifiable. Fixing
+            // that entry, which is the right thing to do, is exactly what
+            // would turn this guess live.
+            let Some(limit) = required_num::<u64>(&parts, 2, "cgmem", sub, "limit in pages") else {
+                return;
+            };
             match cgmem::create(name, limit) {
                 Ok(id) => shell_println!("cgmem: created '{}' id={} limit={}", name, id, limit),
                 Err(e) => {
@@ -102529,10 +102742,17 @@ fn cmd_cgmem(args: &str) {
             }
         }
         "remove" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `init_defaults` sets `next_id: 1` and seeds no cgroups, and
+            // `create` only ever hands out `next_id`, so cgroup 0 is
+            // unreachable and `remove(0)` could only return `NotFound`. The
+            // guess was therefore safe and dishonest in the same breath:
+            // `cgmem remove 1O` answered "remove error: NotFound", which says
+            // the cgroup does not exist. It does; the word naming it could not
+            // be read. The reader is sent to check `list` rather than at what
+            // they typed.
+            let Some(id) = required_num::<u32>(&parts, 1, "cgmem", sub, "cgroup id") else {
+                return;
+            };
             match cgmem::remove(id) {
                 Ok(()) => shell_println!("cgmem: removed cg {}", id),
                 Err(e) => {
@@ -102542,15 +102762,25 @@ fn cmd_cgmem(args: &str) {
             }
         }
         "charge" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            let is_cache = parts.get(3).copied().unwrap_or("rss") == "cache";
+            let Some(id) = required_num::<u32>(&parts, 1, "cgmem", sub, "cgroup id") else {
+                return;
+            };
+            // An accumulator, like `ipcns record_*` — but with a *partial*
+            // inverse, which turns out to be its own category rather than a
+            // milder version of the same thing. `record_uncharge` can put
+            // `usage_pages` back, so a guessed page count looks correctable.
+            // The tallies are not: `c.charges` and `state.total_charges` are
+            // `+= 1` with nothing that ever decrements them, so the correction
+            // is *itself recorded*. Un-charging a guessed 1 leaves
+            // `charges=1 uncharges=1` where the truth was `charges=1
+            // uncharges=0`. The quantity can be repaired; the audit trail
+            // saying what happened to it cannot.
+            let Some(pages) = required_num::<u64>(&parts, 2, "cgmem", sub, "page count") else {
+                return;
+            };
+            let Some(is_cache) = memory_kind_arg(&parts, 3, sub) else {
+                return;
+            };
             match cgmem::record_charge(id, pages, is_cache) {
                 Ok(()) => shell_println!("cgmem: charged {} pages to cg {}", pages, id),
                 Err(e) => {
@@ -102560,15 +102790,15 @@ fn cmd_cgmem(args: &str) {
             }
         }
         "uncharge" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            let is_cache = parts.get(3).copied().unwrap_or("rss") == "cache";
+            let Some(id) = required_num::<u32>(&parts, 1, "cgmem", sub, "cgroup id") else {
+                return;
+            };
+            let Some(pages) = required_num::<u64>(&parts, 2, "cgmem", sub, "page count") else {
+                return;
+            };
+            let Some(is_cache) = memory_kind_arg(&parts, 3, sub) else {
+                return;
+            };
             match cgmem::record_uncharge(id, pages, is_cache) {
                 Ok(()) => shell_println!("cgmem: uncharged {} pages from cg {}", pages, id),
                 Err(e) => {

@@ -81109,7 +81109,101 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **487 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **481 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-fifth batch): `cmd_cgmem` (6, plus
+> three uncounted) cleared — 487 → 481 across 218 → 217 functions. Pinned by
+> `kshell::self_test` rung 93.
+>
+> **In short:** `cgmem` tracks how much memory each cgroup (a named group of
+> processes with a memory ceiling) is using. Bare `cgmem create` invented a
+> cgroup called `cg0` with a ceiling nobody chose; a mistyped page count was
+> read as 1; a mistyped `rss`/`cache` was read as `rss`; and a mistyped cgroup
+> id was answered "no such cgroup".
+>
+> **Three shapes in one command, each a refinement of an earlier row rather
+> than a repeat of it.**
+>
+> **1. The ids are the familiar misdiagnosis.** `init_defaults` sets `next_id:
+> 1` and seeds no cgroups, and `create` only ever hands out `next_id`, so
+> cgroup 0 is unreachable. The guessed `0` was therefore *safe* — it removed
+> nothing, charged nothing — and dishonest in the same breath: `cgmem remove
+> 1O` answered `remove error: NotFound`, which says the cgroup does not exist.
+> It does. The word naming it could not be read, and the reader is sent to
+> check `list` instead of at what they typed.
+>
+> **2. The `create` limit is a *policy ceiling*, and this is the new row.**
+> Every earlier guessed number was a selector, a measurement, an address, or a
+> quantity. This one is the *threshold everything else is compared against*:
+> `record_charge` tests `usage_pages > limit_pages` on every call. `cgmem
+> create web 5OOOO` built a cgroup limited to 100000 pages — double the
+> intended 50000 — and echoed it back as though chosen.
+>
+> What makes it worth its own row is *why it does not currently hurt*. The
+> comparison's only output is `high_events`, which no command prints and no
+> accessor exposes (`A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`).
+> So today a guessed ceiling has no observable consequence at all — it is not
+> merely undetected but **unfalsifiable**, masked by a second defect. And
+> fixing that second defect, which is the right thing to do, is precisely what
+> would make this guess bite. That is a trap worth naming: *a burn-down that
+> looks harmless because something else is broken is not harmless, it is
+> queued.*
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **policy ceiling masked by a second defect** (`cmd_cgmem create`) | nothing, until the thing that reads the ceiling is fixed | you don't — and fixing an unrelated bug is what makes it start |
+>
+> **3. The page counts refine the `ipcns` accumulator row to *partially*
+> reversible.** The previous batch established that a guess `+=`'d into a total
+> with no inverse is uncorrectable in place. `cgmem` has an inverse —
+> `record_uncharge` puts `usage_pages` back — so at first glance it is the mild
+> version. It is not. `c.charges` and `state.total_charges` are `+= 1` with
+> nothing that ever decrements them, so **the correction is itself recorded**.
+> Un-charging a guessed 1 leaves `charges=1 uncharges=1` where the truth was
+> `charges=1 uncharges=0`. The quantity can be repaired; the record of what
+> happened to it cannot. That is arguably worse than `ipcns`, where at least
+> the wrongness stays in one number instead of being laundered into a
+> plausible-looking history.
+>
+> **The uncounted third operand is the one that hides best.** `[rss|cache]` was
+> read as `parts.get(3).copied().unwrap_or("rss") == "cache"` — `toggle_word`'s
+> `matches!` defect in a two-word alphabet. The expression has no way to say "I
+> did not understand you", so every spelling that was not exactly `cache`
+> evaluated to `rss`, and `cgmem charge 1 500 cach` charged 500 pages to the
+> wrong bucket and reported success. Two things make that worse than a mis-set
+> flag:
+>
+> * **It is invisible in the aggregate.** `record_charge` adds the pages to
+>   `usage_pages` either way, so `cgmem list`'s headline number is correct and
+>   only the breakdown beside it is wrong — and the breakdown is exactly what
+>   distinguishes memory that can be reclaimed under pressure (`cache`) from
+>   memory that cannot (`rss`). Nothing in the output looks off.
+> * **On the un-charge side it breaks an invariant.** `record_uncharge` floors
+>   the aggregate and the bucket with two independent `saturating_sub` calls,
+>   so un-charging `cache` from a cgroup holding none deflates `usage_pages`
+>   and nothing else. See
+>   `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` —
+>   an independent defect, reachable by typing `cache` correctly, and not
+>   cleared by fixing the parse.
+>
+> The refusal lives in a new `memory_kind_arg` helper next to `cmd_cgmem`
+> rather than in the generic operand family, because it is specific to this
+> command's alphabet and grouping it with `toggle_arg`/`required_num` would
+> imply otherwise.
+>
+> **Rung 93 also pins the other half of §607.** The kind is bracketed
+> `[rss|cache]` in the usage line, so an *absent* word keeps its documented
+> default: `cgmem charge 1 7` still charges rss, and the rung asserts it lands
+> in `rss=7 cache=0`. Only an unreadable word is refused. Two uncounted guesses
+> in one command that differ in exactly this way — `create`'s `<name>` is
+> refused when absent, `charge`'s `[rss|cache]` is not — is the clearest
+> illustration so far of why §607 keys on the brackets rather than on whether a
+> default exists in the code.
+>
+> **Found while reading for evidence:** two independent `cgmem` defects, both
+> logged separately and both still open —
+> `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` and
+> `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`.
 
 > **Burn-down log.** 2026-08-26 (twenty-fourth batch): `cmd_colortemp` (7,
 > plus two uncounted) cleared — 494 → 487 across 219 → 218 functions. Pinned

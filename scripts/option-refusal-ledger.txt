@@ -29,7 +29,6 @@
 # the shell to cause that jump and nothing regressed: the gate simply began
 # seeing what had been there all along. See
 # `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`.
-cmd_a11y 10
 cmd_acpistat 1
 cmd_aiostat 8
 cmd_alloc_trace 1

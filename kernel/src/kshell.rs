@@ -17434,6 +17434,118 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "fpick open succeeds");
     }
 
+    serial_println!(
+        "  kshell::self_test 78: an accessibility setting that cannot read `on' says so instead \
+         of answering a question nobody asked"
+    );
+    // `cmd_a11y` (10 ledger sites) — and eight more the ledger's regex cannot
+    // see, which are the reason this batch got its own rung rather than being
+    // folded into the id conversions above.
+    //
+    // Six settings (`contrast`, `motion`, `reader`, `sticky`, `mousekeys`,
+    // `captions`) were written as `match parts.get(1)…unwrap_or("")` with the
+    // catch-all printing the *current value*. That catch-all served two callers
+    // with nothing in common: `a11y captions` (tell me) and `a11y captions onn`
+    // (turn them on). The second got the first one's answer — `Captions: false`,
+    // a true statement, in reply to a request to change it, exit 0. That is
+    // worse than a guessed number: a guessed number prints something the user
+    // can see is wrong, this prints something that is right.
+    //
+    // `fontscale` and `cursor` had the same shape with `if let Some(v) … else`.
+    // The new `toggle_arg` helper and the `Toggle` enum exist for the first six;
+    // absence, and only absence, selects the query.
+    //
+    // The three most consequential sites here are not numeric at all, and all
+    // three are silent by construction — the user who typed the word is not the
+    // user who suffers the misreading:
+    //
+    //   * `a11y regelem 1 buton Save` registered a **generic** element. A screen
+    //     reader announces an element by its role, so the misreading is invisible
+    //     to the sighted developer and is the whole experience of the blind user.
+    //   * `a11y announce alrt "disk full"` downgraded an **alert** to normal.
+    //     Priority is what decides whether the reader interrupts, so a mistyped
+    //     one is a warning that arrives too late, if at all.
+    //   * `a11y inject key F1` injected scancode **0** into whatever had focus
+    //     and printed `Injected key 0x00`.
+    {
+        // The query/refusal split, on the setting whose catch-all hid it best.
+        let out = capture_command("a11y captions");
+        assert_output_contains("a bare setting still reports itself", &out, b"Captions:");
+        assert_eq!(last_exit(), 0, "a bare `a11y captions` queries");
+
+        let out = capture_command("a11y captions on");
+        assert_output_contains("and can still be set", &out, b"Captions: on");
+        assert_eq!(last_exit(), 0, "`a11y captions on` succeeds");
+
+        let out = capture_command("a11y captions onn");
+        assert_output_contains(
+            "a misspelt `on' is named rather than answered",
+            &out,
+            b"`onn' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "`a11y captions onn` errors");
+
+        let out = capture_command("a11y fontscale 12o");
+        assert_output_contains(
+            "a misread scale is named rather than answered",
+            &out,
+            b"`12o' is not a percentage",
+        );
+        assert_eq!(last_exit(), 1, "`a11y fontscale 12o` errors");
+
+        let out = capture_command("a11y fontscale");
+        assert_output_contains("a bare scale still reports itself", &out, b"Font scale:");
+        assert_eq!(last_exit(), 0, "a bare `a11y fontscale` queries");
+
+        // The three silent ones.
+        let out = capture_command("a11y regelem 1 buton zzSave");
+        assert_output_contains(
+            "a misread role is refused rather than made generic",
+            &out,
+            b"`buton' is not an element role",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable role errors");
+        assert_output_lacks("and nothing is registered", &out, b"Registered element");
+
+        let out = capture_command("a11y announce alrt zzdisk");
+        assert_output_contains(
+            "a misread priority is refused rather than downgraded",
+            &out,
+            b"`alrt' is not a priority",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable priority errors");
+        assert_output_lacks("and nothing is announced", &out, b"Announcement #");
+
+        let out = capture_command("a11y inject key F1");
+        assert_output_contains(
+            "a misread key code is refused rather than injected as zero",
+            &out,
+            b"`F1' is not a key code",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable key code errors");
+        assert_output_lacks("and no keystroke is delivered", &out, b"Injected key");
+
+        // The id arms, sampled: they are the same `required_id` call ten times.
+        let out = capture_command("a11y focus zz");
+        assert_output_contains(
+            "a11y names the element id it could not read",
+            &out,
+            b"`zz' is not an element id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable element id errors");
+
+        // The control: the priority *is* required now, so the working form must
+        // be shown still to work, or the rung above would pass on a command that
+        // refuses everything.
+        let out = capture_command("a11y announce high zzhello");
+        assert_output_contains(
+            "a readable priority still announces",
+            &out,
+            b"Announcement #",
+        );
+        assert_eq!(last_exit(), 0, "`a11y announce high …` succeeds");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -36388,10 +36500,9 @@ fn cmd_a11y(args: &str) {
             }
         }
         "unregtool" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_id(&parts, "a11y", sub, "tool") else {
+                return;
+            };
             match a11y::unregister_tool(id) {
                 Ok(()) => shell_println!("Unregistered tool #{}", id),
                 Err(e) => {
@@ -36417,26 +36528,38 @@ fn cmd_a11y(args: &str) {
             }
         }
         "regelem" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let role_s = parts.get(2).copied().unwrap_or("generic");
+            let Some(wid) = required_id(&parts, "a11y", sub, "window") else {
+                return;
+            };
             let name = if parts.len() > 3 {
                 parts[3..].join(" ")
             } else {
                 String::from("Element")
             };
-            let role = match role_s {
-                "button" | "btn" => a11y::ElementRole::Button,
-                "text" | "input" => a11y::ElementRole::TextInput,
-                "label" => a11y::ElementRole::Label,
-                "menu" => a11y::ElementRole::Menu,
-                "checkbox" | "check" => a11y::ElementRole::Checkbox,
-                "slider" => a11y::ElementRole::Slider,
-                "list" => a11y::ElementRole::List,
-                "link" => a11y::ElementRole::Link,
-                _ => a11y::ElementRole::Generic,
+            // `_ => Generic` was the role's version of the same guess, and an
+            // unusually costly one: a screen reader announces an element by its
+            // role, so `a11y regelem 1 buton Save` registered a control that a
+            // blind user is told is a "generic" — the misreading is invisible to
+            // the sighted developer who typed it and is the entire experience of
+            // the user it was registered for.
+            let role = match parts.get(2).copied() {
+                None | Some("generic") => a11y::ElementRole::Generic,
+                Some("button" | "btn") => a11y::ElementRole::Button,
+                Some("text" | "input") => a11y::ElementRole::TextInput,
+                Some("label") => a11y::ElementRole::Label,
+                Some("menu") => a11y::ElementRole::Menu,
+                Some("checkbox" | "check") => a11y::ElementRole::Checkbox,
+                Some("slider") => a11y::ElementRole::Slider,
+                Some("list") => a11y::ElementRole::List,
+                Some("link") => a11y::ElementRole::Link,
+                Some(other) => {
+                    shell_println!("a11y: {}: `{}' is not an element role", sub, other);
+                    shell_println!(
+                        "Roles: generic, button, text, label, menu, checkbox, slider, list, link"
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match a11y::register_element(wid, role, &name, (0, 0, 100, 30)) {
                 Ok(id) => shell_println!(
@@ -36453,10 +36576,9 @@ fn cmd_a11y(args: &str) {
             }
         }
         "rmelem" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_id(&parts, "a11y", sub, "element") else {
+                return;
+            };
             match a11y::remove_element(id) {
                 Ok(()) => shell_println!("Removed element #{}", id),
                 Err(e) => {
@@ -36466,10 +36588,9 @@ fn cmd_a11y(args: &str) {
             }
         }
         "focus" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_id(&parts, "a11y", sub, "element") else {
+                return;
+            };
             match a11y::set_focus(id) {
                 Ok(()) => shell_println!("Focused element #{}", id),
                 Err(e) => {
@@ -36483,10 +36604,9 @@ fn cmd_a11y(args: &str) {
             None => shell_println!("No focused element"),
         },
         "elems" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            let Some(wid) = required_id(&parts, "a11y", sub, "window") else {
+                return;
+            };
             let elems = a11y::elements_in_window(wid);
             if elems.is_empty() {
                 shell_println!("No elements in window {}", wid);
@@ -36503,14 +36623,15 @@ fn cmd_a11y(args: &str) {
             }
         }
         "hit" => {
-            let x = parts
-                .get(1)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
-            let y = parts
-                .get(2)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
+            // Signed, because the origin is the primary display's top-left and
+            // a secondary display to its left has negative coordinates.
+            let Some(x) = required_num::<i32>(&parts, 1, "a11y", sub, "horizontal coordinate")
+            else {
+                return;
+            };
+            let Some(y) = required_num::<i32>(&parts, 2, "a11y", sub, "vertical coordinate") else {
+                return;
+            };
             match a11y::element_at(x, y) {
                 Some(e) => shell_println!("Hit: #{} [{}] '{}'", e.id, e.role.label(), e.name),
                 None => shell_println!("No element at ({},{})", x, y),
@@ -36520,24 +36641,48 @@ fn cmd_a11y(args: &str) {
             let what = parts.get(1).copied().unwrap_or("");
             match what {
                 "key" => {
-                    let code = parts
-                        .get(2)
-                        .and_then(|s| s.parse::<u16>().ok())
-                        .unwrap_or(0);
-                    let _ = a11y::inject_key(code, true);
-                    let _ = a11y::inject_key(code, false);
+                    // `a11y inject key F1` injected scancode **0** and reported
+                    // `Injected key 0x00` — a keystroke the user never asked for,
+                    // delivered to whatever has focus, announced as if it were
+                    // the one they named.
+                    let Some(code) =
+                        required_num::<u16>(&parts, 2, "a11y", "inject key", "key code")
+                    else {
+                        return;
+                    };
+                    if let Err(e) =
+                        a11y::inject_key(code, true).and_then(|()| a11y::inject_key(code, false))
+                    {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                        return;
+                    }
                     shell_println!("Injected key 0x{:02X}", code);
                 }
                 "click" => {
-                    let x = parts
-                        .get(2)
-                        .and_then(|s| s.parse::<i32>().ok())
-                        .unwrap_or(0);
-                    let y = parts
-                        .get(3)
-                        .and_then(|s| s.parse::<i32>().ok())
-                        .unwrap_or(0);
-                    let _ = a11y::inject_click(x, y, 1);
+                    let Some(x) = required_num::<i32>(
+                        &parts,
+                        2,
+                        "a11y",
+                        "inject click",
+                        "horizontal coordinate",
+                    ) else {
+                        return;
+                    };
+                    let Some(y) = required_num::<i32>(
+                        &parts,
+                        3,
+                        "a11y",
+                        "inject click",
+                        "vertical coordinate",
+                    ) else {
+                        return;
+                    };
+                    if let Err(e) = a11y::inject_click(x, y, 1) {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                        return;
+                    }
                     shell_println!("Injected click at ({},{})", x, y);
                 }
                 "text" => {
@@ -36556,14 +36701,37 @@ fn cmd_a11y(args: &str) {
             }
         }
         "announce" => {
-            let prio_s = parts.get(1).copied().unwrap_or("normal");
+            // The synopsis is `a11y announce <priority> <text…>`, so the first
+            // word is consumed as a priority whether or not it is one. With
+            // `unwrap_or(Normal)` that produced two failures at once:
+            // `a11y announce alrt "disk full"` downgraded an *alert* to normal —
+            // the priority is what decides whether a screen reader interrupts,
+            // so a mistyped one is a warning the user does not hear in time —
+            // and `a11y announce Hello there` announced only "there", the word
+            // `Hello` having been silently eaten as a failed priority.
+            let Some(prio) = (match parts.get(1).copied() {
+                None => {
+                    shell_println!("a11y: {}: missing priority", sub);
+                    set_exit(1);
+                    None
+                }
+                Some(word) => match a11y::AnnouncePriority::from_str(word) {
+                    Some(p) => Some(p),
+                    None => {
+                        shell_println!("a11y: {}: `{}' is not a priority", sub, word);
+                        shell_println!("Priorities: low, normal, high, alert");
+                        set_exit(1);
+                        None
+                    }
+                },
+            }) else {
+                return;
+            };
             let text = if parts.len() > 2 {
                 parts[2..].join(" ")
             } else {
                 String::new()
             };
-            let prio =
-                a11y::AnnouncePriority::from_str(prio_s).unwrap_or(a11y::AnnouncePriority::Normal);
             match a11y::announce(&text, prio) {
                 Ok(id) => shell_println!("Announcement #{}: [{}] {}", id, prio.label(), text),
                 Err(e) => {
@@ -36582,98 +36750,84 @@ fn cmd_a11y(args: &str) {
                 }
             }
         }
-        "contrast" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
-                a11y::set_high_contrast(true);
-                shell_println!("High contrast: on");
-            }
-            "off" | "false" => {
-                a11y::set_high_contrast(false);
-                shell_println!("High contrast: off");
-            }
-            _ => {
+        "contrast" => match toggle_arg(&parts, 1, "a11y", sub) {
+            None => return,
+            Some(Toggle::Query) => {
                 shell_println!("High contrast: {}", a11y::config().high_contrast);
             }
+            Some(Toggle::Set(v)) => {
+                a11y::set_high_contrast(v);
+                shell_println!("High contrast: {}", if v { "on" } else { "off" });
+            }
         },
-        "motion" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
-                a11y::set_reduce_motion(true);
-                shell_println!("Reduce motion: on");
-            }
-            "off" | "false" => {
-                a11y::set_reduce_motion(false);
-                shell_println!("Reduce motion: off");
-            }
-            _ => {
+        "motion" => match toggle_arg(&parts, 1, "a11y", sub) {
+            None => return,
+            Some(Toggle::Query) => {
                 shell_println!("Reduce motion: {}", a11y::config().reduce_motion);
             }
+            Some(Toggle::Set(v)) => {
+                a11y::set_reduce_motion(v);
+                shell_println!("Reduce motion: {}", if v { "on" } else { "off" });
+            }
         },
-        "reader" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
-                a11y::set_screen_reader(true);
-                shell_println!("Screen reader: on");
-            }
-            "off" | "false" => {
-                a11y::set_screen_reader(false);
-                shell_println!("Screen reader: off");
-            }
-            _ => {
+        "reader" => match toggle_arg(&parts, 1, "a11y", sub) {
+            None => return,
+            Some(Toggle::Query) => {
                 shell_println!("Screen reader: {}", a11y::config().screen_reader_active);
             }
+            Some(Toggle::Set(v)) => {
+                a11y::set_screen_reader(v);
+                shell_println!("Screen reader: {}", if v { "on" } else { "off" });
+            }
         },
-        "fontscale" => {
-            if let Some(v) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+        "fontscale" => match parts.get(1) {
+            None => shell_println!("Font scale: {}%", a11y::config().font_scale),
+            Some(_) => {
+                let Some(v) = required_num::<u32>(&parts, 1, "a11y", sub, "percentage") else {
+                    return;
+                };
                 a11y::set_font_scale(v);
                 shell_println!("Font scale: {}%", v.clamp(50, 500));
-            } else {
-                shell_println!("Font scale: {}%", a11y::config().font_scale);
             }
-        }
-        "sticky" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
-                a11y::set_sticky_keys(true);
-                shell_println!("Sticky keys: on");
-            }
-            "off" | "false" => {
-                a11y::set_sticky_keys(false);
-                shell_println!("Sticky keys: off");
-            }
-            _ => {
+        },
+        "sticky" => match toggle_arg(&parts, 1, "a11y", sub) {
+            None => return,
+            Some(Toggle::Query) => {
                 shell_println!("Sticky keys: {}", a11y::config().sticky_keys);
             }
+            Some(Toggle::Set(v)) => {
+                a11y::set_sticky_keys(v);
+                shell_println!("Sticky keys: {}", if v { "on" } else { "off" });
+            }
         },
-        "mousekeys" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
-                a11y::set_mouse_keys(true);
-                shell_println!("Mouse keys: on");
-            }
-            "off" | "false" => {
-                a11y::set_mouse_keys(false);
-                shell_println!("Mouse keys: off");
-            }
-            _ => {
+        "mousekeys" => match toggle_arg(&parts, 1, "a11y", sub) {
+            None => return,
+            Some(Toggle::Query) => {
                 shell_println!("Mouse keys: {}", a11y::config().mouse_keys);
             }
+            Some(Toggle::Set(v)) => {
+                a11y::set_mouse_keys(v);
+                shell_println!("Mouse keys: {}", if v { "on" } else { "off" });
+            }
         },
-        "cursor" => {
-            if let Some(v) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
+        "cursor" => match parts.get(1) {
+            None => shell_println!("Cursor scale: {}%", a11y::config().cursor_scale),
+            Some(_) => {
+                let Some(v) = required_num::<u32>(&parts, 1, "a11y", sub, "percentage") else {
+                    return;
+                };
                 a11y::set_cursor_scale(v);
                 shell_println!("Cursor scale: {}%", v.clamp(50, 500));
-            } else {
-                shell_println!("Cursor scale: {}%", a11y::config().cursor_scale);
             }
-        }
-        "captions" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
-                a11y::set_captions(true);
-                shell_println!("Captions: on");
-            }
-            "off" | "false" => {
-                a11y::set_captions(false);
-                shell_println!("Captions: off");
-            }
-            _ => {
+        },
+        "captions" => match toggle_arg(&parts, 1, "a11y", sub) {
+            None => return,
+            Some(Toggle::Query) => {
                 shell_println!("Captions: {}", a11y::config().captions);
+            }
+            Some(Toggle::Set(v)) => {
+                a11y::set_captions(v);
+                shell_println!("Captions: {}", if v { "on" } else { "off" });
             }
         },
         "show" | "config" => {
@@ -42357,6 +42511,63 @@ fn optional_num<T: core::str::FromStr>(
         return None;
     };
     Some(v)
+}
+
+/// What a `<cmd> <setting> [on|off]` arm was asked to do: report the setting, or
+/// change it.
+///
+/// The two are told apart by whether a word is *present*, never by whether one
+/// could be read — which is the whole reason this type exists. See
+/// [`toggle_arg`].
+enum Toggle {
+    /// No word followed the setting name, so the user is asking what it is.
+    Query,
+    /// A word followed, and it was understood.
+    Set(bool),
+}
+
+/// The `on`/`off` operand of a setting that also prints its own value when the
+/// operand is omitted — read, or refused with a diagnostic naming the word.
+///
+/// This is [`optional_num`]'s defect, in the shape that hides it best. Those
+/// arms were written as
+///
+/// ```ignore
+/// match parts.get(1).copied().unwrap_or("") {
+///     "on" | "true" => { set(true); … }
+///     "off" | "false" => { set(false); … }
+///     _ => shell_println!("Captions: {}", config().captions),
+/// }
+/// ```
+///
+/// so the catch-all serves two callers that have nothing to do with each other:
+/// the user who typed `a11y captions` and wants to be told, and the user who
+/// typed `a11y captions onn` and wants captions on. The second gets the first
+/// one's answer — a line reading `Captions: false`, which is a true statement,
+/// arrives in response to a request to make it true, and is indistinguishable
+/// from the query that would have printed it legitimately. Exit status was 0
+/// either way.
+///
+/// That makes it *worse* than the numeric sentinels the ledger tracks. A
+/// guessed number at least produces output the user can see is wrong
+/// (`Brightness → 0%`); this produces output that is right, for a question
+/// nobody asked.
+///
+/// Absence is the only thing that selects [`Toggle::Query`]. A word that is
+/// present and not understood is an error, and says which word.
+fn toggle_arg(parts: &[&str], idx: usize, cmd: &str, sub: &str) -> Option<Toggle> {
+    let Some(word) = parts.get(idx) else {
+        return Some(Toggle::Query);
+    };
+    match *word {
+        "on" | "true" | "yes" | "1" | "enable" | "enabled" => Some(Toggle::Set(true)),
+        "off" | "false" | "no" | "0" | "disable" | "disabled" => Some(Toggle::Set(false)),
+        other => {
+            shell_println!("{}: {}: `{}' is not on or off", cmd, sub, other);
+            set_exit(1);
+            None
+        }
+    }
 }
 
 /// `fstune` — filesystem tuning profiles and parameters.

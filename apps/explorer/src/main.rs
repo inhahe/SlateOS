@@ -33,6 +33,9 @@ use guitk::color::Color;
 use guitk::render::RenderTree;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
+use dropzone::{
+    DragModifiers, DropOperation, DropResult, DropZone, DropZoneEvent, DropZoneManager, Rect,
+};
 use fileops::{
     ConflictPolicy, ErrorPolicy, FileOpEvent, FileOperation, OperationExecutor, OperationPlan,
     OperationSummary, RecycleBin, UndoStack,
@@ -188,6 +191,24 @@ const LIST_ROW_H: f32 = 32.0;
 /// Side of the square thumbnail at the left of a list-view row.
 const LIST_THUMB_SIZE: f32 = 24.0;
 
+/// Height of one sidebar quick-access row.
+const SIDEBAR_ROW_H: f32 = 24.0;
+
+/// The sidebar's quick-access entries: the label drawn, and the directory it
+/// stands for.
+///
+/// The two are separate fields rather than one string because `"/ (Root)"` is
+/// not a path. They were one before this became a drop target, which was
+/// harmless while the label was only ever drawn — and would have meant dropping
+/// a file into a directory literally named `/ (Root)` the moment it was not.
+const SIDEBAR_ITEMS: [(&str, &str); 5] = [
+    ("/ (Root)", "/"),
+    ("/home", "/home"),
+    ("/tmp", "/tmp"),
+    ("/var", "/var"),
+    ("/usr", "/usr"),
+];
+
 /// How many thumbnails [`ExplorerState::pump_thumbnails`] generates per call
 /// when the caller does not say.
 ///
@@ -223,6 +244,56 @@ pub enum SortDir {
 pub enum ClipboardOp {
     Copy(Vec<PathBuf>),
     Cut(Vec<PathBuf>),
+}
+
+// ============================================================================
+// Drag state
+// ============================================================================
+
+/// A drag in flight over the explorer window.
+///
+/// The zone, operation and validity are cached here rather than recomputed
+/// while drawing, because deciding validity touches the filesystem — it
+/// canonicalises both ends so that a nested drop reached through a symlink is
+/// still caught, and it stats every source against the target to find
+/// conflicts. A frame is drawn far more often than the pointer crosses a zone
+/// boundary, so recomputing per frame would turn a hover into a syscall storm
+/// while also making `render` need `&mut` for a reason that has nothing to do
+/// with rendering.
+#[derive(Clone, Debug)]
+pub struct DragState {
+    /// Files being dragged, as handed over by the source of the drag.
+    pub sources: Vec<PathBuf>,
+    /// Last known pointer position, in window coordinates.
+    pub x: f32,
+    pub y: f32,
+    /// Modifier keys as of the last pointer movement.
+    pub modifiers: DragModifiers,
+    /// The zone the cached `operation`/`valid` were computed for.
+    zone: DropZone,
+    /// What releasing here would do.
+    operation: DropOperation,
+    /// Whether releasing here would be allowed.
+    valid: bool,
+    /// Why not, when `valid` is false — shown instead of the operation label.
+    invalid_reason: Option<String>,
+}
+
+impl DragState {
+    /// What releasing the drag at its current position would do.
+    pub fn operation(&self) -> DropOperation {
+        self.operation
+    }
+
+    /// Whether releasing the drag at its current position is allowed.
+    pub fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    /// Why the drop is disallowed, when it is.
+    pub fn invalid_reason(&self) -> Option<&str> {
+        self.invalid_reason.as_deref()
+    }
 }
 
 // ============================================================================
@@ -319,6 +390,18 @@ pub struct ExplorerState {
     /// view is correct at every stage, including the stage where there is no
     /// compositor connection at all.
     uploaded: HashSet<u64>,
+    /// Where a dropped file would land: the on-screen rectangles of the file
+    /// rows, the sidebar entries and the list pane, rebuilt every frame.
+    ///
+    /// Rebuilt by [`Self::render`] rather than by the code that changes the
+    /// listing, because a zone is a *screen* rectangle and only the renderer
+    /// knows where anything ended up. That is also why `render` takes `&mut
+    /// self`: registering the zones is the same pass that draws them, and a
+    /// second pass computing the same layout is a second layout to keep in
+    /// agreement with the first.
+    pub dropzone: DropZoneManager,
+    /// The drag currently over the window, if any.
+    drag: Option<DragState>,
 }
 
 impl ExplorerState {
@@ -350,6 +433,8 @@ impl ExplorerState {
             thumb_config: ThumbConfig::default(),
             pending_uploads: Vec::new(),
             uploaded: HashSet::new(),
+            dropzone: DropZoneManager::new(start_path.to_path_buf()),
+            drag: None,
         };
         state.sync_sort_indicator();
         state.load_directory();
@@ -430,6 +515,12 @@ impl ExplorerState {
     /// Load entries from the current directory.
     pub fn load_directory(&mut self) {
         self.entries.clear();
+        // Every navigation path — forward, back, up, address bar, a reload
+        // after an operation — ends here, so this is the one place the drop
+        // target for empty space can be kept in step with what is on screen
+        // without a caller being able to forget. Getting it wrong would drop
+        // files into the directory the user navigated *away* from.
+        self.dropzone.set_current_dir(self.current_path.clone());
 
         match fs::read_dir(&self.current_path) {
             Ok(read_dir) => {
@@ -1041,14 +1132,236 @@ impl ExplorerState {
     }
 
     // ======================================================================
+    // Drag and drop
+    // ======================================================================
+
+    /// The drag currently over the window, if any.
+    pub fn drag(&self) -> Option<&DragState> {
+        self.drag.as_ref()
+    }
+
+    /// Begin tracking a drag of `sources` over the window.
+    ///
+    /// No zone is chosen yet: the pointer position arrives with the first
+    /// movement, and highlighting a guess before then would flash a target the
+    /// user never aimed at.
+    pub fn drag_enter(&mut self, sources: Vec<PathBuf>) {
+        self.drag = Some(DragState {
+            sources,
+            x: 0.0,
+            y: 0.0,
+            modifiers: DragModifiers::default(),
+            zone: DropZone::None,
+            operation: DropOperation::None,
+            valid: false,
+            invalid_reason: None,
+        });
+    }
+
+    /// Record a pointer movement during a drag, returning the zone transition
+    /// it caused.
+    ///
+    /// Returns `None` when no drag is in flight, which is also what the manager
+    /// returns for a move that stays outside every zone — the two are
+    /// indistinguishable to a caller that only wants to know whether to redraw,
+    /// and both mean "nothing to show".
+    pub fn drag_over(&mut self, x: f32, y: f32, modifiers: DragModifiers) -> Option<DropZoneEvent> {
+        let mut drag = self.drag.take()?;
+        drag.x = x;
+        drag.y = y;
+
+        let event = self.dropzone.update_hover(x, y, modifiers, &drag.sources);
+        let zone = self.dropzone.current_hover().clone();
+
+        // Re-decide only when the answer can have changed. `evaluate_drop`
+        // canonicalises both ends of the drop and stats every source against
+        // the target; doing that for each of the hundreds of pointer positions
+        // that make up one traversal of a row would be a syscall per pixel.
+        if zone != drag.zone || modifiers != drag.modifiers {
+            let result = self.evaluate_drop(x, y, &drag.sources, modifiers);
+            drag.operation = result.operation;
+            drag.valid = result.valid;
+            drag.invalid_reason = result.invalid_reason;
+            drag.zone = zone;
+            drag.modifiers = modifiers;
+        }
+
+        self.drag = Some(drag);
+        event
+    }
+
+    /// Abandon the drag without dropping — the pointer left the window, or the
+    /// user pressed Escape.
+    pub fn drag_cancel(&mut self) {
+        self.drag = None;
+        self.dropzone.clear_hover();
+    }
+
+    /// Release the drag at `(x, y)`, performing the operation if it is allowed.
+    ///
+    /// Returns what was decided — including a rejected decision, whose
+    /// `invalid_reason` the status bar shows — or `None` if no drag was in
+    /// flight. The drag is over either way: a refused drop does not leave the
+    /// pointer still holding the files, because the release already happened.
+    pub fn drop_at(&mut self, x: f32, y: f32, modifiers: DragModifiers) -> Option<DropResult> {
+        let drag = self.drag.take()?;
+        self.dropzone.clear_hover();
+
+        let result = self.evaluate_drop(x, y, &drag.sources, modifiers);
+        if !result.valid {
+            // A drop onto nothing is the user missing, not an error worth
+            // interrupting them over; a drop onto a folder that refuses it is.
+            if let Some(reason) = &result.invalid_reason
+                && result.operation != DropOperation::None
+            {
+                self.status_message = reason.clone();
+            }
+            return Some(result);
+        }
+
+        self.execute_drop(&result);
+        Some(result)
+    }
+
+    /// What releasing `sources` at `(x, y)` would do, and whether it is
+    /// allowed.
+    ///
+    /// Wraps [`DropZoneManager::handle_drop`] with the two rules the manager
+    /// cannot know because they belong to the *executor*, not to the layout:
+    ///
+    /// * `fileops` has no link operation, so an Alt-drag is refused here rather
+    ///   than reported as `Link` and then silently not performed.
+    /// * A move whose sources are already in the target directory has nothing
+    ///   to do. Left alone it would be worse than nothing: the conflict policy
+    ///   is `Rename`, so moving `notes.txt` into the folder it is already in
+    ///   would produce `notes (2).txt` — a duplicate conjured by a drag the
+    ///   user meant as a no-op. A *copy* into the same folder is not the same
+    ///   case; duplicating a file that way is a thing people do on purpose.
+    fn evaluate_drop(
+        &self,
+        x: f32,
+        y: f32,
+        sources: &[PathBuf],
+        modifiers: DragModifiers,
+    ) -> DropResult {
+        let mut result = self.dropzone.handle_drop(x, y, sources, modifiers);
+        if !result.valid {
+            return result;
+        }
+
+        if result.operation == DropOperation::Link {
+            result.valid = false;
+            result.invalid_reason = Some("Links are not supported yet".to_string());
+            return result;
+        }
+
+        if result.operation == DropOperation::Move {
+            let target = result.target_dir.clone();
+            result
+                .sources
+                .retain(|s| s.parent() != Some(target.as_path()));
+            result.conflicts.retain(|c| {
+                result
+                    .sources
+                    .iter()
+                    .any(|s| s.file_name() == c.file_name())
+            });
+            if result.sources.is_empty() {
+                result.valid = false;
+                result.invalid_reason = Some("Already in this folder".to_string());
+            }
+        }
+
+        result
+    }
+
+    /// Carry out a validated drop through the same executor as paste.
+    ///
+    /// Not a second copy engine: the conflict policy, the crash journal, the
+    /// per-file error collection and the undo entries all live in [`fileops`],
+    /// and a drag-and-drop that wrote files itself would have none of them —
+    /// which is precisely the state paste was rescued from.
+    fn execute_drop(&mut self, result: &DropResult) {
+        let (plan, verb) = match result.operation {
+            DropOperation::Move => (
+                OperationPlan::plan_move(
+                    &result.sources,
+                    &result.target_dir,
+                    ConflictPolicy::Rename,
+                    ErrorPolicy::SkipAndContinue,
+                ),
+                "Moved",
+            ),
+            DropOperation::Copy => (
+                OperationPlan::plan_copy(
+                    &result.sources,
+                    &result.target_dir,
+                    ConflictPolicy::Rename,
+                    ErrorPolicy::SkipAndContinue,
+                ),
+                "Copied",
+            ),
+            // `evaluate_drop` refuses both of these, so reaching here would
+            // mean the caller executed a result it was told was invalid.
+            DropOperation::Link | DropOperation::None => return,
+        };
+
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(e) => {
+                self.status_message = format!("Drop failed: {e}");
+                return;
+            }
+        };
+
+        let mut executor = OperationExecutor::new(plan);
+        let events = executor.execute();
+        self.status_message = Self::describe_outcome(&events, verb);
+
+        let (undo_op, entries) = executor.into_undo_entries();
+        if !entries.is_empty() {
+            self.undo.push(undo_op, entries);
+        }
+
+        self.load_directory();
+    }
+
+    // ======================================================================
     // Rendering
     // ======================================================================
 
-    /// Render the complete file explorer UI.
-    pub fn render(&self) -> RenderTree {
+    /// Render the complete file explorer UI, re-registering the drop zones as
+    /// it goes.
+    ///
+    /// The zones are the rectangles a dragged file can be released onto, and
+    /// they are a *product of the layout*: only this pass knows where row seven
+    /// ended up, or that the pane was too narrow for a third icon column. So
+    /// the drawing pass registers them, and a drag hit-tests what the last
+    /// frame drew — which is exactly what the user was looking at when they
+    /// aimed.
+    ///
+    /// The manager is moved out of `self` for the duration rather than borrowed
+    /// from it, because the per-view helpers read `self.entries` while writing
+    /// the manager and the compiler will not split a `&self` borrow that way.
+    /// Moving it out and back also carries `current_hover` across the frame,
+    /// which a freshly-constructed manager would drop — making the highlight
+    /// flicker off on every frame of a stationary hover.
+    pub fn render(&mut self) -> RenderTree {
         let mut tree = RenderTree::new();
         let w = self.window_width as f32;
         let h = self.window_height as f32;
+
+        // The placeholder left in `self.dropzone` is never observed: nothing
+        // between here and the restore below reads the field, and the helpers
+        // are handed `zones` instead. It is an empty path rather than a clone
+        // of the current one because a clone would be an allocation per frame
+        // to construct a value with no reader.
+        let mut zones = std::mem::replace(&mut self.dropzone, DropZoneManager::new(PathBuf::new()));
+        // Only the zones are rebuilt. The current directory is *not* re-set
+        // here: `load_directory` is the single place that tracks it, because
+        // every navigation ends there and a second setter would be a second
+        // thing to keep in step with the first.
+        zones.clear_zones();
 
         // Background
         tree.fill_rect(0.0, 0.0, w, h, Color::from_hex(0xF5F5F5));
@@ -1060,15 +1373,47 @@ impl ExplorerState {
         self.render_address_bar(&mut tree);
 
         // Sidebar (directory tree)
-        self.render_sidebar(&mut tree);
+        self.render_sidebar(&mut tree, &mut zones);
 
         // File list
-        self.render_file_list(&mut tree);
+        self.render_file_list(&mut tree, &mut zones);
 
         // Status bar (bottom)
         self.render_status_bar(&mut tree);
 
+        self.dropzone = zones;
+
+        // Drop feedback last, so the highlight sits over the row it marks
+        // rather than under it.
+        self.render_drop_feedback(&mut tree);
+
         tree
+    }
+
+    /// Overlay the highlight and the "Copy to …" label for a drag in flight.
+    ///
+    /// The zone is re-found from the rectangles this very frame registered,
+    /// rather than reused from the one cached at the last pointer movement, so
+    /// that a list which scrolled under a stationary pointer highlights the row
+    /// now under it. The *operation* stays as cached: what a drop would do
+    /// depends on the target, and re-deciding it here would mean stat-ing the
+    /// filesystem once per frame for an answer that only changes when the
+    /// pointer or a modifier key moves.
+    fn render_drop_feedback(&self, tree: &mut RenderTree) {
+        let Some(drag) = &self.drag else {
+            return;
+        };
+        let zone = self.dropzone.find_zone(drag.x, drag.y);
+        for cmd in dropzone::render_drop_feedback(
+            &zone,
+            drag.operation,
+            drag.x,
+            drag.y,
+            self.dropzone.list_area(),
+            drag.valid,
+        ) {
+            tree.push(cmd);
+        }
     }
 
     fn render_toolbar(&self, tree: &mut RenderTree) {
@@ -1122,7 +1467,7 @@ impl ExplorerState {
         tree.text(12.0, bar_y + 7.0, &self.address_text, Color::BLACK, 13.0);
     }
 
-    fn render_sidebar(&self, tree: &mut RenderTree) {
+    fn render_sidebar(&self, tree: &mut RenderTree, zones: &mut DropZoneManager) {
         let sidebar_y = 64.0;
         let sidebar_h = self.window_height as f32 - 64.0 - 24.0; // minus toolbar and status bar
         let sw = self.sidebar_width;
@@ -1138,23 +1483,30 @@ impl ExplorerState {
         );
 
         // Quick access items
-        let items = ["/ (Root)", "/home", "/tmp", "/var", "/usr"];
-        for (i, item) in items.iter().enumerate() {
-            let iy = sidebar_y + 8.0 + i as f32 * 24.0;
-            tree.text(16.0, iy + 4.0, item, Color::from_hex(0x333333), 12.0);
+        for (i, (label, path)) in SIDEBAR_ITEMS.iter().enumerate() {
+            let iy = sidebar_y + 8.0 + i as f32 * SIDEBAR_ROW_H;
+            tree.text(16.0, iy + 4.0, label, Color::from_hex(0x333333), 12.0);
+            // The whole strip is the target, not just the glyphs: a drop aimed
+            // at the gap beside a short name like "/tmp" is still aimed at
+            // /tmp.
+            zones.register_sidebar_item(Path::new(path), Rect::new(0.0, iy, sw, SIDEBAR_ROW_H));
         }
     }
 
-    fn render_file_list(&self, tree: &mut RenderTree) {
+    fn render_file_list(&self, tree: &mut RenderTree, zones: &mut DropZoneManager) {
         let list_x = self.sidebar_width;
         let list_y = 64.0;
         let list_w = self.window_width as f32 - self.sidebar_width;
         let list_h = self.window_height as f32 - 64.0 - 24.0;
 
+        // The pane itself is the fallback target: anything inside it that is
+        // not a folder row means "into the directory being shown".
+        zones.set_list_area(Rect::new(list_x, list_y, list_w, list_h));
+
         match self.view_mode {
-            ViewMode::Details => self.render_details(tree, list_x, list_y, list_w, list_h),
-            ViewMode::Icons => self.render_icons(tree, list_x, list_y, list_w, list_h),
-            ViewMode::List => self.render_list(tree, list_x, list_y, list_w, list_h),
+            ViewMode::Details => self.render_details(tree, zones, list_x, list_y, list_w, list_h),
+            ViewMode::Icons => self.render_icons(tree, zones, list_x, list_y, list_w, list_h),
+            ViewMode::List => self.render_list(tree, zones, list_x, list_y, list_w, list_h),
         }
     }
 
@@ -1169,7 +1521,15 @@ impl ExplorerState {
     /// not hold draws nothing and reports nothing, so a view that emitted one
     /// optimistically would show an empty white frame with no way to tell
     /// whether the file was undrawable or the upload had simply not happened.
-    fn render_icons(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+    fn render_icons(
+        &self,
+        tree: &mut RenderTree,
+        zones: &mut DropZoneManager,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) {
         // At least one column, however narrow the pane: a zero here would make
         // the row index a division by zero, and a pane too narrow for a cell
         // should clip one cell rather than draw none.
@@ -1190,6 +1550,18 @@ impl ExplorerState {
             // from a line thirty above it.
             let cx = i.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W;
             let cy = i.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H;
+
+            // Registered in window coordinates, not the pane-local ones the
+            // commands are emitted in: the pointer position a drop arrives
+            // with is a window position, and translating one of the two at
+            // hit-test time would mean the zone list only made sense to a
+            // caller that knew which pane it came from.
+            zones.register_file_row(
+                i,
+                &entry.path,
+                Rect::new(x + cx, y + cy, ICON_CELL_W, ICON_CELL_H),
+                entry.is_dir,
+            );
 
             if entry.selected {
                 tree.fill_rounded_rect(
@@ -1238,7 +1610,15 @@ impl ExplorerState {
     /// column, so a long name has the whole pane to be legible in. The
     /// thumbnail follows the same generated-and-uploaded rule as the icon
     /// view's; see [`Self::render_icons`].
-    fn render_list(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+    fn render_list(
+        &self,
+        tree: &mut RenderTree,
+        zones: &mut DropZoneManager,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) {
         let visible_rows = (h / LIST_ROW_H).max(0.0) as usize;
 
         tree.translate(x, y);
@@ -1246,6 +1626,13 @@ impl ExplorerState {
 
         for (i, entry) in self.entries.iter().take(visible_rows).enumerate() {
             let ry = i as f32 * LIST_ROW_H;
+
+            zones.register_file_row(
+                i,
+                &entry.path,
+                Rect::new(x, y + ry, w, LIST_ROW_H),
+                entry.is_dir,
+            );
 
             if entry.selected {
                 tree.fill_rect(0.0, ry, w, LIST_ROW_H, Color::from_hex(0xCCE8FF));
@@ -1299,7 +1686,15 @@ impl ExplorerState {
     /// origin. The icon occupies a fixed gutter to the left of the first
     /// column; the header's own bar starts where the columns do, so the gutter
     /// strip of it is filled here to keep the bar continuous.
-    fn render_details(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+    fn render_details(
+        &self,
+        tree: &mut RenderTree,
+        zones: &mut DropZoneManager,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) {
         let table_w = (w - ICON_GUTTER).max(0.0);
         let visible_rows = ((h - HEADER_H) / ROW_H).max(0.0) as usize;
 
@@ -1314,6 +1709,8 @@ impl ExplorerState {
 
         for (i, entry) in self.entries.iter().take(visible_rows).enumerate() {
             let ey = HEADER_H + i as f32 * ROW_H;
+
+            zones.register_file_row(i, &entry.path, Rect::new(x, y + ey, w, ROW_H), entry.is_dir);
 
             if entry.selected {
                 tree.fill_rect(0.0, ey, w, ROW_H, Color::from_hex(0xCCE8FF));
@@ -2056,7 +2453,8 @@ mod tests {
 
     fn details_tree(state: &ExplorerState) -> RenderTree {
         let mut tree = RenderTree::new();
-        state.render_details(&mut tree, 0.0, 0.0, 600.0, 400.0);
+        let mut zones = DropZoneManager::new(state.current_path.clone());
+        state.render_details(&mut tree, &mut zones, 0.0, 0.0, 600.0, 400.0);
         tree
     }
 
@@ -2443,5 +2841,410 @@ mod tests {
             text_y(&tree, "a.txt").is_some(),
             "a pane too narrow for a cell still draws the first one"
         );
+    }
+
+    // ======================================================================
+    // Drag and drop
+    //
+    // A drop zone is a claim about where something is on screen, so every
+    // test here goes through `render` to make the claim rather than calling
+    // `register_file_row` with coordinates of its own. A test that registered
+    // its own rectangles would keep passing after the layout it is describing
+    // had moved out from under it — which is the failure that let this whole
+    // module sit unreachable for as long as it did.
+    // ======================================================================
+
+    /// Middle of the row `name` occupies in the current view, in window
+    /// coordinates — the point a user would actually be over.
+    fn row_center(state: &ExplorerState, name: &str) -> (f32, f32) {
+        let index = state
+            .entries
+            .iter()
+            .position(|e| e.name == name)
+            .unwrap_or_else(|| panic!("no entry named {name}"));
+        let x = state.sidebar_width;
+        let y = 64.0;
+        let w = state.window_width as f32 - state.sidebar_width;
+        match state.view_mode {
+            ViewMode::Details => (
+                x + w / 2.0,
+                y + HEADER_H + index as f32 * ROW_H + ROW_H / 2.0,
+            ),
+            ViewMode::List => (
+                x + w / 2.0,
+                y + index as f32 * LIST_ROW_H + LIST_ROW_H / 2.0,
+            ),
+            ViewMode::Icons => {
+                let cols = ((w / ICON_CELL_W) as usize).max(1);
+                (
+                    x + index.checked_rem(cols).unwrap_or(0) as f32 * ICON_CELL_W
+                        + ICON_CELL_W / 2.0,
+                    y + index.checked_div(cols).unwrap_or(0) as f32 * ICON_CELL_H
+                        + ICON_CELL_H / 2.0,
+                )
+            }
+        }
+    }
+
+    /// A point inside the file pane that is below every row drawn.
+    fn empty_space(state: &ExplorerState) -> (f32, f32) {
+        let x = state.sidebar_width;
+        let w = state.window_width as f32 - state.sidebar_width;
+        let bottom = state.window_height as f32 - 24.0;
+        (x + w / 2.0, bottom - 4.0)
+    }
+
+    #[test]
+    fn every_view_mode_registers_the_folder_row_it_draws() {
+        let scratch = temp_dir("dz_modes");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("target")).unwrap();
+        write(&root.join("a.txt"), "x");
+
+        for mode in [ViewMode::Details, ViewMode::List, ViewMode::Icons] {
+            let mut state = state_at(&root);
+            state.set_view_mode(mode);
+            let _ = state.render();
+
+            let (fx, fy) = row_center(&state, "target");
+            match state.dropzone.find_zone(fx, fy) {
+                DropZone::Folder { path, rect } => {
+                    assert_eq!(path, root.join("target"), "{mode:?}");
+                    // The rectangle is in window coordinates, not the
+                    // pane-local ones the row was drawn in: a hit test is fed
+                    // a pointer position, which is a window position.
+                    assert!(
+                        rect.contains(fx, fy),
+                        "{mode:?}: the registered rect covers the point it was found by"
+                    );
+                    assert!(
+                        rect.x >= state.sidebar_width,
+                        "{mode:?}: and starts at the pane, not at the window origin"
+                    );
+                }
+                other => panic!("{mode:?}: expected the folder row, got {other:?}"),
+            }
+
+            // A *file* row is not a target — you cannot drop into a file — so
+            // it falls through to the directory being shown.
+            let (ax, ay) = row_center(&state, "a.txt");
+            assert_eq!(
+                state.dropzone.find_zone(ax, ay),
+                DropZone::CurrentDirectory,
+                "{mode:?}: a file row falls through to the current directory"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_space_below_the_rows_is_the_directory_being_shown() {
+        let scratch = temp_dir("dz_empty");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("a.txt"), "x");
+
+        let mut state = state_at(&root);
+        let _ = state.render();
+
+        let (x, y) = empty_space(&state);
+        assert_eq!(state.dropzone.find_zone(x, y), DropZone::CurrentDirectory);
+
+        // Outside the window entirely is no zone at all, not a silent fallback
+        // to the current directory: a drag released over the taskbar has not
+        // been aimed at the explorer.
+        assert_eq!(state.dropzone.find_zone(-5.0, -5.0), DropZone::None);
+    }
+
+    #[test]
+    fn a_sidebar_row_targets_the_path_it_names_not_the_label_it_draws() {
+        let scratch = temp_dir("dz_sidebar");
+        let root = scratch.dir().to_path_buf();
+
+        let mut state = state_at(&root);
+        let _ = state.render();
+
+        // The first quick-access row is labelled "/ (Root)" and stands for "/".
+        let y = 64.0 + 8.0 + SIDEBAR_ROW_H / 2.0;
+        match state.dropzone.find_zone(state.sidebar_width / 2.0, y) {
+            DropZone::Sidebar { path, .. } => assert_eq!(path, PathBuf::from("/")),
+            other => panic!("expected the root sidebar row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_frames_zones_do_not_outlive_the_frame() {
+        let scratch = temp_dir("dz_stale");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("gone")).unwrap();
+        fs::create_dir(root.join("empty")).unwrap();
+
+        let mut state = state_at(&root);
+        let _ = state.render();
+        let (x, y) = row_center(&state, "gone");
+        assert!(matches!(
+            state.dropzone.find_zone(x, y),
+            DropZone::Folder { .. }
+        ));
+
+        // Navigate into the empty directory and draw again. The old rows are
+        // not on screen any more, so a drop where one used to be must land in
+        // the new directory rather than in a folder that is no longer visible.
+        state.navigate_to(&root.join("empty"));
+        let _ = state.render();
+        assert_eq!(
+            state.dropzone.find_zone(x, y),
+            DropZone::CurrentDirectory,
+            "the previous frame's folder rows are gone"
+        );
+        assert_eq!(state.dropzone.current_dir(), root.join("empty"));
+    }
+
+    #[test]
+    fn dropping_a_file_on_a_folder_row_moves_it_in() {
+        let scratch = temp_dir("dz_move");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("target")).unwrap();
+        write(&root.join("note.txt"), "hello");
+
+        let mut state = state_at(&root);
+        let _ = state.render();
+
+        let (x, y) = row_center(&state, "target");
+        state.drag_enter(vec![root.join("note.txt")]);
+        state.drag_over(x, y, DragModifiers::default());
+        let result = state.drop_at(x, y, DragModifiers::default()).expect("drop");
+
+        assert!(result.valid, "{:?}", result.invalid_reason);
+        assert_eq!(result.operation, DropOperation::Move);
+        assert!(root.join("target/note.txt").exists(), "arrived");
+        assert!(!root.join("note.txt").exists(), "and left");
+
+        // The drop went through the shared executor, so it is undoable — a
+        // drag that moved a file irreversibly would be the one operation in
+        // the explorer that could not be taken back.
+        assert!(!state.undo.is_empty(), "the drop is on the undo stack");
+
+        // And the listing was reloaded, so the moved file is no longer shown.
+        assert!(!state.entries.iter().any(|e| e.name == "note.txt"));
+    }
+
+    #[test]
+    fn a_drop_on_empty_space_lands_in_the_directory_being_shown() {
+        let scratch = temp_dir("dz_here");
+        let root = scratch.dir().to_path_buf();
+        let outside = scratch.dir().join("outside");
+        fs::create_dir(&outside).unwrap();
+        write(&outside.join("note.txt"), "hello");
+        fs::create_dir(root.join("here")).unwrap();
+
+        let mut state = state_at(&root.join("here"));
+        let _ = state.render();
+
+        let (x, y) = empty_space(&state);
+        state.drag_enter(vec![outside.join("note.txt")]);
+        state.drag_over(x, y, DragModifiers::default());
+        let result = state.drop_at(x, y, DragModifiers::default()).expect("drop");
+
+        assert!(result.valid, "{:?}", result.invalid_reason);
+        assert_eq!(result.target_dir, root.join("here"));
+        assert!(root.join("here/note.txt").exists());
+    }
+
+    #[test]
+    fn a_folder_cannot_be_dropped_into_itself() {
+        let scratch = temp_dir("dz_nested");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("outer")).unwrap();
+
+        let mut state = state_at(&root);
+        let _ = state.render();
+
+        let (x, y) = row_center(&state, "outer");
+        state.drag_enter(vec![root.join("outer")]);
+        state.drag_over(x, y, DragModifiers::default());
+        let result = state.drop_at(x, y, DragModifiers::default()).expect("drop");
+
+        assert!(!result.valid);
+        assert!(
+            result.invalid_reason.unwrap_or_default().contains("itself"),
+            "the refusal says why"
+        );
+        assert!(root.join("outer").is_dir(), "and nothing happened to it");
+    }
+
+    /// The whole reason [`ExplorerState::evaluate_drop`] exists rather than the
+    /// manager's verdict being used unchanged.
+    ///
+    /// The executor's conflict policy is `Rename`, so a move of `note.txt` into
+    /// the directory it is already in would not be the no-op the user meant —
+    /// it would conjure `note (2).txt` out of a drag that went nowhere.
+    #[test]
+    fn moving_a_file_into_the_folder_it_is_already_in_does_nothing() {
+        let scratch = temp_dir("dz_selfmove");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("note.txt"), "hello");
+
+        let mut state = state_at(&root);
+        let _ = state.render();
+
+        let (x, y) = empty_space(&state);
+        state.drag_enter(vec![root.join("note.txt")]);
+        state.drag_over(x, y, DragModifiers::default());
+        let result = state.drop_at(x, y, DragModifiers::default()).expect("drop");
+
+        assert!(!result.valid);
+        assert_eq!(
+            result.invalid_reason.as_deref(),
+            Some("Already in this folder")
+        );
+        assert_eq!(
+            fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().starts_with("note"))
+                .count(),
+            1,
+            "no duplicate was conjured"
+        );
+    }
+
+    /// The counterpart to the above: duplicating a file inside its own folder
+    /// is a thing people do on purpose, and Ctrl says so explicitly.
+    #[test]
+    fn copying_a_file_into_its_own_folder_still_duplicates_it() {
+        let scratch = temp_dir("dz_selfcopy");
+        let root = scratch.dir().to_path_buf();
+        write(&root.join("note.txt"), "hello");
+
+        let mut state = state_at(&root);
+        let _ = state.render();
+
+        let ctrl = DragModifiers {
+            ctrl: true,
+            ..DragModifiers::default()
+        };
+        let (x, y) = empty_space(&state);
+        state.drag_enter(vec![root.join("note.txt")]);
+        state.drag_over(x, y, ctrl);
+        let result = state.drop_at(x, y, ctrl).expect("drop");
+
+        assert!(result.valid, "{:?}", result.invalid_reason);
+        assert_eq!(result.operation, DropOperation::Copy);
+        assert_eq!(
+            fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().starts_with("note"))
+                .count(),
+            2,
+            "the copy was renamed rather than overwriting the original"
+        );
+    }
+
+    /// `fileops` has no link operation, so Alt-drag is refused up front instead
+    /// of being reported as `Link` and then quietly not performed.
+    #[test]
+    fn an_alt_drag_is_refused_rather_than_silently_doing_nothing() {
+        let scratch = temp_dir("dz_link");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("target")).unwrap();
+        write(&root.join("note.txt"), "hello");
+
+        let mut state = state_at(&root);
+        let _ = state.render();
+
+        let alt = DragModifiers {
+            alt: true,
+            ..DragModifiers::default()
+        };
+        let (x, y) = row_center(&state, "target");
+        state.drag_enter(vec![root.join("note.txt")]);
+        state.drag_over(x, y, alt);
+
+        let drag = state.drag().expect("a drag is in flight");
+        assert!(!drag.is_valid(), "the feedback is red before the release");
+        assert_eq!(drag.invalid_reason(), Some("Links are not supported yet"));
+
+        let result = state.drop_at(x, y, alt).expect("drop");
+        assert!(!result.valid);
+        assert!(!root.join("target/note.txt").exists());
+        assert_eq!(state.status_message, "Links are not supported yet");
+    }
+
+    #[test]
+    fn no_drop_feedback_is_drawn_until_the_pointer_has_moved() {
+        let scratch = temp_dir("dz_feedback");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("target")).unwrap();
+
+        let mut state = state_at(&root);
+        let baseline = state.render().commands.len();
+
+        // A drag that has entered the window but not yet reported a position
+        // has no target, so it must not highlight one.
+        state.drag_enter(vec![PathBuf::from("/elsewhere/note.txt")]);
+        assert_eq!(
+            state.render().commands.len(),
+            baseline,
+            "nothing is highlighted before the first movement"
+        );
+
+        let (x, y) = row_center(&state, "target");
+        state.drag_over(x, y, DragModifiers::default());
+        assert!(
+            state.render().commands.len() > baseline,
+            "hovering a folder row draws the highlight and the label"
+        );
+
+        state.drag_cancel();
+        assert_eq!(
+            state.render().commands.len(),
+            baseline,
+            "cancelling takes the highlight away again"
+        );
+        assert_eq!(state.dropzone.current_hover(), &DropZone::None);
+    }
+
+    /// The hover survives the frame that redraws it.
+    ///
+    /// `render` takes the manager out of `self` and puts it back rather than
+    /// building a fresh one, precisely so that this holds: a new manager per
+    /// frame would reset `current_hover`, and every frame of a stationary hover
+    /// would re-fire `DragEnter` for the zone the pointer had not left.
+    #[test]
+    fn a_stationary_hover_does_not_re_enter_its_zone_every_frame() {
+        let scratch = temp_dir("dz_hover");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("target")).unwrap();
+
+        let mut state = state_at(&root);
+        let _ = state.render();
+
+        let (x, y) = row_center(&state, "target");
+        state.drag_enter(vec![PathBuf::from("/elsewhere/note.txt")]);
+        assert!(matches!(
+            state.drag_over(x, y, DragModifiers::default()),
+            Some(DropZoneEvent::DragEnter { .. })
+        ));
+
+        let _ = state.render();
+        assert!(
+            matches!(
+                state.drag_over(x, y, DragModifiers::default()),
+                Some(DropZoneEvent::DragOver { .. })
+            ),
+            "still over the same zone after a redraw"
+        );
+    }
+
+    #[test]
+    fn a_drop_with_no_drag_in_flight_is_not_an_operation() {
+        let scratch = temp_dir("dz_nodrag");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        let _ = state.render();
+
+        let (x, y) = empty_space(&state);
+        assert!(state.drop_at(x, y, DragModifiers::default()).is_none());
+        assert!(state.drag_over(x, y, DragModifiers::default()).is_none());
     }
 }

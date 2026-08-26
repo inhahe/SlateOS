@@ -68209,6 +68209,99 @@ it sits.
 
   Still pinned from this app: `dropzone.rs` (1,259).
 
+- **2026-08-25 — `apps/explorer/src/dropzone.rs` (1,259 lines) is reached, and
+  `apps/explorer` is off the ledger entirely.** All three of the app's pinned
+  islands — `columns.rs` (2,372), `thumbs.rs` (1,980), `dropzone.rs` (1,259),
+  5,611 lines — are now called by the app that `mod`-declared them. 54 remain
+  repo-wide, from 57.
+
+  A drop zone is a claim about *where something is on screen*, so registration
+  belongs to the pass that decides where things go and to no other. `render`
+  therefore took `&mut self` and now rebuilds the zone list as it draws: each
+  row registers its own rectangle, the sidebar registers its five quick-access
+  strips, and the pane registers itself as the fallback. A second pass
+  computing the same layout would be a second layout to keep in agreement with
+  the first, and it is exactly that kind of shadow layout that goes stale
+  without anyone finding out.
+
+  The borrow this needs does not exist: the per-view helpers read
+  `self.entries` while writing `self.dropzone`, and a `&self` borrow will not
+  split that way. The manager is `mem::replace`d out for the frame and put
+  back. That is not only a borrow trick — a *fresh* manager per frame would
+  reset `current_hover`, so every frame of a stationary hover would re-fire
+  `DragEnter` for a zone the pointer had never left.
+
+  Three defects the wiring exposed:
+  - **The module keyed everything by `String`.** Paths, sources, targets: all
+    `String`, reached from `PathBuf` by `to_string_lossy`, which maps every
+    undecodable unit to U+FFFD and so merges two distinct filenames into one
+    target. The same trust-boundary defect class as `columns.rs`'s `&str`
+    lookups, and fixed the same way — `Path`/`PathBuf` throughout. The one
+    surviving lossy conversion is in `operation_label`, which is drawn for a
+    human and never used to reach a file; there, U+FFFD on screen is right and
+    hiding the label would be wrong.
+  - **The sidebar's rows were their own labels.** They were five strings,
+    `"/ (Root)"` among them — harmless while a label was only ever drawn, and
+    a drop into a directory literally named `/ (Root)` the moment it was not.
+    Label and path are now separate fields of `SIDEBAR_ITEMS`.
+  - **A move into the folder the file is already in would have conjured a
+    duplicate.** The manager's verdict cannot see this, because it is a fact
+    about the *executor*: `fileops`' conflict policy here is `Rename`, so
+    moving `notes.txt` into its own directory produces `notes (2).txt` from a
+    drag the user meant as a no-op. `ExplorerState::evaluate_drop` wraps
+    `handle_drop` and refuses it. A *copy* into the same folder is not the
+    same case and still duplicates — people do that on purpose.
+
+  The drop itself runs through `OperationPlan` + `OperationExecutor`, the same
+  engine as paste, so a drag-and-drop is undoable, journalled and reports
+  per-file errors. A second copy engine behind a drag would have had none of
+  those, which is the state paste itself was rescued from.
+
+  **Known limitation, deliberately not fixed here:** `fileops` has no link
+  operation, so Alt-drag is *refused* — red feedback and "Links are not
+  supported yet" — rather than reported as `Link` and then quietly not
+  performed. The proper fix is a `FileOperation::Link` with its own plan,
+  journal entry and undo (`unlink` the created link), which is a `fileops`
+  feature rather than a wiring one. Until it exists, the refusal is at least
+  visible before the user releases the button. See
+  `TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE` below.
+
+## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25)
+
+**In short:** Holding Alt while dragging a file is the standard way to ask for
+a *symbolic link* — a small stand-in file that points at the real one, so the
+same file appears in two places without being copied. The explorer understands
+the request and the file-operation engine cannot carry it out, so the explorer
+refuses it to the user's face instead of pretending. Nothing is broken; a
+feature is missing and says so.
+
+**Where it lives.** `apps/explorer/src/dropzone.rs` computes
+`DropOperation::Link` from the Alt modifier, correctly — that part is done.
+`apps/explorer/src/fileops.rs`'s `FileOperation` enum has `Copy`, `Move`,
+`Delete`, `Recycle` and `Restore`, and no `Link`; there is no `plan_link`.
+`ExplorerState::evaluate_drop` (`apps/explorer/src/main.rs`) closes the gap by
+marking a `Link` drop invalid with the reason `"Links are not supported yet"`,
+which the hover feedback shows in red and the status bar repeats on release.
+Covered by `an_alt_drag_is_refused_rather_than_silently_doing_nothing`.
+
+**Why it is refused rather than downgraded.** Silently doing a Copy instead
+would be worse than doing nothing: the user asked for a stand-in and would get
+a second independent file, which then drifts out of step with the original with
+no sign that it ever was one.
+
+**The proper fix.** Add `FileOperation::Link` to `fileops` with the same
+apparatus every other operation has: an `OperationPlan::plan_link`, a journal
+entry so a crash mid-batch is recoverable, per-file error collection, and an
+undo entry whose reverse is `remove_file` on the link (never on its target).
+Then delete the special case in `evaluate_drop`. The one real design question
+is what to do on a filesystem that refuses symlinks — Windows needs a
+privilege for them, so the host test suite cannot assume they work — which
+argues for `ErrorPolicy::SkipAndContinue` reporting a per-file failure rather
+than a plan that refuses up front.
+
+**Cost of leaving it.** One gesture is unavailable and says so. It does not
+get worse with time and blocks nothing.
+
 ## TD-B-FIVE-COPIES-OF-THE-FILE-TYPE-HALF-OF-A-MODE-WORD (lane B, 2026-08-22) — RESOLVED 2026-08-22
 
 **In short:** A file's *mode* is one integer holding two unrelated things: what

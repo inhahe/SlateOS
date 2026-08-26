@@ -4,6 +4,8 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
+# 54 remain: apps/explorer's columns.rs, thumbs.rs and dropzone.rs — 5,611
+# lines between them — have been wired into the app that declared them.
 #
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
@@ -15,7 +17,6 @@
 # TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
 # largest entries are blocked on open-questions.md -> C-Q6, which decides
 # whether the shell's settings pages survive at all.
-apps/explorer/src/dropzone.rs
 apps/imageviewer/src/video.rs
 apps/installer/src/grub.rs
 apps/procexplorer/src/features.rs

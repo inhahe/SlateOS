@@ -80232,45 +80232,97 @@ well as the pipe, and the supplied final newline.
 
 ---
 
-## `A-KSHELL-COLUMN-S-TAKES-ONE-CHARACTER-WHERE-GNU-TAKES-A-SET` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-COLUMN-S-TAKES-ONE-CHARACTER-WHERE-GNU-TAKES-A-SET` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (the set); the whitespace-separator gap below is still open
 
-**In short:** `column -s` is documented and implemented as "use this one
+**In short:** `column -s` was documented and implemented as "use this one
 character as the delimiter". GNU treats the argument as a *set* — any one of
-the characters in it separates — so `column -t -s ', '` splits on a comma or a
-space under GNU and on a comma only here. A user who types the GNU form gets a
-plausible-looking table built on the wrong split, with no diagnostic.
+the characters in it separates — so `column -t -s ',;'` split on a comma or a
+semicolon under GNU and on a comma only here. A user who typed the GNU form got
+a plausible-looking table built on the wrong split, with no diagnostic.
 
-**Where.** `kernel/src/kshell.rs` — `column_parse_args`, which does
+**Where.** `kernel/src/kshell.rs` — `column_parse_args`, which did
 `s.chars().next()`.
 
-**What the proper fix looks like.** Carry the whole argument as a set of
+**What the proper fix looked like.** Carry the whole argument as a set of
 characters (as bytes, one entry per character, since a multi-byte one must
 still match as a unit) and split on any member. `split_on_bytes` becomes
 `split_on_any_of`. The empty-field rule is unchanged: an explicit separator
 keeps them.
 
-**Why it is filed rather than done.** It is a behaviour change, not a
-correctness fix, and it was found while fixing
+**How it was fixed** (`7cfbd2ac8`, in its own commit as this note asked). Exactly
+that. Three things worth carrying forward:
+
+- **It is a set of characters, not of bytes.** Each member is the bytes of one
+  character, matched as a unit, so `-s '→,'` splits on the whole `→`. Expanding
+  the argument byte-wise would make `E2`, `86` and `92` each a separator, so one
+  `→` would produce three breaks and two empty fields. Pinned by an assertion.
+- **Longest match wins** where two members could both match. For a set built
+  from characters that cannot happen — no character's UTF-8 encoding is a prefix
+  of another's — but "first member in the order the user typed them" would make
+  the output depend on argument order for no reason a user could predict, and
+  longest-match is the rule that stays right if this ever takes multi-character
+  separators.
+- **A second `-s` replaces the set rather than extending it**, matching
+  util-linux, where the option's argument *is* the set. Unioning would be just
+  as implementable, so there is an assertion on input where the two readings
+  differ visibly, to keep it a decision.
+
+The return type became a named `ColumnArgs` struct on the way: with the
+separator an `Option<Vec<Vec<u8>>>`, the old three-tuple tripped
+`clippy::type_complexity`, which is deny-level here and right — see Lesson 49
+for how that error nearly shipped past a delta check that filtered on
+`grep warning`.
+
+**Why it was filed rather than done at the time.** It is a behaviour change, not
+a correctness fix, and it was found while fixing
 `A-KSHELL-COLUMN-PADS-TO-BYTES-AND-REWRITES-WHAT-IT-CANNOT-DECODE` above.
 Smuggling it into that commit would have made a bug fix and a semantic change
 indistinguishable in the history — the same reason `diff`'s missing
 `Binary files X and Y differ` was kept out of the `diff` byte fix (and was
-then landed on its own, 2026-08-25). The
-character-not-set reading is documented in `column_parse_args`'s doc comment so
-it stays a decision rather than an oversight.
+then landed on its own, 2026-08-25).
 
-**A second, smaller gap in the same place.** The flag walk is
+**A second, smaller gap in the same place — STILL OPEN.** The flag walk is
 `args.split_whitespace()`, so a separator that *is* whitespace cannot be
 expressed at all: `column -t -s ' '` loses the argument to the splitter and
 falls back to the default. Harmless today because space is the default, but
-`column -t -s '\t'` — meaning tab and *not* space, which is how one lines up a
-TSV whose fields contain spaces — is unreachable. The fix is the same fix:
-whichever pass carries the `-s` argument has to take it as a token rather than
-re-splitting it. Pre-existing; not introduced by the byte conversion.
+`column -t -s '<TAB>'` — meaning tab and *not* space, which is how one lines up
+a TSV whose fields contain spaces — is unreachable. Pre-existing; not introduced
+by the byte conversion or by the set fix.
 
-**Severity.** Low. Wrong answer, but only for an argument longer than one
-character, and the wrong answer is visibly a table with the wrong columns
-rather than a silently corrupt one.
+> **The fix is available and the earlier note was wrong to imply otherwise.**
+> This was previously written up as needing a quote-aware splitter that
+> `kshell.rs` did not have. It has one: [`split_words`], and the mechanism for
+> reaching it is [`command_parses_own_quotes`], the list of commands that receive
+> their arguments with the quoting still in place. `column -s` is *precisely* the
+> shape of `cut -d`, which is already on that list for the identical reason —
+> `cut -d' ' -f1` is how you say "split on spaces", and dequoted it became
+> `-d  -f1`, so the delimiter turned into the string `-f1`. `tr` is there for the
+> same reason and failed silently rather than loudly.
+>
+> So the fix is: add `"column"` to `command_parses_own_quotes`, switch
+> `column_parse_args` from `args.split_whitespace()` to `split_words(args)`, and
+> model the loop on `parse_cut_args` (index-based over `Vec<String>`).
+> `ColumnArgs::file_path` becomes a `String`, since the words are owned.
+>
+> One behaviour note for whoever does it: `split_words` drops an empty word, so
+> `-s ''` will arrive as a bare `-s` with no argument and be refused with
+> "`-s` requires a separator" rather than falling back to the default split.
+> That is a *better* answer than the current silent fallback, but it contradicts
+> the paragraph currently in `column_parse_args`'s doc comment, which must be
+> updated in the same commit.
+>
+> Kept separate from the set fix because they are different changes: one is what
+> the separator *means*, the other is whether the separator *arrives*.
+
+**A third, smaller one, noted while reading `parse_cut_args`.** `column` takes
+`-s` only as two words. getopt also accepts the attached form, `column -s,;`,
+which `cut` supports via `cut_opt_value` (`cut -d:` and `cut -d :` are both
+legal). Not a wrong answer — `column -s,;` is refused as an unrecognised option,
+loudly — but it is a legal invocation this shell rejects.
+
+**Severity.** Low, and lower now. The set half is fixed. What remains is a
+separator that cannot be *expressed* (a refusal or a fallback, not a wrong
+answer) and an option form that is rejected rather than misread.
 
 ---
 

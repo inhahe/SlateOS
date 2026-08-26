@@ -515,7 +515,10 @@ impl<'a> Cursor<'a> {
         let raw = usize::try_from(self.u64(what)?)
             .map_err(|_| IndexError::CorruptIndex(format!("{what}: count too large")))?;
         let remaining = self.data.len().saturating_sub(self.pos);
-        Ok(raw.min(remaining / min_bytes_each.max(1)))
+        // `max(1)` already makes the divisor non-zero; `checked_div` says so at
+        // the division rather than one call away, so the two cannot be
+        // separated by a later edit.
+        Ok(raw.min(remaining.checked_div(min_bytes_each.max(1)).unwrap_or(0)))
     }
 }
 
@@ -588,10 +591,18 @@ impl FileIndex {
 
     /// Approximate index size in memory.
     fn approx_size_bytes(&self) -> usize {
-        let entries_size = self.entries.len() * std::mem::size_of::<IndexEntry>();
+        // This figure is only ever printed by `indexer status`, so saturating
+        // is the honest choice: a size that stops climbing is visibly wrong,
+        // whereas one that wraps reports a huge index as a small one.
+        let entries_size = self
+            .entries
+            .len()
+            .saturating_mul(std::mem::size_of::<IndexEntry>());
         let paths_size: usize = self.entries.iter().map(|e| e.path.as_os_str().len()).sum();
         let names_size: usize = self.entries.iter().map(|e| e.filename.len()).sum();
-        entries_size + paths_size + names_size
+        entries_size
+            .saturating_add(paths_size)
+            .saturating_add(names_size)
     }
 
     // ---- Serialization ----
@@ -770,14 +781,16 @@ fn extract_trigrams(text: &str) -> Vec<[u8; 3]> {
     if bytes.len() < TRIGRAM_SIZE {
         return Vec::new();
     }
-    let mut trigrams = Vec::with_capacity(bytes.len() - TRIGRAM_SIZE + 1);
+    let mut trigrams =
+        Vec::with_capacity(bytes.len().saturating_sub(TRIGRAM_SIZE).saturating_add(1));
     for window in bytes.windows(TRIGRAM_SIZE) {
-        let trigram = [
-            window[0].to_ascii_lowercase(),
-            window[1].to_ascii_lowercase(),
-            window[2].to_ascii_lowercase(),
-        ];
-        trigrams.push(trigram);
+        // `windows` yields slices of exactly `TRIGRAM_SIZE`, so this cannot
+        // fail -- but `try_into` gets that from the type rather than from three
+        // indexed reads whose bound lives in the loop header.
+        let Ok(trigram) = <[u8; TRIGRAM_SIZE]>::try_from(window) else {
+            continue;
+        };
+        trigrams.push(trigram.map(|b| b.to_ascii_lowercase()));
     }
     trigrams.sort_unstable();
     trigrams.dedup();
@@ -830,16 +843,16 @@ fn index_all_contents(index: &mut FileIndex, config: &Config, stats: &mut ScanSt
         let bytes = match fs::read(&path) {
             Ok(b) => b,
             Err(_) => {
-                stats.errors += 1;
+                stats.errors = stats.errors.saturating_add(1);
                 continue;
             }
         };
         let Ok(text) = String::from_utf8(bytes) else {
-            stats.files_skipped += 1;
+            stats.files_skipped = stats.files_skipped.saturating_add(1);
             continue;
         };
         index_file_content(index, idx, &text);
-        stats.files_content_indexed += 1;
+        stats.files_content_indexed = stats.files_content_indexed.saturating_add(1);
     }
 }
 
@@ -990,13 +1003,15 @@ fn search_content(index: &FileIndex, query: &str, limit: usize) -> Vec<SearchRes
         }
     }
 
-    if candidate_sets.is_empty() {
+    // Intersect all candidate sets. `split_first` both proves the list is
+    // non-empty and hands over the tail, collapsing the emptiness check and
+    // the two reads it licensed into one statement that cannot disagree with
+    // itself.
+    let Some((first, others)) = candidate_sets.split_first() else {
         return Vec::new();
-    }
-
-    // Intersect all candidate sets.
-    let mut candidates: Vec<usize> = candidate_sets[0].clone();
-    for set in &candidate_sets[1..] {
+    };
+    let mut candidates: Vec<usize> = (*first).clone();
+    for set in others {
         candidates.retain(|idx| set.contains(idx));
     }
 
@@ -1026,61 +1041,77 @@ fn glob_match(pattern: &str, text: &str) -> bool {
     glob_match_chars(&pat, &txt)
 }
 
+/// The matcher proper: one pass over `text` with a single backtrack point.
+///
+/// Everything is read through `get`, so each access carries its own bound
+/// instead of borrowing one from a `while` header several lines up. That is
+/// not cosmetic here. `apps/backup` had a glob matcher of the same shape whose
+/// bounds were argued rather than carried, and it shipped a pattern
+/// (`--exclude '**a'`) that recursed until the stack overflowed and took the
+/// backup down with it. This one is a single loop with no recursion, so it
+/// cannot fail that way -- and reading through `get` is what keeps the claim
+/// checkable instead of merely believed.
+///
+/// Termination: every iteration either advances `ti`, or advances `pi` on a
+/// `*` (which `pi` can only be reset behind by a backtrack, and a backtrack
+/// strictly increases `star_ti`, which bounds `ti` from below and never
+/// decreases). So the pair `(star_ti, pi)` increases lexicographically on
+/// every iteration and is bounded, and the loop must end.
 fn glob_match_chars(pattern: &[char], text: &[char]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    // `Option` rather than a `usize::MAX` sentinel: "no star seen yet" is a
+    // distinct state, not a magic index, and the compiler will not let it be
+    // used as one by accident.
+    let mut star_pi: Option<usize> = None;
+    let mut star_ti = 0usize;
 
-    while ti < text.len() {
-        if pi < pattern.len() {
-            match pattern[pi] {
-                '*' => {
-                    star_pi = pi;
-                    star_ti = ti;
-                    pi += 1;
-                    continue;
-                }
-                '?' => {
-                    pi += 1;
-                    ti += 1;
-                    continue;
-                }
-                '[' => {
-                    // Character class.
-                    if let Some((matched, end)) = match_char_class(&pattern[pi..], text[ti])
-                        && matched
-                    {
-                        pi += end;
-                        ti += 1;
+    while let Some(&t) = text.get(ti) {
+        let consumed = match pattern.get(pi) {
+            Some('*') => {
+                star_pi = Some(pi);
+                star_ti = ti;
+                pi = pi.saturating_add(1);
+                continue;
+            }
+            Some('?') => true,
+            Some('[') => {
+                // A malformed class (no closing `]`) yields `None` and is
+                // treated as "did not match here", which sends us to the
+                // backtrack below rather than into a literal-`[` fallback.
+                match match_char_class(pattern.get(pi..).unwrap_or_default(), t) {
+                    Some((true, end)) => {
+                        pi = pi.saturating_add(end);
+                        ti = ti.saturating_add(1);
                         continue;
                     }
-                    // Fall through to star backtrack.
-                }
-                ch => {
-                    if ch == text[ti] {
-                        pi += 1;
-                        ti += 1;
-                        continue;
-                    }
-                    // Fall through to star backtrack.
+                    _ => false,
                 }
             }
+            Some(&ch) => ch == t,
+            None => false,
+        };
+
+        if consumed {
+            pi = pi.saturating_add(1);
+            ti = ti.saturating_add(1);
+            continue;
         }
 
-        // Backtrack to last star.
-        if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ti += 1;
-            ti = star_ti;
-        } else {
+        // Backtrack to just after the last `*`, having let it swallow one more
+        // character of the text.
+        let Some(resume_at) = star_pi else {
             return false;
-        }
+        };
+        pi = resume_at.saturating_add(1);
+        star_ti = star_ti.saturating_add(1);
+        ti = star_ti;
     }
 
-    // Consume remaining stars.
-    while pi < pattern.len() && pattern[pi] == '*' {
-        pi += 1;
+    // The text is exhausted; the pattern matches only if what is left of it can
+    // match nothing at all, which means trailing stars and then the end.
+    while pattern.get(pi) == Some(&'*') {
+        pi = pi.saturating_add(1);
     }
 
     pi == pattern.len()
@@ -1089,47 +1120,46 @@ fn glob_match_chars(pattern: &[char], text: &[char]) -> bool {
 /// Match a character class like [abc] or [a-z]. Returns (matched,
 /// characters consumed).
 fn match_char_class(pattern: &[char], ch: char) -> Option<(bool, usize)> {
-    if pattern.is_empty() || pattern[0] != '[' {
+    if pattern.first() != Some(&'[') {
         return None;
     }
 
-    let mut i = 1;
-    let negate = if i < pattern.len() && pattern[i] == '!' {
-        i += 1;
-        true
-    } else {
-        false
-    };
+    let mut i = 1usize;
+    let negate = pattern.get(i) == Some(&'!');
+    if negate {
+        i = i.saturating_add(1);
+    }
 
     let mut matched = false;
-    while i < pattern.len() && pattern[i] != ']' {
-        if i + 2 < pattern.len() && pattern[i + 1] == '-' {
-            // Range.
-            let lo = pattern[i];
-            let hi = pattern[i + 2];
-            if ch >= lo && ch <= hi {
-                matched = true;
+    // Reading the separator through `get` is what makes the range arm safe:
+    // `[a-` at the end of a pattern leaves no `hi` character, and asking for
+    // one returns `None` rather than reading past the class.
+    while let Some(&lo) = pattern.get(i).filter(|&&c| c != ']') {
+        match (
+            pattern.get(i.saturating_add(1)),
+            pattern.get(i.saturating_add(2)),
+        ) {
+            (Some('-'), Some(&hi)) if hi != ']' => {
+                if (lo..=hi).contains(&ch) {
+                    matched = true;
+                }
+                i = i.saturating_add(3);
             }
-            i += 3;
-        } else {
-            if pattern[i] == ch {
-                matched = true;
+            _ => {
+                if lo == ch {
+                    matched = true;
+                }
+                i = i.saturating_add(1);
             }
-            i += 1;
         }
     }
 
-    if i < pattern.len() && pattern[i] == ']' {
-        let consumed = i + 1; // Include the ']'.
-        if negate {
-            Some((!matched, consumed))
-        } else {
-            Some((matched, consumed))
-        }
-    } else {
+    if pattern.get(i) != Some(&']') {
         // Malformed — no closing bracket.
-        None
+        return None;
     }
+    let consumed = i.saturating_add(1); // Include the ']'.
+    Some((matched != negate, consumed))
 }
 
 // ============================================================================
@@ -1146,7 +1176,7 @@ fn match_char_class(pattern: &[char], ch: char) -> Option<(bool, usize)> {
 /// was accepted. The early-out on `abs_diff` of the lengths had the same
 /// problem, rejecting candidates before the DP ever ran.
 fn levenshtein(a: &str, b: &str) -> u32 {
-    levenshtein_bounded(a, b, FUZZY_MAX_DISTANCE + 1)
+    levenshtein_bounded(a, b, FUZZY_MAX_DISTANCE.saturating_add(1))
 }
 
 fn levenshtein_bounded(a: &str, b: &str, max: u32) -> u32 {
@@ -1155,37 +1185,59 @@ fn levenshtein_bounded(a: &str, b: &str, max: u32) -> u32 {
     let m = a_chars.len();
     let n = b_chars.len();
 
+    // A distance is only ever compared against `max`, which is small, so
+    // saturating a length that genuinely exceeds `u32::MAX` cannot change an
+    // answer: such a string is further than `max` from anything.
+    let clamp = |v: usize| u32::try_from(v).unwrap_or(u32::MAX);
+
     // Quick length check.
-    let len_diff = m.abs_diff(n);
-    if len_diff as u32 > max {
+    if clamp(m.abs_diff(n)) > max {
         return max;
     }
 
     if m == 0 {
-        return n as u32;
+        return clamp(n);
     }
     if n == 0 {
-        return m as u32;
+        return clamp(m);
     }
 
     // Standard DP with single row optimization.
-    let mut prev_row: Vec<u32> = (0..=n as u32).collect();
-    let mut curr_row: Vec<u32> = vec![0; n + 1];
+    //
+    // Written over iterators with the left neighbour carried in a variable
+    // rather than as `curr_row[j - 1]`. The `- 1`s were the whole difficulty
+    // of reading this loop: four of them, on two different rows, each correct
+    // only because the ranges start at 1. Carrying the value forward removes
+    // the question instead of answering it.
+    let mut prev_row: Vec<u32> = (0..=n).map(clamp).collect();
+    let mut curr_row: Vec<u32> = vec![0; n.saturating_add(1)];
 
-    for i in 1..=m {
-        curr_row[0] = i as u32;
-        let mut row_min = curr_row[0];
+    for (i, a_ch) in a_chars.iter().enumerate() {
+        let row = clamp(i.saturating_add(1));
+        if let Some(first) = curr_row.first_mut() {
+            *first = row;
+        }
+        let mut row_min = row;
+        // `curr_row[j - 1]`: the cell to the left, which is the one this loop
+        // wrote on its previous turn.
+        let mut left = row;
 
-        for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] {
-                0
-            } else {
-                1
-            };
-            curr_row[j] = (prev_row[j] + 1)
-                .min(curr_row[j - 1] + 1)
-                .min(prev_row[j - 1] + cost);
-            row_min = row_min.min(curr_row[j]);
+        for (j, b_ch) in b_chars.iter().enumerate() {
+            let cost = u32::from(a_ch != b_ch);
+            let up = prev_row
+                .get(j.saturating_add(1))
+                .copied()
+                .unwrap_or(u32::MAX);
+            let diagonal = prev_row.get(j).copied().unwrap_or(u32::MAX);
+            let value = up
+                .saturating_add(1)
+                .min(left.saturating_add(1))
+                .min(diagonal.saturating_add(cost));
+            if let Some(slot) = curr_row.get_mut(j.saturating_add(1)) {
+                *slot = value;
+            }
+            left = value;
+            row_min = row_min.min(value);
         }
 
         if row_min > max {
@@ -1195,7 +1247,7 @@ fn levenshtein_bounded(a: &str, b: &str, max: u32) -> u32 {
         std::mem::swap(&mut prev_row, &mut curr_row);
     }
 
-    prev_row[n]
+    prev_row.get(n).copied().unwrap_or(max)
 }
 
 // ============================================================================
@@ -1287,18 +1339,18 @@ fn scan_directory(
     let read_dir = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => {
-            stats.errors += 1;
+            stats.errors = stats.errors.saturating_add(1);
             return;
         }
     };
 
-    stats.dirs_scanned += 1;
+    stats.dirs_scanned = stats.dirs_scanned.saturating_add(1);
 
     for dir_entry in read_dir {
         let dir_entry = match dir_entry {
             Ok(de) => de,
             Err(_) => {
-                stats.errors += 1;
+                stats.errors = stats.errors.saturating_add(1);
                 continue;
             }
         };
@@ -1307,7 +1359,7 @@ fn scan_directory(
         let metadata = match dir_entry.metadata() {
             Ok(m) => m,
             Err(_) => {
-                stats.errors += 1;
+                stats.errors = stats.errors.saturating_add(1);
                 continue;
             }
         };
@@ -1339,7 +1391,7 @@ fn scan_directory(
                     .iter()
                     .any(|e| e.to_ascii_lowercase() == ext_lower)
                 {
-                    stats.files_skipped += 1;
+                    stats.files_skipped = stats.files_skipped.saturating_add(1);
                     continue;
                 }
 
@@ -1347,18 +1399,18 @@ fn scan_directory(
                 if let Some(ref includes) = config.include_extensions
                     && !includes.iter().any(|e| e.to_ascii_lowercase() == ext_lower)
                 {
-                    stats.files_skipped += 1;
+                    stats.files_skipped = stats.files_skipped.saturating_add(1);
                     continue;
                 }
             } else if config.include_extensions.is_some() {
                 // No extension and include filter is set — skip.
-                stats.files_skipped += 1;
+                stats.files_skipped = stats.files_skipped.saturating_add(1);
                 continue;
             }
 
             // Check file size.
             if metadata.len() > config.max_file_size {
-                stats.files_skipped += 1;
+                stats.files_skipped = stats.files_skipped.saturating_add(1);
                 continue;
             }
         }
@@ -1377,7 +1429,7 @@ fn scan_directory(
             mtime,
             file_type,
         });
-        stats.files_found += 1;
+        stats.files_found = stats.files_found.saturating_add(1);
 
         // Recurse into subdirectories.
         if metadata.is_dir() {
@@ -1426,7 +1478,7 @@ fn scan_directory_incremental(
     let dir_meta = match fs::metadata(dir) {
         Ok(m) => m,
         Err(_) => {
-            stats.errors += 1;
+            stats.errors = stats.errors.saturating_add(1);
             return;
         }
     };
@@ -1460,7 +1512,7 @@ fn scan_directory_incremental(
 
     // Directory has changed — remove old entries under it and rescan.
     index.remove_path_prefix(dir);
-    stats.dirs_scanned += 1;
+    stats.dirs_scanned = stats.dirs_scanned.saturating_add(1);
 
     let mut new_entries = Vec::new();
     scan_directory(dir, config, &mut new_entries, stats);
@@ -1935,9 +1987,15 @@ fn cmd_config(args: &[String]) {
         return;
     }
 
-    if args.len() >= 3 && args[0] == "set" {
-        let key = &args[1];
-        let value = &args[2..].join(" ");
+    // `["set", key, value..]` as a pattern, rather than a length check plus
+    // three indexed reads: the shape of the command line and the reads it
+    // licenses are then one statement instead of four that must agree.
+    let [verb, key, value_words @ ..] = args else {
+        eprintln!("usage: indexer config set <KEY> <VALUE>");
+        process::exit(1);
+    };
+    if verb == "set" && !value_words.is_empty() {
+        let value = &value_words.join(" ");
         config.set_field(key, value);
         match config.save() {
             Ok(()) => println!("Configuration updated: {} = {}", key, value),
@@ -2035,35 +2093,39 @@ fn print_usage() {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 2 {
+    // Split rather than index-and-guard. The two are equivalent today, but
+    // `args.len() < 2` followed by `args[1]` states the bound in one place and
+    // relies on it in another, so an edit that adds a subcommand between them
+    // can leave the guard behind. Splitting hands over `rest` already narrowed,
+    // and there is no second place for the bound to drift out of.
+    let Some((_program, rest)) = args.split_first() else {
         print_usage();
         process::exit(0);
-    }
+    };
+    let Some((command, operands)) = rest.split_first() else {
+        print_usage();
+        process::exit(0);
+    };
 
     let config = Config::load();
 
-    match args[1].as_str() {
+    match command.as_str() {
         "start" => cmd_start(&config),
         "stop" => cmd_stop(),
         "status" => cmd_status(),
         "search" => {
-            if args.len() < 3 {
+            if operands.is_empty() {
                 eprintln!("usage: indexer search <QUERY>");
                 process::exit(1);
             }
-            let query = args[2..].join(" ");
+            let query = operands.join(" ");
             cmd_search(&query, &config);
         }
         "reindex" => {
-            let path = if args.len() >= 3 {
-                Some(args[2].as_str())
-            } else {
-                None
-            };
-            cmd_reindex(path, &config);
+            cmd_reindex(operands.first().map(String::as_str), &config);
         }
         "config" => {
-            cmd_config(&args[2..]);
+            cmd_config(operands);
         }
         "help" | "--help" | "-h" => {
             print_usage();
@@ -2082,6 +2144,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that unwraps a failure should fail loudly at the line that did
+    // it — that is the diagnosis. The defensive lints exist to keep panics out
+    // of code that runs on a user's data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
     use scratchdir::ScratchDir;
 
@@ -2099,7 +2172,7 @@ mod tests {
 
     #[test]
     fn test_config_parse() {
-        let content = r#"
+        let content = r"
 enabled = true
 index_paths = /home, /data
 exclude_paths = /tmp, /.git
@@ -2107,7 +2180,7 @@ max_file_size = 10485760
 scan_interval_secs = 1800
 index_contents = true
 exclude_extensions = .o, .tmp
-"#;
+";
         let cfg = Config::parse(content);
         assert!(cfg.enabled);
         assert_eq!(cfg.index_paths, vec!["/home", "/data"]);
@@ -2790,6 +2863,33 @@ exclude_extensions = .o, .tmp
     }
 
     #[test]
+    fn a_trailing_dash_in_a_class_is_a_literal_dash() {
+        // POSIX, `fnmatch(3)` and every shell agree that a `-` in the final
+        // position of a bracket expression is an ordinary character, because
+        // there is nothing after it for it to be a range to. This matcher used
+        // to disagree: the range arm was guarded by `i + 2 < pattern.len()`,
+        // which is true for the `]` of `[a-]`, so it read the `]` as the range
+        // end, consumed it, ran off the end of the class and reported the whole
+        // thing malformed -- and a malformed class never matches. `[a-]` and
+        // `[--]` therefore matched nothing at all.
+        //
+        // Checked against bash: `case - in [a-]) ;; esac` matches, as does
+        // `case a in [a-])`, and `[--]` matches `-`.
+        assert!(glob_match("[a-]", "a"));
+        assert!(glob_match("[a-]", "-"));
+        assert!(!glob_match("[a-]", "b"));
+        assert!(glob_match("[--]", "-"));
+        assert!(!glob_match("[--]", "a"));
+
+        // A real range is unaffected -- the `-` there has a character after it.
+        assert!(glob_match("[a-z]", "m"));
+        assert!(!glob_match("[a-z]", "-"));
+
+        // Still malformed, because there is no closing bracket at all.
+        assert!(!glob_match("[a-", "a"));
+    }
+
+    #[test]
     fn test_glob_complex() {
         assert!(glob_match("test_*.py", "test_main.py"));
         assert!(glob_match("**/main.*", "src/main.rs"));
@@ -3320,7 +3420,7 @@ exclude_extensions = .o, .tmp
         control.request_stop().unwrap();
         assert!(control.stop_requested());
         assert!(
-            sleep_until_scan_or_stop(&control, Duration::from_secs(3600)),
+            sleep_until_scan_or_stop(&control, Duration::from_hours(1)),
             "an hour-long sleep must return at once when a stop is pending"
         );
 

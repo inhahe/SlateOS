@@ -45551,3 +45551,195 @@ bytes.
 
 **Numbering note.** Lane C's allocated band ended at 499; this continues the
 documented overflow past it.
+
+---
+
+## 559. The file manager's picture cache is also its eviction policy: what falls out of the cache is what the display server is told to forget
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** the file manager makes small previews ("thumbnails") of the files
+in a folder and asks the display server to hold the pixels so it can draw them
+by number. The display server never throws any of them away on its own — it
+holds whatever it is given until it is explicitly told to stop — and there is a
+limit on how much one program may have it hold at once. So somebody has to
+decide *when* a preview stops being held. The decision: the answer is already
+sitting in the file manager, in the size-limited preview cache it keeps in its
+own memory, and the rule is simply "whatever falls out of that cache is what the
+display server is told to forget."
+
+**What was actually at stake.** Walk a photograph library — a hundred folders,
+tens of thousands of files — and without an eviction rule the file manager
+accumulates every preview it has ever produced on the display server's side.
+Eventually the per-connection image budget (`MAX_IMAGE_BYTES_PER_LINK`, 256 MiB,
+`gui/compositor/src/wire.rs:726`) refuses an upload. A refusal is
+`?`-propagated by `apply_images` (`gui/window/src/app.rs:490`), which ends the
+event loop — so the failure mode is not "previews stop appearing", it is "the
+file manager quits". This had to be solved before the window could ship, not
+after.
+
+**The decision.** `ThumbnailCache` — the bounded LRU already in `thumbs.rs`,
+already the thing the renderer reads to decide what to draw — grew a
+`evicted: Vec<u64>` field. Every route out of the map records the image id that
+left with it: LRU fall-off on insert, `invalidate` (a file changed on disk),
+and `clear`. `take_evicted_image_ids()` drains that list, and `take_images()`
+turns each into an `ImageChange::Drop`.
+
+*Alternative considered — a separate residency tracker beside the cache,* with
+its own size limit and its own policy (say, "hold the current folder plus the
+last one"). *Against:* two bounded structures over the same set of files, which
+must agree about what is held or else the renderer draws an id the server has
+forgotten (which renders nothing, silently, by design). The cache is already
+bounded, already ordered by use, and is already the authority on what can be
+drawn; a second structure adds a way for those two answers to differ and no new
+capability. *For:* it could hold more on the server than in local memory, which
+would let the cache be small (memory) while the residency set is large (drawing
+without re-decoding). That is a real property, and it is the reason this is a
+tradeoff rather than an obvious call — but the two limits would then need
+tuning against each other, and the win only shows up in a directory larger than
+the local cache and smaller than the budget.
+
+**The consequence, stated plainly.** The size of `ThumbnailCache` is now also
+the size of the file manager's footprint inside the display server. Changing one
+changes the other. That is written at `take_evicted_image_ids`.
+
+**Two details that are easy to get wrong.**
+
+- **Only actual removals are recorded.** `invalidate` takes a path and is called
+  routinely for files that were never cached. Recording a drop for an id the
+  server never held is not harmless: ids are derived from the file, so that same
+  id may have been *re-uploaded* by a later insert of the same file, and the
+  stale drop would forget the fresh pixels. `note_removed` records only when
+  `map.remove` returned `Some`.
+- **Drops go out before uploads, in one ordered list.** The budget arithmetic is
+  `after = held - freed + incoming`, so a batch that uploads first is charged
+  for both sets at once. Same reason as the wallpaper's slideshow (§557).
+
+**Where it lives.** `apps/explorer/src/thumbs.rs` (`ThumbnailCache::evicted`,
+`note_removed`, `clear`, `take_evicted_image_ids`, and the four tests under
+"What leaves the cache must leave the compositor"),
+`apps/explorer/src/main.rs` (`take_images`).
+
+---
+
+## 560. A preview's number is keyed on the same three facts as the cache entry it belongs to
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** each preview picture is given a number, and the display server
+stores the pixels under it. That number used to be computed from the file's path
+and its last-modified time. But the file manager's own cache files previews
+under path, modified-time **and length**. Those two disagree for a file that is
+written twice within the same second — the clock does not move, the length does
+— which produced two different cache entries claiming the same number. The
+second upload silently overwrites the first, and one of the two entries then
+draws the other's picture. The fix is to key the number on all three.
+
+**Why a second's resolution is not a corner case.** `mtime_secs` truncates to
+whole seconds because that is what the filesystem records. Any program that
+writes a file, then rewrites it — a download that resumes, an editor that saves
+twice, a build that regenerates an image — does this routinely. The old code was
+not wrong about a rare race; it was wrong about a common one that happened to be
+invisible because nothing had ever uploaded the pixels.
+
+**The decision.** `thumbnail_image_id(&Thumbnail)` is deleted and replaced by
+`pub fn image_id(path: &Path, mtime: u64, size: u64) -> u64`, which mixes the
+length's eight bytes into the existing `simple_hash` with an FNV round.
+`CacheKey::image_id()` calls it with the key's own three fields, so the id and
+the key cannot drift apart by construction.
+
+*Alternative considered — a counter,* handing out a fresh number per upload and
+storing it in the cache entry. *For:* collisions become impossible rather than
+improbable; it is what the wallpaper does (`alloc_image_id`). *Against:* the id
+would then be state that must be carried through every path that produces a
+`Thumbnail`, and a cache miss followed by a re-generation of the *same* file
+would get a new number and a new upload where the derived id gets a free
+replacement of the existing one. The wallpaper holds one picture and can afford
+a counter; the file manager holds hundreds.
+
+**A deliberate non-change.** `simple_hash(path, mtime)` is left exactly as it
+was, because it also names the on-disk thumbnail cache *files*. Changing it
+would invalidate every user's saved thumbnails for no benefit — a disk cache
+keyed on two facts is merely conservative (it re-generates when it need not),
+whereas an *id* keyed on two facts is incorrect (it conflates).
+
+**The signature change this forced.** `render_thumbnail` now takes the id as a
+parameter rather than deriving it, because a `Thumbnail` knows its pixels and
+its dimensions and knows nothing about the path, time or length it came from.
+Deriving an id inside it would have meant either passing those three in anyway
+or storing them on every thumbnail.
+
+**Where it lives.** `apps/explorer/src/thumbs.rs` (`image_id`,
+`CacheKey::image_id`, `render_thumbnail`), `apps/explorer/src/main.rs`
+(`pump_thumbnails`, `drawable_thumb`). The test is
+`two_versions_of_a_file_written_in_the_same_second_get_different_ids`.
+
+---
+
+## 561. "ARGB" names two opposite byte orders, so the conversion is named after the wire format and lives in exactly one place
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** a colour is four bytes — red, green, blue, and transparency — and
+there are two ways round to store them. This tree uses both, and calls both of
+them "ARGB". The drawing surface stores transparency first; the display server's
+wire format expects it last. Passing one where the other is wanted compiles
+cleanly, never crashes, and produces a picture with red and blue exchanged and
+transparency read out of the blue channel. The file manager's first draft did
+exactly that. The decision is about how to make that mistake hard, given both
+orders must continue to exist.
+
+**The two orders, and why neither can go.**
+
+| | Bytes, low to high | Who requires it |
+|---|---|---|
+| `Canvas::from_argb`/`to_argb` | `A, R, G, B` | the file manager's on-disk thumbnail cache, whose saved files are in this order already |
+| `BufferFormat::Argb8888` (`gui/remote/src/control.rs:186`) | `B, G, R, A` | every buffer handed to the display server; it is a little-endian `u32` of `0xAARRGGBB`, which is what the rasteriser's `blend_pixel` reads |
+
+The wire order is fixed by the format's own definition and by the hardware
+convention it follows. The other is fixed by files already written to users'
+disks. Neither is free to change.
+
+**The decision.** `Canvas` gained a second pair, `from_argb8888`/`to_argb8888`,
+and `Thumbnail::to_wire_bytes` routes through it — decode with one order, encode
+with the other. Three things about that:
+
+1. **Named after the wire enum, not after its byte order.** `to_bgra` would have
+   been more descriptive of the bytes and *worse*, because the two names would
+   then be `to_argb` and `to_bgra` and a caller would pick between them by
+   guessing which one the compositor wants. `to_argb8888` matches
+   `BufferFormat::Argb8888` character for character at the call site, so the
+   match is checkable by eye.
+2. **In `Canvas`, not hand-rolled at the call site.** The obvious
+   implementation is `chunks_exact_mut(4)` + `reverse()` in the thumbnailer. It
+   would work. It would also be a *third* statement of the byte order, free to
+   drift from the two definitions it sits between, and it would silently accept
+   a buffer with a trailing partial pixel where `Canvas::from_argb` returns
+   `None`. Routing through `Canvas` gets the length check for free.
+3. **Asserted, not just documented.** `the_compositors_argb_is_the_byte_reverse_of_the_other_argb`
+   states the relationship as an executable fact: `Color::rgba(1,2,3,4)` is
+   `[3,2,1,4]` in wire order, that is `to_argb()` reversed, and reading it as a
+   little-endian `u32` gives `0x0401_0203`. A change to either definition breaks
+   it loudly.
+
+*Alternative considered — one order everywhere, converting the disk cache on
+read.* *For:* one order is unambiguously simpler than two. *Against:* the
+conversion does not go away, it moves — and it moves to a path that runs on
+every cache hit rather than only on upload, which is the opposite of where you
+want it. It also does not remove the wire format's constraint, only hides it.
+
+**What this does *not* fix, and is logged as debt.** Both orders are still
+`Vec<u8>` with identical signatures, so nothing *prevents* the wrong one being
+passed — only the naming, the docs and the test discourage it. The real fix is a
+newtype the upload path requires and only `to_argb8888` can produce; it touches
+every upload site in `gui/**` and `apps/**` at once, which is why it is not in
+this change. See `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB`.
+
+**Where it lives.** `gui/toolkit/src/canvas.rs` (`from_argb8888`, `to_argb8888`,
+the cross-references on `from_argb`/`to_argb`, the module-doc warning, and two
+tests), `apps/explorer/src/thumbs.rs` (`Thumbnail::to_wire_bytes`),
+`apps/explorer/src/main.rs` (`take_images`, and
+`an_upload_carries_wire_order_bytes_and_not_the_stored_ones`).

@@ -82279,16 +82279,18 @@ needs a third-party oracle: had the two been compared only to each other, all
 
 ---
 
-## `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING` (lane C, 2026-08-26) — **mostly fixed 2026-08-26: the decoder exists and the wallpaper and the image viewer use it; explorer thumbnails do not yet**
+## `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING` (lane C, 2026-08-26) — **mostly fixed 2026-08-26: the decoder exists and the wallpaper, the image viewer and the file manager use it; the viewer's own filmstrip does not yet**
 
 **In short (update):** there is a PNG decoder now — `gui/imagecodec`, a
 dependency-free `no_std` crate that turns a `.png` on disk into the exact
 `0xAARRGGBB` pixels the compositor stores. The missing link in the table below
-is therefore no longer missing. Two of the callers are wired to it: a wallpaper
-the user picks appears, and the image viewer shows the photograph you opened
-instead of a grey checkerboard. What remains is `apps/explorer`'s thumbnails,
-and the image viewer's own filmstrip, both of which need a bounded scheduler for
-decoding many files at once. The entry stays open until they are.
+is therefore no longer missing. Three of the callers are wired to it: a
+wallpaper the user picks appears, the image viewer shows the photograph you
+opened instead of a grey checkerboard, and the file manager's icon view shows
+the picture in each file instead of a flat green rectangle. What remains is the
+image viewer's own filmstrip, which can now reuse the file manager's generator
+and eviction rule rather than inventing a second one. The entry stays open until
+it does.
 
 **What was built.**
 
@@ -82317,8 +82319,8 @@ agreed with ours exactly. The suite also truncates every real file at every
 length and flips a bit in every byte of every one, asserting only that nothing
 unwinds.
 
-**What is left.** Wire the remaining caller below to it — `apps/explorer`'s
-thumbnails, and the image viewer's filmstrip, which are the same problem.
+**What is left.** Wire the remaining caller below to it — the image viewer's
+filmstrip.
 
 **Wired so far — the wallpaper (2026-08-26).**
 `ShellSession::refresh_wallpaper_image` (`gui/desktop/src/session.rs`) runs at
@@ -82399,16 +82401,50 @@ application, so this half of the fix is reusable by all ~140 of them:
 (`render_thumbnail_strip`, ~line 1631) still draws a grey `FillRect` per entry
 under a comment reading "would use actual thumbnails". Decoding every file in a
 directory to fill it needs a bounded, off-the-draw-path scheduler and a
-per-thumbnail image id with an eviction rule — the same problem
-`apps/explorer` has, and it should be solved once for both rather than twice.
+per-thumbnail image id with an eviction rule — **all three of which now exist**,
+in `apps/explorer/src/thumbs.rs` (`ThumbnailGenerator`, `ThumbnailCache`,
+`take_evicted_image_ids`). The filmstrip should be wired by lifting that module
+somewhere both apps can depend on it, not by writing a second one; two
+thumbnailers is the glob-matcher mistake (design-decisions.md → 555) again.
 The **video** path in `apps/imageviewer/src/video.rs` is also still frameless:
 `imagecodec` decodes stills only, and no MP4/Matroska video decoder exists.
 
-**Still unwired.** `apps/explorer` (thumbnails). It does not depend on
-`oswindow` yet, which is what carries an upload to the compositor, so it needs
-that dependency before it can upload anything it decodes; `thumbs.rs` ~1313 says
-outright that "the caller is responsible for registering the pixel data with the
-compositor under this ID" and no caller does.
+**Wired so far — the file manager (2026-08-26).** `apps/explorer` decodes a
+`.png` into its thumbnail (`try_decoded_thumbnail`) *and* now has somewhere to
+put the result: the crate gained an `oswindow` dependency and an `App`
+implementation, so it is a real window rather than a print-only demo. The three
+pieces that had to exist:
+
+- **An eviction rule, which nothing else in the tree had needed.** The
+  compositor never evicts — it holds what a client gives it until the client
+  drops it — so a file manager walking a photograph library would accumulate
+  every preview it had ever made and eventually be refused by the per-link image
+  budget. `ThumbnailCache` now records the image id of every entry that leaves
+  it, by any route (LRU fall-off, `invalidate`, `clear`), and
+  `take_evicted_image_ids()` drains that list into `Drop` messages. The bounded
+  LRU cache the renderer already reads *is* the policy; a second policy beside it
+  would be a second thing to keep in agreement. See design-decisions.md §559.
+- **An image id keyed on the same three facts as the cache.** It was hashed from
+  (path, mtime) while the cache is keyed on (path, mtime, length), so a file
+  rewritten twice inside one second produced two cache entries sharing one id —
+  the second upload would silently replace the first and one of the two entries
+  would draw the other's picture. `thumbs::image_id(path, mtime, size)` now takes
+  all three. See design-decisions.md §560.
+- **A byte-order conversion, because "ARGB" names two opposite layouts here.**
+  The stored thumbnail is `A, R, G, B` low-to-high; the compositor's
+  `BufferFormat::Argb8888` is `B, G, R, A`. `Canvas` gained
+  `from_argb8888`/`to_argb8888` named after the *wire enum*, and
+  `Thumbnail::to_wire_bytes` routes through it. See
+  `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` below and design-decisions.md
+  §561.
+
+Drops are emitted before uploads in the same `take_images()` list, for the same
+budget reason the wallpaper has. `+19` tests, including one that decodes an
+upload's bytes back through `Canvas::from_argb8888` and asserts they are *not*
+the stored bytes — a test that passes trivially if you forget the conversion is
+a test that does nothing.
+
+**Still unwired.** Nothing outside the viewer's filmstrip.
 `gui/toolkit/src/grid.rs` takes the caller's id and is correct as it stands.
 
 **Original entry follows.**
@@ -82553,3 +82589,119 @@ into an unknown number.
 directory made the file manager read the wrong bytes. As a developer, every
 `cargo clippy -p explorer` prints 33 warnings, which is enough noise to hide the
 34th when someone adds it.
+
+---
+
+## `TD-C-EXPLORER-HAS-NO-EDITING-KEYS` (lane C, 2026-08-26)
+
+**In short:** the file manager is now a real window you can click and type in,
+but only the keys that *look* at files work — arrows, Home/End, Enter,
+Backspace, Ctrl+A, F5. The keys everyone expects to *change* a file do nothing
+at all: Delete does not delete, F2 does not rename, Ctrl+C/Ctrl+V do not copy or
+paste. Pressing them is silent — no beep, no message, no greyed-out menu item —
+so the window looks broken rather than incomplete.
+
+**Where it lives.** `apps/explorer/src/main.rs` → `handle_key`, the `match` on
+`Key`. Everything the file manager needs underneath already exists and is
+tested: `fileops.rs` has copy, move, rename and recycle, and `ExplorerState`
+already tracks a selection.
+
+**Why it was left out rather than added.** The three editing keys each need a
+piece of *window* that does not exist yet, and wiring the key without the piece
+is worse than leaving the key dead:
+
+| Key | What is missing |
+|---|---|
+| `Delete` | A confirmation, and a visible undo. A Delete key that recycled the selection with no prompt and no way back is a key that destroys a user's files on a mis-keypress. |
+| `F2` | An in-place rename field. `fileops::rename` is ready; there is no text entry in the listing to drive it. |
+| `Ctrl+C` / `Ctrl+V` | A clipboard the file manager can put a *file reference* on, and a paste target. `gui/toolkit` has a clipboard for text. |
+
+**What the proper fix is.** Build the three missing widgets, then wire the keys
+to them — not the reverse. A modal confirmation and an inline edit field are
+both generally useful in `gui/toolkit`, so neither belongs in this app.
+Meanwhile, add a *visible* refusal: a status-line message on a dead editing key
+beats silence, because silence is indistinguishable from a bug.
+
+**How you would notice.** Select a file, press Delete. Nothing happens, and
+nothing says why.
+
+---
+
+## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26)
+
+**In short:** the file manager draws as many entries as fit in the window and
+then stops. There is no scrollbar, no mouse wheel, no Page Up/Page Down — so in
+a directory with more files than fit on screen, the ones past the bottom edge
+**cannot be reached at all**. The arrow keys will move the selection onto them
+(the selection is an index into the full listing, not into the visible part), at
+which point the highlighted row is off-screen and the window appears to have
+lost the selection.
+
+**Where it lives.** `apps/explorer/src/main.rs` — the renderer walks
+`self.entries` and emits rows until it runs out of vertical space; nothing holds
+a scroll offset. `dropzone.rs` registers hit rectangles only for the rows that
+were actually drawn, which is correct and means clicking is consistent with what
+is visible — the gap is purely that nothing changes *which* rows those are.
+
+**Why it is separate from the input work.** Scrolling is a viewport, not a key
+binding: it needs a first-visible-row offset threaded through layout, a
+scroll-into-view rule so keyboard movement drags the viewport with it, wheel
+handling in `handle_mouse` (`MouseEventKind::Scroll` is already delivered and
+currently ignored), and a scrollbar widget. That is a layout change, and folding
+it into the commit that made the window clickable would have made both harder to
+review.
+
+**What the proper fix is.** A `scroll_top: usize` on `ExplorerState`, clamped to
+`entries.len().saturating_sub(visible_rows)`; every layout path offsets by it;
+`move_selection` calls a `scroll_into_view` after it moves; `Scroll { dy }`
+adjusts it; Page Up/Page Down move by `visible_rows`. The icon and column views
+need the same offset expressed in their own units. A scrollbar in `gui/toolkit`
+would serve every other app that will hit this too.
+
+**How you would notice.** Open a directory with a hundred files. You can see
+about twenty. Press Down thirty times: the selection highlight vanishes off the
+bottom and the listing never moves.
+
+---
+
+## `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` (lane C, 2026-08-26)
+
+**In short:** "ARGB" names two *opposite* arrangements of the same four bytes in
+this tree, and both are spelled the same way in code. `Canvas::to_argb` writes
+alpha first (`A, R, G, B`); the compositor's wire format
+`BufferFormat::Argb8888` expects alpha last (`B, G, R, A`). Handing one to
+something expecting the other is not a compile error and does not panic — the
+picture simply appears with red and blue swapped and its transparency read out
+of the blue channel. The file manager was written with exactly that bug and it
+was caught by reading the two definitions side by side, not by any test.
+
+**Where it lives.** `gui/toolkit/src/canvas.rs` (`from_argb`/`to_argb` versus
+`from_argb8888`/`to_argb8888`) and `gui/remote/src/control.rs:186` (the wire
+enum's definition). Every caller that hands pixels to the compositor —
+`Thumbnail::to_wire_bytes`, the wallpaper upload, the image viewer — must use
+the `8888` pair; every caller reading or writing explorer's on-disk thumbnail
+cache must use the other.
+
+**What has been done about it.** The `8888` pair is named after the *wire enum*
+rather than after its byte order, so the two cannot be chosen between by reading
+the name and guessing; each of the four functions carries a table saying which
+is which and cross-references the other; the module doc opens with a "beware"
+paragraph; and a test (`the_compositors_argb_is_the_byte_reverse_of_the_other_argb`)
+asserts the reversal explicitly, so a change to either definition breaks loudly.
+See design-decisions.md §561.
+
+**Why that is not enough.** It is still two `Vec<u8>` types with identical
+signatures. Nothing stops a future caller from writing
+`canvas.to_argb()` into an `ImageChange::Upload`, which is precisely the mistake
+that was made once already.
+
+**What the proper fix is.** Make the byte order part of the *type*, not the
+function name: a `WireBytes(Vec<u8>)` newtype that only `to_argb8888` can
+produce and that `ImageChange::Upload`/`upload_image` require, so the wrong
+buffer cannot be passed at all. The same treatment would suit the disk-cache
+order. Cheap to do; it was not done in the same change because it touches every
+upload site in `gui/**` and `apps/**` at once.
+
+**How you would notice.** A thumbnail, wallpaper or photograph draws with red
+and blue exchanged — a blue sky above orange grass — and semi-transparent
+pixels come out wrong. Nothing reports an error.

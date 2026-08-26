@@ -88069,3 +88069,162 @@ fail independently and are tested completely differently — one against rendere
 geometry, the other against archive bytes. This mirrors what was done for
 `apps/diskcleanup`, which was wired first and given a real back end in the
 following commit.
+
+## C-NETMANAGER-CLICKED-ROWS-THAT-WERE-NOT-ON-SCREEN (lane C, 2026-08-26) — FIXED 2026-08-26
+
+**In short:** in the Network Connections window, clicking the status bar along
+the bottom could select a network profile that was scrolled off the bottom of
+the list and not visible anywhere on screen. The profile list drew as many rows
+as there were profiles and let the window's clipping hide the overflow — which
+worked for what you *saw*, but not for what you could *click*. With 24 profiles
+in a small window, twenty rows were clickable below the bottom edge of the
+window entirely, and one straddled the status bar.
+
+**Where it lived:** `apps/netmanager/src/main.rs`. The app had its own private
+`Frame` type — the thing that records where each control was drawn so a click
+can be matched back to it — and that copy did not track the clip stack.
+`render_tab_profiles` has no visible-row limit; it loops over every profile and
+relies on the enclosing `PushClip` to stop the overflow. The compositor honours
+that clip for drawing. The hit-test did not honour it at all, because the copy
+of `Frame` in this app had never been taught about clips.
+
+**Why it existed:** the same `Frame` was written twice, once in
+`apps/archivemanager` and once here. The archivemanager copy grew clip tracking
+when a scrolling file list needed it. The netmanager copy did not, because
+nothing there looked like it needed it — and the one place that did, an
+unbounded profile list, was not the place anyone was looking. Two copies of an
+invariant, and the bug is in whichever one you are not currently reading.
+
+**The fix:** `gui/toolkit/src/frame.rs` now holds a single generic
+`Frame<T>` and `Rect`, and both apps use it. It intersects every recorded rect
+with the clip in force and drops it entirely if nothing is visible. It also
+tracks `PushTranslate`/`PopTranslate`, which *neither* private copy did: a
+scrolling pane that draws its rows inside a translation is painted somewhere
+else entirely, so a rect recorded verbatim would be clickable at coordinates
+nothing was drawn at. Both stacks mirror the compositor's own semantics
+(`ClipStack`/`TranslateStack` in `gui/compositor/src/lib.rs`) so the ink and the
+click target cannot end up in different places.
+
+**Regression tests** (both confirmed to fail when the clip trimming is mutated
+out of the toolkit):
+
+| Test | Catches |
+|---|---|
+| `a_list_row_past_the_bottom_of_its_panel_is_not_clickable` | any `Profile` rect reaching past the panel, and all rows being reachable when only some are drawn |
+| `clicking_the_status_bar_does_not_select_an_off_screen_profile` | the user-visible symptom, clicking 2px inside the status bar |
+
+Plus 19 unit tests and a doctest on `guitk::frame` itself.
+
+**What this means for the other 123 unwired programs:** each one needs the same
+"record what you draw, hit-test by reading it back" machinery, and each would
+have been a fresh transcription of it. They now get a reviewed one with an
+import. Net effect on the two apps that had copies: 107 lines deleted.
+
+## C-VPNMANAGER-SORTING-MOVED-THE-SELECTION-TO-A-DIFFERENT-PROFILE (lane C, 2026-08-26) — FIXED 2026-08-26
+
+**In short:** in the VPN Manager window, changing the sort order silently moved
+the highlight onto a *different* VPN profile than the one the user had picked —
+whichever profile happened to land on the row number the old one had been on.
+Everything the window then did (Connect, Disconnect, Remove, and every on/off
+switch on the detail panel) acted on that other profile. Removing the wrong VPN
+profile is not a cosmetic bug.
+
+**Where it lived:** `apps/vpnmanager/src/main.rs`, `VpnManager::sort_profiles`.
+`selected_profile` is an `Option<usize>` — an *index* into `self.profiles` — and
+`sort_profiles` reorders that vector in place. Nothing re-pointed the index
+afterwards.
+
+**Why it went unnoticed:** the sort order could not be changed. The toolbar drew
+`Sort: Name` as a label and nothing clicked it, so `set_sort_order` had no
+caller outside the tests, and the tests all asserted on `profiles` rather than
+on `selected_profile`. The bug existed for as long as the control that triggers
+it was a picture.
+
+**The fix:** `sort_profiles` now records the selected profile's **id** before
+sorting and looks the index back up afterwards. The list is small and the sort
+is not on any hot path, so a linear search costs nothing worth measuring.
+
+**Regression test:** `sorting_keeps_the_selection_on_the_profile_the_user_chose`
+— it clicks a row, clicks the Sort control twice, and asserts both that the
+row number *did* change (or the test proves nothing) and that the selected id
+did not. Confirmed to fail when the id re-lookup is mutated out.
+
+**The general shape, for the other 122 unwired programs:** a selection stored as
+an index into a list the program itself re-orders is a bug waiting for the
+control that re-orders it to be wired up. Store the id.
+
+## C-VPNMANAGER-A-REJECTED-SAVE-THREW-AWAY-THE-WHOLE-FORM (lane C, 2026-08-26) — FIXED 2026-08-26
+
+**In short:** in the VPN Manager's Add/Edit Profile dialog, pressing Save with
+one field left blank closed the dialog and discarded *everything else* that had
+been typed into it — and the explanation of what was wrong was returned to a
+dialog that no longer existed, so it was never shown. The user's only clue was
+that nothing happened.
+
+**Where it lived:** `apps/vpnmanager/src/main.rs`, `VpnManager::confirm_edit`.
+It did `self.editing_profile.take()` and set `show_add_dialog = false` *before*
+calling `validate`, then returned the `Err(String)` to a caller that had no
+surface left to display it on.
+
+**Two separate faults, both fixed:**
+
+1. `confirm_edit` now clones the profile, tries the add-or-update, and only
+   clears `editing_profile`/`show_add_dialog` **if it succeeded**. A refused
+   Save leaves the dialog exactly as the user left it.
+2. There was nowhere readable to *put* the complaint. The status bar is behind
+   the dialog's scrim (63% black over the whole window), so writing it there is
+   a Save button that appears to do nothing. `VpnManager` gained a
+   `dialog_error` field, rendered in red inside the dialog under the fields it
+   is about, and cleared as soon as the user edits any dialog field — so the
+   complaint does not sit under the corrected value still claiming the field is
+   blank.
+
+**Why it went unnoticed:** same reason as the entry above — nothing clicked the
+Save button. `test_confirm_edit_add` called `confirm_edit` only on a *valid*
+profile.
+
+**Regression test:**
+`a_rejected_save_keeps_the_dialog_up_with_everything_typed_into_it` — types a
+name, saves without a server, and asserts the dialog is still up, the name is
+still in it, no profile was added, and the string
+`"Server address is required"` is among the `RenderCommand::Text` the frame
+actually draws. Confirmed to fail when the early-close is mutated back in.
+
+## C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER (lane C, 2026-08-26)
+
+**In short:** the VPN Manager's Import and Export buttons work, but they always
+read and write **one fixed file** — `$HOME/.config/slateos/vpn/profiles.txt` —
+rather than letting the user choose where. Export names that path in the status
+bar afterwards, so nothing is hidden; but there is no way to export two
+different sets of profiles to two different files, or to import one a colleague
+sent you without first moving it to that exact path.
+
+**Where it lives:** `apps/vpnmanager/src/main.rs` — `PROFILE_FILE`,
+`profile_file()`, `VpnManager::export_to_file`, `VpnManager::import_from_file`.
+
+**Why it is a fixed path rather than a chooser.** `guitk::dialog::FileDialog`
+exists but cannot serve as one here, for three separate reasons:
+
+| What a picker needs | What `FileDialog` does |
+|---|---|
+| respond to clicks | keyboard-only; it records no hit targets, so nothing in it can be clicked |
+| know what is in the directory | does not read the filesystem — the caller must hand it a listing |
+| be one widget | is a second full application's worth of state to drive from inside this one |
+
+So wiring it in would not be a button; it would be a second program. A fixed,
+*named* path is honest and usable today. The alternative that was rejected is
+`apps/archivemanager`'s current precedent of writing "not yet implemented" into
+the status bar, which is strictly worse: it gives the user nothing.
+
+**The proper fix:** `guitk::dialog::FileDialog` needs (a) hit-target recording
+via `guitk::frame`, and (b) a directory-listing source. That is toolkit work
+that every app with an Open/Save button will need — the file manager, the text
+editor, the image viewer and the archive manager all want the same widget — so
+it should be done once in `gui/toolkit`, not once per app. Tracked separately
+alongside
+`TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`,
+which the same rework has to fix; this entry is the caller waiting on both.
+
+**Until then:** Export says where it wrote, Import says how many profiles it
+read and names the first failure if a block was malformed, and both refuse
+clearly (`"Cannot export: $HOME is not set"`) rather than failing silently.

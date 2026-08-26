@@ -340,11 +340,23 @@ pub fn self_test() {
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
-    // Leave NO residue: a diagnostic self-test must not populate the live
-    // /proc/futexstat table with its fixtures.  Reset to the uninitialised
-    // state so production reads report an empty table until the futex syscall
-    // path wires real accounting.
-    *STATE.lock() = None;
+    // Leave NO residue: a diagnostic self-test must not leave its fixtures in
+    // the live /proc/futexstat table.  Clear it -- and then *re-initialise*, so
+    // what is left behind is an empty table rather than a dead one.
+    //
+    // The distinction did not matter while nothing fed this module, which is
+    // why the original teardown stopped at the reset.  It matters now:
+    // `init_defaults` runs once at boot and nothing calls it again, so leaving
+    // `STATE` as `None` makes every subsequent `record_*` return `NotSupported`
+    // and be discarded by `ipc::futex`'s deliberately result-dropping
+    // accounting helpers.  A single `futexstat test` from the shell would
+    // therefore switch futex accounting off for the rest of the boot, and the
+    // only symptom would be /proc reporting the zeros it used to report anyway.
+    {
+        let mut guard = STATE.lock();
+        *guard = None;
+    }
+    init_defaults();
 
     crate::serial_println!("futexstat::self_test() — all 8 tests passed");
 }

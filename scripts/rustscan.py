@@ -119,7 +119,7 @@ def is_char_literal(text: str, i: int) -> bool:
     return text[i + 2 : i + 3] == "'"
 
 
-def strip_comments(text: str) -> str:
+def strip_comments(text: str, keep_literals: bool = False) -> str:
     """Blank `//`-to-newline and `/* */` comments, and string/char literals.
 
     A doc comment that *talks about* the construct a gate searches for --
@@ -131,6 +131,18 @@ def strip_comments(text: str) -> str:
     in a string. They go because [`strip_cfg_test`] matches braces, and a
     `'{'` or a `"unclosed {"` in the source would otherwise throw the match
     off and swallow the rest of the file.
+
+    `keep_literals=True` blanks the comments and leaves the literals standing.
+    A gate whose *subject* is a literal needs that:
+    `check-diskcleanup-test-roots.py` looks for the path `"/"` being handed to
+    something that deletes, and the default would blank away the only evidence
+    there is. Literals are still fully *parsed* in that mode rather than
+    skipped over -- a `"http://x"` read as ordinary text would open a comment,
+    and a `'"'` would open a string that ran to the end of the file.
+
+    Callers that match braces must keep the default. A `"{"` left standing is
+    exactly the trap the blanking was written to close, and this argument does
+    not make it safe -- it makes it the caller's problem.
     """
     out = list(text)
     i = 0
@@ -140,6 +152,10 @@ def strip_comments(text: str) -> str:
         for k in range(a, min(b, n)):
             if out[k] != "\n":
                 out[k] = " "
+
+    def wipe_literal(a: int, b: int) -> None:
+        if not keep_literals:
+            wipe(a, b)
 
     while i < n:
         two = text[i : i + 2]
@@ -170,7 +186,7 @@ def strip_comments(text: str) -> str:
             hashes = m.group("hashes")
             close = text.find('"' + hashes, m.end())
             j = n if close < 0 else close + 1 + len(hashes)
-            wipe(i, j)
+            wipe_literal(i, j)
             i = j
         elif text[i] == '"':
             j = i + 1
@@ -182,7 +198,7 @@ def strip_comments(text: str) -> str:
                     break
                 else:
                     j += 1
-            wipe(i, j)
+            wipe_literal(i, j)
             i = j
         elif text[i] == "'" and is_char_literal(text, i):
             j = i + 1
@@ -194,7 +210,7 @@ def strip_comments(text: str) -> str:
                     break
                 else:
                     j += 1
-            wipe(i, j)
+            wipe_literal(i, j)
             i = j
         else:
             i += 1

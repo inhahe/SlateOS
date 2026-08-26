@@ -48,8 +48,10 @@ use guitk::text;
 use oswindow::app::Response;
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -182,7 +184,14 @@ pub struct CleanupItem {
     /// Glob pattern that matched this item (e.g. `/tmp/*`).
     pub path_pattern: String,
     /// Actual resolved path on disk.
-    pub path: String,
+    ///
+    /// A [`PathBuf`], not a `String`, and that is not a stylistic preference:
+    /// this program *deletes* what this field names. A path that had to survive
+    /// a round trip through UTF-8 would, for any filename the filesystem allows
+    /// but Unicode does not, come back either unopenable or — worse — naming a
+    /// different file, and the operation on the other end is `remove_dir_all`.
+    /// Paths stay bytes until the moment they are drawn.
+    pub path: PathBuf,
     /// Which category this item belongs to.
     pub category: CleanupCategory,
     /// Human-readable note about the item.
@@ -197,10 +206,10 @@ pub struct CleanupItem {
 
 impl CleanupItem {
     /// Builder-style constructor.
-    pub fn new(path: &str, category: CleanupCategory) -> Self {
+    pub fn new<P: AsRef<Path>>(path: P, category: CleanupCategory) -> Self {
         Self {
             path_pattern: category.default_pattern().to_string(),
-            path: path.to_string(),
+            path: path.as_ref().to_path_buf(),
             category,
             description: category.description().to_string(),
             estimated_size_bytes: 0,
@@ -241,17 +250,166 @@ impl CleanupItem {
 }
 
 // ============================================================================
+// Walking the filesystem
+// ============================================================================
+
+/// How deep [`measure_recursive`] descends before it stops adding.
+const MAX_MEASURE_DEPTH: u32 = 16;
+
+/// How many entries [`measure_recursive`] stats before it stops adding.
+const MAX_MEASURE_ENTRIES: u32 = 50_000;
+
+/// Seconds in a day, for turning a file's age into the number the UI shows.
+const SECS_PER_DAY: u64 = 86_400;
+
+/// Total size of `path` in bytes, following no symlinks, bounded in depth and
+/// in the number of entries examined.
+///
+/// **Bounded, because the size walk is the part of a cleaner that a directory
+/// gets to make run forever.** `/tmp` is world-writable by definition, so its
+/// shape is not something this program may assume anything about — a million
+/// files, or sixty levels of nesting, are both things a user's machine can
+/// contain by accident. When a bound is hit the walk stops and the answer comes
+/// back *short*. That is the safe direction: the program under-promises how
+/// much it will free and then frees at least that much, whereas over-promising
+/// is the lie this whole area of the code exists to avoid.
+///
+/// **Symlinks are never followed.** `symlink_metadata` rather than `metadata`
+/// is the difference between measuring a link (a few bytes) and measuring
+/// whatever it points at; a link in `/tmp` pointing at `/` would otherwise make
+/// this walk the entire disk. The deletion path makes the same distinction, for
+/// a much worse reason — see [`CleanupExecutor::remove`].
+fn measure_recursive(path: &Path) -> u64 {
+    let mut budget = MAX_MEASURE_ENTRIES;
+    measure_inner(path, 0, &mut budget)
+}
+
+fn measure_inner(path: &Path, depth: u32, budget: &mut u32) -> u64 {
+    if depth > MAX_MEASURE_DEPTH || *budget == 0 {
+        return 0;
+    }
+    *budget = budget.saturating_sub(1);
+
+    // A path the filesystem will not describe contributes nothing. It is also a
+    // path the executor will fail to delete, and it will say so then; guessing a
+    // size for it here would only put a number on the results screen that no
+    // deletion ever backs up.
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return 0;
+    };
+    let file_type = meta.file_type();
+    if file_type.is_symlink() || !file_type.is_dir() {
+        return meta.len();
+    }
+
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total: u64 = 0;
+    for entry in entries {
+        // Same reasoning as above, one level down: an entry the directory
+        // refuses to name is one nothing downstream can act on either.
+        let Ok(entry) = entry else {
+            continue;
+        };
+        total = total.saturating_add(measure_inner(
+            &entry.path(),
+            depth.saturating_add(1),
+            budget,
+        ));
+        if *budget == 0 {
+            break;
+        }
+    }
+    total
+}
+
+/// Whole days since `meta` was last modified, or `0` when the clock cannot say.
+///
+/// `0` — "modified just now" — rather than a large number, and the choice
+/// matters because the only caller uses this to decide whether an item is *old
+/// enough to delete*. An unknown age must therefore fail the age filter rather
+/// than pass it. A file whose timestamp the filesystem will not report is not a
+/// file to delete on a guess.
+fn age_in_days(meta: &fs::Metadata) -> u32 {
+    let Ok(modified) = meta.modified() else {
+        return 0;
+    };
+    // `duration_since` errs when `modified` is in the future — a clock that has
+    // been set backwards, or a file copied from a machine ahead of this one.
+    // "Zero days old" is the right reading of a file from the future too.
+    let Ok(elapsed) = SystemTime::now().duration_since(modified) else {
+        return 0;
+    };
+    u32::try_from(elapsed.as_secs() / SECS_PER_DAY).unwrap_or(u32::MAX)
+}
+
+/// One [`CleanupItem`] per entry *inside* `dir`, skipping anything newer than
+/// `min_age_days`.
+///
+/// The entries, not `dir` itself. Every category's pattern ends in `/*`, and the
+/// difference between the two readings is whether cleaning `/tmp` leaves `/tmp`
+/// behind. It must: removing the directory that a hundred running programs are
+/// about to write into is not cleanup, it is breakage.
+///
+/// A directory that does not exist yields nothing rather than an error. A system
+/// that has never crashed has no `/var/crash`, and "this category is empty" is
+/// the truthful reading of that, not "the scan failed".
+fn enumerate_entries(dir: &Path, category: CleanupCategory, min_age_days: u32) -> Vec<CleanupItem> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries {
+        // An entry the directory will not describe is an entry this program
+        // could not delete either. Leaving it out of the list is the honest
+        // report; listing it with a guessed size is not.
+        let Ok(entry) = entry else {
+            continue;
+        };
+        // `DirEntry::metadata` does not traverse a symlink, which is what is
+        // wanted: the link's own age, not its target's.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let age = age_in_days(&meta);
+        if age < min_age_days {
+            continue;
+        }
+        let path = entry.path();
+        let size = measure_recursive(&path);
+        out.push(
+            CleanupItem::new(&path, category)
+                .with_size(size)
+                .with_last_accessed_days(age),
+        );
+    }
+    out
+}
+
+// ============================================================================
 // CleanupScanner
 // ============================================================================
 
 /// Scans the filesystem for items that can be cleaned up.
 ///
-/// In a real deployment this would call into the VFS to stat files and walk
-/// directories.  The current implementation provides the scanning logic with
-/// stub filesystem calls that can be wired to the real VFS later.
+/// Each `scan_*` method names a directory whose *contents* are reclaimable and
+/// enumerates it, measuring what it finds. A category whose directory is absent
+/// simply contributes nothing.
 pub struct CleanupScanner {
     /// Items discovered during the most recent scan.
     items: Vec<CleanupItem>,
+    /// Every directory this scan actually enumerated.
+    ///
+    /// This is the **confinement list**, and it is the reason a bug elsewhere in
+    /// this program cannot delete a user's documents. It travels with the plan
+    /// into [`CleanupExecutor::execute`], which refuses to remove any path that
+    /// is not strictly inside one of these directories. Nothing constructs it
+    /// except [`CleanupScanner::collect`], one entry per directory it opened, so
+    /// the set of things this program may delete is exactly the set of things it
+    /// looked at — a property that holds no matter what an injected item,
+    /// a `..` in a filename, or a future refactor of the UI tries to claim.
+    roots: Vec<PathBuf>,
     /// Maximum age (days) for log files before they are considered reclaimable.
     max_log_age_days: u32,
     /// Maximum age (days) for package cache entries.
@@ -262,6 +420,7 @@ impl CleanupScanner {
     pub fn new() -> Self {
         Self {
             items: Vec::new(),
+            roots: Vec::new(),
             max_log_age_days: 30,
             max_package_cache_age_days: 60,
         }
@@ -284,6 +443,7 @@ impl CleanupScanner {
     /// Each path is examined for every category.  Returns all discovered items.
     pub fn scan(&mut self, paths: &[&str]) -> &[CleanupItem] {
         self.items.clear();
+        self.roots.clear();
         for path in paths {
             self.scan_temp_files(path);
             self.scan_logs(path, self.max_log_age_days);
@@ -311,114 +471,198 @@ impl CleanupScanner {
         &self.items
     }
 
+    /// The directories this scan enumerated — see [`Self::roots`].
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
     // -- per-category scan methods ------------------------------------------
 
+    /// Enumerate `dir`, decorate every item, and add them to the scan.
+    ///
+    /// One private helper rather than nine copies of the same four lines,
+    /// because the four lines include *`min_age_days`* — and a category that
+    /// forgot to pass it would silently delete files that are still in use, with
+    /// nothing in the output to say which category had the bug.
+    fn collect(
+        &mut self,
+        dir: &str,
+        category: CleanupCategory,
+        min_age_days: u32,
+        description: &str,
+        pattern: &str,
+        is_safe: bool,
+    ) {
+        let dir = Path::new(dir);
+        let found = enumerate_entries(dir, category, min_age_days);
+        // Recorded whether or not anything was found: the confinement list says
+        // where deletion is *permitted*, and that is a property of the scan's
+        // configuration, not of what happened to be on the disk at the time.
+        self.roots.push(dir.to_path_buf());
+        for item in found {
+            self.items.push(
+                item.with_description(description)
+                    .with_pattern(pattern)
+                    .with_safety(is_safe),
+            );
+        }
+    }
+
     /// Scan for temporary files under `<base>/tmp` and `<base>/var/tmp`.
+    ///
+    /// No age floor: a temporary directory is the one place where "created a
+    /// second ago" is not evidence of anything, since that is what temporary
+    /// means. A program that still needs its scratch file holds it open, and the
+    /// filesystem — not this scanner — is what refuses to unlink it.
     pub fn scan_temp_files(&mut self, base_path: &str) {
         let tmp_path = join_path(base_path, "tmp");
         let var_tmp_path = join_paths(base_path, &["var", "tmp"]);
-
-        // In a real OS this would call the VFS to enumerate directory contents.
-        // We record the directories themselves as representative items.
-        self.items.push(
-            CleanupItem::new(&tmp_path, CleanupCategory::TempFiles)
-                .with_description("Contents of /tmp")
-                .with_pattern("/tmp/*"),
+        self.collect(
+            &tmp_path,
+            CleanupCategory::TempFiles,
+            0,
+            "Contents of /tmp",
+            "/tmp/*",
+            true,
         );
-        self.items.push(
-            CleanupItem::new(&var_tmp_path, CleanupCategory::TempFiles)
-                .with_description("Contents of /var/tmp")
-                .with_pattern("/var/tmp/*"),
+        self.collect(
+            &var_tmp_path,
+            CleanupCategory::TempFiles,
+            0,
+            "Contents of /var/tmp",
+            "/var/tmp/*",
+            true,
         );
     }
 
     /// Scan for old log files in `<base>/var/log` older than `max_age_days`.
+    ///
+    /// The age floor is the whole point of this category: a log written an hour
+    /// ago is a log something is still writing, and truncating it under a
+    /// running daemon loses the record of whatever it is about to do wrong.
     pub fn scan_logs(&mut self, base_path: &str, max_age_days: u32) {
         let log_dir = join_paths(base_path, &["var", "log"]);
-        self.items.push(
-            CleanupItem::new(&log_dir, CleanupCategory::LogFiles)
-                .with_description(&format!("Log files older than {max_age_days} days"))
-                .with_last_accessed_days(max_age_days)
-                .with_pattern("/var/log/*.log"),
+        let description = format!("Log files older than {max_age_days} days");
+        self.collect(
+            &log_dir,
+            CleanupCategory::LogFiles,
+            max_age_days,
+            &description,
+            "/var/log/*.log",
+            true,
         );
     }
 
     /// Scan for old package downloads in `<base>/var/cache/pkg/archives`.
     pub fn scan_package_cache(&mut self, base_path: &str) {
         let cache_dir = join_paths(base_path, &["var", "cache", "pkg", "archives"]);
-        self.items.push(
-            CleanupItem::new(&cache_dir, CleanupCategory::PackageCache)
-                .with_description("Old downloaded package archives")
-                .with_pattern("/var/cache/pkg/archives/*"),
+        self.collect(
+            &cache_dir,
+            CleanupCategory::PackageCache,
+            self.max_package_cache_age_days,
+            "Old downloaded package archives",
+            "/var/cache/pkg/archives/*",
+            true,
         );
     }
 
     /// Scan for recycle bin contents under `<base>/home/*/…/Trash`.
     pub fn scan_recycle_bin(&mut self, base_path: &str) {
         let bin_path = join_paths(base_path, &["home", "user", ".local", "share", "Trash"]);
-        self.items.push(
-            CleanupItem::new(&bin_path, CleanupCategory::RecycleBin)
-                .with_description("Deleted files awaiting permanent removal")
-                .with_pattern("/home/*/.local/share/Trash/*"),
+        self.collect(
+            &bin_path,
+            CleanupCategory::RecycleBin,
+            0,
+            "Deleted files awaiting permanent removal",
+            "/home/*/.local/share/Trash/*",
+            true,
         );
     }
 
     /// Scan for thumbnail cache under `<base>/home/*/.cache/thumbnails`.
     pub fn scan_thumbnail_cache(&mut self, base_path: &str) {
         let cache_dir = join_paths(base_path, &["home", "user", ".cache", "thumbnails"]);
-        self.items.push(
-            CleanupItem::new(&cache_dir, CleanupCategory::ThumbnailCache)
-                .with_description("Cached image thumbnails")
-                .with_pattern("/home/*/.cache/thumbnails/*"),
+        self.collect(
+            &cache_dir,
+            CleanupCategory::ThumbnailCache,
+            0,
+            "Cached image thumbnails",
+            "/home/*/.cache/thumbnails/*",
+            true,
         );
     }
 
     /// Scan for browser cache under `<base>/home/*/.cache/browser`.
     pub fn scan_browser_cache(&mut self, base_path: &str) {
         let cache_dir = join_paths(base_path, &["home", "user", ".cache", "browser"]);
-        self.items.push(
-            CleanupItem::new(&cache_dir, CleanupCategory::BrowserCache)
-                .with_description("Cached web pages, images, scripts")
-                .with_pattern("/home/*/.cache/browser/*"),
+        self.collect(
+            &cache_dir,
+            CleanupCategory::BrowserCache,
+            0,
+            "Cached web pages, images, scripts",
+            "/home/*/.cache/browser/*",
+            true,
         );
     }
 
     /// Scan for crash dump files under `<base>/var/crash`.
     pub fn scan_crash_dumps(&mut self, base_path: &str) {
         let crash_dir = join_paths(base_path, &["var", "crash"]);
-        self.items.push(
-            CleanupItem::new(&crash_dir, CleanupCategory::CrashDumps)
-                .with_description("Process crash core dumps")
-                .with_safety(false)
-                .with_pattern("/var/crash/*"),
+        self.collect(
+            &crash_dir,
+            CleanupCategory::CrashDumps,
+            0,
+            "Process crash core dumps",
+            "/var/crash/*",
+            false,
         );
     }
 
     /// Scan for outdated backup snapshots under `<base>/var/backups/old`.
     pub fn scan_old_backups(&mut self, base_path: &str) {
         let backup_dir = join_paths(base_path, &["var", "backups", "old"]);
-        self.items.push(
-            CleanupItem::new(&backup_dir, CleanupCategory::OldBackups)
-                .with_description("Superseded backup snapshots")
-                .with_safety(false)
-                .with_pattern("/var/backups/old/*"),
+        self.collect(
+            &backup_dir,
+            CleanupCategory::OldBackups,
+            0,
+            "Superseded backup snapshots",
+            "/var/backups/old/*",
+            false,
         );
     }
 
     /// Scan for previously downloaded updates under `<base>/var/cache/updates`.
     pub fn scan_downloaded_updates(&mut self, base_path: &str) {
         let updates_dir = join_paths(base_path, &["var", "cache", "updates"]);
-        self.items.push(
-            CleanupItem::new(&updates_dir, CleanupCategory::DownloadedUpdates)
-                .with_description("Already-installed update packages")
-                .with_pattern("/var/cache/updates/*"),
+        self.collect(
+            &updates_dir,
+            CleanupCategory::DownloadedUpdates,
+            0,
+            "Already-installed update packages",
+            "/var/cache/updates/*",
+            true,
         );
     }
 
     /// Inject pre-built items (useful for testing or when the VFS provides
     /// a ready-made listing).
+    ///
+    /// **This does not grant permission to delete them.** The confinement list
+    /// is left alone, so a plan built from injected items removes nothing until
+    /// [`Self::allow_root`] has named a directory those items live inside. That
+    /// asymmetry is deliberate: "here is a list of files" and "you may erase
+    /// these" are different statements, and the second one should have to be
+    /// made out loud.
     pub fn set_items(&mut self, items: Vec<CleanupItem>) {
         self.items = items;
+    }
+
+    /// Permit deletion of anything strictly inside `dir` — see [`Self::roots`].
+    ///
+    /// The counterpart to [`Self::set_items`], and the only way to grant that
+    /// permission without having enumerated the directory.
+    pub fn allow_root<P: AsRef<Path>>(&mut self, dir: P) {
+        self.roots.push(dir.as_ref().to_path_buf());
     }
 }
 
@@ -441,6 +685,9 @@ pub struct CleanupPlan {
     pub items: Vec<CleanupItem>,
     /// Total estimated space savings.
     pub total_savings_bytes: u64,
+    /// Copied from [`CleanupScanner::roots`]: the directories inside which this
+    /// plan is permitted to delete, and outside which it is not.
+    pub roots: Vec<PathBuf>,
 }
 
 impl CleanupPlan {
@@ -459,7 +706,21 @@ impl CleanupPlan {
             selected_categories: selected.to_vec(),
             items,
             total_savings_bytes: total,
+            roots: scanner.roots().to_vec(),
         }
+    }
+
+    /// Whether `path` is somewhere this plan is allowed to delete.
+    ///
+    /// `starts_with` on a [`Path`] compares whole components, so `/tmp` does not
+    /// contain `/tmpfoo` — which is the bug the string version of this check
+    /// always has. The `!=` excludes the root directory itself: cleaning `/tmp`
+    /// must leave `/tmp` there, or the next program to want a scratch file finds
+    /// its home gone.
+    fn permits(&self, path: &Path) -> bool {
+        self.roots
+            .iter()
+            .any(|root| path != root && path.starts_with(root))
     }
 
     /// Number of items that will be deleted.
@@ -480,6 +741,7 @@ impl CleanupPlan {
             selected_categories: self.selected_categories.clone(),
             items,
             total_savings_bytes: total,
+            roots: self.roots.clone(),
         }
     }
 }
@@ -496,17 +758,22 @@ pub struct CleanupResult {
     /// Total bytes freed.
     pub bytes_freed: u64,
     /// Errors encountered (path -> error message).
-    pub errors: Vec<(String, String)>,
+    ///
+    /// A `Vec` rather than a first-error-and-stop, because a cleanup that halts
+    /// at the first permission denial leaves the disk in a state the user cannot
+    /// reason about: some of what they asked for is gone, some is not, and the
+    /// screen names one file out of the however-many it never reached.
+    pub errors: Vec<(PathBuf, String)>,
     /// Whether these numbers describe files that were actually removed, or
     /// only files that *would* have been.
     ///
-    /// This bit exists because today it is always `true` — see
-    /// [`CleanupExecutor::deletes_for_real`] — and a results screen reading
-    /// "Space freed: 1.4 GiB" after nothing was touched is not a cosmetic
-    /// problem. It is a program lying to a user about their disk, and the user
-    /// finds out when the disk is still full. Carrying the fact in the result
-    /// rather than in the renderer means the history log records it too, so a
-    /// row written today cannot later be mistaken for a real cleanup.
+    /// [`CleanupExecutor::execute`] leaves this `false`; [`CleanupExecutor::dry_run`]
+    /// leaves it `true`. Every piece of user-facing wording reads it, because a
+    /// results screen saying "Space freed: 1.4 GiB" after nothing was touched is
+    /// not a cosmetic problem — it is a program lying to a user about their
+    /// disk, and the user finds out when the disk is still full. Carrying the
+    /// fact in the result rather than in the renderer means the history log
+    /// records it too, so a preview can never be mistaken for a cleanup.
     pub simulated: bool,
 }
 
@@ -547,40 +814,80 @@ pub struct CleanupExecutor;
 impl CleanupExecutor {
     /// Whether [`Self::execute`] actually removes anything.
     ///
-    /// `false`, and the UI reads this rather than assuming: the confirmation
-    /// asks to *simulate* rather than to delete, and the results screen says
-    /// plainly that the disk is unchanged. When the real deleter lands, this
-    /// becomes `true` in one place and every piece of wording follows.
-    ///
-    /// It is a function rather than a comment because the wording has to change
-    /// with the behaviour, and a comment cannot make that happen. See
-    /// `known-issues.md` → `TD-C-DISKCLEANUP-DELETES-NOTHING`.
+    /// `true` since 2026-08-26. It stays a function rather than becoming a
+    /// comment because [`CleanupResult::simulated`] is what the wording reads,
+    /// and [`Self::dry_run`] still produces a simulated result — so the two
+    /// vocabularies ("would be deleted" / "deleted") both remain live and both
+    /// remain driven by the same bit rather than by a renderer's assumption.
     #[must_use]
     pub const fn deletes_for_real() -> bool {
-        false
+        true
     }
 
-    /// Execute the plan.  Returns a result summary.
+    /// Execute the plan: remove every item, and report what happened.
     ///
-    /// Today this only counts: [`Self::deletes_for_real`] is `false`, so the
-    /// result comes back with `simulated: true` and nothing on disk is touched.
-    /// A real implementation calls VFS `unlink` / `rmdir` for each item and
-    /// records the per-path failures in `errors` — which is why `errors` is
-    /// already in the shape it is, even though it can only be empty now.
+    /// One item's failure does not stop the others. A permission denial on a
+    /// file some other user owns is the *expected* case in `/tmp`, not an
+    /// exceptional one, and a cleanup that aborted there would clean almost
+    /// nothing on a busy machine while appearing to have tried.
+    ///
+    /// Only successful removals are counted, so the "space freed" figure is
+    /// backed by an actual `unlink` for every byte of it.
     pub fn execute(plan: &CleanupPlan) -> CleanupResult {
         let mut result = CleanupResult::new();
         result.simulated = !Self::deletes_for_real();
         for item in &plan.items {
-            // A real implementation would call `std::fs::remove_file` or the
-            // VFS equivalent here, and push a `(path, message)` onto `errors`
-            // when it refused.
-            result.files_deleted = result.files_deleted.saturating_add(1);
-            result.bytes_freed = result.bytes_freed.saturating_add(item.estimated_size_bytes);
+            // The confinement check, before any syscall. An item that names a
+            // path outside every directory the scan enumerated is a bug
+            // somewhere upstream, and the useful response to a bug in a program
+            // holding `remove_dir_all` is to not call it and to say why.
+            if !plan.permits(&item.path) {
+                result.errors.push((
+                    item.path.clone(),
+                    String::from("refused: outside every directory this scan examined"),
+                ));
+                continue;
+            }
+            match Self::remove(&item.path) {
+                Ok(()) => {
+                    result.files_deleted = result.files_deleted.saturating_add(1);
+                    result.bytes_freed =
+                        result.bytes_freed.saturating_add(item.estimated_size_bytes);
+                }
+                Err(err) => result.errors.push((item.path.clone(), err.to_string())),
+            }
         }
         result
     }
 
+    /// Remove one path, whatever kind of thing it is.
+    ///
+    /// **The symlink arm is the one that matters.** `fs::metadata` follows
+    /// links; if this used it, a symlink sitting in `/tmp` and pointing at the
+    /// user's home directory would report itself as a directory and be handed to
+    /// `remove_dir_all`, which is how a disk cleaner erases someone's documents.
+    /// `symlink_metadata` asks about the link itself, and the link itself is all
+    /// that is ever unlinked.
+    ///
+    /// Windows needs both calls for a link: a directory symlink is removed with
+    /// `remove_dir` and a file symlink with `remove_file`, and nothing in the
+    /// metadata distinguishes them portably. On Unix `remove_file` handles both
+    /// and the second call never runs.
+    fn remove(path: &Path) -> std::io::Result<()> {
+        let file_type = fs::symlink_metadata(path)?.file_type();
+        if file_type.is_symlink() {
+            fs::remove_file(path).or_else(|_| fs::remove_dir(path))
+        } else if file_type.is_dir() {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        }
+    }
+
     /// Perform a dry run: report what *would* be deleted without touching disk.
+    ///
+    /// The result keeps `simulated: true`, which is what makes the results
+    /// screen say "would be" rather than "was".
     pub fn dry_run(plan: &CleanupPlan) -> CleanupResult {
         let mut result = CleanupResult::new();
         for item in &plan.items {
@@ -1601,11 +1908,13 @@ impl CleanupUI {
                     break;
                 }
 
-                // Path.
+                // Path. `display()` is the one place a path is allowed to
+                // become text, because drawing is the one thing that cannot be
+                // done to bytes. Nothing reads this string back.
                 tree.push(RenderCommand::Text {
                     x: PADDING,
                     y,
-                    text: item.path.clone(),
+                    text: item.path.display().to_string(),
                     color: COLOR_TEXT,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
@@ -1785,7 +2094,7 @@ impl CleanupUI {
                 tree.push(RenderCommand::Text {
                     x: PADDING * 2.0,
                     y,
-                    text: format!("{path}: {msg}"),
+                    text: format!("{}: {msg}", path.display()),
                     color: COLOR_RED,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
@@ -1949,6 +2258,88 @@ mod tests {
     )]
 
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // -- Scratch directories ------------------------------------------------
+
+    // Every test below that touches a disk goes through `ScratchDir`, and this
+    // is not a tidiness rule. `CleanupExecutor::execute` really calls
+    // `remove_dir_all` now, and the machine these tests run on is a *developer's
+    // machine*, not SlateOS -- where `"/tmp"` resolves to `C:\tmp`, which on the
+    // machine this was written on contained a year of the operator's scratch
+    // files. A single test that scanned `"/"` and then executed would have
+    // deleted them.
+    //
+    // The confinement list (`CleanupScanner::roots`) is what makes that a
+    // *structural* guarantee rather than a convention: a plan built from
+    // injected items deletes nothing at all unless a root was named explicitly,
+    // so the way to write a dangerous test is now to opt in to it by name.
+
+    /// A uniquely-named directory under the system temp dir, deleted on drop.
+    struct ScratchDir {
+        path: PathBuf,
+    }
+
+    impl ScratchDir {
+        fn new(label: &str) -> Self {
+            // Process id *and* a counter: the id separates two runs of the
+            // suite, the counter separates the threads within one run, and
+            // libtest runs these in parallel by default.
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "diskcleanup-test-{}-{label}-{n}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("create scratch dir");
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        /// The scratch root as a `&str`, for the `&[&str]` scan API.
+        ///
+        /// The name is built out of ASCII above, so this cannot lose anything.
+        fn as_str(&self) -> &str {
+            self.path.to_str().expect("scratch path is ASCII")
+        }
+
+        /// Create `rel` (creating parents) with `len` bytes, and return its path.
+        fn file(&self, rel: &str, len: usize) -> PathBuf {
+            let path = self.path.join(rel);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create parent");
+            }
+            fs::write(&path, vec![b'x'; len]).expect("write file");
+            path
+        }
+
+        /// Create directory `rel` (creating parents), and return its path.
+        fn dir(&self, rel: &str) -> PathBuf {
+            let path = self.path.join(rel);
+            fs::create_dir_all(&path).expect("create dir");
+            path
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            // Best effort: a test that already failed may have left a handle
+            // open, and turning that into a second failure hides the first.
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// A scanner permitted to delete inside `dir`, holding exactly `items`.
+    fn scanner_over(dir: &Path, items: Vec<CleanupItem>) -> CleanupScanner {
+        let mut scanner = CleanupScanner::new();
+        scanner.set_items(items);
+        scanner.allow_root(dir);
+        scanner
+    }
 
     // -- CleanupCategory tests ----------------------------------------------
 
@@ -2002,7 +2393,7 @@ mod tests {
             .with_last_accessed_days(5)
             .with_pattern("/tmp/*");
 
-        assert_eq!(item.path, "/tmp/foo");
+        assert_eq!(item.path, PathBuf::from("/tmp/foo"));
         assert_eq!(item.category, CleanupCategory::TempFiles);
         assert_eq!(item.estimated_size_bytes, 4096);
         assert_eq!(item.description, "test temp file");
@@ -2027,10 +2418,65 @@ mod tests {
 
     #[test]
     fn test_scanner_scan_populates_items() {
+        let scratch = ScratchDir::new("full-scan");
+        scratch.file("tmp/leftover", 10);
+        scratch.file("var/tmp/other", 20);
+        scratch.file("var/crash/core.1", 30);
         let mut scanner = CleanupScanner::new();
-        scanner.scan(&["/"]);
-        // Should have items for every category (at least one per scan method).
+        scanner.scan(&[scratch.as_str()]);
+
+        let cats: Vec<_> = scanner.items().iter().map(|i| i.category).collect();
+        assert!(cats.contains(&CleanupCategory::TempFiles));
+        assert!(cats.contains(&CleanupCategory::CrashDumps));
+        assert_eq!(scanner.estimate_savings(), 60);
+    }
+
+    #[test]
+    fn test_scanner_reports_nothing_for_directories_that_do_not_exist() {
+        // A machine that has never crashed has no `/var/crash`, and "this
+        // category is empty" is the truth about it -- not an error, and
+        // certainly not an item the user could then select and "clean".
+        let scratch = ScratchDir::new("absent");
+        let mut scanner = CleanupScanner::new();
+        scanner.scan(&[scratch.as_str()]);
+        assert!(scanner.items().is_empty());
+        assert_eq!(scanner.estimate_savings(), 0);
+    }
+
+    #[test]
+    fn test_scanner_measures_a_directory_by_what_is_inside_it() {
+        let scratch = ScratchDir::new("measure");
+        scratch.file("tmp/nested/a", 100);
+        scratch.file("tmp/nested/deeper/b", 250);
+        let mut scanner = CleanupScanner::new();
+        scanner.scan_temp_files(scratch.as_str());
+
+        // One item -- the `nested` directory -- whose size is the sum of the
+        // files below it, not the size the filesystem reports for the directory
+        // entry itself (which on most systems is a fixed few kilobytes and
+        // tells the user nothing about what cleaning it would free).
+        assert_eq!(scanner.items().len(), 1);
+        assert_eq!(scanner.estimate_savings(), 350);
+    }
+
+    #[test]
+    fn test_scan_clears_the_previous_results_and_permissions() {
+        // Both halves matter. Items left over from a previous scan would be
+        // shown as present when they may be gone; roots left over would be a
+        // standing permission to delete somewhere the current scan never looked.
+        let first = ScratchDir::new("scan-one");
+        first.file("tmp/a", 5);
+        let second = ScratchDir::new("scan-two");
+
+        let mut scanner = CleanupScanner::new();
+        scanner.scan(&[first.as_str()]);
         assert!(!scanner.items().is_empty());
+        let old_root_count = scanner.roots().len();
+
+        scanner.scan(&[second.as_str()]);
+        assert!(scanner.items().is_empty());
+        assert_eq!(scanner.roots().len(), old_root_count);
+        assert!(!scanner.roots().iter().any(|r| r.starts_with(first.path())));
     }
 
     #[test]
@@ -2064,62 +2510,122 @@ mod tests {
 
     #[test]
     fn test_scanner_scan_temp_files() {
+        let scratch = ScratchDir::new("temp");
+        scratch.file("tmp/one", 1);
+        scratch.file("tmp/two", 2);
+        scratch.file("var/tmp/three", 4);
         let mut scanner = CleanupScanner::new();
-        scanner.scan_temp_files("/");
-        let temp_items: Vec<_> = scanner
-            .items()
-            .iter()
-            .filter(|i| i.category == CleanupCategory::TempFiles)
-            .collect();
-        assert_eq!(temp_items.len(), 2); // /tmp and /var/tmp
+        scanner.scan_temp_files(scratch.as_str());
+
+        // Three -- one per *entry*, not one per directory. The distinction is
+        // the whole difference between a preview screen that names files and
+        // one that names two folders the user already knew about.
+        assert_eq!(scanner.items().len(), 3);
+        assert_eq!(scanner.estimate_savings(), 7);
     }
 
     #[test]
-    fn test_scanner_scan_logs() {
+    fn test_scanner_leaves_the_directory_itself_out_of_the_list() {
+        // Cleaning `/tmp` must leave `/tmp` there. If the scanner listed the
+        // directory rather than its contents, the executor would remove it --
+        // and the next program that wanted a scratch file would find its home
+        // gone. Two independent guards, tested here and in `permits`.
+        let scratch = ScratchDir::new("keep-dir");
+        let tmp = scratch.dir("tmp");
+        scratch.file("tmp/inside", 1);
         let mut scanner = CleanupScanner::new();
-        scanner.scan_logs("/", 14);
-        let log_items: Vec<_> = scanner
-            .items()
-            .iter()
-            .filter(|i| i.category == CleanupCategory::LogFiles)
-            .collect();
-        assert_eq!(log_items.len(), 1);
+        scanner.scan_temp_files(scratch.as_str());
+
+        assert!(!scanner.items().iter().any(|i| i.path == tmp));
+        assert!(scanner.items().iter().any(|i| i.path == tmp.join("inside")));
     }
 
     #[test]
-    fn test_scanner_scan_package_cache() {
+    fn test_scanner_skips_logs_that_are_still_being_written() {
+        // A log written a moment ago is a log something still has open, and
+        // deleting it loses the record of whatever that program is about to do
+        // wrong. The freshly-created file below is zero days old, so a 14-day
+        // floor must exclude it.
+        let scratch = ScratchDir::new("fresh-log");
+        scratch.file("var/log/today.log", 100);
         let mut scanner = CleanupScanner::new();
-        scanner.scan_package_cache("/");
-        let items: Vec<_> = scanner
-            .items()
-            .iter()
-            .filter(|i| i.category == CleanupCategory::PackageCache)
-            .collect();
-        assert_eq!(items.len(), 1);
+        scanner.scan_logs(scratch.as_str(), 14);
+        assert!(scanner.items().is_empty());
+    }
+
+    #[test]
+    fn test_scanner_scan_logs_with_no_age_floor_takes_them() {
+        // The other side of the same switch: with the floor at zero the same
+        // file is in scope, which proves the previous test failed for the
+        // reason it claims and not because the directory was never read.
+        let scratch = ScratchDir::new("any-log");
+        scratch.file("var/log/today.log", 100);
+        let mut scanner = CleanupScanner::new();
+        scanner.scan_logs(scratch.as_str(), 0);
+
+        assert_eq!(scanner.items().len(), 1);
+        assert_eq!(scanner.items()[0].category, CleanupCategory::LogFiles);
+        assert_eq!(scanner.items()[0].estimated_size_bytes, 100);
+    }
+
+    #[test]
+    fn test_scanner_scan_package_cache_respects_its_own_age_floor() {
+        let scratch = ScratchDir::new("pkg");
+        scratch.file("var/cache/pkg/archives/thing.pkg", 512);
+
+        let mut strict = CleanupScanner::new();
+        strict.scan_package_cache(scratch.as_str());
+        assert!(
+            strict.items().is_empty(),
+            "60-day default excludes a new file"
+        );
+
+        let mut lenient = CleanupScanner::new().with_max_package_cache_age(0);
+        lenient.scan_package_cache(scratch.as_str());
+        assert_eq!(lenient.items().len(), 1);
     }
 
     #[test]
     fn test_scanner_scan_recycle_bin() {
+        let scratch = ScratchDir::new("trash");
+        scratch.file("home/user/.local/share/Trash/gone.txt", 8);
         let mut scanner = CleanupScanner::new();
-        scanner.scan_recycle_bin("/");
-        let items: Vec<_> = scanner
-            .items()
-            .iter()
-            .filter(|i| i.category == CleanupCategory::RecycleBin)
-            .collect();
-        assert_eq!(items.len(), 1);
+        scanner.scan_recycle_bin(scratch.as_str());
+
+        assert_eq!(scanner.items().len(), 1);
+        assert_eq!(scanner.items()[0].category, CleanupCategory::RecycleBin);
     }
 
     #[test]
     fn test_scanner_scan_thumbnail_cache() {
+        let scratch = ScratchDir::new("thumbs");
+        scratch.file("home/user/.cache/thumbnails/a.png", 16);
         let mut scanner = CleanupScanner::new();
-        scanner.scan_thumbnail_cache("/");
-        let items: Vec<_> = scanner
-            .items()
-            .iter()
-            .filter(|i| i.category == CleanupCategory::ThumbnailCache)
-            .collect();
-        assert_eq!(items.len(), 1);
+        scanner.scan_thumbnail_cache(scratch.as_str());
+
+        assert_eq!(scanner.items().len(), 1);
+        assert_eq!(scanner.items()[0].category, CleanupCategory::ThumbnailCache);
+    }
+
+    #[test]
+    fn test_scanner_marks_crash_dumps_and_old_backups_unsafe() {
+        // `safe_only()` is what a cautious user gets, and it reads `is_safe`.
+        // The decoration happens in `collect`, so a category that passed the
+        // wrong flag would be silently promoted into the cautious plan.
+        let scratch = ScratchDir::new("unsafe-cats");
+        scratch.file("var/crash/core.1", 4);
+        scratch.file("var/backups/old/snap", 4);
+        scratch.file("tmp/scratch", 4);
+        let mut scanner = CleanupScanner::new();
+        scanner.scan(&[scratch.as_str()]);
+
+        for item in scanner.items() {
+            let expected = !matches!(
+                item.category,
+                CleanupCategory::CrashDumps | CleanupCategory::OldBackups
+            );
+            assert_eq!(item.is_safe, expected, "{:?}", item.category);
+        }
     }
 
     // -- CleanupPlan tests --------------------------------------------------
@@ -2176,33 +2682,182 @@ mod tests {
     // -- CleanupExecutor tests ----------------------------------------------
 
     #[test]
-    fn test_executor_execute() {
-        let mut scanner = CleanupScanner::new();
-        scanner.set_items(vec![
-            CleanupItem::new("/tmp/a", CleanupCategory::TempFiles).with_size(1024),
-            CleanupItem::new("/tmp/b", CleanupCategory::TempFiles).with_size(2048),
-        ]);
+    fn test_executor_execute_actually_removes_the_files() {
+        // The test this program did not have until 2026-08-26: before that
+        // `execute` was byte-identical to `dry_run`, counted every item as a
+        // success, and no assertion anywhere looked at the disk afterwards.
+        let scratch = ScratchDir::new("exec");
+        let a = scratch.file("tmp/a", 1024);
+        let b = scratch.file("tmp/b", 2048);
+        let scanner = scanner_over(
+            scratch.path(),
+            vec![
+                CleanupItem::new(&a, CleanupCategory::TempFiles).with_size(1024),
+                CleanupItem::new(&b, CleanupCategory::TempFiles).with_size(2048),
+            ],
+        );
         let plan = CleanupPlan::build(&scanner, &[CleanupCategory::TempFiles]);
         let result = CleanupExecutor::execute(&plan);
 
         assert_eq!(result.files_deleted, 2);
         assert_eq!(result.bytes_freed, 3072);
-        assert!(result.is_success());
+        assert!(result.is_success(), "{:?}", result.errors);
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(!result.simulated);
     }
 
     #[test]
-    fn test_executor_dry_run_same_counts() {
-        let mut scanner = CleanupScanner::new();
-        scanner.set_items(vec![
-            CleanupItem::new("/tmp/a", CleanupCategory::TempFiles).with_size(500),
-        ]);
+    fn test_executor_removes_a_directory_and_everything_under_it() {
+        let scratch = ScratchDir::new("exec-dir");
+        let nested = scratch.dir("tmp/nested");
+        scratch.file("tmp/nested/deep/file", 64);
+        let bystander = scratch.file("tmp/keepme", 8);
+
+        let scanner = scanner_over(
+            scratch.path(),
+            vec![CleanupItem::new(&nested, CleanupCategory::TempFiles).with_size(64)],
+        );
+        let plan = CleanupPlan::build(&scanner, &[CleanupCategory::TempFiles]);
+        let result = CleanupExecutor::execute(&plan);
+
+        assert!(result.is_success(), "{:?}", result.errors);
+        assert!(!nested.exists());
+        // The half that a "did it delete?" assertion alone would miss: nothing
+        // outside the plan was touched.
+        assert!(bystander.exists());
+    }
+
+    #[test]
+    fn test_executor_refuses_a_path_outside_every_scanned_directory() {
+        // The guard that makes this program's blast radius equal to the set of
+        // directories it looked at. Without it, any item that reached the plan
+        // -- injected, mis-joined, or carrying a `..` -- would be handed
+        // straight to `remove_dir_all`.
+        let scratch = ScratchDir::new("confine");
+        let inside = scratch.file("tmp/mine", 4);
+        let outside = ScratchDir::new("confine-other");
+        let theirs = outside.file("precious", 4);
+
+        let scanner = scanner_over(
+            &scratch.path().join("tmp"),
+            vec![
+                CleanupItem::new(&inside, CleanupCategory::TempFiles).with_size(4),
+                CleanupItem::new(&theirs, CleanupCategory::TempFiles).with_size(4),
+            ],
+        );
+        let plan = CleanupPlan::build(&scanner, &[CleanupCategory::TempFiles]);
+        let result = CleanupExecutor::execute(&plan);
+
+        assert!(!inside.exists());
+        assert!(theirs.exists(), "a path outside the scan must survive");
+        assert_eq!(result.files_deleted, 1);
+        assert_eq!(result.error_count(), 1);
+        assert_eq!(result.errors[0].0, theirs);
+        assert!(result.errors[0].1.contains("refused"));
+    }
+
+    #[test]
+    fn test_executor_refuses_the_scanned_directory_itself() {
+        // `permits` excludes the root, so even an item naming `/tmp` exactly --
+        // which the scanner never produces, but a caller could inject -- leaves
+        // `/tmp` standing.
+        let scratch = ScratchDir::new("confine-root");
+        let root = scratch.dir("tmp");
+        let scanner = scanner_over(
+            &root,
+            vec![CleanupItem::new(&root, CleanupCategory::TempFiles)],
+        );
+        let plan = CleanupPlan::build(&scanner, &[CleanupCategory::TempFiles]);
+        let result = CleanupExecutor::execute(&plan);
+
+        assert!(root.exists());
+        assert_eq!(result.files_deleted, 0);
+        assert_eq!(result.error_count(), 1);
+    }
+
+    #[test]
+    fn test_executor_confinement_compares_whole_path_components() {
+        // The bug every string-prefix version of this check has: `/tmp` is not
+        // a prefix of `/tmpfoo` in any sense that matters, but it is if you
+        // compare bytes. `Path::starts_with` compares components, and this
+        // pins that we use it.
+        let scratch = ScratchDir::new("confine-prefix");
+        scratch.dir("tmp");
+        let sibling = scratch.file("tmpfoo/file", 4);
+
+        let scanner = scanner_over(
+            &scratch.path().join("tmp"),
+            vec![CleanupItem::new(&sibling, CleanupCategory::TempFiles)],
+        );
+        let plan = CleanupPlan::build(&scanner, &[CleanupCategory::TempFiles]);
+        let result = CleanupExecutor::execute(&plan);
+
+        assert!(sibling.exists());
+        assert_eq!(result.error_count(), 1);
+    }
+
+    #[test]
+    fn test_executor_reports_a_missing_file_and_keeps_going() {
+        // One failure must not end the run. On a busy machine a file vanishing
+        // between the scan and the cleanup is the ordinary case, not an
+        // exceptional one -- and a cleanup that aborted there would clean almost
+        // nothing while appearing to have tried.
+        let scratch = ScratchDir::new("exec-missing");
+        let gone = scratch.path().join("tmp/never-existed");
+        let real = scratch.file("tmp/real", 32);
+
+        let scanner = scanner_over(
+            scratch.path(),
+            vec![
+                CleanupItem::new(&gone, CleanupCategory::TempFiles).with_size(999),
+                CleanupItem::new(&real, CleanupCategory::TempFiles).with_size(32),
+            ],
+        );
+        let plan = CleanupPlan::build(&scanner, &[CleanupCategory::TempFiles]);
+        let result = CleanupExecutor::execute(&plan);
+
+        assert!(!real.exists());
+        assert_eq!(result.files_deleted, 1);
+        // 32, not 1031: only bytes backed by an actual removal are counted.
+        assert_eq!(result.bytes_freed, 32);
+        assert_eq!(result.error_count(), 1);
+        assert_eq!(result.errors[0].0, gone);
+    }
+
+    #[test]
+    fn test_executor_dry_run_touches_nothing_and_says_so() {
+        let scratch = ScratchDir::new("dry");
+        let a = scratch.file("tmp/a", 500);
+        let scanner = scanner_over(
+            scratch.path(),
+            vec![CleanupItem::new(&a, CleanupCategory::TempFiles).with_size(500)],
+        );
         let plan = CleanupPlan::build(&scanner, &[CleanupCategory::TempFiles]);
 
-        let real = CleanupExecutor::execute(&plan);
         let dry = CleanupExecutor::dry_run(&plan);
+        assert_eq!(dry.files_deleted, 1);
+        assert_eq!(dry.bytes_freed, 500);
+        assert!(dry.simulated, "the wording depends on this bit");
+        assert!(a.exists(), "a dry run must leave the disk alone");
+    }
 
-        assert_eq!(real.files_deleted, dry.files_deleted);
-        assert_eq!(real.bytes_freed, dry.bytes_freed);
+    #[test]
+    fn test_deletes_for_real_agrees_with_what_execute_does() {
+        // The two must not be able to drift: `deletes_for_real` is what every
+        // string on the results screen reads, so a `false` here beside a real
+        // `remove_file` would put "would be deleted" over files that are gone.
+        let scratch = ScratchDir::new("agree");
+        let a = scratch.file("tmp/a", 4);
+        let scanner = scanner_over(
+            scratch.path(),
+            vec![CleanupItem::new(&a, CleanupCategory::TempFiles).with_size(4)],
+        );
+        let plan = CleanupPlan::build(&scanner, &[CleanupCategory::TempFiles]);
+        let result = CleanupExecutor::execute(&plan);
+
+        assert_eq!(CleanupExecutor::deletes_for_real(), !a.exists());
+        assert_eq!(result.simulated, !CleanupExecutor::deletes_for_real());
     }
 
     #[test]
@@ -2358,10 +3013,21 @@ mod tests {
 
     #[test]
     fn test_ui_run_scan() {
+        let scratch = ScratchDir::new("ui-scan");
+        scratch.file("tmp/a", 1000);
+        scratch.file("var/crash/core.1", 24);
         let mut ui = CleanupUI::new();
-        ui.run_scan(&["/"]);
+        ui.run_scan(&[scratch.as_str()]);
+
         assert!(ui.scan_complete);
-        assert!(!ui.scanner.items().is_empty());
+        assert_eq!(
+            ui.category_sizes.get(&CleanupCategory::TempFiles),
+            Some(&1000)
+        );
+        assert_eq!(
+            ui.category_sizes.get(&CleanupCategory::CrashDumps),
+            Some(&24)
+        );
     }
 
     #[test]
@@ -2384,16 +3050,20 @@ mod tests {
 
     #[test]
     fn test_ui_execute_cleanup() {
+        let scratch = ScratchDir::new("ui-exec");
+        let a = scratch.file("tmp/a", 4096);
         let mut ui = CleanupUI::new();
         ui.scanner.set_items(vec![
-            CleanupItem::new("/tmp/a", CleanupCategory::TempFiles).with_size(4096),
+            CleanupItem::new(&a, CleanupCategory::TempFiles).with_size(4096),
         ]);
+        ui.scanner.allow_root(scratch.path());
         ui.toggle_category(CleanupCategory::TempFiles);
         ui.scan_complete = true;
 
         let result = ui.execute_cleanup();
         assert_eq!(result.files_deleted, 1);
         assert_eq!(result.bytes_freed, 4096);
+        assert!(!a.exists());
         assert_eq!(ui.screen, UiScreen::Results);
         assert_eq!(ui.history.count(), 1);
     }
@@ -2596,8 +3266,8 @@ mod tests {
 
     #[test]
     fn test_click_on_live_clean_button_confirms_first() {
-        let mut ui = CleanupUI::new();
-        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        let scratch = ScratchDir::new("wiring");
+        let mut ui = scanned_over(&scratch);
         ui.select_all();
         assert!(ui.can_clean());
 
@@ -2613,8 +3283,8 @@ mod tests {
         // The dialog quotes the selection back at the user. A click that got
         // past it could change that selection while it was on screen, so that
         // the user authorised one thing and a different thing happened.
-        let mut ui = CleanupUI::new();
-        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        let scratch = ScratchDir::new("wiring");
+        let mut ui = scanned_over(&scratch);
         ui.select_all();
         ui.show_confirm();
 
@@ -2624,14 +3294,31 @@ mod tests {
         assert_eq!(ui.selected, before, "a click reached the list underneath");
     }
 
+    /// A UI that has *really* scanned a scratch tree holding one 4 KiB temp file.
+    ///
+    /// Every event-wiring test that needs the "scan found something" state goes
+    /// through here rather than through `DEFAULT_SCAN_ROOTS`. That constant is
+    /// `["/"]`, which is correct for SlateOS and catastrophic here: on the
+    /// machine these tests run on it resolves to `C:\`, so the scan would
+    /// enumerate and measure the developer's `C:\tmp` -- and, worse, add it to
+    /// the confinement list, at which point one `Enter` in a dialog test would
+    /// erase it. `scripts/check-diskcleanup-test-roots.py` enforces the rule
+    /// this comment states, because a comment cannot stop the next test.
+    fn scanned_over(scratch: &ScratchDir) -> CleanupUI {
+        scratch.file("tmp/a", 4096);
+        let mut ui = CleanupUI::new();
+        ui.run_scan(&[scratch.as_str()]);
+        ui
+    }
+
     /// A UI whose scan found `bytes` in `cat`, and its index.
     ///
-    /// Built by hand rather than by calling `run_scan`, because the real
-    /// scanner reports **zero bytes for every category** -- it records the
-    /// directories as placeholder items and never asks how big they are. See
-    /// `known-issues.md` -> `TD-C-DISKCLEANUP-DELETES-NOTHING`. A test that
-    /// went through `run_scan` could therefore never reach the size-dependent
-    /// half of the UI, which is most of it.
+    /// Items are injected rather than scanned, and **no root is allowed**, so
+    /// nothing this UI is asked to clean can be deleted: the confinement check
+    /// refuses every item before any syscall. These are tests of the *event
+    /// wiring* -- that a click at a coordinate reaches a method -- and a test of
+    /// where a button is has no business owning a `remove_dir_all`. What
+    /// deletion does is tested directly, against a `ScratchDir`, above.
     fn scanned(cat: CleanupCategory, bytes: u64) -> (CleanupUI, usize) {
         let mut ui = CleanupUI::new();
         ui.scanner
@@ -2714,8 +3401,8 @@ mod tests {
 
     #[test]
     fn test_accepting_the_confirmation_runs_the_cleanup() {
-        let mut ui = CleanupUI::new();
-        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        let scratch = ScratchDir::new("wiring");
+        let mut ui = scanned_over(&scratch);
         ui.select_all();
         ui.show_confirm();
 
@@ -2727,9 +3414,11 @@ mod tests {
         assert!(!ui.is_confirming());
         assert_eq!(ui.screen, UiScreen::Results);
         let result = ui.last_result.as_ref().expect("a result was recorded");
-        // And it says so: nothing was deleted, and the screen must not claim
-        // otherwise. See `known-issues.md` -> TD-C-DISKCLEANUP-DELETES-NOTHING.
-        assert!(result.simulated);
+        assert!(!result.simulated);
+        // The assertion that makes this a test of the *program* rather than of
+        // its bookkeeping: the file the scan found is gone from the disk.
+        assert!(!scratch.path().join("tmp/a").exists());
+        assert_eq!(result.files_deleted, 1);
     }
 
     #[test]
@@ -2740,8 +3429,8 @@ mod tests {
         // reading this one must not thereby empty their disk. Asserted here
         // rather than trusted, because it is a property of *this* dialog that a
         // later change to its button set could silently reverse.
-        let mut ui = CleanupUI::new();
-        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        let scratch = ScratchDir::new("wiring");
+        let mut ui = scanned_over(&scratch);
         ui.select_all();
         ui.show_confirm();
 
@@ -2749,12 +3438,13 @@ mod tests {
         assert!(!ui.is_confirming());
         assert_eq!(ui.screen, UiScreen::CategoryList);
         assert!(ui.last_result.is_none());
+        assert!(scratch.path().join("tmp/a").exists());
     }
 
     #[test]
     fn test_dismissing_the_confirmation_deletes_nothing() {
-        let mut ui = CleanupUI::new();
-        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        let scratch = ScratchDir::new("wiring");
+        let mut ui = scanned_over(&scratch);
         ui.select_all();
         ui.show_confirm();
 
@@ -2762,6 +3452,7 @@ mod tests {
         assert!(!ui.is_confirming());
         assert_eq!(ui.screen, UiScreen::CategoryList);
         assert!(ui.last_result.is_none());
+        assert!(scratch.path().join("tmp/a").exists());
     }
 
     #[test]
@@ -2782,8 +3473,8 @@ mod tests {
 
     #[test]
     fn test_done_button_returns_to_the_list() {
-        let mut ui = CleanupUI::new();
-        ui.run_scan(&DEFAULT_SCAN_ROOTS);
+        let scratch = ScratchDir::new("wiring");
+        let mut ui = scanned_over(&scratch);
         ui.select_all();
         ui.execute_cleanup();
         assert_eq!(ui.screen, UiScreen::Results);

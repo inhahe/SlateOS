@@ -87197,8 +87197,12 @@ and are the separate pipeline-stage-stdin defect recorded below.
 
 ## osh: a `read` in a pipeline stage swallows the rest of the pipe
 
-**Status:** open (found 2026-08-26 while verifying the special-redirection-filename
-fix; **not** caused by it — it reproduces with no special filename involved).
+**Status:** fixed 2026-08-26 (found the same day while verifying the
+special-redirection-filename fix; **not** caused by it — it reproduced with no
+special filename involved). The fix went wider than the one proposed below, and
+took two neighbouring defects with it — see *"What was actually done"* at the
+end. Regression case:
+`userspace/oils/tests/corpus/a-pipeline-stages-fd-0-is-an-ordinary-descriptor.sh`.
 
 After `read` consumes a line from a pipeline stage's stdin, any *later command*
 in that same stage sees EOF. Measured, bash 5.2.21 vs osh, glibc:
@@ -87242,6 +87246,50 @@ is the same cost bash pays, and correctness here is the point of the exercise.
 
 `take` (mapfile) and `read_to_end` are unaffected: both consume to EOF, and
 `BufReader` overrides `read_to_end` to drain its buffer and then delegate.
+
+**What was actually done.** Shrinking the buffer would have fixed the symptom
+and left the cause, which was not the buffer size but the fact that a pipeline
+stage's fd 0 was held as a *shape of its own* — `StdinSrc::Pipe`, a
+`RefCell<BufReader<PipeReader>>` — rather than as an ordinary input descriptor.
+Three defects followed from that one fact, and only the first is the one this
+entry was filed for:
+
+1. The stranded read-ahead above.
+2. **`exec 3<&0` in a pipeline stage was a silent no-op.** The fd-0 lookup
+   (`clone_input_fd`) only knows about `InputFd`s, so it found nothing to
+   duplicate and fell back to the empty stream it gives an unbound stdin:
+   `printf 'A\nB\n' | { exec 3<&0; read -u 3 l; }` left `l` empty with rc 0
+   where bash reads `A`. The transient form `{ read -r l <&3; } 3<&0` had the
+   same hole, through `plan_stdin_fd`.
+3. **`/dev/stdin` on a pipe was answered by draining the pipe** into a byte
+   snapshot rather than re-opening the descriptor.
+
+So `StdinSrc::Pipe` was deleted outright. `StdinSrc::pipe` now builds
+`StdinSrc::Fd(file_input(pipe_reader_into_file(r)))`, i.e. an
+`InputSrc::File(FileInput)` over a pipe-derived `File` — at which point
+`FileInput::build`'s existing seekability rule supplies the one-byte buffer for
+free, a child gets a duplicate positioned where the shell is, and `/dev/stdin`
+is a genuine `/proc/self/fd` re-open. Two supporting changes fell out:
+
+* `FileInput` gained a `seekable` field and a `readable_now()`, so `read -t 0`
+  still distinguishes a seekable file (always ready) from a live descriptor
+  (must be probed) now that the distinction is no longer visible in the enum's
+  shape. `pipe_reader_readable_now(&PipeReader)` became
+  `file_readable_now(&File)`.
+* `AmbientStdin` lost its `Opaque` variant (a stage's fd 0 is an
+  `AmbientStdin::Fd` like any other) and gained a reader, `Shell::dup_input_fd`,
+  which resolves fd 0 against the ambient rather than the `exec`-installed
+  table. Both dup paths — persistent (`apply_persistent_dup_in`) and transient
+  (`plan_stdin_fd`) — go through it, which is what closes defect 2.
+
+The comment conceding the shortcut ("Bytes already buffered by an earlier
+in-stage `read` are not replayed — a rare edge case") is gone with the code it
+described.
+
+One divergence in this area remains, and is **not** part of this: osh models
+fds ≥ 3 in user space and does not pass them to children, so
+`printf 'A\nB\n' | { exec 3<&0; ls -l /proc/self/fd/3; }` still fails where
+bash succeeds. That is the separately-tracked user-space-fd-table limitation.
 
 ## osh: a here-document over 64 KiB is a temp file, which `/dev/stdin` re-opens from the start
 

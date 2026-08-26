@@ -102,7 +102,6 @@ use bstr::ByteSlice;
 use tzrules::{Tz, TzFile, TzInfo};
 
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
@@ -2482,6 +2481,10 @@ struct FileInput {
     /// Whether this descriptor's OS position can be observed without going
     /// through [`FileInput::share`] — see [`FileInput::observable`].
     observable: bool,
+    /// Whether the descriptor can seek. Decides the read-ahead in
+    /// [`FileInput::build`], and answers `read -t 0`: a seekable file is always
+    /// ready, where a pipe or a terminal has to be asked.
+    seekable: bool,
 }
 
 impl FileInput {
@@ -2517,7 +2520,18 @@ impl FileInput {
             pos: 0,
             len: 0,
             observable,
+            seekable,
         }
+    }
+
+    /// `read -t 0`: would a read from this descriptor proceed without blocking?
+    ///
+    /// A seekable file is always ready — at EOF included, which is what bash
+    /// answers for an empty file. Anything else is a live object and has to be
+    /// asked: bytes already in the read-ahead count first (they are the shell's
+    /// even if the OS has handed them over), then the host probe.
+    fn readable_now(&self) -> bool {
+        self.seekable || self.pos < self.len || file_readable_now(&self.file)
     }
 
     /// Give the OS offset back the bytes this reader has read ahead but not yet
@@ -3177,16 +3191,12 @@ enum StdinSrc {
     /// Inherit the shell's real stdin.
     Inherit,
     /// Read from a shared, position-tracking open descriptor — a real file for
-    /// `< file`, a byte snapshot for a here-doc or here-string. Sharing is what
-    /// makes repeated `read` calls (`while read …; done < file`) consume
-    /// successive lines rather than restarting from the beginning, and what
-    /// makes a subshell's or a child's consumption visible afterwards.
+    /// `< file`, a byte snapshot for a here-doc or here-string, the read end of
+    /// an upstream stage's pipe. Sharing is what makes repeated `read` calls
+    /// (`while read …; done < file`) consume successive lines rather than
+    /// restarting from the beginning, and what makes a subshell's or a child's
+    /// consumption visible afterwards.
     Fd(InputFd),
-    /// Read from the read end of an OS pipe fed by a concurrent upstream stage.
-    /// Wrapped in a `BufReader`/`RefCell` so line-oriented `read` builtins can
-    /// consume successive lines from the stream (interior mutability behind the
-    /// `&StdinSrc` shared borrow, matching [`StdinSrc::Fd`]).
-    Pipe(RefCell<io::BufReader<io::PipeReader>>),
 }
 
 impl StdinSrc {
@@ -3196,24 +3206,43 @@ impl StdinSrc {
         StdinSrc::Fd(bytes_input(bytes))
     }
 
-    /// Build a source over the read end of an OS pipe.
+    /// Build a source over the read end of an OS pipe — a pipeline stage's fd 0.
+    ///
+    /// **An ordinary input descriptor, not a shape of its own.** A pipe read end
+    /// used to be held apart, as its own `BufReader`, and every difference that
+    /// followed from that was a bug:
+    ///
+    /// * `exec 3<&0` found nothing to duplicate, because the fd-0 lookup only
+    ///   knows about [`InputFd`]s. `printf 'A\nB\n' | { exec 3<&0; read -u 3 l; }`
+    ///   bound fd 3 to an empty stream where bash binds the pipe.
+    /// * A default 8 KiB read-ahead over a descriptor that cannot seek discarded
+    ///   whatever it had pulled in: `printf 'A\nB\n' | { read -r l; cat; }`
+    ///   printed nothing where bash prints `B`. [`FileInput::build`] already
+    ///   drops to a one-byte buffer for exactly this reason — read-ahead is only
+    ///   safe when the remainder can be seeked back — and bash reaches the same
+    ///   place from the same direction, `zsyncfd` reading unseekable input a byte
+    ///   at a time so the descriptor is left just past the delimiter.
+    /// * A child was handed a *fresh* clone of the read end rather than the
+    ///   shell's position, and `/dev/stdin` had to be answered by draining the
+    ///   pipe into a byte snapshot rather than re-opening it.
+    ///
+    /// As an `InputFd` all three are simply the behaviour every other input
+    /// descriptor already has.
     fn pipe(r: io::PipeReader) -> StdinSrc {
-        StdinSrc::Pipe(RefCell::new(io::BufReader::new(r)))
+        StdinSrc::Fd(file_input(pipe_reader_into_file(r)))
     }
 
     /// A second handle on the same input, for a reader that outlives this one —
     /// the counterpart of [`Out::share`].
     ///
     /// A background job that inherits fd 0 keeps reading after the command that
-    /// started it has returned, so it needs a handle it can own. An open
-    /// descriptor is shared outright (both parties advance one offset, as two
-    /// processes sharing an fd do); a pipe's read end is duplicated, which is
-    /// literally what `fork` does to it.
+    /// started it has returned, so it needs a handle it can own. The descriptor
+    /// is shared outright: both parties advance one position, as two processes
+    /// sharing an open file description do.
     fn share(&self) -> io::Result<StdinSrc> {
         Ok(match self {
             StdinSrc::Inherit => StdinSrc::Inherit,
             StdinSrc::Fd(c) => StdinSrc::Fd(Arc::clone(c)),
-            StdinSrc::Pipe(r) => StdinSrc::pipe(r.borrow().get_ref().try_clone()?),
         })
     }
 }
@@ -9980,12 +10009,16 @@ impl Shell {
     ///
     /// The result is an owned [`HeadIn`] (`None` meaning "inherit").
     ///
-    /// A **real file** is handed over as a duplicate descriptor, which is what
-    /// bash's fork does: the stage shares the shell's open file description, so
+    /// A **real descriptor** — a file, or the read end of an enclosing
+    /// pipeline's pipe — is handed over as a duplicate, which is what bash's
+    /// fork does: the stage shares the shell's open file description, so
     /// `{ head -n 1 | cat; head -n 1; } < f` prints the first two lines rather
-    /// than the first one twice. A **snapshot** has no descriptor to duplicate,
-    /// so its remaining bytes are pushed down a fresh OS pipe by a short-lived
-    /// writer thread — a thread rather than an inline `write_all` because the
+    /// than the first one twice, and the duplicate is positioned where the shell
+    /// is, so an unbounded upstream like `yes` streams rather than being drained.
+    ///
+    /// A **snapshot** has no descriptor to duplicate, so its remaining bytes are
+    /// pushed down a fresh OS pipe by a short-lived writer thread — a thread
+    /// rather than an inline `write_all` because the
     /// bytes can exceed the pipe buffer, which would deadlock against a reader
     /// that has not started yet. Draining it advances the source, so a later
     /// `read` in the enclosing command does not replay those bytes.
@@ -9998,17 +10031,6 @@ impl Shell {
     /// script's own input rather than `f`. Only a genuinely unbound fd 0 is
     /// `None`, and that is the case `Stdio::inherit()` is right for.
     fn pipeline_head_stdin(&mut self, stdin: &StdinSrc) -> Option<HeadIn> {
-        // A clone of the read end, so the head stage streams rather than
-        // buffering (an unbounded upstream like `yes` must not be drained).
-        if let StdinSrc::Pipe(r) = stdin {
-            return match r.borrow().get_ref().try_clone() {
-                Ok(rp) => Some(HeadIn::Pipe(rp)),
-                Err(e) => {
-                    self.perrln(&format!("pipe: {e}"));
-                    None
-                }
-            };
-        }
         let cursor = match stdin {
             StdinSrc::Fd(c) => Some(Arc::clone(c)),
             _ => self.exec_stdin.as_ref().map(Arc::clone),
@@ -24096,7 +24118,6 @@ impl Shell {
                 (Some(c), _) => Some(c),
                 (None, StdinSrc::Fd(c)) => Some(c),
                 (None, StdinSrc::Inherit) => self.exec_stdin.as_ref(),
-                (None, StdinSrc::Pipe(_)) => None,
             };
             match src {
                 Some(c) => match child_input(c) {
@@ -24118,28 +24139,10 @@ impl Shell {
                         closed = ClosedStd::STDIN;
                     }
                 },
-                None => match stdin {
-                    StdinSrc::Inherit | StdinSrc::Fd(_) => {
-                        cmd.stdin(Stdio::inherit());
-                    }
-                    StdinSrc::Pipe(r) => {
-                        // Hand the child a live clone of the upstream pipe read
-                        // end so it streams (buffering would deadlock an
-                        // unbounded producer like `yes`). Bytes already buffered
-                        // by an earlier in-stage `read` are not replayed — a rare
-                        // edge case (mixing `read` and an external in one stage).
-                        match r.borrow().get_ref().try_clone() {
-                            Ok(rp) => {
-                                cmd.stdin(Stdio::from(rp));
-                            }
-                            Err(e) => {
-                                self.perrln(&format!("pipe: {e}"));
-                                self.last_status = 1;
-                                return;
-                            }
-                        }
-                    }
-                },
+                // Nothing bound fd 0 at all, so the child inherits the shell's.
+                None => {
+                    cmd.stdin(Stdio::inherit());
+                }
             }
         }
 
@@ -25490,7 +25493,7 @@ impl Shell {
         ambient: &AmbientStdin,
     ) -> Result<(), Str> {
         if input {
-            self.apply_persistent_dup_in(origin, fd, target, out)
+            self.apply_persistent_dup_in(origin, fd, target, out, ambient)
         } else {
             self.apply_persistent_dup_out(origin, fd, target, out, ambient)
         }
@@ -25568,7 +25571,7 @@ impl Shell {
         }
         let n = n.to_string().into_bytes();
         let res = if read {
-            self.apply_persistent_dup_in(&DupOrigin::SpecialPath, fd, &n, out)
+            self.apply_persistent_dup_in(&DupOrigin::SpecialPath, fd, &n, out, ambient)
         } else {
             self.apply_persistent_dup_out(&DupOrigin::SpecialPath, fd, &n, out, ambient)
         };
@@ -25630,7 +25633,7 @@ impl Shell {
                     // readable as well as writable, and `exec 0< f; exec 1>&0`
                     // leaves it readable and not writable.
                     1 | 2 => {
-                        let rd = self.exec_dup_read_half(n);
+                        let rd = self.exec_dup_read_half(n, ambient);
                         self.set_std_read_half(fd, Some(rd));
                         self.set_std_write_half(fd, src);
                     }
@@ -25651,7 +25654,7 @@ impl Shell {
                         // `exec 3< file; exec 4>&3` leaves fd 4 readable, and
                         // sharing fd 3's cursor — see [`ExtraFdOp::AliasFd`],
                         // which says the same for the transient path.
-                        let rd = self.exec_dup_read_half(n);
+                        let rd = self.exec_dup_read_half(n, ambient);
                         self.open_fds.insert(fd, rd);
                         self.coproc_read_fds.remove(&fd);
                     }
@@ -25699,6 +25702,7 @@ impl Shell {
         fd: i32,
         target: BStr<'_>,
         out: &Out,
+        ambient: &AmbientStdin,
     ) -> Result<(), Str> {
         match Self::classify_dup_word(target) {
             DupWord::Close => {
@@ -25718,7 +25722,8 @@ impl Shell {
             // `exec 8< /dev/fd/8` is an open, so fd 8 must be there — but the
             // dup it stands for would still leave fd 8 exactly as it was.
             DupWord::Fd(n) if n == fd => {
-                if !self.coproc_read_fds.contains_key(&n) && self.clone_input_fd(n).is_none() {
+                if !self.coproc_read_fds.contains_key(&n) && self.dup_input_fd(n, ambient).is_none()
+                {
                     return Err(bfmt![
                         Self::dup_subject(origin, fd, 0, target),
                         b": Bad file descriptor"
@@ -25751,7 +25756,7 @@ impl Shell {
                 // names a write-only source, and bash makes that dup and lets
                 // the read through fd 3 fail. Only a descriptor with no half at
                 // all is refused here.
-                let read_half = self.clone_input_fd(n);
+                let read_half = self.dup_input_fd(n, ambient);
                 let write_half = self.exec_dup_source(n, out);
                 if read_half.is_none() && write_half.is_err() {
                     return Err(bfmt![
@@ -25818,8 +25823,9 @@ impl Shell {
     /// It does not answer whether fd `n` is open — [`Shell::exec_dup_source`]
     /// does, for both halves at once, and a source with neither is the one a
     /// dup is refused for.
-    fn exec_dup_read_half(&self, n: i32) -> InputFd {
-        self.clone_input_fd(n).unwrap_or_else(write_only_input)
+    fn exec_dup_read_half(&self, n: i32, ambient: &AmbientStdin) -> InputFd {
+        self.dup_input_fd(n, ambient)
+            .unwrap_or_else(write_only_input)
     }
 
     /// Bind — or unbind — the *read* half of standard write descriptor `fd`
@@ -25855,6 +25861,32 @@ impl Shell {
         }
     }
 
+    /// [`Shell::clone_input_fd`] with fd 0 resolved against the descriptor the
+    /// *command* was handed, which is what a `<&0` actually duplicates.
+    ///
+    /// The shell's own fd table does not hold a pipeline stage's fd 0: the
+    /// stage's input arrives as a [`StdinSrc`], not as an `exec`-installed
+    /// descriptor, so `clone_input_fd(0)` finds nothing and falls back to the
+    /// empty stream it gives an unbound stdin. Both dup paths were wrong for it
+    /// — `printf 'A\nB\n' | { exec 3<&0; read -u 3 l; }` and the same written
+    /// `{ read -r l <&3; } 3<&0` each bound fd 3 to nothing at all, a silent
+    /// no-op where bash duplicates the pipe. [`AmbientStdin`] is the missing
+    /// piece, and both paths already carry one.
+    fn dup_input_fd(&self, n: i32, ambient: &AmbientStdin) -> Option<InputFd> {
+        if n == 0
+            && self.exec_stdin.is_none()
+            && let AmbientStdin::Fd(c) = ambient
+        {
+            // A closed ambient fd 0 is not a descriptor to dup *from*, the same
+            // rule `clone_input_fd` applies to an `exec 0<&-`.
+            return match &*lock_input(c) {
+                InputSrc::Closed => None,
+                _ => Some(Arc::clone(c)),
+            };
+        }
+        self.clone_input_fd(n)
+    }
+
     /// Resolve input fd `n`'s current source for an input dup (`M<&N`). fd 0
     /// resolves to `exec_stdin` (falling back to an empty stream), fds ≥ 3 to
     /// the `open_fds` table. `None` for an unbound descriptor — the caller owns
@@ -25863,6 +25895,9 @@ impl Shell {
     ///
     /// The source is *shared*, not copied: a dup names one open file
     /// description, so reading through either descriptor advances both.
+    ///
+    /// A `<&0` wants [`Shell::dup_input_fd`] instead — this one cannot see the
+    /// fd 0 a *command* was handed, only the one an `exec` installed.
     fn clone_input_fd(&self, n: i32) -> Option<InputFd> {
         let cur = if n == 0 {
             self.exec_stdin.as_ref()
@@ -25923,20 +25958,13 @@ impl Shell {
                     return self.input_special_src(&lock_input(c), n, redir, out);
                 }
                 match stdin {
+                    // A pipeline stage's fd 0 is an ordinary descriptor here
+                    // too, and re-opening it through `/proc/self/fd` is the
+                    // right answer for one: a pipe re-opens as the same pipe,
+                    // with no rewind. Measured: `printf 'echo A\necho B\n' | {
+                    // read -r l; source /dev/stdin; }` prints `B` in bash, where
+                    // the same over a seekable fd 0 prints both lines.
                     StdinSrc::Fd(c) => self.input_special_src(&lock_input(c), n, redir, out),
-                    // A pipe has no rewind — a re-open names the same
-                    // description — and this reader may already hold bytes the
-                    // pipe will not yield twice, so continuing *is* the re-open.
-                    // Measured: `printf 'echo A\necho B\n' | { read -r l;
-                    // source /dev/stdin; }` prints `B` in bash, where the same
-                    // over a seekable fd 0 prints both lines.
-                    StdinSrc::Pipe(r) => {
-                        let mut rest = Vec::new();
-                        match io::Read::read_to_end(&mut *r.borrow_mut(), &mut rest) {
-                            Ok(_) => SpecialSrc::Bytes(rest),
-                            Err(_) => SpecialSrc::Unavailable,
-                        }
-                    }
                     StdinSrc::Inherit => match &self.exec_stdin {
                         Some(cur) => self.input_special_src(&lock_input(cur), n, redir, out),
                         // Nothing redirected it, so the shell's fd 0 *is* the
@@ -26211,7 +26239,7 @@ impl Shell {
             }
             return Some(Arc::clone(c));
         }
-        self.clone_input_fd(0)
+        self.dup_input_fd(0, &plan.ambient_stdin)
     }
 
     /// The read half fd `n` (≥ 3) names *at this point in the redirect list*:
@@ -27917,16 +27945,13 @@ impl Shell {
                     Some(p) => SpecialSrc::Host(Reopen::borrowed(p)),
                     None => SpecialSrc::Unavailable,
                 },
+                // A pipeline stage's pipe arrives here too, and the re-open is
+                // right for it: `/dev/fd/0` on a pipe yields the same pipe,
+                // positioned where the reader left it.
                 AmbientStdin::Fd(c) => {
                     let src = lock_input(&c);
                     self.input_special_src(&src, n, plan, out)
                 }
-                // A pipeline stage's stdin: a live reader with no name and no
-                // rewind. Falling through to the dup is *right* here rather
-                // than a concession — bash's re-open of `/dev/fd/0` on a pipe
-                // yields the same pipe, positioned where the reader left it,
-                // which is exactly what the dup gives.
-                AmbientStdin::Opaque => SpecialSrc::Unavailable,
             };
         }
         match self.dup_read_half(plan, n) {
@@ -54531,7 +54556,6 @@ impl Shell {
         }
         match stdin {
             StdinSrc::Fd(c) => take(&mut *lock_input(c), delim, max),
-            StdinSrc::Pipe(r) => take(&mut *r.borrow_mut(), delim, max),
             StdinSrc::Inherit => {
                 if let Some(cur) = &self.exec_stdin {
                     return take(&mut *lock_input(cur), delim, max);
@@ -58027,6 +58051,9 @@ impl Shell {
     /// "ready" (bash returns 0 even for an empty file or at EOF). A live
     /// upstream pipe is ready only when it already holds buffered bytes; an
     /// interactive terminal with no pending keystroke is treated as would-block.
+    /// Which of the two a descriptor is, is decided by whether it can seek —
+    /// see [`FileInput::readable_now`], which is why a pipeline stage's fd 0
+    /// gets the pipe's answer even though it is an ordinary [`InputFd`].
     ///
     /// Known limitation: a pipe sitting exactly at EOF (writer closed, buffer
     /// drained) reports would-block here, where bash reports ready — a precise
@@ -58038,15 +58065,14 @@ impl Shell {
             return true;
         }
         match stdin {
-            StdinSrc::Fd(_) => true,
+            StdinSrc::Fd(c) => match &*lock_input(c) {
+                InputSrc::File(f) => f.readable_now(),
+                // Nothing here can block: a snapshot answers from memory, and a
+                // closed, write-only or directory descriptor answers with an
+                // error the moment it is read.
+                _ => true,
+            },
             StdinSrc::Inherit => self.exec_stdin.is_some() || stdin_readable_now(),
-            StdinSrc::Pipe(r) => {
-                let g = r.borrow();
-                // Bytes already pulled into the BufReader are unconditionally
-                // ready; otherwise probe the underlying OS pipe (data queued or
-                // writer-closed EOF ⇒ ready; empty live pipe ⇒ would block).
-                !g.buffer().is_empty() || pipe_reader_readable_now(g.get_ref())
-            }
         }
     }
 
@@ -58087,13 +58113,10 @@ impl Shell {
             StdinSrc::Fd(c) => {
                 // `io::Cursor` implements `BufRead`; `read_line` advances its
                 // position exactly past the consumed newline, so successive
-                // reads yield successive lines.
+                // reads yield successive lines. A streaming upstream stage is
+                // the same shape — a `FileInput` over the pipe read end, which
+                // yields successive lines as the producer writes them.
                 read_one_line(&mut *lock_input(c), raw)
-            }
-            StdinSrc::Pipe(r) => {
-                // Streaming upstream stage: the `BufReader` yields successive
-                // lines as the producer writes them.
-                read_one_line(&mut *r.borrow_mut(), raw)
             }
             StdinSrc::Inherit => {
                 // A persistent `exec < file` rebinds the shell's ambient fd 0.
@@ -58144,7 +58167,6 @@ impl Shell {
         }
         match stdin {
             StdinSrc::Fd(c) => read_record(&mut *lock_input(c), delim, nchars, exact, raw, true),
-            StdinSrc::Pipe(r) => read_record(&mut *r.borrow_mut(), delim, nchars, exact, raw, true),
             StdinSrc::Inherit => {
                 if let Some(cur) = &self.exec_stdin {
                     return read_record(&mut *lock_input(cur), delim, nchars, exact, raw, true);
@@ -59229,23 +59251,18 @@ struct VarfdUndo {
 /// thing about the command's environment the list cannot work out for itself,
 /// and the thing a `< /dev/stdin` in the list has to open.
 ///
-/// A [`StdinSrc`] cannot be stored here: a pipeline stage's is a `RefCell` over
-/// a live reader, neither cloneable nor meaningfully copyable. What the question
-/// needs is only which of three kinds it is.
+/// A [`StdinSrc`] is not stored here directly because it is not `Clone` — an
+/// `Inherit` says only "the process's own", with no handle to carry. What the
+/// question needs is which of the two kinds it is, and for a bound descriptor
+/// the descriptor itself.
 #[derive(Debug, Clone, Default)]
 enum AmbientStdin {
     /// The process's own fd 0 — the one the kernel will name back.
     #[default]
     Process,
-    /// A descriptor the shell holds: an `exec 0< f`, or the `< f` of an
-    /// enclosing compound command.
+    /// A descriptor the shell holds: an `exec 0< f`, the `< f` of an enclosing
+    /// compound command, or the read end of an enclosing pipeline's pipe.
     Fd(InputFd),
-    /// A pipeline stage's pipe. There is no file behind it and no name the
-    /// kernel would give back that another process could open, so a
-    /// special filename naming it falls back to the dup — which for a pipe is
-    /// what re-opening `/proc/self/fd/0` would have produced anyway, the same
-    /// pipe with no rewind.
-    Opaque,
 }
 
 impl AmbientStdin {
@@ -59254,7 +59271,6 @@ impl AmbientStdin {
         match stdin {
             StdinSrc::Inherit => AmbientStdin::Process,
             StdinSrc::Fd(c) => AmbientStdin::Fd(Arc::clone(c)),
-            StdinSrc::Pipe(_) => AmbientStdin::Opaque,
         }
     }
 }
@@ -66781,11 +66797,16 @@ fn stdin_readable_now() -> bool {
     handle_readable_now(io::stdin().as_raw_handle())
 }
 
-/// `read -t 0`: does the upstream pipeline pipe hold data (or sit at EOF)?
+/// `read -t 0`: does an unseekable descriptor hold data (or sit at EOF)?
+///
+/// Asked of a `File` rather than a pipe read end because a pipeline stage's
+/// fd 0 is an ordinary input descriptor like any other — see [`StdinSrc::Fd`].
+/// `handle_readable_now` switches on the handle's type, so a FIFO, a console
+/// and a pipe are each asked the right question.
 #[cfg(windows)]
-fn pipe_reader_readable_now(r: &io::PipeReader) -> bool {
+fn file_readable_now(f: &File) -> bool {
     use std::os::windows::io::AsRawHandle;
-    handle_readable_now(r.as_raw_handle())
+    handle_readable_now(f.as_raw_handle())
 }
 
 /// Fallback readability probe for non-Windows targets (including SlateOS).
@@ -66799,10 +66820,10 @@ fn stdin_readable_now() -> bool {
 }
 
 /// Fallback: without a `poll(2)` peek, only bytes already buffered by the caller
-/// count as ready for an upstream pipe (a bare OS-pipe query is not yet wired
+/// count as ready for an unseekable descriptor (a bare fd query is not yet wired
 /// for non-Windows targets — see TD-OILS-READ-T0-POLL).
 #[cfg(not(windows))]
-fn pipe_reader_readable_now(_r: &io::PipeReader) -> bool {
+fn file_readable_now(_f: &File) -> bool {
     false
 }
 

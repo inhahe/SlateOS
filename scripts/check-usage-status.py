@@ -104,6 +104,10 @@ ALLOWED = {
         "bare `ksyms` prints its synopsis as output; documented exclusion",
     ("cmd_scrollback", "Usage: scrollback [N | search <pattern> | screen]"):
         "same: the `\"\"` arm is bare invocation, which succeeds",
+    ("cmd_lockdep", "  Usage: lockdep [classes|edges|held|all]"):
+        "same: the `subcmd.is_empty()` branch is bare `lockdep`, whose whole "
+        "output is this synopsis and the four descriptions under it. Its sibling "
+        "unrecognised-subcommand branch prints the identical line and does fail",
 
     # A usage line appended to a *successful query* as a hint, not printed as a
     # complaint. Both are guarded on "no argument given", so the branch is only
@@ -154,6 +158,24 @@ ALLOWED = {
         "awk error formatter; callers set the status",
     ("cmd_selftest", "Usage: selftest <category>"):
         "a hint line inside the successful output of `selftest list`",
+    ("cmd_rev_input", "Usage: cut -d DELIM -f FIELDS [file]"):
+        "the `NoList` arm of `cut`'s error `report()`; like its nine sibling "
+        "arms it only prints, and all fifteen `e.report()` call sites set a "
+        "non-zero status immediately after (checked: twelve set 1, three set 2)",
+
+    # Explicit `--help`, which is a request that was granted, so 0 is right.
+    # Both carry a comment saying so; both print the *same* text an
+    # unrecognised option does, which is precisely why the status has to be
+    # what tells the two apart. Invisible to the check until it began matching
+    # a whole statement -- rustfmt puts these long synopses on their own line,
+    # so the `USAGE` regex, which wanted the literal to follow the macro name,
+    # matched neither line. See
+    # A-KSHELL-THE-USAGE-GATE-CANNOT-SEE-A-SYNOPSIS-RUSTFMT-PUT-ON-ITS-OWN-LINE.
+    ("cmd_dedup", "Usage: dedup [--dry-run|-n] [--delete]"):
+        "the `\"--help\" | \"-h\"` arm; its sibling `other =>` arm prints the "
+        "identical synopsis and does set 1",
+    ("cmd_journal", "Usage: journal [-n N] [--all] [--since SEQ]"):
+        "the `\"--help\" | \"-h\"` arm; every other arm of the same loop sets 1",
 
     # The query halves of the five subcommand branches that used to answer a
     # query and report a typo with one arm and one status. Each now has a
@@ -171,6 +193,11 @@ ALLOWED = {
         "the no-argument `else`: a query, answered by the current-mode line above",
     ("cmd_faceunlock", "Usage: faceunlock security <low|standard|high|maximum>"):
         "the no-argument `else`: a query, answered by the current-level line above",
+    ("cmd_credentials", "Use: cred autofill <app> to list rules for an app"):
+        "two hint lines under the answer to bare `cred autofill`, which lists "
+        "every rule. It only looked like a bare complaint because the listing "
+        "was missing: the branch called `list_all()` and dropped it on the floor "
+        "with `let _ = all`",
 
     # `tsession` reaches this arm from `""`, `info` and `status` -- all three
     # are requests for the session summary, which the lines above print. Its
@@ -178,7 +205,7 @@ ALLOWED = {
     ("cmd_tsession", "Usage: tsession <new|list|switch|kill|rename>"):
         "the `\"\" | \"info\" | \"status\"` arm is the query; the `_` arm fails separately",
 
-    # These two catch-all help arms *are* resolved -- they end in
+    # These four catch-all help arms *are* resolved -- they end in
     # `end_help_arm` like the other 23 -- but the checker cannot see it. Their
     # help text lives in a nested `#[inline(never)] fn case()` (a stack-frame
     # workaround for a very long arm), so the forward walk from the usage line
@@ -189,6 +216,13 @@ ALLOWED = {
         "help text in a nested `fn case()`; its only caller ends in `end_help_arm`",
     ("cmd_tasksched", "Usage: tasksched|schtask <subcommand>"):
         "help text in a nested `fn case()`; its only caller ends in `end_help_arm`",
+    ("cmd_firewall", "Usage: fw [on|off|on6|off6|policy|policy6"):
+        "same shape; `end_help_arm(\"fw\", cmd)` follows `case()`. Bare `fw` "
+        "cannot reach this arm -- `\"\" | \"status\"` catches it -- so the arm "
+        "sees only a real subcommand or a help request",
+    ("cmd_container", "Usage: container [list|create|delete|rootfs"):
+        "same shape; `end_help_arm(\"container\", cmd)` follows `case()`. Bare "
+        "`container` is caught by the `\"\" | \"list\" | \"ls\"` arm",
 }
 
 # Arms reached BOTH by an explicit help/query request (a success) and by an
@@ -227,6 +261,12 @@ USAGE = re.compile(
     r'(?:console_println!|shell_println!)\s*\(\s*"'
     r'(?:\s*[Uu]sage\b|Unknown\b|Unrecogni[sz]ed\b|Invalid\b|Use:)'
 )
+# The macro call on its own, without the literal. `USAGE` is matched against a
+# whole statement, whose text has had its newlines collapsed, so the column of
+# the match within it says nothing about any line. The block walk still needs a
+# real line and column to start from -- the call, on the statement's first
+# line -- or it starts at column zero and counts the `{` the print is inside.
+CALL = re.compile(r"(?:console_println!|shell_println!)\s*\(")
 FN = re.compile(r"(?:pub )?(?:async )?fn ([a-z_0-9]+)")
 
 
@@ -273,15 +313,47 @@ def main(argv):
 
     unaccounted = []
     seen_conflated = {}
-    for i, ln in enumerate(code):
-        if not USAGE.search(ln):
+    # Matched per *statement*, not per line. `USAGE` requires the literal to
+    # follow `shell_println!(` immediately, and when the synopsis is long
+    # `cargo fmt` puts the literal on its own line -- at which point the regex
+    # matches neither line. That hid 192 usage diagnostics, and the longest
+    # synopses are precisely the ones most likely to be wrapped, so the sites
+    # it hid were biased towards the most complicated commands. Third instance
+    # of the same family: `walk_block` for braces, `statements` for chains,
+    # this for a macro call and its first argument.
+    for i, stmt in _rl.statements(code, struct):
+        if not USAGE.search(stmt):
             continue
+        # The walk must begin at the macro call, which is on the statement's
+        # first line -- not at the literal, which may be on a later one, and
+        # not at column zero, which would count a `{` the print sits inside.
+        m_call = CALL.search(code[i])
+        start_col = m_call.start() if m_call else 0
 
-        # Walk to wherever control leaves this block, looking for a failure status.
-        depth = 0
+        # Walk to wherever control leaves this block, looking for a failure
+        # status.
+        #
+        # The walk is `strip_noise`'s, not this file's, and the difference is
+        # not cosmetic. The local one counted braces a *line* at a time, so
+        # `} else {` -- which closes one block and opens another -- summed to
+        # zero and the walk sailed straight through it into the `else` branch.
+        # Any `set_exit(1)` living there was credited to the `if`, so the
+        # overwhelmingly common
+        #
+        #     if parts.len() < 2 { <usage> } else { .. set_exit(1) .. }
+        #
+        # counted as accounted for. This gate reported zero findings while
+        # hiding 195 real ones across 50 commands, and a gate that is wrong in
+        # the clean direction has no symptom at all.
+        #
+        # The match's column is passed too: a one-liner spelled entirely on the
+        # usage line would otherwise be walked from column zero, counting the
+        # `{` the usage print is already inside.
         raised = False
-        for k in range(i, min(i + 300, len(code))):
-            s = code[k]
+        for k, a, b in _rl.walk_block(struct, i, start_col):
+            # Only the slice the walk vouches for. Text outside it is a
+            # sibling block's, which is the whole point.
+            s = code[k][a:b]
             if "set_exit(" in s and "set_exit(0)" not in s:
                 raised = True
                 break
@@ -295,25 +367,24 @@ def main(argv):
             if "end_help_arm(" in s:
                 raised = True
                 break
-            if k > i and re.search(r"\breturn\b", struct[k]):
-                break
-            depth += struct[k].count("{") - struct[k].count("}")
-            if depth < 0:
+            if k > i and re.search(r"\breturn\b", struct[k][a:b]):
                 break
         if raised:
             continue
 
         fn = fn_of(i)
-        # Matched against the comment-free view, so an ALLOWED fragment quoted
-        # in a comment cannot grant the exemption; reported from the verbatim
-        # one, so the reader sees the line as it is written.
-        matchable = code[i].strip()
-        if any(fn == f and frag in matchable for (f, frag) in ALLOWED):
+        # Matched against the statement's comment-free text, so an ALLOWED
+        # fragment quoted in a comment cannot grant the exemption, and a
+        # fragment inside a synopsis rustfmt has moved to its own line is still
+        # found. Reported from the same text rather than from `lines[i]`,
+        # because for a wrapped call `lines[i]` is a bare `shell_println!(`,
+        # which tells the reader nothing about which message was flagged.
+        if any(fn == f and frag in stmt for (f, frag) in ALLOWED):
             continue
         if seen_conflated.get(fn, 0) < KNOWN_CONFLATED.get(fn, 0):
             seen_conflated[fn] = seen_conflated.get(fn, 0) + 1
             continue
-        unaccounted.append((i + 1, fn, lines[i].strip()[:88]))
+        unaccounted.append((i + 1, fn, stmt[:88]))
 
     # A debt entry that no longer matches anything is itself a defect: it means
     # the site was fixed (so the entry is stale and should go) or renamed away

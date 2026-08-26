@@ -80806,8 +80806,25 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **240 of 334 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **706 of 800 remain**
 
+> **The denominator moved, and not because anything regressed.** 2026-08-25:
+> the gate was matching its regex against a *line*, and `cargo fmt` — not the
+> author — decides whether one of these chains fits on one. Matching against a
+> statement instead found **466 more sites of the identical shape**, all of
+> which were in the shell the whole time. Every figure in the log below was
+> measured under the old, line-granular gate and is therefore an undercount of
+> what those batches actually left behind; they are kept verbatim because the
+> *work* they describe was real and is still done. The running total is
+> restated above against the true denominator: **706 remain across 240
+> functions**, and the 94 sites the log below records as fixed bring the known
+> total to 800 — not 334. (Whether those 94 batches also swept up wrapped-form
+> siblings that the old gate never listed is unknowable, so 800 is stated as
+> the floor it is.) No function's count went down when the gate was corrected,
+> which is the check that this is the gate seeing more rather than a
+> re-attribution of what it already saw. See
+> `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`.
+>
 > **Burn-down log.** 2026-08-25 (second batch): `cmd_monitors` (13),
 > `cmd_userns` (10), `cmd_reslimit` (10) and `cmd_splitview` (9) cleared —
 > 42 sites, four more ledger lines deleted, 282 → 240 across 114 → 110
@@ -81131,7 +81148,48 @@ authoritative.
 
 ---
 
-## `A-KSHELL-THE-USAGE-GATE-WALKS-STRAIGHT-THROUGH-} else {` (lane A, 2026-08-25) — **open**, 195 hidden sites measured
+## `A-KSHELL-THE-USAGE-GATE-WALKS-STRAIGHT-THROUGH-} else {` (lane A, 2026-08-25) — **FIXED** 2026-08-25, all 195 sites resolved
+
+> **Resolution.** The walk is now `walk_block` in `check-recursive-locks.py`,
+> the directory's shared self-tested scanner, counting braces a character at a
+> time and handing each caller a per-line *column range* rather than a line —
+> text outside the range belongs to a sibling block, which is the whole bug.
+> It also takes the match's column, so a one-liner is not walked from column
+> zero and does not count the `{` its usage print is already inside. Five
+> regression cases, all of which a line-granular count answers wrongly.
+>
+> Rewiring `check-usage-status.py` onto it took the gate from 0 findings to
+> 195 — the number this entry predicted from an in-process probe, reproduced
+> independently by the real fix. Of the 195: **192** were the mechanical
+> "print a synopsis, exit 0" and got their `set_exit(1)`; **3** would have
+> been made worse by one and are handled in their own commit —
+>
+> * `bright set [display_id] <level>`, the one synopsis here whose *optional*
+>   operand comes first. Reading `parts[1]` as the display made the documented
+>   one-word form print its own usage line, and under that sat the guess:
+>   `bright set 1 abc` parsed to 0, turned the backlight off, said
+>   `Brightness → 0%` and exited 0. Both operands now go through
+>   `required_u32`.
+> * bare `cred autofill`, which claimed in a comment to list every autofill
+>   rule and did not — it called `list_all()` (the *credential* list), dropped
+>   it with `let _ = all`, and printed two hint lines alone. Now lists, via a
+>   new `credentials::list_all_autofill()`.
+> * bare `lockdep`, which prints its synopsis *as* its output, like `ksyms`.
+>   Correct as it stood; now in `ALLOWED` with the reason.
+>
+> Pinned by `kshell::self_test` rung 67: one command per guard shape, each
+> paired with a control naming an operand that does not exist, which must not
+> print a synopsis — so the rung cannot pass by having broken the command.
+>
+> **The rule this produced, which is the part worth keeping:** a walk over a
+> *balanced* block (start on its `{`, stop when depth returns to 0) is safe at
+> line granularity, because `} else {` nets to zero truthfully. Only a walk
+> that must notice depth going *negative* — leaving a block it never entered —
+> is broken by it. That rule cleared the other three line-granular counters in
+> `scripts/`, and it is what the shared helper's docstring now states. **It
+> did not clear `check-option-refusal.py`, whose problem is a different
+> granularity bug in the same family** — see
+> `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR` below.
 
 **In short:** the gate that exists to catch "the shell printed a complaint and
 then told the caller it succeeded" counts curly braces one *line* at a time.
@@ -81276,6 +81334,158 @@ does not stop, an `ERR` trap does not fire.
 
 **Not a regression.** True since the checker was written; every site it hides
 predates it.
+
+---
+
+## `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR` (lane A, 2026-08-25) — **FIXED** 2026-08-25 (the gate); the 706-site backlog it revealed is now carried honestly
+
+> **Resolution.** The blind spot is closed. `check-recursive-locks.py` — the
+> directory's one self-tested Rust scanner — gained `statements(code, struct)`,
+> which yields each statement-sized span with its newlines collapsed, so a
+> regex spanning method calls matches the wrapped and unwrapped spellings
+> alike. `check-option-refusal.py` now runs D1 and D2 over that instead of over
+> `lines`.
+>
+> The predicted figure held: **240 → 706**, i.e. 466 sites that had been in the
+> shell all along and were invisible because rustfmt had wrapped their chain.
+> The estimate above said "about 712"; it was made by gluing a statement
+> starting at *every* line, which double-counts a wrapped chain once per line
+> it occupies. 706 is the measured number.
+>
+> **No function's count went down**, which is the check that this is purely
+> additive — the gate is seeing more, not re-attributing what it already saw.
+> `scripts/option-refusal-ledger.txt` was regenerated wholesale: 110 functions
+> → 240, and its header now records why its known-issues key names a figure a
+> third of the truth (renaming the key would break every reference to it).
+>
+> Eight self-test cases guard the span walk, each one answered wrongly by a
+> line-granular splitter: the wrapped chain; the unwrapped chain, which must
+> produce the *same* span or the blind spot has only moved; a `(` inside a
+> string literal (counting it makes the depth drift up and never return — that
+> mistake, made in the first draft, collapsed 100698 spans into 1068 and 706
+> findings into 2); a `;` inside a literal; sibling match arms, which must not
+> glue, or a `.parse()` in one and an `.unwrap_or()` in the next would match a
+> chain that is not in the source; an argument comma, which must not split; a
+> closure body, which must stay with its chain; and the crediting of a span to
+> its first line.
+>
+> **The burn-down itself is not done** — 706 sites across 240 functions are
+> carried in the ledger, where they can only shrink. That work continues under
+> `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+> What is fixed here is the measurement: the number in the ledger is now the
+> number in the shell.
+>
+> **The lesson, which is the same one as the entry above it, one granularity
+> up.** That one counted braces by the line and hid 195 findings; this one
+> counted statements by the line and hid 466. Both were *silent*, because a
+> gate that undercounts prints a smaller number and reads as progress. Three
+> counters in `scripts/` remain line-granular and are correct — the rule that
+> separates them is now written into `walk_block`'s and `statements`'
+> docstrings: a walk over a *balanced* region is safe by the line; a walk that
+> must see depth go *negative*, or a regex that spans a construct **rustfmt is
+> free to wrap**, is not.
+
+**In short:** the shell has a known, deliberately-counted backlog of places
+where it invents a value for a word it could not read — `bright set 1 abc`
+reading `abc` as 0 and turning the backlight off, that family. A gate counts
+that backlog so it can only shrink. The gate reads the source **one line at a
+time**, and the code formatter splits exactly these expressions across four
+lines. So the count it publishes — 240 — is not the backlog. The backlog is
+**about 712**. Two thirds of a debt that exists specifically to be honest
+about its size are missing from it.
+
+**Where.** `scripts/check-option-refusal.py`, the `D1` scan in `main`:
+
+```python
+for i, ln in enumerate(lines):
+    ...
+    if D1.search(code) and not allowed(fn, shown):
+```
+
+`D1` is `\.parse(?:::<[^>]*>)?\(\)[^;]*?\.unwrap_or(?:_default|_else)?\b` — a
+single-line regex, and `[^;]` cannot cross a newline anyway. It sees
+
+```rust
+let level = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+```
+
+and misses the *identical expression* after `cargo fmt` decides the chain is
+too long:
+
+```rust
+let level = parts
+    .get(2)
+    .and_then(|s| s.parse::<u32>().ok())
+    .unwrap_or(0);
+```
+
+Which form a site is in has nothing to do with whether it is a defect. It is
+decided by the length of the variable name and the depth of the indentation.
+
+**The measurement.** Walking statements instead of lines — glue each line to
+its continuations up to the `;`, then match once per statement, so a wrapped
+chain is one unit and cannot be counted once per line it spans:
+
+| | statements matching `D1` |
+|---|---|
+| seen by the gate as shipped (per line) | 236 |
+| **hidden by line granularity** | **472** in 148 functions |
+| total | 708 |
+
+(236 rather than the ledger's 240 because a statement holding two `D1` chains
+counts once here and twice there. The ledger is per line.)
+
+Worst affected: `cmd_partmgr` 21, `cmd_vdesktop` 18, `cmd_colorpicker` 16,
+`cmd_winsnap` 12, `cmd_wintiling` 11, `cmd_screenshot` 10, `cmd_a11y` 10,
+`cmd_filepicker` 10, `cmd_focusassist` 9, `cmd_peninput` 9, `cmd_aiostat` 8,
+`cmd_cgiostat` 8.
+
+A random sample of eight hidden sites was read by hand; all eight are genuine,
+and one is the defect twice in one statement:
+
+```rust
+let pid = parts
+    .get(1)
+    .copied()
+    .unwrap_or("0")      // no pid given  -> "0"
+    .parse::<u32>()
+    .unwrap_or(0);       // pid unreadable -> 0, the same value
+```
+
+**Why this is the same family as the `} else {` bug and not the same bug.**
+Both are a scanner reading Rust a line at a time when Rust is not written a
+line at a time. But the rule that cleared the other three counters — *a walk
+over a balanced block is safe at line granularity; only one that must see
+depth go negative is not* — is about **brace counting**, and this is not brace
+counting. It is **pattern matching across a statement**, and there the rule is
+simpler and admits no exceptions: a regex spanning method calls must be
+matched against the statement, because the formatter, not the author, chooses
+where the newlines go. `check-usage-status.py` was fixed by sharing a walk;
+this needs a shared *statement view* — a list of `(start_line, end_line, text)`
+built once from `strip_noise` output — which `check-variant-lists.py` and
+`check-tick-wiring.py` would also be able to use.
+
+**The fix.**
+
+1. Add a statement view to the shared scanner in `check-recursive-locks.py`,
+   with self-test cases covering the wrapped-chain form specifically (it is
+   the form that hid 472 sites, so it is the form a regression must fail on).
+2. Match `D1` and `D2` against statements rather than lines.
+3. Regenerate `scripts/option-refusal-ledger.txt`. The published debt goes
+   from 240 across 110 functions to roughly 712 across ~200. **That number
+   going up is the point** — a counted ledger (§296) is worth having only if
+   the count is the real one, and this one has been understating it since the
+   day it was written.
+4. Continue the burn-down against the true figure.
+
+**What it costs to leave.** Nothing gets worse on its own, but every burn-down
+report so far has quoted a denominator that is wrong by 3×, and the ledger's
+one job is to be believed. The sites themselves are ordinary D1: a mistyped
+number silently becomes a default, and the command reports success.
+
+**Not a regression.** True since the checker was written. Found while fixing
+the `} else {` bug, from a single site — `cmd_brightness` had an obvious
+`.unwrap_or(1)` on an unreadable operand and was not in the ledger.
 
 ---
 
@@ -81585,8 +81795,6 @@ path — `Drop` runs during unwind where a trailing `remove_dir_all` does not.
 
 ---
 
----
-
 ## `TD-C-AN-IMAGE-CAN-ONLY-BE-UPLOADED-IN-PROCESS` (lane C, 2026-08-25) — **open**
 
 **What it is.** The compositor now has an image store and paints
@@ -81624,3 +81832,83 @@ needs, so the handler is a decode and a call.
 **How you would notice.** `apps/explorer`'s icon view will draw correctly under
 the in-process compositor and draw nothing under a remote one, with no error
 either way — the unresolved-id case is silent by design.
+
+---
+
+## `A-KSHELL-THE-USAGE-GATE-CANNOT-SEE-A-SYNOPSIS-RUSTFMT-PUT-ON-ITS-OWN-LINE` (lane A, 2026-08-25) — **FIXED** 2026-08-25, all 95 defects resolved
+
+**In short:** the gate that checks "if a command prints its usage line because
+you typed something wrong, it must also report failure" could not see 192 of
+those usage lines at all. Its pattern required the quoted synopsis to sit on
+the *same source line* as the `shell_println!(` that prints it — and `cargo
+fmt`, not the author, decides that. A long synopsis gets wrapped onto its own
+line, at which point the pattern matches neither line. 95 of the 192 it hid
+were real defects: the command complained and then reported success, so a
+script could not tell a typo from a completed request.
+
+**Third instance of one bug.** This is the same mistake as
+`A-KSHELL-THE-USAGE-GATE-WALKS-STRAIGHT-THROUGH-} else {` (braces counted by
+the line) and `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`
+(a method chain matched by the line), in a third place:
+
+| # | What was counted by the line | What it should have been | Hidden |
+|---|---|---|---|
+| 1 | `{`/`}` depth, where `} else {` nets to zero | a character-column walk (`walk_block`) | 195 |
+| 2 | a regex spanning `.parse().ok().unwrap_or(…)` | a statement (`statements`) | 466 |
+| 3 | a regex spanning `shell_println!(` and its first argument | a statement | 192 |
+
+**Why it was found third and not first.** Each of the three is invisible in the
+same way: a gate that undercounts prints a *smaller* number, and a smaller
+number reads as progress. Nothing failed, nothing warned; the gate said
+"clean" and meant "clean, of the subset I can see." What broke the pattern was
+an anomaly, not an audit — `pmgr create` visibly lacked a `set_exit(1)` while
+the gate was green, and following that one discrepancy back through the regex
+found the class.
+
+**The bias is the worst part.** These are not a random 192. The longer a
+synopsis, the likelier rustfmt wraps it, and the longest synopses belong to the
+commands with the most subcommands — `container` (28 of them), `fw` (20),
+`overlay` (12). So the gate's blind spot was concentrated on exactly the
+commands where getting a subcommand wrong is easiest.
+
+**The rule, now recorded in both docstrings.** A walk over a *balanced* region
+is safe to do by the line. A walk that must see depth go **negative**, or a
+regex spanning a construct **rustfmt is free to wrap**, is not — in the second
+case the source you are matching against was laid out by a formatter, and its
+newlines carry no meaning you may rely on.
+
+**Fix.**
+
+* `scripts/check-usage-status.py` matches `USAGE` against a statement from
+  `_rl.statements(...)` rather than a line. Because a statement's text has had
+  its newlines collapsed, the match column within it says nothing about any
+  line, so a second regex `CALL` locates the macro call on the statement's
+  *first* line to give `walk_block` a real starting column. Without that the
+  walk starts at column zero and counts the `{` the print is nested inside.
+* The 95 defects were repaired in four shapes:
+  * **38** catch-all `_ => { help }` arms that fell out of their match with no
+    status, now ending in `end_help_arm(cmd, sub)` — which sets 1 only for a
+    subcommand that was *not* a request for help, so the one arm can serve both
+    callers correctly.
+  * **50** guard branches (`if parts.len() < N`, `if let Some(..) = .. else`)
+    that printed a synopsis and exited 0, now ending in `set_exit(1)`.
+  * **2** arms where the status was set *above* the message rather than below
+    it (`cmd_overlay`, `cmd_container_network`) — harmless at run time and
+    invisible to a reader, caught only by the forward walk. Reordered.
+  * **5** genuinely correct sites added to `ALLOWED` with reasons: two explicit
+    `--help` arms (`cmd_dedup`, `cmd_journal`), `cut`'s error formatter whose
+    fifteen callers all set a status, and the two catch-alls whose help text
+    lives in a nested `#[inline(never)] fn case()` the walk cannot follow
+    (`cmd_firewall`, `cmd_container`) — the same exemption `cmd_netsettings`
+    and `cmd_tasksched` already carried.
+* `kshell::self_test` rung 68 covers one command per repair shape, each
+  refusal paired with a control that runs the same command with a usable
+  operand, so the rung cannot pass by having broken the command outright.
+
+**Severity.** Moderate. No memory-safety or correctness consequence inside the
+kernel; the damage is to scripting. A command that complains and exits 0 tells
+`&&` and `set -e` that it worked, so a script built on 95 of these silently
+continues past its own errors — and the gate that existed to prevent exactly
+that reported clean the whole time.
+
+---

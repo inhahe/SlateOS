@@ -80987,8 +80987,60 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **552 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **544 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (sixteenth batch): `cmd_cgiostat` (8) cleared —
+> 552 → 544 across 227 → 226 functions. Pinned by `kshell::self_test` rung 83.
+>
+> **A fourth row for the table below, and it is the worst one.** In the first
+> thirteen batches the guessed number selected the wrong object; in `cmd_splice`
+> it wrote to the wrong address; in `cmd_taskio` it invented a measurement. In
+> all three the command did *less* than, or *other* than, what was asked. Here
+> it does the **opposite** of what was asked, and the guessed value is a
+> perfectly legal one:
+>
+> | The guessed number is a… | What the command does | How you find out |
+> |---|---|---|
+> | **inversion** — `cmd_cgiostat` | the guessed `0` is the subsystem's word for *unlimited*, so the request is negated | you don't — the cgroup exists, `create` reported success, and the cap it was created to enforce simply isn't one |
+>
+> `cgiostat create web 100O000` — a capital O where a zero belongs — asked for a
+> 100 MB/s bandwidth cap and created a cgroup with **no cap at all**, printing
+> `cgiostat: created 'web' → id 3 (bw=0 iops=0)`. Every other shape in this entry
+> fails toward doing less than was asked. This one fails toward doing the exact
+> reverse, in a subsystem whose entire purpose is to say no. A throttle that
+> silently becomes no throttle is the one failure a throttle must not have.
+>
+> Note what makes it invisible in a way the other three are not. A guessed
+> selector leaves the object you meant untouched, so you notice. A guessed write
+> address destroys something, so eventually you notice. A guessed measurement is
+> at least *anomalous* if you look hard. But an uncapped cgroup looks exactly
+> like a cgroup that is not being asked for much — it is only ever discovered by
+> the load that the cap was supposed to prevent.
+>
+> Per §607 the limits stay **optional**: `create <name> [bw_limit] [iops_limit]`
+> brackets them, so omitting them to mean unlimited is a documented request that
+> must keep working, and rung 83 asserts it still does. The fix removes the
+> *guess*, not the *default*. Same for the bracketed byte counts in `read`/
+> `write`; the cgroup id, written `<cg_id>`, becomes `required_num`.
+>
+> **The `list` arm changed too, and that part is not incidental.** It built the
+> limit string separately — `alloc::format!("{}B/s", …)` or
+> `String::from("unlimited")` — and interpolated the result through a trailing
+> `bw={}`. So the unit and the word `unlimited` existed nowhere a reader of
+> `cmd_cgiostat` could see them, and nothing short of booting a kernel could
+> establish that a zero limit prints as `unlimited` rather than as `0`. That is
+> the same inversion the `create` arm was being fixed for, hiding one layer
+> down, in the one line whose job is to *reveal* it. Both spellings are now
+> branches of the format string.
+>
+> `check-selftest-wording.py` is what surfaced this: it rejected the rung's
+> `bw=100000000B/s` and `bw=unlimited` assertions as text the command cannot
+> print, which was **correct** — no format literal in the function contained
+> either. The temptation was to weaken the assertions; the right reading is that
+> the gate had found a real defect in the code under test, not in the test. That
+> is the second time this gate has paid for itself by refusing an assertion that
+> was true of the running kernel but underivable from its source.
+>
 > **Burn-down log.** 2026-08-26 (fifteenth batch): `cmd_taskio` (8) cleared —
 > 560 → 552 across 228 → 227 functions. Pinned by `kshell::self_test` rung 82.
 >

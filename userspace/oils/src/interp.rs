@@ -576,6 +576,25 @@ fn path_is_executable(p: &std::path::Path) -> bool {
     }
 }
 
+/// Whether a command word *spells a path* rather than naming a command to look
+/// up — the question behind every "a name with a slash is used as-is" rule:
+/// `$PATH` is not searched for it, it is never hashed, `$EXECIGNORE` reaches it
+/// differently, and a failure is reported against the word rather than against a
+/// search that never happened.
+///
+/// The separator is the host's, and on every host but Windows that is `/` alone.
+/// **A backslash is an ordinary filename byte there** — SlateOS included, whose
+/// paths allow every byte but `/` and NUL — so a word carrying one is a plain
+/// command name and is searched for like any other. Measured, bash 5.2.21 on
+/// Linux: `nosuch\` is `command not found` and 127, not a stat of a file; and a
+/// file genuinely named `we\ird.sh` is found on `$PATH` by that name, run, and
+/// reported by `type -P` as `./we\ird.sh`. osh read the backslash as a separator
+/// on every host, so it answered `No such file or directory` for the first and
+/// could not run the second at all.
+fn word_is_path(word: BStr<'_>) -> bool {
+    word.contains(&b'/') || (cfg!(windows) && word.contains(&b'\\'))
+}
+
 /// An external command about to be started: the word the shell was given, and
 /// the file its `$PATH` (and `hash`) lookup made of it — `None` when the lookup
 /// found nothing and the OS is to be handed the word to locate for itself.
@@ -754,18 +773,32 @@ fn open_error(path: &std::path::Path, e: io::Error) -> io::Error {
 /// leak into `$PWD`, `$OLDPWD`, `pwd`, `$DIRSTACK` and `dirs` output and silently
 /// break all of the above. Windows accepts `/` in every path API, so the
 /// converted form still round-trips as a real path.
+///
+/// Off that host it really is the identity, and has to be: a backslash is an
+/// ordinary filename byte everywhere else — SlateOS included, whose paths admit
+/// every byte but `/` and NUL — so rewriting one would not tidy a path but name
+/// a different file. It did: a `$PATH` hit called `we\ird.sh` came back as
+/// `we/ird.sh`, which is two components neither of which exists (measured
+/// against bash 5.2.21, which runs the file).
 fn shell_path(p: &std::path::Path) -> Str {
     let s = bytes::path_to_bytes(p);
-    // `canonicalize` on Windows returns the `\\?\` (or `\\?\UNC\`) form; strip
-    // it so the reported path is the one the user could have typed.
-    let s = if let Some(rest) = s.strip_prefix(br"\\?\UNC\".as_slice()) {
-        bfmt![br"\\", rest]
-    } else if let Some(rest) = s.strip_prefix(br"\\?\".as_slice()) {
-        rest.to_vec()
-    } else {
+    #[cfg(not(windows))]
+    {
         s
-    };
-    s.replace(b"\\", b"/")
+    }
+    #[cfg(windows)]
+    {
+        // `canonicalize` on Windows returns the `\\?\` (or `\\?\UNC\`) form;
+        // strip it so the reported path is the one the user could have typed.
+        let s = if let Some(rest) = s.strip_prefix(br"\\?\UNC\".as_slice()) {
+            bfmt![br"\\", rest]
+        } else if let Some(rest) = s.strip_prefix(br"\\?\".as_slice()) {
+            rest.to_vec()
+        } else {
+            s
+        };
+        s.replace(b"\\", b"/")
+    }
 }
 
 /// A program path in the spelling the *host* wants to launch it by.
@@ -1363,7 +1396,7 @@ enum SpawnTarget {
 fn spawn_target(cwd: BStr<'_>, word: BStr<'_>, resolved: Option<&std::path::Path>) -> SpawnTarget {
     let path: Str = match resolved {
         Some(p) => bytes::path_to_bytes(p),
-        None if word.contains(&b'/') || word.contains(&b'\\') => exec_path_name(cwd, word),
+        None if word_is_path(word) => exec_path_name(cwd, word),
         None => return SpawnTarget::Other,
     };
     if let Ok(m) = std::fs::metadata(bytes::bytes_to_path(&path)) {
@@ -1439,7 +1472,7 @@ fn spawn_error_message(
     as_exec: bool,
 ) -> (Vec<SpawnDiag>, i32) {
     use std::io::ErrorKind;
-    let is_path = word.contains(&b'/') || word.contains(&b'\\');
+    let is_path = word_is_path(word);
     if let Some(interp) = interp {
         if e.kind() == ErrorKind::NotFound {
             return (
@@ -1545,7 +1578,7 @@ fn spawn_resolved(
     resolved: Option<&std::path::Path>,
     closed: ClosedStd,
 ) -> std::io::Result<std::process::Child> {
-    if resolved.is_none() && !word.contains(&b'/') && !word.contains(&b'\\') {
+    if resolved.is_none() && !word_is_path(word) {
         return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
     }
     spawn_with_closed_std(pc, closed)
@@ -21022,8 +21055,7 @@ impl Shell {
         // …) instead of reporting "command not found". The cheap function-
         // existence check comes first so the common case never scans `$PATH`
         // twice.
-        if !name.contains(&b'/')
-            && !name.contains(&b'\\')
+        if !word_is_path(&name)
             && self.funcs.contains_key(b"command_not_found_handle".as_slice())
             // Against the same `$PATH` the run itself will use, prefix included:
             // `PATH=dir cmd` must not reach the handler when `dir` holds `cmd`.
@@ -23180,8 +23212,7 @@ impl Shell {
         // describing command is the exception: it asks about a *different*
         // search, so the table has nothing to say about it (measured).
         if temp_path.is_none()
-            && !target.contains(&b'/')
-            && !target.contains(&b'\\')
+            && !word_is_path(target)
             && let Some(ps) = self.hashed_description(target)
         {
             let line = if verbose {
@@ -23477,7 +23508,7 @@ impl Shell {
     /// Returns `None` when the name cannot be resolved — the caller then falls
     /// back to letting the OS attempt the spawn (preserving prior behavior).
     fn resolve_external(&mut self, name: BStr<'_>) -> Option<std::path::PathBuf> {
-        if name.contains(&b'/') || name.contains(&b'\\') {
+        if word_is_path(name) {
             return self.find_in_path(name, None);
         }
         if let Some((path, hits)) = self.cmd_hash.get_mut(name) {
@@ -38451,7 +38482,7 @@ impl Shell {
             .and_then(shell_script_indirection);
         let (program, args) = match (&indirect, resolved) {
             (Some(via), Some(path)) => {
-                let script = if word.contains(&b'/') || word.contains(&b'\\') {
+                let script = if word_is_path(word) {
                     word.to_vec()
                 } else {
                     shell_path(path)
@@ -38736,7 +38767,7 @@ impl Shell {
     /// variable in bash — `export _` does not make it one — which is also why an
     /// imported `_` must be stripped of its exported mark at startup.
     fn child_underscore(prog: ChildProgram<'_>) -> Str {
-        if prog.word.contains(&b'/') || prog.word.contains(&b'\\') {
+        if word_is_path(prog.word) {
             return prog.word.to_vec();
         }
         prog.resolved.map_or_else(|| prog.word.to_vec(), shell_path)
@@ -43166,7 +43197,7 @@ impl Shell {
             // it — and skips it silently for *every* remaining mode, including
             // `-d` and `-p`. (`-l` with names is not a listing at all: the
             // names fall through to the search below, as in bash.)
-            if name.contains(&b'/') || name.contains(&b'\\') {
+            if word_is_path(name) {
                 continue;
             }
             if delete {
@@ -54093,7 +54124,7 @@ impl Shell {
         // not conditioned on the shell being non-interactive.
         //
         // A name with a separator was never a search, in either mode.
-        let resolved: Str = if path.contains(&b'/') || path.contains(&b'\\') {
+        let resolved: Str = if word_is_path(path) {
             path.clone()
         } else if let Some(hit) = self.find_source_in_path(path) {
             // The hit, not the operand: `$BASH_SOURCE` and `caller` report the

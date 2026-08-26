@@ -81109,7 +81109,260 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **487 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **469 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-seventh batch): `cmd_kconsole` (6, plus
+> one uncounted) cleared — 475 → 469 across 216 → 215 functions. Pinned by
+> `kshell::self_test` rung 95.
+>
+> **In short:** `kconsole` manages virtual consoles — the text screens you
+> switch between. When it could not read a number you typed it made one up, and
+> the number it made up was **80 columns by 25 rows**. That is not an arbitrary
+> default; it is what a console *is* to almost everyone who has seen one. So
+> `kconsole resize 2 l32 43` — a lowercase L where a 1 belonged — quietly shrank
+> a 120-column console to 80 and printed `Resized console 2 to 80x43.`, a
+> sentence that no amount of knowing the subsystem lets you recognise as wrong.
+>
+> **The new row is about where the guessed value comes from, not what it does.**
+> Every previous row in this table asked what the guess *is* — a length, a
+> ceiling, a selector, an accumulator — and derived the severity from that. This
+> one is about the guess's *provenance*. `0` is recognisable as a placeholder
+> because nothing means zero on purpose; `80x25` is recognisable as nothing at
+> all, because it is the answer the reader would have given.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **canonical value of its own domain** (`cmd_kconsole resize`) | the wrong size is applied and reported in a sentence that is internally consistent and idiomatic | you don't — the only witness is `kconsole list`, and only if you already knew the old size |
+>
+> This sharpens the `cputhr` thesis rather than adding to it. That thesis was
+> that the guessed default is always the *reassuring* value — the one that says
+> nothing is wrong. Here the reassuring value and the *textbook* value coincide,
+> which removes the last defence a reader has. Against a guessed `0` you can at
+> least ask "why would anything be zero?"; against a guessed `80x25` there is no
+> question to ask. A corollary worth carrying forward: **the more plausible a
+> default is as documentation, the more dangerous it is as a guess.**
+>
+> **It is also the cleanest illustration of §607 found so far, and it needs only
+> one command to be it.** `create <name> [cols] [rows]` and `resize <id> <cols>
+> <rows>` take the *same two operands*, bracketed in the subcommand that merely
+> needs somewhere to start and angled in the one that exists for no other purpose
+> than to set them. Previous batches had to put two commands side by side to show
+> that the usage line, not the operand's type, decides required-versus-optional.
+> Here the contrast is four lines apart in the same `match`: `create rung95` with
+> no size still means 80x25, `resize 2 132` with no row count is refused, and
+> `create rung95 l20` — present and unreadable — is refused just like `resize`.
+>
+> **The id guess is the misdiagnosis row again** (`cmd_cgmem`, batch 25):
+> `init_defaults` seeds ids 1/2/3 with `next_id: 4`, so id `0` is unreachable and
+> `kconsole switch l` answered `Error: NotFound`. Safe, but pointed at the wrong
+> remedy — "that console does not exist" says *create one*, when the truth says
+> *fix the typo*.
+>
+> **The uncounted one** is `create`'s name, `unwrap_or("ttyN")` — not a
+> placeholder the module expands, a console literally named with the letter N.
+> It is self-limiting in the way that hides it: `create` rejects duplicate names,
+> so the *first* omission succeeds and every one after it fails with
+> `AlreadyExists`, which reads as a collision with something the user never
+> created. It now says `kconsole: create: missing console name`.
+>
+> **Rung 95 owns its fixture, and doing so required the module to gain a destroy
+> path** — the same discovery as batch 26, in a module that had the same gap for
+> the same reason. `kconsole::create` only ever pushed, `MAX_CONSOLES` caps the
+> vector at 16, and nothing removed. See
+> `A-KCONSOLE-CAN-CREATE-A-CONSOLE-AND-HAS-NO-WAY-TO-DESTROY-ONE`. That this is
+> now the second consecutive batch to uncover a missing teardown is itself a
+> finding: *a module whose shell command has no destructive subcommand is worth
+> checking for a missing destructor*, because nothing else in the system was
+> ever the caller that would have needed one.
+>
+> The rung establishes its premise before relying on it (`2: tty1 type=fb
+> 120x40`), pins severity with a before/after equality on both `kconsole list`
+> and `kconsole stats` across nine refusals, then proves §607's positive half by
+> creating `rung95` with no size operands and asserting the list shows
+> `80x25` — and destroys it again, so `/proc/kconsole` does not carry a console
+> the boot battery invented.
+
+> **Burn-down log.** 2026-08-26 (twenty-sixth batch): `cmd_fdtable` (6, plus
+> one uncounted) cleared — 481 → 475 across 217 → 216 functions. Pinned by
+> `kshell::self_test` rung 94.
+>
+> **In short:** `fdtable` shows and edits the table of open files a process
+> holds. Every one of its operands was guessed as `0` when it could not be read.
+> The process-id guesses were then caught by a guard and turned into a
+> complaint about the command's *shape*; the file-descriptor guesses were not
+> caught at all, and `0` is the first descriptor a process ever opens — so
+> `fdtable close 42 1O` closed it and said "Closed fd=0 for PID 42".
+>
+> **This is the first command in the burn-down that had already noticed the
+> problem and protected the wrong operand.** Both pid sites read
+>
+> ```rust
+> let pid = pid_str.parse::<u32>().unwrap_or(0);
+> if pid == 0 { shell_println!("Usage: fdtable close <pid> <fd>"); set_exit(1); return; }
+> ```
+>
+> which is the **conflation** row (`cmd_shmem`, `cmd_blkread`): one sentinel
+> serves as both the guess and the invalidity marker, so the shell reports that
+> the *form* of the command was wrong when the form was right and only the word
+> was unreadable. The reader's obvious response is to re-type the same shape and
+> get the same complaint. Note that the guard was not useless — `open`
+> auto-creates a table for whatever pid it is handed, so without it a mistyped
+> pid would have built a real fd table for process 0 — it was simply spent on
+> the operand that was not doing the damage.
+>
+> **The new row is the descriptor, and it turns on how the id space is
+> allocated.** Batch 25 established that a guessed `0` in `cgmem` was *safe but
+> dishonest*, because `next_id` starts at 1 and so cgroup 0 is unreachable. The
+> fd table inverts exactly that property: `next_fd` starts at **0**, so the
+> guess names the first descriptor the process ever opened — the entry most
+> likely to exist and the oldest one in the table. Reachability is not a
+> property of the number `0`; it is a property of where the allocator starts.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **selector in an allocation-ordered id space that starts at 0** (`cmd_fdtable close`) | destroys the process's first and oldest descriptor, reports success | you don't — and no later call can re-issue the number |
+>
+> **And it is not undoable at the number.** `open` and `dup` both allocate from
+> the monotonic `next_fd`, which never goes backwards and never reuses a freed
+> value. Re-opening the same path after a mistaken close returns *some later
+> fd*. In a table where the number is the interface — 0 being stdin by universal
+> convention — that is a permanent renumbering, not a recoverable deletion. This
+> is a stronger form of irreversibility than the `ipcns` accumulator row: there
+> the *count* could not be repaired, here the *identity* cannot.
+>
+> **`dup` is the additive twin.** The same guessed `0` there does not remove an
+> entry, it manufactures a second alias for the wrong descriptor, consumes a
+> number from `next_fd`, and bumps `total_dups` — which has no decrement. So
+> closing the surplus alias afterwards still leaves `dups=1` where the truth was
+> `dups=0`, the same laundered-audit-trail problem batch 25 found in `cgmem
+> charge`. One mistyped word thus reaches both the destructive and the
+> accumulating failure modes depending only on which subcommand it lands in.
+>
+> **The uncounted one** is `open`'s path, `parts.get(2).copied().unwrap_or("")`,
+> whose emptiness was folded into the *same* usage line as the pid — so an
+> omitted path and an unreadable pid produced byte-identical output. It now says
+> `fdtable: open: missing path`.
+>
+> **Rung 94 owns its fixture, and the first draft did not.** The rung needs a
+> descriptor to exist so it can prove the refused `close` did not destroy it.
+> The first attempt borrowed the tables `fdtable::self_test` builds earlier in
+> the boot battery — and panicked on `FDs for PID 100 (0):`, because that
+> self-test *ends* with `*STATE.lock() = None`, precisely so its fixtures cannot
+> masquerade as live processes in `/proc/fdtable`. The assertion that caught it
+> was the one written to make exactly that assumption fail loudly rather than
+> silently test an empty table, so the gate worked as designed; the lesson is
+> that a rung must build what it acts on.
+>
+> Doing that properly required the module to gain a process-exit path, which it
+> did not have — see
+> `A-FDTABLE-HAS-NO-PROCESS-EXIT-PATH-AND-THE-TABLE-VECTOR-ONLY-GROWS`, a
+> genuine leak (256-slot cap, nothing ever freed a slot) that stayed invisible
+> until a caller finally needed the operation. The rung now opens one descriptor
+> for pid 424242, pins severity with a before/after equality on both `fdtable
+> show 424242` and `fdtable stats` — the first proves the descriptor is still
+> listed, the second that no dup was tallied — and releases the fixture with
+> `fdtable exit 424242`, asserting the released count is exactly 1, which would
+> read 0 or 2 if any of the seven refusals had actually run. Neither reader
+> takes the `with_state` path, so neither perturbs `ops` and the captures are
+> comparable.
+
+> **Burn-down log.** 2026-08-26 (twenty-fifth batch): `cmd_cgmem` (6, plus
+> three uncounted) cleared — 487 → 481 across 218 → 217 functions. Pinned by
+> `kshell::self_test` rung 93.
+>
+> **In short:** `cgmem` tracks how much memory each cgroup (a named group of
+> processes with a memory ceiling) is using. Bare `cgmem create` invented a
+> cgroup called `cg0` with a ceiling nobody chose; a mistyped page count was
+> read as 1; a mistyped `rss`/`cache` was read as `rss`; and a mistyped cgroup
+> id was answered "no such cgroup".
+>
+> **Three shapes in one command, each a refinement of an earlier row rather
+> than a repeat of it.**
+>
+> **1. The ids are the familiar misdiagnosis.** `init_defaults` sets `next_id:
+> 1` and seeds no cgroups, and `create` only ever hands out `next_id`, so
+> cgroup 0 is unreachable. The guessed `0` was therefore *safe* — it removed
+> nothing, charged nothing — and dishonest in the same breath: `cgmem remove
+> 1O` answered `remove error: NotFound`, which says the cgroup does not exist.
+> It does. The word naming it could not be read, and the reader is sent to
+> check `list` instead of at what they typed.
+>
+> **2. The `create` limit is a *policy ceiling*, and this is the new row.**
+> Every earlier guessed number was a selector, a measurement, an address, or a
+> quantity. This one is the *threshold everything else is compared against*:
+> `record_charge` tests `usage_pages > limit_pages` on every call. `cgmem
+> create web 5OOOO` built a cgroup limited to 100000 pages — double the
+> intended 50000 — and echoed it back as though chosen.
+>
+> What makes it worth its own row is *why it does not currently hurt*. The
+> comparison's only output is `high_events`, which no command prints and no
+> accessor exposes (`A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`).
+> So today a guessed ceiling has no observable consequence at all — it is not
+> merely undetected but **unfalsifiable**, masked by a second defect. And
+> fixing that second defect, which is the right thing to do, is precisely what
+> would make this guess bite. That is a trap worth naming: *a burn-down that
+> looks harmless because something else is broken is not harmless, it is
+> queued.*
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **policy ceiling masked by a second defect** (`cmd_cgmem create`) | nothing, until the thing that reads the ceiling is fixed | you don't — and fixing an unrelated bug is what makes it start |
+>
+> **3. The page counts refine the `ipcns` accumulator row to *partially*
+> reversible.** The previous batch established that a guess `+=`'d into a total
+> with no inverse is uncorrectable in place. `cgmem` has an inverse —
+> `record_uncharge` puts `usage_pages` back — so at first glance it is the mild
+> version. It is not. `c.charges` and `state.total_charges` are `+= 1` with
+> nothing that ever decrements them, so **the correction is itself recorded**.
+> Un-charging a guessed 1 leaves `charges=1 uncharges=1` where the truth was
+> `charges=1 uncharges=0`. The quantity can be repaired; the record of what
+> happened to it cannot. That is arguably worse than `ipcns`, where at least
+> the wrongness stays in one number instead of being laundered into a
+> plausible-looking history.
+>
+> **The uncounted third operand is the one that hides best.** `[rss|cache]` was
+> read as `parts.get(3).copied().unwrap_or("rss") == "cache"` — `toggle_word`'s
+> `matches!` defect in a two-word alphabet. The expression has no way to say "I
+> did not understand you", so every spelling that was not exactly `cache`
+> evaluated to `rss`, and `cgmem charge 1 500 cach` charged 500 pages to the
+> wrong bucket and reported success. Two things make that worse than a mis-set
+> flag:
+>
+> * **It is invisible in the aggregate.** `record_charge` adds the pages to
+>   `usage_pages` either way, so `cgmem list`'s headline number is correct and
+>   only the breakdown beside it is wrong — and the breakdown is exactly what
+>   distinguishes memory that can be reclaimed under pressure (`cache`) from
+>   memory that cannot (`rss`). Nothing in the output looks off.
+> * **On the un-charge side it breaks an invariant.** `record_uncharge` floors
+>   the aggregate and the bucket with two independent `saturating_sub` calls,
+>   so un-charging `cache` from a cgroup holding none deflates `usage_pages`
+>   and nothing else. See
+>   `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` —
+>   an independent defect, reachable by typing `cache` correctly, and not
+>   cleared by fixing the parse.
+>
+> The refusal lives in a new `memory_kind_arg` helper next to `cmd_cgmem`
+> rather than in the generic operand family, because it is specific to this
+> command's alphabet and grouping it with `toggle_arg`/`required_num` would
+> imply otherwise.
+>
+> **Rung 93 also pins the other half of §607.** The kind is bracketed
+> `[rss|cache]` in the usage line, so an *absent* word keeps its documented
+> default: `cgmem charge 1 7` still charges rss, and the rung asserts it lands
+> in `rss=7 cache=0`. Only an unreadable word is refused. Two uncounted guesses
+> in one command that differ in exactly this way — `create`'s `<name>` is
+> refused when absent, `charge`'s `[rss|cache]` is not — is the clearest
+> illustration so far of why §607 keys on the brackets rather than on whether a
+> default exists in the code.
+>
+> **Found while reading for evidence:** two independent `cgmem` defects, both
+> logged separately and both **since fixed** —
+> `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` and
+> `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`. Fixing the
+> second is what armed this batch's ceiling guess: `high_events` is now printed,
+> so a wrong ceiling is finally falsifiable. The trap named above was not
+> hypothetical — it was resolved within the hour, and the refusal had to be in
+> place first.
 
 > **Burn-down log.** 2026-08-26 (twenty-fourth batch): `cmd_colortemp` (7,
 > plus two uncounted) cleared — 494 → 487 across 219 → 218 functions. Pinned
@@ -84629,7 +84882,7 @@ values are all in range; it is the *stored* pair that has to be inverted.
 
 ---
 
-## `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` (lane A, 2026-08-26) — **open**
+## `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` (lane A, 2026-08-26) — **fixed** the same day
 
 **In short:** `cgmem` tracks a cgroup's memory as one total (`usage`) plus a
 breakdown of that same memory into two buckets (`rss` for a program's own
@@ -84683,8 +84936,8 @@ was read with `unwrap_or("rss") == "cache"` and so turned any misspelling into
 `rss`. But the sequence above types `cache` correctly; the defect is in the
 subsystem, not in the parse, and clearing the parse does not clear it.
 
-**Proper fix.** Un-charge no more from the aggregate than actually left the
-bucket, so the two can never diverge:
+**Fixed.** Un-charge no more from the aggregate than actually left the bucket,
+so the two can never diverge:
 
 ```rust
 let actual = if is_cache {
@@ -84699,20 +84952,32 @@ let actual = if is_cache {
 c.usage_pages -= actual;   // == rss + cache still holds
 ```
 
-An alternative — refusing an un-charge larger than the bucket with
-`KernelError::InvalidArgument` — is worth considering *instead*, since silently
-un-charging less than asked is itself a kind of guess. The reason to prefer the
-clamp is that `record_uncharge` has exactly one honest job, keeping the two
-views of the same memory consistent, and a caller who over-un-charges has
-already lost track; refusing leaves the caller's own accounting wrong with no
-way to resynchronise. That is a genuine trade-off and is recorded here rather
-than decided in passing.
+`actual <= the bucket <= usage_pages` by the invariant, so the aggregate cannot
+underflow and the invariant holds afterwards.
+
+**The alternative that was rejected**, and it is a real trade-off rather than
+an obvious call: refuse an un-charge larger than the bucket with
+`KernelError::InvalidArgument`. That has a genuine argument behind it —
+silently un-charging less than asked is itself a quiet substitution of a number
+the caller did not supply, which is the very shape §600 exists to stamp out.
+The clamp wins because `record_uncharge` has exactly one honest job, keeping
+the two views of the same memory consistent, and a caller who over-un-charges
+has *already* lost track of what it charged; refusing leaves that caller's
+accounting wrong with no way to resynchronise, whereas clamping repairs the
+invariant on the spot. The §600 objection does not really apply either: the
+substituted number is not a guess about what the user meant, it is the
+arithmetic truth about how many pages were actually there.
+
+**Regression test.** `cgmem::self_test` test 9 covers both halves — un-charging
+a bucket that is empty (which used to deflate the aggregate and nothing else)
+and un-charging more than the right bucket holds — and asserts `usage_pages ==
+rss_pages + cache_pages` directly.
 
 **Not a regression.** True since `record_uncharge` was written.
 
 ---
 
-## `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN` (lane A, 2026-08-26) — **open**
+## `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN` (lane A, 2026-08-26) — **fixed 2026-08-26**
 
 **In short:** `cgmem create` takes a memory ceiling, and every charge checks
 whether the cgroup has gone over it. The result of that check is written to a
@@ -84763,6 +85028,43 @@ since a column that is always zero misinforms. Do not leave it printed and
 unwritten.
 
 **Not a regression.** True since the module was written.
+
+**Fixed.** Both ends, in one change.
+
+*The reported-and-not-measured end.* `record_swap(cg_id, pages, swap_in)` now
+exists: `swap_in` false adds to `swap_pages` (pages left memory for swap),
+`swap_in` true subtracts, saturating at zero so a swap-in larger than the
+recorded swap-out clamps rather than wrapping to `u64::MAX`. It is reachable
+from the shell as `cgmem swap <cg_id> <pages> [out|in]`, with `out` as the
+bracketed default — that being the only direction that can be first, since pages
+cannot come back in before they went out. It deliberately does *not* move the
+pages out of `rss_pages`/`cache_pages`, because only the caller knows which
+bucket they came from and inferring one would be §600's guessed-value shape; the
+caller pairs it with `record_uncharge`.
+
+*The measured-and-not-reported end.* `high_events` is now printed by
+`cgmem list` as `high={}` between `swap=` and `oom=`, and a new
+`total_high_events` aggregate is carried in `State`, bumped alongside the
+per-cgroup counter in `record_charge`, and returned by `stats()` — which widened
+from a 5-tuple to `(cgroups, charges, uncharges, ooms, high, ops)`. Both
+`cmd_cgmem stats` and `/proc/cgmem` print it as `High events:`.
+
+*Why this ordering matters beyond tidiness.* Surfacing `high_events` is what
+makes the twenty-fifth burn-down batch's `cmd_cgmem create` limit-guess
+falsifiable. Before this change a guessed policy ceiling had no observable
+consequence anywhere in the system, so the burn-down entry looked harmless — it
+was not harmless, it was *queued*, waiting for this fix to arm it. Both were
+therefore done together.
+
+*Tests.* `cgmem::self_test` grew from 9 to 10 tests. Test 1 now destructures the
+6-tuple and asserts `high == 0` at init; test 8 asserts `high == 1` after test
+6's deliberate over-limit charge; new test 10 (`swap_cg`) asserts `swap_pages ==
+25` after out-40/in-15, asserts the clamp to 0 after an over-large swap-in, and
+asserts `record_swap` on a nonexistent cgroup is an `Err`. Shell rung 93 asserts
+the `high=0` column is present in `cgmem list` output.
+
+*Design decision.* The delete-the-field alternative and why completing it won
+are recorded as `design-decisions.md` §608.
 
 ---
 
@@ -84838,6 +85140,148 @@ ignored is worse than a control that says it is not available yet.
 **Not a regression.** Until 2026-08-26 the rules engine had no caller at all, so
 *seventeen* of seventeen did nothing. This is the state after wiring five of
 them up.
+
+---
+
+## `A-FDTABLE-HAS-NO-PROCESS-EXIT-PATH-AND-THE-TABLE-VECTOR-ONLY-GROWS` (lane A, 2026-08-26) — **fixed 2026-08-26**
+
+**In short:** The module that tracks which files each process has open had no
+way to represent a process *exiting*. Tables were created on first use and never
+removed, and the list of them is capped at 256 — so once 256 different processes
+had ever opened a single file, every later open failed permanently, whether or
+not any of those processes still existed.
+
+**Where.** `kernel/src/fs/fdtable.rs`. `open` (~line 187) pushes a fresh
+`ProcessFdTable` for any pid it has not seen:
+
+```rust
+if state.tables.len() >= MAX_PROCESSES {
+    return Err(KernelError::ResourceExhausted);
+}
+state.tables.push(ProcessFdTable { pid, entries: Vec::new(), next_fd: 0, max_fds: DEFAULT_MAX_FDS });
+```
+
+`MAX_PROCESSES` is 256 (line 124). The module's public surface was
+`init_defaults`, `open`, `close`, `dup`, `list`, `get`, `set_max_fds`,
+`list_tables`, `stats`, `self_test` — every one of which either adds a table or
+reads one. **Nothing removed a table.** `close` removes a single *entry* and
+leaves the table in place, so a process that opened one file and closed it still
+occupied one of the 256 slots forever.
+
+**Why this is worse than an ordinary leak.** Process exit is not an edge case in
+an fd table — it is the single most frequent event in its life, and the one the
+data structure exists to survive. A module that can model open, close and dup
+but not exit is not leaking by oversight in a corner; it is missing the main
+lifecycle transition. The symptom, moreover, is delayed and unattributable: the
+256th distinct pid works fine, the 257th gets `ResourceExhausted`, and nothing
+in the error names *exhausted by long-dead processes* as the cause. A reader
+would look for a process holding too many descriptors, which is exactly what is
+not happening.
+
+**Found by.** Writing `kshell::self_test` rung 94 for the twenty-sixth
+option-refusal burn-down batch. The rung needed a descriptor to exist so it
+could prove that a refused `close` had not destroyed it, and needed to leave no
+fixture behind afterwards — and there was no operation that could do the second
+thing. The absence was visible only because something finally asked for it.
+
+**Fixed.** `close_all(pid) -> KernelResult<usize>` removes the process's whole
+table, returns how many descriptors were still open, and adds them to
+`total_closes` (they *were* closed; an aggregate that disagreed with the
+per-process history for no discoverable reason would be its own bug). It uses
+`Vec::remove` rather than `swap_remove` so that a process exiting does not
+silently reorder the `/proc/fdtable` listing of the ones that did not. A second
+exit for the same pid is `NotFound` rather than a silent success — the caller
+has lost track of the process either way, and saying so is more useful than
+pretending. Reachable from the shell as `fdtable exit <pid>`.
+
+`fdtable::self_test` grew from 8 to 9 tests; test 9 asserts the table
+disappears, the surviving tables are untouched, the close tally moves by exactly
+the number of descriptors released, a repeat exit errors, and the pid is
+genuinely reusable afterwards — `open` re-creates the table and fd numbering
+restarts at 0, because `next_fd` went away with it. It is deliberately placed
+*after* test 8 so the exact totals that test asserts stay meaningful.
+
+**Not a regression.** True since the module was written.
+
+---
+
+## `A-KCONSOLE-CAN-CREATE-A-CONSOLE-AND-HAS-NO-WAY-TO-DESTROY-ONE` (lane A, 2026-08-26) — **fixed 2026-08-26**
+
+**In short:** The module that manages virtual consoles — the text screens you
+switch between with a hotkey — could make new ones and had no operation for
+getting rid of one. The list of them is capped at sixteen, so a session that
+opened consoles for temporary work eventually could not open any more, and
+there was nothing the user could do about it: the only way back was a reboot.
+
+**Where.** `kernel/src/fs/kconsole.rs`. `create` (~line 188) was the only writer
+of the `consoles` vector, and the cap it checks is the whole of the pressure:
+
+```rust
+const MAX_CONSOLES: usize = 16;
+
+pub fn create(name: &str, console_type: ConsoleType, cols: u32, rows: u32) -> KernelResult<u32> {
+    with_state(|state| {
+        if state.consoles.len() >= MAX_CONSOLES {
+            return Err(KernelError::ResourceExhausted);
+        }
+        ...
+        state.consoles.push(Console { ... });
+```
+
+`init_defaults` seeds three, so a user got thirteen creations per boot, ever.
+There was no `destroy`, no `remove`, no `close` — the module's entire public
+surface was `init_defaults`, `switch`, `write`, `create`, `resize`, `active`,
+`list`, `get`, `stats`, `self_test`. The shell command matched it exactly.
+
+**Why it stayed invisible.** Nothing in the kernel calls `kconsole::create`.
+The only caller is `cmd_kconsole`, i.e. a human typing at the shell, and the
+gap does not bite until the fourteenth creation in one boot — which nothing had
+ever done, because until this batch the boot battery did not create consoles
+either. It surfaced only when `kshell::self_test` rung 95 needed to create one
+to prove that omitting a bracketed operand still yields the documented default,
+and then needed to put the table back the way it found it. This is the second
+consecutive batch in which writing a rung that owns its fixture exposed a
+missing teardown path in the module under test (see
+`A-FDTABLE-HAS-NO-PROCESS-EXIT-PATH-AND-THE-TABLE-VECTOR-ONLY-GROWS`), which is
+worth generalising: **a module whose only caller is an interactive command
+tends to be missing precisely the operations no test ever needed.**
+
+**Fixed.** `kconsole::destroy(id)` and a `kconsole destroy <id>` subcommand.
+Two decisions inside it were not obvious and are recorded in the function's own
+doc comment:
+
+*The active console is refused, not silently vacated.* `destroy` returns
+`DeviceBusy` when `id` is the active console, matching what Linux's
+`VT_DISALLOCATE` has done with `EBUSY` for as long as virtual terminals have
+existed. Destroying it instead would leave `active_id` pointing at nothing — a
+state `init_defaults` can never produce and nothing can leave, since `active()`
+would find no console and `switch` is the only writer of `active_id` and needs a
+target that exists. Auto-selecting a survivor was rejected for the reason that
+governs this whole burn-down: which console the user wants to be looking at is
+not something the function can know, so picking one is a guess wearing the
+clothes of a recovery. Switch first, then destroy.
+
+*`next_id` is not rewound.* Ids are never re-issued, because `kconsole list` and
+`/proc/kconsole` name consoles by id and a re-used number would silently rebind
+an identifier the user had already read. That is deliberately the *opposite* of
+the rule in `fdtable`, where descriptor numbers do restart at 0 after a process
+exits — and correctly so, because there the whole table goes away with its
+allocator and the numbers were scoped to a process that no longer exists. Here
+the id space outlives every individual console.
+
+`remove`, not `swap_remove`, so destroying one console does not silently
+reorder the ones that survive in `kconsole list` and `/proc/kconsole`.
+
+`kconsole::self_test` grew from 8 to 9 tests; test 9 asserts the active console
+is refused, that the refused destroy freed nothing, that a destroyed console is
+gone from both the count and `get`, that destroying it twice is an error rather
+than a silent no-op, that the survivors are untouched, and that re-creating a
+console under the freed *name* gets a strictly greater id. It is deliberately
+placed after test 8 so the exact `count == 4` that test asserts stays meaningful.
+
+**Not a regression.** True since the module was written.
+
+---
 
 ## `TD-C-THE-SHORTCUT-CARD-HAS-NO-DOOR` (lane C, 2026-08-26) — **RESOLVED 2026-08-26**
 
@@ -84942,3 +85386,4 @@ rebound shortcut works until the session restarts.
 **If it is never fixed:** the shortcuts stay at their defaults for every user in
 practice. Nothing breaks; the card is still worth having as a reference. This is
 a feature gap, not a bug.
+

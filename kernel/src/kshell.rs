@@ -19091,6 +19091,458 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("colortemp schedule 1 1200 420 30");
     }
 
+    serial_println!(
+        "  kshell::self_test 93: a guessed ceiling, a tally with no inverse, and a bucket the \
+         total cannot tell you was wrong"
+    );
+    // Three shapes in one command, and each is a refinement of an earlier row
+    // rather than a repeat of it.
+    //
+    // The ids are the familiar misdiagnosis: `next_id` starts at 1 and `create`
+    // only ever hands out `next_id`, so the guessed 0 was unreachable and every
+    // typo came back `NotFound` — the cgroup exists, the word naming it could
+    // not be read, and the reader is sent to check `list`.
+    //
+    // The `create` limit is a *policy ceiling*, not a selector: it is the
+    // number every subsequent charge is compared against. And its damage is
+    // currently masked by a second defect — the comparison's only output is
+    // `high_events`, which nothing prints — so today a guessed ceiling is not
+    // merely undetected but unfalsifiable, and fixing that (which is the right
+    // thing to do) is exactly what would make this guess bite.
+    //
+    // The page counts are an accumulator with a *partial* inverse, which is its
+    // own category rather than a milder `ipcns`. `record_uncharge` can put
+    // `usage_pages` back, so the guess looks correctable; `charges` and
+    // `uncharges` are `+= 1` with nothing that decrements them, so the
+    // correction is itself recorded and the tally is permanently wrong.
+    {
+        // `cgmem::self_test` ends with `*STATE.lock() = None`, so the table is
+        // empty here and `init` seeds it with `next_id: 1`. No other rung
+        // touches `cgmem`, which is why the id below can be written as a
+        // literal; the `created` assertion is what makes that assumption fail
+        // loudly rather than silently testing some other cgroup.
+        let _ = capture_command("cgmem init");
+        let out = capture_command("cgmem create zzrung93 500");
+        assert_output_contains(
+            "a cgroup with a known ceiling is created for this rung",
+            &out,
+            b"created 'zzrung93' id=1 limit=500",
+        );
+        assert_eq!(last_exit(), 0, "`cgmem create' succeeds");
+
+        // The uncounted guess: a cgroup named `cg0`, built and given an id
+        // because no name was supplied.
+        let out = capture_command("cgmem create");
+        assert_output_contains(
+            "an omitted name is reported, not invented as `cg0'",
+            &out,
+            b"cgmem: create: missing cgroup name",
+        );
+        assert_eq!(last_exit(), 1, "a missing cgroup name errors");
+
+        // The ceiling. `cgmem create web 5OOOO` used to build a cgroup limited
+        // to 100000 pages — double what was asked for, echoed back as though
+        // chosen.
+        let out = capture_command("cgmem create zzbad 5OOOO");
+        assert_output_contains(
+            "an unreadable ceiling is named rather than replaced with 100000",
+            &out,
+            b"`5OOOO' is not a limit in pages",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable ceiling errors");
+
+        let out = capture_command("cgmem remove 1O");
+        assert_output_contains(
+            "an unreadable id is named rather than reported as a missing cgroup",
+            &out,
+            b"`1O' is not a cgroup id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `remove' errors");
+
+        let out = capture_command("cgmem charge 1O 5");
+        assert_output_contains(
+            "and the same id in `charge'",
+            &out,
+            b"`1O' is not a cgroup id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `charge' errors");
+
+        let out = capture_command("cgmem charge 1 5O");
+        assert_output_contains(
+            "an unreadable page count is named rather than charged as 1",
+            &out,
+            b"`5O' is not a page count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable page count errors");
+
+        // The bucket. `unwrap_or("rss") == "cache"` had no way to say it did
+        // not understand, so every spelling that was not exactly `cache`
+        // charged rss — invisibly, because `usage_pages` is the same either
+        // way and only the breakdown beside it differs.
+        let out = capture_command("cgmem charge 1 5 cach");
+        assert_output_contains(
+            "a mistyped memory kind is refused rather than silently meaning rss",
+            &out,
+            b"`cach' is not rss or cache",
+        );
+        assert_eq!(last_exit(), 1, "an unrecognised memory kind errors");
+
+        let out = capture_command("cgmem uncharge 1 5O");
+        assert_output_contains(
+            "an unreadable page count in `uncharge' is named too",
+            &out,
+            b"`5O' is not a page count",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "an unreadable page count in `uncharge' errors"
+        );
+
+        let out = capture_command("cgmem uncharge 1 5 cach");
+        assert_output_contains(
+            "and a mistyped kind on the side that can break the aggregate",
+            &out,
+            b"`cach' is not rss or cache",
+        );
+        assert_eq!(last_exit(), 1, "an unrecognised kind in `uncharge' errors");
+
+        // The severity pin. Eight refusals and the cgroup is untouched: the
+        // ceiling is the 500 that was asked for rather than a guessed 100000,
+        // no page count landed in either bucket, and the cgroup the refused
+        // `remove` named is still here to say so.
+        let out = capture_command("cgmem list");
+        assert_output_contains(
+            "the refused ceiling, page counts and buckets left the cgroup exactly as created",
+            &out,
+            b"usage=0/500 rss=0 cache=0 swap=0 high=0 oom=0",
+        );
+        // And the tallies, which are the part no un-charge could ever repair.
+        let out = capture_command("cgmem stats");
+        assert_output_contains(
+            "and nothing was tallied for the words the shell refused to read",
+            &out,
+            b"Charges: 0  Uncharges: 0  OOM kills: 0",
+        );
+
+        // The other half of §607: the kind is bracketed `[rss|cache]` in the
+        // usage line, so an *absent* word keeps its documented default. Only an
+        // unreadable one is refused.
+        let out = capture_command("cgmem charge 1 7");
+        assert_output_contains(
+            "an omitted memory kind still means rss",
+            &out,
+            b"charged 7 pages to cg 1",
+        );
+        assert_eq!(last_exit(), 0, "an omitted memory kind is not an error");
+        let out = capture_command("cgmem list");
+        assert_output_contains(
+            "and lands in rss rather than cache",
+            &out,
+            b"usage=7/500 rss=7 cache=0",
+        );
+
+        // Leave the table as this rung found it, so rung order cannot matter.
+        let _ = capture_command("cgmem remove 1");
+    }
+
+    serial_println!(
+        "  kshell::self_test 94: the guard was spent on the operand that did not need it, and the \
+         guessed descriptor was the first one rather than an unused one"
+    );
+    // `cmd_fdtable` is the first command in this burn-down that had *already*
+    // noticed the problem and then protected the wrong operand. Its pid sites
+    // were `unwrap_or(0)` followed by `if pid == 0 { usage; exit 1 }` — the
+    // conflation shape: `fdtable show 1O` answered "Usage: fdtable show <pid>",
+    // telling the reader the command's *form* was wrong when the form was right
+    // and only the word was unreadable, so the obvious response is to re-type
+    // the same thing.
+    //
+    // The descriptor operands of `close` and `dup` had no guard at all, and
+    // they are the ones that act. In this table `next_fd` starts at 0 and only
+    // ever increments, so unlike cgroup id 0 — unreachable, which is why that
+    // guess merely misdiagnosed — fd 0 is *the first descriptor the process
+    // ever opened*, present the moment the process holds any descriptor at all.
+    // The guess therefore named the most reachable and the oldest entry in the
+    // table, closed it, and reported success. Nothing re-issues the number:
+    // `open` and `dup` both allocate from `next_fd`, which has moved on, so in
+    // a table where the number *is* the interface the loss is a permanent
+    // renumbering rather than a recoverable deletion.
+    {
+        // This rung builds and tears down its own fixture rather than borrowing
+        // one. `fdtable::self_test` runs earlier in the boot battery, but it
+        // ends with `*STATE.lock() = None` precisely so that its fixtures do not
+        // masquerade as live processes in `/proc/fdtable` — so by the time this
+        // rung runs the table is empty, and an earlier draft that read pid 100
+        // panicked on `FDs for PID 100 (0):`. That is the assertion doing its
+        // job; the lesson is that a rung must own its fixture.
+        //
+        // `close_all` at the bottom is what lets it: the module now has a
+        // process-exit path, so this rung leaves no table behind either.
+        let out = capture_command("fdtable open 424242 /rung94/held");
+        assert_output_contains(
+            "the fixture this rung will act on is created by this rung",
+            &out,
+            b"Opened fd=0 for PID 424242",
+        );
+        assert_eq!(last_exit(), 0, "`fdtable open' succeeds");
+        let before_show = capture_command("fdtable show 424242");
+        assert_output_contains(
+            "and the descriptor is fd 0 — the number the guesses below resolve to",
+            &before_show,
+            b"/rung94/held flags=",
+        );
+        let before_stats = capture_command("fdtable stats");
+
+        let out = capture_command("fdtable show 1O0");
+        assert_output_contains(
+            "an unreadable pid names the word rather than complaining about the command's shape",
+            &out,
+            b"`1O0' is not a pid",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable pid in `show' errors");
+
+        let out = capture_command("fdtable open 1O0 /tmp/x");
+        assert_output_contains("and the same pid in `open'", &out, b"`1O0' is not a pid");
+        assert_eq!(last_exit(), 1, "an unreadable pid in `open' errors");
+
+        // The path was `unwrap_or("")` folded into the same usage line as the
+        // pid, so an omitted path and an unreadable pid were indistinguishable.
+        let out = capture_command("fdtable open 424242");
+        assert_output_contains(
+            "an omitted path is reported as a missing path, not as a bad command",
+            &out,
+            b"fdtable: open: missing path",
+        );
+        assert_eq!(last_exit(), 1, "a missing path errors");
+
+        let out = capture_command("fdtable close 1O0 0");
+        assert_output_contains("and the pid in `close'", &out, b"`1O0' is not a pid");
+        assert_eq!(last_exit(), 1, "an unreadable pid in `close' errors");
+
+        // The one that acted. This closed fd 0 and printed
+        // "Closed fd=0 for PID 424242".
+        let out = capture_command("fdtable close 424242 1O");
+        assert_output_contains(
+            "an unreadable descriptor is named rather than resolved to the process's first fd",
+            &out,
+            b"`1O' is not a file descriptor",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable descriptor in `close' errors");
+
+        let out = capture_command("fdtable dup 1O0 0");
+        assert_output_contains("and the pid in `dup'", &out, b"`1O0' is not a pid");
+        assert_eq!(last_exit(), 1, "an unreadable pid in `dup' errors");
+
+        // The additive twin: this duplicated fd 0, consumed a number from
+        // `next_fd`, and bumped `total_dups` — a tally with no decrement, so
+        // even closing the surplus alias leaves the count permanently wrong.
+        let out = capture_command("fdtable dup 424242 1O");
+        assert_output_contains(
+            "and the descriptor in `dup', which added an alias rather than removing an entry",
+            &out,
+            b"`1O' is not a file descriptor",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable descriptor in `dup' errors");
+
+        // The severity pin. Seven refusals: the descriptor the refused `close`
+        // would have destroyed is still listed, no alias was added beside it,
+        // and `next_fd` was not advanced — which the totals report, since a dup
+        // that had happened would still be counted after the alias was closed.
+        let after_show = capture_command("fdtable show 424242");
+        assert!(
+            after_show == before_show,
+            "seven refusals left every descriptor of the process untouched"
+        );
+        let after_stats = capture_command("fdtable stats");
+        assert!(
+            after_stats == before_stats,
+            "and counted no open, no close and no dup for words the shell refused to read"
+        );
+
+        // Tear the fixture down, so `/proc/fdtable` does not carry a process
+        // this rung invented. The count doubles as the pin on `close_all`
+        // itself: one descriptor was held, so one is released — had any of the
+        // seven refusals actually run, this would read 0 or 2.
+        let out = capture_command("fdtable exit 424242");
+        assert_output_contains(
+            "the rung's fixture is released, and exactly the one descriptor it held",
+            &out,
+            b"Released 1 fd(s) and the table for PID 424242",
+        );
+        assert_eq!(last_exit(), 0, "`fdtable exit' succeeds");
+    }
+
+    serial_println!(
+        "  kshell::self_test 95: the same two operands were bracketed in one subcommand and \
+         angled in the next, and the value guessed for both was the textbook console size"
+    );
+    // `cmd_kconsole` is the cleanest illustration of design-decisions.md §607
+    // in the burn-down so far, because it does not need a second command to
+    // make the point: `create <name> [cols] [rows]` and `resize <id> <cols>
+    // <rows>` take the *same two operands*, bracketed in the subcommand that
+    // can start a console at a sensible size and angled in the one that exists
+    // for no other purpose than to set them. So an absent `cols` still means
+    // 80 in `create` and is refused in `resize`, and a *present* `cols` that
+    // cannot be read is refused in both.
+    //
+    // The guesses these replace were the hardest in the burn-down to catch by
+    // reading the output, because 80x25 is not an arbitrary default — it is the
+    // canonical console size, the number a reader would supply themselves if
+    // asked what a console is. `kconsole resize 2 l32 43` shrank tty1 from 120
+    // columns to 80 and said "Resized console 2 to 80x43.", a sentence domain
+    // knowledge cannot falsify. That is the `cputhr` thesis at its limit: the
+    // guessed default is the reassuring value, and here the reassuring value is
+    // also the textbook one.
+    //
+    // The id guess was `0`, and `init_defaults` seeds 1/2/3 with `next_id: 4`,
+    // so no console can ever hold it — the misdiagnosis shape. `kconsole switch
+    // l` answered "Error: NotFound", which says *create the console*, when what
+    // had happened says *fix the typo*.
+    {
+        // Establish the premise rather than assume it, which is rung 94's
+        // lesson. Nothing else in the boot mutates this module — the module's
+        // own suite runs under `with_pristine` and restores what it found — so
+        // this is the first call, `init_defaults` seeds the table here, and
+        // tty1 is 120x40. If that ever stops being true this assertion says so
+        // instead of the rung quietly testing something else.
+        let before_list = capture_command("kconsole list");
+        assert_output_contains(
+            "the console this rung resizes is seeded wider than the guess it used to be given",
+            &before_list,
+            b"2: tty1 type=fb 120x40",
+        );
+        let before_stats = capture_command("kconsole stats");
+
+        let out = capture_command("kconsole switch l");
+        assert_output_contains(
+            "an unreadable console id is named rather than reported as a console that is not there",
+            &out,
+            b"`l' is not a console id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable id in `switch' errors");
+
+        let out = capture_command("kconsole switch");
+        assert_output_contains(
+            "and an omitted one is reported as omitted, not resolved to an id nothing can hold",
+            &out,
+            b"kconsole: switch: missing console id",
+        );
+        assert_eq!(last_exit(), 1, "a missing id in `switch' errors");
+
+        // The name was `unwrap_or("ttyN")` — not a placeholder the module
+        // expands, a console literally named with the letter N. Self-limiting
+        // in the way that hides it: the first omission succeeds, and every one
+        // after it fails with `AlreadyExists`, which reads as a collision with
+        // something the user never created.
+        let out = capture_command("kconsole create");
+        assert_output_contains(
+            "an omitted console name is refused rather than invented",
+            &out,
+            b"kconsole: create: missing console name",
+        );
+        assert_eq!(last_exit(), 1, "a missing name in `create' errors");
+
+        let out = capture_command("kconsole create rung95 l20 40");
+        assert_output_contains(
+            "a bracketed operand that is present and unreadable is still refused",
+            &out,
+            b"`l20' is not a column count",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "an unreadable column count in `create' errors"
+        );
+
+        let out = capture_command("kconsole create rung95 120 4O");
+        assert_output_contains(
+            "and the row count beside it",
+            &out,
+            b"`4O' is not a row count",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable row count in `create' errors");
+
+        let out = capture_command("kconsole resize l 132 43");
+        assert_output_contains("the id in `resize'", &out, b"`l' is not a console id");
+        assert_eq!(last_exit(), 1, "an unreadable id in `resize' errors");
+
+        // The one that acted. This resized tty1 to 80 columns and said so.
+        let out = capture_command("kconsole resize 2 l32 43");
+        assert_output_contains(
+            "an unreadable width is named rather than resolved to the size a console usually is",
+            &out,
+            b"`l32' is not a column count",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "an unreadable column count in `resize' errors"
+        );
+
+        let out = capture_command("kconsole resize 2 132 4O");
+        assert_output_contains("and the height beside it", &out, b"`4O' is not a row count");
+        assert_eq!(last_exit(), 1, "an unreadable row count in `resize' errors");
+
+        // Angled here, so an omission is refused too — the half of §607 that
+        // distinguishes `resize` from `create`.
+        let out = capture_command("kconsole resize 2 132");
+        assert_output_contains(
+            "an angled operand is refused when omitted, unlike the bracketed one of the same name",
+            &out,
+            b"kconsole: resize: missing row count",
+        );
+        assert_eq!(last_exit(), 1, "a missing row count in `resize' errors");
+
+        // The severity pin: nine refusals, and every console is the size it
+        // was. `kconsole list` is the only witness a user would have had.
+        let after_list = capture_command("kconsole list");
+        assert!(
+            after_list == before_list,
+            "nine refusals left every console at the size it already had"
+        );
+        let after_stats = capture_command("kconsole stats");
+        assert!(
+            after_stats == before_stats,
+            "and counted no switch, no create and no resize for words the shell refused to read"
+        );
+
+        // The other half of §607, stated positively: the bracketed operands are
+        // genuinely optional, so omitting both still creates a console at the
+        // documented 80x25. Only a word that is *present* and unreadable is
+        // refused.
+        let out = capture_command("kconsole create rung95");
+        assert_output_contains(
+            "omitting a bracketed operand still means its documented default",
+            &out,
+            b"Created console rung95 (id=4).",
+        );
+        assert_eq!(last_exit(), 0, "`kconsole create' with defaults succeeds");
+        let out = capture_command("kconsole list");
+        assert_output_contains(
+            "and the default is the size the usage line advertises",
+            &out,
+            b"rung95 type=virtual 80x25",
+        );
+
+        // Tear the fixture down, so `/proc/kconsole` does not carry a console
+        // this rung invented. `destroy` is what makes that possible: before it
+        // the module could only grow, so a rung that created anything left it
+        // for the rest of the boot.
+        let out = capture_command("kconsole destroy 4");
+        assert_output_contains(
+            "the rung's console is destroyed, and the module now has a way to do that",
+            &out,
+            b"Destroyed console 4.",
+        );
+        assert_eq!(last_exit(), 0, "`kconsole destroy' succeeds");
+        let after = capture_command("kconsole list");
+        assert!(
+            after == before_list,
+            "leaving the table exactly as this rung found it"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -95428,13 +95880,17 @@ fn cmd_fdtable(args: &str) {
             }
         }
         "show" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 {
-                shell_println!("Usage: fdtable show <pid>");
-                set_exit(1);
+            // The pid operands in this command were already half-guarded: the
+            // guess was `0` and `0` was then rejected with the usage line. That
+            // is the conflation shape — a mistyped `fdtable show 1O` answered
+            // "Usage: fdtable show <pid>", which says the *form* of the command
+            // was wrong when the form was right and only the word was
+            // unreadable. The reader re-types the same shape and gets the same
+            // complaint. `required_num` separates the two: a missing pid is
+            // "missing pid", an unreadable one names the word.
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
                 return;
-            }
+            };
             fdtable::init_defaults();
             let fds = fdtable::list(pid);
             shell_println!("FDs for PID {} ({}):", pid, fds.len());
@@ -95451,14 +95907,19 @@ fn cmd_fdtable(args: &str) {
             }
         }
         "open" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let path = parts.get(2).copied().unwrap_or("");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 || path.is_empty() {
-                shell_println!("Usage: fdtable open <pid> <path>");
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
+                return;
+            };
+            // The path was `unwrap_or("")` and the emptiness was folded into the
+            // same usage line as the pid, so an omitted path and an unreadable
+            // pid produced identical output. `open` auto-creates a table for
+            // whatever pid it is handed, so the old guess would have built a
+            // real fd table for process 0 had the guard not caught it.
+            let Some(path) = parts.get(2).copied() else {
+                shell_println!("fdtable: open: missing path");
                 set_exit(1);
                 return;
-            }
+            };
             fdtable::init_defaults();
             let flags = fdtable::FdFlags {
                 read: true,
@@ -95476,15 +95937,27 @@ fn cmd_fdtable(args: &str) {
             }
         }
         "close" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let fd_str = parts.get(2).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            let fd = fd_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 {
-                shell_println!("Usage: fdtable close <pid> <fd>");
-                set_exit(1);
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
                 return;
-            }
+            };
+            // The descriptor is the operand that mattered and the only one that
+            // had no guard at all. In this table `next_fd` starts at 0 and only
+            // ever increments, so `0` is not an unused sentinel the way cgroup
+            // id 0 was — it is *the first descriptor the process ever opened*,
+            // and it exists the moment the process holds any descriptor. A
+            // guessed `0` therefore names the most reachable and the oldest
+            // entry in the table, and `fdtable close 42 1O` closed it and
+            // reported "Closed fd=0 for PID 42".
+            //
+            // It cannot be undone at that number. `dup` and `open` both
+            // allocate from the monotonic `next_fd`, which has moved on, so
+            // re-opening the same path returns some later fd. In a table where
+            // the number *is* the interface — 0 being stdin by universal
+            // convention — that is a permanent renumbering, not a recoverable
+            // deletion.
+            let Some(fd) = required_num::<u32>(&parts, 2, "fdtable", sub, "file descriptor") else {
+                return;
+            };
             fdtable::init_defaults();
             match fdtable::close(pid, fd) {
                 Ok(()) => shell_println!("Closed fd={} for PID {}", fd, pid),
@@ -95495,20 +95968,37 @@ fn cmd_fdtable(args: &str) {
             }
         }
         "dup" => {
-            let pid_str = parts.get(1).copied().unwrap_or("0");
-            let fd_str = parts.get(2).copied().unwrap_or("0");
-            let pid = pid_str.parse::<u32>().unwrap_or(0);
-            let fd = fd_str.parse::<u32>().unwrap_or(0);
-            if pid == 0 {
-                shell_println!("Usage: fdtable dup <pid> <fd>");
-                set_exit(1);
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
                 return;
-            }
+            };
+            // Same guess as `close`, and it succeeds just as quietly, but it
+            // adds rather than removes: a mistyped source fd manufactures a
+            // second alias for the wrong descriptor, consumes a number from
+            // `next_fd`, and bumps `total_dups` — a tally with no decrement, so
+            // closing the surplus alias afterwards leaves the count reading
+            // `dups=1` where the truth was `dups=0` (the `cgmem charge`
+            // accumulator problem again).
+            let Some(fd) = required_num::<u32>(&parts, 2, "fdtable", sub, "file descriptor") else {
+                return;
+            };
             fdtable::init_defaults();
             match fdtable::dup(pid, fd) {
                 Ok(new_fd) => {
                     shell_println!("Duplicated fd={} -> fd={} for PID {}", fd, new_fd, pid)
                 }
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        "exit" => {
+            let Some(pid) = required_num::<u32>(&parts, 1, "fdtable", sub, "pid") else {
+                return;
+            };
+            fdtable::init_defaults();
+            match fdtable::close_all(pid) {
+                Ok(n) => shell_println!("Released {} fd(s) and the table for PID {}", n, pid),
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -95531,7 +96021,7 @@ fn cmd_fdtable(args: &str) {
         }
         _ => {
             shell_println!(
-                "Usage: fdtable [list|show <pid>|open <pid> <path>|close <pid> <fd>|dup <pid> <fd>|stats|test]"
+                "Usage: fdtable [list|show <pid>|open <pid> <path>|close <pid> <fd>|dup <pid> <fd>|exit <pid>|stats|test]"
             );
             end_help_arm("fdtable", sub);
         }
@@ -95681,13 +96171,20 @@ fn cmd_kconsole(args: &str) {
             }
         }
         "switch" => {
+            // Angled in the usage line, so both an absent word and an
+            // unreadable one are refused (design-decisions.md §607). The
+            // guess this replaces was `0`, and `init_defaults` seeds ids
+            // 1/2/3 with `next_id: 4` — so no console can ever *have* id 0
+            // and `kconsole switch l` reported `Error: NotFound`. That is
+            // the misdiagnosis shape: the shell was telling the user their
+            // console did not exist when what had actually happened is that
+            // the shell could not read the word they typed. The two have
+            // opposite remedies -- create the console, or fix the typo --
+            // and the message pointed at the wrong one.
+            let Some(id) = required_num::<u32>(&parts, 1, "kconsole", sub, "console id") else {
+                return;
+            };
             kconsole::init_defaults();
-            let id = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
             match kconsole::switch(id) {
                 Ok(()) => shell_println!("Switched to console {}.", id),
                 Err(e) => {
@@ -95697,20 +96194,33 @@ fn cmd_kconsole(args: &str) {
             }
         }
         "create" => {
+            // The name is angled, and its guess was the literal string
+            // `ttyN` -- not a placeholder the module expands, an actual
+            // console named with the letter N. It is also self-limiting in
+            // the way that makes it hard to notice: `create` rejects a
+            // duplicate name, so the *first* omission quietly succeeds and
+            // every one after it fails with `AlreadyExists`, which reads as
+            // a name collision with something the user never created.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("kconsole: {}: missing console name", sub);
+                set_exit(1);
+                return;
+            };
+            // `cols` and `rows` are *bracketed* here and angled in `resize`,
+            // which is the whole of §607 inside one command: the same two
+            // operands, required in the subcommand that exists to set them
+            // and optional in the one that merely needs somewhere to start.
+            // So an absent word still means 80x25, and only a word that is
+            // present and unreadable is refused.
+            let Some(cols) = optional_num::<u32>(&parts, 2, "kconsole", sub, "column count", 80)
+            else {
+                return;
+            };
+            let Some(rows) = optional_num::<u32>(&parts, 3, "kconsole", sub, "row count", 25)
+            else {
+                return;
+            };
             kconsole::init_defaults();
-            let name = parts.get(1).copied().unwrap_or("ttyN");
-            let cols = parts
-                .get(2)
-                .copied()
-                .unwrap_or("80")
-                .parse::<u32>()
-                .unwrap_or(80);
-            let rows = parts
-                .get(3)
-                .copied()
-                .unwrap_or("25")
-                .parse::<u32>()
-                .unwrap_or(25);
             match kconsole::create(name, kconsole::ConsoleType::Virtual, cols, rows) {
                 Ok(id) => shell_println!("Created console {} (id={}).", name, id),
                 Err(e) => {
@@ -95719,26 +96229,41 @@ fn cmd_kconsole(args: &str) {
                 }
             }
         }
-        "resize" => {
+        "destroy" => {
+            let Some(id) = required_num::<u32>(&parts, 1, "kconsole", sub, "console id") else {
+                return;
+            };
             kconsole::init_defaults();
-            let id = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let cols = parts
-                .get(2)
-                .copied()
-                .unwrap_or("80")
-                .parse::<u32>()
-                .unwrap_or(80);
-            let rows = parts
-                .get(3)
-                .copied()
-                .unwrap_or("25")
-                .parse::<u32>()
-                .unwrap_or(25);
+            match kconsole::destroy(id) {
+                Ok(()) => shell_println!("Destroyed console {}.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        "resize" => {
+            // All three are angled, and the guesses here were the sharpest
+            // in the command: 80x25 is the *canonical* console size, the
+            // number a reader would supply themselves if asked what a
+            // console is. `kconsole resize 2 l32 43` on tty1 -- seeded at
+            // 120x40 -- shrank it to 80 columns and printed `Resized
+            // console 2 to 80x43.`, a sentence with nothing wrong with it.
+            // Domain knowledge cannot falsify this guess the way it can
+            // falsify a `0`; the only witness is `kconsole list`, and only
+            // if the user knew the old width. This is the `cputhr` thesis
+            // at its limit -- the guessed default is the reassuring value,
+            // and here the reassuring value is also the textbook one.
+            let Some(id) = required_num::<u32>(&parts, 1, "kconsole", sub, "console id") else {
+                return;
+            };
+            let Some(cols) = required_num::<u32>(&parts, 2, "kconsole", sub, "column count") else {
+                return;
+            };
+            let Some(rows) = required_num::<u32>(&parts, 3, "kconsole", sub, "row count") else {
+                return;
+            };
+            kconsole::init_defaults();
             match kconsole::resize(id, cols, rows) {
                 Ok(()) => shell_println!("Resized console {} to {}x{}.", id, cols, rows),
                 Err(e) => {
@@ -95762,7 +96287,7 @@ fn cmd_kconsole(args: &str) {
         }
         _ => {
             shell_println!(
-                "Usage: kconsole [list|active|switch <id>|create <name> [cols] [rows]|resize <id> <cols> <rows>|stats|test]"
+                "Usage: kconsole [list|active|switch <id>|create <name> [cols] [rows]|destroy <id>|resize <id> <cols> <rows>|stats|test]"
             );
             end_help_arm("kconsole", sub);
         }
@@ -102503,6 +103028,43 @@ fn cmd_buddyinfo(args: &str) {
     }
 }
 
+/// The `[rss|cache]` operand of `cgmem charge` / `cgmem uncharge` — read, or
+/// refused with a diagnostic naming the word.
+///
+/// The operand is bracketed in the command's usage line, so an *absent* word
+/// keeps its documented default of `rss` (§607). Only a word that is present
+/// and not understood is an error.
+///
+/// It exists because the two call sites were written
+/// `parts.get(3).copied().unwrap_or("rss") == "cache"`, which is
+/// [`toggle_word`]'s `matches!` defect in a two-word alphabet: the expression
+/// has no way to say "I did not understand you", so every spelling that is not
+/// exactly `cache` evaluated to `rss`. `cgmem charge 1 500 cach` charged 500
+/// pages to the wrong bucket and reported success.
+///
+/// Two things make that worse than a mis-set flag. The first is that it is
+/// **invisible in the aggregate**: `record_charge` adds the pages to
+/// `usage_pages` either way, so `cgmem list`'s headline number is right and
+/// only the breakdown beside it is wrong — and the breakdown is precisely what
+/// distinguishes memory that can be reclaimed under pressure (`cache`) from
+/// memory that cannot (`rss`). The second is that on the un-charge side the
+/// wrong bucket does not merely misfile the pages, it breaks an invariant:
+/// `record_uncharge` floors the aggregate and the bucket with two independent
+/// `saturating_sub` calls, so un-charging `cache` from a cgroup holding none
+/// deflates `usage_pages` and nothing else. See
+/// `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY`.
+fn memory_kind_arg(parts: &[&str], idx: usize, sub: &str) -> Option<bool> {
+    match parts.get(idx).copied() {
+        None | Some("rss") => Some(false),
+        Some("cache") => Some(true),
+        Some(word) => {
+            shell_println!("cgmem: {}: `{}' is not rss or cache", sub, word);
+            set_exit(1);
+            None
+        }
+    }
+}
+
 /// `cgmem` / `cgm` — cgroup memory accounting.
 fn cmd_cgmem(args: &str) {
     use crate::fs::cgmem;
@@ -102515,11 +103077,32 @@ fn cmd_cgmem(args: &str) {
             shell_println!("cgmem: initialized");
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("cg0");
-            let limit = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(100_000);
+            // `create <name> <limit_pages>` in this command's own usage text,
+            // angle brackets on both, and both were implemented optional.
+            // Bare `cgmem create` built a real cgroup called `cg0` with a
+            // 100000-page ceiling and reported it as a success.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("cgmem: create: missing cgroup name");
+                set_exit(1);
+                return;
+            };
+            // The guess that is a *policy ceiling*, not a selector. Every
+            // charge compares `usage_pages` against this number, so a limit
+            // nobody chose is the threshold everything the cgroup ever does is
+            // measured against — and `cgmem create web 5OOOO` silently doubled
+            // the intended one.
+            //
+            // What makes it worse than it currently looks: the damage is
+            // masked by a *second* defect. The comparison's only output is
+            // `high_events`, which no command prints (see
+            // `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`),
+            // so today a wrong ceiling has no observable consequence at all —
+            // the guess is not merely undetected but unfalsifiable. Fixing
+            // that entry, which is the right thing to do, is exactly what
+            // would turn this guess live.
+            let Some(limit) = required_num::<u64>(&parts, 2, "cgmem", sub, "limit in pages") else {
+                return;
+            };
             match cgmem::create(name, limit) {
                 Ok(id) => shell_println!("cgmem: created '{}' id={} limit={}", name, id, limit),
                 Err(e) => {
@@ -102529,10 +103112,17 @@ fn cmd_cgmem(args: &str) {
             }
         }
         "remove" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // `init_defaults` sets `next_id: 1` and seeds no cgroups, and
+            // `create` only ever hands out `next_id`, so cgroup 0 is
+            // unreachable and `remove(0)` could only return `NotFound`. The
+            // guess was therefore safe and dishonest in the same breath:
+            // `cgmem remove 1O` answered "remove error: NotFound", which says
+            // the cgroup does not exist. It does; the word naming it could not
+            // be read. The reader is sent to check `list` rather than at what
+            // they typed.
+            let Some(id) = required_num::<u32>(&parts, 1, "cgmem", sub, "cgroup id") else {
+                return;
+            };
             match cgmem::remove(id) {
                 Ok(()) => shell_println!("cgmem: removed cg {}", id),
                 Err(e) => {
@@ -102542,15 +103132,25 @@ fn cmd_cgmem(args: &str) {
             }
         }
         "charge" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            let is_cache = parts.get(3).copied().unwrap_or("rss") == "cache";
+            let Some(id) = required_num::<u32>(&parts, 1, "cgmem", sub, "cgroup id") else {
+                return;
+            };
+            // An accumulator, like `ipcns record_*` — but with a *partial*
+            // inverse, which turns out to be its own category rather than a
+            // milder version of the same thing. `record_uncharge` can put
+            // `usage_pages` back, so a guessed page count looks correctable.
+            // The tallies are not: `c.charges` and `state.total_charges` are
+            // `+= 1` with nothing that ever decrements them, so the correction
+            // is *itself recorded*. Un-charging a guessed 1 leaves
+            // `charges=1 uncharges=1` where the truth was `charges=1
+            // uncharges=0`. The quantity can be repaired; the audit trail
+            // saying what happened to it cannot.
+            let Some(pages) = required_num::<u64>(&parts, 2, "cgmem", sub, "page count") else {
+                return;
+            };
+            let Some(is_cache) = memory_kind_arg(&parts, 3, sub) else {
+                return;
+            };
             match cgmem::record_charge(id, pages, is_cache) {
                 Ok(()) => shell_println!("cgmem: charged {} pages to cg {}", pages, id),
                 Err(e) => {
@@ -102560,15 +103160,15 @@ fn cmd_cgmem(args: &str) {
             }
         }
         "uncharge" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let pages = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1);
-            let is_cache = parts.get(3).copied().unwrap_or("rss") == "cache";
+            let Some(id) = required_num::<u32>(&parts, 1, "cgmem", sub, "cgroup id") else {
+                return;
+            };
+            let Some(pages) = required_num::<u64>(&parts, 2, "cgmem", sub, "page count") else {
+                return;
+            };
+            let Some(is_cache) = memory_kind_arg(&parts, 3, sub) else {
+                return;
+            };
             match cgmem::record_uncharge(id, pages, is_cache) {
                 Ok(()) => shell_println!("cgmem: uncharged {} pages from cg {}", pages, id),
                 Err(e) => {
@@ -102585,7 +103185,7 @@ fn cmd_cgmem(args: &str) {
                     format!("{}", c.limit_pages)
                 };
                 shell_println!(
-                    "  [{}] {:<10} usage={}/{} rss={} cache={} swap={} oom={}",
+                    "  [{}] {:<10} usage={}/{} rss={} cache={} swap={} high={} oom={}",
                     c.cg_id,
                     c.name,
                     c.usage_pages,
@@ -102593,26 +103193,67 @@ fn cmd_cgmem(args: &str) {
                     c.rss_pages,
                     c.cache_pages,
                     c.swap_pages,
+                    c.high_events,
                     c.oom_kills
                 );
             }
         }
+        "swap" => {
+            let Some(id) = required_num::<u32>(&parts, 1, "cgmem", sub, "cgroup id") else {
+                return;
+            };
+            let Some(pages) = required_num::<u64>(&parts, 2, "cgmem", sub, "page count") else {
+                return;
+            };
+            // `out` is the default because that is the direction which creates
+            // the state being reported: pages only come back *in* if they went
+            // out first, so `swap 1 40` with no direction is the only reading
+            // that cannot describe an impossible history. Bracketed in the
+            // usage line, so an absent word keeps that default and only a word
+            // that is present and unreadable is refused (§607).
+            let swap_in = match parts.get(3).copied() {
+                None | Some("out") => false,
+                Some("in") => true,
+                Some(word) => {
+                    shell_println!("cgmem: swap: `{}' is not in or out", word);
+                    set_exit(1);
+                    return;
+                }
+            };
+            match cgmem::record_swap(id, pages, swap_in) {
+                Ok(()) => shell_println!(
+                    "cgmem: swapped {} {} pages for cg {}",
+                    if swap_in { "in" } else { "out" },
+                    pages,
+                    id
+                ),
+                Err(e) => {
+                    shell_println!("cgmem: swap error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
         "stats" => {
-            let (cgroups, charges, uncharges, ooms, ops) = cgmem::stats();
+            let (cgroups, charges, uncharges, ooms, high, ops) = cgmem::stats();
             shell_println!(
-                "Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  Ops: {}",
+                "Cgroups: {}  Charges: {}  Uncharges: {}  OOM kills: {}  High events: {}  Ops: {}",
                 cgroups,
                 charges,
                 uncharges,
                 ooms,
+                high,
                 ops
             );
         }
         "test" => cgmem::self_test(),
         _ => {
-            shell_println!("Usage: cgmem <init|create|remove|charge|uncharge|list|stats|test>");
+            shell_println!(
+                "Usage: cgmem <init|create|remove|charge|uncharge|swap|list|stats|test>"
+            );
             shell_println!("  create <name> <limit_pages>        — create cgroup");
             shell_println!("  charge <cg_id> <pages> [rss|cache]");
+            shell_println!("  uncharge <cg_id> <pages> [rss|cache]");
+            shell_println!("  swap <cg_id> <pages> [out|in]      — out is the default");
             set_exit(1);
         }
     }

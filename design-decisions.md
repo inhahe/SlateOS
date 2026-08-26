@@ -47157,6 +47157,159 @@ into a differently-ordered list activates a window the user was not looking at.
 **Where it lives.** `gui/desktop/src/lib.rs` — `DesktopShell::apply_window_list`,
 `rule_requests`, `listed_windows`; `gui/desktop/src/session.rs` `pump`.
 
+---
+
+## 608. A printed field that nothing writes is completed, not deleted — but only when a real writer exists to give it
+
+*Date: 2026-08-26*
+**Decided by:** Claude (autonomous)
+
+**In short:** `cgmem list` printed a `swap=` column for every memory cgroup, and
+a `high=` count was tracked internally but printed nowhere. The `swap=` number
+was always `0` — not because nothing was ever swapped, but because no line of
+code anywhere could ever change it. A column that is structurally frozen at zero
+is not a missing feature, it is a *false statement*: a reader sees `swap=0` and
+concludes nothing was swapped. The choice was between deleting the column and
+giving it a writer. We gave it a writer (`cgmem swap <id> <pages> [out|in]`),
+and symmetrically surfaced the `high=` counter that was already being computed
+and thrown away.
+
+**The two halves of the problem.** They are mirror images and it is worth
+keeping them apart:
+
+| | `swap_pages` | `high_events` |
+|---|---|---|
+| Written by | nothing | `record_charge`, on every charge that leaves usage above the cgroup's limit |
+| Read by | `cgmem list`, `/proc/cgmem` | nothing |
+| What a reader concluded | "no pages were swapped" — false by construction | nothing, because there was nothing to read |
+| Severity | **actively misleading** | **silently inert** |
+
+`swap_pages` is the worse of the two, because a printed constant is evidence in
+a way an absent line is not. But `high_events` is not harmless either, and its
+harm is specifically documented in the twenty-fifth burn-down batch
+(`cmd_cgmem create`, §600's guessed-value defect): the `limit` operand was
+guessed when unreadable, and the *only* consequence of a wrong limit is a wrong
+`high_events`. Because nothing printed `high_events`, a guessed policy ceiling
+had no observable consequence whatsoever — the guess was not merely undetected
+but **unfalsifiable**. Two defects, each of which concealed the other.
+
+**The alternative: delete the field and its two columns.** This is a serious
+option and it is the one a minimalist reading of "don't ship dead code" picks.
+Its case:
+
+- It is smaller, and it cannot be wrong. A column that does not exist cannot
+  lie.
+- The kernel has no swap subsystem yet. Adding a *writer* for a swap counter
+  before there is any swapping means the only thing that will ever call it is a
+  shell command and a self-test — which is arguably just a more elaborate way of
+  writing a number nobody produced.
+- Deleting is reversible in the cheap direction: when a real swap subsystem
+  lands, it can add the field back along with the code that fills it, and the
+  field will arrive already correct.
+
+**Why completing won anyway.** Three reasons, in order of weight:
+
+1. **`high_events` had to be surfaced regardless**, because it is the fix for a
+   *logged, open* defect that is not hypothetical. Once that line is being
+   printed, `swap=` is the only remaining frozen column on the same row, and
+   leaving one lie beside one newly-honest number is the worst of the three
+   available states.
+2. **The field is not speculative — the accounting model is already here.**
+   `record_charge` / `record_uncharge` maintain `usage_pages == rss_pages +
+   cache_pages`, and swap is the third bucket in exactly the same ledger. The
+   writer is not inventing a subsystem; it is completing an arithmetic that the
+   other two thirds of already exist and are tested. When a swap subsystem
+   arrives it will call `record_swap`, not replace it.
+3. **A writer makes the field testable, and a test is what stops it drifting
+   back.** The deleted-field option leaves nothing behind to notice if someone
+   re-adds a column later; the completed field has a self-test rung
+   (`swap_cg`: out 40, in 15, expect 25; then an over-large swap-in, expect a
+   clamp to 0, not an underflow) that pins both the arithmetic and the
+   saturation.
+
+**What was rejected inside the chosen option.** `record_swap` does *not* move
+pages out of `rss_pages` / `cache_pages` when they are swapped out, even though
+that is what a real kernel does. It cannot: only the caller knows which bucket
+the pages came from, and guessing one would be §600's second prohibited shape
+wearing a different hat. So the contract is explicit in the doc comment — the
+caller reports the memory side with `record_uncharge` and the swap side with
+`record_swap`, and the two are separate calls on purpose. A single call that
+inferred the bucket would be more convenient and would be wrong half the time.
+
+**The general rule this sets.** *A field that is printed but never written is a
+bug of the same class as a wrong value, and it is fixed the same way: by making
+the printed thing true.* Deleting the column is a legitimate fix only when there
+is no honest writer available and none in prospect. When the surrounding
+accounting already exists — when the field is the third bucket in a ledger whose
+other two are maintained and tested — the correct fix is the writer. And a
+counter that is computed and never shown is the same bug read backwards: it lets
+a second defect hide behind the absence of any reader, which is precisely what
+happened here.
+
+**Where it came from.**
+`A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`, found while
+gathering severity evidence for the twenty-fifth burn-down batch of
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+
+---
+
+## 609. When a self-test rung needs to own its fixture and the module has no way to release one, the module gains a teardown operation — it is not a test-only affordance
+
+*Date: 2026-08-26*
+
+**Decided by:** Claude (autonomous)
+
+**In short:** A test that borrows state some *other* test built is fragile, so
+each kernel-shell self-test rung should create whatever it acts on and put it
+back afterwards. Twice in a row now, doing that has run into the same wall: the
+module could create the thing but had no operation for destroying it. The
+decision is to add the missing destroy/teardown operation to the module's real
+public API — not a `#[cfg(test)]` back door, and not a workaround in the rung —
+because in both cases the absence was a genuine defect that no caller had
+happened to hit yet.
+
+**The two cases.** In `fdtable` there was no process-exit path at all: tables
+were created on first use, never removed, and capped at 256, so after 256
+distinct pids had opened one descriptor every later open failed permanently. In
+`kconsole` there was no way to destroy a console: `create` only pushed, the cap
+is 16, three are seeded at init, so a user got thirteen creations per boot and a
+reboot was the only way back. Both are logged
+(`A-FDTABLE-HAS-NO-PROCESS-EXIT-PATH-AND-THE-TABLE-VECTOR-ONLY-GROWS`,
+`A-KCONSOLE-CAN-CREATE-A-CONSOLE-AND-HAS-NO-WAY-TO-DESTROY-ONE`).
+
+**The alternatives, and why they lost.**
+
+| Option | *What changes:* | Why not |
+|---|---|---|
+| Rung borrows another suite's fixture | the rung reads state built by a self-test that ran earlier in the boot battery | This is what was tried first, and it failed loudly: `fdtable::self_test` ends with `*STATE.lock() = None` on purpose, so its fixtures cannot masquerade as live processes in `/proc`. A rung that depends on another suite's leftovers depends on that suite *not* cleaning up — i.e. on a bug. |
+| Rung creates the fixture and leaves it | `/proc/<module>` carries an invented process/console for the rest of the boot | Makes the boot battery a source of fake system state, which is precisely what `with_pristine` and the `STATE = None` teardown exist to prevent. It also makes rung order matter, since a later rung's counts would include the earlier rung's residue. |
+| Add a `#[cfg(test)]`-only teardown | nothing a user can reach changes | The kernel is built with `test = false`, so shell rungs run in the *real* binary; there is no `cfg(test)` to hide behind. Even if there were, it would leave the real defect — a module that can only grow — undiscovered and unfixed. |
+| **Chosen: add the operation to the public API** | the module gains `close_all` / `destroy`, and the shell gains `fdtable exit` / `kconsole destroy` | The operation was independently missing. Writing the rung was the *occasion*, not the reason. |
+
+**Why this is not the usual "don't add API for tests" smell.** The objection to
+test-driven API is that it adds surface nobody needs. Here the test is simply
+the first caller to need an operation the design always implied: every resource
+that can be created must be releasable, and a manager whose only verbs are
+*create* and *list* is not a manager. The tell is that both additions are
+justifiable with no reference to testing at all — each closes a hard resource
+cap that a user could hit by hand, and each has an obvious precedent in an
+existing OS (`VT_DISALLOCATE` for consoles, process exit for descriptor tables).
+If an addition *cannot* be justified without mentioning the test, that is the
+case where this rule does not apply and the rung should be redesigned instead.
+
+**The general rule, worth applying beyond these two.** A module whose only
+caller is an interactive shell command tends to be missing precisely the
+operations no test ever needed — because nothing in the system was ever the
+caller that would have needed one. When picking a module to work on, the absence
+of a destructive subcommand in its shell usage line is a cheap and surprisingly
+reliable signal that its teardown path does not exist.
+
+**Where it came from.** Writing `kshell::self_test` rungs 94 and 95 for the
+twenty-sixth and twenty-seventh burn-down batches of
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+
+---
+
 ## 571. One shortcut table, not two: the configurable registry became the live one
 
 **Date:** 2026-08-26
@@ -47351,3 +47504,4 @@ there is no division by a count a later edit could let reach zero.
 **Where it lives:** `gui/desktop/src/hotkeys.rs` — `PanelLayout`, `panel_layout`,
 `settings_panel_size`, `render_settings_panel`; `gui/desktop/src/lib.rs` —
 `DesktopShell::render_shortcut_card`.
+

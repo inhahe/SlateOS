@@ -47,7 +47,6 @@ cmd_bootcfg 1
 cmd_bpfstat 4
 cmd_buddyinfo 3
 cmd_cal 2
-cmd_cgmem 6
 cmd_cgroup 2
 cmd_cgroupfs 3
 cmd_cliphistory 1
@@ -82,7 +81,6 @@ cmd_eventlog 4
 cmd_eyeprotect 2
 cmd_faceunlock 1
 cmd_fault_inject 3
-cmd_fdtable 6
 cmd_filelock 1
 cmd_filerules 1
 cmd_fileshare 1
@@ -118,7 +116,6 @@ cmd_iperf 6
 cmd_irqstat 1
 cmd_kbmacro 2
 cmd_kbsettings 4
-cmd_kconsole 6
 cmd_kernlog 1
 cmd_kmod 1
 cmd_kprobes 3

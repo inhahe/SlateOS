@@ -68313,6 +68313,35 @@ it sits.
   `unread_count` was the whole of its readable state, which is the same reason
   nothing could ask it to draw.
 
+  **Follow-up the same day — the pane now has the mouse route its own doc
+  promised.** `notif_pane`'s module comment has said since it was written that
+  the pane is toggled "on system tray click or Win+N", and only the chord
+  existed. A chord is a route nobody discovers, so the wallpaper message above
+  had somewhere to appear and no way to be found. The tray grew a bell in its
+  own fixed 24-px slot left of the clock (`bell_rect`,
+  `Hit::NotificationBell`), accent-coloured with an unread count when the
+  history is not empty.
+
+  Making the bell a *toggle* rather than a one-way door forced a second change,
+  recorded as §563: the pane used to be as tall as the display, so it covered
+  the bell that opened it and the second press landed on its own opaque column
+  and did nothing. `DesktopShell::notification_pane_height()` now returns the
+  taskbar's top edge and is the single source for the number given to both
+  `render` and `handle_mouse_event`. The bar stays visible and live while the
+  pane is open; a press on it that is not the bell closes the pane and is spent
+  doing so, exactly as the start menu, the power menu and the calendar already
+  behave.
+
+  **Still open from this thread:** the pane's `NotifPaneEvent`s are never
+  drained by the session. `QuickSettingToggled`, `NotificationClicked`,
+  `ClearAll` and `SettingChanged` accumulate in `NotificationPane::events` for
+  ever and nothing acts on them — so the quick-settings toggles (Wi-Fi,
+  Bluetooth, Do Not Disturb) move under the cursor and change nothing, and
+  clicking a notification does not open the application that posted it. The
+  fix is a drain in `ShellSession::step` beside the one the launcher already
+  has, plus a decision about who owns each setting; the radio toggles in
+  particular have no service to talk to yet.
+
   **Still an island next door:** `gui/desktop/src/osd.rs` (3,457 lines), the
   volume/brightness/lock on-screen display, remains uncalled. It was the other
   candidate for the wallpaper message and lost on the merits — an OSD

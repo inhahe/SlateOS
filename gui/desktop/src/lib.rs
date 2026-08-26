@@ -307,6 +307,17 @@ const TASKBAR_BUTTON_MAX_WIDTH: f32 = 160.0;
 const TRAY_MIN_WIDTH: f32 = 120.0;
 /// Gap at the tray's outer edge and between the items inside it.
 const TRAY_PADDING: f32 = 8.0;
+/// Width of the notification bell's slot in the tray.
+///
+/// A fixed square rather than a measured one: the bell is a glyph, not a
+/// reading, so nothing about it changes width when the clock's switches do.
+/// The unread badge is drawn *inside* this slot for the same reason — a count
+/// that widened the tray as notifications arrived would shuffle the window
+/// buttons sideways every time something was posted.
+const TRAY_BELL_WIDTH: f32 = 24.0;
+/// The bell the tray draws. Same codepoint `focus_assist` and `widgets` already
+/// use for it, so the desktop has one bell rather than three.
+const NOTIF_BELL_GLYPH: &str = "\u{1F514}";
 /// Extra room the window buttons leave beyond the tray, so the last button does
 /// not end flush against the desktop indicator.
 const TRAY_RESERVE_GAP: f32 = 20.0;
@@ -508,6 +519,8 @@ pub enum Hit {
     TaskbarPanel,
     /// The tray clock, which opens the calendar popup.
     Clock,
+    /// The tray's notification bell, which opens the notification pane.
+    NotificationBell,
     /// A control of the open calendar popup — including
     /// [`calendar::CalendarHit::Panel`], which is the popup's own inert space
     /// and must **not** dismiss it. A point off the popup is not this variant
@@ -1577,6 +1590,13 @@ impl DesktopShell {
             if self.clock_rect().contains(x, y) {
                 return Hit::Clock;
             }
+            // Left of the clock, and tested after it: the two slots abut, and
+            // `bell_rect` is derived from `clock_rect` so they cannot overlap —
+            // but the order makes the clock's edge belong to the clock by rule
+            // rather than by a rounding error going the way it happens to.
+            if self.bell_rect().contains(x, y) {
+                return Hit::NotificationBell;
+            }
             // The slot is resolved to a window *here*, while the list that
             // produced the rectangle is still in hand — see
             // [`Hit::TaskbarButton`].
@@ -1600,23 +1620,31 @@ impl DesktopShell {
     /// Returns what the caller should do with it — see [`ShellAction`].
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
         // Before the match, and before `handle_press`'s own overview check: the
-        // notification pane draws a scrim across the whole screen, so while it
-        // is up every event landed on it — including one over the strip the
-        // taskbar occupies, which is *under* the scrim.
+        // notification pane draws a scrim across everything above the taskbar,
+        // so while it is up an event there landed on it whatever is underneath.
         //
-        // Consumed unconditionally rather than forwarding the pane's
-        // `Ignored`. The pane ignores motion outside its column because it has
-        // no hover state out there, not because the event belongs to whatever
-        // is behind it; passing that through would light a button under an
-        // overlay, which is exactly what the overview arm below guards against.
-        if self.notifications.pane_state().is_visible() {
+        // The taskbar is the exception, and deliberately so — see
+        // [`notification_pane_height`](Self::notification_pane_height). The bar
+        // is neither covered nor dimmed while the pane is open, so a press on
+        // it is a real press on it, and falls through to `hit_test` below.
+        // That is what lets the bell close the pane it opened.
+        //
+        // Everything else is consumed unconditionally rather than forwarding
+        // the pane's `Ignored`. The pane ignores motion outside its column
+        // because it has no hover state out there, not because the event
+        // belongs to whatever is behind it; passing that through would light a
+        // button under an overlay, which is exactly what the overview arm below
+        // guards against.
+        if self.notifications.pane_state().is_visible()
+            && !self.taskbar_rect().contains(event.x, event.y)
+        {
             // Result deliberately discarded: see the paragraph above. Whether
             // the pane found something under the cursor does not change the
             // answer, which is that the click cannot reach past the scrim.
             let _ = self.notifications.handle_mouse_event(
                 event,
                 self.screen_width as f32,
-                self.screen_height as f32,
+                self.notification_pane_height(),
             );
             return ShellAction::Consumed;
         }
@@ -1733,6 +1761,17 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
+        // And for the notification pane, which by this point can only be a
+        // press on the taskbar: every other press was consumed by the pane
+        // above. Pressing the bell falls through to its own arm, which toggles
+        // — otherwise the button that opened the pane would close it here and
+        // then reopen it a line later. Anything else on the bar closes the pane
+        // and is spent doing so, like every other dismissal in this function.
+        if self.notifications.pane_state().is_visible() && !matches!(hit, Hit::NotificationBell) {
+            self.notifications.hide();
+            return ShellAction::Consumed;
+        }
+
         // Only the primary button acts. The rest still cannot fall through to a
         // client when they land on the shell's own surfaces.
         if button != MouseButton::Left {
@@ -1784,6 +1823,10 @@ impl DesktopShell {
             }
             Hit::Clock => {
                 self.toggle_calendar();
+                ShellAction::Consumed
+            }
+            Hit::NotificationBell => {
+                self.toggle_notifications();
                 ShellAction::Consumed
             }
             Hit::CalendarControl(control) => {
@@ -2731,6 +2774,59 @@ impl DesktopShell {
             self.font_size(TextRole::Body),
         );
 
+        // The notification bell, in its own slot immediately left of the clock.
+        // Without it the pane this shell owns had exactly one way in — Super+N
+        // — which is a route nobody discovers, and the pane's own module doc
+        // has always claimed a "system tray click" as the other.
+        let bell = self.bell_rect();
+        let unread = self.notifications.unread_count();
+        tree.text(
+            bell.x,
+            tray_text_y,
+            NOTIF_BELL_GLYPH,
+            // Accent when something is waiting. The glyph alone would be a
+            // silent difference: a bell that looks the same whether or not it
+            // has anything behind it is a bell nobody presses.
+            if unread == 0 {
+                self.theme.taskbar_fg
+            } else {
+                self.theme.taskbar_accent
+            },
+            self.font_size(TextRole::Glyph),
+        );
+        if unread > 0 {
+            // Two characters at most, so a hundred notifications cannot widen
+            // the badge past its slot. The pill is filled with the accent and
+            // lettered in the bar's own colour, which is the one pair the theme
+            // guarantees contrasts — see `DesktopTheme::taskbar_accent`.
+            let label = if unread > 9 {
+                "9+".to_owned()
+            } else {
+                unread.to_string()
+            };
+            let badge_size = self.font_size(TextRole::Caption);
+            let badge_w = text::width(&label, badge_size) + self.scale(6.0);
+            let badge_h = badge_size + self.scale(2.0);
+            // Right-aligned inside the slot: a badge that grew leftwards from
+            // the glyph would push the clock, and one that grew rightwards
+            // would sit on top of it.
+            let badge_x = (bell.x + bell.w - badge_w).max(bell.x);
+            let badge_y = bar.y + self.scale(4.0);
+            fill_round(
+                &mut tree,
+                Rect::new(badge_x, badge_y, badge_w, badge_h),
+                self.theme.taskbar_accent,
+                CornerRadii::all(badge_h / 2.0),
+            );
+            tree.text(
+                badge_x + self.scale(3.0),
+                badge_y + self.scale(1.0),
+                &label,
+                self.theme.taskbar_bg,
+                badge_size,
+            );
+        }
+
         // Desktop indicator, at the tray's left edge.
         tree.text(
             tray_x + padding,
@@ -3086,10 +3182,30 @@ impl DesktopShell {
     /// since nothing about a clipped clock says which end was cut.
     fn tray_width(&self) -> f32 {
         let padding = self.scale(TRAY_PADDING);
-        let content = self.clock_width() + self.desktop_indicator_width();
-        // Padding at the right edge, between the two items, and at the left of
-        // the tray.
-        (content + padding * 3.0).max(self.scale(TRAY_MIN_WIDTH))
+        let content =
+            self.clock_width() + self.scale(TRAY_BELL_WIDTH) + self.desktop_indicator_width();
+        // Padding at the right edge, between each pair of items, and at the
+        // left of the tray.
+        (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH))
+    }
+
+    /// The notification bell's clickable area, immediately left of the clock.
+    ///
+    /// Placed from the clock rather than from the tray's left edge: the tray's
+    /// contents are laid out right-to-left from the display edge — so that a
+    /// wider clock pushes everything left instead of running off the screen —
+    /// and an item positioned from the *left* edge of a right-aligned strip
+    /// would drift the moment the clock's switches changed its width.
+    ///
+    /// Full bar height, like [`clock_rect`](Self::clock_rect), because a target
+    /// only as tall as the glyph misses most presses aimed at it.
+    #[must_use]
+    pub fn bell_rect(&self) -> Rect {
+        let bar = self.taskbar_rect();
+        let padding = self.scale(TRAY_PADDING);
+        let width = self.scale(TRAY_BELL_WIDTH) + padding;
+        let x = (self.clock_rect().x - width).max(0.0);
+        Rect::new(x, bar.y, width.min((bar.w - x).max(0.0)), bar.h)
     }
 
     // ========================================================================
@@ -3292,14 +3408,27 @@ impl DesktopShell {
         Some(tree)
     }
 
-    /// Render the notification pane, if it is open.
+    /// How tall the notification pane — scrim included — is allowed to be.
     ///
-    /// Screen-sized, because the pane draws a scrim over the whole desktop and
-    /// sizes its own column from the right edge. The same two numbers are given
-    /// to [`NotificationPane::handle_mouse_event`], which is what keeps the
-    /// pane hit-tested where it is painted.
+    /// The taskbar's top edge, not the display's bottom. The pane is opened
+    /// from a button *on* the taskbar, and a panel that covers the button that
+    /// opened it is a panel the user cannot close the way they opened it: the
+    /// second press lands on the pane's own opaque column and does nothing.
+    /// Stopping above the bar leaves the bell reachable, which is what makes it
+    /// a toggle rather than a one-way door.
     ///
+    /// The same number goes to [`NotificationPane::render`] and to
+    /// [`NotificationPane::handle_mouse_event`] — one source, so the pane is
+    /// hit-tested exactly where it is painted.
+    ///
+    /// [`NotificationPane::render`]: notif_pane::NotificationPane::render
     /// [`NotificationPane::handle_mouse_event`]: notif_pane::NotificationPane::handle_mouse_event
+    #[must_use]
+    pub fn notification_pane_height(&self) -> f32 {
+        self.taskbar_rect().y
+    }
+
+    /// Render the notification pane, if it is open.
     #[must_use]
     pub fn render_notifications(&self) -> Option<RenderTree> {
         if !self.notifications.pane_state().is_visible() {
@@ -3309,7 +3438,7 @@ impl DesktopShell {
         tree.commands.extend(self.notifications.render(
             &Palette::from_settings(&self.appearance),
             self.screen_width as f32,
-            self.screen_height as f32,
+            self.notification_pane_height(),
         ));
         Some(tree)
     }
@@ -5269,18 +5398,21 @@ mod overview_wiring_tests {
     }
 
     #[test]
-    fn the_pane_swallows_presses_over_the_taskbar() {
-        // The scrim covers the whole screen, taskbar included. A press that
-        // reached the start button through it would raise a menu behind an
-        // overlay the user cannot see past.
+    fn a_press_on_the_taskbar_closes_the_pane_and_is_spent_doing_so() {
+        // The pane stops above the bar, so this press is a real press on the
+        // start button rather than one through a scrim. It still must not open
+        // the menu: dismissing is what the user aimed at, and acting as well
+        // would make one click do something they could not see coming — the
+        // rule every other popup in `handle_press` already follows.
         let mut s = shell();
         s.toggle_notifications();
         let action = press(&mut s, 20.0, 1080.0 - 24.0);
         assert_eq!(action, ShellAction::Consumed);
         assert!(
             !s.start_menu_open,
-            "a press through the scrim opened a menu"
+            "the press that closed the pane also opened a menu"
         );
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
     }
 
     #[test]
@@ -5369,5 +5501,215 @@ mod overview_wiring_tests {
         });
         assert!(!s.notifications.pane_state().is_visible());
         assert_eq!(s.notifications.unread_count(), 1);
+    }
+
+    // ======================================================================
+    // The tray bell
+    //
+    // `notif_pane`'s module doc has said since it was written that the pane is
+    // opened "from the system tray or Win+N". Only the chord existed, and a
+    // chord is a route nobody discovers. These are the tests that would have
+    // failed while the bell was a sentence in a doc comment.
+    // ======================================================================
+
+    /// Every string the taskbar draws, in order.
+    fn taskbar_text(s: &DesktopShell) -> Vec<String> {
+        s.render_taskbar()
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Post `n` unread notifications.
+    fn post(s: &mut DesktopShell, n: usize) {
+        for i in 0..n {
+            let _ = s.notify(notif_pane::Notification {
+                id: 0,
+                app_name: "Desktop".to_owned(),
+                title: format!("Something {i}"),
+                body: String::new(),
+                timestamp: 0,
+                priority: notif_pane::NotifPriority::Normal,
+                read: false,
+                action: None,
+            });
+        }
+    }
+
+    /// The middle of the bell's slot.
+    fn bell_centre(s: &DesktopShell) -> (f32, f32) {
+        let r = s.bell_rect();
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    #[test]
+    fn the_tray_draws_a_bell() {
+        let s = shell();
+        assert!(
+            taskbar_text(&s)
+                .iter()
+                .any(|t| t == super::NOTIF_BELL_GLYPH),
+            "the tray drew no bell"
+        );
+    }
+
+    #[test]
+    fn pressing_the_bell_opens_the_pane() {
+        let mut s = shell();
+        let (x, y) = bell_centre(&s);
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert_eq!(
+            s.notifications.pane_state(),
+            notif_pane::PaneState::Visible,
+            "the bell opened the pane but left it waiting for a frame"
+        );
+    }
+
+    #[test]
+    fn pressing_the_bell_again_closes_the_pane() {
+        // The reason the pane stops above the taskbar. A panel that covers the
+        // button that opened it is a one-way door: the second press lands on
+        // the panel's own opaque column and does nothing at all.
+        let mut s = shell();
+        let (x, y) = bell_centre(&s);
+        let _ = press(&mut s, x, y);
+        assert!(s.notifications.pane_state().is_visible());
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
+    }
+
+    #[test]
+    fn the_pane_stops_above_the_taskbar() {
+        let s = shell();
+        assert_eq!(s.notification_pane_height(), s.taskbar_rect().y);
+        assert!(
+            s.notification_pane_height() < s.screen_height as f32,
+            "a pane as tall as the display covers the bell that opens it"
+        );
+    }
+
+    #[test]
+    fn the_bell_and_the_clock_do_not_overlap() {
+        // Both are derived from the display's right edge inwards, so this is a
+        // claim about the derivation and not about one screen size: check it
+        // across the widths the clock's own switches produce.
+        for show_date in [false, true] {
+            let mut s = shell();
+            s.datetime.show_date = show_date;
+            let bell = s.bell_rect();
+            let clock = s.clock_rect();
+            assert!(
+                bell.x + bell.w <= clock.x + 0.5,
+                "bell runs into the clock with show_date={show_date}"
+            );
+            assert!(
+                bell.x >= s.tray_x() - 0.5,
+                "bell sits outside the tray with show_date={show_date}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bell_is_not_hit_tested_as_the_clock() {
+        let s = shell();
+        let (x, y) = bell_centre(&s);
+        assert_eq!(s.hit_test(x, y), super::Hit::NotificationBell);
+        let clock = s.clock_rect();
+        assert_eq!(
+            s.hit_test(clock.x + clock.w / 2.0, clock.y + clock.h / 2.0),
+            super::Hit::Clock,
+            "the bell stole the clock's slot"
+        );
+    }
+
+    #[test]
+    fn the_window_buttons_stop_short_of_the_bell() {
+        // `taskbar_button_width` sizes the buttons from what is left after the
+        // tray. A bell the tray did not account for would be drawn over by the
+        // last button.
+        let mut s = shell();
+        s.apply_window_list(&WindowList::new(
+            0,
+            (1..=12)
+                .map(|i| placed(i, "Window", 0, (0, 0, 400, 300)))
+                .collect(),
+        ));
+        let bell = s.bell_rect();
+        for index in 0..s.taskbar_windows().len() {
+            let button = s.taskbar_button_rect(index);
+            assert!(
+                button.x + button.w <= bell.x + 0.5,
+                "window button {index} reaches the bell"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unread_notification_puts_a_count_on_the_bell() {
+        let mut s = shell();
+        assert!(
+            !taskbar_text(&s).iter().any(|t| t == "1"),
+            "an empty history drew a badge"
+        );
+        post(&mut s, 1);
+        assert!(
+            taskbar_text(&s).iter().any(|t| t == "1"),
+            "one unread notification drew no count"
+        );
+    }
+
+    #[test]
+    fn the_badge_stops_counting_at_nine() {
+        let mut s = shell();
+        post(&mut s, 40);
+        let drawn = taskbar_text(&s);
+        assert!(
+            drawn.iter().any(|t| t == "9+"),
+            "a two-digit count would not fit the slot: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_badge_does_not_move_the_tray() {
+        // A count that widened the tray would shuffle every window button
+        // sideways each time something was posted.
+        let mut s = shell();
+        let quiet = (s.tray_x(), s.clock_rect().x, s.bell_rect().x);
+        post(&mut s, 40);
+        assert_eq!(
+            (s.tray_x(), s.clock_rect().x, s.bell_rect().x),
+            quiet,
+            "the badge pushed the tray"
+        );
+    }
+
+    #[test]
+    fn the_bell_changes_colour_when_something_is_waiting() {
+        // A bell that looks the same whether or not it has anything behind it
+        // is a bell nobody presses.
+        fn bell_colour(s: &DesktopShell) -> super::Color {
+            s.render_taskbar()
+                .commands
+                .iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Text { text, color, .. } if text == super::NOTIF_BELL_GLYPH => {
+                        Some(*color)
+                    }
+                    _ => None,
+                })
+                .expect("the tray drew no bell")
+        }
+        let mut s = shell();
+        let quiet = bell_colour(&s);
+        post(&mut s, 1);
+        assert_ne!(
+            bell_colour(&s),
+            quiet,
+            "the bell did not react to a message"
+        );
     }
 }

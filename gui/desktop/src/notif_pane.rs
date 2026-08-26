@@ -4,6 +4,19 @@
 //! grouped by time (Today, Yesterday, This Week, Older), quick settings toggles,
 //! and per-app notification configuration.
 //!
+//! # Where the caller puts it
+//!
+//! `screen_height` is the height the caller gives the pane, not the display's.
+//! [`DesktopShell`] passes the taskbar's top edge, so the pane and its scrim
+//! stop above the bar and the bell that opens it stays visible and clickable —
+//! see `DesktopShell::notification_pane_height`. Pass the same number to
+//! [`NotificationPane::render`] and [`NotificationPane::handle_mouse_event`];
+//! the pane is hit-tested from whatever it was last told, so two different
+//! numbers is a pane that answers clicks somewhere other than where it is
+//! drawn.
+//!
+//! [`DesktopShell`]: crate::DesktopShell
+//!
 //! # Usage from the desktop shell
 //!
 //! ```ignore

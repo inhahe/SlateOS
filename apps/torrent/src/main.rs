@@ -3793,6 +3793,53 @@ mod tests {
         assert!(hs.supports_extensions());
     }
 
+    #[test]
+    fn a_handshake_is_the_sixty_eight_bytes_bep_3_specifies() {
+        // The round-trip test above cannot stand in for this one. It catches
+        // an encoder bug only on the assumption that the decoder is right, and
+        // nothing in this file pins the decoder to BEP 3 either -- so the pair
+        // is checked against itself and never against the specification.
+        //
+        // That matters because the peer on the other end of this handshake is
+        // a *foreign* implementation -- libtorrent, Transmission, qBittorrent.
+        // A matched pair of bugs, `encode` and `decode` both putting the peer
+        // id before the info hash, or both treating pstrlen as a `u32`,
+        // round-trips perfectly here and is hung up on by every client in the
+        // swarm. Asserting the bytes against the specification is the only
+        // check the two of them cannot pass by agreeing with each other.
+        //
+        // BEP 3 gives the layout as, in order:
+        //   1 byte   pstrlen = 19
+        //   19 bytes pstr    = "BitTorrent protocol"
+        //   8 bytes  reserved
+        //   20 bytes info_hash
+        //   20 bytes peer_id
+        //
+        // The two 20-byte fields are filled with different constants
+        // precisely so that swapping them is visible.
+        let bytes = Handshake::new([0xAA; 20], [0xBB; 20]).encode();
+
+        assert_eq!(bytes.len(), 68, "1 + 19 + 8 + 20 + 20");
+        assert_eq!(
+            bytes.first().copied(),
+            Some(19),
+            "pstrlen is a single byte, not a length prefix like every other \
+             message on this connection"
+        );
+        assert_eq!(
+            bytes.get(1..20),
+            Some(b"BitTorrent protocol".as_slice()),
+            "the protocol name is fixed by BEP 3 and is not ours to change"
+        );
+        assert_eq!(
+            bytes.get(20..28),
+            Some([0, 0, 0, 0, 0, 0x10, 0, 0].as_slice()),
+            "BEP 10 puts the extension-protocol bit at 0x10 of reserved byte 5"
+        );
+        assert_eq!(bytes.get(28..48), Some([0xAA; 20].as_slice()), "info_hash");
+        assert_eq!(bytes.get(48..68), Some([0xBB; 20].as_slice()), "peer_id");
+    }
+
     // Piece tracker tests
     #[test]
     fn test_piece_tracker_new() {

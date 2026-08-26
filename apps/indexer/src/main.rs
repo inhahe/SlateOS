@@ -2216,6 +2216,61 @@ exclude_extensions = .o, .tmp
     }
 
     #[test]
+    fn a_written_config_is_a_file_a_person_can_edit() {
+        // Nothing above this can see the file's *shape*. `Config::parse`
+        // discards comments, blank lines and layout, so every round-trip test
+        // in this module passes just as happily against a serializer that
+        // dropped the header explaining the escapes -- or that reverted to the
+        // comma-joined lists the header explicitly promises it does not write.
+        // This config is a file a human opens and edits by hand when the
+        // indexer is reading the wrong directories, so its shape is a feature
+        // and gets pinned like one.
+        //
+        // Built line by line rather than as one multi-line literal because
+        // `exclude_paths = ` and `include_extensions = ` end in a significant
+        // space, which a trailing-whitespace-trimming editor would silently
+        // eat out of a block literal and turn into a mystery failure.
+        let cfg = Config {
+            // A comma inside a path is the case the one-per-line format exists
+            // for: joined with commas this would come back as two entries,
+            // `/home/u/Private` and `Ltd`, and the directory the user asked to
+            // keep out of the index would be indexed.
+            index_paths: vec!["/home/u/Private, Ltd".to_string(), "/srv".to_string()],
+            exclude_paths: Vec::new(),
+            include_extensions: None,
+            exclude_extensions: vec![".o".to_string()],
+            max_file_size: 100,
+            scan_interval_secs: 60,
+            index_contents: true,
+            enabled: true,
+        };
+
+        let expected = [
+            "# Slate OS File Indexer Configuration",
+            "#",
+            "# Paths and extensions take one line each. Values are escaped:",
+            "#   \\\\  backslash    \\n  newline    \\r  return",
+            "#   \\t  tab          \\s  a leading or trailing space",
+            "# A path may contain any byte but `/` and NUL, commas included,",
+            "# so the list is not comma-separated.",
+            "",
+            "enabled = true",
+            "index_path = /home/u/Private, Ltd",
+            "index_path = /srv",
+            "exclude_paths = ",
+            "include_extensions = ",
+            "exclude_extension = .o",
+            "max_file_size = 100",
+            "scan_interval_secs = 60",
+            "index_contents = true",
+            "",
+        ]
+        .join("\n");
+
+        assert_eq!(cfg.serialize(), expected);
+    }
+
+    #[test]
     fn an_empty_list_stays_empty_rather_than_reverting_to_defaults() {
         // The one thing repeated keys cannot say: no lines is indistinguishable
         // from "key absent", which means keep the defaults.

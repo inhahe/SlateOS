@@ -72,10 +72,21 @@ const FONT_SIZE_SMALL: f32 = 12.0;
 /// Named because the height calculation and the per-line draw both depend on
 /// it; as two separate literals they could disagree and clip the last line.
 const MESSAGE_LINE_HEIGHT: f32 = 20.0;
+/// Baseline-to-baseline spacing of the detail line under a dialog message.
+/// Smaller than [`MESSAGE_LINE_HEIGHT`] because the detail is set smaller.
+const DETAIL_LINE_HEIGHT: f32 = 16.0;
+/// Gap between the last line of the message and the first line of the detail.
+const DETAIL_GAP: f32 = 8.0;
 const SHADOW_BLUR: f32 = 24.0;
 const SHADOW_OFFSET_Y: f32 = 8.0;
 const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 100);
 const CLOSE_BUTTON_SIZE: f32 = 28.0;
+/// How far a hovered button is moved towards white, as a fraction.
+///
+/// Applied to whichever colour the button's role already gives it, rather than
+/// swapping in one shared highlight, so a hovered destructive button stays
+/// visibly red.
+const HOVER_LIGHTEN: f32 = 0.15;
 
 // --- DialogResult ---
 
@@ -98,39 +109,127 @@ pub enum DialogResult {
 
 // --- Button configuration ---
 
-/// Identifier for standard dialog buttons.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DialogButton {
-    Ok,
-    Cancel,
-    Yes,
-    No,
+/// How a dialog button is drawn, and what weight it carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ButtonRole {
+    /// The action the dialog exists to offer. Accent-coloured, and the button
+    /// focus starts on.
+    Primary,
+    /// A secondary action — cancelling, declining, "not now". Drawn plainly.
+    #[default]
+    Secondary,
+    /// An action that destroys something the user cannot get back.
+    ///
+    /// Drawn in the error colour rather than the accent colour, which is the
+    /// whole reason the role exists: a red "Erase Disk" and a blue "OK" carry
+    /// different warnings, and a confirmation that cannot say which one it is
+    /// asking for is a confirmation that gets clicked through.
+    Destructive,
+}
+
+/// A button in a dialog: what it says, what it means, and how it is drawn.
+///
+/// These are three independent facts, and the type used to fuse them into four
+/// fixed combinations — `Ok`/`Cancel`/`Yes`/`No`, each with a hardcoded English
+/// label and no way to be anything but accent-blue or grey. That is why the two
+/// callers in the tree who needed a dialog — `apps/partmanager` and
+/// `apps/diskimager` — each hand-rolled their own instead: both needed a button
+/// that says `Delete` or `Write` and is red, and neither could say so here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogButton {
+    label: String,
+    result: DialogResult,
+    role: ButtonRole,
 }
 
 impl DialogButton {
-    /// Display label for this button.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Ok => "OK",
-            Self::Cancel => "Cancel",
-            Self::Yes => "Yes",
-            Self::No => "No",
+    /// A button with an arbitrary label, meaning, and role.
+    #[must_use]
+    pub fn new(label: &str, result: DialogResult, role: ButtonRole) -> Self {
+        Self {
+            label: label.to_string(),
+            result,
+            role,
         }
     }
 
-    /// Map button to its corresponding DialogResult.
-    fn to_result(self) -> DialogResult {
-        match self {
-            Self::Ok => DialogResult::Ok,
-            Self::Cancel => DialogResult::Cancel,
-            Self::Yes => DialogResult::Yes,
-            Self::No => DialogResult::No,
-        }
+    /// The standard affirmative button: `OK`, accent-coloured.
+    #[must_use]
+    pub fn ok() -> Self {
+        Self::new("OK", DialogResult::Ok, ButtonRole::Primary)
     }
 
-    /// Whether this is a "primary" (accent-colored) button.
-    fn is_primary(self) -> bool {
-        matches!(self, Self::Ok | Self::Yes)
+    /// The standard dismissive button: `Cancel`, drawn plainly.
+    #[must_use]
+    pub fn cancel() -> Self {
+        Self::new("Cancel", DialogResult::Cancel, ButtonRole::Secondary)
+    }
+
+    /// The standard `Yes` button, accent-coloured.
+    #[must_use]
+    pub fn yes() -> Self {
+        Self::new("Yes", DialogResult::Yes, ButtonRole::Primary)
+    }
+
+    /// The standard `No` button, drawn plainly.
+    #[must_use]
+    pub fn no() -> Self {
+        Self::new("No", DialogResult::No, ButtonRole::Secondary)
+    }
+
+    /// A destructive action under its own name — `Delete`, `Erase Disk`,
+    /// `Write Image`.
+    ///
+    /// Reports [`DialogResult::Ok`], so a caller that only cares whether the
+    /// user went ahead can treat it exactly like the affirmative button; the
+    /// difference is what the user was shown, which is the point.
+    #[must_use]
+    pub fn destructive(label: &str) -> Self {
+        Self::new(label, DialogResult::Ok, ButtonRole::Destructive)
+    }
+
+    /// Builder: override the label without changing what the button means.
+    #[must_use]
+    pub fn with_label(mut self, label: &str) -> Self {
+        self.label = label.to_string();
+        self
+    }
+
+    /// Builder: override the role without changing what the button means.
+    #[must_use]
+    pub fn with_role(mut self, role: ButtonRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// The text drawn on the button.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// What pressing this button reports.
+    #[must_use]
+    pub fn result(&self) -> &DialogResult {
+        &self.result
+    }
+
+    /// How this button is drawn.
+    #[must_use]
+    pub fn role(&self) -> ButtonRole {
+        self.role
+    }
+
+    /// The width this button needs: never below [`BUTTON_MIN_WIDTH`], and wide
+    /// enough for its own label once labels are no longer four known strings.
+    ///
+    /// Both the hit rectangle and the drawn rectangle come from this one
+    /// function, via [`DialogLayout::button_rects`]. They used to be two copies
+    /// of the constant, which was harmless only while every button was exactly
+    /// as wide as every other.
+    fn width(&self) -> f32 {
+        let text = crate::text::measure(&self.label, FONT_SIZE, FontWeightHint::Bold);
+        BUTTON_MIN_WIDTH.max(text + BUTTON_PADDING_H * 2.0)
     }
 }
 
@@ -138,40 +237,94 @@ impl DialogButton {
 #[derive(Clone, Debug)]
 pub struct ButtonSet {
     buttons: Vec<DialogButton>,
+    /// Which button focus starts on. Zero for every set but the destructive
+    /// one; see [`ButtonSet::destructive_cancel`] for why that one differs.
+    default_index: usize,
 }
 
 impl ButtonSet {
     /// Single OK button.
+    #[must_use]
     pub fn ok() -> Self {
         Self {
-            buttons: vec![DialogButton::Ok],
+            buttons: vec![DialogButton::ok()],
+            default_index: 0,
         }
     }
 
     /// OK and Cancel buttons.
+    #[must_use]
     pub fn ok_cancel() -> Self {
         Self {
-            buttons: vec![DialogButton::Ok, DialogButton::Cancel],
+            buttons: vec![DialogButton::ok(), DialogButton::cancel()],
+            default_index: 0,
         }
     }
 
     /// Yes and No buttons.
+    #[must_use]
     pub fn yes_no() -> Self {
         Self {
-            buttons: vec![DialogButton::Yes, DialogButton::No],
+            buttons: vec![DialogButton::yes(), DialogButton::no()],
+            default_index: 0,
         }
     }
 
     /// Yes, No, and Cancel buttons.
+    #[must_use]
     pub fn yes_no_cancel() -> Self {
         Self {
-            buttons: vec![DialogButton::Yes, DialogButton::No, DialogButton::Cancel],
+            buttons: vec![
+                DialogButton::yes(),
+                DialogButton::no(),
+                DialogButton::cancel(),
+            ],
+            default_index: 0,
         }
     }
 
-    /// Custom button set.
+    /// A destructive action under its own name, plus `Cancel`.
+    ///
+    /// The default is `Cancel`, not the destructive button — the one case where
+    /// focus does not start at the left. A user who hits Enter on a dialog they
+    /// have not finished reading must not thereby erase a disk, and Enter is
+    /// exactly what gets hit reflexively when a dialog appears unexpectedly. The
+    /// destructive button is still the one the dialog is *asking* about, which
+    /// is what its colour and its verb are for; it just is not the one a stray
+    /// keystroke reaches.
+    #[must_use]
+    pub fn destructive_cancel(label: &str) -> Self {
+        Self {
+            buttons: vec![DialogButton::destructive(label), DialogButton::cancel()],
+            default_index: 1,
+        }
+    }
+
+    /// Custom button set. Focus starts on the first button; use
+    /// [`with_default`](Self::with_default) to move it.
+    #[must_use]
     pub fn custom(buttons: Vec<DialogButton>) -> Self {
-        Self { buttons }
+        Self {
+            buttons,
+            default_index: 0,
+        }
+    }
+
+    /// Builder: choose which button focus starts on.
+    ///
+    /// Out-of-range indices are clamped to the last button rather than
+    /// rejected, so a set that later loses a button cannot leave focus pointing
+    /// past the end of the row.
+    #[must_use]
+    pub fn with_default(mut self, index: usize) -> Self {
+        self.default_index = index.min(self.buttons.len().saturating_sub(1));
+        self
+    }
+
+    /// The button focus starts on when the dialog is shown.
+    #[must_use]
+    pub fn default_index(&self) -> usize {
+        self.default_index
     }
 
     /// Number of buttons.
@@ -393,9 +546,18 @@ impl Default for ModalOverlay {
 pub struct AlertDialog {
     title: String,
     message: String,
+    /// A second, quieter line under the message — the consequence, where the
+    /// message is the question. Drawn in the warning colour and smaller, so
+    /// "All data on /dev/sda will be permanently destroyed" can sit under
+    /// "Write 'ubuntu.iso' to 'USB Drive'?" without the two competing.
+    detail: Option<String>,
     icon: DialogIcon,
     buttons: ButtonSet,
     focused_button: usize,
+    /// Which button the pointer is over, or `None`. Purely presentational —
+    /// nothing is decided by it — but its absence is what made every
+    /// hand-rolled copy of this dialog in the tree feel different from it.
+    hovered_button: Option<usize>,
     result: Option<DialogResult>,
     overlay: ModalOverlay,
     /// Custom width (if set, overrides auto-sizing).
@@ -436,10 +598,37 @@ impl AlertDialog {
         Self::new(title, message, DialogIcon::Info, ButtonSet::yes_no_cancel())
     }
 
+    /// Create a confirmation for an action that destroys something.
+    ///
+    /// The affirmative button carries the verb (`Delete`, `Erase Disk`) rather
+    /// than reading `OK`, is drawn in the error colour, and is *not* the button
+    /// focus starts on — see [`ButtonSet::destructive_cancel`].
+    #[must_use]
+    pub fn destructive(title: &str, message: &str, confirm_label: &str) -> Self {
+        Self::new(
+            title,
+            message,
+            DialogIcon::Warning,
+            ButtonSet::destructive_cancel(confirm_label),
+        )
+    }
+
     /// Builder: set custom button set.
+    ///
+    /// Moves focus to the new set's default, because the index focus was on
+    /// belongs to the row that has just been replaced; leaving it put is how a
+    /// two-button dialog ends up focusing a button that no longer exists.
     #[must_use]
     pub fn with_buttons(mut self, buttons: ButtonSet) -> Self {
+        self.focused_button = buttons.default_index();
         self.buttons = buttons;
+        self
+    }
+
+    /// Builder: set the quieter second line under the message.
+    #[must_use]
+    pub fn with_detail(mut self, detail: &str) -> Self {
+        self.detail = Some(detail.to_string());
         self
     }
 
@@ -474,7 +663,8 @@ impl AlertDialog {
     /// Show the dialog (activate overlay, begin fade-in).
     pub fn show(&mut self) {
         self.result = None;
-        self.focused_button = 0;
+        self.focused_button = self.buttons.default_index();
+        self.hovered_button = None;
         self.overlay.show();
     }
 
@@ -493,9 +683,21 @@ impl AlertDialog {
         self.focused_button
     }
 
+    /// The button the pointer is over, if any.
+    #[must_use]
+    pub fn hovered_button(&self) -> Option<usize> {
+        self.hovered_button
+    }
+
     /// The button set for this dialog.
     pub fn buttons(&self) -> &ButtonSet {
         &self.buttons
+    }
+
+    /// The quieter second line under the message, if one was set.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     /// Update animation state.
@@ -549,7 +751,7 @@ impl AlertDialog {
             Key::Enter | Key::Space => {
                 // Activate focused button.
                 if let Some(btn) = self.buttons.buttons.get(self.focused_button) {
-                    self.result = Some(btn.to_result());
+                    self.result = Some(btn.result().clone());
                     self.overlay.hide();
                 }
                 EventResult::Consumed
@@ -567,24 +769,30 @@ impl AlertDialog {
             return EventResult::Consumed;
         }
 
-        // Check button clicks, against the rectangles the buttons were last
-        // drawn at. Nothing is clickable before the first frame, which is
+        // Which button the pointer is over, against the rectangles the buttons
+        // were last drawn at. Nothing is hit before the first frame, which is
         // correct: a dialog that has not been drawn has no buttons on screen to
         // have been aimed at.
-        if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            let hit = self.placement.as_ref().and_then(|layout| {
-                layout
-                    .button_rects
-                    .iter()
-                    .position(|r| point_in_rect(event.x, event.y, r.0, r.1, r.2, r.3))
-            });
-            if let Some(i) = hit
-                && let Some(btn) = self.buttons.buttons.get(i)
-            {
-                self.result = Some(btn.to_result());
-                self.overlay.hide();
-                return EventResult::Consumed;
-            }
+        let hit = self.placement.as_ref().and_then(|layout| {
+            layout
+                .button_rects
+                .iter()
+                .position(|r| point_in_rect(event.x, event.y, r.0, r.1, r.2, r.3))
+        });
+
+        // Hover follows the pointer on every kind of mouse event, not only on
+        // `Move`: a press that misses, a release, and a wheel tick all move the
+        // cursor's relationship to the buttons, and a highlight left stuck on a
+        // button the pointer has left is a lie about what a click would do.
+        self.hovered_button = hit;
+
+        if let MouseEventKind::Press(MouseButton::Left) = event.kind
+            && let Some(i) = hit
+            && let Some(btn) = self.buttons.buttons.get(i)
+        {
+            self.result = Some(btn.result().clone());
+            self.overlay.hide();
+            return EventResult::Consumed;
         }
 
         EventResult::Consumed
@@ -701,13 +909,13 @@ impl AlertDialog {
         // Message text, one command per wrapped line.
         let text_max_width = self.message_max_width();
         let lines = self.message_lines();
-        // Centred against the icon while the message is the shorter of the
+        // Centred against the icon while the text column is the shorter of the
         // two, then top-aligned once it is taller — so a one-line message
         // still sits level with its icon.
-        let block_height = lines.len() as f32 * MESSAGE_LINE_HEIGHT;
+        let block_height = self.text_block_height();
         let first_line_y = content_y + (ICON_SIZE - block_height).max(0.0) / 2.0;
-        for (n, line) in lines.iter().enumerate() {
-            let line_y = first_line_y + n as f32 * MESSAGE_LINE_HEIGHT;
+        let mut line_y = first_line_y;
+        for line in &lines {
             // The dialog height is clamped at `DIALOG_MAX_HEIGHT`, so a message
             // can be longer than the box it is given. Lines that do not fit are
             // dropped rather than drawn over the button row: text on top of the
@@ -725,6 +933,30 @@ impl AlertDialog {
                 max_width: Some(text_max_width),
                 overflow: TextOverflow::Ellipsis,
             });
+            line_y += MESSAGE_LINE_HEIGHT;
+        }
+
+        // Detail, under whatever the message actually occupied — not under a
+        // fixed allowance for it. Same overflow rule as the message above.
+        let detail_lines = self.detail_lines();
+        if !detail_lines.is_empty() {
+            line_y = first_line_y + lines.len() as f32 * MESSAGE_LINE_HEIGHT + DETAIL_GAP;
+            for line in &detail_lines {
+                if line_y + DETAIL_LINE_HEIGHT > buttons_y {
+                    break;
+                }
+                tree.push(RenderCommand::Text {
+                    x: text_x,
+                    y: line_y,
+                    text: line.clone(),
+                    color: COLOR_YELLOW,
+                    font_size: FONT_SIZE_SMALL,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(text_max_width),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                line_y += DETAIL_LINE_HEIGHT;
+            }
         }
 
         // Buttons (bottom-right aligned).
@@ -741,22 +973,34 @@ impl AlertDialog {
     /// it with no test able to see it happen.
     fn render_buttons(&self, tree: &mut RenderTree, layout: &DialogLayout) {
         for (i, btn) in self.buttons.buttons.iter().enumerate() {
-            let Some(&(btn_x, y, _, _)) = layout.button_rects.get(i) else {
+            // Width comes from the layout, not from the constant: buttons carry
+            // their own labels now, so they are no longer all the same width and
+            // a redrawn guess would drift away from the rectangle a click is
+            // tested against.
+            let Some(&(btn_x, y, btn_w, btn_h)) = layout.button_rects.get(i) else {
                 continue;
             };
             let is_focused = i == self.focused_button;
+            let is_hovered = self.hovered_button == Some(i);
 
-            // Button background.
-            let bg_color = if btn.is_primary() {
-                COLOR_BLUE
+            // Button background. Hover lightens whatever the role's colour is,
+            // rather than substituting one shared highlight colour, so a hovered
+            // destructive button is still visibly the destructive one.
+            let (base_bg, text_color) = match btn.role() {
+                ButtonRole::Primary => (COLOR_BLUE, COLOR_CRUST),
+                ButtonRole::Secondary => (COLOR_SURFACE1, COLOR_TEXT),
+                ButtonRole::Destructive => (COLOR_RED, COLOR_CRUST),
+            };
+            let bg_color = if is_hovered {
+                base_bg.lerp(Color::WHITE, HOVER_LIGHTEN)
             } else {
-                COLOR_SURFACE1
+                base_bg
             };
             tree.push(RenderCommand::FillRect {
                 x: btn_x,
                 y,
-                width: BUTTON_MIN_WIDTH,
-                height: BUTTON_HEIGHT,
+                width: btn_w,
+                height: btn_h,
                 color: bg_color,
                 corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS),
             });
@@ -766,8 +1010,8 @@ impl AlertDialog {
                 tree.push(RenderCommand::StrokeRect {
                     x: btn_x - 2.0,
                     y: y - 2.0,
-                    width: BUTTON_MIN_WIDTH + 4.0,
-                    height: BUTTON_HEIGHT + 4.0,
+                    width: btn_w + 4.0,
+                    height: btn_h + 4.0,
                     color: COLOR_LAVENDER,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS + 2.0),
@@ -776,20 +1020,13 @@ impl AlertDialog {
 
             // Button label.
             let label = btn.label();
-            let text_color = if btn.is_primary() {
-                COLOR_CRUST
-            } else {
-                COLOR_TEXT
-            };
             tree.push(RenderCommand::Text {
                 // Centred on the label's measured width. The flat 7px-per-byte
                 // guess this replaces drifted further off-centre the longer the
                 // label was, and mis-centred non-ASCII labels badly.
                 x: btn_x
-                    + (BUTTON_MIN_WIDTH
-                        - crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold))
-                        / 2.0,
-                y: y + (BUTTON_HEIGHT - FONT_SIZE) / 2.0,
+                    + (btn_w - crate::text::measure(label, FONT_SIZE, FontWeightHint::Bold)) / 2.0,
+                y: y + (btn_h - FONT_SIZE) / 2.0,
                 text: label.to_string(),
                 color: text_color,
                 font_size: FONT_SIZE,
@@ -801,10 +1038,27 @@ impl AlertDialog {
     }
 
     /// The dialog's outer width.
+    ///
+    /// Never narrower than the button row, which is what stops a dialog whose
+    /// buttons carry a verb (`Erase Disk`, `Overwrite Existing File`) from
+    /// laying them out starting to the left of its own left edge — the buttons
+    /// are right-aligned inside the box, so overflow goes off the *near* side
+    /// where it is least expected.
     fn dialog_width(&self) -> f32 {
-        self.width
-            .unwrap_or(DIALOG_MIN_WIDTH)
+        let requested = self.width.unwrap_or(DIALOG_MIN_WIDTH);
+        requested
+            .max(self.buttons_row_width() + CONTENT_PADDING * 2.0)
             .clamp(DIALOG_MIN_WIDTH, DIALOG_MAX_WIDTH)
+    }
+
+    /// Total width of the button row, buttons and the gaps between them.
+    fn buttons_row_width(&self) -> f32 {
+        self.buttons
+            .buttons
+            .iter()
+            .map(DialogButton::width)
+            .sum::<f32>()
+            + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING
     }
 
     /// Horizontal room the message has, after the padding and any icon.
@@ -839,23 +1093,27 @@ impl AlertDialog {
         let x = (parent_width - width) / 2.0;
         let y = (parent_height - height) / 2.0;
 
-        // Compute button rects for hit testing.
+        // Compute button rects for hit testing. Each button is as wide as its
+        // own label needs, so the row has to be walked rather than indexed:
+        // button `i` starts where button `i - 1` ended, which is only a
+        // multiplication while every button is the same width.
         let buttons_y = y + height - BUTTON_HEIGHT - CONTENT_PADDING;
-        let total_btn_width: f32 = self
+        let widths: Vec<f32> = self
             .buttons
             .buttons
             .iter()
-            .map(|_| BUTTON_MIN_WIDTH)
-            .sum::<f32>()
+            .map(DialogButton::width)
+            .collect();
+        let total_btn_width: f32 = widths.iter().sum::<f32>()
             + (self.buttons.len().saturating_sub(1) as f32) * BUTTON_SPACING;
         let start_x = x + width - CONTENT_PADDING - total_btn_width;
 
-        let button_rects: Vec<(f32, f32, f32, f32)> = (0..self.buttons.len())
-            .map(|i| {
-                let bx = start_x + (i as f32) * (BUTTON_MIN_WIDTH + BUTTON_SPACING);
-                (bx, buttons_y, BUTTON_MIN_WIDTH, BUTTON_HEIGHT)
-            })
-            .collect();
+        let mut cursor_x = start_x;
+        let mut button_rects: Vec<(f32, f32, f32, f32)> = Vec::with_capacity(widths.len());
+        for w in widths {
+            button_rects.push((cursor_x, buttons_y, w, BUTTON_HEIGHT));
+            cursor_x += w + BUTTON_SPACING;
+        }
 
         DialogLayout {
             x,
@@ -867,6 +1125,33 @@ impl AlertDialog {
         }
     }
 
+    /// The detail line, broken into the lines it will be drawn as, or empty if
+    /// there is none. Wrapped at the message's own column and in the detail's
+    /// smaller face, so [`compute_height`](Self::compute_height) and the draw
+    /// loop cannot disagree about how many lines there are.
+    fn detail_lines(&self) -> Vec<String> {
+        let Some(detail) = self.detail.as_deref() else {
+            return Vec::new();
+        };
+        crate::text::wrap(
+            detail,
+            self.message_max_width(),
+            FONT_SIZE_SMALL,
+            FontWeightHint::Regular,
+        )
+    }
+
+    /// Height of the message and, under it, the detail — the whole text column.
+    fn text_block_height(&self) -> f32 {
+        let message = self.message_lines().len() as f32 * MESSAGE_LINE_HEIGHT;
+        let detail = self.detail_lines().len() as f32 * DETAIL_LINE_HEIGHT;
+        if detail > 0.0 {
+            message + DETAIL_GAP + detail
+        } else {
+            message
+        }
+    }
+
     /// Compute the height needed for the dialog content.
     fn compute_height(&self) -> f32 {
         // Title bar + content padding + icon/message area + padding + buttons + padding
@@ -874,8 +1159,7 @@ impl AlertDialog {
         // The message area is as tall as the message's own wrapped lines. It
         // used to be a flat three-line guess, which left a band of empty space
         // under a one-line message and clipped anything longer than three.
-        let message_height = self.message_lines().len() as f32 * MESSAGE_LINE_HEIGHT;
-        let content_height = ICON_SIZE.max(message_height);
+        let content_height = ICON_SIZE.max(self.text_block_height());
         (TITLE_BAR_HEIGHT
             + CONTENT_PADDING
             + content_height
@@ -890,12 +1174,15 @@ impl AlertDialog {
         overlay.dismiss_on_escape = true;
         overlay.dismiss_on_click_outside = true;
 
+        let focused_button = buttons.default_index();
         Self {
             title: title.to_string(),
             message: message.to_string(),
+            detail: None,
             icon,
             buttons,
-            focused_button: 0,
+            focused_button,
+            hovered_button: None,
             result: None,
             overlay,
             width: None,
@@ -2622,6 +2909,21 @@ mod tests {
 
     use super::*;
 
+    /// A plain key press with no modifiers.
+    fn key_press(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    /// A mouse event of the given kind at the given point.
+    fn mouse_at(x: f32, y: f32, kind: MouseEventKind) -> Event {
+        Event::Mouse(MouseEvent { x, y, kind })
+    }
+
     // --- DialogResult tests ---
 
     #[test]
@@ -2645,56 +2947,281 @@ mod tests {
         let bs = ButtonSet::ok();
         assert_eq!(bs.len(), 1);
         assert!(!bs.is_empty());
-        assert_eq!(bs.buttons[0], DialogButton::Ok);
+        assert_eq!(bs.buttons[0], DialogButton::ok());
     }
 
     #[test]
     fn test_button_set_ok_cancel() {
         let bs = ButtonSet::ok_cancel();
         assert_eq!(bs.len(), 2);
-        assert_eq!(bs.buttons[0], DialogButton::Ok);
-        assert_eq!(bs.buttons[1], DialogButton::Cancel);
+        assert_eq!(bs.buttons[0], DialogButton::ok());
+        assert_eq!(bs.buttons[1], DialogButton::cancel());
     }
 
     #[test]
     fn test_button_set_yes_no() {
         let bs = ButtonSet::yes_no();
         assert_eq!(bs.len(), 2);
-        assert_eq!(bs.buttons[0], DialogButton::Yes);
-        assert_eq!(bs.buttons[1], DialogButton::No);
+        assert_eq!(bs.buttons[0], DialogButton::yes());
+        assert_eq!(bs.buttons[1], DialogButton::no());
     }
 
     #[test]
     fn test_button_set_yes_no_cancel() {
         let bs = ButtonSet::yes_no_cancel();
         assert_eq!(bs.len(), 3);
-        assert_eq!(bs.buttons[0], DialogButton::Yes);
-        assert_eq!(bs.buttons[1], DialogButton::No);
-        assert_eq!(bs.buttons[2], DialogButton::Cancel);
+        assert_eq!(bs.buttons[0], DialogButton::yes());
+        assert_eq!(bs.buttons[1], DialogButton::no());
+        assert_eq!(bs.buttons[2], DialogButton::cancel());
     }
 
     #[test]
     fn test_button_set_custom() {
-        let bs = ButtonSet::custom(vec![DialogButton::No, DialogButton::Ok]);
+        let bs = ButtonSet::custom(vec![DialogButton::no(), DialogButton::ok()]);
         assert_eq!(bs.len(), 2);
-        assert_eq!(bs.buttons[0], DialogButton::No);
-        assert_eq!(bs.buttons[1], DialogButton::Ok);
+        assert_eq!(bs.buttons[0], DialogButton::no());
+        assert_eq!(bs.buttons[1], DialogButton::ok());
     }
 
     #[test]
     fn test_button_to_result() {
-        assert_eq!(DialogButton::Ok.to_result(), DialogResult::Ok);
-        assert_eq!(DialogButton::Cancel.to_result(), DialogResult::Cancel);
-        assert_eq!(DialogButton::Yes.to_result(), DialogResult::Yes);
-        assert_eq!(DialogButton::No.to_result(), DialogResult::No);
+        assert_eq!(*DialogButton::ok().result(), DialogResult::Ok);
+        assert_eq!(*DialogButton::cancel().result(), DialogResult::Cancel);
+        assert_eq!(*DialogButton::yes().result(), DialogResult::Yes);
+        assert_eq!(*DialogButton::no().result(), DialogResult::No);
     }
 
     #[test]
-    fn test_button_is_primary() {
-        assert!(DialogButton::Ok.is_primary());
-        assert!(DialogButton::Yes.is_primary());
-        assert!(!DialogButton::Cancel.is_primary());
-        assert!(!DialogButton::No.is_primary());
+    fn test_button_roles() {
+        assert_eq!(DialogButton::ok().role(), ButtonRole::Primary);
+        assert_eq!(DialogButton::yes().role(), ButtonRole::Primary);
+        assert_eq!(DialogButton::cancel().role(), ButtonRole::Secondary);
+        assert_eq!(DialogButton::no().role(), ButtonRole::Secondary);
+        assert_eq!(
+            DialogButton::destructive("Erase").role(),
+            ButtonRole::Destructive
+        );
+    }
+
+    #[test]
+    fn a_destructive_button_says_what_it_does_and_reports_a_plain_confirmation() {
+        // The whole reason the role exists: a caller that only wants to know
+        // whether the user went ahead reads `Ok` exactly as it would from an OK
+        // button, while the user was shown the verb rather than "OK".
+        let btn = DialogButton::destructive("Erase Disk");
+        assert_eq!(btn.label(), "Erase Disk");
+        assert_eq!(*btn.result(), DialogResult::Ok);
+        assert_eq!(btn.role(), ButtonRole::Destructive);
+    }
+
+    #[test]
+    fn a_destructive_set_starts_focused_on_cancel() {
+        // Enter is what gets hit reflexively when a dialog appears unexpectedly,
+        // and it must not thereby erase a disk.
+        let bs = ButtonSet::destructive_cancel("Delete");
+        assert_eq!(bs.len(), 2);
+        assert_eq!(bs.default_index(), 1);
+        assert_eq!(*bs.buttons[1].result(), DialogResult::Cancel);
+
+        let dialog = AlertDialog::destructive("Delete", "Delete the partition?", "Delete");
+        assert_eq!(dialog.focused_button(), 1);
+        assert_eq!(
+            *dialog.buttons().buttons[dialog.focused_button()].result(),
+            DialogResult::Cancel
+        );
+    }
+
+    #[test]
+    fn enter_on_a_destructive_dialog_cancels_rather_than_destroying() {
+        let mut dialog = AlertDialog::destructive("Erase", "Erase /dev/sda?", "Erase Disk");
+        dialog.show();
+        dialog.handle_event(&key_press(Key::Enter));
+        assert_eq!(dialog.result(), Some(&DialogResult::Cancel));
+    }
+
+    #[test]
+    fn tab_reaches_the_destructive_button_deliberately() {
+        // Cancel being the default must not make the destructive action
+        // unreachable from the keyboard — only un-hittable by accident.
+        let mut dialog = AlertDialog::destructive("Erase", "Erase /dev/sda?", "Erase Disk");
+        dialog.show();
+        dialog.handle_event(&key_press(Key::Tab));
+        assert_eq!(dialog.focused_button(), 0);
+        dialog.handle_event(&key_press(Key::Enter));
+        assert_eq!(dialog.result(), Some(&DialogResult::Ok));
+    }
+
+    #[test]
+    fn with_default_clamps_rather_than_pointing_past_the_row() {
+        let bs = ButtonSet::ok_cancel().with_default(9);
+        assert_eq!(bs.default_index(), 1);
+        let empty = ButtonSet::custom(Vec::new()).with_default(3);
+        assert_eq!(empty.default_index(), 0);
+    }
+
+    #[test]
+    fn replacing_the_button_row_moves_focus_to_the_new_rows_default() {
+        // Focus is an index into a row that has just been thrown away.
+        let dialog =
+            AlertDialog::confirm("T", "M").with_buttons(ButtonSet::destructive_cancel("X"));
+        assert_eq!(dialog.focused_button(), 1);
+    }
+
+    #[test]
+    fn a_button_is_at_least_as_wide_as_its_own_label() {
+        // The four built-in labels fit the minimum; a verb need not.
+        assert!((DialogButton::ok().width() - BUTTON_MIN_WIDTH).abs() < 0.01);
+        let long = DialogButton::destructive("Overwrite Every Existing File");
+        assert!(
+            long.width() > BUTTON_MIN_WIDTH,
+            "a long label must widen its button, got {}",
+            long.width()
+        );
+        assert!(
+            long.width()
+                >= crate::text::measure(long.label(), FONT_SIZE, FontWeightHint::Bold)
+                    + BUTTON_PADDING_H * 2.0
+        );
+    }
+
+    #[test]
+    fn a_wide_button_row_widens_the_dialog_rather_than_hanging_off_it() {
+        // Buttons are right-aligned inside the box, so a row too wide for the
+        // box runs off the *left* edge, which is where it is least expected.
+        let dialog = AlertDialog::confirm("T", "M").with_buttons(ButtonSet::custom(vec![
+            DialogButton::destructive("Overwrite Every Existing File"),
+            DialogButton::new("Keep Both Copies", DialogResult::No, ButtonRole::Secondary),
+            DialogButton::cancel(),
+        ]));
+        let width = dialog.dialog_width();
+        assert!(
+            width >= dialog.buttons_row_width() + CONTENT_PADDING * 2.0,
+            "row {} does not fit in width {}",
+            dialog.buttons_row_width(),
+            width
+        );
+    }
+
+    #[test]
+    fn the_button_a_click_lands_on_is_the_button_that_was_drawn() {
+        // The drawn rectangle and the hit rectangle used to be two separate
+        // copies of `BUTTON_MIN_WIDTH`, which agreed only while every button
+        // was the same width. Press each button at the centre of the rectangle
+        // it was *drawn* at, and check the result matches that button.
+        let mut dialog = AlertDialog::confirm("T", "M").with_buttons(ButtonSet::custom(vec![
+            DialogButton::destructive("Erase Disk"),
+            DialogButton::cancel(),
+        ]));
+        dialog.show();
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+
+        let drawn: Vec<(f32, f32, f32, f32)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if (*height - BUTTON_HEIGHT).abs() < 0.01 => Some((*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(drawn.len(), 2, "expected two button rects, got {drawn:?}");
+
+        for (i, expect) in [DialogResult::Ok, DialogResult::Cancel].iter().enumerate() {
+            let (x, y, w, h) = drawn[i];
+            let mut d = dialog.clone();
+            d.show();
+            let mut t = RenderTree::new();
+            d.render(800.0, 600.0, &mut t);
+            d.handle_event(&mouse_at(
+                x + w / 2.0,
+                y + h / 2.0,
+                MouseEventKind::Press(MouseButton::Left),
+            ));
+            assert_eq!(d.result(), Some(expect), "button {i} drawn at {x},{y}");
+        }
+    }
+
+    #[test]
+    fn the_detail_sits_under_the_message_and_makes_the_dialog_taller() {
+        let plain = AlertDialog::destructive("Erase", "Erase /dev/sda?", "Erase Disk");
+        let with_detail = plain.clone().with_detail(
+            "All data on /dev/sda will be permanently destroyed. This cannot be undone.",
+        );
+        assert_eq!(plain.detail(), None);
+        assert!(with_detail.detail().is_some());
+        assert!(
+            with_detail.compute_height() > plain.compute_height(),
+            "detail {} must not be squeezed into the plain height {}",
+            with_detail.compute_height(),
+            plain.compute_height()
+        );
+
+        let mut d = with_detail;
+        d.show();
+        let mut tree = RenderTree::new();
+        d.render(800.0, 600.0, &mut tree);
+        let detail_ys: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    color,
+                    font_size,
+                    ..
+                } if *color == COLOR_YELLOW && (*font_size - FONT_SIZE_SMALL).abs() < 0.01 => {
+                    Some(*y)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!detail_ys.is_empty(), "detail was not drawn at all");
+        let message_ys: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { y, color, .. } if *color == COLOR_SUBTEXT1 => Some(*y),
+                _ => None,
+            })
+            .collect();
+        let last_message = message_ys.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            detail_ys.iter().all(|y| *y > last_message),
+            "detail {detail_ys:?} must sit below the message ending at {last_message}"
+        );
+    }
+
+    #[test]
+    fn hover_follows_the_pointer_onto_and_off_the_buttons() {
+        let mut dialog = AlertDialog::confirm("T", "M");
+        dialog.show();
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        assert_eq!(dialog.hovered_button(), None);
+
+        let (bx, by, bw, bh) = dialog.placement.as_ref().expect("drawn").button_rects[0];
+        dialog.handle_event(&mouse_at(
+            bx + bw / 2.0,
+            by + bh / 2.0,
+            MouseEventKind::Move,
+        ));
+        assert_eq!(dialog.hovered_button(), Some(0));
+
+        // Off the row, but still inside the dialog, so the overlay does not
+        // treat it as a click-outside dismissal.
+        let (lx, ly) = dialog
+            .placement
+            .as_ref()
+            .map(|l| (l.x, l.y))
+            .expect("drawn");
+        dialog.handle_event(&mouse_at(lx + 4.0, ly + 4.0, MouseEventKind::Move));
+        assert_eq!(dialog.hovered_button(), None);
     }
 
     // --- ModalOverlay tests ---
@@ -2863,8 +3390,8 @@ mod tests {
     fn test_alert_yes_no_has_two_buttons() {
         let dialog = AlertDialog::yes_no("Choice", "Pick one");
         assert_eq!(dialog.buttons.len(), 2);
-        assert_eq!(dialog.buttons.buttons[0], DialogButton::Yes);
-        assert_eq!(dialog.buttons.buttons[1], DialogButton::No);
+        assert_eq!(dialog.buttons.buttons[0], DialogButton::yes());
+        assert_eq!(dialog.buttons.buttons[1], DialogButton::no());
     }
 
     #[test]
@@ -3149,10 +3676,12 @@ mod tests {
 
     #[test]
     fn test_alert_builder_custom_buttons() {
-        let dialog = AlertDialog::info("Test", "Test")
-            .with_buttons(ButtonSet::custom(vec![DialogButton::No, DialogButton::Yes]));
+        let dialog = AlertDialog::info("Test", "Test").with_buttons(ButtonSet::custom(vec![
+            DialogButton::no(),
+            DialogButton::yes(),
+        ]));
         assert_eq!(dialog.buttons.len(), 2);
-        assert_eq!(dialog.buttons.buttons[0], DialogButton::No);
+        assert_eq!(dialog.buttons.buttons[0], DialogButton::no());
     }
 
     #[test]

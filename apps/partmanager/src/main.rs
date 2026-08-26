@@ -27,6 +27,10 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::wheel;
+use oswindow::app::Response;
+
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -3857,7 +3861,63 @@ fn select_adjacent_region(app: &mut PartitionManagerApp, up: bool) {
 // Entry point
 // ============================================================================
 
-fn main() {}
+impl oswindow::app::App for PartitionManagerApp {
+    fn title(&self) -> String {
+        String::from("Partition Manager")
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn initial_size(&self) -> (u32, u32) {
+        // The same numbers the layout constants are written against, so the
+        // first frame is drawn at the geometry every hard-coded offset in this
+        // file assumes.
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// A clock only while the confirmation is fading.
+    ///
+    /// Nothing else in this app moves on its own: the disk map, the queue and
+    /// the panels all change only in response to a click or a key. The one
+    /// exception is `guitk::modal`'s scrim, which fades in and out over a few
+    /// frames, and a fade with no clock is a dialog that appears and vanishes
+    /// instantly.
+    ///
+    /// `is_animating` and not `is_open`: a confirmation is a question, and a
+    /// question waits for a human. Ticking for as long as one is on screen
+    /// would hold the compositor awake — and with it every other window's
+    /// frame budget — for as long as the user takes to read it, which is the
+    /// longest any state in this program lasts.
+    fn tick_interval(&self) -> Option<Duration> {
+        match &self.dialog {
+            ActiveDialog::Confirm { dialog, .. } if dialog.is_animating() => {
+                Some(Duration::from_millis(16))
+            }
+            _ => None,
+        }
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match crate::handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the compositor last reported, not the one that was asked
+        // for. `handle_event` also records it from `Event::Resize`, but the
+        // very first frame arrives before any resize does, so without this the
+        // opening window would be laid out against the requested size rather
+        // than the granted one.
+        self.width = width;
+        self.height = height;
+        crate::render(self)
+    }
+}
+
+fn main() -> ExitCode {
+    oswindow::app::launch("partmanager", &mut PartitionManagerApp::new())
+}
 
 // ============================================================================
 // Tests
@@ -6335,5 +6395,108 @@ mod tests {
         // Up should stay at 0
         select_adjacent_region(&mut app, true);
         assert_ne!(app.selected_item, SelectedItem::None);
+    }
+
+    // ------------------------------------------------------------------
+    // The window
+    // ------------------------------------------------------------------
+    //
+    // Until 2026-08-26 this program's entry point was `fn main() {}`. Every
+    // test below this line passed then, against an application that could not
+    // be run: nothing in the toolchain reports a `main` that never reaches
+    // `oswindow::app::launch`, because from the compiler's side it is a
+    // perfectly good program that ran and returned. See `known-issues.md` →
+    // C-A-HUNDRED-AND-THIRTY-TWO-APPS-NEVER-OPEN-A-WINDOW, and
+    // `scripts/check-window-wiring.py`, which now names the rest of them.
+
+    #[test]
+    fn the_clock_runs_only_while_the_confirmation_fades() {
+        use oswindow::app::App as _;
+
+        // Nothing in this app moves on its own, so an idle window must not
+        // hold a timer: a tick that changes nothing is a frame the compositor
+        // spends on nothing, multiplied by every window that does the same.
+        let mut app = PartitionManagerApp::new();
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "an idle partition manager asked for a clock"
+        );
+
+        app.dialog = ActiveDialog::destructive(
+            ConfirmIntent::DeletePartition,
+            "Delete Partition",
+            "Sure?",
+            "Delete",
+        );
+        assert!(
+            app.tick_interval().is_some(),
+            "the scrim was fading in with no clock to move it"
+        );
+
+        // Let the fade finish. The dialog is still open and still waiting for
+        // an answer -- and a question waits for a human, which is the longest
+        // any state here lasts. Holding the clock through that would keep the
+        // whole desktop awake for the length of a read.
+        for _ in 0..64 {
+            let _ = handle_event(&mut app, &Event::Tick { elapsed_ms: 16 });
+        }
+        assert!(
+            matches!(app.dialog, ActiveDialog::Confirm { .. }),
+            "the confirmation closed itself"
+        );
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a settled confirmation went on asking for frames"
+        );
+    }
+
+    #[test]
+    fn the_window_is_drawn_at_the_size_the_compositor_reported() {
+        use oswindow::app::App;
+
+        // The first frame arrives before any `Event::Resize` does, so a render
+        // that trusted `WINDOW_WIDTH` would lay the opening window out against
+        // the size that was *asked for* rather than the one that was granted --
+        // visible as a stretched or clipped frame for one refresh, and as
+        // clicks landing off-target until the first resize.
+        let mut app = PartitionManagerApp::new();
+        let tree = App::render(&mut app, 1440.0, 900.0);
+        assert_eq!(app.width, 1440.0);
+        assert_eq!(app.height, 900.0);
+
+        // Drawn at that size, not merely recorded at it: the background fill
+        // is the first command and spans the window.
+        match tree.commands.first() {
+            Some(RenderCommand::FillRect { width, height, .. }) => {
+                assert_eq!(*width, 1440.0);
+                assert_eq!(*height, 900.0);
+            }
+            other => panic!("expected a full-window background fill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unconsumed_event_does_not_cost_a_frame() {
+        use oswindow::app::{App as _, Response};
+
+        // `Response::Idle` is what lets the compositor skip a repaint. An app
+        // that answered `Redraw` to everything would repaint on every mouse
+        // move over dead space.
+        let mut app = PartitionManagerApp::new();
+        assert_eq!(
+            app.on_event(&Event::Tick { elapsed_ms: 16 }),
+            Response::Idle,
+            "a tick with nothing to animate asked for a repaint"
+        );
+        assert_eq!(
+            app.on_event(&Event::Resize {
+                width: 1200,
+                height: 800
+            }),
+            Response::Redraw,
+            "a resize did not ask for a repaint"
+        );
     }
 }

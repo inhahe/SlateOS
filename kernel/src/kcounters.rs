@@ -283,10 +283,15 @@ pub fn builtin_snapshot() -> alloc::vec::Vec<CounterSnapshot> {
         name: "total_interrupts",
         value: total_irqs,
     });
+    // Slot 32 is the APIC timer.  This reported a hard zero for the life of the
+    // kernel until `dispatch_vector` started counting -- on a machine whose timer
+    // had fired millions of times, which is the exact reading an operator would
+    // take as evidence of a wedged timer.  `.get()` rather than `[]` so that
+    // shrinking the array below 33 could never turn a diagnostic into a panic.
     result.push(CounterSnapshot {
         group: "irq",
         name: "timer_irqs",
-        value: irq_counts[32],
+        value: irq_counts.get(32).copied().unwrap_or(0),
     });
     result.push(CounterSnapshot {
         group: "irq",

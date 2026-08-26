@@ -41,9 +41,17 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 /// Per-vector exception/interrupt counts since boot.
 ///
 /// Index = vector number (0–31 for CPU exceptions, 32+ for IRQs).
-/// We only track the first 48 vectors (32 exceptions + 16 device IRQs)
-/// to keep the array manageable.
-const VECTOR_STATS_SIZE: usize = 48;
+///
+/// Sized for the **whole** vector space rather than for the vectors that
+/// looked interesting when this was written.  It was 48, on the reasoning that
+/// 32 exceptions plus 16 device IRQs was everything worth keeping — but the IDT
+/// installs handlers on 33–56 (24 IOAPIC inputs, not 16), and on 251, 252 and
+/// 255 for the two IPIs and the APIC spurious vector.  Every one of those past
+/// 47 landed outside the array, where `count_vector`'s `.get()` dropped it
+/// silently.  An array that cannot represent a third of the installed handlers
+/// is not a smaller version of this one, it is a wrong one; 2 KiB of `.bss` is
+/// the entire cost of not having to think about the bound again.
+const VECTOR_STATS_SIZE: usize = 256;
 
 /// Counts of exception/interrupt firings per vector.
 static VECTOR_COUNTS: [AtomicU64; VECTOR_STATS_SIZE] = {
@@ -287,6 +295,37 @@ pub const EXCEPTION_NAMES: [&str; 32] = [
     "(Reserved 31)",
 ];
 
+/// Human-readable name for any vector in the 0–255 space.
+///
+/// One naming authority, next to the table it names.  Before this existed each
+/// consumer named the low 32 from `EXCEPTION_NAMES` and then improvised: `kshell`'s
+/// `exceptions` command called everything from 32 up `"IRQ"`, while its `irqrate`
+/// command knew about the APIC timer but believed device IRQs stopped at 47 — so
+/// the same vector printed under two different names depending on which command
+/// you asked, and 48–56 printed as "Unknown" in one of them despite being
+/// perfectly ordinary IOAPIC inputs.  A caller that wants a name should not have
+/// to know the vector layout; that knowledge belongs here, where the layout is
+/// defined.
+///
+/// Device IRQs are deliberately *not* individually named. Which line carries the
+/// keyboard is a property of the IOAPIC's routing at run time, not of this table,
+/// and a hardcoded guess here would be wrong on any machine that routes
+/// differently.
+#[must_use]
+pub fn vector_name(vector: usize) -> &'static str {
+    match vector {
+        // `EXCEPTION_NAMES` covers exactly 0–31, so this index cannot be out of
+        // bounds; `.get()` rather than `[]` so that stays true if it is resized.
+        0..=31 => EXCEPTION_NAMES.get(vector).copied().unwrap_or("(exception)"),
+        32 => "APIC Timer",
+        33..=56 => "Device IRQ",
+        251 => "TLB Shootdown IPI",
+        252 => "Reschedule IPI",
+        255 => "APIC Spurious",
+        _ => "(unassigned)",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // IDT entry
 // ---------------------------------------------------------------------------
@@ -505,6 +544,22 @@ extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
     // stub and points to a valid `InterruptStackFrame` that outlives this
     // call (it lives on the interrupted task's kernel stack).
     let frame_ref: &InterruptStackFrame = unsafe { &*frame };
+
+    // Count here, at the one point every hardware vector passes through, rather
+    // than in each of the five handlers below.  Two reasons, and the second is
+    // the load-bearing one:
+    //
+    //  - A vector added to the `match` later is counted without the author of
+    //    that arm having to know this counter exists.  The five-call-site
+    //    version is correct exactly as long as everyone remembers it, which is
+    //    the property that failed for 33–56 already.
+    //  - It is *before* the match, so the `_ => {}` arm is counted too.  An
+    //    interrupt arriving on a vector with an installed stub and no handler
+    //    is precisely the event worth having a number for, and it is the one
+    //    event a per-handler count can never see.
+    #[allow(clippy::cast_possible_truncation)] // Vectors are 0–255 by hardware.
+    count_vector(vector as usize);
+
     match vector {
         32 => crate::apic::handle_timer_irq(frame_ref, 0),
         251 => crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0),

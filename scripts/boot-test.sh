@@ -2871,6 +2871,83 @@ check_selftest_skips() {
 
 check_selftest_skips
 
+# A shell self-test asserts on wording, and wording is the thing this tree is
+# busiest changing.
+#
+# `kshell::self_test` runs only inside QEMU -- the kernel binary carries
+# `test = false`, because a bare-metal crate supplies its own panic lang item
+# and cannot link the host test harness -- so an assertion that names text no
+# command can print any more is invisible to `cargo check`, `cargo clippy` and
+# every other gate here, and shows up as a panicked kernel eleven minutes into
+# a boot.
+#
+# It has happened.  On adddc7459 a table of nine commands asserted each one's
+# arity complaint contained `Usage:`; `vd remove` was then converted to
+# `required_id` and began saying `vd: remove: missing desktop id`, which is
+# strictly better, and the rung took the kernel down *for the improvement*.
+# The defect class is not "someone typed Usage:" -- it is an assertion whose
+# expected text no longer belongs to the command under test, in either
+# direction: a `contains` that fails a correct kernel, or a `lacks` that can no
+# longer fire and so guards nothing.  This gate found one of each still live in
+# the tree the day it was written.
+#
+# Before the build, like its siblings: seconds against ten minutes, and exit 2
+# counts as failure so a gate that cannot run never reads as one that passed.
+check_selftest_wording() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Self-test wording check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    # Grade the gate before letting it grade the tree.  Every way this checker
+    # can break -- a call-graph edge it stops following, a `match` arm it stops
+    # narrowing to, a `self_test` span cut short by a brace inside a comment --
+    # makes findings *disappear*, and it reports that in the same words as a
+    # clean tree.  Its fixture is the `adddc7459` bug in miniature, so a gate
+    # that has lost the ability to catch the one bug it was written for says so
+    # here, instead of nodding a broken tree through to an eleven-minute boot.
+    echo "=== Checking the self-test wording gate against its fixture ==="
+    if ! "$py" "$PROJECT_ROOT/scripts/check-selftest-wording.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The self-test wording gate no longer" >&2
+        echo "agrees with its own fixture, so its verdict on the tree means" >&2
+        echo "nothing -- a gate whose analysis has collapsed reports zero" >&2
+        echo "findings just like a clean tree does." >&2
+        exit 1
+    fi
+
+    echo "=== Checking that self-test assertions name text their command prints ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-selftest-wording.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each report above is an assertion whose" >&2
+    echo "expected text the command under test cannot produce." >&2
+    echo "" >&2
+    echo "For an assert_output_contains: the rung will panic the kernel on a" >&2
+    echo "correct boot.  Re-read what the command says now and assert that --" >&2
+    echo "usually the operand helper's wording, 'cmd: sub: missing <noun>' or" >&2
+    echo "\`word' is not a <noun>." >&2
+    echo "" >&2
+    echo "For an assert_output_lacks: the assertion can never fire, so the" >&2
+    echo "regression it was written to catch is no longer guarded.  Point it at" >&2
+    echo "the sentence a *wrong* run would print today." >&2
+    echo "" >&2
+    echo "If the expected text is genuinely right and merely underivable -- a" >&2
+    echo "value the command rearranged out of the rung's own data -- add it to" >&2
+    echo "ALLOWED in the script with the reason.  Do not widen the analysis to" >&2
+    echo "make a real finding disappear." >&2
+    exit 1
+}
+
+check_selftest_wording
+
 # A hand-written "every variant" list cannot go stale loudly.
 #
 # `const ALL: [Foo; N] = [...]` claims to name every variant of `Foo`, and the

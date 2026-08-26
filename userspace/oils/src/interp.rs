@@ -249,27 +249,108 @@ fn bash_compat_enabled() -> bool {
     }
 }
 
-/// The `(uid, euid)` identity `osh` reports via readonly `$UID`/`$EUID`
-/// (open-questions Q28). Defaults to `(0, 0)` — **root**, option A — for the
-/// current single-user, pre-privilege-model bring-up, so root-gated scripts
-/// (`if [ "$EUID" -ne 0 ]; then echo "run as root"; fi`) correctly take their
-/// privileged path while the shell genuinely *is* the all-powerful system.
+/// The process's real and effective user IDs, from the OS.
 ///
-/// The operator asked for the reported identity to be per-user configurable: a
-/// session provides numeric `OSH_UID` (and optionally `OSH_EUID`, which defaults
-/// to `OSH_UID`) in the environment. Once SlateOS exposes a real
-/// `getuid`/`geteuid` credential, that should be preferred over this env
-/// override (tracked in known-issues TD-OILS-IDVARS).
+/// Asked of libc, exactly as [`parent_pid`] asks it for `getppid`, and for the
+/// same reasons: `std` exposes no `getuid`, this crate deliberately carries no
+/// `libc` dependency (see `Cargo.toml`), and the four functions involved are
+/// nullary, infallible and already linked. SlateOS's own libc exports them
+/// (`posix::unistd::{getuid, geteuid, getgid, getegid}`, reading the process
+/// credentials the kernel set at spawn), so this answers on the target as well
+/// as on the development host.
+///
+/// Deliberately *not* `/proc/self/status`, which would have been the other
+/// obvious source and is how [`system_hostname`] works: SlateOS mounts no
+/// procfs, so on the target that read would fail and the caller would fall back
+/// to reporting **root** — a shell that says "you own this file" about every
+/// file on a machine that knows better. A missing symbol is a link error, which
+/// is loud; a missing `/proc` is a silent lie about privilege.
+#[cfg(unix)]
+fn os_uids() -> (u32, u32) {
+    // SAFETY: `getuid`/`geteuid` are the POSIX libc functions: no arguments, no
+    // side effects, no failure mode, returning `uid_t` (a 32-bit unsigned int on
+    // every platform this builds for).
+    unsafe extern "C" {
+        fn getuid() -> u32;
+        fn geteuid() -> u32;
+    }
+    // SAFETY: nullary calls into libc, as above.
+    unsafe { (getuid(), geteuid()) }
+}
+
+/// The process's effective group ID, from the OS. See [`os_uids`].
+#[cfg(unix)]
+fn os_egid() -> u32 {
+    // SAFETY: `getegid` is the POSIX libc function: no arguments, no side
+    // effects, no failure mode, returning `gid_t`.
+    unsafe extern "C" {
+        fn getegid() -> u32;
+    }
+    // SAFETY: nullary call into libc, as above.
+    unsafe { getegid() }
+}
+
+/// The `(uid, euid)` identity `osh` reports via readonly `$UID`/`$EUID`
+/// (open-questions Q28), and the credential every ownership and permission
+/// primary (`-O`, `-r`/`-w`/`-x`) is judged against.
+///
+/// **The OS answers on any unix**, via [`os_uids`] — the process's real
+/// `getuid`/`geteuid`. That is what makes `[ -O file ]` agree with bash instead
+/// of inverting it, and it holds on SlateOS as well as on the development host,
+/// because SlateOS's libc reports the credentials the kernel recorded at spawn.
+/// The Q28 default therefore survives where it was actually aimed: a SlateOS
+/// that spawns its shell as root still reports root, but it does so because the
+/// system said so rather than because the shell assumed it.
+///
+/// Everywhere else — Windows, and any future non-unix target — the answer is
+/// [`configured_identity`]: numeric `OSH_UID` (and optionally `OSH_EUID`,
+/// defaulting to `OSH_UID`) from the environment, else `(0, 0)`, **root**,
+/// option A, so root-gated scripts (`if [ "$EUID" -ne 0 ]; then echo "run as
+/// root"; fi`) take their privileged path.
+///
+/// So on unix the `OSH_UID` override is not merely outranked — it is gone,
+/// even though it was the operator's Q28 configurability. That override existed
+/// to stand in for a credential the system could not supply; consulting it at
+/// all on a system that *can* would let any parent process redefine `$UID` by
+/// exporting a variable, which is precisely the spoofing bash refuses when it
+/// ignores an inherited `UID=` from the environment.
 fn reported_identity() -> (u32, u32) {
-    let uid = std::env::var("OSH_UID")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-    let euid = std::env::var("OSH_EUID")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(uid);
-    (uid, euid)
+    #[cfg(unix)]
+    return os_uids();
+    #[cfg(not(unix))]
+    configured_identity(
+        std::env::var("OSH_UID").ok().as_deref(),
+        std::env::var("OSH_EUID").ok().as_deref(),
+    )
+}
+
+/// The half of [`reported_identity`] that does not ask the OS: the Q28 default
+/// and the `OSH_UID`/`OSH_EUID` override that adjusts it.
+///
+/// Split out and taking its two inputs as arguments rather than reading the
+/// environment itself so that the operator's Q28 policy stays testable. On unix
+/// the policy is not merely unpreferred but *unreachable* — every call is
+/// answered by `getuid` before it gets here — so the `cfg` below compiles it
+/// there only under `test`, which is what keeps a rule that unix does not use
+/// from being a rule no unix run ever exercises. Arguments also keep those
+/// tests off the process-global environment, which no parallel test can safely
+/// write.
+///
+/// The corollary is worth stating plainly, because it retires a documented
+/// knob: on unix — which includes SlateOS, whose target spec says
+/// `"os": "linux"` — `OSH_UID`/`OSH_EUID` no longer do anything. A session
+/// layer that wants the shell to report a user sets the *process credentials*,
+/// which is both what bash reads and what `posix::unistd::getuid` returns.
+///
+/// An unparseable value is *ignored*, not an error: this is read from an
+/// inherited environment, and a shell that refused to start because some
+/// ancestor exported `OSH_UID=root` would be worse than one that reports the
+/// default.
+#[cfg(any(not(unix), test))]
+fn configured_identity(uid: Option<&str>, euid: Option<&str>) -> (u32, u32) {
+    let parse = |v: Option<&str>| v.and_then(|v| v.trim().parse::<u32>().ok());
+    let uid = parse(uid).unwrap_or(0);
+    (uid, parse(euid).unwrap_or(uid))
 }
 
 /// The variables bash marks `att_noassign`: the shell maintains them, so a
@@ -40244,20 +40325,27 @@ impl Shell {
         }
     }
 
-    /// Announce every reaped job that a signal killed, the way bash does
-    /// asynchronously — `<name>: line N: <pid> <state padded to 24><command>`
-    /// on stderr — and forget it.
+    /// Take notice of every reaped job that a signal killed — announcing it the
+    /// way bash does asynchronously, `<name>: line N: <pid> <state padded to
+    /// 24><command>` on stderr, when it is one bash announces — and forget it
+    /// either way.
     ///
-    /// bash does not make a script ask about a job that was *killed*. Most
-    /// signals mean something the script did not arrange, so the news is pushed
-    /// out at the next opportunity rather than held for the next `jobs`; the
-    /// three that a script normally does arrange (`INT`, `TERM`, `PIPE` — see
-    /// [`signal_announced_when_reaped`]) are the exception, and are the only
-    /// signal states a listing ever shows.
+    /// bash does not make a script ask about a job that was *killed*: it notices
+    /// the death at the next opportunity, and noticing *is* reporting, so the
+    /// job is dropped in the same breath — `%1` becomes unknown to `wait` and
+    /// free for the next job to reuse, unlike the row a `jobs` listing leaves
+    /// behind for one more sweep.
     ///
-    /// Announcing *is* reporting, so the job is dropped in the same breath —
-    /// `%1` becomes unknown to `wait` and free for the next job to reuse, unlike
-    /// the row a `jobs` listing leaves behind for one more sweep.
+    /// **The message and the sweep are separate questions.**
+    /// [`signal_announced_when_reaped`] decides only whether a line is printed;
+    /// the row goes regardless. So `TERM` and `PIPE`, which print nothing, still
+    /// leave the table silently, and a non-interactive `jobs` can never word a
+    /// signal death at all: it either finds the job not yet reaped (`Running`)
+    /// or finds it already gone. Measured against bash 5.2.21 — `sleep 5 &
+    /// kill -TERM %1; sleep 0.02; jobs` lists nothing, on every one of eight
+    /// runs, while the same line without the settle delay lists `Running` on
+    /// every one. (Interactive bash is a different shell here: with job control
+    /// on, `jobs` does show `Terminated`.)
     ///
     /// The line number is the one still current when the announcement is made:
     /// the news arrives *between* commands, so it carries the line of the
@@ -40276,7 +40364,7 @@ impl Shell {
         let mut swept = false;
         let mut idx = 0;
         while idx < self.jobs.len() {
-            if self.announce_signalled_job(idx) {
+            if self.notice_signalled_job(idx) {
                 let gone = self.jobs.remove(idx);
                 self.remember_reaped(gone.pid, gone.status.unwrap_or(0));
                 swept = true;
@@ -40289,34 +40377,40 @@ impl Shell {
         }
     }
 
-    /// Say the one line [`Shell::notify_signalled_jobs`] would say about the job
-    /// at `idx`, if that job is one bash announces. Returns whether it did —
-    /// which is also whether the job has now been reported, and so whether the
-    /// caller should drop it.
+    /// Notice the signal death of the job at `idx`: say the one line
+    /// [`Shell::notify_signalled_jobs`] would say about it, if it is one bash
+    /// announces, and report back whether the shell has now taken notice — which
+    /// is whether the caller should drop the row.
+    ///
+    /// The two are not the same question. A `TERM` or a `PIPE` prints nothing
+    /// (`DONT_REPORT_SIGTERM`/`DONT_REPORT_SIGPIPE`) and is still noticed, so
+    /// this returns `true` having said nothing at all. What suppresses the
+    /// *notice* is something else entirely: a command substitution, whose
+    /// announcement would land on a stderr unrelated to the value being
+    /// collected, so bash holds the death for the substitution's own `jobs` to
+    /// report.
     ///
     /// Split out because `wait -n` reaps a job itself and must announce it on
     /// the way past, before it removes the row it is about to answer with.
-    fn announce_signalled_job(&mut self, idx: usize) -> bool {
+    fn notice_signalled_job(&mut self, idx: usize) -> bool {
         let Some(job) = self.jobs.get(idx) else {
             return false;
         };
         let Some(sig) = job.signal else {
             return false;
         };
-        if self.in_comsub
-            || job.status.is_none()
-            || job.notified
-            || !signal_announced_when_reaped(sig)
-        {
+        if self.in_comsub || job.status.is_none() || job.notified {
             return false;
         }
-        let msg = bfmt![
-            self.err_prefix(),
-            format!("{} {:<24}", job.pid, signal_description(sig)),
-            &job.cmd,
-            b"\n"
-        ];
-        self.emit_stderr(&msg);
+        if signal_announced_when_reaped(sig) {
+            let msg = bfmt![
+                self.err_prefix(),
+                format!("{} {:<24}", job.pid, signal_description(sig)),
+                &job.cmd,
+                b"\n"
+            ];
+            self.emit_stderr(&msg);
+        }
         true
     }
 
@@ -41196,8 +41290,9 @@ impl Shell {
                     job.status = Some(status);
                     job.exit_seen = true;
                     // A killed job is announced wherever the shell hears of it,
-                    // the very job `wait -n` is answering with included.
-                    self.announce_signalled_job(idx);
+                    // the very job `wait -n` is answering with included. The
+                    // row goes either way, so the verdict is not consulted.
+                    self.notice_signalled_job(idx);
                     self.jobs.remove(idx);
                     self.reset_job_markers();
                     // `wait -n` reaps just like a targeted `wait PID`, so the
@@ -42134,10 +42229,10 @@ impl Shell {
     ///
     /// A directory is a failure, not an empty file: POSIX lets `open` succeed on
     /// one and then fails the `read` with `EISDIR`, so glibc bash answers
-    /// `bind -f adir` with `bind: adir: cannot read: Is a directory` and status
-    /// 1. This once returned emptiness and status 0, from a measurement taken
-    /// against a Cygwin bash, where the open is refused before the read and the
-    /// builtin swallows it.
+    /// `bind -f adir` with `bind: adir: cannot read: Is a directory`, and exits
+    /// with status 1. This once returned emptiness and status 0, from a
+    /// measurement taken against a Cygwin bash, where the open is refused before
+    /// the read and the builtin swallows it.
     ///
     /// Windows refuses the open outright and calls it `ERROR_ACCESS_DENIED`, so
     /// [`open_error`] is what makes the development host say `EISDIR` too.
@@ -60215,17 +60310,24 @@ fn signal_terminates_async_job(signum: u8) -> bool {
     !matches!(signum, 2 /* INT */ | 3 /* QUIT */) && signal_default_terminates(signum)
 }
 
-/// Whether a job's death by this signal is *announced* rather than left for
-/// `jobs` to report.
+/// Whether a job's death by this signal is announced on stderr — and *only*
+/// that. Whether the job leaves the table is a separate question, answered
+/// `yes` for every signal; see [`Shell::notice_signalled_job`].
 ///
 /// bash tells a script about a background job killed by a signal the moment it
-/// notices, on stderr, instead of holding the news until something asks — but
-/// only for signals that say something the script did not already know. `INT`
-/// is exempt because an interrupt is normally the user's own doing and was
-/// aimed at the whole shell; `TERM` and `PIPE` are exempt because bash is built
-/// with `DONT_REPORT_SIGTERM` and `DONT_REPORT_SIGPIPE`, both being ordinary
-/// ways for a job to be told to stop. Those three, and only those, are the
-/// signal names a `jobs` listing can ever show.
+/// notices, on stderr, but only for signals that say something the script did
+/// not already know. `INT` is exempt because an interrupt is normally the
+/// user's own doing and was aimed at the whole shell; `TERM` and `PIPE` are
+/// exempt because bash is built with `DONT_REPORT_SIGTERM` and
+/// `DONT_REPORT_SIGPIPE`, both being ordinary ways for a job to be told to
+/// stop.
+///
+/// The exemption is from the *message*, not from the reaping. This once read
+/// "those three are the only signal names a `jobs` listing can ever show" — the
+/// exact inverse of what bash does, learned from an MSYS bash and believed for
+/// as long as the corpus measured against one. A non-interactive `jobs` shows
+/// no signal name at all, because the sweep that says nothing still takes the
+/// row.
 fn signal_announced_when_reaped(signum: u8) -> bool {
     !matches!(signum, 2 /* INT */ | 13 /* PIPE */ | 15 /* TERM */)
 }
@@ -68286,9 +68388,12 @@ fn unary_mode_bit(_path: &std::path::Path, _op: BStr<'_>) -> bool {
     false
 }
 
-/// `-O`/`-G` — the file is owned by our effective UID / GID. bash compares
-/// against the effective credential only, not the supplementary group list, so
-/// `-G` uses the first entry of [`reported_groups`] (the primary group).
+/// `-O`/`-G` — the file is owned by our effective UID / GID.
+///
+/// The *effective* credential and nothing else — not the supplementary group
+/// list. Measured against bash 5.2.21: a file `chgrp`ed to a group we genuinely
+/// belong to (group 24, for a member of 24) is `-G` **false**, so asking the
+/// group list would answer a different question from the one bash answers.
 #[cfg(unix)]
 fn unary_owner(path: &std::path::Path, op: BStr<'_>) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -68298,7 +68403,7 @@ fn unary_owner(path: &std::path::Path, op: BStr<'_>) -> bool {
     if op == b"-O" {
         md.uid() == reported_identity().1
     } else {
-        reported_groups().first().is_some_and(|g| *g == md.gid())
+        md.gid() == os_egid()
     }
 }
 
@@ -84369,26 +84474,58 @@ st=1
 
     #[test]
     fn special_var_identity_uid_euid() {
-        // Default reported identity is root (0/0) per the operator's Q28
-        // decision — SlateOS runs single-user-as-root until a login/session
-        // layer injects a per-user identity via OSH_UID/OSH_EUID.
-        assert_eq!(run("echo $UID").0, "0\n");
-        assert_eq!(run("echo $EUID").0, "0\n");
-        // The canonical root check scripts use works out to "root".
+        // The identity is the platform's, not a constant: on a host with procfs
+        // it is the process's real credential (which is what makes `[ -O f ]`
+        // agree with bash), and only below that the Q28 root default — see
+        // `configured_identity`, whose own tests pin that policy.
+        let (uid, euid) = reported_identity();
+        assert_eq!(run("echo $UID").0, format!("{uid}\n"));
+        assert_eq!(run("echo $EUID").0, format!("{euid}\n"));
+        // The canonical root check scripts use agrees with it — this is the
+        // arithmetic comparison, not the seeding, and it is the reason the
+        // value has to be an integer rather than a string that looks like one.
         assert_eq!(
             run("if [ \"$EUID\" -ne 0 ]; then echo notroot; else echo root; fi").0,
-            "root\n"
+            if euid == 0 { "root\n" } else { "notroot\n" }
         );
         // bash marks both readonly-integer (`declare -ir`); reassignment fails.
         assert!(run("declare -p UID").0.starts_with("declare -ir UID="));
         assert!(run("declare -p EUID").0.starts_with("declare -ir EUID="));
         // A bare reassignment of a readonly var reports status 1 and (as osh
         // does non-interactively) aborts the list, so the value is untouched.
-        assert_eq!(run("UID=1000").1, 1);
-        assert_eq!(run("EUID=1000").1, 1);
-        assert_eq!(run("echo $UID").0, "0\n");
-        // The `\\$` prompt escape resolves to `#` for the root EUID.
-        assert_eq!(run("PS1='\\$ '; echo \"${PS1@P}\"").0, "# \n");
+        assert_eq!(run("UID=99999").1, 1);
+        assert_eq!(run("EUID=99999").1, 1);
+        assert_eq!(run("echo $UID").0, format!("{uid}\n"));
+        // The `\\$` prompt escape resolves to `#` for the root EUID and `$` for
+        // any other.
+        assert_eq!(
+            run("PS1='\\$ '; echo \"${PS1@P}\"").0,
+            if euid == 0 { "# \n" } else { "$ \n" }
+        );
+    }
+
+    #[test]
+    fn configured_identity_defaults_to_root_and_honours_the_env() {
+        // Q28, option A: with nothing configured the shell reports root, so a
+        // `[ "$EUID" -ne 0 ]` gate takes its privileged path on a SlateOS that
+        // genuinely is single-user-as-root.
+        assert_eq!(configured_identity(None, None), (0, 0));
+        // `OSH_UID` alone sets both — a session that names one identity means
+        // one identity, not a setuid split.
+        assert_eq!(configured_identity(Some("1000"), None), (1000, 1000));
+        // `OSH_EUID` splits them when it is given.
+        assert_eq!(configured_identity(Some("1000"), Some("0")), (1000, 0));
+        // `OSH_EUID` on its own leaves the real uid at the default.
+        assert_eq!(configured_identity(None, Some("7")), (0, 7));
+        // Surrounding whitespace is trimmed, as for every other numeric env
+        // toggle the shell reads.
+        assert_eq!(configured_identity(Some(" 42 \n"), None), (42, 42));
+        // A value that is not a number is ignored rather than fatal: this comes
+        // from an inherited environment nobody here controls.
+        assert_eq!(configured_identity(Some("root"), None), (0, 0));
+        assert_eq!(configured_identity(Some(""), Some("-1")), (0, 0));
+        // Out of range for a uid_t, so not a uid — same treatment.
+        assert_eq!(configured_identity(Some("4294967296"), None), (0, 0));
     }
 
     #[test]
@@ -99922,23 +100059,30 @@ st=1
         // The older one keeps its `-` after finishing — and loses its `&`,
         // because there is no longer anything running in the background.
         //
-        // Job 1 is ended by a `kill` rather than by outliving a short `sleep`,
-        // for the reason above: the mark it is given depends on its being
-        // *alive* when job 2 is created. `Terminated` in place of `Done` is
-        // incidental; what is under test is that death does not disturb the
-        // marker.
-        sh.run_source("sleep 30 & sleep 30 &".as_bytes());
-        sh.run_source("kill %1".as_bytes());
+        // Job 1 has to be *alive* when job 2 is created (that is what earns it
+        // the `-`) and then finish *cleanly*, and neither half can be left to
+        // the clock. A `kill` would settle the lifetime but not the row: a
+        // signal-killed job is swept out of the table the moment the shell
+        // notices it, taking the marker under test with it (see
+        // `Shell::notice_signalled_job`). So job 1 waits on a file we create,
+        // which ends it exactly when we choose and ends it with status 0.
+        sh.run_source("until [ -e gate ]; do sleep 0.01; done & sleep 30 &".as_bytes());
+        sh.run_source(": > gate".as_bytes());
         // Wait for the shell to *admit* job 1 is over rather than for a fixed
         // stretch of wall clock.
         settle_job(&mut sh, 1);
+        // The command column is not the source text for a compound command:
+        // both shells re-print it from the parse tree, four-space indented and
+        // broken over lines. Verified against bash 5.2.21, which renders this
+        // job identically (`until …; do` / `    sleep 0.01;` / `done`).
         assert_eq!(
             listing(&mut sh, "jobs"),
-            "[1]-  Terminated              sleep 30\n\
+            "[1]-  Done                    until [ -e gate ]; do\n    sleep 0.01;\ndone\n\
              [2]+  Running                 sleep 30 &\n"
         );
         sh.run_source("kill %2".as_bytes());
         sh.run_source("wait".as_bytes());
+        sh.run_source("rm -f gate".as_bytes());
 
         // A job that had *already* finished when the next one started never
         // gets the `-` at all: with no older job running, previous falls back
@@ -100022,15 +100166,19 @@ st=1
             wait_for_bg(&mut sh);
             assert_eq!(listing(&mut sh, "jobs"), format!("[1]+  {want}\n"), "{src}");
         }
-        for (sig, want) in [("TERM", "Terminated"), ("PIPE", "Broken pipe")] {
+        // A signal produces no such row at all. `TERM` and `PIPE` are the two
+        // deaths bash does not announce (`DONT_REPORT_SIGTERM`,
+        // `DONT_REPORT_SIGPIPE`), which is exactly why they are the tempting
+        // ones to expect here — but not announcing is not the same as not
+        // noticing, and the sweep that says nothing still takes the row. So a
+        // non-interactive listing can word `Done` and `Exit N` and never
+        // `Terminated`. (Measured against bash 5.2.21: `sleep 5 & kill -TERM
+        // %1; sleep 0.02; jobs` printed nothing on eight runs out of eight.)
+        for sig in ["TERM", "PIPE"] {
             sh.run_source("sleep 5 &".as_bytes());
             sh.run_source(format!("kill -{sig} %1").as_bytes());
-            wait_for_bg(&mut sh);
-            assert_eq!(
-                listing(&mut sh, "jobs"),
-                format!("[1]+  {want:<24}sleep 5\n"),
-                "kill -{sig}"
-            );
+            settle_job(&mut sh, 1);
+            assert_eq!(listing(&mut sh, "jobs"), "", "kill -{sig}");
         }
         // `INT` and `QUIT` cannot produce such a row at all — no background job
         // is ever listed as `Interrupt` or `Quit` — because an asynchronous job
@@ -100070,17 +100218,19 @@ st=1
         assert_eq!(o, "osh: wait: %1: no such job\n");
         assert_eq!(s, 127);
 
-        // The three signals a listing can word are the three that are never
-        // announced: the job is left in the table, still owed.
-        for (sig, want) in [("TERM", "Terminated"), ("PIPE", "Broken pipe")] {
+        // `TERM` and `PIPE` are the deaths bash does not announce — and it
+        // forgets them all the same. Silence is not a deferral: the row is gone
+        // by the next command just as the announced one was, so nothing is left
+        // for a listing to report and `%1` is already unknown.
+        for sig in ["TERM", "PIPE"] {
             sh.run_source("sleep 5 &".as_bytes());
             let (o, _) = run_in(&mut sh, &format!("{{ kill -{sig} %1; :; }} 2>&1"));
             assert_eq!(o, "", "kill -{sig} says nothing");
-            assert_eq!(
-                listing(&mut sh, "jobs"),
-                format!("[1]+  {want:<24}sleep 5\n")
-            );
-            sh.run_source("disown -a".as_bytes());
+            assert!(sh.jobs.is_empty(), "kill -{sig} still forgets the job");
+            assert_eq!(listing(&mut sh, "jobs"), "", "kill -{sig} lists nothing");
+            let (o, s) = run_in(&mut sh, "wait %1 2>&1");
+            assert_eq!(o, "osh: wait: %1: no such job\n", "kill -{sig}");
+            assert_eq!(s, 127, "kill -{sig}");
         }
     }
 
@@ -101232,18 +101382,22 @@ st=1
              declare -A m=([x]=\"1\" )\ndeclare -A n=([y]=\"2\" )\n"
         );
 
-        // `PPID` lists with the real parent pid, so it is normalised away before
-        // the listings below are compared literally.
-        let hide_ppid = |o: String| {
+        // Three of these carry a value the host decides rather than the shell:
+        // `PPID` is the real parent pid, and `EUID`/`UID` are the process's real
+        // credential wherever the kernel publishes one. The listings below are
+        // compared literally, so the *values* are masked away and only the
+        // names, attributes and sort position are asserted.
+        let hide_host_values = |o: String| {
             o.lines()
                 .map(|l| {
-                    if l.starts_with("declare -ir PPID=") {
-                        "declare -ir PPID"
-                    } else {
-                        l
+                    for name in ["PPID", "EUID", "UID"] {
+                        if l.starts_with(&format!("declare -ir {name}=")) {
+                            return format!("declare -ir {name}");
+                        }
                     }
+                    l.to_string()
                 })
-                .collect::<Vec<&str>>()
+                .collect::<Vec<String>>()
                 .join("\n")
         };
 
@@ -101255,10 +101409,10 @@ st=1
         // in sort order, exactly as bash lists them.
         let (o2, _) = run("declare -i k=5; s=hi; declare -i k2=9; declare -i");
         assert_eq!(
-            hide_ppid(o2),
-            "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
+            hide_host_values(o2),
+            "declare -i BASHPID\ndeclare -ir EUID\ndeclare -i HISTCMD\n\
              declare -i OPTIND=\"1\"\ndeclare -ir PPID\ndeclare -i RANDOM\n\
-             declare -i SRANDOM\ndeclare -ir UID=\"0\"\n\
+             declare -i SRANDOM\ndeclare -ir UID\n\
              declare -i k=\"5\"\ndeclare -i k2=\"9\""
         );
 
@@ -101269,10 +101423,10 @@ st=1
         // readonly vars like BASH_VERSINFO.
         let (o3, _) = run("declare -i ii=1; declare -l low=HELLO; plain=3; declare -il");
         assert_eq!(
-            hide_ppid(o3),
-            "declare -i BASHPID\ndeclare -ir EUID=\"0\"\ndeclare -i HISTCMD\n\
+            hide_host_values(o3),
+            "declare -i BASHPID\ndeclare -ir EUID\ndeclare -i HISTCMD\n\
              declare -i OPTIND=\"1\"\ndeclare -ir PPID\ndeclare -i RANDOM\n\
-             declare -i SRANDOM\ndeclare -ir UID=\"0\"\n\
+             declare -i SRANDOM\ndeclare -ir UID\n\
              declare -i ii=\"1\"\ndeclare -l low=\"hello\""
         );
 

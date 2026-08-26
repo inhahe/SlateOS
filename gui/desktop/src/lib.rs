@@ -315,8 +315,15 @@ const TRAY_PADDING: f32 = 8.0;
 /// that widened the tray as notifications arrived would shuffle the window
 /// buttons sideways every time something was posted.
 const TRAY_BELL_WIDTH: f32 = 24.0;
-/// The bell the tray draws. Same codepoint `focus_assist` and `widgets` already
-/// use for it, so the desktop has one bell rather than three.
+/// The bell the tray draws when nothing is being silenced.
+///
+/// Not read by the renderer, which asks the focus manager for the glyph of
+/// whatever mode is in force; this is the same codepoint that
+/// [`focus_assist::FocusMode::Off`] answers, kept so a test can say *which*
+/// glyph "not silencing anything" is without asserting it against the very
+/// function under test. `focus_assist` and `widgets` use the same codepoint, so
+/// the desktop has one bell rather than three.
+#[cfg(test)]
 const NOTIF_BELL_GLYPH: &str = "\u{1F514}";
 /// Extra room the window buttons leave beyond the tray, so the last button does
 /// not end flush against the desktop indicator.
@@ -869,6 +876,30 @@ pub struct DesktopShell {
     /// [`PaneState::is_visible`](notif_pane::PaneState::is_visible) **is** the
     /// open flag. See `design-decisions.md` §493.
     pub notifications: notif_pane::NotificationPane,
+    /// Whether — and how much — notifications are being silenced right now.
+    ///
+    /// The single truth for Do Not Disturb. The pane's two quick-setting
+    /// switches are *views* of this: pressing one is reported to the shell,
+    /// applied here, and pushed back onto both switches by
+    /// [`sync_quick_settings`](Self::sync_quick_settings), so the pair can
+    /// never disagree with what is actually happening to arriving
+    /// notifications.
+    ///
+    /// It was the second-largest orphan island in the shell (1,466 lines that
+    /// nothing constructed) for the same reason the pane was: a complete
+    /// module with a settings page, per-app priorities and automatic rules,
+    /// and no owner. See known-issues.md
+    /// `TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
+    ///
+    /// One half is still unwired: [`evaluate_auto_rules`] needs a wall clock
+    /// and a "the foreground window went fullscreen" signal, neither of which
+    /// reaches the shell yet, so [`effective_mode`] is today exactly the manual
+    /// mode. That is recorded in known-issues.md rather than papered over with
+    /// a clock read from the wrong place.
+    ///
+    /// [`evaluate_auto_rules`]: focus_assist::FocusAssistManager::evaluate_auto_rules
+    /// [`effective_mode`]: focus_assist::FocusAssistManager::effective_mode
+    pub focus: focus_assist::FocusAssistManager,
     /// The events the popup marks and lists.
     ///
     /// Empty until something fills it. It lives on the shell rather than
@@ -1098,6 +1129,7 @@ impl DesktopShell {
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
             notifications: notif_pane::NotificationPane::new(),
+            focus: focus_assist::FocusAssistManager::new(),
             events: calendar::EventStore::new(),
             // Placeholder: the real area needs `taskbar_rect()`, which needs
             // the appearance scaling that is only set two fields up. Seeded
@@ -1618,7 +1650,29 @@ impl DesktopShell {
     /// Handle a pointer event.
     ///
     /// Returns what the caller should do with it — see [`ShellAction`].
+    ///
+    /// The drain is here, wrapping the whole of the handling, rather than on
+    /// the branch that forwards to the pane. *Every* path out of this function
+    /// can have touched the pane — the bell toggles it, a press elsewhere on
+    /// the bar dismisses it, `dismiss_popups` closes it along with everything
+    /// else — and each of those reports a [`Closed`] nobody else empties. A
+    /// drain on the forwarding branch alone bounded the buffer for clicks
+    /// *inside* the pane and let it grow once per click that closed it, which
+    /// is the more common of the two.
+    ///
+    /// [`Closed`]: notif_pane::NotifPaneEvent::Closed
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        let action = self.handle_mouse_inner(event);
+        match (action, self.apply_pane_events()) {
+            // A click on a notification card that names a program. The pane
+            // consumed the press and marked the card read; starting the
+            // program is the part only the caller can do.
+            (ShellAction::Consumed, Some(path)) => ShellAction::Launch(path),
+            (action, _) => action,
+        }
+    }
+
+    fn handle_mouse_inner(&mut self, event: &MouseEvent) -> ShellAction {
         // Before the match, and before `handle_press`'s own overview check: the
         // notification pane draws a scrim across everything above the taskbar,
         // so while it is up an event there landed on it whatever is underneath.
@@ -1646,6 +1700,8 @@ impl DesktopShell {
                 self.screen_width as f32,
                 self.notification_pane_height(),
             );
+            // The events this produced are drained by `handle_mouse`, which
+            // wraps this call and turns a clicked action into a `Launch`.
             return ShellAction::Consumed;
         }
 
@@ -2332,7 +2388,23 @@ impl DesktopShell {
     /// reason a taskbar click does not: the compositor owns which windows exist
     /// and what state they are in, and the shell finds out from the next window
     /// list like everything else.
+    ///
+    /// Wrapped for the same reason [`handle_mouse`](Self::handle_mouse) is: a
+    /// key can close the pane by several routes — Escape into the pane itself,
+    /// Escape into `dismiss_popups`, Super+N — and every one of them reports a
+    /// `Closed` that nothing else empties.
+    ///
+    /// Nothing the pane reports from a key is a launch, and it is as well:
+    /// [`HotkeyOutcome`] carries compositor requests, not program starts.
+    /// Should the pane grow an "Enter opens the selected card" key, it needs a
+    /// launch channel here rather than a path quietly dropped — see todo.txt.
     pub fn handle_hotkey(&mut self, key: &KeyEvent) -> HotkeyOutcome {
+        let outcome = self.handle_hotkey_inner(key);
+        drop(self.apply_pane_events());
+        outcome
+    }
+
+    fn handle_hotkey_inner(&mut self, key: &KeyEvent) -> HotkeyOutcome {
         if !key.pressed {
             // Key release — check for Alt+Tab completion
             if (key.key == Key::LeftAlt || key.key == Key::RightAlt) && self.alt_tab_active {
@@ -2778,15 +2850,28 @@ impl DesktopShell {
         // Without it the pane this shell owns had exactly one way in — Super+N
         // — which is a route nobody discovers, and the pane's own module doc
         // has always claimed a "system tray click" as the other.
+        //
+        // The glyph is the focus mode's own — a plain bell when nothing is
+        // being silenced, a struck bell / alarm clock / no-entry sign when
+        // something is — so one slot carries both "here is your history" and
+        // "here is why it has been quiet", without the tray growing a second
+        // item and shuffling every window button sideways.
         let bell = self.bell_rect();
-        let unread = self.notifications.unread_count();
+        let unread = self.notifications.attention_count();
         tree.text(
             bell.x,
             tray_text_y,
-            NOTIF_BELL_GLYPH,
+            self.focus.effective_mode().icon(),
             // Accent when something is waiting. The glyph alone would be a
             // silent difference: a bell that looks the same whether or not it
             // has anything behind it is a bell nobody presses.
+            //
+            // The mode is deliberately *not* tinted with `focus_assist`'s
+            // severity hues here. Those are measured against that module's
+            // pill fill; on the taskbar the only pair this theme guarantees
+            // legible is accent-on-background (pinned by
+            // `the_taskbar_accent_contrasts_with_the_bar`), and the changed
+            // glyph already carries the mode.
             if unread == 0 {
                 self.theme.taskbar_fg
             } else {
@@ -3351,8 +3436,163 @@ impl DesktopShell {
     /// anyone is looking. A message that could only arrive while the pane was
     /// open would be a message the user can only read by already knowing it is
     /// there.
-    pub fn notify(&mut self, notif: notif_pane::Notification) -> u64 {
+    ///
+    /// # Focus assist suppresses attention, not the record
+    ///
+    /// If [`focus`](Self::focus) says this app is silenced right now, the
+    /// notification is still stored — it is simply marked
+    /// [`silent`](notif_pane::Notification::silent), which keeps it out of the
+    /// bell's badge and out of [`attention_count`]. Dropping it instead was the
+    /// obvious alternative and is wrong: Do Not Disturb is a request not to be
+    /// interrupted, not a request to be lied to about what happened, and a user
+    /// who turns it off has no way to ask for the missed hour back. `Windows`
+    /// and macOS both keep the record for the same reason.
+    ///
+    /// The suppressed ones are also counted on the manager, so the "you missed
+    /// N things" summary [`FocusAssistManager::show_summary`] promises has a
+    /// number to show.
+    ///
+    /// [`attention_count`]: notif_pane::NotificationPane::attention_count
+    /// [`FocusAssistManager::show_summary`]: focus_assist::FocusAssistManager
+    pub fn notify(&mut self, mut notif: notif_pane::Notification) -> u64 {
+        // Keyed on `app_name` because that is the only app identity a
+        // `Notification` carries, and it is the same key the pane files its
+        // per-app settings under. A separate opaque id would have to be
+        // threaded through every poster to buy nothing the name does not
+        // already buy.
+        if !self.focus.should_show_notification(&notif.app_name) {
+            self.focus.record_suppressed();
+            notif.silent = true;
+        }
         self.notifications.push_notification(notif)
+    }
+
+    /// Push the focus manager's mode back onto the pane's two switches.
+    ///
+    /// Do Not Disturb and Focus Mode are one four-valued mode spelled as two
+    /// booleans, so the mapping has to be stated in one place or the switches
+    /// drift from what is actually happening:
+    ///
+    /// | mode | Do Not Disturb | Focus Mode |
+    /// |---|---|---|
+    /// | `Off` | off | off |
+    /// | `PriorityOnly` | off | **on** |
+    /// | `AlarmsOnly` | off | **on** |
+    /// | `TotalSilence` | **on** | off |
+    ///
+    /// `AlarmsOnly` reads as "Focus Mode on", which is true — focus assist is
+    /// engaged and it is not total silence — so no switch ever shows a state
+    /// the system is not in. What the pair *cannot* do is tell `AlarmsOnly`
+    /// apart from `PriorityOnly`; that distinction lives on the focus-assist
+    /// settings page, and the tray glyph shows it in the meantime.
+    ///
+    /// Called after every press rather than only when the mode changes,
+    /// because an unchanged mode after a press is precisely the case that
+    /// needs the write-back: the switch has already moved on screen and must
+    /// be moved back.
+    fn sync_quick_settings(&mut self) {
+        use focus_assist::FocusMode;
+        use notif_pane::QuickSetting;
+        let mode = self.focus.effective_mode();
+        self.notifications
+            .set_quick_setting(QuickSetting::DoNotDisturb, mode == FocusMode::TotalSilence);
+        self.notifications.set_quick_setting(
+            QuickSetting::FocusMode,
+            matches!(mode, FocusMode::PriorityOnly | FocusMode::AlarmsOnly),
+        );
+    }
+
+    /// Act on everything the pane reported since the last call, and empty it.
+    ///
+    /// Returns the one thing the shell cannot do itself: the program a clicked
+    /// notification's [`action`](notif_pane::Notification::action) names, for
+    /// the caller to turn into a [`ShellAction::Launch`]. Everything else the
+    /// pane has already done to its own state before reporting it, so the rest
+    /// of the arms are the shell deciding whether anything *outside* the pane
+    /// should follow.
+    ///
+    /// Calling this is mandatory, not housekeeping: the pane's event buffer is
+    /// unbounded and nothing else empties it. Until this existed the shell
+    /// accumulated one entry per click for the life of the session and the
+    /// quick-setting switches moved without changing anything.
+    fn apply_pane_events(&mut self) -> Option<String> {
+        use notif_pane::{NotifPaneEvent, QuickSetting};
+        let mut launch = None;
+        for event in self.notifications.drain_events() {
+            match event {
+                NotifPaneEvent::QuickSettingToggled(qs) => match qs {
+                    QuickSetting::DoNotDisturb | QuickSetting::FocusMode => {
+                        self.apply_focus_toggle(qs);
+                    }
+                    // Wi-Fi, Bluetooth and Night Light have no service in this
+                    // process to talk to: the first two are the network and
+                    // bluetooth daemons' state and the third is the
+                    // compositor's gamma ramp, all of which are reached over
+                    // IPC the shell does not hold yet. The switches move and
+                    // are remembered by the pane, and that is all they do —
+                    // recorded in known-issues.md rather than left to be
+                    // rediscovered by someone wondering why the radio stayed
+                    // on.
+                    QuickSetting::WiFi | QuickSetting::Bluetooth | QuickSetting::NightLight => {}
+                },
+                // The pane marks the card read before reporting the click, so
+                // the only thing left is the part it cannot do: start the
+                // program the notification points at. A card with no action is
+                // a message, and reading it is the whole of the interaction.
+                NotifPaneEvent::NotificationClicked(id) => {
+                    // Last one wins, which is the same rule the mouse path
+                    // already follows: one press produces at most one click
+                    // event, so a second can only come from a drain that was
+                    // skipped, and the newer intent is the right one to honour.
+                    launch = self
+                        .notifications
+                        .notifications()
+                        .iter()
+                        .find(|n| n.id == id)
+                        .and_then(|n| n.action.clone())
+                        .or(launch);
+                }
+                // All four are already done by the time they are reported: the
+                // card is gone, the list is empty, the per-app setting is
+                // stored, the pane is closing. They are drained so the buffer
+                // stays bounded, and matched by name so that adding a variant
+                // is a compile error here rather than a silent no-op.
+                NotifPaneEvent::NotificationDismissed(_)
+                | NotifPaneEvent::ClearAll
+                | NotifPaneEvent::SettingChanged { .. }
+                | NotifPaneEvent::Closed => {}
+            }
+        }
+        launch
+    }
+
+    /// Turn a press on one of the two focus switches into a mode.
+    ///
+    /// Reads the switch the pane just flipped rather than the mode, so "the
+    /// user asked for this to be on" is taken from the thing the user actually
+    /// pressed. The two are mutually exclusive by construction — turning
+    /// either on replaces the mode outright — which is what keeps the
+    /// write-back in [`sync_quick_settings`](Self::sync_quick_settings) from
+    /// having to undo a press.
+    fn apply_focus_toggle(&mut self, qs: notif_pane::QuickSetting) {
+        use focus_assist::FocusMode;
+        use notif_pane::QuickSetting;
+        let wanted = self.notifications.quick_setting_value(qs);
+        let mode = match (qs, wanted) {
+            (QuickSetting::DoNotDisturb, true) => FocusMode::TotalSilence,
+            // Priority Only rather than Alarms Only: a switch labelled just
+            // "Focus Mode" has to pick one of the two, and the milder is the
+            // one a user who wanted *silence* would not have reached for —
+            // they would have pressed Do Not Disturb, which is right beside it.
+            (QuickSetting::FocusMode, true) => FocusMode::PriorityOnly,
+            // Either switch turned off means "stop suppressing", including
+            // when the mode was the *other* switch's. Turning Focus Mode off
+            // while Alarms Only is engaged is the case that makes this right:
+            // the switch was showing that mode, so it is the one it turns off.
+            _ => FocusMode::Off,
+        };
+        self.focus.set_mode(mode);
+        self.sync_quick_settings();
     }
 
     /// Close whatever popup is open. Returns whether anything was.
@@ -5027,7 +5267,7 @@ mod overview_wiring_tests {
     use super::{
         DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
         RenderTree, ShellAction, ShellControlAction, ShellRequest, WindowId, WindowInfo,
-        WindowList, notif_pane, overview,
+        WindowList, focus_assist, notif_pane, overview,
     };
     use guitk::render::RenderCommand;
 
@@ -5498,6 +5738,7 @@ mod overview_wiring_tests {
             priority: notif_pane::NotifPriority::Normal,
             read: false,
             action: None,
+            silent: false,
         });
         assert!(!s.notifications.pane_state().is_visible());
         assert_eq!(s.notifications.unread_count(), 1);
@@ -5524,20 +5765,30 @@ mod overview_wiring_tests {
             .collect()
     }
 
-    /// Post `n` unread notifications.
+    /// Post `n` unread notifications from `Desktop`, carrying no action.
     fn post(s: &mut DesktopShell, n: usize) {
         for i in 0..n {
-            let _ = s.notify(notif_pane::Notification {
-                id: 0,
-                app_name: "Desktop".to_owned(),
-                title: format!("Something {i}"),
-                body: String::new(),
-                timestamp: 0,
-                priority: notif_pane::NotifPriority::Normal,
-                read: false,
-                action: None,
-            });
+            post_from(s, "Desktop", &format!("Something {i}"), None);
         }
+    }
+
+    /// Post one notification from `app`, optionally carrying a launch path.
+    ///
+    /// Goes through [`DesktopShell::notify`] rather than the pane directly, so
+    /// focus assist gets its say — which is the whole point in the tests below
+    /// that turn it on first.
+    fn post_from(s: &mut DesktopShell, app: &str, title: &str, action: Option<&str>) -> u64 {
+        s.notify(notif_pane::Notification {
+            id: 0,
+            app_name: app.to_owned(),
+            title: title.to_owned(),
+            body: String::new(),
+            timestamp: 0,
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: action.map(ToOwned::to_owned),
+            silent: false,
+        })
     }
 
     /// The middle of the bell's slot.
@@ -5711,5 +5962,302 @@ mod overview_wiring_tests {
             quiet,
             "the bell did not react to a message"
         );
+    }
+
+    // ======================================================================
+    // Focus assist
+    //
+    // `focus_assist.rs` was the second-largest island in the shell: 1,466
+    // lines with a settings page, per-app priorities and automatic rules, and
+    // nothing anywhere that constructed a `FocusAssistManager`. Meanwhile the
+    // pane's Do Not Disturb switch moved on screen and changed nothing at all,
+    // and every click the pane reported piled up in a `Vec` nobody emptied.
+    // These are the tests that would have failed while the two were strangers.
+    // ======================================================================
+
+    /// Where the open pane draws `label`, in screen coordinates.
+    ///
+    /// The translations have to be replayed, not ignored: the pane emits every
+    /// one of its sections in pane-local coordinates under a
+    /// `PushTranslate { dx: pane_x }`, and the scrolling list adds a second one
+    /// of its own. A test that read the raw `x` would get a point 380 pixels
+    /// left of the pane — outside its column, where a press dismisses the pane
+    /// instead of pressing anything in it.
+    ///
+    /// Four pixels past the text's own origin rather than at it: a quick
+    /// setting's whole 36-pixel row is its hit area, and a point on the very
+    /// first line of the label is a point a rounding error could put in the row
+    /// above.
+    fn pane_label_at(s: &DesktopShell, label: &str) -> (f32, f32) {
+        let tree = s
+            .render_notifications()
+            .expect("the pane is not open, so it drew nothing");
+        let mut stack: Vec<(f32, f32)> = Vec::new();
+        let mut here = (0.0_f32, 0.0_f32);
+        for cmd in &tree.commands {
+            match cmd {
+                RenderCommand::PushTranslate { dx, dy } => {
+                    stack.push(here);
+                    here = (here.0 + dx, here.1 + dy);
+                }
+                RenderCommand::PopTranslate => {
+                    here = stack.pop().unwrap_or((0.0, 0.0));
+                }
+                RenderCommand::Text { x, y, text, .. } if text == label => {
+                    return (here.0 + x + 4.0, here.1 + y + 4.0);
+                }
+                _ => {}
+            }
+        }
+        panic!("the pane drew no {label:?}")
+    }
+
+    /// The point on the quick-setting row labelled `label` that toggles it.
+    ///
+    /// The pill at the right end of the row is the control and the label
+    /// deliberately is not, so a test that pressed the words would press
+    /// nothing. Two pixels in from the display's right edge is inside the pill
+    /// whatever width the pill is given, and the pane's right edge *is* the
+    /// display's whenever it is fully out — which is what `show()` makes it.
+    fn quick_setting_switch_at(s: &DesktopShell, label: &str) -> (f32, f32) {
+        let (_, y) = pane_label_at(s, label);
+        (s.taskbar_rect().w - 2.0, y)
+    }
+
+    /// Open the pane, if it is not open, and press the quick setting `label`.
+    fn toggle_quick_setting(s: &mut DesktopShell, label: &str) -> ShellAction {
+        if !s.notifications.pane_state().is_visible() {
+            s.toggle_notifications();
+        }
+        let (x, y) = quick_setting_switch_at(s, label);
+        press(s, x, y)
+    }
+
+    #[test]
+    fn nothing_is_silenced_to_begin_with() {
+        let s = shell();
+        assert_eq!(s.focus.effective_mode(), focus_assist::FocusMode::Off);
+        assert!(
+            taskbar_text(&s)
+                .iter()
+                .any(|t| t == super::NOTIF_BELL_GLYPH),
+            "the tray drew something other than a plain bell with nothing silenced"
+        );
+    }
+
+    #[test]
+    fn pressing_do_not_disturb_in_the_pane_actually_silences_things() {
+        // The defect this fixes: the switch moved and nothing else did. It was
+        // a control with no wire behind it.
+        let mut s = shell();
+        let action = toggle_quick_setting(&mut s, "Do Not Disturb");
+        assert_eq!(action, ShellAction::Consumed);
+        assert_eq!(
+            s.focus.effective_mode(),
+            focus_assist::FocusMode::TotalSilence
+        );
+        assert!(
+            s.notifications
+                .quick_setting_value(notif_pane::QuickSetting::DoNotDisturb)
+        );
+    }
+
+    #[test]
+    fn pressing_do_not_disturb_again_stops_silencing_things() {
+        let mut s = shell();
+        let _ = toggle_quick_setting(&mut s, "Do Not Disturb");
+        let _ = toggle_quick_setting(&mut s, "Do Not Disturb");
+        assert_eq!(s.focus.effective_mode(), focus_assist::FocusMode::Off);
+        assert!(
+            !s.notifications
+                .quick_setting_value(notif_pane::QuickSetting::DoNotDisturb)
+        );
+    }
+
+    #[test]
+    fn the_two_focus_switches_cannot_both_be_on() {
+        // They are one four-valued mode spelled as two booleans. A pair that
+        // could both read on would be claiming a state the manager has no way
+        // to be in.
+        use notif_pane::QuickSetting;
+        let mut s = shell();
+        let _ = toggle_quick_setting(&mut s, "Do Not Disturb");
+        let _ = toggle_quick_setting(&mut s, "Focus Mode");
+        assert_eq!(
+            s.focus.effective_mode(),
+            focus_assist::FocusMode::PriorityOnly
+        );
+        assert!(
+            !s.notifications
+                .quick_setting_value(QuickSetting::DoNotDisturb),
+            "Do Not Disturb stayed on while Priority Only was in force"
+        );
+        assert!(s.notifications.quick_setting_value(QuickSetting::FocusMode));
+    }
+
+    #[test]
+    fn alarms_only_reads_as_focus_mode_on() {
+        // The one mode the pair cannot spell exactly. It must still show as
+        // *something* on, because focus assist is engaged — a switch reading
+        // off while notifications are being silenced is the switch lying.
+        use notif_pane::QuickSetting;
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::AlarmsOnly);
+        s.sync_quick_settings();
+        assert!(s.notifications.quick_setting_value(QuickSetting::FocusMode));
+        assert!(
+            !s.notifications
+                .quick_setting_value(QuickSetting::DoNotDisturb)
+        );
+        // And pressing it turns *that* mode off, rather than swapping it for
+        // the milder one the switch nominally stands for.
+        let _ = toggle_quick_setting(&mut s, "Focus Mode");
+        assert_eq!(s.focus.effective_mode(), focus_assist::FocusMode::Off);
+    }
+
+    #[test]
+    fn the_tray_glyph_says_which_mode_is_in_force() {
+        // One slot carries both "here is your history" and "here is why it has
+        // been quiet". A tray that looked identical in Total Silence would
+        // leave the user with no way to find out why nothing has arrived.
+        let mut s = shell();
+        let quiet = taskbar_text(&s);
+        s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
+        let silenced = taskbar_text(&s);
+        assert_ne!(quiet, silenced, "the tray drew the same thing either way");
+        assert!(
+            silenced
+                .iter()
+                .any(|t| t == focus_assist::FocusMode::TotalSilence.icon()),
+            "the tray drew no mode glyph: {silenced:?}"
+        );
+    }
+
+    #[test]
+    fn a_silenced_notification_still_enters_the_history() {
+        // Suppression governs attention, not the record. A user who turns Do
+        // Not Disturb off has no other way to ask for the missed hour back.
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        assert_eq!(s.notifications.notifications().len(), 1);
+        assert_eq!(s.notifications.unread_count(), 1);
+        assert_eq!(
+            s.notifications.attention_count(),
+            0,
+            "a suppressed notification asked to be looked at"
+        );
+        assert_eq!(s.focus.suppressed_count, 1);
+    }
+
+    #[test]
+    fn a_silenced_notification_does_not_badge_the_bell() {
+        // The whole point of suppressing a notification is that nothing about
+        // it interrupts. A badge is an interruption.
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        let drawn = taskbar_text(&s);
+        assert!(
+            !drawn.iter().any(|t| t == "1"),
+            "Do Not Disturb lit a badge: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn a_priority_app_comes_through_priority_only() {
+        // Otherwise "Priority Only" would be Total Silence with a longer name.
+        use focus_assist::{AppNotifOverride, NotifPriority};
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::PriorityOnly);
+        s.focus.set_app_override(
+            AppNotifOverride::new("Alarms", "Alarms").with_priority(NotifPriority::Critical),
+        );
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        let _ = post_from(&mut s, "Alarms", "Wake up", None);
+        assert_eq!(
+            s.notifications.attention_count(),
+            1,
+            "the wrong number of notifications got through Priority Only"
+        );
+        assert_eq!(s.focus.suppressed_count, 1);
+    }
+
+    #[test]
+    fn turning_focus_assist_off_forgets_what_it_suppressed() {
+        // The count exists to answer "you missed N things" once, when the mode
+        // ends. Carrying it into the next session of Do Not Disturb would make
+        // that summary a running total of everything ever silenced.
+        let mut s = shell();
+        s.focus.set_mode(focus_assist::FocusMode::TotalSilence);
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        assert_eq!(s.focus.suppressed_count, 1);
+        s.focus.set_mode(focus_assist::FocusMode::Off);
+        assert_eq!(s.focus.suppressed_count, 0);
+    }
+
+    // ---- the pane's events reach the shell ----
+
+    #[test]
+    fn the_panes_event_buffer_does_not_grow() {
+        // It is an unbounded `Vec` that only `drain_events` empties, so a
+        // shell that rendered the pane and never drained it grew one entry per
+        // click for the life of the session.
+        //
+        // Driven only through the shell's own mouse path, because that is the
+        // claim: a `hide()` called behind the shell's back would report a
+        // `Closed` the shell never had the chance to drain, and the test would
+        // be about the pane rather than about the wiring.
+        let mut s = shell();
+        for _ in 0..5 {
+            let _ = toggle_quick_setting(&mut s, "Night Light");
+            let (bx, by) = bell_centre(&s);
+            let _ = press(&mut s, bx, by);
+        }
+        assert!(
+            s.notifications.drain_events().is_empty(),
+            "the shell left events in the pane"
+        );
+    }
+
+    #[test]
+    fn closing_the_pane_with_escape_is_drained_too() {
+        // `hide()` reports `Closed`, so a session driven only from the
+        // keyboard would grow one entry per press.
+        let mut s = shell();
+        for _ in 0..5 {
+            s.toggle_notifications();
+            let _ = s.handle_hotkey(&key(Key::Escape, Modifiers::NONE, None));
+        }
+        assert!(
+            s.notifications.drain_events().is_empty(),
+            "the key path left events in the pane"
+        );
+    }
+
+    #[test]
+    fn clicking_a_notification_that_names_a_program_launches_it() {
+        // The `action` field had no reader anywhere in the tree: a card could
+        // say what it was about and clicking it did nothing but mark it read.
+        let mut s = shell();
+        let _ = post_from(&mut s, "Mail", "Three new messages", Some("/apps/mail"));
+        s.toggle_notifications();
+        let (x, y) = pane_label_at(&s, "Three new messages");
+        assert_eq!(
+            press(&mut s, x, y),
+            ShellAction::Launch("/apps/mail".to_owned())
+        );
+    }
+
+    #[test]
+    fn clicking_a_notification_that_names_nothing_is_merely_consumed() {
+        // Most notifications are messages, and reading one is the whole of the
+        // interaction. Launching *something* would be worse than launching
+        // nothing.
+        let mut s = shell();
+        let _ = post_from(&mut s, "Mail", "Three new messages", None);
+        s.toggle_notifications();
+        let (x, y) = pane_label_at(&s, "Three new messages");
+        assert_eq!(press(&mut s, x, y), ShellAction::Consumed);
     }
 }

@@ -42,6 +42,15 @@
 //!     }
 //! }
 //! ```
+//!
+//! The drain is not optional. [`NotificationPane::events`] is an unbounded
+//! `Vec` that only [`drain_events`](NotificationPane::drain_events) empties, so
+//! a caller that renders the pane and never drains it grows one entry per click
+//! for the life of the session, and its quick-setting switches move on screen
+//! and change nothing anywhere else. [`DesktopShell`] drains after every mouse
+//! and key event it hands the pane — see `DesktopShell::apply_pane_events`.
+//!
+//! [`NotificationPane::events`]: NotificationPane
 
 use appearance::{Palette, readable_on};
 use guitk::color::Color;
@@ -279,7 +288,25 @@ pub struct Notification {
     pub timestamp: u64,
     pub priority: NotifPriority,
     pub read: bool,
+    /// What clicking the card should launch, if anything.
+    ///
+    /// A program path, resolved by whoever drains
+    /// [`NotifPaneEvent::NotificationClicked`] — `DesktopShell` turns it into a
+    /// `ShellAction::Launch`. `None` means the card is a message and nothing
+    /// more, which is the common case and why this is an `Option` rather than a
+    /// `String` that is usually empty.
     pub action: Option<String>,
+    /// Arrived while focus assist was suppressing this app.
+    ///
+    /// The notification is *in* the history either way — suppression governs
+    /// attention, not the record, so a user who turns Do Not Disturb off can
+    /// still read what arrived while it was on. What it does not do is ask to
+    /// be looked at: [`attention_count`](NotificationPane::attention_count)
+    /// skips it, so the tray bell does not badge for it.
+    ///
+    /// Set by the poster, not by the pane: the pane has no focus-assist
+    /// manager and cannot know. See `DesktopShell::notify`.
+    pub silent: bool,
 }
 
 /// Quick-setting toggles.
@@ -826,8 +853,46 @@ impl NotificationPane {
     }
 
     /// Number of unread notifications.
+    ///
+    /// A plain fact about the history: how many cards the user has not opened.
+    /// It counts suppressed ones too, because they *are* unread. What asks for
+    /// the user's attention is a narrower question — see
+    /// [`attention_count`](Self::attention_count).
     pub fn unread_count(&self) -> usize {
         self.notifications.iter().filter(|n| !n.read).count()
+    }
+
+    /// Number of unread notifications that are asking to be looked at.
+    ///
+    /// [`unread_count`](Self::unread_count) minus the ones that arrived while
+    /// focus assist was suppressing their app. This is what the tray bell's
+    /// badge counts: a Do Not Disturb that still lit a badge would be a Do Not
+    /// Disturb that did not, and the whole point of suppressing a notification
+    /// is that nothing about it interrupts.
+    #[must_use]
+    pub fn attention_count(&self) -> usize {
+        self.notifications
+            .iter()
+            .filter(|n| !n.read && !n.silent)
+            .count()
+    }
+
+    /// Set a quick-setting toggle without emitting an event.
+    ///
+    /// The write-back half of the pane's quick settings. A toggle the user
+    /// presses is the pane's to flip and to *report*
+    /// ([`NotifPaneEvent::QuickSettingToggled`]); a toggle whose real state
+    /// lives somewhere else — Do Not Disturb and Focus Mode both live in
+    /// `focus_assist::FocusAssistManager` — is the owner's to push back here,
+    /// so the switch shows what the system is actually doing rather than what
+    /// the last press asked for.
+    ///
+    /// Deliberately silent: re-emitting an event for a value the owner just
+    /// set would loop the owner straight back into setting it again.
+    pub fn set_quick_setting(&mut self, setting: QuickSetting, value: bool) {
+        if self.quick_settings.get(setting) != value {
+            self.quick_settings.toggle(setting);
+        }
     }
 
     /// The history, newest first.
@@ -1984,6 +2049,7 @@ mod tests {
             priority: NotifPriority::Normal,
             read: false,
             action: None,
+            silent: false,
         }
     }
 

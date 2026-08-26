@@ -68332,15 +68332,53 @@ it sits.
   doing so, exactly as the start menu, the power menu and the calendar already
   behave.
 
-  **Still open from this thread:** the pane's `NotifPaneEvent`s are never
-  drained by the session. `QuickSettingToggled`, `NotificationClicked`,
-  `ClearAll` and `SettingChanged` accumulate in `NotificationPane::events` for
-  ever and nothing acts on them — so the quick-settings toggles (Wi-Fi,
-  Bluetooth, Do Not Disturb) move under the cursor and change nothing, and
-  clicking a notification does not open the application that posted it. The
-  fix is a drain in `ShellSession::step` beside the one the launcher already
-  has, plus a decision about who owns each setting; the radio toggles in
-  particular have no service to talk to yet.
+  **Repaid the same day — the events are drained and focus assist is no longer
+  an island.** `DesktopShell::apply_pane_events` drains
+  `NotificationPane::drain_events` from *wrappers* around `handle_mouse` and
+  `handle_hotkey`, not from the branch that forwards to the pane: every path
+  out of those functions can have closed the pane — the bell, a press
+  elsewhere on the bar, `dismiss_popups` — and each reports a `Closed`, so a
+  drain on the forwarding branch alone still leaked one entry per click that
+  closed it. `gui/desktop/src/focus_assist.rs` (1,466 lines, the second-largest
+  island after `osd.rs`) is now constructed as `DesktopShell::focus`:
+  `QuickSetting::DoNotDisturb` and `QuickSetting::FocusMode` are views of its
+  four-valued mode via `sync_quick_settings`, `notify` marks an arriving
+  notification `silent` when the mode suppresses its app (it still enters the
+  history — suppression governs attention, not the record) and counts it on
+  the manager, the bell's badge counts `attention_count` rather than
+  `unread_count`, and the tray glyph is `effective_mode().icon()`.
+  `Notification::action` gained its first reader in the tree: a click on a card
+  that names a program now returns `ShellAction::Launch`. See
+  `design-decisions.md` §564; 14 new tests.
+
+  **Still open from this thread — three toggles with nothing behind them.**
+  `QuickSetting::WiFi`, `QuickSetting::Bluetooth` and `QuickSetting::NightLight`
+  still move under the cursor and change nothing outside the pane. They are
+  matched explicitly in `apply_pane_events` with an empty arm, so adding a
+  variant is a compile error rather than a silent no-op, but there is nothing
+  in this process for them to talk to: the first two are the network and
+  bluetooth daemons' state and the third is the compositor's gamma ramp, all
+  reached over IPC the shell does not hold. The proper fix is a shell-side
+  client for each, which is blocked on those services existing; until then a
+  case could be made for hiding the three rather than showing dead controls,
+  which is a user-visible call and so belongs in `open-questions.md` if it is
+  ever pressing. Neither the volume nor the brightness slider in the same block
+  is wired either, for the same reason.
+
+  **Still open from this thread — focus assist's automatic half.**
+  `FocusAssistManager::evaluate_auto_rules` is never called, so
+  `effective_mode()` is today exactly `manual_mode`: the schedule rules
+  (`AutoRule::Schedule`), and the ones keyed on the machine being fullscreen,
+  presenting, gaming or on battery, do nothing. It needs a wall clock — the
+  shell reads one for the taskbar clock, so that half is available — and a
+  "the foreground window went fullscreen" signal from the compositor, which is
+  not. Wiring only the clock half would make a manager that switches modes on
+  schedule but never on a game, which is a worse state than neither, so both
+  wait together. Note also that `set_mode(Off)` clears `manual_override`, so
+  once auto rules *are* live, turning a switch off while an auto rule is
+  asserting a mode will re-assert it on the next evaluation — the manual "off"
+  needs to become a distinct suppress-the-rule state at that point, not the
+  absence of an override.
 
   **Still an island next door:** `gui/desktop/src/osd.rs` (3,457 lines), the
   volume/brightness/lock on-screen display, remains uncalled. It was the other

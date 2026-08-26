@@ -458,6 +458,11 @@ impl<T: Transport> ShellSession<T> {
                 priority: notif_pane::NotifPriority::Normal,
                 read: false,
                 action: None,
+                // Left to `notify`, which is the only thing that knows whether
+                // focus assist is silencing "Desktop" right now. Setting it
+                // here would be this call answering a question it cannot see
+                // the state of.
+                silent: false,
             });
             self.dirty = true;
         }

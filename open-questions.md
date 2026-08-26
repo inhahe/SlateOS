@@ -1169,6 +1169,88 @@ is confidently wrong. It has already been stuck nine days for want of one
 sentence from you. Everything else about the feature is finished.
 
 
+## C-Q9 — [C] The backup tool and the search tools read the same-looking patterns by different rules. Should they be made the same? — Status: OPEN
+
+**In short:** when you tell the backup program which folders to skip, you type a
+pattern like `*.tmp` or `build/**`. When you search for a file, you type a
+pattern that looks the same. They are not the same: the search tools understand
+`[a-z]` to mean "any lowercase letter", and the backup tool understands it to
+mean "a folder whose name literally contains a square bracket". Both behaviours
+are defensible. The question is whether to make the backup tool agree with the
+search tools — which would change what the exclude lists people have *already
+written* actually exclude.
+
+**Where it bites:** `apps/backup/src/main.rs` (`glob_matches`,
+`glob_match_recursive`, `glob_match_simple` — lines 40–215) versus
+`apps/globmatch/src/lib.rs`, which `apps/indexer` and `apps/filesearch` now
+share. The reasoning behind the split is `design-decisions.md` §555.
+
+### What is actually different
+
+The desktop used to contain four separate pattern matchers. The two that are the
+same feature seen twice — the search window and the background indexer — have
+been merged into one shared implementation, because they disagreed with each
+other on 646 of 730,236 test patterns and no test either of them had could ever
+have noticed. That part needed no decision; it was a bug.
+
+The backup tool is the case that does need one. It is not a broken copy of the
+search matcher; it is a different pattern language, the one `.gitignore` uses:
+
+| | search tools (`apps/globmatch`) | backup (`apps/backup`) |
+|---|---|---|
+| `*` | matches any run of characters, including `/` | stops at a `/` |
+| `**` | nothing special — two stars, same as one | spans folder boundaries |
+| `?` | any one character | any one character except `/` |
+| `[a-z]` | any lowercase letter | the six characters `[`, `a`, `-`, `z`, `]` |
+| works on | text, character by character | raw path bytes |
+
+The first three rows are *correct as they stand*: an exclude list matches paths,
+so `*.tmp` should not match `logs/a.tmp`, and `build/**` should. Nobody is
+proposing to change those. The only row in dispute is the fourth.
+
+### The options
+
+**A — Leave it. Two dialects, written down.** *What changes:* nothing. Backup
+patterns keep treating `[` as an ordinary character; search patterns keep
+treating it as the start of a character class. Someone who learns one and
+assumes the other is surprised once.
+
+**B — Teach the backup tool character classes.** *What changes:* an existing
+exclude line like `cache[1]/` stops excluding the folder literally named
+`cache[1]` and starts excluding a folder named `cache1`. Everything else keeps
+working. Gains: one rule to learn instead of two, and `*.[ch]` becomes a way to
+skip C sources. Costs: a silent change of meaning in data users already wrote —
+the backup that quietly starts including a folder it used to skip is not an error
+anyone will see.
+
+**C — Teach the backup tool character classes, but only for new patterns.**
+*What changes:* the same as B for anything written from now on; existing exclude
+files are read under the old rules until edited. *What it costs:* a file format
+that means two different things depending on its age, which is the kind of thing
+that is impossible to explain and impossible to remove later. Listed for
+completeness; I do not recommend it.
+
+### My recommendation
+
+**A.** The two search tools had to be unified because they are one feature with
+two implementations — a disagreement with no upside. Backup is not that: its
+dialect is the right one for its job and matches what every developer already
+knows from `.gitignore`, where `[` is likewise not special in the common case.
+The gain from B is small (a shorter way to write a few exclude patterns) and the
+cost lands on data that already exists and that nobody will re-read to check.
+
+If you prefer B, the change itself is small — `apps/backup` would call
+`globmatch`'s class parser for the segment-matching step — and the real work is
+deciding whether to warn about existing patterns containing a `[`.
+
+### If this is never answered
+
+Nothing is blocked and nothing degrades. The two dialects are documented in
+`design-decisions.md` §555 and in `apps/globmatch`'s module docs, so the split is
+a recorded decision rather than an accident. The only ongoing cost is that a user
+who learns one pattern language may assume the other works the same way.
+
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

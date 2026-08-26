@@ -367,6 +367,93 @@ def walk_block(
         yield k, col, len(line)
 
 
+def statements(code: list[str], struct: list[str]) -> Iterator[tuple[int, str]]:
+    """Yield `(start_index, text)` for each statement-sized span of a file.
+
+    `text` is the span's source with its newlines collapsed to single spaces,
+    so a regex that spans method calls can be matched against it.  Match
+    against *this*, never against a line.
+
+    Why: **the author does not decide where the newlines go -- `cargo fmt`
+    does.**  These two are the same code, and a line-granular regex sees only
+    the first::
+
+        let n = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);
+
+        let n = parts
+            .get(2)
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(20);
+
+    Which form a given site takes is decided by how long the surrounding names
+    happen to be.  `check-option-refusal.py` matched by the line and so
+    published 240 findings while hiding 466 more of the identical shape -- and,
+    like the `} else {` bug that `walk_block` exists for, a gate that is wrong
+    in the *clean* direction produces no symptom at all.
+
+    Two views are required, and they must be the two that `strip_noise`
+    produces from one text, because it blanks in place and so leaves every line
+    at its original length and number:
+
+    * `struct` -- comments *and* literals blanked.  Terminators and nesting are
+      counted over this only.  A `(` inside a string literal is not a bracket;
+      counting one makes the depth drift upward and never come back, after
+      which no terminator fires again and the rest of the file glues into a
+      single span.  (Measured: doing it over the literals-kept view collapsed
+      this file's 100698 spans into 1068.)
+    * `code` -- comments blanked, literals kept.  The text is taken from here,
+      because the detectors look for literal option spellings.
+
+    A span ends at `;`, `{`, `}` or `,` appearing at bracket depth zero.  The
+    comma is not decoration: at depth zero it separates match arms, and without
+    it a `.parse()` in one arm and an `.unwrap_or()` in the next would glue
+    into a single span and match a chain that does not exist.  `{` and `}` end
+    a span only outside brackets, so a closure body -- `unwrap_or_else(|| {
+    ... })` -- stays with the chain that owns it.
+
+    A statement's start index is the line its *first* text sits on, which is
+    the line a reader would call it.  Two consequences worth knowing: a site
+    can be reported against an earlier line than the one it is written on (a
+    wrapped chain is credited to its `let`), and the enclosing function is
+    looked up at that line -- always the same function, since a statement
+    cannot straddle two.
+    """
+    depth = 0
+    buf: list[str] = []
+    start: int | None = None
+    for i, sline in enumerate(struct):
+        cline = code[i]
+        seg = 0
+        for j, ch in enumerate(sline):
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                # Clamped at zero rather than allowed to go negative: a file
+                # this walk cannot balance (a macro with unmatched brackets,
+                # say) would otherwise drift permanently and silence every
+                # terminator after it.  Clamping localises the damage.
+                depth = max(depth - 1, 0)
+            elif depth == 0 and ch in ";{},":
+                if start is None:
+                    start = i
+                buf.append(cline[seg : j + 1])
+                text = " ".join(part.strip() for part in buf).strip()
+                if text:
+                    yield start, text
+                buf = []
+                start = None
+                seg = j + 1
+        rest = cline[seg:]
+        if rest.strip():
+            if start is None:
+                start = i
+            buf.append(rest)
+    if buf and start is not None:
+        text = " ".join(part.strip() for part in buf).strip()
+        if text:
+            yield start, text
+
+
 def analyse(path: Path) -> list[str]:
     raw = path.read_text(encoding="utf-8", errors="replace")
     src = strip_noise(raw)
@@ -550,6 +637,81 @@ _BLOCK_WALK_CASES: tuple[tuple[str, str, int, int, str], ...] = (
     ),
 )
 
+# Cases for `statements`. Each is `(name, src, expected)` where `expected` is
+# the list of `(start_index, text)` pairs the span walk must produce. Every one
+# of them is answered wrongly by matching a line: the first is the bug itself,
+# and the rest are the ways a naive splitter gets the *opposite* answer -- too
+# few spans, or too many -- once real Rust is fed to it.
+_STATEMENT_CASES: tuple[tuple[str, str, list[tuple[int, str]]], ...] = (
+    # The shipped bug. `cargo fmt` chose these newlines, and a per-line regex
+    # for `.parse()…​.unwrap_or(` sees four fragments and matches none of them.
+    (
+        "a chain rustfmt wrapped is one span",
+        "let n = parts\n    .get(2)\n"
+        "    .and_then(|s| s.parse::<u32>().ok())\n    .unwrap_or(20);\n",
+        [(0, "let n = parts .get(2) .and_then(|s| s.parse::<u32>().ok()) .unwrap_or(20);")],
+    ),
+    # The unwrapped spelling of the identical code must give the identical
+    # span, or the walk has merely moved the blind spot rather than closed it.
+    (
+        "the same chain on one line is the same span",
+        "let n = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);\n",
+        [(0, "let n = parts.get(2).and_then(|s| s.parse::<u32>().ok()).unwrap_or(20);")],
+    ),
+    # Why the depth count must run over the literals-blanked view. With
+    # literals kept, this `(` is never closed, the depth drifts up by one, and
+    # no terminator fires for the rest of the file -- which is how the first
+    # draft of this walk turned 100698 spans into 1068 and found 2 sites.
+    (
+        "a bracket inside a string literal is not a bracket",
+        'shell_println!("(");\nlet n = x.parse::<u32>().unwrap_or(0);\n',
+        [(0, 'shell_println!("(");'), (1, "let n = x.parse::<u32>().unwrap_or(0);")],
+    ),
+    # A `;` inside a literal does not end a span either, for the same reason.
+    (
+        "a semicolon inside a string literal does not end a span",
+        'let s = "a;b".len();\n',
+        [(0, 'let s = "a;b".len();')],
+    ),
+    # The comma is a terminator at depth zero because match arms are separated
+    # by one. Without it these two arms glue, and a `.parse()` in the first
+    # would pair with an `.unwrap_or()` in the second to match a chain that is
+    # not in the source -- a false finding, which costs a gate its credibility
+    # just as surely as a missed one.
+    (
+        "sibling match arms do not glue",
+        "match x {\n    A => a.parse::<u32>(),\n    B => b.unwrap_or(0),\n}\n",
+        [
+            (0, "match x {"),
+            (1, "A => a.parse::<u32>(),"),
+            (2, "B => b.unwrap_or(0),"),
+            (3, "}"),
+        ],
+    ),
+    # ...but a comma *inside* brackets is an argument separator and must not
+    # split, or every multi-argument call becomes several spans.
+    (
+        "a comma inside brackets is not a terminator",
+        "let n = cmp::min(a, b).parse::<u32>().unwrap_or(0);\n",
+        [(0, "let n = cmp::min(a, b).parse::<u32>().unwrap_or(0);")],
+    ),
+    # A closure body's braces sit inside the call's parens, so they do not end
+    # the span: the fallback stays attached to the chain it belongs to.
+    (
+        "a closure body stays with its chain",
+        "let n = s.parse::<u32>().unwrap_or_else(|_| { 0 });\n",
+        [(0, "let n = s.parse::<u32>().unwrap_or_else(|_| { 0 });")],
+    ),
+    # A span is credited to the line its first text is on, not the line the
+    # terminator is on. This is what lets the caller look up the enclosing
+    # function and the production/test classification at a sane line.
+    (
+        "a span is credited to its first line",
+        "let n =\n    read();\n",
+        [(0, "let n = read();")],
+    ),
+)
+
 
 def self_test() -> int:
     """Check the source scanner against the literal forms that have broken it.
@@ -598,7 +760,20 @@ def self_test() -> int:
             failures += 1
             print(f"FAIL walk_block/{name}:\n  expected {want!r}\n  got      {got!r}")
 
-    total = len(_PARSER_CASES) + len(_KEEP_LITERAL_CASES) + len(_BLOCK_WALK_CASES)
+    for name, src, want_spans in _STATEMENT_CASES:
+        code = strip_noise(src, keep_literals=True).split("\n")
+        struct = strip_noise(src).split("\n")
+        got_spans = list(statements(code, struct))
+        if got_spans != want_spans:
+            failures += 1
+            print(f"FAIL statements/{name}:\n  expected {want_spans!r}\n  got      {got_spans!r}")
+
+    total = (
+        len(_PARSER_CASES)
+        + len(_KEEP_LITERAL_CASES)
+        + len(_BLOCK_WALK_CASES)
+        + len(_STATEMENT_CASES)
+    )
     if failures:
         print(f"\n[parser self-test] {failures} failure(s) across {total} case(s)", file=sys.stderr)
         return 1

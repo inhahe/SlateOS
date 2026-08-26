@@ -1179,9 +1179,24 @@ pub(crate) unsafe fn restore_interrupts(flags: u64) {
 /// Acquires the global lock, pops up to `PCPU_BATCH` order-0 frames,
 /// and pushes them into the per-CPU cache.
 ///
+/// The interrupts-disabled precondition is not a nicety: this is one of only
+/// two `ALLOCATOR` acquisitions in this file that is *not* wrapped in
+/// `without_interrupts`, and if a caller ever forgets, a same-CPU IRQ that
+/// re-enters the allocator spins with `IF=0` and never returns — no panic, no
+/// stall report, no serial output at all. That class already froze a boot once
+/// (see [`stats`], and the 2026-06-07 frag_history hang). The wrap is omitted
+/// deliberately — this is the batch fast path, and its whole reason for
+/// existing is to keep per-frame overhead off the hot path — so the
+/// precondition is asserted instead of enforced.
+///
 /// Returns the number of frames transferred.
 #[allow(clippy::indexing_slicing)]
 fn pcpu_refill(cpu: usize) -> usize {
+    debug_assert!(
+        !crate::cpu::interrupts_enabled(),
+        "pcpu_refill requires interrupts disabled: a same-CPU IRQ re-entering \
+         the allocator while ALLOCATOR is held wedges this CPU with IF=0"
+    );
     let Some(allocator) = ALLOCATOR.get() else {
         return 0;
     };
@@ -1194,7 +1209,8 @@ fn pcpu_refill(cpu: usize) -> usize {
         match guard.alloc_inner(0) {
             Ok(addr) => {
                 // SAFETY: cpu < MAX_CPUS (validated by smp::fast_cpu_index()),
-                // and interrupts are disabled so no preemption.
+                // and interrupts are disabled — asserted at entry, not merely
+                // assumed — so no preemption can observe a torn cache.
                 unsafe {
                     PCPU_CACHES[cpu].push(addr);
                 }
@@ -1211,8 +1227,16 @@ fn pcpu_refill(cpu: usize) -> usize {
 ///
 /// Called with interrupts disabled when the per-CPU cache is full.
 /// Returns the number of frames drained.
+///
+/// The interrupts-disabled precondition carries the same weight, and is
+/// asserted for the same reason, as in [`pcpu_refill`].
 #[allow(clippy::indexing_slicing)]
 fn pcpu_drain(cpu: usize) -> usize {
+    debug_assert!(
+        !crate::cpu::interrupts_enabled(),
+        "pcpu_drain requires interrupts disabled: a same-CPU IRQ re-entering \
+         the allocator while ALLOCATOR is held wedges this CPU with IF=0"
+    );
     let Some(allocator) = ALLOCATOR.get() else {
         return 0;
     };
@@ -1222,7 +1246,9 @@ fn pcpu_drain(cpu: usize) -> usize {
 
     let mut drained = 0;
     for _ in 0..PCPU_BATCH {
-        // SAFETY: cpu < MAX_CPUS, interrupts disabled.
+        // SAFETY: cpu < MAX_CPUS, and interrupts are disabled — asserted at
+        // entry, not merely assumed — so no preemption can observe a torn
+        // cache.
         let addr = unsafe { PCPU_CACHES[cpu].pop() };
         match addr {
             Some(a) => {

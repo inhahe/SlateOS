@@ -306,6 +306,34 @@ fn last_exit() -> u8 {
     LAST_EXIT.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Close a subcommand-dispatching command's catch-all help arm with the right
+/// status, and say so when the subcommand was not recognised.
+///
+/// These arms serve two callers at once, which is the whole problem.
+/// `nat help` asked for the synopsis and got it — that command succeeded.
+/// `nat banana` is a mistake, and the synopsis is a consolation prize. Before
+/// this existed the arm reported the same thing to both, so nothing downstream
+/// could tell a deliberate query from a typo: `nat banana && deploy` ran
+/// `deploy`. `cmd_nat` said as much in a comment — *`"help"` or any
+/// unrecognised subcommand falls through to the help text* — which named the
+/// defect without treating it as one.
+///
+/// The empty string counts as a request because commands whose bare form means
+/// "print the help" reach here through `parts.first().copied().unwrap_or("help")`,
+/// and one or two pass the empty string straight through.
+///
+/// The unrecognised-subcommand line is printed *after* the help text on
+/// purpose: it is the line that stays next to the prompt, and it is the one
+/// piece of information the help text cannot supply — that what you typed was
+/// not in it. Without it the shell answers a typo with a wall of correct-looking
+/// output and no hint that it is not what was asked for.
+fn end_help_arm(cmd: &str, sub: &str) {
+    if !matches!(sub, "" | "help" | "-h" | "--help" | "?") {
+        shell_println!("{}: unknown subcommand '{}'", cmd, sub);
+        set_exit(1);
+    }
+}
+
 /// Echo a captured command's output to serial if the command reported failure.
 ///
 /// For self-test rungs that assert a *checker* succeeded. When one does not,
@@ -1130,6 +1158,42 @@ fn unquoted_positions(s: &str, needle: u8) -> (Option<usize>, Option<usize>) {
     (first, last)
 }
 
+/// Byte offset of the first *unquoted* space or tab in `s`, or `None` if the
+/// whole string is a single word.
+///
+/// Same quoting convention as [`unquoted_positions`]: a `'` opens a region only
+/// another `'` closes, likewise `"`, and an unterminated quote runs to the end
+/// of the string — which is the whole shell's convention, not a choice made
+/// here, and is why this returns `None` rather than an error for `a='b c`.
+///
+/// This is "where does the first word end", which is not the same question as
+/// `str::find([' ', '\t'])`. The difference is load-bearing wherever the first
+/// word can carry a quoted value: see [`parse_inline_assignment`], where the
+/// raw search made `FOO='a b' cmd` run the command `b'`.
+fn first_unquoted_space(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while let Some(&b) = bytes.get(i) {
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if b == b'\'' || b == b'"' {
+                    quote = Some(b);
+                } else if b == b' ' || b == b'\t' {
+                    return Some(i);
+                }
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    None
+}
+
 /// Split `s` on *unquoted* occurrences of `sep`, keeping the pieces verbatim.
 ///
 /// Always returns at least one piece, so `parts.len() > 1` is the test for
@@ -1398,6 +1462,15 @@ fn remove_quotes(s: &str) -> String {
 /// and exited 0: the one outcome indistinguishable from a file that needed no
 /// translating.
 ///
+/// `column` is `cut`'s case exactly. Its `-s` separator can *be* whitespace,
+/// and `column -t -s '<TAB>'` — meaning tab and not space, which is how one
+/// lines up a TSV whose fields contain spaces — is the invocation that needs
+/// it. Dequoted, the tab is whitespace like any other, so the flag walk's word
+/// splitter swallowed it and `-s` was left with the *next* word as its
+/// argument, or with none at all. Unlike `cut`, this one never produced a wrong
+/// answer: a lost separator fell back to the default split on blanks, which is
+/// what the user got and not what they asked for.
+///
 /// `sed` is `awk`'s case: the script is one argument whose interior spaces are
 /// load-bearing, on both sides of a substitution. Dequoted,
 /// `sed 's/hello world/hi/'` becomes the two words `s/hello` and `world/hi/`,
@@ -1414,7 +1487,7 @@ fn remove_quotes(s: &str) -> String {
 fn command_parses_own_quotes(cmd: &str) -> bool {
     matches!(
         cmd,
-        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed"
+        "trap" | "awk" | "fold" | "base64" | "cut" | "tr" | "sed" | "column"
     )
 }
 
@@ -6437,9 +6510,23 @@ struct InlineAssignment {
 /// - There's no `=` in the first word
 /// - The variable name is invalid
 /// - There's no command after the assignment (bare assignment)
+///
+/// **The first word ends at the first *unquoted* space**, which is the whole
+/// point of [`first_unquoted_space`]. A quoted value with a space in it is the
+/// ordinary reason to write this construct at all — `LANG='en US' cmd`,
+/// `MSG="a b" cmd` — and splitting on the raw space cut it in half: the first
+/// word became `MSG="a`, so the shell set `MSG` to the fragment `"a` and then
+/// ran, as a command, the remainder `b" cmd`. Two wrong things, neither
+/// reported: a variable holding a piece of its own value, and a command nobody
+/// asked for. The `b"` case usually surfaces as "unknown command", but only
+/// usually — the fragment is whatever the value happened to contain.
+///
+/// Chained assignments keep working because the recursion is unchanged:
+/// `A=1 B=2 cmd` parses `A=1` here and hands `B=2 cmd` back to
+/// [`execute_single`], which parses `B=2` the same way.
 fn parse_inline_assignment(line: &str) -> Option<InlineAssignment> {
-    // The first word (up to first whitespace) must contain `=`.
-    let first_space = line.find([' ', '\t'])?;
+    // The first word (up to the first *unquoted* whitespace) must contain `=`.
+    let first_space = first_unquoted_space(line)?;
     let first_word = line.get(..first_space)?;
     let rest = line.get(first_space.saturating_add(1)..)?.trim();
 
@@ -6940,6 +7027,11 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
             // `cat` with no args reads from pipe.
             shell_write_bytes(input);
         }
+        // `column` re-spaces its input and hands back every other byte, so a
+        // decode here was a rewrite of the very thing it was asked to preserve.
+        // It still measures display width -- but in cells, off the bytes, by
+        // the console's own rule; see `display_width`.
+        "column" => cmd_column_input(args, input),
 
         // --- Still text-only: narrowed individually, at the point of use. ---
         // The narrowing is here rather than at the top of the function so that
@@ -6948,12 +7040,11 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
         // arm up into the block above.
         //
         // `grep` is `char`-oriented (character classes, code-point ranges);
-        // `xargs` and `column` re-parse into words and measure display width.
-        // `mapfile` is blocked on something else rather than on itself — it
-        // stores its lines as `String`s in the shell environment, which is
-        // still a `String` map, so converting it here would only move the
-        // decode one call deeper.
-        "grep" | "mapfile" | "readarray" | "xargs" | "column" => {
+        // `xargs` re-parses into words. `mapfile` is blocked on something else
+        // rather than on itself — it stores its lines as `String`s in the shell
+        // environment, which is still a `String` map, so converting it here
+        // would only move the decode one call deeper.
+        "grep" | "mapfile" | "readarray" | "xargs" => {
             let Some(text) = shell_bytes_as_str(input, cmd) else {
                 set_exit(1);
                 return;
@@ -6962,7 +7053,6 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
                 "grep" => cmd_grep_input(args, text),
                 "mapfile" | "readarray" => cmd_mapfile_input(args, text),
                 "xargs" => cmd_xargs_input(args, text),
-                "column" => cmd_column_input(args, text),
                 // Unreachable: the outer arm lists exactly these names.
                 _ => dispatch(line),
             }
@@ -7642,9 +7732,13 @@ fn dispatch(line: &str) {
         "fsck" => {
             // Auto-dispatch: try ext4 first, then FAT.
             if args.trim().is_empty() {
+                // Not a query with an answer, unlike the help arms below: `fsck`
+                // with no device checked nothing, so there is no result it could
+                // be reporting. A missing operand is a failure.
                 shell_println!("Usage: fsck DEVICE  (auto-detects fs type)");
                 shell_println!("  fsck.fat DEVICE   — check FAT filesystem");
                 shell_println!("  fsck.ext4 DEVICE  — check ext4 filesystem");
+                set_exit(1);
             } else {
                 let dev = args
                     .split_whitespace()
@@ -7866,7 +7960,9 @@ fn cmd_help() {
     );
     shell_println!("  cmp F1 F2 Compare two files byte-by-byte");
     shell_println!("  comm [-123] F1 F2  Compare sorted files (3-column output)");
-    shell_println!("  diff F1 F2 Line-level diff (unified format)");
+    shell_println!(
+        "  diff [-a|--text] F1 F2  Line-level diff (unified format; a file with a NUL is reported as binary unless -a)"
+    );
     shell_println!("  od [-A o|d|x|n] [-t o1|x1|d1|u1|c] [-N count] F  Octal/hex dump");
     shell_println!("  cpuinfo   Show per-CPU utilization and scheduler counters");
     shell_println!("  top       Compact system overview (uptime, memory, CPU, tasks)");
@@ -8015,7 +8111,9 @@ fn cmd_help() {
     shell_println!(
         "  strings [-n N] F  Extract printable strings from binary file (min length N, default 4)"
     );
-    shell_println!("  column [-t] [-s SEP] F  Format text into aligned columns (-t table mode)");
+    shell_println!(
+        "  column [-t] [-s CHARS] F  Format text into aligned columns (-t table mode; -s splits on any character of CHARS)"
+    );
     shell_println!("  date [+FMT] Show date/time (format: %Y %m %d %H %M %S %a %b %F %T %s)");
     shell_println!("  cal [M] [Y] Show monthly calendar (current month if no args)");
     shell_println!("  test EXPR / [ EXPR ]  Conditional expressions");
@@ -9074,6 +9172,7 @@ fn cmd_colorscheme(args: &str) {
                 }
             }
             shell_println!("Unknown scheme '{}'. Available:", name);
+            set_exit(1);
             for scheme in crate::console::BUILTIN_SCHEMES {
                 shell_println!("  {}", scheme.name);
             }
@@ -9458,39 +9557,60 @@ fn cmd_dmesg(args: &str) {
     let mut module_filter: &str = "";
     let words: Vec<&str> = args.split_whitespace().collect();
     let mut i = 0;
-    while i < words.len() {
-        match words[i] {
-            "-n" => {
-                i = i.saturating_add(1);
-                if let Some(n) = words.get(i).and_then(|s| s.parse::<usize>().ok()) {
-                    limit = n;
-                }
+    while let Some(&word) = words.get(i) {
+        // A word that is none of these three is not a filter this command
+        // knows how to apply: it is either a typo for one that is, or an
+        // operand `dmesg` has no use for. Either way, printing the *whole* log
+        // would be answering a question that was not asked.
+        let what = match word {
+            "-n" => "a count",
+            "-l" => "a level",
+            "-m" => "a module name",
+            other => {
+                shell_println!("dmesg: unrecognized option `{}'", other);
+                set_exit(1);
+                return;
             }
-            "-l" => {
-                i = i.saturating_add(1);
-                if let Some(&lvl) = words.get(i) {
-                    min_level = lvl;
+        };
+        i = i.saturating_add(1);
+        let Some(&value) = words.get(i) else {
+            shell_println!("dmesg: {} requires {}", word, what);
+            set_exit(1);
+            return;
+        };
+        match word {
+            "-n" => match value.parse::<usize>() {
+                Ok(n) => limit = n,
+                Err(_) => {
+                    shell_println!("dmesg: -n: `{}' is not a count", value);
+                    set_exit(1);
+                    return;
                 }
-            }
-            "-m" => {
-                i = i.saturating_add(1);
-                if let Some(&m) = words.get(i) {
-                    module_filter = m;
-                }
-            }
-            _ => {}
+            },
+            "-l" => min_level = value,
+            _ => module_filter = value,
         }
         i = i.saturating_add(1);
     }
 
-    // Map level string to numeric priority for filtering.
+    // Map level string to numeric priority for filtering. An empty
+    // `min_level` means `-l` was never given, which is the only case in which
+    // "show all" is what the user asked for; a *misspelled* level asked for
+    // fewer lines than it would get, so it is refused rather than widened.
     let min_prio = match min_level {
-        "trace" => 0u8,
+        "" | "trace" => 0u8,
         "debug" => 1,
         "info" => 2,
         "warn" => 3,
         "error" => 4,
-        _ => 0, // No filter (show all).
+        other => {
+            shell_println!(
+                "dmesg: -l: `{}' is not a level (trace/debug/info/warn/error)",
+                other
+            );
+            set_exit(1);
+            return;
+        }
     };
 
     // Read all log entries from the ring buffer.
@@ -11220,6 +11340,67 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_starts_with("diff names the file it could not read", &out, b"diff: ");
         assert_eq!(last_exit(), 2, "diff: unread is not 'identical'");
 
+        // A file with a NUL is reported, not rendered. The status stays 1:
+        // abbreviating the *output* must not be confused with failing to
+        // compare, which is 2 and is what `diff a b || rebuild` branches on.
+        let bin1 = Path::new("/tmp/kshell_diff_selftest_bin1");
+        let bin2 = Path::new("/tmp/kshell_diff_selftest_bin2");
+        Vfs::write_file(bin1, b"head\n\x00\xffpayload\n")?;
+        Vfs::write_file(bin2, b"head\n\x00\xfepayload\n")?;
+        let out =
+            capture_command("diff /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin2");
+        assert_output_starts_with("diff reports binary files", &out, b"Binary files ");
+        assert_eq!(last_exit(), 1, "diff: binary-and-differing is still 1");
+
+        // Two identical binaries say nothing at all -- the equality test runs
+        // before the binary test, exactly as in GNU. If that order were
+        // reversed this would print "Binary files ... differ" about two files
+        // that do not.
+        let out =
+            capture_command("diff /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin1");
+        assert_eq!(
+            out.as_slice(),
+            b"",
+            "diff: identical binaries print nothing"
+        );
+        assert_eq!(last_exit(), 0, "diff: identical binaries are success");
+
+        // `-a` reaches the byte-clean line diff underneath, and that diff must
+        // still distinguish `\xff` from `\xfe`. Those two bytes are the reason
+        // the lossy decode was removed: both used to become U+FFFD, so the
+        // lines compared *equal* and were printed as shared context. A `-a`
+        // that produced no hunk here would mean the old bug is back.
+        let out = capture_command(
+            "diff -a /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin2",
+        );
+        assert_output_starts_with("-a forces the line diff", &out, b"--- ");
+        assert_output_lacks("-a does not report binary", &out, b"Binary files ");
+        assert_eq!(last_exit(), 1, "diff -a: differing is 1");
+
+        // `--text` is the same flag spelled the other way, and both had to be
+        // named in the match or the second would have been dropped.
+        let out = capture_command(
+            "diff --text /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin2",
+        );
+        assert_output_starts_with("--text forces the line diff", &out, b"--- ");
+        assert_eq!(last_exit(), 1, "diff --text: differing is 1");
+
+        // An option nobody recognises stops the command. Dropped, it would
+        // have become a plain `diff` that reports "Binary files ... differ"
+        // about the very files the user asked to see the contents of -- a
+        // different command, run successfully.
+        let out = capture_command(
+            "diff --txt /tmp/kshell_diff_selftest_bin1 /tmp/kshell_diff_selftest_bin2",
+        );
+        assert_output_starts_with(
+            "diff refuses an option it does not know",
+            &out,
+            b"diff: unrecognized option `--txt'",
+        );
+        assert_eq!(last_exit(), 2, "diff: a usage error is not a comparison");
+
+        let _ = Vfs::remove(bin1);
+        let _ = Vfs::remove(bin2);
         let _ = Vfs::remove(a);
         let _ = Vfs::remove(b);
         let _ = Vfs::remove(same);
@@ -14394,6 +14575,1287 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!("  kshell::self_test 55: diff and comm compare the bytes they reported differ");
+    {
+        let a = "/tmp/kshell_cmp_a";
+        let b = "/tmp/kshell_cmp_b";
+        let write = |p: &str, d: &[u8]| crate::fs::Vfs::write_file(p, d);
+
+        // The case that needs no unusual input: a DOS file against its Unix
+        // twin. `str::lines` strips a trailing `\r`, so every line decoded
+        // identically, no hunk was produced, and the fallback announced
+        // "(files differ only in trailing newline)" about files that differ on
+        // every line. The message was a guess -- the only benign explanation
+        // for a state its own comment called impossible.
+        write(a, b"zz_one\r\nzz_two\r\n")?;
+        write(b, b"zz_one\nzz_two\n")?;
+        let out = capture_command(&alloc::format!("diff {a} {b}"));
+        assert_eq!(last_exit(), 1, "CRLF against LF is a difference");
+        assert_output_lacks(
+            "and is not blamed on the trailing newline",
+            &out,
+            b"trailing newline",
+        );
+        // Every line differs, so every line must appear on both sides. `-`
+        // carries the CR; `+` must not.
+        assert_output_contains("the CRLF line is removed", &out, b"-zz_one\r\n");
+        assert_output_contains("and the LF line added", &out, b"+zz_one\n");
+
+        // The undecodable case, which is worse than a missing hunk: U+FFFD
+        // collapsed distinct bytes, so lines that differ compared *equal* and
+        // were printed with a leading space -- as context the two files share.
+        // The exit status was right the whole time, which is why this needs an
+        // assertion about the output and not about the status.
+        write(a, b"zz_head\n\xff\nzz_tail\n")?;
+        write(b, b"zz_head\n\xfe\nzz_tail\n")?;
+        let out = capture_command(&alloc::format!("diff {a} {b}"));
+        assert_eq!(last_exit(), 1, "two undecodable bytes differ");
+        assert_output_contains("the differing line is removed", &out, b"-\xff\n");
+        assert_output_contains("and the other added", &out, b"+\xfe\n");
+        // Forbid the replacement character itself, not ` \xff\n`. Forbidding
+        // the latter would have been the natural way to write "not reported as
+        // shared context" and could never have failed: the broken build never
+        // emitted `\xff` at all, it emitted U+FFFD. Naming the three bytes a
+        // decoder invents states the actual invariant -- every byte of this
+        // diff was copied from one of the two files.
+        assert_output_lacks("no byte of the diff was invented", &out, b"\xef\xbf\xbd");
+
+        // The fallback itself, now derived rather than assumed. This is the one
+        // state that genuinely is only the final newline, and it should still
+        // say so -- and say which file has it, which the old line could not.
+        write(a, b"zz_only\n")?;
+        write(b, b"zz_only")?;
+        let out = capture_command(&alloc::format!("diff {a} {b}"));
+        assert_eq!(last_exit(), 1, "a missing final newline is a difference");
+        assert_output_contains("named as the trailing newline", &out, b"trailing newline");
+        // The whole phrase, not just the filename: both names appear in the
+        // `---`/`+++` header no matter what is found, so asserting on a name
+        // alone would pass whatever the note said -- an assertion that cannot
+        // fail, which is the shape this rung exists to remove from `diff`.
+        assert_output_contains("and says which file has it", &out, b"kshell_cmp_a has one");
+
+        // `comm`'s share of the same defect: lines differing only in
+        // undecodable bytes were reported in the "common to both" column.
+        // Sorted by bytes, which is what `sort` produces and what `comm`
+        // requires -- \xfe before \xff.
+        write(a, b"zz_common\n\xfe\n")?;
+        write(b, b"zz_common\n\xff\n")?;
+        let out = capture_command(&alloc::format!("comm -12 {a} {b}"));
+        // Whole-output equality, not `contains` plus two `lacks`. The obvious
+        // spelling -- forbid `\xfe` and `\xff` in the common column -- is an
+        // assertion that **cannot fail under the bug it names**: the decode
+        // turned both bytes into U+FFFD, so the wrong output contained
+        // `\xef\xbf\xbd`, and neither forbidden string was ever going to be
+        // there. It would have passed against the broken build and read as
+        // coverage. Equality has no such gap: it pins what the third column
+        // holds and, by exhausting the output, that nothing else does.
+        assert_eq!(
+            out.as_slice(),
+            b"zz_common\n",
+            "only the genuinely identical line is common to both"
+        );
+
+        // ...and the ordering half, which is `comm`'s alone. `comm` is a merge
+        // and only correct on sorted input. Under the decode, U+FFFD is the
+        // three bytes EF BF BD, so \xff sorted *below* \xfe -- the reverse of
+        // the byte order `sort` uses. Fed a byte-sorted file, the merge saw its
+        // precondition violated and put lines in the wrong columns. Column 1
+        // here is file-1-only, and both bytes belong there in byte order.
+        write(a, b"\xfe\n\xff\n")?;
+        write(b, b"zz_zzz\n")?;
+        let out = capture_command(&alloc::format!("comm -23 {a} {b}"));
+        assert_eq!(
+            out.as_slice(),
+            b"\xfe\n\xff\n",
+            "a byte-sorted file merges in byte order, and neither line is lost"
+        );
+
+        let _ = crate::fs::Vfs::remove(a);
+        let _ = crate::fs::Vfs::remove(b);
+    }
+
+    serial_println!(
+        "  kshell::self_test 56: comm refuses unsorted input instead of guessing at it"
+    );
+    {
+        let a = "/tmp/kshell_cmp_a";
+        let b = "/tmp/kshell_cmp_b";
+        let write = |p: &str, d: &[u8]| crate::fs::Vfs::write_file(p, d);
+
+        // File 1 out of order. The merge is a two-stream walk that advances
+        // whichever side compares Less and never looks back, so it does not
+        // degrade gracefully here -- it put `zz_a` in the file-1-only column
+        // while `zz_a` sat in file 2 as well, and reported exit 0.
+        write(a, b"zz_b\nzz_a\nzz_c\n")?;
+        write(b, b"zz_a\nzz_b\nzz_c\n")?;
+        let out = capture_command(&alloc::format!("comm {a} {b}"));
+        assert_eq!(last_exit(), 1, "an unsorted file 1 is refused, not merged");
+        assert_output_contains("naming which file", &out, b"file 1:");
+        assert_output_contains("and which one that is", &out, b"kshell_cmp_a");
+        assert_output_contains("and which line broke the order", &out, b"line 2");
+        // The three `lacks` are the assertions that fail on the old build: it
+        // emitted all three lines, in the wrong columns. A refusal that still
+        // printed its partial merge would be the worse half of both -- a wrong
+        // answer next to a correct exit status -- so what is pinned here is that
+        // *nothing* of the merge escapes, not merely that the diagnostic is
+        // present. None of the three appears in the path, so none of these can
+        // be satisfied by the diagnostic itself.
+        assert_output_lacks("and printing no part of the wrong merge", &out, b"zz_a");
+        assert_output_lacks("no part at all", &out, b"zz_b");
+        assert_output_lacks("none of it", &out, b"zz_c");
+
+        // File 2 out of order, at the one index an in-merge check cannot reach.
+        // File 1 runs out on the pass that consumes `zz_c`, so the loop exits
+        // with file 2 sitting at `zz_b` -- a line that had already lost a
+        // comparison, and that sorts before the `zz_c` consumed before it. Its
+        // twin in file 1 went past unmatched, so `zz_b` appeared in *both*
+        // single-file columns. The check runs after the merge precisely so this
+        // straddling pair is covered.
+        write(a, b"zz_a\nzz_b\nzz_c\n")?;
+        write(b, b"zz_a\nzz_c\nzz_b\n")?;
+        let out = capture_command(&alloc::format!("comm {a} {b}"));
+        assert_eq!(last_exit(), 1, "an unsorted file 2 is refused too");
+        assert_output_contains("naming file 2", &out, b"file 2:");
+        assert_output_contains("by path", &out, b"kshell_cmp_b");
+        assert_output_contains(
+            "at the line that straddles the merge's exit",
+            &out,
+            b"line 3",
+        );
+        assert_output_lacks("and nothing of the merge", &out, b"zz_b");
+
+        // ...and the other half, which is what stops the check being a nuisance.
+        // Disorder that lies wholly inside a tail changes nothing: once file 2
+        // is exhausted, every remaining line of file 1 goes to column 1 whatever
+        // order it arrives in. `zz_b` after `zz_z` is such a pair, and the
+        // answer below is correct despite it. A check that scanned whole files
+        // instead of stopping at the merge's exit would refuse this -- and a
+        // gate that refuses correct input is one that gets switched off.
+        write(a, b"zz_a\nzz_z\nzz_b\n")?;
+        write(b, b"zz_a\n")?;
+        let out = capture_command(&alloc::format!("comm {a} {b}"));
+        assert_eq!(
+            last_exit(),
+            0,
+            "disorder confined to the tail is not refused"
+        );
+        assert_eq!(
+            out.as_slice(),
+            b"\t\tzz_a\nzz_z\nzz_b\n",
+            "and the answer it declined to refuse is the right one"
+        );
+
+        let _ = crate::fs::Vfs::remove(a);
+        let _ = crate::fs::Vfs::remove(b);
+    }
+
+    serial_println!(
+        "  kshell::self_test 57: an inline assignment's first word ends at an unquoted space"
+    );
+    {
+        // `VAR=value cmd` found the end of `VAR=value` with
+        // `line.find([' ', '\t'])`, which does not know about quotes. A quoted
+        // value containing a space -- the ordinary reason to write this
+        // construct -- was therefore cut in half: `ZZMSG="a b" printenv` set
+        // `ZZMSG` to the fragment `"a` and ran `b" printenv` as a command.
+        // Neither half was reported.
+        let out = capture_command("ZZMSG=\"a b\" printenv");
+        assert_output_contains(
+            "the quoted value reaches the command whole",
+            &out,
+            b"ZZMSG=a b\n",
+        );
+
+        // The other half of the same cut, and the one with teeth: what ran.
+        // Whole-output equality, because the failure mode is not "the wrong
+        // output is missing" but "some other command's output is present" --
+        // here the old build reached `b'` and printed an unknown-command
+        // message, which a `contains` on `zz_kept` would have caught but a
+        // `lacks` would not have described.
+        let out = capture_command("ZZMSG='a b' echo zz_kept");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_kept\n",
+            "and the command that runs is the one that was written"
+        );
+        assert_eq!(last_exit(), 0, "which succeeds, as it always did");
+
+        // Unchanged behaviour, pinned because the fix moves where the word
+        // ends and so could have moved what gets restored.
+        let out = capture_command("printenv");
+        assert_output_lacks("the binding does not outlive the command", &out, b"ZZMSG=");
+
+        // Chained assignments still recurse: `A=1 B=2 cmd` parses one here and
+        // hands the rest back to `execute_single`. The second value is quoted
+        // so the recursion is exercised on the case that was broken, not only
+        // on the case that always worked.
+        let out = capture_command("ZZ1=x ZZ2='y z' printenv");
+        assert_output_contains("the first assignment binds", &out, b"ZZ1=x\n");
+        assert_output_contains("and so does the second", &out, b"ZZ2=y z\n");
+
+        // A *bare* quoted assignment went through the same door, which is the
+        // part that is easy to miss: with no command after it, `ZZBARE='a b'`
+        // still had a space, so the inline parser claimed it, set `ZZBARE` to
+        // `'a`, and ran `b'`. It reaches `parse_bare_assignment` now because
+        // there is no unquoted space to find.
+        let _ = capture_command("ZZBARE='a b'");
+        let out = capture_command("echo $ZZBARE");
+        assert_eq!(
+            out.as_slice(),
+            b"a b\n",
+            "a bare quoted assignment keeps its whole value"
+        );
+
+        let _ = capture_command("unset ZZBARE");
+    }
+
+    serial_println!("  kshell::self_test 58: printing a usage message is reporting a failure");
+    {
+        // 87 subcommand arms printed `Usage: ...` and returned without touching
+        // the exit status, so the shell reported success for a command that had
+        // not run. `cmd && next` therefore ran `next` after a typo, and a script
+        // testing `$?` saw 0. The diagnostic was on the screen the whole time --
+        // it was the *status* that lied, which is the worse half: a script does
+        // not read the screen.
+        //
+        // Three arms, one per syntactic shape that the sweep had to handle, so a
+        // regression in any one of them is caught here rather than in whichever
+        // of the 87 happens to be noticed first.
+
+        // Shape 1: `_ =>` on one line -- an unrecognised value.
+        let out = capture_command("speech tts zz_not_a_toggle");
+        assert_output_contains(
+            "an unrecognised value still prints the usage line",
+            &out,
+            b"Usage: speech tts <on|off>",
+        );
+        assert_eq!(last_exit(), 1, "and now says so in the exit status");
+
+        // Shape 2: `None =>` on one line -- a required argument omitted. Worth
+        // pinning separately because it is a different arm reached by a
+        // different route (a failed parse, not an unmatched value).
+        let out = capture_command("dynlock grace");
+        assert_output_contains(
+            "a missing argument still prints the usage line",
+            &out,
+            b"Usage: dynlock grace <seconds>",
+        );
+        assert_eq!(last_exit(), 1, "and is a failure too");
+
+        // Shape 3: the usage print inside a braced block rather than as the
+        // whole arm -- the form the first pass of the sweep could not see.
+        let out = capture_command("wallpaper bgcolor");
+        assert_output_contains(
+            "and the block form reports it as well",
+            &out,
+            b"Usage: wallpaper bgcolor <#hex>",
+        );
+        assert_eq!(last_exit(), 1, "with the same status");
+
+        // The control, and the reason it is here: the sweep inserted `set_exit(1)`
+        // into 87 blocks mechanically, and the way that goes wrong is by landing
+        // in the sibling arm that *succeeded*. This runs the good path of the
+        // same subcommand as shape 3, so a misplaced insertion turns a passing
+        // command into a failing one and this line catches it.
+        let out = capture_command("wallpaper bgcolor #112233");
+        assert_output_lacks("the good path prints no usage line", &out, b"Usage:");
+        assert_eq!(last_exit(), 0, "and still succeeds");
+
+        // The mirror-image defect, which is the one this sweep actually
+        // *created* -- twice, and the sweep before it shipped two more. A
+        // subcommand with no argument is often a query: it prints the current
+        // value and appends the usage line as a hint. That command did what was
+        // asked, so it succeeded, and stapling a failure status onto the usage
+        // line turns a working query into a failing one.
+        //
+        // These three are guarded on "no argument given", so nothing but the
+        // query reaches them -- there is no error case whose status could be
+        // argued for. They are pinned because the shape is a magnet for the
+        // next person sweeping usage lines, this session included.
+        let out = capture_command("elog echo");
+        assert_output_contains(
+            "a bare query prints its answer",
+            &out,
+            b"Serial echo level:",
+        );
+        assert_eq!(last_exit(), 0, "and reports success, because it answered");
+
+        let out = capture_command("fc algo");
+        assert_output_contains("likewise for the compressor default", &out, b"Current:");
+        assert_eq!(last_exit(), 0, "which is not a usage error");
+
+        // `wallpaper offset` used to be the harder relative -- one branch
+        // served the query *and* an unparseable pair, so no single status was
+        // right for it and it deliberately set none. The branch has since been
+        // split; rung 59 exercises the other half.
+        let out = capture_command("wallpaper offset");
+        assert_output_contains("the offset query answers", &out, b"Offset: (");
+        assert_eq!(last_exit(), 0, "and does not claim to have failed");
+    }
+
+    serial_println!("  kshell::self_test 59: asking for help is not the same as mistyping");
+    {
+        // Rung 58 pinned "a usage message is a failure report". The 33 arms it
+        // could not pin were the ones serving two callers at once: `nat help`
+        // asks for the synopsis and gets it, so it succeeded, while `nat
+        // banana` is a mistake. Both landed in the same `_ => { ...help... }`
+        // arm, so whichever status that arm set, one of the two was lied to --
+        // and it set none, which lied to the second. This rung is the pair of
+        // assertions the old arm could not have satisfied simultaneously.
+        let out = capture_command("nat help");
+        assert_output_contains(
+            "an explicit help request prints the help",
+            &out,
+            b"nat forward",
+        );
+        assert_output_lacks(
+            "and is not scolded for a subcommand it did not get wrong",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 0, "asking for help is a request, answered");
+
+        let out = capture_command("nat zz_not_a_subcommand");
+        assert_output_contains(
+            "a typo gets the help too -- it is the useful reply",
+            &out,
+            b"nat forward",
+        );
+        assert_output_contains(
+            "but is told what was actually wrong",
+            &out,
+            b"unknown subcommand 'zz_not_a_subcommand'",
+        );
+        assert_eq!(last_exit(), 1, "and reports failure, which `&&` can see");
+
+        // The bare form. Fourteen of these commands map no-argument to `""` and
+        // ten map it to `"help"`; both reach the arm and both must count as a
+        // request. `swapcfg` is one of the `""` commands, so this covers the
+        // half of the predicate `nat help` above does not.
+        let out = capture_command("swapcfg");
+        assert_output_contains("a bare invocation prints its help", &out, b"swapcfg");
+        assert_eq!(
+            last_exit(),
+            0,
+            "and succeeds -- that is what it was asked for"
+        );
+
+        // `nat` on its own maps to `"status"`, not to the help arm, so it must
+        // not be caught by the unrecognised-subcommand line. This is the exact
+        // regression the helper would cause if its request-set were consulted
+        // without checking that a `"status"` arm exists to intercept it.
+        let out = capture_command("nat");
+        assert_output_lacks(
+            "a command whose bare form means something else is not a typo",
+            &out,
+            b"unknown subcommand",
+        );
+        assert_eq!(last_exit(), 0, "and still succeeds");
+
+        // The query/error branches, which are the same conflation one level
+        // down: `fhist autoversion` asks, `fhist autoversion banana` mistypes.
+        let out = capture_command("fhist autoversion");
+        assert_output_contains("the query is answered", &out, b"Auto-versioning:");
+        assert_eq!(last_exit(), 0, "and succeeded");
+
+        let out = capture_command("fhist autoversion zzbanana");
+        assert_output_contains(
+            "an unusable setting says so",
+            &out,
+            b"unknown autoversion setting",
+        );
+        assert_eq!(last_exit(), 1, "and fails, having changed nothing");
+
+        // The other half of the `wallpaper offset` branch rung 58 left pinned
+        // as ambiguous. A single coordinate is not a query.
+        let out = capture_command("wallpaper offset 0.5");
+        assert_output_contains(
+            "half a coordinate pair is an error, not a question",
+            &out,
+            b"two numbers",
+        );
+        assert_eq!(last_exit(), 1, "and reports it");
+
+        // `lockdep` prints its summary either way, so before the split an
+        // unrecognised subcommand was completely invisible: same output, same
+        // status. Its recognised set is a chain of `if`s with no catch-all,
+        // which is why it needed its own treatment rather than the helper.
+        let out = capture_command("lockdep");
+        assert_output_contains(
+            "the bare form answers with the summary",
+            &out,
+            b"Violations:",
+        );
+        assert_eq!(last_exit(), 0, "which is a successful query");
+
+        let out = capture_command("lockdep zz_not_a_view");
+        assert_output_contains(
+            "and an unrecognised view no longer passes unnoticed",
+            &out,
+            b"unknown subcommand 'zz_not_a_view'",
+        );
+        assert_eq!(last_exit(), 1, "with a failure status");
+    }
+
+    serial_println!("  kshell::self_test 60: a bare `quota` reports the state, not an error");
+    {
+        // Found by check-query-status.py, which is the mirror of the usage-line
+        // gate: a block reachable only when no argument was given, printing
+        // program state, and then setting a failure status. `quota` was the
+        // third instance of the shape that `elog echo` and `fc algo` shipped --
+        // it answers "quotas are currently enabled" and used to report that it
+        // had failed to do so.
+        //
+        // Pinned separately from rung 58's two because the fix also reordered
+        // the output: the state line leads and the synopsis follows it as a
+        // hint. Printed the other way round the text reads as a complaint, and
+        // the next person sweeping usage lines will put the status back.
+        let out = capture_command("quota");
+        assert_output_contains(
+            "the bare form answers with the current enforcement state",
+            &out,
+            b"Quotas are currently ",
+        );
+        assert_eq!(last_exit(), 0, "and succeeded, because it answered");
+
+        // The synopsis is still there -- dropping the status must not have cost
+        // the reader the list of subcommands.
+        assert_output_contains(
+            "with the synopsis kept as a hint",
+            &out,
+            b"Usage: quota <on|off|",
+        );
+
+        // And the error case, which shares no branch with the query above and
+        // must still fail.
+        let out = capture_command("quota zz_not_a_subcommand");
+        assert_output_contains(
+            "an unrecognised subcommand is a mistake",
+            &out,
+            b"Unknown subcommand 'zz_not_a_subcommand'",
+        );
+        assert_eq!(last_exit(), 1, "and reports failure");
+    }
+
+    serial_println!(
+        "  kshell::self_test 61: a diagnostic not worded `Usage:` still reports failure"
+    );
+    {
+        // The usage-status gate found its diagnostics by searching for the word
+        // `Usage:`, which is the wording the *first* instance of this bug
+        // happened to have. Everything worded `Unknown ...` / `Invalid ...`
+        // passed it while still reporting success -- 49 sites in 29 commands.
+        // The trigger now fires on the category rather than the word; see
+        // design-decisions.md §299.
+        //
+        // Four of the 49 are pinned here, chosen for the four *shapes* the
+        // sweep had to handle rather than for the commands they live in, since
+        // it is the shapes that a future edit would reintroduce:
+        //
+        //   * a `None =>` arm whose whole body was the print (`fstrim mode`),
+        //   * the same, but where the print was the block's tail expression
+        //     with no trailing `;` -- the one site the mechanical pass refused
+        //     and left for hand treatment (`fstrim mode`, as it happens),
+        //   * a `let ... else { print; continue; }` inside a loop over
+        //     arguments (`container start`),
+        //   * a catch-all `other =>` binding the offending word
+        //     (`container network`).
+        //
+        // Each is paired, where the command has one, with the *query* reading
+        // next door that must keep exit 0 -- because the failure mode of
+        // fixing this class is over-applying it, which is exactly what §298's
+        // second gate exists to catch.
+
+        // Shape 1 and 2: `fstrim mode <bad>` is a `None =>` arm, and it was the
+        // site whose print had no trailing semicolon.
+        let out = capture_command("fstrim mode zz_not_a_mode");
+        assert_output_contains(
+            "an unrecognised trim mode is named back to the user",
+            &out,
+            b"Unknown mode: zz_not_a_mode",
+        );
+        assert_eq!(last_exit(), 1, "and reported as a failure, not a success");
+
+        // ... and its sibling branch, which answers a question and must not.
+        let out = capture_command("fstrim mode");
+        assert_output_contains(
+            "while the bare form answers with the current mode",
+            &out,
+            b"Current mode: ",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds, because it answered");
+
+        // Shape 3: a `let Ok(id) = ... else { print; continue; }` in a loop.
+        // The `continue` is why this one is easy to miss: control leaves the
+        // block without a `return` and without falling off the end of a match
+        // arm, so neither of the two earlier sweeps' shapes would have caught
+        // it.
+        let out = capture_command("container start zz_not_a_number");
+        assert_output_contains(
+            "an unparseable container id is named back to the user",
+            &out,
+            b"Invalid container ID 'zz_not_a_number'",
+        );
+        assert_eq!(last_exit(), 1, "and reported as a failure");
+
+        // Shape 4: a catch-all arm binding the offending word.
+        let out = capture_command("container network zz_not_an_action");
+        assert_output_contains(
+            "an unrecognised subcommand is named back to the user",
+            &out,
+            b"Unknown network action 'zz_not_an_action'",
+        );
+        assert_eq!(last_exit(), 1, "and reported as a failure");
+
+        // And a control from the other direction: `theme accent` with no
+        // argument prints the current accent, which is an answer.
+        let out = capture_command("theme accent");
+        assert_output_contains(
+            "a bare `theme accent` answers with the current colour",
+            &out,
+            b"Accent: ",
+        );
+        assert_eq!(last_exit(), 0, "and succeeds");
+
+        let out = capture_command("theme accent zz_not_hex");
+        assert_output_contains(
+            "while a malformed colour is a mistake",
+            &out,
+            b"Invalid hex color: zz_not_hex",
+        );
+        assert_eq!(last_exit(), 1, "and reports failure");
+    }
+
+    serial_println!("  kshell::self_test 62: column aligns in cells and passes bytes through");
+    {
+        fn piped(cmd: &str, input: &[u8]) -> Vec<u8> {
+            let capture = capture_start();
+            dispatch_with_input(cmd, input);
+            capture.finish()
+        }
+
+        // The visible defect, and the one that made this worth doing: widths
+        // were measured with `str::len`, so a column was padded to a *byte*
+        // count. `é` is two bytes and one cell, so it over-counted by one and
+        // the next column started a cell early -- in the one command whose
+        // entire job is to make columns line up.
+        //
+        // Worked through: `é` is width 1, `ab` is width 2, so the column is 2
+        // wide and both rows must start their second field at cell 4. Under
+        // the old reading both fields measured 2, so `é`'s row got no padding
+        // and `x` landed at cell 3 while `y` landed at 4.
+        let out = piped("column -t", "é x\nab y\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            "é   x\nab  y\n".as_bytes(),
+            "a column holding a two-byte character is padded to cells, not bytes"
+        );
+
+        // Bytes that are not UTF-8 at all. `column` is a formatter -- it
+        // re-spaces its input and hands back every other byte of it -- so
+        // `from_utf8_lossy` was rewriting the very thing it was asked to
+        // preserve, turning each undecodable byte into `EF BF BD`. The console
+        // draws such a byte as one replacement character, so it is also one
+        // cell wide, and the two rows below must still line up.
+        let out = piped("column -t", b"\xff zz_x\nabc zz_y\n");
+        assert_eq!(
+            out.as_slice(),
+            b"\xff    zz_x\nabc  zz_y\n",
+            "an undecodable byte survives and counts as the one cell it is drawn in"
+        );
+
+        // CRLF, the same half of the bug `sed` had: `str::lines` strips a
+        // trailing `\r`, so a DOS-ending file came back with Unix endings.
+        // Simple mode is a pure pass-through and must not touch them.
+        let out = piped("column", b"zz_a\r\nzz_b\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a\r\nzz_b\r\n",
+            "CRLF endings round-trip through the non-table mode"
+        );
+
+        // ...and in table mode the `\r` rides on the last field, which is the
+        // one that is never padded, so the row still ends `\r\n`. This is why
+        // the default split is space-and-tab rather than `is_ascii_whitespace`:
+        // treating `\r` as a separator would have dropped it.
+        let out = piped("column -t", b"zz_a zz_b\r\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b\r\n",
+            "and in table mode too, because \\r is not a field separator"
+        );
+
+        // U+00A0 NO-BREAK SPACE is `White_Space` to Rust and not a space to
+        // glibc, so `str::split_whitespace` tore apart the one character whose
+        // entire purpose is not to be a break. GNU keeps it whole; so do we.
+        let out = piped("column -t", "zz_a\u{a0}zz_b zz_c\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            "zz_a\u{a0}zz_b  zz_c\n".as_bytes(),
+            "a no-break space is not a field separator"
+        );
+
+        // `-s` members are whole *characters*, so a multi-byte one splits on
+        // the sequence the user typed. Taking the first byte instead would
+        // split on 0xE2, which appears inside other characters.
+        let out = piped("column -t -s →", "zz_a→zz_b\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b\n",
+            "a multi-byte -s separator splits on the whole character"
+        );
+
+        // `-s` is a *set*: every character of the argument is a separator and a
+        // line splits at any of them. This used to keep only the first
+        // character, so the semicolon below was not a separator at all -- it
+        // rode along inside a field, and the table came out with two columns
+        // where the user had asked for three.
+        let out = piped("column -t -s ,;", b"zz_a,zz_b;zz_c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b  zz_c\n",
+            "-s takes a set of separators, not just its first character"
+        );
+
+        // ...and it is a set of characters, not of bytes, so a multi-byte
+        // member still matches as a unit when it shares the set with an ASCII
+        // one. The failure this guards is expanding the set byte-wise: E2, 86
+        // and 92 would then each be a separator, so one `→` would produce three
+        // breaks and two empty fields instead of one break.
+        let out = piped("column -t -s →,", "zz_a→zz_b,zz_c\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b  zz_c\n",
+            "a multi-byte member of a mixed set still matches as one character"
+        );
+
+        // A second `-s` replaces the set rather than extending it, as
+        // util-linux does -- the option's argument *is* the set. Stated here so
+        // it stays a decision: unioning would be just as implementable, and the
+        // two readings differ visibly on this input, where a union would also
+        // split the comma.
+        let out = piped("column -t -s , -s ;", b"zz_a,zz_b;zz_c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a,zz_b  zz_c\n",
+            "a second -s replaces the first set instead of extending it"
+        );
+
+        // A separator that *is* whitespace. The flag walk used to be
+        // `str::split_whitespace`, which swallowed the argument, so `-s` was
+        // left with the next word or with none -- and a lost separator fell
+        // back silently to the default split on blanks. `column` is now on
+        // `command_parses_own_quotes`, so the quoting survives to here and
+        // `split_words` keeps the tab as one word.
+        //
+        // Tab and *not* space is the invocation that needs this: it lines up a
+        // TSV whose fields contain spaces. Under the default split `zz_a b`
+        // would be two fields; here it is one.
+        let out = piped("column -t -s '\t'", b"zz_a b\tzz_c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a b  zz_c\n",
+            "a tab separator is expressible, and a space inside a field survives it"
+        );
+
+        // A quoted space is the other half, and it is observably not the same
+        // as the default: the default collapses runs of blanks, an explicit
+        // separator keeps the empty field between two of them.
+        let out = piped("column -t -s ' '", b"zz_a  zz_b\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a    zz_b\n",
+            "an explicit space separator keeps the empty field the default split collapses"
+        );
+
+        // ...and the same input under the default split, to show the two really
+        // do differ. Without this the assertion above could pass on a `-s` that
+        // was dropped, if the default happened to agree.
+        let out = piped("column -t", b"zz_a  zz_b\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b\n",
+            "the default split collapses the run, so the previous case proves -s arrived"
+        );
+
+        // An empty separator argument is refused rather than ignored.
+        // `split_words` yields no word for `''`, so `-s` finds nothing after it
+        // -- and a `-s` the user typed but that reached nothing is exactly the
+        // silent-guess shape, so it must not fall back to the default.
+        let out = piped("column -t -s ''", b"zz_a zz_b\n");
+        assert_eq!(
+            last_exit(),
+            1,
+            "an empty -s argument is refused, not silently ignored"
+        );
+        assert!(
+            out.starts_with(b"column: -s requires a separator"),
+            "and says so"
+        );
+
+        // An explicit separator keeps empty fields, where the default split
+        // collapses runs -- unchanged from `str::split` and worth holding still,
+        // since `split_on_any_of` is new code doing an old job.
+        let out = piped("column -t -s ,", b"zz_a,,zz_b\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a    zz_b\n",
+            "an explicit separator keeps the empty field between two of them"
+        );
+
+        // The file path had the same decode, and it is the worse one: a pipe
+        // that could not be decoded was at least the caller's own bytes, but a
+        // file is on disk and was read for exactly this.
+        let path = "/tmp/kshell_column_bytes.bin";
+        crate::fs::Vfs::write_file(path, b"\xff zz_x\nabc zz_y\n")?;
+        let out = capture_command(&alloc::format!("column -t {path}"));
+        assert_eq!(
+            last_exit(),
+            0,
+            "a file that is not UTF-8 is still formattable"
+        );
+        assert_eq!(
+            out.as_slice(),
+            b"\xff    zz_x\nabc  zz_y\n",
+            "and formats to the same bytes the pipe did"
+        );
+        let _ = crate::fs::Vfs::remove(path);
+
+        // The other half of what moving `column` onto
+        // `command_parses_own_quotes` buys: an operand with a space in it. Our
+        // paths allow every byte but `/` and NUL, so this is an ordinary file
+        // name. Dequoted at the dispatch boundary it became two words, and the
+        // second tripped the extra-operand refusal -- so the file was
+        // unreachable rather than misread, but unreachable all the same.
+        let spaced = "/tmp/kshell column spaced.txt";
+        crate::fs::Vfs::write_file(spaced, b"zz_a zz_b\n")?;
+        let out = capture_command("column -t '/tmp/kshell column spaced.txt'");
+        assert_eq!(
+            last_exit(),
+            0,
+            "a quoted operand containing a space names one file, not two operands"
+        );
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b\n",
+            "and its contents are formatted"
+        );
+        let _ = crate::fs::Vfs::remove(spaced);
+
+        // A last line with no newline gains one. That is GNU's behaviour --
+        // `column` emits a row terminator after every row -- and it is stated
+        // here so that it stays a decision rather than becoming an accident of
+        // whichever splitter is in use.
+        let out = piped("column", b"zz_a");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a\n",
+            "a missing final newline is supplied, as GNU column does"
+        );
+    }
+
+    serial_println!("  kshell::self_test 63: an option that is not understood is refused");
+    // Seven commands used to *discard* a word they did not recognise. That is
+    // the silent-guess shape in its purest form: the command runs, answers a
+    // question nobody asked -- usually a broader one, since the dropped word
+    // was almost always a filter -- and exits 0, so nothing downstream can
+    // tell. The two that matter most are asserted by their effect on the disk
+    // rather than by their message, because a message is what a *reader*
+    // sees and the disk is what a script sees.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let dir = "/tmp/kshell_optsweep";
+        Vfs::mkdir_all(Path::new(dir))?;
+        Vfs::write_file(Path::new("/tmp/kshell_optsweep/zz_full.txt"), b"content")?;
+        // A file whose name begins with `-`. Our paths allow every byte but
+        // `/` and NUL, so this is an ordinary file, and before `--` existed it
+        // could not be named on any of these command lines.
+        Vfs::write_file(Path::new("/tmp/kshell_optsweep/-empty"), b"x")?;
+
+        // find: an unimplemented predicate used to fall off the end of the
+        // `if`/`else if` chain, leaving an *unfiltered* walk that printed every
+        // file under the path and exited 0.
+        let out = capture_command("find /tmp/kshell_optsweep -mtime -1");
+        assert_output_contains(
+            "find refuses a predicate it cannot evaluate",
+            &out,
+            b"unknown predicate",
+        );
+        assert_eq!(last_exit(), 1, "find: an unknown predicate is an error");
+
+        // find -size: `.unwrap_or(0)` turned this into "size greater than 0",
+        // which matches nearly every file there is.
+        let out = capture_command("find /tmp/kshell_optsweep -size +abc");
+        assert_output_contains("find refuses a size it cannot read", &out, b"invalid -size");
+        assert_eq!(last_exit(), 1, "find: an unreadable size is an error");
+
+        // ...and a size it *can* read still works, so the rung above is not
+        // passing because -size stopped working altogether.
+        let out = capture_command("find /tmp/kshell_optsweep -size +1c");
+        assert_output_contains("a valid -size still selects", &out, b"zz_full.txt");
+        assert_eq!(last_exit(), 0, "find: a valid size is not an error");
+
+        // A third bare word had nowhere to go and was dropped.
+        let out = capture_command("find /tmp/kshell_optsweep zz_full.txt zz_extra");
+        assert_output_contains(
+            "find refuses an operand it has no slot for",
+            &out,
+            b"paths must precede expression",
+        );
+        assert_eq!(last_exit(), 1, "find: a stray operand is an error");
+
+        // `--` makes the file called `-empty` nameable. Without it the word is
+        // the empty-file predicate, so this is a case where the *same* line
+        // means two different things and only `--` can say which.
+        let out = capture_command("find /tmp/kshell_optsweep -- -empty");
+        assert_output_contains("`--` names a file that begins with a dash", &out, b"-empty");
+        assert_eq!(last_exit(), 0, "find: `--` is not an error");
+
+        // locate: the catch-all silently dropped anything starting with `-`.
+        let out = capture_command("locate --zznosuch zzpat");
+        assert_output_contains(
+            "locate refuses an unknown option",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "locate: an unknown option is an error");
+
+        // A missing value is the same defect in a different place: `ext_filter`
+        // stayed `None`, which is not "no extension asked for" but "every
+        // extension", so the search silently widened.
+        let out = capture_command("locate --ext");
+        assert_output_contains(
+            "locate refuses a missing value",
+            &out,
+            b"requires an extension",
+        );
+        assert_eq!(last_exit(), 1, "locate: a missing value is an error");
+
+        // dedup: `--min-size` fell back to its default, and dedup's other half
+        // is `--delete`.
+        let out = capture_command("dedup --min-size zzz");
+        assert_output_contains("dedup refuses a size it cannot read", &out, b"--min-size");
+        assert_eq!(last_exit(), 1, "dedup: an unreadable size is an error");
+
+        let out = capture_command("dedup --zznosuch");
+        assert_output_contains(
+            "dedup refuses an unknown option",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "dedup: an unknown option is an error");
+
+        // backup: each flag was tested for independently, so `--dry-runn` was
+        // not a dry run *and* not an error -- the backup ran for real.
+        let out = capture_command(
+            "backup create /tmp/kshell_optsweep /tmp/kshell_optsweep_bk --dry-runn",
+        );
+        assert_output_contains(
+            "backup refuses a misspelled --dry-run rather than backing up",
+            &out,
+            b"unrecognized argument",
+        );
+        assert_eq!(last_exit(), 1, "backup: an unknown flag is an error");
+        assert!(
+            Vfs::readdir(Path::new("/tmp/kshell_optsweep_bk")).is_err(),
+            "and the backup it was told not to perform did not happen"
+        );
+
+        // undelete scan: every filter was optional-on-failure, so a mistake
+        // listed *more* than was asked for.
+        let out = capture_command("undelete scan --zznosuch");
+        assert_output_contains(
+            "undelete refuses an unknown option",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "undelete: an unknown option is an error");
+
+        let out = capture_command("undelete scan --limit abc");
+        assert_output_contains(
+            "undelete refuses a limit it cannot read",
+            &out,
+            b"not a number",
+        );
+        assert_eq!(last_exit(), 1, "undelete: an unreadable limit is an error");
+
+        // batch: the worst of the seven. The flag scan did not match the typo,
+        // and every operand list separately dropped `-`-leading words, so the
+        // typo vanished between the two and the files were deleted for real by
+        // a command asked only to describe itself.
+        let out = capture_command("batch delete --dry-runn /tmp/kshell_optsweep/zz_full.txt");
+        assert_output_contains(
+            "batch refuses a misspelled --dry-run",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "batch: an unknown option is an error");
+        assert!(
+            Vfs::read_file(Path::new("/tmp/kshell_optsweep/zz_full.txt")).is_ok(),
+            "and the file it was told not to delete is still there"
+        );
+
+        // mapfile: an option it does not implement used to fall through into
+        // the *array name* slot.
+        let out = capture_command("mapfile -u 0 ZZOPTARR");
+        assert_output_contains(
+            "mapfile refuses an option it does not implement",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(
+            last_exit(),
+            2,
+            "mapfile: a builtin reports a usage error as 2"
+        );
+
+        // oci run: an unknown option was skipped but its *value* was not, so
+        // the value became the container's command. Refused before the image
+        // is even loaded, which is why a nonexistent image dir is fine here.
+        let out = capture_command("oci run /zz_no_such_image --menory 512m");
+        assert_output_contains(
+            "oci refuses an unknown option",
+            &out,
+            b"Unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "oci: an unknown option is an error");
+
+        let _ = Vfs::remove(Path::new("/tmp/kshell_optsweep/zz_full.txt"));
+        let _ = Vfs::remove(Path::new("/tmp/kshell_optsweep/-empty"));
+        let _ = Vfs::remove(Path::new(dir));
+    }
+
+    serial_println!(
+        "  kshell::self_test 64: the option-refusal rule holds where a checker, not a bug, found it"
+    );
+    // Rung 63's nine commands were found by reading the code next to a bug.
+    // These fourteen were found by `scripts/check-option-refusal.py`, whose
+    // D3 detector asks the *category* question -- "does this loop dispatch on
+    // option spellings and have no way to say no?" -- rather than looking for
+    // the shapes the first nine happened to use. That is the difference §299
+    // is about, and it is why this rung exists separately: if the two ever
+    // diverge, the checker is the one that generalises.
+    {
+        use crate::fs::vfs::Vfs;
+
+        let dir = "/tmp/kshell_optsweep2";
+        Vfs::mkdir_all(Path::new(dir))?;
+        Vfs::write_file(Path::new("/tmp/kshell_optsweep2/zz.txt"), b"content")?;
+
+        // du: `-d N` (separated) was never implemented, so the depth fell back
+        // to 0 *and* `N` then became the path, and `/tmp/...` overwrote that.
+        // Three misreadings of one line, reported as a successful listing.
+        let out = capture_command("du -d 1 /tmp/kshell_optsweep2");
+        assert_eq!(last_exit(), 0, "du: `-d N` is now a real option");
+        assert_output_contains("du -d N still lists", &out, b"kshell_optsweep2");
+
+        let out = capture_command("du -d abc /tmp/kshell_optsweep2");
+        assert_output_contains("du refuses a depth it cannot read", &out, b"is not a depth");
+        assert_eq!(last_exit(), 1, "du: an unreadable depth is an error");
+
+        let out = capture_command("du --zznosuch /tmp/kshell_optsweep2");
+        assert_output_contains("du refuses an unknown option", &out, b"unrecognized option");
+        assert_eq!(last_exit(), 1, "du: an unknown option is an error");
+
+        // dmesg: the catch-all dropped the word, and every one of dmesg's
+        // options *narrows* the log, so a typo printed the whole ring buffer.
+        let out = capture_command("dmesg --zznosuch");
+        assert_output_contains(
+            "dmesg refuses an unknown option",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "dmesg: an unknown option is an error");
+
+        // A misspelled level fell into the `_ => 0` arm, which is *no filter*:
+        // `dmesg -l eror` asked for errors and got every line at every level.
+        let out = capture_command("dmesg -l eror");
+        assert_output_contains(
+            "dmesg refuses a level it does not know",
+            &out,
+            b"is not a level",
+        );
+        assert_eq!(last_exit(), 1, "dmesg: an unknown level is an error");
+
+        // touch: an unknown option became the path, then the real path
+        // overwrote it -- so `touch -x f` created `f` and lost the `-x`.
+        let out = capture_command("touch -x /tmp/kshell_optsweep2/zz_touch.txt");
+        assert_output_contains(
+            "touch refuses an unknown option",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "touch: an unknown option is an error");
+        assert!(
+            Vfs::read_file(Path::new("/tmp/kshell_optsweep2/zz_touch.txt")).is_err(),
+            "and the file it was asked to create under a misread line was not created"
+        );
+
+        // od: `-N` with an unreadable count became `usize::MAX`, which is the
+        // *absence* of a limit -- the exact opposite of what -N is for.
+        let out = capture_command("od -N 4o /tmp/kshell_optsweep2/zz.txt");
+        assert_output_contains(
+            "od refuses a count it cannot read",
+            &out,
+            b"is not a byte count",
+        );
+        assert_eq!(last_exit(), 1, "od: an unreadable -N is an error");
+
+        // ...and a radix letter no arm below handles fell through to octal, so
+        // the dump was correct and in the wrong format.
+        let out = capture_command("od -A q /tmp/kshell_optsweep2/zz.txt");
+        assert_output_contains(
+            "od refuses a radix it does not know",
+            &out,
+            b"address radix",
+        );
+        assert_eq!(last_exit(), 1, "od: an unknown radix is an error");
+
+        let out = capture_command("od -A x -N 4 /tmp/kshell_optsweep2/zz.txt");
+        assert_eq!(last_exit(), 0, "od: a valid -A/-N pair is not an error");
+        assert_output_contains("od still dumps", &out, b"0000000");
+
+        // flock: the default mode is `query`, which takes no lock at all, so a
+        // dropped `-x` silently declined to lock and printed a status line.
+        let out = capture_command("flock --zznosuch /tmp/kshell_optsweep2/zz.txt");
+        assert_output_contains(
+            "flock refuses an unknown option",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "flock: an unknown option is an error");
+
+        // mkfs.fat: destroys every byte on the device, and used to accept a
+        // command line it had misread. `-L` at the end took no label and left
+        // the device empty; a typo'd flag became a device name in passing.
+        let out = capture_command("mkfs.fat --labl ZZ /zz_no_such_device");
+        assert_output_contains(
+            "mkfs.fat refuses an unknown option before formatting anything",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "mkfs.fat: an unknown option is an error");
+
+        // mount: `-t` at the end fell into the positional arm, so `mount -t`
+        // tried to mount a device literally named `-t`.
+        let out = capture_command("mount -t");
+        assert_output_contains(
+            "mount refuses a -t with no type rather than mounting `-t`",
+            &out,
+            b"requires a filesystem type",
+        );
+        assert_eq!(last_exit(), 1, "mount: a missing value is an error");
+
+        // lsplus: an unreadable `--type` became `TypeFilter::All`, which is
+        // every entry -- a filter that widens when it is misspelled.
+        let out = capture_command("lsplus --type fil /tmp/kshell_optsweep2");
+        assert_output_contains(
+            "lsplus refuses a type it does not know",
+            &out,
+            b"is not a type",
+        );
+        assert_eq!(last_exit(), 1, "lsplus: an unknown type is an error");
+
+        let out = capture_command("lsplus --type file /tmp/kshell_optsweep2");
+        assert_eq!(last_exit(), 0, "lsplus: a valid type is not an error");
+        assert_output_contains("lsplus still lists", &out, b"zz.txt");
+
+        // recent: `--type` fell back to `None`, which is not "no type given"
+        // but "every type", so a misspelling listed everything.
+        let out = capture_command("recent list --type opne");
+        assert_output_contains(
+            "recent refuses a type it does not know",
+            &out,
+            b"is not a type",
+        );
+        assert_eq!(last_exit(), 1, "recent: an unknown type is an error");
+
+        // fswalk: the trailing max-depth operand took 64 when it could not be
+        // read -- deep enough to walk the whole tree from `/`.
+        let out = capture_command("fswalk count /tmp/kshell_optsweep2 two");
+        assert_output_contains(
+            "fswalk refuses a max-depth it cannot read",
+            &out,
+            b"is not a max-depth",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "fswalk: an unreadable max-depth is an error"
+        );
+
+        // traceroute: `-m 5x` sent thirty hops' worth of probes and printed
+        // "max 30 hops" as though that had been the request.
+        let out = capture_command("traceroute 127.0.0.1 -m 5x");
+        assert_output_contains(
+            "traceroute refuses a hop count it cannot read",
+            &out,
+            b"is not a hop count",
+        );
+        assert_eq!(last_exit(), 1, "traceroute: an unreadable -m is an error");
+
+        // fileops: the operand list was "everything that was not a flag", so a
+        // mistyped flag became the *destination* path.
+        let out = capture_command("fileops copy /tmp/kshell_optsweep2/zz.txt /tmp --overwite");
+        assert_output_contains(
+            "fileops refuses a misspelled policy rather than copying to it",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "fileops: an unknown option is an error");
+        assert!(
+            Vfs::read_file(Path::new("/tmp/--overwite")).is_err(),
+            "and no file was created under the name of the typo"
+        );
+
+        // container info: a second id was dropped, so `info 3 4` answered
+        // about 3 alone and said nothing about 4.
+        let out = capture_command("container info 3 4");
+        assert_output_contains("container info refuses a second id", &out, b"extra operand");
+        assert_eq!(last_exit(), 1, "container: a stray operand is an error");
+
+        // column: a second operand replaced the first, so `column a b`
+        // formatted `b` and never mentioned `a`.
+        let out = capture_command("column /tmp/kshell_optsweep2/zz.txt zz_extra");
+        assert_output_contains("column refuses a second operand", &out, b"extra operand");
+        assert_eq!(last_exit(), 1, "column: a stray operand is an error");
+
+        let _ = Vfs::remove(Path::new("/tmp/kshell_optsweep2/zz.txt"));
+        let _ = Vfs::remove(Path::new(dir));
+    }
+
+    serial_println!(
+        "  kshell::self_test 65: an id or a name that cannot be read is not replaced by a default"
+    );
+    // `fstune`, `certmgr`, `installer` and `fontmgr` between them held 52 sites
+    // that answered an unreadable word with a value of their own. Two shapes:
+    // a number that became 0 (or the documented default), and a name that
+    // matched no arm and fell through `_` to the default variant. Neither
+    // reported anything -- the command ran, printed a success line, and exited
+    // 0, having done something the user did not ask for.
+    //
+    // Every assertion below is on a command whose refusal happens *before* any
+    // state is touched, which is the property that makes the fix worth having:
+    // the old code had already acted by the time it printed.
+    {
+        // The dangerous one. `remove` names which object to destroy, and an
+        // unreadable name became session 0 -- so this used to print "Removed".
+        let out = capture_command("installer remove abc");
+        assert_output_contains(
+            "installer refuses a session id it cannot read",
+            &out,
+            b"is not a session id",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "installer remove: an unreadable id is an error"
+        );
+        assert!(
+            !out.windows(7).any(|w| w == b"Removed"),
+            "and it does not also claim to have removed something"
+        );
+
+        // Omitted and mistyped were the same answer before: both id 0.
+        let out = capture_command("installer info");
+        assert_output_contains(
+            "installer refuses a missing session id",
+            &out,
+            b"missing session id",
+        );
+        assert_eq!(last_exit(), 1, "installer info: a missing id is an error");
+
+        // A numeric operand with no sensible default: 0 is not a block size.
+        let out = capture_command("fstune blocksize 1 4o96");
+        assert_output_contains(
+            "fstune refuses a block size it cannot read",
+            &out,
+            b"is not a block size",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "fstune blocksize: an unreadable size is an error"
+        );
+
+        // A numeric operand whose default is a *query* sentinel. `fontmgr size`
+        // with no operand prints the current size, and `fontmgr size 1l`
+        // (letter L) printed it too -- so a typo was indistinguishable from a
+        // successful set, right down to a plausible number in the output.
+        let out = capture_command("fontmgr size 1l");
+        assert_output_contains(
+            "fontmgr refuses a point size it cannot read",
+            &out,
+            b"is not a size in points",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "fontmgr size: an unreadable size is an error"
+        );
+
+        // The control for that pair: absent still means "show me", so the fix
+        // refused the typo without taking the query form away.
+        let out = capture_command("fontmgr size");
+        assert_eq!(last_exit(), 0, "fontmgr size with no operand still reports");
+        assert_output_contains("and still prints the current size", &out, b"Size:");
+
+        // A name that matched no arm. `create` used to build an *easy* install
+        // session and report success for a mode nobody asked for.
+        let out = capture_command("installer create qwerty");
+        assert_output_contains(
+            "installer refuses an install mode it does not know",
+            &out,
+            b"unknown mode",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "installer create: an unknown mode is an error"
+        );
+
+        // The fall-through here widened the query instead of narrowing it: an
+        // unknown category listed *every* font, which looks like it worked.
+        let out = capture_command("fontmgr list qwerty");
+        assert_output_contains(
+            "fontmgr refuses a category it does not know",
+            &out,
+            b"unknown category",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "fontmgr list: an unknown category is an error"
+        );
+
+        // A mistyped flag used to become the device name. The device here does
+        // not exist, which is the point: the refusal must come first, so this
+        // never reaches the filesystem.
+        let out = capture_command("fsck.ext4 /dev/zz_no_such_device --verbse");
+        assert_output_contains(
+            "fsck.ext4 refuses a misspelled flag rather than checking a device by that name",
+            &out,
+            b"unrecognized option",
+        );
+        assert_eq!(last_exit(), 1, "fsck.ext4: an unknown option is an error");
+
+        // `file` means swap-in-a-file; anything else is a size in MiB. An
+        // unreadable size fell to `None`, which *is* swap-in-a-file -- the plan
+        // and the output were identical to having asked for one.
+        let out = capture_command("installer partition 1 /dev/sda 1024 abc");
+        assert_output_contains(
+            "installer refuses a swap size it cannot read",
+            &out,
+            b"is not a swap size in MiB",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "installer partition: an unreadable swap size is an error"
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -14817,46 +16279,37 @@ fn cmd_strings(args: &str) {
 
 /// Format text into aligned columns.
 ///
-/// Usage: `column [-t] [-s SEP]` (reads from file or pipe)
+/// Usage: `column [-t] [-s CHARS]` (reads from file or pipe)
 ///
-/// `-t` — format into a table (auto-detect columns based on whitespace)
-/// `-s CHAR` — use CHAR as the delimiter (default: whitespace)
+/// `-t` — format into a table (columns split on runs of space or tab)
+/// `-s CHARS` — split on *any* character of CHARS (default: space or tab)
 ///
 /// Without `-t`, merges short lines into side-by-side columns filling
 /// the terminal width.
+///
+/// Byte-clean end to end: the file or pipe is never decoded, so input that is
+/// not UTF-8 comes back out as it went in. Column widths are console *cells*
+/// via [`display_width`], which is what makes `-t` line up for input that is
+/// not all ASCII — the thing the command exists to do.
 fn cmd_column(args: &str) {
     if args.is_empty() {
-        shell_println!("Usage: column [-t] [-s SEP] <file>");
+        shell_println!("Usage: column [-t] [-s CHARS] <file>");
         shell_println!("   or: ... | column -t");
         set_exit(1);
         return;
     }
 
-    // Parse flags.
-    let mut table_mode = false;
-    let mut sep: Option<char> = None;
-    let mut file_path = "";
+    let Some(parsed) = column_parse_args(args) else {
+        return;
+    };
 
-    let mut words = args.split_whitespace().peekable();
-    while let Some(w) = words.next() {
-        if w == "-t" {
-            table_mode = true;
-        } else if w == "-s" {
-            if let Some(s) = words.next() {
-                sep = s.chars().next();
-            }
-        } else {
-            file_path = w;
-        }
-    }
-
-    if file_path.is_empty() {
+    if parsed.file_path.is_empty() {
         shell_println!("column: no input file");
         set_exit(1);
         return;
     }
 
-    let path = resolve_path(file_path);
+    let path = resolve_path(&parsed.file_path);
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
@@ -14865,38 +16318,148 @@ fn cmd_column(args: &str) {
             return;
         }
     };
-    let text = alloc::string::String::from_utf8_lossy(&data);
-    column_format(&text, table_mode, sep);
+    column_format(&data, parsed.table_mode, parsed.seps.as_deref());
+}
+
+/// A parsed `column` command line.
+///
+/// A struct rather than the tuple this used to be: once the separator became a
+/// set the return type was `Option<(bool, Option<Vec<Vec<u8>>>, &str)>`, which
+/// `clippy::type_complexity` rejects at deny level and which no reader could
+/// have told apart from a differently-ordered one anyway. Naming the fields
+/// also means the two call sites destructure by name, so adding a fourth flag
+/// later cannot silently reorder them.
+struct ColumnArgs {
+    /// `-t`: format into an aligned table rather than passing lines through.
+    table_mode: bool,
+    /// `-s`: the separator **set**, one entry per character, or `None` for the
+    /// default split on runs of space and tab.
+    seps: Option<Vec<Vec<u8>>>,
+    /// The single file operand, or `""` when reading from a pipe.
+    ///
+    /// Owned rather than borrowed from the argument string: the words come from
+    /// [`split_words`], which builds them, because a quoted operand's bytes are
+    /// not a contiguous slice of the line it was written on.
+    file_path: String,
+}
+
+/// Parse `column`'s flags, shared by the file and pipe entry points.
+///
+/// The separator is a **set**: every character of the `-s` argument is one
+/// member, and a line is split at any occurrence of any of them —
+/// `column -s ',;'` splits on a comma or a semicolon. That is GNU/util-linux's
+/// reading of the flag, and this used to keep only the first character, so
+/// `column -s ',;'` split on commas and carried the semicolons along inside the
+/// fields.
+///
+/// Each member is carried as the *bytes of one character*, not as a byte, so a
+/// multi-byte separator (`column -s →`) splits on the whole sequence the user
+/// typed rather than on its lead byte — which is a byte that appears inside
+/// other characters too, and splitting there would cut a character in half and
+/// emit two undecodable halves. It is a set of characters, in other words, not
+/// a set of bytes.
+///
+/// A `-s` given more than once replaces the previous set rather than adding to
+/// it, matching util-linux, where the option's argument *is* the set.
+///
+/// The words come from [`split_words`], not from `str::split_whitespace`, which
+/// is what makes a separator that *is* whitespace expressible at all.
+/// `column -t -s '<TAB>'` — tab and not space, which is how one lines up a TSV
+/// whose fields contain spaces — used to lose its argument to the splitter and
+/// silently fall back to the default split on blanks. `column` is on
+/// [`command_parses_own_quotes`] for this reason, exactly as `cut` is for
+/// `cut -d' ' -f1`.
+///
+/// One consequence to know about: `split_words` produces no word at all for an
+/// empty quoted argument, so `column -s ''` arrives as a bare `-s` and is
+/// refused with "`-s` requires a separator". That is a better answer than the
+/// silent fallback it replaced — an empty separator set is not something a user
+/// can have meant — but it is a refusal where this function's older comment
+/// promised a fallback, so it is stated rather than left to be discovered.
+fn column_parse_args(args: &str) -> Option<ColumnArgs> {
+    let mut table_mode = false;
+    let mut sep: Option<Vec<Vec<u8>>> = None;
+    let mut file_path = String::new();
+    let mut flags_done = false;
+
+    // Index-based over an owned `Vec<String>`, as `parse_cut_args` is: an
+    // option that takes a value has to look at the *next* word, which an
+    // iterator borrowed from `words` cannot do while `words` is being consumed
+    // by the outer loop.
+    let words = split_words(args);
+    let mut i = 0usize;
+    while let Some(word) = words.get(i) {
+        i = i.saturating_add(1);
+        let w = word.as_str();
+
+        if !flags_done && w == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || w == "-" || !w.starts_with('-') {
+            // A second operand used to overwrite the first in silence, so
+            // `column a b` formatted `b` and never mentioned `a`.
+            if !file_path.is_empty() {
+                shell_println!("column: extra operand `{}'", w);
+                set_exit(1);
+                return None;
+            }
+            file_path = String::from(w);
+            continue;
+        }
+        if w == "-t" {
+            table_mode = true;
+        } else if w == "-s" {
+            let Some(s) = words.get(i) else {
+                shell_println!("column: -s requires a separator");
+                set_exit(1);
+                return None;
+            };
+            i = i.saturating_add(1);
+            let set: Vec<Vec<u8>> = s
+                .chars()
+                .map(|c| {
+                    let mut buf = [0u8; 4];
+                    c.encode_utf8(&mut buf).as_bytes().to_vec()
+                })
+                .collect();
+            // An empty set means "no explicit separator", which is what the
+            // default blank split already is -- carrying `Some(vec![])` would
+            // reach `split_on_any_of` and make it decide the same thing again.
+            // Not reachable through `split_words`, which drops an empty word;
+            // kept because `set` is derived rather than assumed non-empty.
+            sep = if set.is_empty() { None } else { Some(set) };
+        } else {
+            shell_println!("column: unrecognized option `{}'", w);
+            set_exit(1);
+            return None;
+        }
+    }
+
+    Some(ColumnArgs {
+        table_mode,
+        seps: sep,
+        file_path,
+    })
 }
 
 /// column from piped input.
-fn cmd_column_input(args: &str, input: &str) {
+fn cmd_column_input(args: &str, input: &[u8]) {
     if input.is_empty() && args.is_empty() {
-        shell_println!("Usage: ... | column [-t] [-s SEP]");
+        shell_println!("Usage: ... | column [-t] [-s CHARS]");
         set_exit(1);
         return;
     }
 
-    let mut table_mode = false;
-    let mut sep: Option<char> = None;
-    let mut file_path = "";
-
-    let mut words = args.split_whitespace().peekable();
-    while let Some(w) = words.next() {
-        if w == "-t" {
-            table_mode = true;
-        } else if w == "-s" {
-            if let Some(s) = words.next() {
-                sep = s.chars().next();
-            }
-        } else {
-            file_path = w;
-        }
-    }
+    let Some(parsed) = column_parse_args(args) else {
+        return;
+    };
 
     // If a file was specified, read from it; otherwise use piped input.
-    if !file_path.is_empty() {
-        let path = resolve_path(file_path);
+    if parsed.file_path.is_empty() {
+        column_format(input, parsed.table_mode, parsed.seps.as_deref());
+    } else {
+        let path = resolve_path(&parsed.file_path);
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
             Err(e) => {
@@ -14905,71 +16468,165 @@ fn cmd_column_input(args: &str, input: &str) {
                 return;
             }
         };
-        let text = alloc::string::String::from_utf8_lossy(&data);
-        column_format(&text, table_mode, sep);
-    } else {
-        column_format(input, table_mode, sep);
+        column_format(&data, parsed.table_mode, parsed.seps.as_deref());
     }
 }
 
 /// Core column formatting: split lines into columns and align.
-#[allow(clippy::arithmetic_side_effects)]
-fn column_format(text: &str, table_mode: bool, sep: Option<char>) {
-    let lines: alloc::vec::Vec<&str> = text.lines().collect();
+///
+/// Bytes throughout. `column` is a *formatter* — it re-spaces its input and
+/// hands back every other byte of it — so the one thing it must never do is
+/// rewrite the bytes it was given, which is exactly what the
+/// `from_utf8_lossy` this replaced did to any input that was not UTF-8.
+///
+/// Field widths come from [`display_width`], not from `len`, because the
+/// padding is measured in console cells. See that function for why the two
+/// disagree and by how much.
+fn column_format(text: &[u8], table_mode: bool, sep: Option<&[Vec<u8>]>) {
+    let lines = split_lines(text);
     if lines.is_empty() {
         return;
     }
 
-    if table_mode {
-        // Split each line into fields, compute max width per column,
-        // then print left-aligned with 2-space padding.
-        let rows: alloc::vec::Vec<alloc::vec::Vec<&str>> = lines
-            .iter()
-            .map(|line| {
-                if let Some(c) = sep {
-                    line.split(c).collect()
-                } else {
-                    line.split_whitespace().collect()
-                }
-            })
-            .collect();
-
-        // Find max columns and per-column max width.
-        let max_cols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        let mut widths = alloc::vec![0usize; max_cols];
-        for row in &rows {
-            for (i, field) in row.iter().enumerate() {
-                if field.len() > widths[i] {
-                    widths[i] = field.len();
-                }
-            }
-        }
-
-        for row in &rows {
-            let mut out = alloc::string::String::new();
-            for (i, field) in row.iter().enumerate() {
-                if i > 0 {
-                    out.push_str("  ");
-                }
-                out.push_str(field);
-                // Pad to column width (except for the last column).
-                if i + 1 < row.len() {
-                    let pad = widths[i].saturating_sub(field.len());
-                    for _ in 0..pad {
-                        out.push(' ');
-                    }
-                }
-            }
-            shell_println!("{}", out);
-        }
-    } else {
-        // Simple mode: print lines as-is (no table formatting).
-        // A full implementation would fill the terminal width, but
-        // without terminal width info we just print each line.
+    if !table_mode {
+        // Simple mode: print lines as-is (no table formatting). A full
+        // implementation would fill the terminal width, but without terminal
+        // width info we just print each line.
         for line in &lines {
-            shell_println!("{}", line);
+            shell_write_bytes(line);
+            shell_write_bytes(b"\n");
+        }
+        return;
+    }
+
+    // Split each line into fields, compute max width per column, then print
+    // left-aligned with 2-space padding.
+    let rows: Vec<Vec<&[u8]>> = lines
+        .iter()
+        .map(|line| match sep {
+            Some(s) => split_on_any_of(line, s),
+            None => split_ascii_blanks(line),
+        })
+        .collect();
+
+    // Find max columns and per-column max width.
+    let max_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = alloc::vec![0usize; max_cols];
+    for row in &rows {
+        for (i, field) in row.iter().enumerate() {
+            let w = display_width(field);
+            if let Some(slot) = widths.get_mut(i) {
+                if w > *slot {
+                    *slot = w;
+                }
+            }
         }
     }
+
+    for row in &rows {
+        let mut out: Vec<u8> = Vec::new();
+        let last = row.len().saturating_sub(1);
+        for (i, field) in row.iter().enumerate() {
+            if i > 0 {
+                out.extend_from_slice(b"  ");
+            }
+            out.extend_from_slice(field);
+            // Pad to column width (except for the last column).
+            if i < last {
+                let pad = widths
+                    .get(i)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(display_width(field));
+                out.resize(out.len().saturating_add(pad), b' ');
+            }
+        }
+        out.push(b'\n');
+        shell_write_bytes(&out);
+    }
+}
+
+/// Split `line` at every occurrence of *any* member of `seps`.
+///
+/// Each member is the bytes of one character, so this is a set of characters
+/// rather than a set of bytes; see [`column_parse_args`] for why the
+/// distinction matters. A member is matched as a unit, so a multi-byte
+/// separator never splits a character in half.
+///
+/// Empty fields are kept — `a,,b` is three fields, the middle one empty — and
+/// a separator at either end produces an empty field there, which is what
+/// `str::split` did before and what an explicitly-given delimiter should do.
+/// The separator itself is *consumed*, not returned in any field.
+///
+/// Where two members could both match at one position the **longer** one wins.
+/// For a set built from characters that cannot happen, because no character's
+/// UTF-8 encoding is a prefix of another's — that is what self-synchronising
+/// means — so this rule is unobservable today. It is written down anyway
+/// because "first member in the order the user typed them" would make the
+/// output depend on argument order for no reason a user could predict, and
+/// longest-match is the rule that stays right if this ever takes multi-character
+/// separators.
+fn split_on_any_of<'a>(line: &'a [u8], seps: &[Vec<u8>]) -> Vec<&'a [u8]> {
+    // No separators is not "split on nothing" by accident -- it is the caller
+    // having nothing to split on, so the whole line is one field.
+    if seps.iter().all(Vec::is_empty) {
+        return alloc::vec![line];
+    }
+    let mut out: Vec<&[u8]> = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < line.len() {
+        let mut hit = 0usize;
+        for sep in seps {
+            if sep.is_empty() || sep.len() <= hit {
+                // An empty member would match everywhere and split between
+                // every byte; a shorter one cannot beat what we already have.
+                continue;
+            }
+            if line.get(i..i.saturating_add(sep.len())) == Some(sep.as_slice()) {
+                hit = sep.len();
+            }
+        }
+        if hit == 0 {
+            i = i.saturating_add(1);
+            continue;
+        }
+        out.push(line.get(start..i).unwrap_or(&[]));
+        i = i.saturating_add(hit);
+        start = i;
+    }
+    out.push(line.get(start..).unwrap_or(&[]));
+    out
+}
+
+/// Split `line` on runs of blanks, ignoring leading and trailing ones.
+///
+/// "Blank" is **space and tab only**, deliberately narrower than the
+/// `str::split_whitespace` this replaces. Two reasons, and they point the same
+/// way. Rust's rule is Unicode `White_Space`, which includes U+00A0 NO-BREAK
+/// SPACE — the character whose entire purpose is *not* to be a break — so a
+/// name written `Mr.\u{a0}Smith` was silently torn into two columns. glibc's
+/// `iswspace(U+00A0)` is false and util-linux's `column` tokenises on `" \t"`,
+/// so GNU keeps it whole; this now agrees. And it leaves a CRLF file's trailing
+/// `\r` attached to the last field, where it is emitted unpadded at end of row
+/// and the line comes back out as CRLF — where treating `\r` as a separator
+/// would have dropped it, rewriting the file's line endings for no reason.
+fn split_ascii_blanks(line: &[u8]) -> Vec<&[u8]> {
+    let mut out: Vec<&[u8]> = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, &b) in line.iter().enumerate() {
+        if b == b' ' || b == b'\t' {
+            if let Some(s) = start.take() {
+                out.push(line.get(s..i).unwrap_or(&[]));
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        out.push(line.get(s..).unwrap_or(&[]));
+    }
+    out
 }
 
 /// Display a monthly calendar.
@@ -16462,15 +18119,44 @@ fn cmd_touch(args: &str) {
     let mut ref_file: Option<&str> = None;
     let mut file_path = "";
 
+    let mut flags_done = false;
     let mut words = args.split_whitespace();
     while let Some(w) = words.next() {
+        if !flags_done && w == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || w == "-" || !w.starts_with('-') {
+            // A second operand used to overwrite the first, so `touch a b`
+            // created `b` and left `a` untouched without saying so. Only one
+            // path is supported; say that rather than pick one.
+            if !file_path.is_empty() {
+                shell_println!("touch: extra operand `{}' (one path at a time)", w);
+                set_exit(1);
+                return;
+            }
+            file_path = w;
+            continue;
+        }
         if w == "-d" {
             // Collect the date string — it might have spaces (e.g., "2026-01-15 12:30:00").
             date_str = words.next();
+            if date_str.is_none() {
+                shell_println!("touch: -d requires a date");
+                set_exit(1);
+                return;
+            }
         } else if w == "-r" {
             ref_file = words.next();
+            if ref_file.is_none() {
+                shell_println!("touch: -r requires a reference file");
+                set_exit(1);
+                return;
+            }
         } else {
-            file_path = w;
+            shell_println!("touch: unrecognized option `{}'", w);
+            set_exit(1);
+            return;
         }
     }
 
@@ -16713,21 +18399,51 @@ fn cmd_du(args: &str) {
     let mut max_depth: usize = usize::MAX;
     let mut path_arg = "";
 
-    for word in args.split_whitespace() {
+    let mut flags_done = false;
+    let mut words = args.split_whitespace();
+    while let Some(word) = words.next() {
+        if !flags_done && word == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || word == "-" || !word.starts_with('-') {
+            if !path_arg.is_empty() {
+                shell_println!("du: extra operand `{}' (one path at a time)", word);
+                set_exit(1);
+                return;
+            }
+            path_arg = word;
+            continue;
+        }
         if word == "-s" {
             summary_only = true;
         } else if let Some(rest) = word.strip_prefix("-d") {
-            // -d N or -dN
+            // Both `-dN` and `-d N`. The separated form used to fall through
+            // to `"0"` — so `du -d 2 /tmp` reported depth 0 *of the current
+            // directory*, because `2` then became the path and `/tmp`
+            // overwrote it. Neither half of that was reported.
             let num_str = if rest.is_empty() {
-                // -d followed by next arg is not handled in this simple parser;
-                // use -dN form.
-                "0"
+                let Some(next) = words.next() else {
+                    shell_println!("du: -d requires a depth");
+                    set_exit(1);
+                    return;
+                };
+                next
             } else {
                 rest
             };
-            max_depth = num_str.parse::<usize>().unwrap_or(0);
+            match num_str.parse::<usize>() {
+                Ok(n) => max_depth = n,
+                Err(_) => {
+                    shell_println!("du: -d: `{}' is not a depth", num_str);
+                    set_exit(1);
+                    return;
+                }
+            }
         } else {
-            path_arg = word;
+            shell_println!("du: unrecognized option `{}'", word);
+            set_exit(1);
+            return;
         }
     }
 
@@ -16829,17 +18545,78 @@ fn cmd_find(args: &str) {
     let mut user_max_depth: Option<u32> = None;
     let mut empty_filter = false;
 
+    // Set by `--`. A path is allowed to begin with `-` -- our filesystem
+    // permits every byte but `/` and NUL in a name -- so without this there is
+    // no way to hand `find` a directory literally called `-empty`.
+    let mut flags_done = false;
+
     let mut words = args.split_whitespace().peekable();
     while let Some(w) = words.next() {
+        if !flags_done && w == "--" {
+            flags_done = true;
+            continue;
+        }
+        // A lone `-` is a filename, not a truncated predicate.
+        if flags_done || w == "-" || !w.starts_with('-') {
+            if search_path.is_empty() {
+                search_path = w;
+            } else if name_pattern.is_none() {
+                // Legacy: bare pattern without -name.
+                name_pattern = Some(w);
+            } else {
+                // A third bare word has nowhere to go. It used to be dropped,
+                // so `find . foo bar` searched for `foo` and reported success
+                // while `bar` -- possibly the argument the user actually cared
+                // about -- was never considered.
+                shell_println!("find: paths must precede expression: `{}'", w);
+                set_exit(1);
+                return;
+            }
+            continue;
+        }
         if w == "-name" {
-            name_pattern = words.next();
+            let Some(p) = words.next() else {
+                shell_println!("find: missing argument to `-name'");
+                set_exit(1);
+                return;
+            };
+            name_pattern = Some(p);
         } else if w == "-type" {
-            if let Some(t) = words.next() {
-                type_filter = t.chars().next();
+            let Some(t) = words.next() else {
+                shell_println!("find: missing argument to `-type'");
+                set_exit(1);
+                return;
+            };
+            // `t.chars().next()` used to take the first character of whatever
+            // arrived, so `-type zzz` became `-type z`, matched nothing, and
+            // exited 0 — a search that answered "no such files" to a question
+            // it had not understood. There are three types; anything else is a
+            // mistake, and a mistake in a filter must not be answered with an
+            // empty result set.
+            match t {
+                "f" | "d" | "l" => type_filter = t.chars().next(),
+                _ => {
+                    shell_println!(
+                        "find: unknown argument to -type: {} (expected f, d or l)",
+                        t
+                    );
+                    set_exit(1);
+                    return;
+                }
             }
         } else if w == "-size" {
-            if let Some(s) = words.next() {
-                size_filter = Some(parse_size_predicate(s));
+            let Some(s) = words.next() else {
+                shell_println!("find: missing argument to `-size'");
+                set_exit(1);
+                return;
+            };
+            match parse_size_predicate(s) {
+                Some(spec) => size_filter = Some(spec),
+                None => {
+                    shell_println!("find: invalid -size argument `{}'", s);
+                    set_exit(1);
+                    return;
+                }
             }
         } else if w == "-maxdepth" {
             // `.unwrap_or(16)` used to turn `-maxdepth abc` into a silent
@@ -16862,11 +18639,17 @@ fn cmd_find(args: &str) {
             }
         } else if w == "-empty" {
             empty_filter = true;
-        } else if !w.starts_with('-') && search_path.is_empty() {
-            search_path = w;
-        } else if !w.starts_with('-') && name_pattern.is_none() {
-            // Legacy: bare pattern without -name.
-            name_pattern = Some(w);
+        } else {
+            // Everything reaching here begins with `-` and is not a predicate
+            // we implement. The chain used to end without an `else`, so
+            // `find . -mtime -1` and `find . -nmae x` alike ran an *unfiltered*
+            // walk and printed every file under `.` with a zero exit -- a
+            // wrong answer wearing the costume of a right one. A predicate we
+            // cannot evaluate cannot be dropped from the query; it can only be
+            // refused.
+            shell_println!("find: unknown predicate `{}'", w);
+            set_exit(1);
+            return;
         }
     }
 
@@ -16964,8 +18747,27 @@ struct FindTally {
     unreadable: usize,
 }
 
-/// Parse a `-size` argument like `+1M`, `-512k`, `100c`.
-fn parse_size_predicate(s: &str) -> (i64, char) {
+/// Parse a `-size` argument like `+1M`, `-512k`, `100c`, into
+/// `(bytes, one of '+' / '-' / '=')`.
+///
+/// Returns `None` for anything it cannot read as a size, which is the entire
+/// point of the function's shape. It used to end
+/// `num_str.parse::<i64>().unwrap_or(0) * multiplier`, so `find . -size +abc`
+/// quietly became "size greater than 0" -- which matches almost every file on
+/// the disk, printed as a successful answer to a question nobody asked. The
+/// caller now refuses instead.
+///
+/// This is the same bug, in the same function-sized neighbourhood, as the
+/// `-maxdepth` `.unwrap_or(16)` fixed a few lines above: that fix was applied
+/// to the *site* rather than to the *category*, so its twin three lines down
+/// survived it. A guessed number is worse than a refusal precisely because it
+/// is indistinguishable from a real one at the exit status.
+///
+/// Deliberate divergence from GNU, noted so it is not mistaken for an
+/// oversight: a bare `-size 100` here means 100 *bytes*, where GNU means 100
+/// 512-byte blocks. See the `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS`
+/// entry in `known-issues.md`.
+fn parse_size_predicate(s: &str) -> Option<(i64, char)> {
     let (sign, rest) = if let Some(stripped) = s.strip_prefix('+') {
         ('+', stripped)
     } else if let Some(stripped) = s.strip_prefix('-') {
@@ -16975,20 +18777,25 @@ fn parse_size_predicate(s: &str) -> (i64, char) {
     };
 
     // Parse suffix.
-    let (num_str, multiplier) = if rest.ends_with('G') || rest.ends_with('g') {
-        (&rest[..rest.len() - 1], 1024i64 * 1024 * 1024)
-    } else if rest.ends_with('M') || rest.ends_with('m') {
-        (&rest[..rest.len() - 1], 1024i64 * 1024)
-    } else if rest.ends_with('k') || rest.ends_with('K') {
-        (&rest[..rest.len() - 1], 1024i64)
-    } else if let Some(stripped) = rest.strip_suffix('c') {
-        (stripped, 1i64)
-    } else {
-        (rest, 1i64) // default: bytes
-    };
+    let (num_str, multiplier) =
+        if let Some(stripped) = rest.strip_suffix('G').or_else(|| rest.strip_suffix('g')) {
+            (stripped, 1024i64 * 1024 * 1024)
+        } else if let Some(stripped) = rest.strip_suffix('M').or_else(|| rest.strip_suffix('m')) {
+            (stripped, 1024i64 * 1024)
+        } else if let Some(stripped) = rest.strip_suffix('k').or_else(|| rest.strip_suffix('K')) {
+            (stripped, 1024i64)
+        } else if let Some(stripped) = rest.strip_suffix('c') {
+            (stripped, 1i64)
+        } else {
+            (rest, 1i64) // default: bytes
+        };
 
-    let value = num_str.parse::<i64>().unwrap_or(0) * multiplier;
-    (value, sign)
+    // A negative count is not a smaller size, it is a different question; and
+    // `parse` would accept `-5` here only because the leading `-` was already
+    // eaten as the comparison sign, so `--5` would slip through. Reject both.
+    let count = num_str.parse::<u64>().ok()?;
+    let value = i64::try_from(count).ok()?.checked_mul(multiplier)?;
+    Some((value, sign))
 }
 
 /// `locate` — fast file search using the filesystem index.
@@ -17022,32 +18829,84 @@ fn cmd_locate(args: &str) {
     let mut size_max: Option<u64> = None;
     let mut path_mode = false;
     let mut pattern: Option<&str> = None;
+    let mut flags_done = false;
     let mut i = 0;
 
     while i < parts.len() {
-        match parts.get(i).copied().unwrap_or("") {
+        let word = parts.get(i).copied().unwrap_or("");
+        if !flags_done && word == "--" {
+            flags_done = true;
+            i = i.saturating_add(1);
+            continue;
+        }
+        if flags_done || word == "-" || !word.starts_with('-') {
+            if pattern.is_some() {
+                // The second pattern used to overwrite the first in silence,
+                // so `locate foo bar` searched only for `bar` and answered as
+                // if `foo` had never been asked about.
+                shell_println!("locate: only one pattern may be given (got `{}')", word);
+                set_exit(1);
+                return;
+            }
+            pattern = Some(word);
+            i = i.saturating_add(1);
+            continue;
+        }
+        match word {
             "--update" | "-u" => do_update = true,
             "--stats" | "-s" => do_stats = true,
             "--path" | "-p" => path_mode = true,
             "--ext" | "-e" => {
                 i = i.saturating_add(1);
-                ext_filter = parts.get(i).copied();
+                // A missing argument used to leave `ext_filter` as `None`,
+                // which is not "no extension given" but "match every
+                // extension" -- the search silently widened to everything.
+                let Some(e) = parts.get(i).copied() else {
+                    shell_println!("locate: option `{}' requires an extension", word);
+                    set_exit(1);
+                    return;
+                };
+                ext_filter = Some(e);
             }
             "--size" => {
                 i = i.saturating_add(1);
-                if let Some(range_str) = parts.get(i).copied() {
-                    if let Some(dash) = range_str.find('-') {
-                        let min_s = &range_str[..dash];
-                        let max_s = &range_str[dash.saturating_add(1)..];
-                        size_min = parse_size_value(min_s);
-                        size_max = parse_size_value(max_s);
+                let Some(range_str) = parts.get(i).copied() else {
+                    shell_println!("locate: option `--size' requires a MIN-MAX range");
+                    set_exit(1);
+                    return;
+                };
+                // Every failure below used to fall through to "no size filter
+                // at all", so `locate --size abc x` quietly answered a
+                // *different, broader* question than the one it was asked and
+                // exited 0. A filter that cannot be built is not an absent
+                // filter.
+                let Some(dash) = range_str.find('-') else {
+                    shell_println!(
+                        "locate: --size: `{}' is not a MIN-MAX range (expected e.g. 1k-1M)",
+                        range_str
+                    );
+                    set_exit(1);
+                    return;
+                };
+                // An *empty* side is a deliberate open end -- `1k-` is "at
+                // least 1k", `-1M` is "at most 1M" -- so only a side that was
+                // written and could not be read is an error.
+                let min_s = range_str.get(..dash).unwrap_or("");
+                let max_s = range_str.get(dash.saturating_add(1)..).unwrap_or("");
+                for side in [min_s, max_s] {
+                    if !side.is_empty() && parse_size_value(side).is_none() {
+                        shell_println!("locate: --size: `{}' is not a size", side);
+                        set_exit(1);
+                        return;
                     }
                 }
+                size_min = parse_size_value(min_s);
+                size_max = parse_size_value(max_s);
             }
-            s => {
-                if !s.starts_with('-') {
-                    pattern = Some(s);
-                }
+            other => {
+                shell_println!("locate: unrecognized option `{}'", other);
+                set_exit(1);
+                return;
             }
         }
         i = i.saturating_add(1);
@@ -17234,27 +19093,61 @@ fn cmd_dedup(args: &str) {
     let mut min_size: u64 = 1; // Skip empty files by default.
     let mut max_size: u64 = 64 * 1024 * 1024; // 64 MiB.
     let mut target_dir: Option<&str> = None;
+    let mut flags_done = false;
     let mut i = 0;
 
     while i < parts.len() {
-        match parts.get(i).copied().unwrap_or("") {
+        let word = parts.get(i).copied().unwrap_or("");
+        if !flags_done && word == "--" {
+            flags_done = true;
+            i = i.saturating_add(1);
+            continue;
+        }
+        if flags_done || word == "-" || !word.starts_with('-') {
+            if target_dir.is_some() {
+                shell_println!("dedup: only one directory may be given (got `{}')", word);
+                set_exit(1);
+                return;
+            }
+            target_dir = Some(word);
+            i = i.saturating_add(1);
+            continue;
+        }
+        match word {
             "--dry-run" | "-n" => dry_run = true,
             "--delete" => {
                 delete_mode = true;
                 dry_run = false;
             }
             "--stats" | "-s" => stats_only = true,
+            // `--min-size`/`--max-size` used to fall back to the *default*
+            // bound when the argument was missing or unreadable. On a command
+            // whose other half is `--delete`, silently widening the size
+            // window means silently enlarging the set of files considered for
+            // removal: `dedup --delete --min-size 1O /` (letter O for zero)
+            // would have deduplicated from one byte upwards while the user
+            // believed they had excluded everything small.
             "--min-size" => {
                 i = i.saturating_add(1);
-                if let Some(v) = parts.get(i).copied() {
-                    min_size = parse_size_value(v).unwrap_or(1);
-                }
+                min_size = match parts.get(i).copied().map(parse_size_value) {
+                    Some(Some(v)) => v,
+                    _ => {
+                        shell_println!("dedup: --min-size: expected a size");
+                        set_exit(1);
+                        return;
+                    }
+                };
             }
             "--max-size" => {
                 i = i.saturating_add(1);
-                if let Some(v) = parts.get(i).copied() {
-                    max_size = parse_size_value(v).unwrap_or(64 * 1024 * 1024);
-                }
+                max_size = match parts.get(i).copied().map(parse_size_value) {
+                    Some(Some(v)) => v,
+                    _ => {
+                        shell_println!("dedup: --max-size: expected a size");
+                        set_exit(1);
+                        return;
+                    }
+                };
             }
             "--help" | "-h" => {
                 shell_println!(
@@ -17271,10 +19164,13 @@ fn cmd_dedup(args: &str) {
                 // which is precisely why the *status* has to tell them apart.
                 return;
             }
-            s => {
-                if !s.starts_with('-') {
-                    target_dir = Some(s);
-                }
+            other => {
+                shell_println!("dedup: unrecognized option `{}'", other);
+                shell_println!(
+                    "Usage: dedup [--dry-run|-n] [--delete] [--stats|-s] [--min-size N] [--max-size N] [DIR]"
+                );
+                set_exit(1);
+                return;
             }
         }
         i = i.saturating_add(1);
@@ -18063,13 +19959,23 @@ fn cmd_fhist(args: &str) {
                     "VFS auto-versioning disabled (use `fhist record` for manual versioning)."
                 );
             }
-            _ => {
+            // The arm this replaces served `fhist autoversion` -- a query, which
+            // the line below answers -- and `fhist autoversion banana`, which
+            // is a mistake that changed nothing. It could not report both
+            // truthfully, so it was left reporting neither; now each has its
+            // own arm and its own status.
+            None => {
                 let st = history::stats();
                 shell_println!(
                     "Auto-versioning: {}",
                     if st.auto_version { "on" } else { "off" }
                 );
                 shell_println!("Usage: fhist autoversion <on|off>");
+            }
+            Some(other) => {
+                shell_println!("fhist: unknown autoversion setting '{}'", other);
+                shell_println!("Usage: fhist autoversion <on|off>");
+                set_exit(1);
             }
         },
 
@@ -18269,16 +20175,23 @@ fn cmd_quota(args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
 
     if parts.is_empty() {
-        shell_println!("Usage: quota <on|off|set|setfiles|show|list|stats|remove> [args...]");
+        // Bare `quota` is a question, and this is its answer -- the same
+        // reading as `elog echo` and `fc algo`, whose no-argument branches
+        // report the current setting and succeed. So the state line leads and
+        // the synopsis follows it as a hint for changing it; printed the other
+        // way round, with a failure status under it, the command answered
+        // correctly and told `quota && …` it had not.
         shell_println!(
-            "  Quotas are currently {}.",
+            "Quotas are currently {}.",
             if quota::is_enabled() {
                 "enabled"
             } else {
                 "disabled"
             }
         );
-        set_exit(1);
+        shell_println!(
+            "Usage: quota <on|off|set|setfiles|show|list|stats|remove> [args...]  to change"
+        );
         return;
     }
 
@@ -18582,10 +20495,15 @@ fn cmd_quota(args: &str) {
         }
 
         _ => {
+            // Worded "Use:" rather than "Usage:", which is why the usage-status
+            // gate never saw it: `quota banana` scolded the user and reported
+            // success. The wording is now the gate's, so the next sweep finds
+            // it the same way every other arm is found.
             shell_println!(
-                "Unknown subcommand '{}'. Use: on, off, set, setfiles, show, list, stats, remove",
+                "Unknown subcommand '{}'. Usage: quota <on|off|set|setfiles|show|list|stats|remove>",
                 parts[0]
             );
+            set_exit(1);
         }
     }
 }
@@ -19377,6 +21295,7 @@ fn cmd_overlay(args: &str) {
 
         _ => {
             shell_println!("Unknown overlay subcommand: {}", parts[0]);
+            set_exit(1);
             shell_println!(
                 "Usage: overlay <list|create|destroy|ls|cat|write|rm|which|whiteouts|stats|reset|commit>"
             );
@@ -19744,19 +21663,52 @@ fn cmd_audit(args: &str) {
             let mut failures = false;
 
             let mut i = 1;
-            while i < parts.len() {
-                match parts[i] {
+            let mut flags_done = false;
+            while let Some(&word) = parts.get(i) {
+                if !flags_done && word == "--" {
+                    flags_done = true;
+                    i += 1;
+                    continue;
+                }
+                if flags_done || word == "-" || !word.starts_with('-') {
+                    if !prefix.is_empty() {
+                        shell_println!("audit add-rule: extra operand `{}'", word);
+                        set_exit(1);
+                        return;
+                    }
+                    prefix = word;
+                    i += 1;
+                    continue;
+                }
+                match word {
                     "--writes" => mask = audit::AuditMask::WRITES,
                     "--security" => mask = audit::AuditMask::SECURITY,
                     "--all" => mask = audit::AuditMask::ALL,
                     "--failures" => failures = true,
                     "--uid" => {
-                        if i + 1 < parts.len() {
-                            i += 1;
-                            uid = parts[i].parse::<u32>().ok();
+                        i += 1;
+                        let Some(&v) = parts.get(i) else {
+                            shell_println!("audit add-rule: --uid requires a uid");
+                            set_exit(1);
+                            return;
+                        };
+                        // `.ok()` here meant an unreadable uid produced `None`,
+                        // which is the *no uid filter* value: the rule then
+                        // audited every user instead of the one named.
+                        match v.parse::<u32>() {
+                            Ok(u) => uid = Some(u),
+                            Err(_) => {
+                                shell_println!("audit add-rule: --uid: `{}' is not a uid", v);
+                                set_exit(1);
+                                return;
+                            }
                         }
                     }
-                    _ => prefix = parts[i],
+                    other => {
+                        shell_println!("audit add-rule: unrecognized option `{}'", other);
+                        set_exit(1);
+                        return;
+                    }
                 }
                 i += 1;
             }
@@ -19835,39 +21787,74 @@ fn cmd_audit(args: &str) {
             let mut uid_filter: Option<u32> = None;
             let mut failures = false;
 
+            // Every filter here *narrows* the result set, so every one of the
+            // silent failures below widened it: a misspelled `--op`, an
+            // unreadable `--uid` and an unrecognised word alike came back as
+            // "no filter" and returned entries the caller had excluded. A
+            // search that answers a broader question than it was asked is a
+            // wrong answer wearing a plausible one's clothes.
+            // No operands, so no `--`: every word here is a flag or a mistake.
             let mut i = 1;
-            while i < parts.len() {
-                match parts[i] {
+            while let Some(&word) = parts.get(i) {
+                match word {
                     "--op" => {
-                        if i + 1 < parts.len() {
-                            i += 1;
-                            op_filter = match parts[i].to_uppercase().as_str() {
-                                "READ" => Some(audit::AuditOp::Read),
-                                "WRITE" => Some(audit::AuditOp::Write),
-                                "DELETE" => Some(audit::AuditOp::Delete),
-                                "RENAME" => Some(audit::AuditOp::Rename),
-                                "CHMOD" => Some(audit::AuditOp::Chmod),
-                                "CHOWN" => Some(audit::AuditOp::Chown),
-                                "MKDIR" => Some(audit::AuditOp::Mkdir),
-                                "RMDIR" => Some(audit::AuditOp::Rmdir),
-                                _ => None,
-                            };
-                        }
+                        i += 1;
+                        let Some(&v) = parts.get(i) else {
+                            shell_println!("audit search: --op requires an operation");
+                            set_exit(1);
+                            return;
+                        };
+                        op_filter = match v.to_uppercase().as_str() {
+                            "READ" => Some(audit::AuditOp::Read),
+                            "WRITE" => Some(audit::AuditOp::Write),
+                            "DELETE" => Some(audit::AuditOp::Delete),
+                            "RENAME" => Some(audit::AuditOp::Rename),
+                            "CHMOD" => Some(audit::AuditOp::Chmod),
+                            "CHOWN" => Some(audit::AuditOp::Chown),
+                            "MKDIR" => Some(audit::AuditOp::Mkdir),
+                            "RMDIR" => Some(audit::AuditOp::Rmdir),
+                            _ => {
+                                shell_println!(
+                                    "audit search: --op: `{}' is not an operation \
+                                     (read/write/delete/rename/chmod/chown/mkdir/rmdir)",
+                                    v
+                                );
+                                set_exit(1);
+                                return;
+                            }
+                        };
                     }
                     "--path" => {
-                        if i + 1 < parts.len() {
-                            i += 1;
-                            path_prefix = Some(parts[i]);
-                        }
+                        i += 1;
+                        let Some(&v) = parts.get(i) else {
+                            shell_println!("audit search: --path requires a path prefix");
+                            set_exit(1);
+                            return;
+                        };
+                        path_prefix = Some(v);
                     }
                     "--uid" => {
-                        if i + 1 < parts.len() {
-                            i += 1;
-                            uid_filter = parts[i].parse::<u32>().ok();
+                        i += 1;
+                        let Some(&v) = parts.get(i) else {
+                            shell_println!("audit search: --uid requires a uid");
+                            set_exit(1);
+                            return;
+                        };
+                        match v.parse::<u32>() {
+                            Ok(u) => uid_filter = Some(u),
+                            Err(_) => {
+                                shell_println!("audit search: --uid: `{}' is not a uid", v);
+                                set_exit(1);
+                                return;
+                            }
                         }
                     }
                     "--failures" => failures = true,
-                    _ => {}
+                    other => {
+                        shell_println!("audit search: unrecognized argument `{}'", other);
+                        set_exit(1);
+                        return;
+                    }
                 }
                 i += 1;
             }
@@ -21130,9 +23117,14 @@ fn cmd_fcompress(args: &str) {
         }
         "algo" | "algorithm" => {
             if parts.len() < 2 {
+                // `fc algo` with no argument is a *query*, and the line above is
+                // its answer. The guard is `parts.len() < 2`, so nothing else
+                // reaches here -- there is no error case to report. The usage
+                // line is a hint on a correct answer, not a diagnostic, and the
+                // `set_exit(1)` that used to follow it made every successful
+                // query look like a failed command to `&&`, `set -e` and `$?`.
                 shell_println!("Current: {}", fcompress::default_algorithm().name());
                 shell_println!("Usage: fc algo <lz4|gzip|zstd|bzip2|xz>");
-                set_exit(1);
                 return;
             }
             match fcompress::Algorithm::from_name(parts[1]) {
@@ -21140,7 +23132,10 @@ fn cmd_fcompress(args: &str) {
                     fcompress::set_default_algorithm(a);
                     shell_println!("Default algorithm set to {}.", a.name());
                 }
-                None => shell_println!("Unknown algorithm: {}", parts[1]),
+                None => {
+                    shell_println!("Unknown algorithm: {}", parts[1]);
+                    set_exit(1);
+                }
             }
         }
         "minsize" | "min" => {
@@ -21228,7 +23223,10 @@ fn cmd_fcompress(args: &str) {
                 fcompress::clear_rules();
                 shell_println!("All rules cleared.");
             }
-            _ => shell_println!("Usage: fc rule <add|rm|list|clear>"),
+            _ => {
+                shell_println!("Usage: fc rule <add|rm|list|clear>");
+                set_exit(1);
+            }
         },
         "info" => {
             if parts.len() < 2 {
@@ -21434,7 +23432,10 @@ fn cmd_encrypt(args: &str) {
                     }
                 }
             }
-            _ => shell_println!("Usage: encrypt key <add|rm|list>"),
+            _ => {
+                shell_println!("Usage: encrypt key <add|rm|list>");
+                set_exit(1);
+            }
         },
         "file" | "enc" => {
             if parts.len() < 3 {
@@ -22521,6 +24522,75 @@ fn cmd_dirsync(args: &str) {
     }
 }
 
+/// The trailing flags of a `backup` subcommand, after its positional
+/// arguments.
+struct BackupCmdFlags {
+    /// `--incremental` / `-i` was given.
+    incremental: bool,
+    /// `--no-verify` was *not* given.
+    verify: bool,
+    /// `--dry-run` / `-n` was given.
+    dry_run: bool,
+    /// `--exclude` / `-x` prefixes, in the order given.
+    exclude: Vec<PathBuf>,
+}
+
+/// Parse the trailing flags of a `backup` subcommand.
+///
+/// Returns `None` — having printed the reason and set a non-zero status — for
+/// any word that is not a flag this subcommand accepts, and for `--exclude`
+/// with no prefix after it.
+///
+/// Each flag used to be tested for independently with `contains` / `any`, so a
+/// word that was none of the three or four being looked for simply did not
+/// exist as far as the command was concerned. For `--no-verfy` that is merely
+/// untidy: the typo fails *safe*, because the backup verifies anyway. But
+/// `--dry-runn` fails *unsafe* — the user asks to be shown what would happen,
+/// the misspelling is discarded, and the backup is performed for real. A flag
+/// that decides whether the command writes to the disk is the last thing that
+/// may be dropped for being mistyped.
+///
+/// `--exclude` with a missing prefix has the same shape: the exclusion the
+/// user asked for silently did not happen, and the files they meant to keep
+/// out of the backup went into it.
+fn backup_parse_flags(
+    sub: &str,
+    flags: &[&str],
+    allow_incremental: bool,
+    allow_exclude: bool,
+) -> Option<BackupCmdFlags> {
+    let mut out = BackupCmdFlags {
+        incremental: false,
+        verify: true,
+        dry_run: false,
+        exclude: Vec::new(),
+    };
+    let mut i = 0usize;
+    while let Some(&w) = flags.get(i) {
+        match w {
+            "--incremental" | "-i" if allow_incremental => out.incremental = true,
+            "--no-verify" => out.verify = false,
+            "--dry-run" | "-n" => out.dry_run = true,
+            "--exclude" | "-x" if allow_exclude => {
+                i = i.saturating_add(1);
+                let Some(&prefix) = flags.get(i) else {
+                    shell_println!("backup {}: `{}' requires a path prefix", sub, w);
+                    set_exit(1);
+                    return None;
+                };
+                out.exclude.push(PathBuf::from(prefix));
+            }
+            _ => {
+                shell_println!("backup {}: unrecognized argument `{}'", sub, w);
+                set_exit(1);
+                return None;
+            }
+        }
+        i = i.saturating_add(1);
+    }
+    Some(out)
+}
+
 /// `backup` — incremental backup engine.
 fn cmd_backup(args: &str) {
     use crate::fs::backup;
@@ -22539,27 +24609,19 @@ fn cmd_backup(args: &str) {
             }
             let src = parts[1];
             let dst = parts[2];
-            let flags = &parts[3..];
-            let mut exclude = Vec::new();
-            let mut i = 0;
-            while i < flags.len() {
-                if flags[i] == "--exclude" || flags[i] == "-x" {
-                    if i + 1 < flags.len() {
-                        exclude.push(PathBuf::from(flags[i + 1]));
-                        i += 1;
-                    }
-                }
-                i += 1;
-            }
+            let Some(flags) = backup_parse_flags(sub, parts.get(3..).unwrap_or(&[]), true, true)
+            else {
+                return;
+            };
             let opts = backup::BackupOptions {
-                mode: if flags.iter().any(|f| *f == "--incremental" || *f == "-i") {
+                mode: if flags.incremental {
                     backup::BackupMode::Incremental
                 } else {
                     backup::BackupMode::Full
                 },
-                verify: !flags.contains(&"--no-verify"),
-                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
-                exclude,
+                verify: flags.verify,
+                dry_run: flags.dry_run,
+                exclude: flags.exclude,
                 ..backup::BackupOptions::default()
             };
             if opts.dry_run {
@@ -22594,11 +24656,14 @@ fn cmd_backup(args: &str) {
             }
             let src = parts[1];
             let dst = parts[2];
-            let flags = &parts[3..];
+            let Some(flags) = backup_parse_flags(sub, parts.get(3..).unwrap_or(&[]), false, false)
+            else {
+                return;
+            };
             let opts = backup::BackupOptions {
                 mode: backup::BackupMode::Incremental,
-                verify: !flags.contains(&"--no-verify"),
-                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
+                verify: flags.verify,
+                dry_run: flags.dry_run,
                 ..backup::BackupOptions::default()
             };
             if opts.dry_run {
@@ -22631,13 +24696,19 @@ fn cmd_backup(args: &str) {
             }
             let backup_root = parts[1];
             let dst = parts[2];
-            let manifest_id = parts
-                .get(3)
-                .and_then(|s| if s.starts_with('-') { None } else { Some(*s) });
-            let flags = &parts[3..];
+            // The optional manifest id sits between the positionals and the
+            // flags, so it has to be taken out before the flag list is judged
+            // — otherwise it would be refused as an unrecognized argument.
+            let manifest_id = parts.get(3).copied().filter(|s| !s.starts_with('-'));
+            let first_flag = if manifest_id.is_some() { 4 } else { 3 };
+            let Some(flags) =
+                backup_parse_flags(sub, parts.get(first_flag..).unwrap_or(&[]), false, false)
+            else {
+                return;
+            };
             let opts = backup::RestoreOptions {
-                verify: !flags.contains(&"--no-verify"),
-                dry_run: flags.iter().any(|f| *f == "--dry-run" || *f == "-n"),
+                verify: flags.verify,
+                dry_run: flags.dry_run,
                 ..backup::RestoreOptions::default()
             };
             if opts.dry_run {
@@ -22756,37 +24827,65 @@ fn cmd_undelete(args: &str) {
     match sub {
         "scan" | "list" | "ls" => {
             let mut filter = undelete::ScanFilter::new();
+            let mut flags_done = false;
             let mut i = 1;
-            while i < parts.len() {
-                match parts[i] {
+            // Every arm below used to shrug off a missing or unparseable
+            // argument, and the catch-all dropped unrecognised options
+            // outright. All three failures widen the scan in silence: the
+            // filter the user asked for is simply not applied, and a listing
+            // of *more* than was asked for looks exactly like a correct one.
+            while let Some(&word) = parts.get(i) {
+                if !flags_done && word == "--" {
+                    flags_done = true;
+                    i = i.saturating_add(1);
+                    continue;
+                }
+                if flags_done || word == "-" || !word.starts_with('-') {
+                    // First positional arg is a path prefix shortcut.
+                    filter = filter.with_prefix(word);
+                    i = i.saturating_add(1);
+                    continue;
+                }
+                let mut take_value = |what: &str| -> Option<&str> {
+                    i = i.saturating_add(1);
+                    let v = parts.get(i).copied();
+                    if v.is_none() {
+                        shell_println!("undelete {}: `{}' requires {}", sub, word, what);
+                        set_exit(1);
+                    }
+                    v
+                };
+                match word {
                     "--prefix" | "-p" => {
-                        if i + 1 < parts.len() {
-                            filter = filter.with_prefix(parts[i + 1]);
-                            i += 1;
-                        }
+                        let Some(v) = take_value("a path prefix") else {
+                            return;
+                        };
+                        filter = filter.with_prefix(v);
                     }
                     "--name" | "-n" => {
-                        if i + 1 < parts.len() {
-                            filter = filter.with_name(parts[i + 1]);
-                            i += 1;
-                        }
+                        let Some(v) = take_value("a name") else {
+                            return;
+                        };
+                        filter = filter.with_name(v);
                     }
                     "--limit" | "-l" => {
-                        if i + 1 < parts.len() {
-                            if let Ok(n) = parts[i + 1].parse::<usize>() {
-                                filter = filter.with_limit(n);
-                            }
-                            i += 1;
-                        }
+                        let Some(v) = take_value("a count") else {
+                            return;
+                        };
+                        let Ok(n) = v.parse::<usize>() else {
+                            shell_println!("undelete {}: --limit: `{}' is not a number", sub, v);
+                            set_exit(1);
+                            return;
+                        };
+                        filter = filter.with_limit(n);
                     }
                     other => {
-                        // First positional arg is a path prefix shortcut.
-                        if !other.starts_with('-') {
-                            filter = filter.with_prefix(other);
-                        }
+                        shell_println!("undelete {}: unrecognized option `{}'", sub, other);
+                        set_exit(1);
+                        return;
                     }
                 }
-                i += 1;
+                i = i.saturating_add(1);
             }
             match undelete::scan(&filter) {
                 Ok(results) => {
@@ -23160,23 +25259,78 @@ fn cmd_archive(args: &str) {
     }
 }
 
-/// `batch` — bulk file operations with pattern matching.
-fn cmd_batch(args: &str) {
+/// Split a `batch` command line into its options and its operands.
+///
+/// Returns `None` — having printed the reason and set a non-zero status — for
+/// any word that begins with `-` and is not an option `batch` accepts.
+///
+/// This replaces a scan that looked for each flag independently across the
+/// whole line while every subcommand separately dropped `-`-leading words from
+/// its operand list with `.filter(|f| !f.starts_with('-'))`. The two halves
+/// together made a misspelled flag *disappear*: `batch delete --dry-runn a b`
+/// was not a dry run, because the typo did not match, and the typo was not an
+/// operand either, so `a` and `b` were deleted for real by a command the user
+/// had asked only to describe itself. Nothing on screen said otherwise.
+///
+/// The filter was also why a file called `-x` could not be deleted, moved or
+/// copied: our filesystem permits every byte but `/` and NUL in a name, so
+/// such files exist, and `--` is how you name one.
+fn batch_split_args<'a>(
+    parts: &[&'a str],
+) -> Option<(crate::fs::batch::BatchOptions, Vec<&'a str>)> {
     use crate::fs::batch;
-    let parts: Vec<&str> = args.split_whitespace().collect();
-    let sub = parts.first().copied().unwrap_or("");
-    let dry_run = parts.iter().any(|f| *f == "--dry-run" || *f == "-n");
-    let conflict = if parts.contains(&"--overwrite") {
+    let mut dry_run = false;
+    let mut overwrite = false;
+    let mut rename = false;
+    let mut operands: Vec<&'a str> = Vec::new();
+    let mut flags_done = false;
+    for &word in parts {
+        if !flags_done && word == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || word == "-" || !word.starts_with('-') {
+            operands.push(word);
+            continue;
+        }
+        match word {
+            "--dry-run" | "-n" => dry_run = true,
+            "--overwrite" => overwrite = true,
+            "--rename" => rename = true,
+            other => {
+                shell_println!("batch: unrecognized option `{}'", other);
+                set_exit(1);
+                return None;
+            }
+        }
+    }
+    // `--overwrite` beat `--rename` regardless of order before, and still
+    // does; changing which wins is a separate question from refusing typos.
+    let on_conflict = if overwrite {
         batch::ConflictStrategy::Overwrite
-    } else if parts.contains(&"--rename") {
+    } else if rename {
         batch::ConflictStrategy::Rename
     } else {
         batch::ConflictStrategy::Skip
     };
-    let opts = batch::BatchOptions {
-        on_conflict: conflict,
-        dry_run,
+    Some((
+        batch::BatchOptions {
+            on_conflict,
+            dry_run,
+        },
+        operands,
+    ))
+}
+
+/// `batch` — bulk file operations with pattern matching.
+fn cmd_batch(args: &str) {
+    use crate::fs::batch;
+    let all: Vec<&str> = args.split_whitespace().collect();
+    let Some((opts, parts)) = batch_split_args(&all) else {
+        return;
     };
+    let sub = parts.first().copied().unwrap_or("");
+    let dry_run = opts.dry_run;
     match sub {
         "rename" | "ren" => {
             if parts.len() < 4 {
@@ -23212,11 +25366,7 @@ fn cmd_batch(args: &str) {
                 return;
             }
             let dest = resolve_path(parts[1]);
-            let resolved: Vec<PathBuf> = parts[2..]
-                .iter()
-                .filter(|f| !f.starts_with('-'))
-                .map(resolve_path)
-                .collect();
+            let resolved: Vec<PathBuf> = parts[2..].iter().map(resolve_path).collect();
             if dry_run {
                 shell_println!("(dry run)");
             }
@@ -23240,11 +25390,7 @@ fn cmd_batch(args: &str) {
                 return;
             }
             let dest = resolve_path(parts[1]);
-            let resolved: Vec<PathBuf> = parts[2..]
-                .iter()
-                .filter(|f| !f.starts_with('-'))
-                .map(resolve_path)
-                .collect();
+            let resolved: Vec<PathBuf> = parts[2..].iter().map(resolve_path).collect();
             if dry_run {
                 shell_println!("(dry run)");
             }
@@ -23262,11 +25408,7 @@ fn cmd_batch(args: &str) {
                 set_exit(1);
                 return;
             }
-            let resolved: Vec<PathBuf> = parts[1..]
-                .iter()
-                .filter(|f| !f.starts_with('-'))
-                .map(resolve_path)
-                .collect();
+            let resolved: Vec<PathBuf> = parts[1..].iter().map(resolve_path).collect();
             if dry_run {
                 shell_println!("(dry run)");
             }
@@ -23626,7 +25768,10 @@ fn cmd_fspolicy(args: &str) {
             };
             match policy::get_setting(key) {
                 Some(val) => shell_println!("{} = {}", key, val),
-                None => shell_println!("Unknown setting: {}", key),
+                None => {
+                    shell_println!("Unknown setting: {}", key);
+                    set_exit(1);
+                }
             }
         }
         "set" => {
@@ -24073,7 +26218,10 @@ fn cmd_atime(args: &str) {
                     atime::add_override(path, p);
                     shell_println!("Override: {} → {}", path, p.label());
                 }
-                None => shell_println!("Unknown policy: {}", parts[2]),
+                None => {
+                    shell_println!("Unknown policy: {}", parts[2]);
+                    set_exit(1);
+                }
             }
         }
         "unmount" | "remove" => {
@@ -24525,7 +26673,8 @@ fn cmd_fstrim(args: &str) {
                         shell_println!("TRIM mode set to: {}", mode.label());
                     }
                     None => {
-                        shell_println!("Unknown mode: {} (manual, periodic, continuous)", mode_str)
+                        shell_println!("Unknown mode: {} (manual, periodic, continuous)", mode_str);
+                        set_exit(1);
                     }
                 }
             } else {
@@ -24846,37 +26995,84 @@ fn cmd_lsplus(args: &str) {
     let mut show_stats = false;
 
     let mut i = 0;
-    while i < parts.len() {
-        match parts[i] {
+    let mut flags_done = false;
+    let mut have_dir = false;
+    while let Some(&word) = parts.get(i) {
+        if !flags_done && word == "--" {
+            flags_done = true;
+            i += 1;
+            continue;
+        }
+        if flags_done || word == "-" || !word.starts_with('-') {
+            // A second directory used to be dropped on the floor, so
+            // `lsplus /a /b` listed `/a` and never said `/b` was ignored.
+            if have_dir {
+                shell_println!("lsplus: extra operand `{}' (one directory at a time)", word);
+                set_exit(1);
+                return;
+            }
+            dir_path = resolve_path(word);
+            have_dir = true;
+            i += 1;
+            continue;
+        }
+        // The value-taking flags below share one failure: a value that could
+        // not be understood used to become the *default*, and both defaults
+        // (`SortOrder::Name`, `TypeFilter::All`) look like a successful
+        // listing. `--type fil` silently listed directories too.
+        match word {
             "-s" | "--sort" => {
-                if let Some(&val) = parts.get(i + 1) {
-                    sort = SortOrder::from_name(val).unwrap_or(SortOrder::Name);
-                    i += 1;
-                }
+                i += 1;
+                let Some(&val) = parts.get(i) else {
+                    shell_println!("lsplus: {} requires a sort order", word);
+                    set_exit(1);
+                    return;
+                };
+                let Some(order) = SortOrder::from_name(val) else {
+                    shell_println!("lsplus: {}: `{}' is not a sort order", word, val);
+                    set_exit(1);
+                    return;
+                };
+                sort = order;
             }
             "-t" | "--type" => {
-                if let Some(&val) = parts.get(i + 1) {
-                    type_filter = match val {
-                        "file" | "f" => TypeFilter::FilesOnly,
-                        "dir" | "d" => TypeFilter::DirsOnly,
-                        "link" | "l" => TypeFilter::SymlinksOnly,
-                        _ => TypeFilter::All,
-                    };
-                    i += 1;
-                }
+                i += 1;
+                let Some(&val) = parts.get(i) else {
+                    shell_println!("lsplus: {} requires a type", word);
+                    set_exit(1);
+                    return;
+                };
+                type_filter = match val {
+                    "file" | "f" => TypeFilter::FilesOnly,
+                    "dir" | "d" => TypeFilter::DirsOnly,
+                    "link" | "l" => TypeFilter::SymlinksOnly,
+                    "all" | "a" => TypeFilter::All,
+                    _ => {
+                        shell_println!(
+                            "lsplus: {}: `{}' is not a type (file/dir/link/all)",
+                            word,
+                            val
+                        );
+                        set_exit(1);
+                        return;
+                    }
+                };
             }
             "-p" | "--pattern" => {
-                if let Some(&val) = parts.get(i + 1) {
-                    pattern = val.as_bytes().to_vec();
-                    i += 1;
-                }
+                i += 1;
+                let Some(&val) = parts.get(i) else {
+                    shell_println!("lsplus: {} requires a pattern", word);
+                    set_exit(1);
+                    return;
+                };
+                pattern = val.as_bytes().to_vec();
             }
             "-A" => show_hidden = false,
             "--stats" => show_stats = true,
             other => {
-                if dir_path.is_empty() {
-                    dir_path = resolve_path(other);
-                }
+                shell_println!("lsplus: unrecognized option `{}'", other);
+                set_exit(1);
+                return;
             }
         }
         i += 1;
@@ -25188,24 +27384,48 @@ fn cmd_recent(args: &str) {
             let mut limit: usize = 20;
             let mut type_filter: Option<AccessType> = None;
             let mut i = if sub == "list" || sub == "show" { 1 } else { 0 };
-            while i < parts.len() {
-                match parts[i] {
+            // No operands here — the subcommand is already consumed — so
+            // every remaining word is a flag or a mistake. `--type` in
+            // particular used to fall back to `None`, which is *no filter*:
+            // a misspelled type listed everything and looked like it worked.
+            while let Some(&word) = parts.get(i) {
+                match word {
                     "-n" | "--limit" => {
-                        if let Some(n_str) = parts.get(i + 1) {
-                            if let Ok(n) = n_str.parse::<usize>() {
-                                limit = n;
-                            }
-                        }
+                        let Some(&n_str) = parts.get(i + 1) else {
+                            shell_println!("recent: {} requires a count", word);
+                            set_exit(1);
+                            return;
+                        };
+                        let Ok(n) = n_str.parse::<usize>() else {
+                            shell_println!("recent: {}: `{}' is not a count", word, n_str);
+                            set_exit(1);
+                            return;
+                        };
+                        limit = n;
                         i += 2;
                     }
                     "-t" | "--type" => {
-                        if let Some(t_str) = parts.get(i + 1) {
-                            type_filter = AccessType::from_name(t_str);
-                        }
+                        let Some(&t_str) = parts.get(i + 1) else {
+                            shell_println!("recent: {} requires a type", word);
+                            set_exit(1);
+                            return;
+                        };
+                        let Some(t) = AccessType::from_name(t_str) else {
+                            shell_println!(
+                                "recent: {}: `{}' is not a type (open/modify/create/exec)",
+                                word,
+                                t_str
+                            );
+                            set_exit(1);
+                            return;
+                        };
+                        type_filter = Some(t);
                         i += 2;
                     }
-                    _ => {
-                        i += 1;
+                    other => {
+                        shell_println!("recent: unrecognized argument `{}'", other);
+                        set_exit(1);
+                        return;
                     }
                 }
             }
@@ -25308,7 +27528,10 @@ fn cmd_recent(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: recent exclude <add|remove|list> [prefix]"),
+                _ => {
+                    shell_println!("Usage: recent exclude <add|remove|list> [prefix]");
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -25428,6 +27651,26 @@ fn cmd_fileinfo(args: &str) {
     }
 }
 
+/// The optional trailing `max-depth` operand shared by `fswalk count`, `size`
+/// and `find`.
+///
+/// `None` for the operand means it was omitted, and 64 — deep enough to reach
+/// the bottom of any tree this shell will meet — is then the right answer.
+/// A *present but unreadable* operand is a different thing entirely, and used
+/// to get the same 64: `fswalk count / 2` was fine, `fswalk count / two`
+/// walked the whole filesystem and said nothing about why.
+fn fswalk_depth_operand(word: Option<&str>) -> Option<usize> {
+    let Some(w) = word else { return Some(64) };
+    match w.parse::<usize>() {
+        Ok(d) => Some(d),
+        Err(_) => {
+            shell_println!("fswalk: `{}' is not a max-depth", w);
+            set_exit(1);
+            None
+        }
+    }
+}
+
 fn cmd_fswalk(args: &str) {
     use crate::fs::fswalk::{self, WalkFilter, WalkOptions, WalkOrder};
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -25450,10 +27693,9 @@ fn cmd_fswalk(args: &str) {
             } else {
                 get_cwd()
             };
-            let depth = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(64);
+            let Some(depth) = fswalk_depth_operand(parts.get(2).copied()) else {
+                return;
+            };
             match fswalk::count(&path, depth) {
                 Ok((files, dirs)) => {
                     shell_println!("{}: {} files, {} dirs", path.display(), files, dirs);
@@ -25470,10 +27712,9 @@ fn cmd_fswalk(args: &str) {
             } else {
                 get_cwd()
             };
-            let depth = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(64);
+            let Some(depth) = fswalk_depth_operand(parts.get(2).copied()) else {
+                return;
+            };
             match fswalk::total_size(&path, depth) {
                 Ok(size) => {
                     shell_println!("{}: {} bytes", path.display(), size);
@@ -25496,10 +27737,9 @@ fn cmd_fswalk(args: &str) {
             } else {
                 get_cwd()
             };
-            let depth = parts
-                .get(3)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(64);
+            let Some(depth) = fswalk_depth_operand(parts.get(3).copied()) else {
+                return;
+            };
             match fswalk::find(&path, pattern, depth) {
                 Ok(files) => {
                     if files.is_empty() {
@@ -25572,20 +27812,40 @@ fn cmd_fswalk(args: &str) {
                 limit: 100,
                 ..Default::default()
             };
-            // Parse extra options.
+            // Parse extra options. The path is `parts[0]`, so from here on
+            // every word is a flag: one that is not recognised used to be
+            // stepped over, and `--depth abc` used to leave the depth at its
+            // default of 3 — a *shallower* walk than asked for, reported as
+            // a complete one.
             let mut i = 1;
-            while i < parts.len() {
-                match parts[i] {
+            while let Some(&word) = parts.get(i) {
+                match word {
                     "-d" | "--depth" => {
-                        if let Some(d) = parts.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
-                            opts.max_depth = d;
-                        }
+                        let Some(&v) = parts.get(i + 1) else {
+                            shell_println!("fswalk: {} requires a depth", word);
+                            set_exit(1);
+                            return;
+                        };
+                        let Ok(d) = v.parse::<usize>() else {
+                            shell_println!("fswalk: {}: `{}' is not a depth", word, v);
+                            set_exit(1);
+                            return;
+                        };
+                        opts.max_depth = d;
                         i += 2;
                     }
                     "-n" | "--limit" => {
-                        if let Some(n) = parts.get(i + 1).and_then(|s| s.parse::<usize>().ok()) {
-                            opts.limit = n;
-                        }
+                        let Some(&v) = parts.get(i + 1) else {
+                            shell_println!("fswalk: {} requires a count", word);
+                            set_exit(1);
+                            return;
+                        };
+                        let Ok(n) = v.parse::<usize>() else {
+                            shell_println!("fswalk: {}: `{}' is not a count", word, v);
+                            set_exit(1);
+                            return;
+                        };
+                        opts.limit = n;
                         i += 2;
                     }
                     "-f" | "--files" => {
@@ -25605,13 +27865,18 @@ fn cmd_fswalk(args: &str) {
                         i += 1;
                     }
                     "-p" | "--pattern" => {
-                        if let Some(p) = parts.get(i + 1) {
-                            opts.pattern = p.as_bytes().to_vec();
-                        }
+                        let Some(&p) = parts.get(i + 1) else {
+                            shell_println!("fswalk: {} requires a pattern", word);
+                            set_exit(1);
+                            return;
+                        };
+                        opts.pattern = p.as_bytes().to_vec();
                         i += 2;
                     }
-                    _ => {
-                        i += 1;
+                    other => {
+                        shell_println!("fswalk: unrecognized argument `{}'", other);
+                        set_exit(1);
+                        return;
                     }
                 }
             }
@@ -26656,6 +28921,49 @@ fn cmd_dragdrop(args: &str) {
 }
 
 /// `fileops` — bulk file operations engine.
+/// Split `fileops copy`/`move` arguments into a conflict policy and the
+/// operand list, refusing any flag the subcommand does not have.
+///
+/// The operands used to be "everything that was not one of the flags", which
+/// meant a mistyped flag became a *path*. Because the last operand is the
+/// destination, `fileops copy a b --overwite` copied `a` and `b` to a
+/// directory literally named `--overwite` — and did it with the default
+/// rename-on-conflict policy, so nothing failed and nothing was said.
+/// `--merge` is worse still: it is a real flag for `copy` and not for `move`,
+/// so `fileops move a b --merge` silently used `--merge` as the destination.
+fn fileops_split_args<'a>(
+    sub: &str,
+    parts: &[&'a str],
+    allow_merge: bool,
+) -> Option<(crate::fs::fileops::ConflictPolicy, Vec<&'a str>)> {
+    use crate::fs::fileops::ConflictPolicy;
+    let mut policy = ConflictPolicy::AutoRename;
+    let mut operands: Vec<&'a str> = Vec::new();
+    let mut flags_done = false;
+    for &p in parts.iter().skip(1) {
+        if !flags_done && p == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || p == "-" || !p.starts_with('-') {
+            operands.push(p);
+            continue;
+        }
+        match p {
+            "--overwrite" | "-o" => policy = ConflictPolicy::Overwrite,
+            "--skip" | "-s" => policy = ConflictPolicy::Skip,
+            "--rename" | "-r" => policy = ConflictPolicy::AutoRename,
+            "--merge" | "-m" if allow_merge => policy = ConflictPolicy::MergeDir,
+            other => {
+                shell_println!("fileops {}: unrecognized option `{}'", sub, other);
+                set_exit(1);
+                return None;
+            }
+        }
+    }
+    Some((policy, operands))
+}
+
 fn cmd_fileops(args: &str) {
     use crate::fs::fileops;
     let parts: Vec<&str> = args.split_whitespace().collect();
@@ -26671,19 +28979,11 @@ fn cmd_fileops(args: &str) {
                 return;
             }
             let mut sources = Vec::new();
-            let mut policy = fileops::ConflictPolicy::AutoRename;
-
-            // Parse: everything except last non-flag arg is a source, last non-flag is dest.
-            let mut non_flags: Vec<&str> = Vec::new();
-            for &p in parts.iter().skip(1) {
-                match p {
-                    "--overwrite" | "-o" => policy = fileops::ConflictPolicy::Overwrite,
-                    "--skip" | "-s" => policy = fileops::ConflictPolicy::Skip,
-                    "--rename" | "-r" => policy = fileops::ConflictPolicy::AutoRename,
-                    "--merge" | "-m" => policy = fileops::ConflictPolicy::MergeDir,
-                    _ => non_flags.push(p),
-                }
-            }
+            // Everything before the last operand is a source; the last is the
+            // destination.
+            let Some((policy, non_flags)) = fileops_split_args(sub, &parts, true) else {
+                return;
+            };
 
             if non_flags.len() < 2 {
                 shell_println!("Need at least one source and one destination.");
@@ -26731,17 +29031,10 @@ fn cmd_fileops(args: &str) {
                 set_exit(1);
                 return;
             }
-            let mut policy = fileops::ConflictPolicy::AutoRename;
-            let mut non_flags: Vec<&str> = Vec::new();
-
-            for &p in parts.iter().skip(1) {
-                match p {
-                    "--overwrite" | "-o" => policy = fileops::ConflictPolicy::Overwrite,
-                    "--skip" | "-s" => policy = fileops::ConflictPolicy::Skip,
-                    "--rename" | "-r" => policy = fileops::ConflictPolicy::AutoRename,
-                    _ => non_flags.push(p),
-                }
-            }
+            // `move` has no `--merge`: a directory merge is a copy semantic.
+            let Some((policy, non_flags)) = fileops_split_args(sub, &parts, false) else {
+                return;
+            };
 
             if non_flags.len() < 2 {
                 shell_println!("Need at least one source and one destination.");
@@ -27682,7 +29975,15 @@ fn cmd_toolbar(args: &str) {
                     "--forward" => ctx.can_go_forward = true,
                     "--search" => ctx.is_searching = true,
                     "--hidden" => ctx.show_hidden = true,
-                    _ => {}
+                    // Every flag here turns a button *on*, so a dropped one
+                    // produced a toolbar missing exactly the button that was
+                    // asked for — indistinguishable from that button not
+                    // existing.
+                    other => {
+                        shell_println!("toolbar: unrecognized option `{}'", other);
+                        set_exit(1);
+                        return;
+                    }
                 }
             }
             let layout = toolbar::build(&ctx);
@@ -28087,7 +30388,10 @@ fn cmd_queryable(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: qattr index <create|drop|list> [attr_name]"),
+                _ => {
+                    shell_println!("Usage: qattr index <create|drop|list> [attr_name]");
+                    set_exit(1);
+                }
             }
         }
         "schema" => {
@@ -28125,7 +30429,10 @@ fn cmd_queryable(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: qattr schema <init|list>"),
+                _ => {
+                    shell_println!("Usage: qattr schema <init|list>");
+                    set_exit(1);
+                }
             }
         }
         "test" => match queryable::self_test() {
@@ -28462,7 +30769,10 @@ fn cmd_rundialog(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: rundialog alias <add|rm|list>"),
+                _ => {
+                    shell_println!("Usage: rundialog alias <add|rm|list>");
+                    set_exit(1);
+                }
             }
         }
         "bookmark" | "bm" => {
@@ -28511,7 +30821,10 @@ fn cmd_rundialog(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: rundialog bookmark <add|rm|list>"),
+                _ => {
+                    shell_println!("Usage: rundialog bookmark <add|rm|list>");
+                    set_exit(1);
+                }
             }
         }
         "path" => {
@@ -28539,7 +30852,10 @@ fn cmd_rundialog(args: &str) {
                     rundialog::clear_path_cache();
                     shell_println!("PATH cache cleared");
                 }
-                _ => shell_println!("Usage: rundialog path <show|refresh|clear>"),
+                _ => {
+                    shell_println!("Usage: rundialog path <show|refresh|clear>");
+                    set_exit(1);
+                }
             }
         }
         "init" => match rundialog::init_defaults() {
@@ -28940,7 +31256,10 @@ fn cmd_appregistry(args: &str) {
                         }
                     }
                 }
-                None => shell_println!("Unknown category: {}", cat_name),
+                None => {
+                    shell_println!("Unknown category: {}", cat_name);
+                    set_exit(1);
+                }
             }
         }
         "mime" => {
@@ -29094,7 +31413,10 @@ fn cmd_theme(args: &str) {
                     theme::set_accent(c);
                     shell_println!("Accent set: {}", c.to_hex());
                 }
-                None => shell_println!("Invalid hex color: {}", hex),
+                None => {
+                    shell_println!("Invalid hex color: {}", hex);
+                    set_exit(1);
+                }
             }
         }
         "color" | "get" => {
@@ -29112,7 +31434,10 @@ fn cmd_theme(args: &str) {
                     let c = theme::color(role);
                     shell_println!("{}: {}", role.label(), c.to_hex());
                 }
-                None => shell_println!("Unknown role: {}", role_str),
+                None => {
+                    shell_println!("Unknown role: {}", role_str);
+                    set_exit(1);
+                }
             }
         }
         "set" => {
@@ -29154,7 +31479,10 @@ fn cmd_theme(args: &str) {
                     theme::clear_override(role);
                     shell_println!("Override cleared: {}", role.label());
                 }
-                None => shell_println!("Unknown role: {}", role_str),
+                None => {
+                    shell_println!("Unknown role: {}", role_str);
+                    set_exit(1);
+                }
             }
         }
         "overrides" => {
@@ -29409,7 +31737,10 @@ fn cmd_hotkey(args: &str) {
                     Some(combo) => shell_println!("{} → {}", combo.display(), action.label()),
                     None => shell_println!("No binding for: {}", action_str),
                 },
-                None => shell_println!("Unknown action: {}", action_str),
+                None => {
+                    shell_println!("Unknown action: {}", action_str);
+                    set_exit(1);
+                }
             }
         }
         "search" => {
@@ -30290,6 +32621,7 @@ fn cmd_wallpaper(args: &str) {
             let color = parts.get(1).copied().unwrap_or("");
             if color.is_empty() {
                 shell_println!("Usage: wallpaper bgcolor <#hex>");
+                set_exit(1);
             } else {
                 wallpaper::set_background_color(color);
                 shell_println!("Background color: {}", color);
@@ -30305,7 +32637,16 @@ fn cmd_wallpaper(args: &str) {
                     x.clamp(0.0, 1.0),
                     y.clamp(0.0, 1.0)
                 );
+            } else if parts.get(1).is_some() {
+                // Arguments were supplied and at least one did not parse as a
+                // float, so the offset was not moved. This also catches
+                // `wallpaper offset 0.5` with the second coordinate missing --
+                // a pair is required, and half of one is not a query.
+                shell_println!("wallpaper: offset needs two numbers in 0.0-1.0");
+                shell_println!("Usage: wallpaper offset <x 0.0-1.0> <y 0.0-1.0>");
+                set_exit(1);
             } else {
+                // Bare `wallpaper offset` is a query, and this is its answer.
                 let cfg = wallpaper::current();
                 shell_println!("Offset: ({:.2}, {:.2})", cfg.offset_x, cfg.offset_y);
                 shell_println!("Usage: wallpaper offset <x 0.0-1.0> <y 0.0-1.0>");
@@ -30718,6 +33059,7 @@ fn cmd_credentials(args: &str) {
             let app = parts.get(1).copied().unwrap_or("");
             if app.is_empty() {
                 shell_println!("Usage: cred deleteapp <app_id>");
+                set_exit(1);
             } else {
                 let n = credentials::delete_app(app);
                 shell_println!("Deleted {} credential(s) for '{}'", n, app);
@@ -30764,6 +33106,7 @@ fn cmd_credentials(args: &str) {
             };
             if query.is_empty() {
                 shell_println!("Usage: cred search <query>");
+                set_exit(1);
             } else {
                 let results = credentials::search(&query);
                 if results.is_empty() {
@@ -31656,6 +33999,7 @@ fn cmd_vdesktop(args: &str) {
                 .unwrap_or(0);
             if wid == 0 {
                 shell_println!("Usage: vd where <window_id>");
+                set_exit(1);
             } else {
                 match vdesktop::desktop_of(wid) {
                     Some(did) => shell_println!("Window {} on desktop #{}", wid, did),
@@ -32886,6 +35230,7 @@ fn cmd_ime(args: &str) {
             let emoji = parts.get(1).copied().unwrap_or("");
             if emoji.is_empty() {
                 shell_println!("Usage: ime pick <emoji>");
+                set_exit(1);
             } else {
                 ime::select_emoji(emoji);
                 shell_println!("Selected: {}", emoji);
@@ -33090,6 +35435,7 @@ fn cmd_netindicator(args: &str) {
                 .unwrap_or(6);
             if ssid.is_empty() {
                 shell_println!("Usage: netind report <ssid> [signal] [security] [channel]");
+                set_exit(1);
             } else {
                 netindicator::report_wifi(ssid, sig, sec, ch, 2437);
                 shell_println!("Reported {} {}% {}", ssid, sig, sec.label());
@@ -33121,6 +35467,7 @@ fn cmd_netindicator(args: &str) {
             let ssid = parts.get(1).copied().unwrap_or("");
             if ssid.is_empty() {
                 shell_println!("Usage: netind save <ssid>");
+                set_exit(1);
             } else {
                 let _ = netindicator::save_profile(ssid, netindicator::WifiSecurity::WPA2, true);
                 shell_println!("Saved profile for {}", ssid);
@@ -33174,6 +35521,7 @@ fn cmd_netindicator(args: &str) {
                 let servers: Vec<&str> = parts[2..].to_vec();
                 if servers.is_empty() {
                     shell_println!("Usage: netind dns manual <server1> [server2]");
+                    set_exit(1);
                 } else {
                     let _ = netindicator::set_dns_manual(&servers);
                     shell_println!("DNS: manual {:?}", servers);
@@ -34624,6 +36972,7 @@ fn cmd_detailcols(args: &str) {
             let types: Vec<&str> = parts[1..].to_vec();
             if types.is_empty() {
                 shell_println!("Usage: dcols query <mime> [mime...]");
+                set_exit(1);
             } else {
                 let cols = detailcols::columns_for_types(&types);
                 shell_println!("Columns for {:?}:", types);
@@ -35762,7 +38111,10 @@ fn cmd_useracct(args: &str) {
                                 set_exit(1);
                             }
                         },
-                        _ => shell_println!("Invalid uid/gid"),
+                        _ => {
+                            shell_println!("Invalid uid/gid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -35782,7 +38134,10 @@ fn cmd_useracct(args: &str) {
                                 set_exit(1);
                             }
                         },
-                        _ => shell_println!("Invalid uid/gid"),
+                        _ => {
+                            shell_println!("Invalid uid/gid");
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36051,7 +38406,10 @@ fn cmd_progmgr(args: &str) {
                                 set_exit(1);
                             }
                         },
-                        None => shell_println!("Unknown capability: {}", parts[2]),
+                        None => {
+                            shell_println!("Unknown capability: {}", parts[2]);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36089,7 +38447,10 @@ fn cmd_progmgr(args: &str) {
                                 set_exit(1);
                             }
                         },
-                        None => shell_println!("Unknown capability: {}", parts[2]),
+                        None => {
+                            shell_println!("Unknown capability: {}", parts[2]);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36230,7 +38591,10 @@ fn cmd_progmgr(args: &str) {
                                 }
                             }
                         }
-                        _ => shell_println!("Unknown field: {}", parts[3]),
+                        _ => {
+                            shell_println!("Unknown field: {}", parts[3]);
+                            set_exit(1);
+                        }
                     }
                 }
             }
@@ -36739,13 +39103,17 @@ fn cmd_scriptlang(args: &str) {
                             }
                         }
                     }
-                    _ => shell_println!("Invalid arguments"),
+                    _ => {
+                        shell_println!("Invalid arguments");
+                        set_exit(1);
+                    }
                 }
             }
         }
         "lookup" => {
             if parts.len() < 2 {
                 shell_println!("Usage: scriptlang lookup <extension>");
+                set_exit(1);
             } else {
                 match scriptlang::engine_for_extension(parts[1]) {
                     Some(e) => shell_println!(
@@ -37778,7 +40146,10 @@ fn cmd_swapcfg(args: &str) {
                             set_exit(1);
                         }
                     },
-                    _ => shell_println!("Invalid arguments"),
+                    _ => {
+                        shell_println!("Invalid arguments");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -37794,7 +40165,10 @@ fn cmd_swapcfg(args: &str) {
                             set_exit(1);
                         }
                     },
-                    _ => shell_println!("Invalid arguments"),
+                    _ => {
+                        shell_println!("Invalid arguments");
+                        set_exit(1);
+                    }
                 }
             }
         }
@@ -37877,7 +40251,7 @@ fn cmd_swapcfg(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("swapcfg — swap space configuration");
             shell_println!("  show             Show configuration");
             shell_println!("  list             List swap areas");
@@ -37894,8 +40268,99 @@ fn cmd_swapcfg(args: &str) {
             shell_println!("  stats            Show statistics");
             shell_println!("  init             Load defaults");
             shell_println!("  test             Run self-tests");
+            end_help_arm("swapcfg", other);
         }
     }
+}
+
+/// The numeric id that a `<cmd> <sub> <id> …` shell command takes as its first
+/// operand — read, or refused with a diagnostic naming the word that failed.
+///
+/// Forty-two subcommand arms across `fstune`, `certmgr`, `installer` and
+/// `fontmgr` each wrote this as
+/// `parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0)`, which folds two
+/// different mistakes into one silent answer: an id the user *omitted* and an id
+/// the user *mistyped* both became id 0. So `installer remove abc` did not
+/// refuse — it removed whatever session 0 happened to be, reported "Removed",
+/// and exited 0. The mistyped case is the dangerous one, because the user has a
+/// specific object in mind and gets a different one.
+///
+/// Neither case has a defensible default: the operand does not configure the
+/// action, it names *which object* to act on, and there is no object the user
+/// can be assumed to have meant. Both are therefore errors
+/// (design-decisions.md §600 — no value is guessed for a word that could not be
+/// read).
+///
+/// `noun` names the thing for the diagnostic ("session", "profile",
+/// "certificate", "font"), so the message says which id-space the word was
+/// judged against rather than the bare "is not a number".
+fn required_id(parts: &[&str], cmd: &str, sub: &str, noun: &str) -> Option<u64> {
+    let Some(word) = parts.get(1) else {
+        shell_println!("{}: {}: missing {} id", cmd, sub, noun);
+        set_exit(1);
+        return None;
+    };
+    let Ok(id) = word.parse::<u64>() else {
+        shell_println!("{}: {}: `{}' is not a {} id", cmd, sub, word, noun);
+        set_exit(1);
+        return None;
+    };
+    Some(id)
+}
+
+/// A numeric operand that the subcommand cannot do without: both an absent word
+/// and an unreadable one are refused.
+///
+/// The sites this replaces wrote `…parse().ok().unwrap_or(0)`, so
+/// `fstune blocksize 3 4o96` (letter O) set the block size to **zero** and said
+/// "Block size set to 0". Zero is not a plausible reading of any word the user
+/// typed here; it is the shape of a value chosen because none could be read.
+fn required_u32(parts: &[&str], idx: usize, cmd: &str, sub: &str, noun: &str) -> Option<u32> {
+    let Some(word) = parts.get(idx) else {
+        shell_println!("{}: {}: missing {}", cmd, sub, noun);
+        set_exit(1);
+        return None;
+    };
+    let Ok(v) = word.parse::<u32>() else {
+        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
+/// A numeric operand that may legitimately be omitted, in which case `default`
+/// stands in — but which is still refused when a word *is* present and cannot be
+/// read.
+///
+/// The distinction is the whole point. `installer scaling 3` with no DPI meaning
+/// "96" is a documented default; `installer scaling 3 ninetysix` meaning "96" is
+/// a guess. The old `…parse().ok().unwrap_or(96)` could not tell them apart.
+///
+/// It matters most where the default is a sentinel for *query* mode:
+/// `fontmgr size` prints the current size because the operand is absent, and
+/// `fontmgr size 1l` (letter L) used to print it too — so a typo looked exactly
+/// like a successful set, right down to a plausible-looking size in the output.
+///
+/// Returns `None` only for the refusal, so callers use the same
+/// `let Some(v) = … else { return; }` shape as [`required_u32`].
+fn optional_u32(
+    parts: &[&str],
+    idx: usize,
+    cmd: &str,
+    sub: &str,
+    noun: &str,
+    default: u32,
+) -> Option<u32> {
+    let Some(word) = parts.get(idx) else {
+        return Some(default);
+    };
+    let Ok(v) = word.parse::<u32>() else {
+        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
 }
 
 /// `fstune` — filesystem tuning profiles and parameters.
@@ -37954,7 +40419,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "info" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             match fstune::get_profile(id) {
                 Ok(p) => {
                     shell_println!("ID:              {}", p.id);
@@ -37991,18 +40458,36 @@ fn cmd_fstune(args: &str) {
         "create" => {
             let name = parts.get(1).copied().unwrap_or("unnamed");
             let fs_type = match parts.get(2).copied().unwrap_or("ext4") {
+                "ext4" => fstune::FsType::Ext4,
                 "btrfs" => fstune::FsType::Btrfs,
                 "xfs" => fstune::FsType::Xfs,
                 "f2fs" => fstune::FsType::F2fs,
                 "fat32" => fstune::FsType::Fat32,
-                _ => fstune::FsType::Ext4,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown filesystem type `{}' (ext4, btrfs, xfs, f2fs, fat32)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             let workload = match parts.get(3).copied().unwrap_or("desktop") {
+                "desktop" => fstune::WorkloadType::Desktop,
                 "database" | "db" => fstune::WorkloadType::Database,
                 "server" | "srv" => fstune::WorkloadType::Server,
                 "dev" | "development" => fstune::WorkloadType::Development,
                 "gaming" | "game" => fstune::WorkloadType::Gaming,
-                _ => fstune::WorkloadType::Desktop,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown workload `{}' (desktop, database, server, dev, gaming)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match fstune::create_profile(name, fs_type, workload) {
                 Ok(id) => shell_println!("Created profile {} (ID {})", name, id),
@@ -38013,7 +40498,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "remove" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             match fstune::remove_profile(id) {
                 Ok(()) => shell_println!("Removed"),
                 Err(e) => {
@@ -38023,13 +40510,24 @@ fn cmd_fstune(args: &str) {
             }
         }
         "workload" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let wl = match parts.get(2).copied().unwrap_or("desktop") {
+                "desktop" => fstune::WorkloadType::Desktop,
                 "database" | "db" => fstune::WorkloadType::Database,
                 "server" | "srv" => fstune::WorkloadType::Server,
                 "dev" | "development" => fstune::WorkloadType::Development,
                 "gaming" | "game" => fstune::WorkloadType::Gaming,
-                _ => fstune::WorkloadType::Desktop,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown workload `{}' (desktop, database, server, dev, gaming)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match fstune::apply_workload(id, wl) {
                 Ok(()) => shell_println!("Applied workload preset"),
@@ -38040,8 +40538,12 @@ fn cmd_fstune(args: &str) {
             }
         }
         "blocksize" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let sz: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
+            let Some(sz) = required_u32(&parts, 2, "fstune", sub, "block size") else {
+                return;
+            };
             match fstune::set_block_size(id, sz) {
                 Ok(()) => shell_println!("Block size set to {}", sz),
                 Err(e) => {
@@ -38051,12 +40553,23 @@ fn cmd_fstune(args: &str) {
             }
         }
         "journal" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let mode = match parts.get(2).copied().unwrap_or("ordered") {
+                "ordered" => fstune::JournalMode::Ordered,
                 "journal" | "full" => fstune::JournalMode::Journal,
                 "writeback" | "wb" => fstune::JournalMode::Writeback,
                 "off" | "none" => fstune::JournalMode::Off,
-                _ => fstune::JournalMode::Ordered,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown journal mode `{}' (ordered, journal, writeback, off)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match fstune::set_journal_mode(id, mode) {
                 Ok(()) => shell_println!("Journal mode set"),
@@ -38067,8 +40580,13 @@ fn cmd_fstune(args: &str) {
             }
         }
         "commit" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let secs: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
+            let Some(secs) = required_u32(&parts, 2, "fstune", sub, "commit interval in seconds")
+            else {
+                return;
+            };
             match fstune::set_commit_interval(id, secs) {
                 Ok(()) => shell_println!("Commit interval set to {}s", secs),
                 Err(e) => {
@@ -38078,8 +40596,12 @@ fn cmd_fstune(args: &str) {
             }
         }
         "reserved" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let pct: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
+            let Some(pct) = required_u32(&parts, 2, "fstune", sub, "reserved percentage") else {
+                return;
+            };
             match fstune::set_reserved_pct(id, pct) {
                 Ok(()) => shell_println!("Reserved {}%", pct),
                 Err(e) => {
@@ -38089,8 +40611,12 @@ fn cmd_fstune(args: &str) {
             }
         }
         "inode" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let ratio: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
+            let Some(ratio) = required_u32(&parts, 2, "fstune", sub, "inode ratio") else {
+                return;
+            };
             match fstune::set_inode_ratio(id, ratio) {
                 Ok(()) => shell_println!("Inode ratio set to {}", ratio),
                 Err(e) => {
@@ -38100,11 +40626,22 @@ fn cmd_fstune(args: &str) {
             }
         }
         "alloc" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let strat = match parts.get(2).copied().unwrap_or("spread") {
+                "spread" => fstune::AllocStrategy::Spread,
                 "pack" => fstune::AllocStrategy::Pack,
                 "sequential" | "seq" => fstune::AllocStrategy::Sequential,
-                _ => fstune::AllocStrategy::Spread,
+                other => {
+                    shell_println!(
+                        "fstune {}: unknown allocation strategy `{}' (spread, pack, sequential)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match fstune::set_alloc_strategy(id, strat) {
                 Ok(()) => shell_println!("Alloc strategy set"),
@@ -38115,7 +40652,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "discard" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match fstune::set_discard(id, on) {
                 Ok(()) => shell_println!("Discard {}", if on { "enabled" } else { "disabled" }),
@@ -38126,7 +40665,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "checksum" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match fstune::set_data_checksum(id, on) {
                 Ok(()) => {
@@ -38139,7 +40680,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "compress" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             let algo = parts.get(2).copied().unwrap_or("off");
             if algo == "off" {
                 match fstune::set_compression(id, false, "") {
@@ -38160,7 +40703,9 @@ fn cmd_fstune(args: &str) {
             }
         }
         "apply" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fstune", sub, "profile") else {
+                return;
+            };
             match fstune::mark_applied(id) {
                 Ok(()) => shell_println!("Marked as applied"),
                 Err(e) => {
@@ -38269,7 +40814,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "info" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             match certmgr::get_cert(id) {
                 Ok(c) => {
                     shell_println!("ID:          {}", c.id);
@@ -38312,12 +40859,21 @@ fn cmd_certmgr(args: &str) {
         "import" => {
             let cn = parts.get(1).copied().unwrap_or("unknown");
             let ct = match parts.get(2).copied().unwrap_or("server") {
+                "server" => certmgr::CertType::Server,
                 "root" => certmgr::CertType::Root,
                 "inter" => certmgr::CertType::Intermediate,
                 "client" => certmgr::CertType::Client,
                 "code" => certmgr::CertType::CodeSigning,
                 "self" => certmgr::CertType::SelfSigned,
-                _ => certmgr::CertType::Server,
+                other => {
+                    shell_println!(
+                        "certmgr {}: unknown certificate type `{}' (server, root, inter, client, code, self)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             let cert_path = parts.get(3).copied().unwrap_or("/etc/ssl/certs/cert.pem");
             let key_path = parts.get(4).copied().unwrap_or("");
@@ -38338,7 +40894,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "remove" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             match certmgr::remove_cert(id) {
                 Ok(()) => shell_println!("Removed"),
                 Err(e) => {
@@ -38348,7 +40906,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "san" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let name = parts.get(2).copied().unwrap_or("");
             match certmgr::add_san(id, name) {
                 Ok(()) => shell_println!("SAN added: {}", name),
@@ -38359,7 +40919,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "service" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let svc = parts.get(2).copied().unwrap_or("");
             match certmgr::set_service(id, svc) {
                 Ok(()) => shell_println!("Service set: {}", svc),
@@ -38370,13 +40932,24 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "status" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let st = match parts.get(2).copied().unwrap_or("valid") {
+                "valid" => certmgr::CertStatus::Valid,
                 "expired" => certmgr::CertStatus::Expired,
                 "revoked" => certmgr::CertStatus::Revoked,
                 "disabled" | "off" => certmgr::CertStatus::Disabled,
                 "untrusted" => certmgr::CertStatus::Untrusted,
-                _ => certmgr::CertStatus::Valid,
+                other => {
+                    shell_println!(
+                        "certmgr {}: unknown status `{}' (valid, expired, revoked, disabled, untrusted)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match certmgr::set_status(id, st) {
                 Ok(()) => shell_println!("Status updated"),
@@ -38387,7 +40960,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "autorenew" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match certmgr::set_auto_renew(id, on) {
                 Ok(()) => shell_println!("Auto-renew {}", if on { "enabled" } else { "disabled" }),
@@ -38398,7 +40973,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "pin" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             let on = parts.get(2).copied().unwrap_or("on") != "off";
             match certmgr::set_pinned(id, on) {
                 Ok(()) => shell_println!("{}", if on { "Pinned" } else { "Unpinned" }),
@@ -38409,7 +40986,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "renew" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             match certmgr::renew_cert(id) {
                 Ok(()) => shell_println!("Renewed"),
                 Err(e) => {
@@ -38419,7 +40998,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "threshold" => {
-            let days: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(days) = optional_u32(&parts, 1, "certmgr", sub, "number of days", 0) else {
+                return;
+            };
             if days == 0 {
                 shell_println!("Renewal threshold: {} days", certmgr::renewal_threshold());
             } else {
@@ -38449,7 +41030,9 @@ fn cmd_certmgr(args: &str) {
             }
         }
         "complete" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "certmgr", sub, "certificate") else {
+                return;
+            };
             match certmgr::complete_request(id) {
                 Ok(cid) => shell_println!("Certificate created (ID {})", cid),
                 Err(e) => {
@@ -38555,7 +41138,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "info" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::get_session(id) {
                 Ok(s) => {
                     shell_println!("ID:        {}", s.id);
@@ -38602,9 +41187,18 @@ fn cmd_installer(args: &str) {
         }
         "create" => {
             let mode = match parts.get(1).copied().unwrap_or("easy") {
+                "easy" => installer::InstallMode::Easy,
                 "manual" => installer::InstallMode::Manual,
                 "unattended" | "auto" => installer::InstallMode::Unattended,
-                _ => installer::InstallMode::Easy,
+                other => {
+                    shell_println!(
+                        "installer {}: unknown mode `{}' (easy, manual, unattended)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match installer::create_session(mode) {
                 Ok(id) => shell_println!("Created session {}", id),
@@ -38615,7 +41209,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "remove" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::remove_session(id) {
                 Ok(()) => shell_println!("Removed"),
                 Err(e) => {
@@ -38625,7 +41221,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "keyboard" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let layout = parts.get(2).copied().unwrap_or("us");
             let variant = parts.get(3).copied().unwrap_or("");
             match installer::set_keyboard(id, layout, variant) {
@@ -38637,8 +41235,12 @@ fn cmd_installer(args: &str) {
             }
         }
         "scaling" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let dpi: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(96);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
+            let Some(dpi) = optional_u32(&parts, 2, "installer", sub, "DPI", 96) else {
+                return;
+            };
             match installer::detect_and_set_scaling(id, dpi) {
                 Ok(p) => shell_println!("DPI {} → {:?}", dpi, p),
                 Err(e) => {
@@ -38648,12 +41250,23 @@ fn cmd_installer(args: &str) {
             }
         }
         "workload" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let wl = match parts.get(2).copied().unwrap_or("desktop") {
+                "desktop" => installer::WorkloadType::Desktop,
                 "server" | "srv" => installer::WorkloadType::Server,
                 "dev" | "development" => installer::WorkloadType::Development,
                 "gaming" | "game" => installer::WorkloadType::Gaming,
-                _ => installer::WorkloadType::Desktop,
+                other => {
+                    shell_println!(
+                        "installer {}: unknown workload `{}' (desktop, server, dev, gaming)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match installer::set_workload(id, wl) {
                 Ok(()) => shell_println!("Workload set"),
@@ -38664,14 +41277,32 @@ fn cmd_installer(args: &str) {
             }
         }
         "partition" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let disk = parts.get(2).copied().unwrap_or("/dev/sda");
-            let boot: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(1024);
+            let Some(boot) = optional_u32(&parts, 3, "installer", sub, "boot size in MiB", 1024)
+            else {
+                return;
+            };
             let swap_str = parts.get(4).copied().unwrap_or("file");
+            // `file` means "swap in a file, no partition"; anything else must be
+            // a size in MiB. It used to be `.parse().ok()`, so a mistyped size
+            // fell through to `None` -- indistinguishable, in the plan and in
+            // the output, from having asked for a swap file.
             let swap = if swap_str == "file" {
                 None
             } else {
-                swap_str.parse().ok()
+                let Ok(mib) = swap_str.parse() else {
+                    shell_println!(
+                        "installer {}: `{}' is not a swap size in MiB (or `file')",
+                        sub,
+                        swap_str
+                    );
+                    set_exit(1);
+                    return;
+                };
+                Some(mib)
             };
             match installer::set_partition_plan(
                 id,
@@ -38691,7 +41322,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "check" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::sanity_check(id) {
                 Ok(r) => {
                     shell_println!(
@@ -38712,7 +41345,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "install" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::execute_install(id) {
                 Ok(()) => shell_println!("Installation complete — reboot required"),
                 Err(e) => {
@@ -38722,7 +41357,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "firstboot" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::start_first_boot(id) {
                 Ok(()) => shell_println!("First-boot setup started"),
                 Err(e) => {
@@ -38732,7 +41369,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "timezone" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let tz = parts.get(2).copied().unwrap_or("UTC");
             match installer::set_timezone(id, tz) {
                 Ok(()) => shell_println!("Timezone: {}", tz),
@@ -38743,7 +41382,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "user" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let name = parts.get(2).copied().unwrap_or("user");
             let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
             let auto = parts.get(4).copied().unwrap_or("no") == "yes";
@@ -38756,12 +41397,23 @@ fn cmd_installer(args: &str) {
             }
         }
         "browser" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let br = match parts.get(2).copied().unwrap_or("firefox") {
+                "firefox" => installer::BrowserChoice::Firefox,
                 "chromium" | "chrome" => installer::BrowserChoice::Chromium,
                 "epiphany" | "gnome" => installer::BrowserChoice::Epiphany,
                 "custom" => installer::BrowserChoice::Custom,
-                _ => installer::BrowserChoice::Firefox,
+                other => {
+                    shell_println!(
+                        "installer {}: unknown browser `{}' (firefox, chromium, epiphany, custom)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             match installer::set_browser(id, br) {
                 Ok(()) => shell_println!("Browser set"),
@@ -38772,7 +41424,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "theme" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let mode = parts.get(2).copied().unwrap_or("dark");
             match installer::set_theme(id, mode) {
                 Ok(()) => shell_println!("Theme: {}", mode),
@@ -38783,7 +41437,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "wifi" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let ssid = parts.get(2).copied().unwrap_or("");
             let pass = parts.get(3).copied().unwrap_or("yes") == "yes";
             match installer::set_wifi(id, ssid, pass) {
@@ -38795,7 +41451,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "audio" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             let dev = parts.get(2).copied().unwrap_or("default");
             match installer::set_audio_device(id, dev) {
                 Ok(()) => shell_println!("Audio: {}", dev),
@@ -38806,7 +41464,9 @@ fn cmd_installer(args: &str) {
             }
         }
         "complete" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "installer", sub, "session") else {
+                return;
+            };
             match installer::complete_first_boot(id) {
                 Ok(()) => shell_println!("First-boot complete"),
                 Err(e) => {
@@ -39042,14 +41702,26 @@ fn cmd_fontmgr(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "list" => {
+            // `None` here means "every category", which is exactly what `all`
+            // asks for -- so an unknown category used to *widen* the listing
+            // rather than refuse it, and looked like it had worked.
             let cat = match parts.get(1).copied().unwrap_or("all") {
+                "all" => None,
                 "sans" => Some(fontmgr::FontCategory::SansSerif),
                 "serif" => Some(fontmgr::FontCategory::Serif),
                 "mono" => Some(fontmgr::FontCategory::Monospace),
                 "display" => Some(fontmgr::FontCategory::Display),
                 "hand" => Some(fontmgr::FontCategory::Handwriting),
                 "symbol" => Some(fontmgr::FontCategory::Symbol),
-                _ => None,
+                other => {
+                    shell_println!(
+                        "fontmgr {}: unknown category `{}' (all, sans, serif, mono, display, hand, symbol)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             let fonts = fontmgr::list_fonts(cat);
             if fonts.is_empty() {
@@ -39102,7 +41774,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "info" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fontmgr", sub, "font") else {
+                return;
+            };
             match fontmgr::get_font(id) {
                 Ok(f) => {
                     shell_println!("ID:       {}", f.id);
@@ -39142,7 +41816,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "uninstall" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fontmgr", sub, "font") else {
+                return;
+            };
             match fontmgr::uninstall_font(id) {
                 Ok(()) => shell_println!("Uninstalled"),
                 Err(e) => {
@@ -39152,7 +41828,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "enable" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fontmgr", sub, "font") else {
+                return;
+            };
             match fontmgr::set_enabled(id, true) {
                 Ok(()) => shell_println!("Enabled"),
                 Err(e) => {
@@ -39162,7 +41840,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "disable" => {
-            let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(id) = required_id(&parts, "fontmgr", sub, "font") else {
+                return;
+            };
             match fontmgr::set_enabled(id, false) {
                 Ok(()) => shell_println!("Disabled"),
                 Err(e) => {
@@ -39173,11 +41853,20 @@ fn cmd_fontmgr(args: &str) {
         }
         "default" => {
             let role = match parts.get(1).copied().unwrap_or("ui") {
+                "ui" => fontmgr::FontRole::Ui,
                 "doc" | "document" => fontmgr::FontRole::Document,
                 "mono" | "monospace" => fontmgr::FontRole::Monospace,
                 "title" | "titlebar" => fontmgr::FontRole::Titlebar,
                 "fallback" => fontmgr::FontRole::Fallback,
-                _ => fontmgr::FontRole::Ui,
+                other => {
+                    shell_println!(
+                        "fontmgr {}: unknown role `{}' (ui, doc, mono, title, fallback)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             };
             let family = parts.get(2).copied().unwrap_or("");
             if family.is_empty() {
@@ -39198,7 +41887,9 @@ fn cmd_fontmgr(args: &str) {
             }
         }
         "size" => {
-            let pt: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(pt) = optional_u32(&parts, 1, "fontmgr", sub, "size in points", 0) else {
+                return;
+            };
             if pt == 0 {
                 shell_println!("Size: {} pt", fontmgr::render_settings().global_size_pt);
             } else {
@@ -39213,23 +41904,43 @@ fn cmd_fontmgr(args: &str) {
         }
         "hint" => {
             match parts.get(1).copied().unwrap_or("slight") {
+                "slight" => fontmgr::set_hint_mode(fontmgr::HintMode::Slight),
                 "none" => fontmgr::set_hint_mode(fontmgr::HintMode::None),
                 "medium" | "med" => fontmgr::set_hint_mode(fontmgr::HintMode::Medium),
                 "full" => fontmgr::set_hint_mode(fontmgr::HintMode::Full),
-                _ => fontmgr::set_hint_mode(fontmgr::HintMode::Slight),
+                other => {
+                    shell_println!(
+                        "fontmgr {}: unknown hint mode `{}' (slight, none, medium, full)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             }
             shell_println!("Hinting set");
         }
         "antialias" | "aa" => {
             match parts.get(1).copied().unwrap_or("subpixel") {
+                "subpixel" => fontmgr::set_antialias(fontmgr::AntialiasMode::Subpixel),
                 "none" | "off" => fontmgr::set_antialias(fontmgr::AntialiasMode::None),
                 "gray" | "grayscale" => fontmgr::set_antialias(fontmgr::AntialiasMode::Grayscale),
-                _ => fontmgr::set_antialias(fontmgr::AntialiasMode::Subpixel),
+                other => {
+                    shell_println!(
+                        "fontmgr {}: unknown antialias mode `{}' (subpixel, none, gray)",
+                        sub,
+                        other
+                    );
+                    set_exit(1);
+                    return;
+                }
             }
             shell_println!("Antialiasing set");
         }
         "dpi" => {
-            let dpi: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let Some(dpi) = optional_u32(&parts, 1, "fontmgr", sub, "DPI", 0) else {
+                return;
+            };
             if dpi == 0 {
                 shell_println!("DPI: {}", fontmgr::render_settings().dpi);
             } else {
@@ -42343,7 +45054,10 @@ fn cmd_loginscreen(args: &str) {
                 loginscreen::set_background_image(path);
                 shell_println!("Set background image to {}.", path);
             }
-            None => shell_println!("Usage: loginscreen image <path>"),
+            None => {
+                shell_println!("Usage: loginscreen image <path>");
+                set_exit(1);
+            }
         },
         "sync" => {
             loginscreen::sync_with_desktop();
@@ -42437,7 +45151,10 @@ fn cmd_loginscreen(args: &str) {
                 loginscreen::set_logo(path);
                 shell_println!("Set logo to {}.", path);
             }
-            None => shell_println!("Usage: loginscreen logo <path>"),
+            None => {
+                shell_println!("Usage: loginscreen logo <path>");
+                set_exit(1);
+            }
         },
         "keyboard" | "vkb" => {
             let on = parts.get(1).copied() == Some("on") || parts.get(1).copied() == Some("true");
@@ -42796,6 +45513,7 @@ fn cmd_appnotify(args: &str) {
         "effective" | "eff" => {
             if parts.len() < 3 {
                 shell_println!("Usage: appnotify effective <app-id> <type-key>");
+                set_exit(1);
             } else {
                 let eff = appnotify::effective_settings(parts[1], parts[2]);
                 shell_println!("Show:     {}", eff.show);
@@ -42853,7 +45571,7 @@ fn cmd_appnotify(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("appnotify — per-app notification settings");
             shell_println!("Usage: appnotify <subcommand>");
             shell_println!("  list              List registered apps");
@@ -42878,6 +45596,7 @@ fn cmd_appnotify(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("appnotify", other);
         }
     }
 }
@@ -42975,6 +45694,7 @@ fn cmd_kernelbuild(args: &str) {
                     "bootloader" | "boot" => Some(kernelbuild::ComponentType::Bootloader),
                     _ => {
                         shell_println!("Unknown type: {}", parts[3]);
+                        set_exit(1);
                         None
                     }
                 };
@@ -43073,6 +45793,7 @@ fn cmd_kernelbuild(args: &str) {
                     "size" | "os" | "Os" => Some(kernelbuild::OptLevel::Size),
                     _ => {
                         shell_println!("Unknown level: {}", parts[2]);
+                        set_exit(1);
                         None
                     }
                 };
@@ -43181,7 +45902,7 @@ fn cmd_kernelbuild(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("kernelbuild — kernel/OS component build configuration");
             shell_println!("Usage: kernelbuild <subcommand>");
             shell_println!("  list              List components");
@@ -43201,6 +45922,7 @@ fn cmd_kernelbuild(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("kernelbuild", other);
         }
     }
 }
@@ -43284,6 +46006,7 @@ fn cmd_wakesensor(args: &str) {
                     "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
                     _ => {
                         shell_println!("Unknown sensor: {}", parts[1]);
+                        set_exit(1);
                         None
                     }
                 };
@@ -43353,6 +46076,7 @@ fn cmd_wakesensor(args: &str) {
                     "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
                     _ => {
                         shell_println!("Unknown sensor");
+                        set_exit(1);
                         None
                     }
                 };
@@ -43363,6 +46087,7 @@ fn cmd_wakesensor(args: &str) {
                     "custom" => Some(wakesensor::Sensitivity::Custom),
                     _ => {
                         shell_println!("Unknown level");
+                        set_exit(1);
                         None
                     }
                 };
@@ -43386,6 +46111,7 @@ fn cmd_wakesensor(args: &str) {
                     "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
                     _ => {
                         shell_println!("Unknown sensor");
+                        set_exit(1);
                         None
                     }
                 };
@@ -43416,6 +46142,7 @@ fn cmd_wakesensor(args: &str) {
                     "mic" | "microphone" => Some(wakesensor::SensorType::Microphone),
                     _ => {
                         shell_println!("Unknown sensor");
+                        set_exit(1);
                         None
                     }
                 };
@@ -43439,7 +46166,10 @@ fn cmd_wakesensor(args: &str) {
                                     }
                                 }
                             }
-                            _ => shell_println!("Invalid hours"),
+                            _ => {
+                                shell_println!("Invalid hours");
+                                set_exit(1);
+                            }
                         }
                     }
                 }
@@ -43541,7 +46271,7 @@ fn cmd_wakesensor(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("wakesensor — webcam/mic-based screen wake (opt-in)");
             shell_println!("Usage: wakesensor <subcommand>");
             shell_println!("  show              Show current configuration");
@@ -43560,6 +46290,7 @@ fn cmd_wakesensor(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("wakesensor", other);
         }
     }
 }
@@ -43668,6 +46399,7 @@ fn cmd_netsettings(args: &str) {
                         "vpn" => Some(netsettings::InterfaceType::Vpn),
                         _ => {
                             shell_println!("Unknown type: {}", parts[2]);
+                            set_exit(1);
                             None
                         }
                     };
@@ -44046,7 +46778,7 @@ fn cmd_netsettings(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             #[inline(never)]
             fn case() {
                 shell_println!("netsettings — comprehensive network configuration");
@@ -44073,6 +46805,7 @@ fn cmd_netsettings(args: &str) {
                 shell_println!("  test              Run self-tests");
             }
             case();
+            end_help_arm("netsettings", other);
         }
     }
 }
@@ -44299,7 +47032,7 @@ fn cmd_sysinfo(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("sysinfo — system information explorer");
             shell_println!("Usage: sysinfo <subcommand>");
             shell_println!("  (no args)         Full summary");
@@ -44313,6 +47046,7 @@ fn cmd_sysinfo(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("sysinfo", other);
         }
     }
 }
@@ -44546,7 +47280,7 @@ fn cmd_perfmon(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("perfmon — performance monitor / resource tracker");
             shell_println!("Usage: perfmon <subcommand>");
             shell_println!("  (no args)         Show latest readings");
@@ -44561,6 +47295,7 @@ fn cmd_perfmon(args: &str) {
             shell_println!("  init              Load defaults");
             shell_println!("  stats             Show statistics");
             shell_println!("  test              Run self-tests");
+            end_help_arm("perfmon", other);
         }
     }
 }
@@ -44973,7 +47708,10 @@ fn cmd_focusassist(args: &str) {
                     let _ = focusassist::set_auto_fullscreen(false);
                     shell_println!("Auto fullscreen: OFF");
                 }
-                _ => shell_println!("Usage: focusassist autofs <on|off>"),
+                _ => {
+                    shell_println!("Usage: focusassist autofs <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "autogame" => {
@@ -44987,7 +47725,10 @@ fn cmd_focusassist(args: &str) {
                     let _ = focusassist::set_auto_gaming(false);
                     shell_println!("Auto gaming: OFF");
                 }
-                _ => shell_println!("Usage: focusassist autogame <on|off>"),
+                _ => {
+                    shell_println!("Usage: focusassist autogame <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "autopres" => {
@@ -45001,7 +47742,10 @@ fn cmd_focusassist(args: &str) {
                     let _ = focusassist::set_auto_presentation(false);
                     shell_println!("Auto presentation: OFF");
                 }
-                _ => shell_println!("Usage: focusassist autopres <on|off>"),
+                _ => {
+                    shell_println!("Usage: focusassist autopres <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -45220,7 +47964,10 @@ fn cmd_storageclean(args: &str) {
                     let _ = storageclean::set_auto_enabled(false);
                     shell_println!("Auto-cleanup: OFF");
                 }
-                _ => shell_println!("Usage: sclean auto <on|off>"),
+                _ => {
+                    shell_println!("Usage: sclean auto <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "threshold" => {
@@ -45414,6 +48161,7 @@ fn cmd_sysdiag(args: &str) {
                     }
                 } else {
                     shell_println!("Unknown category: {}", cname);
+                    set_exit(1);
                     shell_println!(
                         "Categories: network, storage, memory, services, boot, security"
                     );
@@ -45513,6 +48261,7 @@ fn cmd_sysdiag(args: &str) {
                     }
                 } else {
                     shell_println!("Unknown category: {}", cname);
+                    set_exit(1);
                     shell_println!(
                         "Categories: network, storage, memory, services, boot, security"
                     );
@@ -45559,7 +48308,7 @@ fn cmd_sysdiag(args: &str) {
             sysdiag::init_defaults();
             shell_println!("Diagnostics subsystem initialized.");
         }
-        _ => {
+        other => {
             shell_println!("sysdiag — system diagnostics and troubleshooting");
             shell_println!("Usage: sysdiag|diag <subcommand>");
             shell_println!("");
@@ -45575,6 +48324,7 @@ fn cmd_sysdiag(args: &str) {
             shell_println!("");
             shell_println!("Categories: network, storage, memory, services, boot, security");
             shell_println!("Severities: info, warning, error, critical");
+            end_help_arm("sysdiag", other);
         }
     }
 }
@@ -45904,7 +48654,7 @@ fn cmd_nightlight(args: &str) {
             nightlight::init_defaults();
             shell_println!("Night light subsystem initialized.");
         }
-        _ => {
+        other => {
             shell_println!("nightlight — blue light filter / night mode");
             shell_println!("Usage: nightlight|nlight <subcommand>");
             shell_println!("");
@@ -45925,6 +48675,7 @@ fn cmd_nightlight(args: &str) {
             shell_println!("  stats              Show subsystem statistics");
             shell_println!("  init               Initialize subsystem");
             shell_println!("  test               Run self-tests");
+            end_help_arm("nightlight", other);
         }
     }
 }
@@ -46411,7 +49162,7 @@ fn cmd_tasksched(args: &str) {
             }
             case();
         }
-        _ => {
+        other => {
             #[inline(never)]
             fn case() {
                 shell_println!("tasksched — scheduled task management");
@@ -46439,6 +49190,7 @@ fn cmd_tasksched(args: &str) {
                 shell_println!("  test               Run self-tests");
             }
             case();
+            end_help_arm("tasksched", other);
         }
     }
 }
@@ -46603,6 +49355,7 @@ fn cmd_envvars(args: &str) {
             let input = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
             if input.is_empty() {
                 shell_println!("Usage: envvars expand <uid> <string with $VAR>");
+                set_exit(1);
             } else {
                 let result = envvars::expand(uid, &input);
                 shell_println!("{}", result);
@@ -46697,7 +49450,7 @@ fn cmd_envvars(args: &str) {
             envvars::init_defaults();
             shell_println!("Environment variables initialized.");
         }
-        _ => {
+        other => {
             shell_println!("envvars — environment variable management");
             shell_println!("Usage: envvars|envmgr <subcommand>");
             shell_println!("");
@@ -46715,6 +49468,7 @@ fn cmd_envvars(args: &str) {
             shell_println!("  stats              Show statistics");
             shell_println!("  init               Initialize subsystem");
             shell_println!("  test               Run self-tests");
+            end_help_arm("envvars", other);
         }
     }
 }
@@ -46829,6 +49583,7 @@ fn cmd_bluetooth(args: &str) {
                 shell_println!(
                     "Types: headphones, speaker, headset, keyboard, mouse, gamepad, phone, computer, printer, other"
                 );
+                set_exit(1);
             }
         }
         "unpair" | "remove" => {
@@ -47001,7 +49756,7 @@ fn cmd_bluetooth(args: &str) {
             bluetooth::init_defaults();
             shell_println!("Bluetooth subsystem initialized.");
         }
-        _ => {
+        other => {
             shell_println!("bluetooth — Bluetooth device management");
             shell_println!("Usage: bluetooth|bt <subcommand>");
             shell_println!("");
@@ -47022,6 +49777,7 @@ fn cmd_bluetooth(args: &str) {
             shell_println!("  stats              Show statistics");
             shell_println!("  init               Initialize subsystem");
             shell_println!("  test               Run self-tests");
+            end_help_arm("bluetooth", other);
         }
     }
 }
@@ -47282,7 +50038,7 @@ fn cmd_printmgr(args: &str) {
             printmgr::init_defaults();
             shell_println!("Print manager initialized.");
         }
-        _ => {
+        other => {
             shell_println!("printmgr — print management");
             shell_println!("Usage: printmgr|lp <subcommand>");
             shell_println!("");
@@ -47301,6 +50057,7 @@ fn cmd_printmgr(args: &str) {
             shell_println!("  stats              Show statistics");
             shell_println!("  init               Initialize print manager");
             shell_println!("  test               Run self-tests");
+            end_help_arm("printmgr", other);
         }
     }
 }
@@ -47600,7 +50357,7 @@ fn cmd_screenrec(args: &str) {
             screenrec::init_defaults();
             shell_println!("Screen recording initialized.");
         }
-        _ => {
+        other => {
             shell_println!("screenrec — screen recording");
             shell_println!("Usage: screenrec|srec <subcommand>");
             shell_println!("");
@@ -47621,6 +50378,7 @@ fn cmd_screenrec(args: &str) {
             shell_println!("  stats              Show statistics");
             shell_println!("  init               Initialize subsystem");
             shell_println!("  test               Run self-tests");
+            end_help_arm("screenrec", other);
         }
     }
 }
@@ -47804,9 +50562,18 @@ fn cmd_datausage(args: &str) {
                     set_exit(1);
                 }
             },
-            _ => {
+            // Split because the two callers want opposite answers. `datausage
+            // metered` is a query and the status line is its result, so it
+            // succeeded; `datausage metered banana` set nothing, so it failed.
+            // One arm served both and reported success for both.
+            None => {
                 shell_println!("Metered: {}", datausage::metered_status().label());
                 shell_println!("Usage: datausage metered <on|off|roaming>");
+            }
+            Some(other) => {
+                shell_println!("datausage: unknown metered mode '{}'", other);
+                shell_println!("Usage: datausage metered <on|off|roaming>");
+                set_exit(1);
             }
         },
         "limit" => {
@@ -48032,7 +50799,10 @@ fn cmd_mousesettings(args: &str) {
                     set_exit(1);
                 }
             }
-            None => shell_println!("Usage: mouse accel <flat|adaptive|0-10>"),
+            None => {
+                shell_println!("Usage: mouse accel <flat|adaptive|0-10>");
+                set_exit(1);
+            }
         },
         "lefthanded" => {
             let val = matches!(
@@ -48077,7 +50847,10 @@ fn cmd_mousesettings(args: &str) {
                     set_exit(1);
                 }
             }
-            None => shell_println!("Usage: mouse scroll <wheel|smooth|none|speed>"),
+            None => {
+                shell_println!("Usage: mouse scroll <wheel|smooth|none|speed>");
+                set_exit(1);
+            }
         },
         "dblclick" => {
             if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
@@ -48233,7 +51006,10 @@ fn cmd_touchpad(args: &str) {
                 let _ = touchpad::set_scroll_method(touchpad::TouchScrollMethod::None);
                 shell_println!("Scroll: Disabled");
             }
-            _ => shell_println!("Usage: touchpad scroll <twofinger|edge|none>"),
+            _ => {
+                shell_println!("Usage: touchpad scroll <twofinger|edge|none>");
+                set_exit(1);
+            }
         },
         "click" => match parts.get(1).copied() {
             Some("areas") => {
@@ -48248,7 +51024,10 @@ fn cmd_touchpad(args: &str) {
                 let _ = touchpad::set_click_method(touchpad::ClickMethod::None);
                 shell_println!("Click: None");
             }
-            _ => shell_println!("Usage: touchpad click <areas|finger|none>"),
+            _ => {
+                shell_println!("Usage: touchpad click <areas|finger|none>");
+                set_exit(1);
+            }
         },
         "palm" => match parts.get(1).copied() {
             Some("on") | Some("yes") => {
@@ -48273,7 +51052,10 @@ fn cmd_touchpad(args: &str) {
                     set_exit(1);
                 }
             }
-            None => shell_println!("Usage: touchpad palm <on|off|1-10>"),
+            None => {
+                shell_println!("Usage: touchpad palm <on|off|1-10>");
+                set_exit(1);
+            }
         },
         "gestures" => {
             let gestures = touchpad::list_gestures();
@@ -48493,7 +51275,10 @@ fn cmd_powerprofile(args: &str) {
                     set_exit(1);
                 }
             }
-            None => shell_println!("Usage: powerprofile autoswitch <on|off|threshold%>"),
+            None => {
+                shell_println!("Usage: powerprofile autoswitch <on|off|threshold%>");
+                set_exit(1);
+            }
         },
         "stats" => {
             let (count, active, switches, batt, bstate, ops) = powerprofile::stats();
@@ -48900,7 +51685,10 @@ fn cmd_monitors(args: &str) {
                 let _ = monitors::set_layout_mode(monitors::LayoutMode::Single);
                 shell_println!("Layout: Single");
             }
-            _ => shell_println!("Usage: monitors layout <extend|mirror|single>"),
+            _ => {
+                shell_println!("Usage: monitors layout <extend|mirror|single>");
+                set_exit(1);
+            }
         },
         "arrange" => match monitors::auto_arrange() {
             Ok(()) => shell_println!("Monitors auto-arranged."),
@@ -49011,7 +51799,10 @@ fn cmd_fwsettings(args: &str) {
                 let _ = fwsettings::set_zone(fwsettings::NetworkZone::Public);
                 shell_println!("Zone: Public");
             }
-            _ => shell_println!("Usage: firewall zone <home|work|public>"),
+            _ => {
+                shell_println!("Usage: firewall zone <home|work|public>");
+                set_exit(1);
+            }
         },
         "rules" => {
             let rules = fwsettings::list_rules();
@@ -49168,7 +51959,10 @@ fn cmd_fwsettings(args: &str) {
                 let _ = fwsettings::remove_app_permission(app);
                 shell_println!("App '{}' permission removed.", app);
             }
-            _ => shell_println!("Usage: firewall app <list|allow|block|outonly|rm> [app_id]"),
+            _ => {
+                shell_println!("Usage: firewall app <list|allow|block|outonly|rm> [app_id]");
+                set_exit(1);
+            }
         },
         "stealth" => {
             let val = !matches!(parts.get(1).copied(), Some("off") | Some("no"));
@@ -49381,7 +52175,10 @@ fn cmd_updatemgr(args: &str) {
                 let _ = updatemgr::set_channel(updatemgr::UpdateChannel::Nightly);
                 shell_println!("Channel: Nightly");
             }
-            _ => shell_println!("Usage: updates channel <stable|beta|nightly>"),
+            _ => {
+                shell_println!("Usage: updates channel <stable|beta|nightly>");
+                set_exit(1);
+            }
         },
         "auto" => match parts.get(1).copied() {
             Some("on") | Some("yes") => {
@@ -49621,7 +52418,10 @@ fn cmd_notifprefs(args: &str) {
                 let _ = notifprefs::set_position(notifprefs::NotifPosition::BottomLeft);
                 shell_println!("Position: Bottom Left");
             }
-            _ => shell_println!("Usage: notifprefs position <tr|tl|br|bl>"),
+            _ => {
+                shell_println!("Usage: notifprefs position <tr|tl|br|bl>");
+                set_exit(1);
+            }
         },
         "timeout" => {
             if let Some(val) = parts.get(1).and_then(|s| s.parse::<u32>().ok()) {
@@ -50343,7 +53143,10 @@ fn cmd_parental(args: &str) {
                         if ok { "ALLOWED" } else { "BLOCKED" }
                     );
                 }
-                _ => shell_println!("Unknown check type: {} (app|web|time)", check_type),
+                _ => {
+                    shell_println!("Unknown check type: {} (app|web|time)", check_type);
+                    set_exit(1);
+                }
             }
         }
         "profile" => {
@@ -53176,7 +55979,10 @@ fn cmd_battery(args: &str) {
                     battery::set_critical_action(parts[2]).ok();
                     shell_println!("Critical action set to '{}'.", parts[2]);
                 }
-                _ => shell_println!("Usage: batt alert low|critical|action <value>"),
+                _ => {
+                    shell_println!("Usage: batt alert low|critical|action <value>");
+                    set_exit(1);
+                }
             }
         }
         "limit" => {
@@ -55605,9 +58411,12 @@ fn cmd_elog(args: &str) {
         "echo" => {
             if parts.len() < 2 {
                 let level = eventlog::serial_echo_level();
+                // Same as `fc algo`: guarded by `parts.len() < 2`, so this is
+                // only ever the query path, and the level printed above is the
+                // answer. The trailing "to change" says as much -- it is a hint
+                // appended to a result, not a complaint about an argument.
                 shell_println!("Serial echo level: {} (and above)", level.as_str());
                 shell_println!("Usage: elog echo <level>  to change");
-                set_exit(1);
                 return;
             }
             match Severity::from_str_loose(parts[1]) {
@@ -55615,7 +58424,10 @@ fn cmd_elog(args: &str) {
                     eventlog::set_serial_echo_level(sev);
                     shell_println!("Serial echo level set to: {}", sev.as_str());
                 }
-                None => shell_println!("Unknown severity: {}", parts[1]),
+                None => {
+                    shell_println!("Unknown severity: {}", parts[1]);
+                    set_exit(1);
+                }
             }
         }
         "namespaces" => {
@@ -55787,7 +58599,10 @@ fn cmd_logpersist(args: &str) {
                         logpersist::set_mode(RotationMode::PerNamespace);
                         shell_println!("Mode set to per-namespace");
                     }
-                    _ => shell_println!("Unknown mode: {}. Use 'combined' or 'per-namespace'.", m),
+                    _ => {
+                        shell_println!("Unknown mode: {}. Use 'combined' or 'per-namespace'.", m);
+                        set_exit(1);
+                    }
                 }
             } else {
                 let cfg = logpersist::config();
@@ -56825,7 +59640,10 @@ fn cmd_initproc(args: &str) {
                             set_exit(1);
                         }
                     }
-                    _ => shell_println!("Usage: initproc critical <add|remove> <name>"),
+                    _ => {
+                        shell_println!("Usage: initproc critical <add|remove> <name>");
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Usage: initproc critical <add|remove> <name>");
@@ -57442,11 +60260,13 @@ fn cmd_vmguest(args: &str) {
         "resize" => {
             if parts.len() < 3 {
                 shell_println!("Usage: vmguest resize <width> <height>");
+                set_exit(1);
             } else {
                 let w: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                 let h: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
                 if w == 0 || h == 0 {
                     shell_println!("Invalid dimensions");
+                    set_exit(1);
                 } else {
                     let (ew, eh) = vmguest::request_display_resize(w, h);
                     shell_println!("Requested: {}x{}, effective: {}x{}", w, h, ew, eh);
@@ -58820,6 +61640,7 @@ fn cmd_telnetd(args: &str) {
                 let port: u16 = port_str.parse().unwrap_or(0);
                 if port == 0 {
                     shell_println!("Invalid port");
+                    set_exit(1);
                 } else {
                     telnet::set_port(port);
                     shell_println!("Port set to {} (restart server to apply)", port);
@@ -58937,6 +61758,7 @@ fn cmd_sshd(args: &str) {
                 let port: u16 = port_str.parse().unwrap_or(0);
                 if port == 0 {
                     shell_println!("Invalid port");
+                    set_exit(1);
                 } else {
                     ssh::set_port(port);
                     shell_println!("Port set to {} (restart server to apply)", port);
@@ -59353,6 +62175,7 @@ fn cmd_netsyslog(args: &str) {
                 let port: u16 = port_str.parse().unwrap_or(0);
                 if port == 0 {
                     shell_println!("Invalid port");
+                    set_exit(1);
                 } else {
                     syslog::set_port(port);
                     shell_println!("Port set to {} (restart to apply)", port);
@@ -59573,6 +62396,48 @@ fn cmd_pcap(args: &str) {
 }
 
 /// `traceroute` / `tracert` — Trace route to destination.
+/// The `-m MAXHOPS` / `-q PROBES` tail shared by `traceroute` and
+/// `traceroute6`, after the destination has been taken off the front.
+///
+/// `None` means the flag was not given and the caller's default (30 hops, 3
+/// probes) applies. It used to *also* mean the flag was given with a value
+/// that would not parse, which is the opposite of what was asked: `traceroute
+/// 10.0.0.1 -m 5x` traced 30 hops, printed "max 30 hops" as if that had been
+/// the request, and sent six times the traffic.
+fn traceroute_probe_flags(cmd: &str, parts: &[&str]) -> Option<(Option<u8>, Option<u8>)> {
+    let mut max_hops: Option<u8> = None;
+    let mut probes: Option<u8> = None;
+    let mut i = 1;
+    while let Some(&word) = parts.get(i) {
+        let what = match word {
+            "-m" => "a hop count",
+            "-q" => "a probe count",
+            other => {
+                shell_println!("{}: unrecognized option `{}'", cmd, other);
+                set_exit(1);
+                return None;
+            }
+        };
+        let Some(&v) = parts.get(i + 1) else {
+            shell_println!("{}: {} requires {}", cmd, word, what);
+            set_exit(1);
+            return None;
+        };
+        let Ok(n) = v.parse::<u8>() else {
+            shell_println!("{}: {}: `{}' is not {} (1..=255)", cmd, word, v, what);
+            set_exit(1);
+            return None;
+        };
+        if word == "-m" {
+            max_hops = Some(n);
+        } else {
+            probes = Some(n);
+        }
+        i += 2;
+    }
+    Some((max_hops, probes))
+}
+
 fn cmd_traceroute(args: &str) {
     use crate::net::traceroute;
     use alloc::format;
@@ -59626,24 +62491,9 @@ fn cmd_traceroute(args: &str) {
             };
 
             // Parse optional flags.
-            let mut max_hops: Option<u8> = None;
-            let mut probes: Option<u8> = None;
-            let mut i = 1;
-            while i < parts.len() {
-                match parts.get(i).copied() {
-                    Some("-m") => {
-                        max_hops = parts.get(i + 1).and_then(|s| s.parse::<u8>().ok());
-                        i += 2;
-                    }
-                    Some("-q") => {
-                        probes = parts.get(i + 1).and_then(|s| s.parse::<u8>().ok());
-                        i += 2;
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-            }
+            let Some((max_hops, probes)) = traceroute_probe_flags("traceroute", &parts) else {
+                return;
+            };
 
             shell_println!(
                 "traceroute to {} (max {} hops, {} probes/hop)",
@@ -59750,24 +62600,9 @@ fn cmd_traceroute6(args: &str) {
             };
 
             // Parse optional flags.
-            let mut max_hops: Option<u8> = None;
-            let mut probes: Option<u8> = None;
-            let mut i = 1;
-            while i < parts.len() {
-                match parts.get(i).copied() {
-                    Some("-m") => {
-                        max_hops = parts.get(i + 1).and_then(|s| s.parse::<u8>().ok());
-                        i += 2;
-                    }
-                    Some("-q") => {
-                        probes = parts.get(i + 1).and_then(|s| s.parse::<u8>().ok());
-                        i += 2;
-                    }
-                    _ => {
-                        i += 1;
-                    }
-                }
-            }
+            let Some((max_hops, probes)) = traceroute_probe_flags("traceroute6", &parts) else {
+                return;
+            };
 
             shell_println!(
                 "traceroute6 to {} (max {} hops, {} probes/hop)",
@@ -60274,7 +63109,10 @@ fn cmd_ndisc(args: &str) {
                         }
                     }
                 }
-                None => shell_println!("Usage: ndisc probe <IP>"),
+                None => {
+                    shell_println!("Usage: ndisc probe <IP>");
+                    set_exit(1);
+                }
             }
         }
         "probe6" => {
@@ -60780,8 +63618,12 @@ fn cmd_nat(args: &str) {
                 }
             }
         }
-        // "help" or any unrecognised subcommand falls through to the help text.
-        _ => {
+        // "help" or any unrecognised subcommand falls through to the help text,
+        // which is the useful reply to both. They differ in the status, and in
+        // the extra line `end_help_arm` prints for the second: this comment
+        // used to describe the two as interchangeable, which is exactly the
+        // assumption that let a typo report success.
+        other => {
             shell_println!("nat — NAT/masquerade management");
             shell_println!("Usage:");
             shell_println!("  nat                  — show status (default)");
@@ -60793,6 +63635,7 @@ fn cmd_nat(args: &str) {
             shell_println!("  nat forward list     — list port-forwarding rules");
             shell_println!("  nat forward add <tcp|udp> <host_port> <ip> <port> <ns_id>");
             shell_println!("  nat forward del <tcp|udp> <host_port>");
+            end_help_arm("nat", other);
         }
     }
 }
@@ -60937,7 +63780,7 @@ fn cmd_socks(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("socks — SOCKS5 proxy client (RFC 1928)");
             shell_println!();
             shell_println!("Usage:");
@@ -60945,6 +63788,7 @@ fn cmd_socks(args: &str) {
             shell_println!("  socks codes                — show SOCKS5 reply codes");
             shell_println!("  socks status               — show statistics");
             shell_println!("  socks test                 — run self-tests");
+            end_help_arm("socks", other);
         }
     }
 }
@@ -61182,7 +64026,7 @@ fn cmd_qos(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("qos — Quality of Service traffic management");
             shell_println!();
             shell_println!("Usage:");
@@ -61196,6 +64040,7 @@ fn cmd_qos(args: &str) {
             shell_println!("  qos dscp                                  — show DSCP values");
             shell_println!("  qos status                                — show status");
             shell_println!("  qos test                                  — run self-tests");
+            end_help_arm("qos", other);
         }
     }
 }
@@ -61307,7 +64152,7 @@ fn cmd_vlan(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("vlan — IEEE 802.1Q VLAN management");
             shell_println!();
             shell_println!("Usage:");
@@ -61317,6 +64162,7 @@ fn cmd_vlan(args: &str) {
             shell_println!("  vlan pcp                    — show PCP priority values");
             shell_println!("  vlan status                 — show statistics");
             shell_println!("  vlan test                   — run self-tests");
+            end_help_arm("vlan", other);
         }
     }
 }
@@ -61405,7 +64251,7 @@ fn cmd_smtp(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("smtp — SMTP client for sending email");
             shell_println!();
             shell_println!("Usage:");
@@ -61413,6 +64259,7 @@ fn cmd_smtp(args: &str) {
             shell_println!("  smtp codes                 — show SMTP reply codes");
             shell_println!("  smtp status                — show statistics");
             shell_println!("  smtp test                  — run self-tests");
+            end_help_arm("smtp", other);
         }
     }
 }
@@ -61592,7 +64439,7 @@ fn cmd_ftp(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("ftp — FTP client for file transfer");
             shell_println!();
             shell_println!("Usage:");
@@ -61602,6 +64449,7 @@ fn cmd_ftp(args: &str) {
             shell_println!("  ftp codes                              — show FTP reply codes");
             shell_println!("  ftp status                             — show statistics");
             shell_println!("  ftp test                               — run self-tests");
+            end_help_arm("ftp", other);
         }
     }
 }
@@ -61936,7 +64784,7 @@ fn cmd_snmp(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("snmp — Simple Network Management Protocol client");
             shell_println!();
             shell_println!("Usage:");
@@ -61949,6 +64797,7 @@ fn cmd_snmp(args: &str) {
             shell_println!("  snmp oids                             — list well-known OIDs");
             shell_println!("  snmp status                           — show statistics");
             shell_println!("  snmp test                             — run self-tests");
+            end_help_arm("snmp", other);
         }
     }
 }
@@ -62225,7 +65074,7 @@ fn cmd_iperf(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("iperf — network bandwidth measurement tool (IPv4 + IPv6)");
             shell_println!();
             shell_println!("Usage:");
@@ -62235,6 +65084,7 @@ fn cmd_iperf(args: &str) {
             shell_println!("  iperf udp6 <host> <port> [count] [size] — UDP6 throughput test");
             shell_println!("  iperf status                            — show statistics");
             shell_println!("  iperf test                              — run self-tests");
+            end_help_arm("iperf", other);
         }
     }
 }
@@ -62678,7 +65528,7 @@ fn cmd_nc(args: &str) {
             }
         },
 
-        _ => {
+        other => {
             shell_println!("nc — TCP/UDP networking swiss army knife");
             shell_println!();
             shell_println!("Usage:");
@@ -62694,6 +65544,7 @@ fn cmd_nc(args: &str) {
             shell_println!("  nc service <port>                     — look up well-known service");
             shell_println!("  nc status                             — show statistics");
             shell_println!("  nc test                               — run self-tests");
+            end_help_arm("nc", other);
         }
     }
 }
@@ -63910,6 +66761,7 @@ fn cmd_printqueue(args: &str) {
             let job_str = parts.get(2).copied().unwrap_or("");
             if printer_str.is_empty() || job_str.is_empty() {
                 shell_println!("Usage: pqueue cancel <printer_id> <job_id>");
+                set_exit(1);
             } else if let (Ok(pid), Ok(jid)) = (printer_str.parse::<u32>(), job_str.parse::<u32>())
             {
                 match printqueue::cancel_job(pid, jid) {
@@ -63929,6 +66781,7 @@ fn cmd_printqueue(args: &str) {
             let job_str = parts.get(2).copied().unwrap_or("");
             if printer_str.is_empty() || job_str.is_empty() {
                 shell_println!("Usage: pqueue complete <printer_id> <job_id>");
+                set_exit(1);
             } else if let (Ok(pid), Ok(jid)) = (printer_str.parse::<u32>(), job_str.parse::<u32>())
             {
                 match printqueue::complete_job(pid, jid) {
@@ -66417,7 +69270,10 @@ fn cmd_speechio(args: &str) {
                     speechio::set_tts_enabled(false).ok();
                     shell_println!("TTS disabled.");
                 }
-                _ => shell_println!("Usage: speech tts <on|off>"),
+                _ => {
+                    shell_println!("Usage: speech tts <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "listen" => {
@@ -66437,7 +69293,10 @@ fn cmd_speechio(args: &str) {
                     speechio::stop_listening().ok();
                     shell_println!("Stopped listening.");
                 }
-                _ => shell_println!("Usage: speech listen <start|stop>"),
+                _ => {
+                    shell_println!("Usage: speech listen <start|stop>");
+                    set_exit(1);
+                }
             }
         }
         "results" => {
@@ -67318,6 +70177,7 @@ fn cmd_wintiling(args: &str) {
                 .unwrap_or(0);
             if ws == 0 {
                 shell_println!("Usage: tile gap <workspace> <pixels>");
+                set_exit(1);
             } else {
                 wintiling::set_gap(ws, gap).ok();
                 shell_println!("Gap → {}px", gap);
@@ -67334,6 +70194,7 @@ fn cmd_wintiling(args: &str) {
                 .unwrap_or(55);
             if ws == 0 {
                 shell_println!("Usage: tile ratio <workspace> <percent>");
+                set_exit(1);
             } else {
                 wintiling::set_master_ratio(ws, ratio).ok();
                 shell_println!("Master ratio → {}%", ratio);
@@ -67502,6 +70363,7 @@ fn cmd_peninput(args: &str) {
             let action = parts.get(2).copied().unwrap_or("contact");
             if pen_id == 0 {
                 shell_println!("Usage: pen sim <pen_id> <proxin|proxout|contact|release|move>");
+                set_exit(1);
             } else {
                 match action {
                     "proxin" => {
@@ -70843,7 +73705,10 @@ fn cmd_fontsettings(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: fontsettings size <decipoints>"),
+                None => {
+                    shell_println!("Usage: fontsettings size <decipoints>");
+                    set_exit(1);
+                }
             }
         }
         "scale" => {
@@ -70856,7 +73721,10 @@ fn cmd_fontsettings(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: fontsettings scale <percent>"),
+                None => {
+                    shell_println!("Usage: fontsettings scale <percent>");
+                    set_exit(1);
+                }
             }
         }
         "ligatures" | "lig" => {
@@ -70876,7 +73744,10 @@ fn cmd_fontsettings(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: fontsettings ligatures <on|off>"),
+                _ => {
+                    shell_println!("Usage: fontsettings ligatures <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -71265,7 +74136,10 @@ fn cmd_lockwallpaper(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: lockwallpaper blur <on|off>"),
+                _ => {
+                    shell_println!("Usage: lockwallpaper blur <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -71576,7 +74450,10 @@ fn cmd_hotcorners(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: hotcorners delay <corner> <ms>"),
+                None => {
+                    shell_println!("Usage: hotcorners delay <corner> <ms>");
+                    set_exit(1);
+                }
             }
         }
         "trigger" => {
@@ -71752,7 +74629,10 @@ fn cmd_dynlock(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: dynlock grace <seconds>"),
+                None => {
+                    shell_println!("Usage: dynlock grace <seconds>");
+                    set_exit(1);
+                }
             }
         }
         "autounlock" => {
@@ -71772,7 +74652,10 @@ fn cmd_dynlock(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: dynlock autounlock <on|off>"),
+                _ => {
+                    shell_println!("Usage: dynlock autounlock <on|off>");
+                    set_exit(1);
+                }
             }
         }
         "check" => match dynlock::check_proximity() {
@@ -71872,7 +74755,10 @@ fn cmd_snaplayout(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: snaplayout use <id>"),
+                None => {
+                    shell_println!("Usage: snaplayout use <id>");
+                    set_exit(1);
+                }
             }
         }
         "snap" => {
@@ -71894,7 +74780,10 @@ fn cmd_snaplayout(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: snaplayout snap <window_id> <zone_id>"),
+                _ => {
+                    shell_println!("Usage: snaplayout snap <window_id> <zone_id>");
+                    set_exit(1);
+                }
             }
         }
         "suggest" => {
@@ -71922,7 +74811,10 @@ fn cmd_snaplayout(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: snaplayout remove <id>"),
+                None => {
+                    shell_println!("Usage: snaplayout remove <id>");
+                    set_exit(1);
+                }
             }
         }
         "groups" => {
@@ -72045,7 +74937,10 @@ fn cmd_haptfeedback(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: haptfeedback remove <id>"),
+                None => {
+                    shell_println!("Usage: haptfeedback remove <id>");
+                    set_exit(1);
+                }
             }
         }
         "intensity" | "int" => {
@@ -72059,7 +74954,10 @@ fn cmd_haptfeedback(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: haptfeedback intensity <device_id> <0-100>"),
+                _ => {
+                    shell_println!("Usage: haptfeedback intensity <device_id> <0-100>");
+                    set_exit(1);
+                }
             }
         }
         "pattern" => {
@@ -72262,7 +75160,10 @@ fn cmd_eyeprotect(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: eyeprotect interval <profile_id> <minutes>"),
+                _ => {
+                    shell_println!("Usage: eyeprotect interval <profile_id> <minutes>");
+                    set_exit(1);
+                }
             }
         }
         "duration" => {
@@ -72276,7 +75177,10 @@ fn cmd_eyeprotect(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: eyeprotect duration <profile_id> <seconds>"),
+                _ => {
+                    shell_println!("Usage: eyeprotect duration <profile_id> <seconds>");
+                    set_exit(1);
+                }
             }
         }
         "profile" => {
@@ -72289,7 +75193,10 @@ fn cmd_eyeprotect(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: eyeprotect profile <id>"),
+                None => {
+                    shell_println!("Usage: eyeprotect profile <id>");
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -72475,7 +75382,10 @@ fn cmd_pinnedapps(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: pinnedapps move <location> <app> <position>"),
+                None => {
+                    shell_println!("Usage: pinnedapps move <location> <app> <position>");
+                    set_exit(1);
+                }
             }
         }
         "icon" | "exec" => {
@@ -72635,7 +75545,10 @@ fn cmd_inputmethod(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: inputmethod remove <id>"),
+                None => {
+                    shell_println!("Usage: inputmethod remove <id>");
+                    set_exit(1);
+                }
             }
         }
         "switch" => {
@@ -72648,7 +75561,10 @@ fn cmd_inputmethod(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: inputmethod switch <id>"),
+                None => {
+                    shell_println!("Usage: inputmethod switch <id>");
+                    set_exit(1);
+                }
             }
         }
         "cycle" => match inputmethod::cycle_engine() {
@@ -72691,7 +75607,10 @@ fn cmd_inputmethod(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: inputmethod select <index>"),
+                None => {
+                    shell_println!("Usage: inputmethod select <index>");
+                    set_exit(1);
+                }
             }
         }
         "commit" => match inputmethod::commit() {
@@ -72916,7 +75835,10 @@ fn cmd_storagesense(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: storagesense age <category> <days>"),
+                None => {
+                    shell_println!("Usage: storagesense age <category> <days>");
+                    set_exit(1);
+                }
             }
         }
         "estimate" => match storagesense::estimate_savings() {
@@ -73011,7 +75933,10 @@ fn cmd_autofix(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: autofix fix <issue_id>"),
+                None => {
+                    shell_println!("Usage: autofix fix <issue_id>");
+                    set_exit(1);
+                }
             }
         }
         "fixall" => match autofix::fix_all() {
@@ -73031,7 +75956,10 @@ fn cmd_autofix(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: autofix ignore <issue_id>"),
+                None => {
+                    shell_println!("Usage: autofix ignore <issue_id>");
+                    set_exit(1);
+                }
             }
         }
         "clear" => match autofix::clear_resolved() {
@@ -73315,7 +76243,10 @@ fn cmd_sysmaint(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: sysmaint enable <task_id>"),
+                None => {
+                    shell_println!("Usage: sysmaint enable <task_id>");
+                    set_exit(1);
+                }
             }
         }
         "disable" => {
@@ -73328,7 +76259,10 @@ fn cmd_sysmaint(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: sysmaint disable <task_id>"),
+                None => {
+                    shell_println!("Usage: sysmaint disable <task_id>");
+                    set_exit(1);
+                }
             }
         }
         "interval" => {
@@ -73342,7 +76276,10 @@ fn cmd_sysmaint(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: sysmaint interval <task_id> <hours>"),
+                _ => {
+                    shell_println!("Usage: sysmaint interval <task_id> <hours>");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -73474,7 +76411,10 @@ fn cmd_multiclip(args: &str) {
                         set_exit(1);
                     }
                 },
-                _ => shell_println!("Usage: multiclip setslot <id> <name>"),
+                _ => {
+                    shell_println!("Usage: multiclip setslot <id> <name>");
+                    set_exit(1);
+                }
             }
         }
         "pin" => {
@@ -73487,7 +76427,10 @@ fn cmd_multiclip(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: multiclip pin <id>"),
+                None => {
+                    shell_println!("Usage: multiclip pin <id>");
+                    set_exit(1);
+                }
             }
         }
         "unpin" => {
@@ -73500,7 +76443,10 @@ fn cmd_multiclip(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: multiclip unpin <id>"),
+                None => {
+                    shell_println!("Usage: multiclip unpin <id>");
+                    set_exit(1);
+                }
             }
         }
         "remove" | "rm" => {
@@ -73513,7 +76459,10 @@ fn cmd_multiclip(args: &str) {
                         set_exit(1);
                     }
                 },
-                None => shell_println!("Usage: multiclip remove <id>"),
+                None => {
+                    shell_println!("Usage: multiclip remove <id>");
+                    set_exit(1);
+                }
             }
         }
         "clear" => match multiclip::clear_history() {
@@ -74177,6 +77126,7 @@ fn cmd_appcompat(args: &str) {
                     shell_println!(
                         "         singlethread, legacytimer, permissive, configredirect"
                     );
+                    set_exit(1);
                 }
             }
         }
@@ -75840,6 +78790,14 @@ fn cmd_notifgroup(args: &str) {
                         set_exit(1);
                     }
                 }
+            } else if let Some(bad) = parts.get(1) {
+                // An argument was given and `parse_grouping_mode` rejected it,
+                // so the mode was not changed. Distinguished from the bare
+                // query below, which the single `else` used to conflate with
+                // it: both printed the current mode and both claimed success.
+                shell_println!("notifgroup: unknown grouping mode '{}'", bad);
+                shell_println!("Usage: notifgroup mode <app|category|conversation|none>");
+                set_exit(1);
             } else {
                 let current = notifgroup::get_mode();
                 shell_println!("Current mode: {}", current.label());
@@ -76134,7 +79092,10 @@ fn cmd_kbmacro(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: kbmacro event <type|delay|key> [args]"),
+                _ => {
+                    shell_println!("Usage: kbmacro event <type|delay|key> [args]");
+                    set_exit(1);
+                }
             }
         }
         "stop" => match kbmacro::stop_recording() {
@@ -76538,6 +79499,13 @@ fn cmd_faceunlock(args: &str) {
                         set_exit(1);
                     }
                 }
+            } else if let Some(bad) = parts.get(1) {
+                // Same split as `notifgroup mode`: an argument that no level
+                // matched changed nothing, so it failed, while a bare
+                // `faceunlock security` is answered by the line below.
+                shell_println!("faceunlock: unknown security level '{}'", bad);
+                shell_println!("Usage: faceunlock security <low|standard|high|maximum>");
+                set_exit(1);
             } else {
                 shell_println!("Current: {}", faceunlock::get_security().label());
                 shell_println!("Usage: faceunlock security <low|standard|high|maximum>");
@@ -84242,7 +87210,10 @@ fn cmd_kernlog(args: &str) {
                         shell_println!("  [{}] <{}> {}", e.seq, e.level.label(), e.message);
                     }
                 }
-                _ => shell_println!("Usage: kernlog filter <level|source> <value>"),
+                _ => {
+                    shell_println!("Usage: kernlog filter <level|source> <value>");
+                    set_exit(1);
+                }
             }
         }
         "clear" => {
@@ -86187,7 +89158,10 @@ fn cmd_secpolicy(args: &str) {
                             set_exit(1);
                         }
                     },
-                    None => shell_println!("Invalid mode. Use: disabled|permissive|enforcing"),
+                    None => {
+                        shell_println!("Invalid mode. Use: disabled|permissive|enforcing");
+                        set_exit(1);
+                    }
                 }
             } else {
                 shell_println!("Mode: {}", secpolicy::get_mode().label());
@@ -86223,7 +89197,10 @@ fn cmd_secpolicy(args: &str) {
                         }
                     }
                 }
-                None => shell_println!("Unknown action: {}", act_str),
+                None => {
+                    shell_println!("Unknown action: {}", act_str);
+                    set_exit(1);
+                }
             }
         }
         "label" => {
@@ -86935,7 +89912,10 @@ fn cmd_prociso(args: &str) {
                         }
                     }
                 }
-                _ => shell_println!("Usage: prociso container [create <name>|list|delete <id>]"),
+                _ => {
+                    shell_println!("Usage: prociso container [create <name>|list|delete <id>]");
+                    set_exit(1);
+                }
             }
         }
         "stats" => {
@@ -92002,12 +94982,13 @@ fn cmd_pmcstat(args: &str) {
             );
         }
         "test" => pmcstat::self_test(),
-        _ => {
+        other => {
             shell_println!("Usage: pmcstat <init|sample|ipc|cmr|cpus|stats|test>");
             shell_println!("  sample <cpu> <event> [value]    — record counter sample");
             shell_println!(
                 "    events: cycles|insns|cache-miss|cache-ref|br-miss|br-insn|bus|stall"
             );
+            end_help_arm("pmcstat", other);
         }
     }
 }
@@ -95768,7 +98749,10 @@ fn cmd_taskbar(args: &str) {
                     taskbar::set_small_icons(val == "on" || val == "yes" || val == "true");
                     shell_println!("Small icons: {}", val);
                 }
-                _ => shell_println!("Unknown config key: {}", key),
+                _ => {
+                    shell_println!("Unknown config key: {}", key);
+                    set_exit(1);
+                }
             }
         }
         "test" => match taskbar::self_test() {
@@ -96042,7 +99026,10 @@ fn cmd_startmenu(args: &str) {
             }
             match startmenu::SystemAction::from_str(action) {
                 Some(a) => shell_println!("Power action: {} (simulated)", a.label()),
-                None => shell_println!("Unknown action: {}", action),
+                None => {
+                    shell_println!("Unknown action: {}", action);
+                    set_exit(1);
+                }
             }
         }
         "init" => match startmenu::init_defaults() {
@@ -98588,6 +101575,66 @@ fn to_lower(s: &str) -> String {
     out
 }
 
+/// Split a `grep` argument list into its option words and its operands.
+///
+/// Shared by both halves of `grep` because they are contractually required to
+/// read an argument list the same way — the file half and the pipe half
+/// disagreeing about the same argument is a bug this command has already had
+/// twice (`-l`, then `-Z`), and the predicate below used to be *written out
+/// twice*, once here and once as the pipe half's delegation pre-pass. Two
+/// copies of a rule are two rules.
+///
+/// Three kinds of word:
+///
+/// * `--` ends the options. Everything after it is an operand however it is
+///   spelled, which is the only way to name a file whose name begins with `-`
+///   — and our paths allow every byte but `/` and NUL, so such a file is
+///   perfectly legal and was previously unnameable.
+/// * A word beginning with `--` that is not `--` is a **long option**, and
+///   `grep` here has none. It is an error. It used to fall through to the
+///   operand list, which meant `grep --color pat file` searched for the
+///   literal text `--color` in files named `pat` and `file`, reported however
+///   many lines contained it, and exited 0 or 1 accordingly. Nothing in that
+///   run said the option had not been understood — a wrong answer delivered as
+///   a right one, which is the whole family this is part of.
+/// * `-` alone is an operand (the conventional name for standard input);
+///   anything else beginning with `-` is a bundle of short flags.
+///
+/// `Err` carries the offending long option so the caller can name it.
+fn grep_split_args(args: &str) -> Result<(Vec<&str>, Vec<&str>), &str> {
+    let mut opts: Vec<&str> = Vec::new();
+    let mut operands: Vec<&str> = Vec::new();
+    let mut flags_done = false;
+
+    for word in args.split_whitespace() {
+        if flags_done || word == "-" || !word.starts_with('-') {
+            operands.push(word);
+            continue;
+        }
+        if word == "--" {
+            flags_done = true;
+            continue;
+        }
+        if word.starts_with("--") {
+            return Err(word);
+        }
+        opts.push(word);
+    }
+
+    Ok((opts, operands))
+}
+
+/// Report a long option `grep` does not have, in GNU's wording and with
+/// `grep`'s own usage status.
+///
+/// 2, not 1: within `grep`, 1 is the reserved answer "searched, found nothing",
+/// so a usage error returning 1 would tell `grep --color pat f || echo absent`
+/// that the pattern is absent from a file it never opened.
+fn grep_reject_long_option(word: &str) {
+    shell_println!("grep: unrecognized option '{}'", word);
+    set_exit(2);
+}
+
 /// `grep [-ivclnwrI] PATTERN TARGET...` — search files, or trees with `-r`.
 ///
 /// Exits with GNU's three-valued status: **0** matched, **1** searched
@@ -98598,35 +101645,36 @@ fn to_lower(s: &str) -> String {
 /// as missing *text*.
 fn cmd_grep(args: &str) {
     let mut flags = GrepFlags::new();
-    let mut words: alloc::vec::Vec<&str> = Vec::new();
+    let (opt_words, words) = match grep_split_args(args) {
+        Ok(v) => v,
+        Err(w) => {
+            grep_reject_long_option(w);
+            return;
+        }
+    };
 
-    // Parse flags and positional arguments.
-    for word in args.split_whitespace() {
-        if word.starts_with('-') && word.len() > 1 && !word.starts_with("--") {
-            for ch in word[1..].chars() {
-                match ch {
-                    'i' => flags.case_insensitive = true,
-                    'I' => flags.case_insensitive = false, // explicit case-sensitive
-                    'v' => flags.invert = true,
-                    'c' => flags.count_only = true,
-                    'n' => flags.show_line_numbers = true,
-                    'l' => flags.files_only = true,
-                    'w' => flags.whole_word = true,
-                    'r' | 'R' => flags.recursive = true,
-                    _ => {
-                        // 2, not the shell's usual 1: within `grep`, 1 is the
-                        // reserved, meaningful answer "searched, found
-                        // nothing". A usage error that returned 1 would tell
-                        // `grep -Z pat f || echo absent` that the pattern is
-                        // absent from a file it never opened.
-                        shell_println!("grep: unknown flag '-{}'", ch);
-                        set_exit(2);
-                        return;
-                    }
+    for word in &opt_words {
+        for ch in word.get(1..).unwrap_or("").chars() {
+            match ch {
+                'i' => flags.case_insensitive = true,
+                'I' => flags.case_insensitive = false, // explicit case-sensitive
+                'v' => flags.invert = true,
+                'c' => flags.count_only = true,
+                'n' => flags.show_line_numbers = true,
+                'l' => flags.files_only = true,
+                'w' => flags.whole_word = true,
+                'r' | 'R' => flags.recursive = true,
+                _ => {
+                    // 2, not the shell's usual 1: within `grep`, 1 is the
+                    // reserved, meaningful answer "searched, found
+                    // nothing". A usage error that returned 1 would tell
+                    // `grep -Z pat f || echo absent` that the pattern is
+                    // absent from a file it never opened.
+                    shell_println!("grep: unknown flag '-{}'", ch);
+                    set_exit(2);
+                    return;
                 }
             }
-        } else {
-            words.push(word);
         }
     }
 
@@ -98969,12 +102017,43 @@ fn cmd_cmp(args: &str) {
     set_exit(1);
 }
 
-/// Line-level diff between two text files (unified format).
+/// Line-level diff between two files (unified format).
 ///
-/// Usage: `diff <file1> <file2>`
+/// Usage: `diff [-a|--text] <file1> <file2>`
+///
+/// **A file containing a NUL byte is reported as binary** — `Binary files X
+/// and Y differ`, status 1 — rather than line-diffed, unless `-a`/`--text`
+/// forces the diff. This is not squeamishness about correctness: the line
+/// diff below *is* correct on such a file, byte for byte. It is that a correct
+/// hunk of an object file is unreadable, arrives at a serial console one byte
+/// at a time, and can run to megabytes; the useful answer is the one sentence
+/// GNU prints. `-a` exists because refusing outright would put the byte-clean
+/// diff this function was fixed to produce out of reach for the one input that
+/// most needs it.
+///
+/// The test is a NUL **anywhere in the file**, where GNU's is a NUL in the
+/// first buffer it happens to read. GNU's rule is faster on a huge file and
+/// gives an answer that depends on a buffer size — change the constant and
+/// the same two files get a different verdict. We hold the whole file already
+/// (the byte compare above reads it all), so scanning it costs nothing we have
+/// not already paid, and the answer is a property of the files rather than of
+/// this implementation. The divergence is visible only for a file whose sole
+/// NUL is past GNU's first buffer: GNU line-diffs it, we call it binary, and
+/// `-a` recovers GNU's behaviour exactly.
 ///
 /// Uses a simple LCS-based diff algorithm suitable for kernel context.
 /// Files are capped at 2000 lines to bound memory usage.
+///
+/// **Lines are bytes**, split on `\n` only — see [`split_lines`]. Not a
+/// generalisation for its own sake: the output used to be computed from
+/// `from_utf8_lossy`, which collapses every undecodable byte to one U+FFFD, so
+/// lines that genuinely differed compared equal and were printed as *shared
+/// context*. That the same function had already established the files differ,
+/// by comparing their bytes, is what made it a contradiction rather than a
+/// limitation — the correct status and the wrong output came out of one run.
+///
+/// This is also what makes `diff dos.txt unix.txt` work, `str::lines` having
+/// silently dropped the `\r` that was the entire difference.
 ///
 /// Exits with the same three-valued status as `cmp`: **0** identical, **1**
 /// they differ, **2** the comparison could not be made — an unreadable file, a
@@ -98984,11 +102063,54 @@ fn cmd_cmp(args: &str) {
 /// found no difference were, before this, byte-identical **and**
 /// status-identical. There was no way for a caller to tell them apart.
 fn cmd_diff(args: &str) {
-    let parts: Vec<&str> = args.splitn(2, ' ').collect();
+    // Leading options only, then the two operands. The operand split below is
+    // deliberately `splitn(2, ' ')` rather than a whitespace split, so that an
+    // unquoted second path may contain spaces; that is pre-existing behaviour
+    // and this loop must not take it away, which is why it consumes words from
+    // the front and hands the *remainder* on untouched.
+    let mut force_text = false;
+    let mut rest = args.trim_start();
+    while rest.starts_with('-') {
+        let (word, tail) = match rest.split_once(' ') {
+            Some((w, t)) => (w, t.trim_start()),
+            None => (rest, ""),
+        };
+        if word == "--" {
+            // End of options: whatever follows is a path, even if it starts
+            // with a dash. This is the only way to diff a file called `-a`.
+            rest = tail;
+            break;
+        }
+        if word == "-" {
+            // The stdin convention, which this `diff` does not implement. Left
+            // to fall through as a path so the failure names the thing that is
+            // missing ("diff: -: NotFound") instead of claiming `-` is an
+            // option nobody has heard of.
+            break;
+        }
+        match word {
+            "-a" | "--text" => {
+                force_text = true;
+                rest = tail;
+            }
+            other => {
+                // Refuse rather than drop. A dropped `--txt` would silently
+                // become a plain `diff`, which on a binary file is exactly the
+                // megabyte of unreadable output the flag was typed to request
+                // — or, worse, is not, and the user never learns why.
+                shell_println!("diff: unrecognized option `{}'", other);
+                shell_println!("Usage: diff [-a|--text] <file1> <file2>");
+                set_exit(2);
+                return;
+            }
+        }
+    }
+
+    let parts: Vec<&str> = rest.splitn(2, ' ').collect();
     if parts.len() < 2 || parts[1].is_empty() {
         // 2, not 1: inside `diff`, 1 is the reserved answer "compared them,
         // they differ".
-        shell_println!("Usage: diff <file1> <file2>");
+        shell_println!("Usage: diff [-a|--text] <file1> <file2>");
         set_exit(2);
         return;
     }
@@ -99015,17 +102137,47 @@ fn cmd_diff(args: &str) {
 
     if data1 == data2 {
         // Identical files — no output (like Unix diff), and status 0, which
-        // `dispatch` has already set.
+        // `dispatch` has already set. This is *above* the binary test on
+        // purpose: two identical object files are not something to report, and
+        // GNU says nothing about them either.
         return;
     }
 
-    // Split into lines. Treat as text — invalid UTF-8 bytes get replacement chars.
-    // For a kernel shell this is acceptable; binary files should use `cmp`.
-    let text1 = String::from_utf8_lossy(&data1);
-    let text2 = String::from_utf8_lossy(&data2);
+    // Binary: say so in one line instead of emitting a correct but unreadable
+    // hunk. Status 1, not 2 — this is not a refusal to compare. The comparison
+    // was made (the byte equality above is the whole of it) and its answer is
+    // "they differ"; only the *rendering* is abbreviated. Returning 2 here
+    // would tell `diff a b || rebuild` that the question could not be
+    // answered, when it was.
+    if !force_text && (data1.contains(&0) || data2.contains(&0)) {
+        shell_println!(
+            "Binary files {} and {} differ",
+            path1.display(),
+            path2.display()
+        );
+        set_exit(1);
+        return;
+    }
 
-    let lines1: Vec<&str> = text1.lines().collect();
-    let lines2: Vec<&str> = text2.lines().collect();
+    // Lines are byte slices, and the split is `\n` only. Both halves of that
+    // matter, and both used to be wrong in a way the byte compare above could
+    // not catch — it decides *whether* the files differ, and then everything
+    // below decided *how* from a lossy decode of the same bytes.
+    //
+    // `from_utf8_lossy` maps every invalid byte to the same U+FFFD, so `\xff`
+    // and `\xfe` compared **equal**, and two genuinely different lines were
+    // classified `Edit::Keep` and printed with a leading space — reported as
+    // context the two files share. Wrong output under a correct exit status,
+    // which is the worse pairing: the status is what a script tests and the
+    // output is what a person reads.
+    //
+    // `str::lines` was the half that needed no unusual input at all. It strips
+    // a trailing `\r`, so `diff dos.txt unix.txt` — the commonest reason to
+    // run diff — produced no hunks and fell through to the note at the bottom,
+    // which told the user the files differed "only in trailing newline" about
+    // files differing on every line.
+    let lines1: Vec<&[u8]> = split_lines(&data1);
+    let lines2: Vec<&[u8]> = split_lines(&data2);
 
     const MAX_LINES: usize = 2000;
     if lines1.len() > MAX_LINES || lines2.len() > MAX_LINES {
@@ -99198,24 +102350,66 @@ fn cmd_diff(args: &str) {
 
         for idx in *hstart..*hend {
             if let Some((kind, line_idx)) = edits.get(idx) {
-                let line_text = match kind {
-                    Edit::Keep | Edit::Remove => lines1.get(*line_idx).unwrap_or(&""),
-                    Edit::Add => lines2.get(*line_idx).unwrap_or(&""),
+                let empty: &[u8] = &[];
+                let line_text: &[u8] = match kind {
+                    Edit::Keep | Edit::Remove => lines1.get(*line_idx).copied().unwrap_or(empty),
+                    Edit::Add => lines2.get(*line_idx).copied().unwrap_or(empty),
                 };
-                let prefix = match kind {
-                    Edit::Keep => ' ',
-                    Edit::Remove => '-',
-                    Edit::Add => '+',
+                let prefix: u8 = match kind {
+                    Edit::Keep => b' ',
+                    Edit::Remove => b'-',
+                    Edit::Add => b'+',
                 };
-                shell_println!("{}{}", prefix, line_text);
+                // The body is written as bytes rather than formatted, because
+                // formatting it would need it to be a `str` again and that is
+                // the whole defect. A line that is not text prints as whatever
+                // the terminal makes of it, which is the honest rendering --
+                // and unlike U+FFFD it does not make two different lines look
+                // like one.
+                shell_write_bytes(&[prefix]);
+                shell_write_bytes(line_text);
+                shell_write_bytes(b"\n");
             }
         }
     }
 
     if hunks.is_empty() {
-        // Should not happen since data1 != data2, but could if only trailing
-        // newline differs. Show a minimal note.
-        shell_println!("(files differ only in trailing newline)");
+        // No hunk means the two line sequences are equal: a Keep pairs equal
+        // lines, so if the sequences differed the backtrack would have had to
+        // emit at least one Add or Remove. Combined with `data1 != data2`,
+        // checked at the top, this branch is the case "same lines, different
+        // bytes".
+        //
+        // With a byte-exact splitter that has exactly one cause. `split_lines`
+        // loses nothing except whether the input ended in `\n`: the file is
+        // recoverable as the lines joined by `\n` plus that flag, so the pair
+        // (lines, final-newline) determines the bytes. Equal lines and unequal
+        // bytes therefore force the flag to differ.
+        //
+        // That is what the old line here claimed, but it claimed it under a
+        // comment reading "should not happen" -- it was the only benign
+        // explanation, not a checked one. It was reachable by two other routes,
+        // both of them real differences the lossy decode had erased, and both
+        // ended with the user being told the files were essentially the same.
+        // The claim is now computed from the bytes it describes.
+        let nl1 = data1.last() == Some(&b'\n');
+        let nl2 = data2.last() == Some(&b'\n');
+        if nl1 == nl2 {
+            // Unreachable by the argument above. Kept as a branch rather than
+            // an `unreachable!()` because the alternative to being wrong here
+            // must not be panicking a shell, and kept saying *nothing* about
+            // the cause because naming an unverified one is the defect this
+            // whole change removes. If the splitter ever grows a second thing
+            // it discards, this prints instead of lying.
+            shell_println!("(files differ, but not in any complete line)");
+        } else {
+            let (with, without) = if nl1 {
+                (path1.display(), path2.display())
+            } else {
+                (path2.display(), path1.display())
+            };
+            shell_println!("(only in trailing newline: {with} has one, {without} does not)");
+        }
     }
 
     // Reached only when `data1 != data2`, checked above, so every path here is
@@ -99437,17 +102631,42 @@ fn cmd_mount(args: &str) {
     let mut opts_str: Option<&str> = None;
     let mut positional: Vec<&str> = Vec::new();
     let mut i = 0;
-    while i < words.len() {
-        if words[i] == "-t" && i + 1 < words.len() {
-            fs_type = Some(words[i + 1]);
-            i += 2;
-        } else if words[i] == "-o" && i + 1 < words.len() {
-            opts_str = Some(words[i + 1]);
-            i += 2;
-        } else {
-            positional.push(words[i]);
+    let mut flags_done = false;
+    while let Some(&word) = words.get(i) {
+        if !flags_done && word == "--" {
+            flags_done = true;
             i += 1;
+            continue;
         }
+        if flags_done || word == "-" || !word.starts_with('-') {
+            positional.push(word);
+            i += 1;
+            continue;
+        }
+        // `-t`/`-o` at the very end used to fall through to the positional
+        // arm, so `mount -t` mounted a *device named `-t`*; and any other
+        // dash-leading word went the same way, which is how `mount -r /a /b`
+        // came to try to mount a device called `-r`.
+        let what = match word {
+            "-t" => "a filesystem type",
+            "-o" => "a comma-separated option list",
+            other => {
+                shell_println!("mount: unrecognized option `{}'", other);
+                set_exit(1);
+                return;
+            }
+        };
+        let Some(&v) = words.get(i + 1) else {
+            shell_println!("mount: {} requires {}", word, what);
+            set_exit(1);
+            return;
+        };
+        if word == "-t" {
+            fs_type = Some(v);
+        } else {
+            opts_str = Some(v);
+        }
+        i += 2;
     }
 
     // Handle remount: "mount -o remount,ro /path"
@@ -100468,7 +103687,7 @@ fn cmd_dhcpv6(args: &str) {
                 set_exit(1);
             }
         },
-        _ => {
+        other => {
             shell_println!("dhcpv6 — DHCPv6 client (IPv6 address/config)");
             shell_println!();
             shell_println!("Usage:");
@@ -100476,6 +103695,7 @@ fn cmd_dhcpv6(args: &str) {
             shell_println!("  dhcpv6 info        — stateless (DNS/domain only)");
             shell_println!("  dhcpv6 status      — show client state and stats");
             shell_println!("  dhcpv6 test        — run self-tests");
+            end_help_arm("dhcpv6", other);
         }
     }
 }
@@ -100843,12 +104063,18 @@ fn cmd_firewall(args: &str) {
         "policy" => match parts.get(1).copied() {
             Some("accept") => firewall::set_default_policy(firewall::DefaultPolicy::Accept),
             Some("drop") => firewall::set_default_policy(firewall::DefaultPolicy::Drop),
-            _ => shell_println!("Usage: firewall policy accept|drop"),
+            _ => {
+                shell_println!("Usage: firewall policy accept|drop");
+                set_exit(1);
+            }
         },
         "policy6" => match parts.get(1).copied() {
             Some("accept") => firewall::set_default_policy6(firewall::DefaultPolicy::Accept),
             Some("drop") => firewall::set_default_policy6(firewall::DefaultPolicy::Drop),
-            _ => shell_println!("Usage: firewall policy6 accept|drop"),
+            _ => {
+                shell_println!("Usage: firewall policy6 accept|drop");
+                set_exit(1);
+            }
         },
         "allow" | "deny" => {
             #[inline(never)]
@@ -103215,81 +106441,106 @@ fn cmd_container(args: &str) {
                 // containers of any state; `-l`/`--latest` == `-n 1`. Setting a
                 // limit implies `-a` (last-N spans all states).
                 let mut limit: Option<usize> = None;
+                // Every word here either narrows the listing or does not
+                // belong on the line at all, so *ignoring* one — which is
+                // what the "Ignoring filter" messages below used to do — hands
+                // back containers the caller asked to exclude, and hands them
+                // back with exit status 0. `ls -q --filter status=stoped` in a
+                // `rm $(…)` would have printed every running container's id.
                 let mut fi = 1;
-                while fi < parts.len() {
-                    match parts.get(fi) {
-                        Some(&"-q") | Some(&"--quiet") => {
+                while let Some(&word) = parts.get(fi) {
+                    match word {
+                        "-q" | "--quiet" => {
                             quiet = true;
                             fi = fi.saturating_add(1);
                         }
-                        Some(&"-a") | Some(&"--all") => {
+                        "-a" | "--all" => {
                             all_states = true;
                             fi = fi.saturating_add(1);
                         }
-                        Some(&"-l") | Some(&"--latest") => {
+                        "-l" | "--latest" => {
                             limit = Some(1);
                             all_states = true;
                             fi = fi.saturating_add(1);
                         }
-                        Some(&"-n") | Some(&"--last") => {
-                            match parts
-                                .get(fi.saturating_add(1))
-                                .and_then(|s| s.parse::<usize>().ok())
-                            {
-                                Some(n) => {
-                                    limit = Some(n);
-                                    all_states = true;
+                        "-n" | "--last" => {
+                            let Some(&v) = parts.get(fi.saturating_add(1)) else {
+                                shell_println!(
+                                    "[container] {}: expected a count (e.g. -n 5)",
+                                    word
+                                );
+                                set_exit(1);
+                                return;
+                            };
+                            let Ok(n) = v.parse::<usize>() else {
+                                shell_println!("[container] {}: '{}' is not a count", word, v);
+                                set_exit(1);
+                                return;
+                            };
+                            limit = Some(n);
+                            all_states = true;
+                            fi = fi.saturating_add(2);
+                        }
+                        "--filter" | "-f" => {
+                            let Some(&spec) = parts.get(fi.saturating_add(1)) else {
+                                shell_println!(
+                                    "[container] {}: expected label=KEY[=VALUE], name=SUBSTRING or status=STATE",
+                                    word
+                                );
+                                set_exit(1);
+                                return;
+                            };
+                            if let Some(lbl) = spec.strip_prefix("label=") {
+                                match lbl.split_once('=') {
+                                    Some((k, v)) if !k.is_empty() => {
+                                        label_filters.push((k, Some(v)));
+                                    }
+                                    None if !lbl.is_empty() => {
+                                        label_filters.push((lbl, None));
+                                    }
+                                    _ => {
+                                        shell_println!(
+                                            "[container] Bad filter '{}': expected label=KEY[=VALUE]",
+                                            spec
+                                        );
+                                        set_exit(1);
+                                        return;
+                                    }
                                 }
-                                None => shell_println!(
-                                    "[container] Ignoring -n: expected a count (e.g. -n 5)"
-                                ),
+                            } else if let Some(nm) = spec.strip_prefix("name=") {
+                                if nm.is_empty() {
+                                    shell_println!("[container] Bad filter '{}': empty name", spec);
+                                    set_exit(1);
+                                    return;
+                                }
+                                name_filters.push(nm);
+                            } else if let Some(st) = spec.strip_prefix("status=") {
+                                match container::parse_state(st) {
+                                    Some(state) => status_filters.push(state),
+                                    None => {
+                                        shell_println!(
+                                            "[container] Bad filter '{}': status must be created|running|stopped|failed",
+                                            spec
+                                        );
+                                        set_exit(1);
+                                        return;
+                                    }
+                                }
+                            } else {
+                                shell_println!(
+                                    "[container] Unsupported filter '{}' (supported: label=, name=, status=)",
+                                    spec
+                                );
+                                set_exit(1);
+                                return;
                             }
                             fi = fi.saturating_add(2);
                         }
-                        Some(&"--filter") | Some(&"-f") => {
-                            if let Some(&spec) = parts.get(fi.saturating_add(1)) {
-                                if let Some(lbl) = spec.strip_prefix("label=") {
-                                    match lbl.split_once('=') {
-                                        Some((k, v)) if !k.is_empty() => {
-                                            label_filters.push((k, Some(v)));
-                                        }
-                                        None if !lbl.is_empty() => {
-                                            label_filters.push((lbl, None));
-                                        }
-                                        _ => shell_println!(
-                                            "[container] Ignoring filter '{}': expected label=KEY[=VALUE]",
-                                            spec
-                                        ),
-                                    }
-                                } else if let Some(nm) = spec.strip_prefix("name=") {
-                                    if nm.is_empty() {
-                                        shell_println!(
-                                            "[container] Ignoring filter '{}': empty name",
-                                            spec
-                                        );
-                                    } else {
-                                        name_filters.push(nm);
-                                    }
-                                } else if let Some(st) = spec.strip_prefix("status=") {
-                                    match container::parse_state(st) {
-                                        Some(state) => status_filters.push(state),
-                                        None => shell_println!(
-                                            "[container] Ignoring filter '{}': status must be created|running|stopped|failed",
-                                            spec
-                                        ),
-                                    }
-                                } else {
-                                    shell_println!(
-                                        "[container] Unsupported filter '{}' (supported: label=, name=, status=)",
-                                        spec
-                                    );
-                                }
-                                fi = fi.saturating_add(2);
-                            } else {
-                                fi = fi.saturating_add(1);
-                            }
+                        other => {
+                            shell_println!("[container] Unrecognized option '{}'", other);
+                            set_exit(1);
+                            return;
                         }
-                        _ => fi = fi.saturating_add(1),
                     }
                 }
 
@@ -103518,6 +106769,7 @@ fn cmd_container(args: &str) {
                 for id_str in ids {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     let result = if force {
@@ -103549,6 +106801,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::start(id) {
@@ -103573,6 +106826,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::stop(id) {
@@ -103593,11 +106847,29 @@ fn cmd_container(args: &str) {
                 // non-flag token is the container id.
                 let mut want_json = false;
                 let mut id_str: Option<&str> = None;
+                let mut flags_done = false;
                 for &tok in parts.iter().skip(1) {
+                    if !flags_done && tok == "--" {
+                        flags_done = true;
+                        continue;
+                    }
+                    if flags_done || tok == "-" || !tok.starts_with('-') {
+                        // A second id used to be dropped in silence, so
+                        // `container info 3 4` reported on 3 alone.
+                        if id_str.is_some() {
+                            shell_println!("container info: extra operand '{}' (one id)", tok);
+                            set_exit(1);
+                            return;
+                        }
+                        id_str = Some(tok);
+                        continue;
+                    }
                     if tok == "--json" || tok == "-j" {
                         want_json = true;
-                    } else if id_str.is_none() {
-                        id_str = Some(tok);
+                    } else {
+                        shell_println!("container info: unrecognized option '{}'", tok);
+                        set_exit(1);
+                        return;
                     }
                 }
                 let Some(id_str) = id_str else {
@@ -104195,6 +107467,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::kill(id) {
@@ -104333,6 +107606,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::pause(id) {
@@ -104361,6 +107635,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::unpause(id) {
@@ -104478,6 +107753,7 @@ fn cmd_container(args: &str) {
                 for &id_str in parts.iter().skip(1) {
                     let Ok(id) = id_str.parse::<u32>() else {
                         shell_println!("Invalid container ID '{}'", id_str);
+                        set_exit(1);
                         continue;
                     };
                     match container::restart(id) {
@@ -104798,6 +108074,7 @@ fn cmd_container(args: &str) {
                         shell_println!(
                             "  container system prune  — remove stopped containers + unused networks"
                         );
+                        set_exit(1);
                     }
                 }
             }
@@ -105572,6 +108849,7 @@ fn cmd_container_network(parts: &[&str]) {
         }
         other => {
             shell_println!("Unknown network action '{}'", other);
+            set_exit(1);
             shell_println!(
                 "Usage: container network <create|ls|rm|inspect|prune|resolve|connect|disconnect> NAME [--subnet CIDR] [--gateway IP]"
             );
@@ -106078,8 +109356,12 @@ impl<'a> OciRunFlags<'a> {
     ///
     /// `#[inline(never)]` so the stack split this type exists for survives a
     /// change of optimisation level.
+    ///
+    /// Returns `None` when the line could not be parsed, having said why. The
+    /// caller must abandon the run: see the unknown-option arm below for why a
+    /// half-understood container command line is not safe to act on.
     #[inline(never)]
-    fn parse(parts: &[&'a str]) -> Self {
+    fn parse(parts: &[&'a str]) -> Option<Self> {
         use crate::oci;
 
         let mut name: Option<&str> = None;
@@ -106496,9 +109778,31 @@ impl<'a> OciRunFlags<'a> {
                     }
                 }
                 tok if tok.starts_with('-') => {
-                    // Unknown option: skip it (and don't consume a value,
-                    // since we don't know its arity).
-                    i = i.saturating_add(1);
+                    // An unknown option used to be skipped, on the reasoning
+                    // that we cannot know its arity and so cannot know whether
+                    // to skip its value too. That reasoning is right about the
+                    // arity and wrong about the conclusion: skipping is not
+                    // the neutral act it looks like.
+                    //
+                    // Every flag in this parser exists to *narrow* what the
+                    // container may do -- `--read-only`, `--memory`, `--user`,
+                    // `--tmpfs`, `--cap-drop` when it lands. Dropping one for
+                    // being misspelled runs the container with more authority
+                    // than the operator asked for, and prints a container ID
+                    // as if the request had been honoured in full. Worse, an
+                    // unknown option's *value* is not skipped, so it lands in
+                    // the first positional slot and silently becomes the CMD
+                    // override: `oci run img --menory 512m` runs `512m` as the
+                    // container's command instead of the image's entrypoint.
+                    //
+                    // Not knowing the arity is exactly why we must stop: we
+                    // cannot even say how much of the rest of the line we have
+                    // misread.
+                    shell_println!("[oci] Unrecognized option '{}'", tok);
+                    shell_println!(
+                        "[oci] (put the container's own arguments after the image, not before)"
+                    );
+                    return None;
                 }
                 _ => {
                     // First positional token after the image dir: this and
@@ -106511,7 +109815,7 @@ impl<'a> OciRunFlags<'a> {
                 }
             }
         }
-        Self {
+        Some(Self {
             name,
             net_ip,
             net_gw,
@@ -106535,7 +109839,7 @@ impl<'a> OciRunFlags<'a> {
             labels,
             label_file_entries,
             cmd_override,
-        }
+        })
     }
 }
 
@@ -107205,7 +110509,10 @@ fn oci_run(parts: &[&str]) {
     // Parse the optional flags.  They come back from a separate function, rather
     // than being filled by a loop here, to keep the parser's stack slots out of
     // this frame -- see [`OciRunFlags`].
-    let f = OciRunFlags::parse(parts);
+    let Some(f) = OciRunFlags::parse(parts) else {
+        set_exit(1);
+        return;
+    };
 
     // Step 1: Load OCI image metadata. `dir` may be an on-disk OCI
     // layout directory or a named-store reference (`name:tag`);
@@ -107708,55 +111015,74 @@ fn cmd_oci(args: &str) {
                 )> = alloc::vec::Vec::new();
                 let mut target: Option<&str> = None;
                 let mut tag: Option<&str> = None;
+                // A build is expensive and its output is a *named artifact*,
+                // so a word dropped here is a wrong image built under a right
+                // name. Each of the three flags used to warn and then carry
+                // on without it: no `-t` means the image is never tagged, and
+                // no `--target` means the *last* stage is built instead of the
+                // one that was named — a different image entirely, reported
+                // as a success.
                 let mut i = 1usize;
+                let mut flags_done = false;
                 while let Some(&tok) = parts.get(i) {
-                    if tok == "-t" || tok == "--tag" {
-                        if let Some(&t) = parts.get(i.saturating_add(1)) {
-                            tag = Some(t);
-                            i = i.saturating_add(2);
-                        } else {
-                            shell_println!("[oci] -t/--tag needs a name:tag");
-                            i = i.saturating_add(1);
-                        }
-                    } else if let Some(t) = tok.strip_prefix("--tag=") {
-                        tag = Some(t);
+                    if !flags_done && tok == "--" {
+                        flags_done = true;
                         i = i.saturating_add(1);
-                    } else if tok == "--build-arg" {
-                        if let Some(&kv) = parts.get(i.saturating_add(1)) {
-                            // KEY=VALUE; a bare KEY takes the ambient value "" here
-                            // (the builder only applies it to a declared ARG).
-                            let (k, v) = match kv.split_once('=') {
-                                Some((k, v)) => (k, v),
-                                None => (kv, ""),
-                            };
-                            if k.is_empty() {
-                                shell_println!("[oci] Ignoring --build-arg '{}': empty key", kv);
-                            } else {
-                                build_args.push((
-                                    alloc::string::String::from(k),
-                                    alloc::string::String::from(v),
-                                ));
-                            }
-                            i = i.saturating_add(2);
-                        } else {
-                            shell_println!("[oci] --build-arg needs KEY=VALUE");
-                            i = i.saturating_add(1);
-                        }
-                    } else if tok == "--target" {
-                        if let Some(&t) = parts.get(i.saturating_add(1)) {
-                            target = Some(t);
-                            i = i.saturating_add(2);
-                        } else {
-                            shell_println!("[oci] --target needs a stage name or index");
-                            i = i.saturating_add(1);
-                        }
-                    } else if let Some(t) = tok.strip_prefix("--target=") {
-                        target = Some(t);
-                        i = i.saturating_add(1);
-                    } else {
+                        continue;
+                    }
+                    if flags_done || tok == "-" || !tok.starts_with('-') {
                         positional.push(tok);
                         i = i.saturating_add(1);
+                        continue;
                     }
+                    if let Some(t) = tok.strip_prefix("--tag=") {
+                        tag = Some(t);
+                        i = i.saturating_add(1);
+                        continue;
+                    }
+                    if let Some(t) = tok.strip_prefix("--target=") {
+                        target = Some(t);
+                        i = i.saturating_add(1);
+                        continue;
+                    }
+                    let what = match tok {
+                        "-t" | "--tag" => "a name:tag",
+                        "--build-arg" => "KEY=VALUE",
+                        "--target" => "a stage name or index",
+                        other => {
+                            shell_println!("[oci] build: unrecognized option '{}'", other);
+                            set_exit(1);
+                            return;
+                        }
+                    };
+                    let Some(&v) = parts.get(i.saturating_add(1)) else {
+                        shell_println!("[oci] build: {} needs {}", tok, what);
+                        set_exit(1);
+                        return;
+                    };
+                    match tok {
+                        "-t" | "--tag" => tag = Some(v),
+                        "--target" => target = Some(v),
+                        _ => {
+                            // KEY=VALUE; a bare KEY takes the ambient value ""
+                            // here (the builder only applies it to a declared
+                            // ARG).
+                            let (k, val) = match v.split_once('=') {
+                                Some((k, val)) => (k, val),
+                                None => (v, ""),
+                            };
+                            if k.is_empty() {
+                                shell_println!("[oci] build: --build-arg '{}': empty key", v);
+                                set_exit(1);
+                                return;
+                            }
+                            build_args.push((
+                                alloc::string::String::from(k),
+                                alloc::string::String::from(val),
+                            ));
+                        }
+                    }
+                    i = i.saturating_add(2);
                 }
                 let (Some(&dockerfile), Some(&ctx), Some(&dest)) =
                     (positional.first(), positional.get(1), positional.get(2))
@@ -108586,60 +111912,61 @@ fn cmd_grep_input(args: &str, input: &str) {
     // therefore break `cat x | grep -r pat /dir`, which is a perfectly good file
     // search that merely has a pipe attached — so the delegation has to be the
     // first question asked, not the last.
-    let positional_count = args
-        .split_whitespace()
-        .filter(|w| !(w.starts_with('-') && w.len() > 1 && !w.starts_with("--")))
-        .count();
-    if positional_count >= 2 {
+    let (opt_words, positional) = match grep_split_args(args) {
+        Ok(v) => v,
+        Err(w) => {
+            // Reported here rather than after the delegation: a long option is
+            // wrong for *both* halves, so there is no half to defer to, and
+            // `cmd_grep` would only reach the same conclusion a moment later.
+            grep_reject_long_option(w);
+            return;
+        }
+    };
+    if positional.len() >= 2 {
         cmd_grep(args);
         return;
     }
 
     // Parse flags and find the pattern.
     let mut flags = GrepFlags::new();
-    let mut positional: alloc::vec::Vec<&str> = Vec::new();
 
-    for word in args.split_whitespace() {
-        if word.starts_with('-') && word.len() > 1 && !word.starts_with("--") {
-            for ch in word[1..].chars() {
-                match ch {
-                    'i' => flags.case_insensitive = true,
-                    'I' => flags.case_insensitive = false,
-                    'v' => flags.invert = true,
-                    'c' => flags.count_only = true,
-                    'n' => flags.show_line_numbers = true,
-                    'w' => flags.whole_word = true,
-                    // `-l` used to be silently dropped here while the file half
-                    // honoured it, so `grep -l p f` named the file and
-                    // `cat f | grep -l p` printed the matching lines instead.
-                    // On a pipe the "file" is stdin, which GNU spells
-                    // `(standard input)`.
-                    'l' => flags.files_only = true,
-                    'r' | 'R' => {
-                        // Named, rather than lumped in with a typo, because it
-                        // is a real flag being refused for a real reason: there
-                        // is no tree to walk on the right of a pipe. (With a
-                        // directory operand this never runs — the delegation
-                        // above already sent it to the file form.)
-                        shell_println!("grep: -{}: no directory to search on piped input", ch);
-                        set_exit(2);
-                        return;
-                    }
-                    _ => {
-                        // The file form rejects an unknown flag; this one used
-                        // to drop it on the floor. So `grep -Z pat f` failed
-                        // while `cat f | grep -Z pat` quietly searched with -Z
-                        // ignored -- the two halves disagreeing about the same
-                        // argument, which the contract below forbids. A typo'd
-                        // flag must not silently change what was searched for.
-                        shell_println!("grep: unknown flag '-{}'", ch);
-                        set_exit(2);
-                        return;
-                    }
+    for word in &opt_words {
+        for ch in word.get(1..).unwrap_or("").chars() {
+            match ch {
+                'i' => flags.case_insensitive = true,
+                'I' => flags.case_insensitive = false,
+                'v' => flags.invert = true,
+                'c' => flags.count_only = true,
+                'n' => flags.show_line_numbers = true,
+                'w' => flags.whole_word = true,
+                // `-l` used to be silently dropped here while the file half
+                // honoured it, so `grep -l p f` named the file and
+                // `cat f | grep -l p` printed the matching lines instead.
+                // On a pipe the "file" is stdin, which GNU spells
+                // `(standard input)`.
+                'l' => flags.files_only = true,
+                'r' | 'R' => {
+                    // Named, rather than lumped in with a typo, because it
+                    // is a real flag being refused for a real reason: there
+                    // is no tree to walk on the right of a pipe. (With a
+                    // directory operand this never runs — the delegation
+                    // above already sent it to the file form.)
+                    shell_println!("grep: -{}: no directory to search on piped input", ch);
+                    set_exit(2);
+                    return;
+                }
+                _ => {
+                    // The file form rejects an unknown flag; this one used
+                    // to drop it on the floor. So `grep -Z pat f` failed
+                    // while `cat f | grep -Z pat` quietly searched with -Z
+                    // ignored -- the two halves disagreeing about the same
+                    // argument, which the contract below forbids. A typo'd
+                    // flag must not silently change what was searched for.
+                    shell_println!("grep: unknown flag '-{}'", ch);
+                    set_exit(2);
+                    return;
                 }
             }
-        } else {
-            positional.push(word);
         }
     }
 
@@ -109236,6 +112563,7 @@ fn parse_cut_args(args: &str) -> Result<CutSpec, CutParseError> {
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut only_delimited = false;
     let mut files: Vec<String> = Vec::new();
+    let mut flags_done = false;
 
     let mut i = 0usize;
     while let Some(word) = words.get(i) {
@@ -109243,9 +112571,20 @@ fn parse_cut_args(args: &str) -> Result<CutSpec, CutParseError> {
         let w = word.as_str();
 
         // A lone `-` is the conventional name for standard input, not an
-        // option. Everything else without a leading `-` is a file.
-        if w == "-" || !w.starts_with('-') {
+        // option. Everything else without a leading `-` is a file — and after
+        // `--`, so is everything full stop.
+        if flags_done || w == "-" || !w.starts_with('-') {
             files.push(String::from(w));
+            continue;
+        }
+
+        // `--` ends the options. Our paths allow every byte but `/` and NUL, so
+        // a file called `-weird.txt` is legal, and without this it could not be
+        // named at all: `cut -f1 -weird.txt` reads the name as flags, and
+        // `cut -f1 -- -weird.txt` refused the `--`. A refusal rather than a
+        // wrong answer, but a reachable file two commands could not open.
+        if w == "--" {
+            flags_done = true;
             continue;
         }
 
@@ -110553,6 +113892,7 @@ fn parse_fold_args(args: &str) -> Result<FoldSpec, FoldParseError> {
     let mut spaces = false;
     let mut bytes = false;
     let mut files: Vec<String> = Vec::new();
+    let mut flags_done = false;
 
     let mut i = 0usize;
     while let Some(word) = words.get(i) {
@@ -110560,9 +113900,16 @@ fn parse_fold_args(args: &str) -> Result<FoldSpec, FoldParseError> {
         let w = word.as_str();
 
         // A lone `-` is the conventional name for standard input, not an
-        // option. Everything else without a leading `-` is a file.
-        if w == "-" || !w.starts_with('-') {
+        // option. Everything else without a leading `-` is a file — and after
+        // `--`, so is everything full stop. See `parse_cut_args` for why a file
+        // whose name begins with `-` is a real case here rather than a curio.
+        if flags_done || w == "-" || !w.starts_with('-') {
             files.push(String::from(w));
+            continue;
+        }
+
+        if w == "--" {
+            flags_done = true;
             continue;
         }
 
@@ -111712,24 +115059,64 @@ fn cmd_read(args: &str) {
     }
 }
 
+/// Strip `mapfile`'s leading options off `args`, returning
+/// `(strip_newlines, remainder)`.
+///
+/// Returns `None` after reporting an option `mapfile` does not implement.
+///
+/// The scan this replaces stopped at the first word it did not recognise and
+/// let it fall through into the *array name* slot, so `mapfile -u 0 ARR` read
+/// a file called `0 ARR` into an array called `-u`. That is an error rather
+/// than a silent wrong answer, but it is an error that names neither the
+/// option nor the mistake, and it would quietly become a wrong answer the day
+/// a file called `0 ARR` existed. bash's `mapfile` has `-d -n -O -s -u -C -c`
+/// besides `-t`; we implement only `-t`, and saying so plainly is cheaper than
+/// being wrong in an interesting way.
+///
+/// The remainder is returned as a *slice of the original string*, not as
+/// words, because `cmd_mapfile` deliberately treats everything after the array
+/// name as one file path — spaces included.
+fn mapfile_split_flags(args: &str) -> Option<(bool, &str)> {
+    let mut strip_newlines = false;
+    let mut rest = args.trim_start();
+    while !rest.is_empty() {
+        let (word, tail) = match rest.find([' ', '\t']) {
+            Some(i) => (
+                rest.get(..i).unwrap_or(""),
+                rest.get(i..).unwrap_or("").trim_start(),
+            ),
+            None => (rest, ""),
+        };
+        // An array literally named `-t` is not reachable otherwise.
+        if word == "--" {
+            rest = tail;
+            break;
+        }
+        // A lone `-` is a name, not a truncated option.
+        if word == "-" || !word.starts_with('-') {
+            break;
+        }
+        if word == "-t" {
+            strip_newlines = true;
+            rest = tail;
+            continue;
+        }
+        shell_println!("mapfile: unrecognized option `{}'", word);
+        set_exit(2);
+        return None;
+    }
+    Some((strip_newlines, rest))
+}
+
 /// `mapfile [-t] ARRAY [FILE]` — read lines from file into an array.
 ///
 /// Reads all lines from FILE (or stdin if invoked via pipe) and stores
 /// each line as an element of ARRAY.  With `-t`, trailing newlines are
 /// stripped from each element.  Also available as `readarray`.
 fn cmd_mapfile(args: &str) {
-    let mut strip_newlines = false;
-    let mut rest = args;
-
-    // Parse flags.
-    while rest.starts_with('-') {
-        if rest.starts_with("-t ") || rest.starts_with("-t\t") || rest == "-t" {
-            strip_newlines = true;
-            rest = rest.get(3..).unwrap_or("").trim_start();
-        } else {
-            break;
-        }
-    }
+    let Some((strip_newlines, rest)) = mapfile_split_flags(args) else {
+        return;
+    };
 
     // Parse array name.
     let (var_name, file_path) = if let Some(sp) = rest.find(' ') {
@@ -111765,17 +115152,9 @@ fn cmd_mapfile(args: &str) {
 
 /// `mapfile` with piped input: `cmd | mapfile [-t] ARRAY`
 fn cmd_mapfile_input(args: &str, input: &str) {
-    let mut strip_newlines = false;
-    let mut rest = args;
-
-    while rest.starts_with('-') {
-        if rest.starts_with("-t ") || rest.starts_with("-t\t") || rest == "-t" {
-            strip_newlines = true;
-            rest = rest.get(3..).unwrap_or("").trim_start();
-        } else {
-            break;
-        }
-    }
+    let Some((strip_newlines, rest)) = mapfile_split_flags(args) else {
+        return;
+    };
 
     let mut words = rest.split_whitespace();
     let var_name = words.next().unwrap_or("MAPFILE");
@@ -118882,12 +122261,24 @@ fn cmd_lockdep(args: &str) {
         shell_println!("");
     }
 
+    // `lockdep` on its own is a query: the status summary above is its answer,
+    // and the synopsis is a hint about what else it can show. `lockdep banana`
+    // is a mistake, and used to be indistinguishable from it -- the summary went
+    // up either way and the status said success either way, so the unrecognised
+    // subcommand vanished without trace. Unlike the `match sub` commands, the
+    // subcommands here are tested by a chain of `if`s with no catch-all, so the
+    // recognised set has to be repeated; keep it in step with the four `if`s
+    // above.
     if subcmd.is_empty() {
         shell_println!("  Usage: lockdep [classes|edges|held|all]");
         shell_println!("    classes — show registered lock classes");
         shell_println!("    edges   — show dependency graph edges");
         shell_println!("    held    — show per-CPU held lock depth");
         shell_println!("    all     — show everything");
+    } else if !matches!(subcmd, "classes" | "edges" | "graph" | "held" | "all") {
+        shell_println!("lockdep: unknown subcommand '{}'", subcmd);
+        shell_println!("  Usage: lockdep [classes|edges|held|all]");
+        set_exit(1);
     }
 }
 
@@ -118984,12 +122375,38 @@ fn cmd_mkfs_fat(args: &str) {
     let mut label: Option<&str> = None;
     let mut device = "";
 
+    // This command destroys every byte on the device, so it is the last place
+    // that may act on a command line it did not fully understand.
+    // `mkfs.fat --labl FOO /dev/sda` used to format `/dev/sda` unlabelled: the
+    // typo became the device, then `FOO` replaced it, then `/dev/sda`
+    // replaced that, and the only surviving evidence was a missing label.
+    let mut flags_done = false;
     let mut words = args.split_whitespace();
     while let Some(w) = words.next() {
+        if !flags_done && w == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || w == "-" || !w.starts_with('-') {
+            if !device.is_empty() {
+                shell_println!("mkfs.fat: extra operand `{}' (one device)", w);
+                set_exit(1);
+                return;
+            }
+            device = w;
+            continue;
+        }
         if w == "-L" || w == "-l" || w == "--label" {
             label = words.next();
+            if label.is_none() {
+                shell_println!("mkfs.fat: {} requires a label", w);
+                set_exit(1);
+                return;
+            }
         } else {
-            device = w;
+            shell_println!("mkfs.fat: unrecognized option `{}'", w);
+            set_exit(1);
+            return;
         }
     }
 
@@ -119022,13 +122439,32 @@ fn cmd_fsck_fat(args: &str) {
     let mut repair = false;
     let mut device = "";
 
+    // `-a`/`-n` decide whether this command *writes* to the filesystem, so a
+    // mistyped one may not be dropped: `fsck.fat --repar /dev/sda` looked like
+    // a repair and was a check.
+    let mut flags_done = false;
     for w in args.split_whitespace() {
+        if !flags_done && w == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || w == "-" || !w.starts_with('-') {
+            if !device.is_empty() {
+                shell_println!("fsck.fat: extra operand `{}' (one device)", w);
+                set_exit(1);
+                return;
+            }
+            device = w;
+            continue;
+        }
         if w == "-a" || w == "--repair" || w == "-y" {
             repair = true;
         } else if w == "-n" || w == "--no-repair" {
             repair = false;
         } else {
-            device = w;
+            shell_println!("fsck.fat: unrecognized option `{}'", w);
+            set_exit(1);
+            return;
         }
     }
 
@@ -119063,6 +122499,23 @@ fn cmd_fsck_fat(args: &str) {
     }
 }
 
+/// The `fsck.ext4` synopsis, printed both by `--help` — which succeeded at what
+/// it was asked — and by the missing-device error, which did not.
+///
+/// It is one function rather than two copies of the text because the two differ
+/// only in the exit status, and that is precisely what a reader comparing two
+/// identical `shell_println!` blocks cannot see. It also keeps
+/// `scripts/check-usage-status.py`'s exemption honest: that table is keyed by
+/// enclosing function plus a fragment of the line, so an entry naming the help
+/// arm would have covered the error arm too — the two lines were character-for-
+/// character the same. With the text in a formatter, the exemption names the
+/// formatter, and neither caller is exempted by accident.
+fn fsck_ext4_usage() {
+    shell_println!("Usage: fsck.ext4 [-v] DEVICE");
+    shell_println!("  Check ext4 filesystem consistency (read-only).");
+    shell_println!("  -v  Verbose output (show all phases)");
+}
+
 /// `fsck.ext4 [-v] DEVICE` — check ext4 filesystem consistency.
 ///
 /// Performs read-only checks: superblock validation, bitmap free count
@@ -119076,18 +122529,36 @@ fn cmd_fsck_ext4(args: &str) {
         if w == "-v" || w == "--verbose" {
             verbose = true;
         } else if w == "-h" || w == "--help" {
-            shell_println!("Usage: fsck.ext4 [-v] DEVICE");
-            shell_println!("  Check ext4 filesystem consistency (read-only).");
-            shell_println!("  -v  Verbose output (show all phases)");
-            // No `set_exit(1)`: `--help` succeeded at what it was asked.
+            fsck_ext4_usage();
+            // Asking for help and getting it is a success, so the status stays
+            // at whatever the previous command left. Do not write the reason
+            // for that as a sentence containing `set_exit(1)`: the one that
+            // used to sit here read as a refusal to two different checkers.
             return;
-        } else {
+        } else if w.starts_with('-') && w != "-" {
+            // This arm used to fall through to `device = w`, so a misspelled
+            // flag became the *device name*. `fsck.ext4 /dev/sda --verbse`
+            // checked a device called `--verbse`; `fsck.ext4 --verbse /dev/sda`
+            // was worse, because the real device overwrote the typo and the
+            // check ran, verbosely-not-verbose, with no sign anything was
+            // ignored.
+            shell_println!("fsck.ext4: unrecognized option `{}'", w);
+            set_exit(1);
+            return;
+        } else if device.is_empty() {
             device = w;
+        } else {
+            // Silently keeping the last of several devices is the same class of
+            // guess: the user named two and got one, chosen by position.
+            shell_println!("fsck.ext4: extra operand `{}'", w);
+            set_exit(1);
+            return;
         }
     }
 
     if device.is_empty() {
-        shell_println!("Usage: fsck.ext4 [-v] DEVICE");
+        shell_println!("fsck.ext4: missing DEVICE operand");
+        fsck_ext4_usage();
         set_exit(1);
         return;
     }
@@ -119181,13 +122652,34 @@ fn cmd_flock(args: &str) {
     let mut mode: Option<&str> = None;
     let mut path_arg = "";
 
+    // The default mode is `query`, which does not touch the lock at all — so
+    // a dropped `-x` did not fail, it silently *declined to take the lock*
+    // and printed a status line that looked like an answer.
+    let mut flags_done = false;
     for w in args.split_whitespace() {
+        if !flags_done && w == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || w == "-" || !w.starts_with('-') {
+            if !path_arg.is_empty() {
+                shell_println!("flock: extra operand `{}' (one file)", w);
+                set_exit(1);
+                return;
+            }
+            path_arg = w;
+            continue;
+        }
         match w {
             "-s" | "--shared" => mode = Some("shared"),
             "-x" | "--exclusive" => mode = Some("exclusive"),
             "-u" | "--unlock" => mode = Some("unlock"),
             "-q" | "--query" => mode = Some("query"),
-            _ => path_arg = w,
+            other => {
+                shell_println!("flock: unrecognized option `{}'", other);
+                set_exit(1);
+                return;
+            }
         }
     }
 
@@ -119392,6 +122884,35 @@ fn cmd_glob(args: &str) {
     }
 }
 
+/// The 1-based number of the first line of `lines` that sorts before the line
+/// above it — considering only the pairs whose order [`cmd_comm`]'s merge
+/// actually relied on. `None` if there is no such line.
+///
+/// `merged` is the index the merge loop stopped at: lines `0..merged` were each
+/// assigned a column by a comparison against the other file, and `merged..` is
+/// the tail the caller copies out verbatim.
+///
+/// **Why the scan stops at `merged` and not at the end of the file.** A pair
+/// lying wholly inside the tail may be out of order without changing anything:
+/// once one file is exhausted, every remaining line of the other goes to the
+/// same column whatever order they arrive in, so refusing there would be crying
+/// wolf over an answer that is correct. But the pair that *straddles* the exit
+/// does matter, and it is the one an in-merge check cannot see — line `merged`
+/// lost the comparison that ended the loop, and if it sorts before a line
+/// already consumed then its twin in the other file went past unmatched. Since
+/// `windows(2)` yields one fewer pair than there are lines, `take(merged)` with
+/// `merged == lines.len()` is simply "all of them", which is right: a fully
+/// consumed file has no tail to exempt.
+fn comm_first_unsorted(lines: &[&[u8]], merged: usize) -> Option<usize> {
+    lines
+        .windows(2)
+        .take(merged)
+        .position(|w| matches!(w, [prev, cur] if prev > cur))
+        // `position` counts pairs, and pair `k` is (line `k`, line `k+1`); the
+        // offending line is the second of the pair, so 1-based it is `k + 2`.
+        .map(|k| k.saturating_add(2))
+}
+
 /// Compare two sorted files line by line.
 ///
 /// Usage: `comm [-1] [-2] [-3] FILE1 FILE2`
@@ -119404,17 +122925,35 @@ fn cmd_glob(args: &str) {
 /// `-1` suppresses column 1, `-2` suppresses column 2, `-3` suppresses column 3.
 /// `comm -12 FILE1 FILE2` shows only lines common to both.
 ///
+/// **Sorted input is a precondition, and it is checked.** This is a two-stream
+/// merge: it advances whichever side compares `Less` and never looks back, so on
+/// unsorted input it does not degrade gracefully — it puts lines in the wrong
+/// columns, silently, with exit 0. Given an out-of-order line it refuses:
+/// nothing is printed but the diagnostic, and the exit status is 1. See §295 for
+/// why that is a refusal rather than GNU's warning-and-continue.
+///
 /// Reference: POSIX comm(1).
 fn cmd_comm(args: &str) {
     let mut show1 = true;
     let mut show2 = true;
     let mut show3 = true;
     let mut files: alloc::vec::Vec<&str> = alloc::vec::Vec::new();
+    let mut flags_done = false;
 
     for word in args.split_whitespace() {
-        if word.starts_with('-') && word.len() > 1 && word.as_bytes()[1] != b'/' {
+        // `--` ends the options, which is how a file whose name begins with `-`
+        // is named. This replaces a narrower rule that used to sit in the test
+        // below — `word.as_bytes()[1] != b'/'`, so `-/x` was taken as a file —
+        // which was the same idea reached for ad hoc and covering one spelling
+        // of it. With a real end-of-options marker, `-/x` goes back to being
+        // what GNU calls it: `invalid option -- '/'`.
+        if word == "--" && !flags_done {
+            flags_done = true;
+            continue;
+        }
+        if !flags_done && word.starts_with('-') && word.len() > 1 {
             // Parse flag characters.
-            for ch in word[1..].chars() {
+            for ch in word.get(1..).unwrap_or("").chars() {
                 match ch {
                     '1' => show1 = false,
                     '2' => show2 = false,
@@ -119457,11 +122996,26 @@ fn cmd_comm(args: &str) {
         }
     };
 
-    let text1 = alloc::string::String::from_utf8_lossy(&data1);
-    let text2 = alloc::string::String::from_utf8_lossy(&data2);
-
-    let lines1: alloc::vec::Vec<&str> = text1.lines().collect();
-    let lines2: alloc::vec::Vec<&str> = text2.lines().collect();
+    // Byte lines, for two reasons, of which the second is the one specific to
+    // `comm`.
+    //
+    // The shared one: `from_utf8_lossy` maps every invalid byte to the same
+    // U+FFFD, so two lines differing only in undecodable bytes compared equal
+    // and were printed in the "common to both" column -- a wrong answer with
+    // exit 0.
+    //
+    // The one only `comm` has: this is a merge of two streams, and it is
+    // correct *only* on sorted input -- it advances whichever side compares
+    // Less and never looks back. `sort` orders by bytes. The decoded view does
+    // not preserve that order, because U+FFFD is the three bytes EF BF BD, so a
+    // `\xff` line sorted *below* a `\xfe` one here where the raw bytes put it
+    // above. A file `sort` had just produced could therefore look unsorted to
+    // `comm`, and a merge whose precondition is broken underneath it puts lines
+    // in the wrong columns for reasons no single comparison explains.
+    // `<[u8]>::cmp` below is exactly the ordering `sort` used, so the two
+    // commands now agree by construction rather than by coincidence on ASCII.
+    let lines1: alloc::vec::Vec<&[u8]> = split_lines(&data1);
+    let lines2: alloc::vec::Vec<&[u8]> = split_lines(&data2);
 
     let mut i = 0usize;
     let mut j = 0usize;
@@ -119476,49 +123030,116 @@ fn cmd_comm(args: &str) {
         (false, false) => "",
     };
 
-    while i < lines1.len() && j < lines2.len() {
-        let cmp = lines1[i].cmp(lines2[j]);
-        match cmp {
-            core::cmp::Ordering::Less => {
-                // Line only in file 1.
-                if show1 {
-                    shell_println!("{}", lines1[i]);
+    // One place that writes a column, so the prefix and the body cannot drift
+    // apart. The body goes out as bytes: formatting it would require it to be
+    // a `str` again, which is the defect being removed.
+    //
+    // It accumulates rather than writing through, so that the sortedness check
+    // below can refuse *before* anything reaches the terminal. GNU prints as it
+    // goes and dies where it notices, which leaves the reader holding a prefix
+    // of a wrong answer alongside a correct exit status -- the worse half of
+    // both. The buffer is bounded by the two files, which are already resident.
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    // The block ends `emit`'s mutable borrow of `out` at the brace rather than
+    // at the end of the function, which is what lets `shell_write_bytes` borrow
+    // it below. It yields the pair of indices the merge stopped at — the one
+    // thing the check afterwards needs and cannot recover for itself, since by
+    // then the tail loops have walked `i` and `j` to the ends of their files.
+    let (merged1, merged2) = {
+        let mut emit = |prefix: &str, line: &[u8]| {
+            out.extend_from_slice(prefix.as_bytes());
+            out.extend_from_slice(line);
+            out.push(b'\n');
+        };
+
+        let empty: &[u8] = &[];
+        while i < lines1.len() && j < lines2.len() {
+            let a = lines1.get(i).copied().unwrap_or(empty);
+            let b = lines2.get(j).copied().unwrap_or(empty);
+            match a.cmp(b) {
+                core::cmp::Ordering::Less => {
+                    // Line only in file 1.
+                    if show1 {
+                        emit("", a);
+                    }
+                    i = i.saturating_add(1);
                 }
-                i += 1;
-            }
-            core::cmp::Ordering::Greater => {
-                // Line only in file 2.
-                if show2 {
-                    shell_println!("{}{}", col2_prefix, lines2[j]);
+                core::cmp::Ordering::Greater => {
+                    // Line only in file 2.
+                    if show2 {
+                        emit(col2_prefix, b);
+                    }
+                    j = j.saturating_add(1);
                 }
-                j += 1;
-            }
-            core::cmp::Ordering::Equal => {
-                // Line in both files.
-                if show3 {
-                    shell_println!("{}{}", col3_prefix, lines1[i]);
+                core::cmp::Ordering::Equal => {
+                    // Line in both files.
+                    if show3 {
+                        emit(col3_prefix, a);
+                    }
+                    i = i.saturating_add(1);
+                    j = j.saturating_add(1);
                 }
-                i += 1;
-                j += 1;
             }
         }
+
+        // Where the merge stopped. Everything below these indices was placed in a
+        // column by a comparison against the other file; everything at or above
+        // them is tail, copied out verbatim below.
+        let stopped = (i, j);
+
+        // Remaining lines from file 1.
+        while i < lines1.len() {
+            if show1 {
+                emit("", lines1.get(i).copied().unwrap_or(empty));
+            }
+            i = i.saturating_add(1);
+        }
+
+        // Remaining lines from file 2.
+        while j < lines2.len() {
+            if show2 {
+                emit(col2_prefix, lines2.get(j).copied().unwrap_or(empty));
+            }
+            j = j.saturating_add(1);
+        }
+
+        stopped
+    };
+
+    // The precondition, checked after the fact and before anything is printed.
+    //
+    // Checking here rather than inside the merge is not laziness: the pair that
+    // matters most straddles the loop's exit. When one file runs out, the other
+    // file's *next* line is still one the merge decided about -- it lost the
+    // last comparison -- so if it sorts before a line already consumed, it
+    // reaches a column of its own instead of pairing with its twin. An in-loop
+    // check never sees that pair, because the loop has already exited.
+    // `comm_first_unsorted` takes the exit index and so covers exactly the pairs
+    // whose order changed an answer, and no others.
+    let found = comm_first_unsorted(&lines1, merged1)
+        .map(|n| (1usize, &path1, n))
+        .or_else(|| comm_first_unsorted(&lines2, merged2).map(|n| (2usize, &path2, n)));
+    if let Some((which, path, line_no)) = found {
+        // Deliberately not `out`: a prefix of a merge that went wrong reads
+        // exactly like a short answer, and the point of refusing is that
+        // nothing here can be mistaken for output.
+        shell_println!(
+            "comm: file {}: {}: not in sorted order",
+            which,
+            path.display()
+        );
+        shell_println!(
+            "comm: line {} sorts before the line above it, and comm is a merge that never looks back",
+            line_no
+        );
+        shell_println!(
+            "comm: sort both files first (sort orders by bytes, which is what comm compares)"
+        );
+        set_exit(1);
+        return;
     }
 
-    // Remaining lines from file 1.
-    while i < lines1.len() {
-        if show1 {
-            shell_println!("{}", lines1[i]);
-        }
-        i += 1;
-    }
-
-    // Remaining lines from file 2.
-    while j < lines2.len() {
-        if show2 {
-            shell_println!("{}{}", col2_prefix, lines2[j]);
-        }
-        j += 1;
-    }
+    shell_write_bytes(&out);
 }
 
 /// Display file contents in various dump formats.
@@ -119538,24 +123159,82 @@ fn cmd_od(args: &str) {
     let mut max_bytes: usize = usize::MAX;
     let mut file_path = "";
 
-    let mut words = args.split_whitespace().peekable();
+    // Every fallback that used to live in this loop pointed the same way:
+    // an unreadable `-N` became `usize::MAX`, which is *no limit at all*, so
+    // `od -N 4o /dev/sda` dumped the whole device instead of four bytes; and
+    // an `-A`/`-t` letter that no arm below handles fell through to the
+    // octal default, so the output was a correct dump of the wrong format.
+    let mut flags_done = false;
+    let mut words = args.split_whitespace();
     while let Some(w) = words.next() {
-        if w == "-A" {
-            if let Some(radix) = words.next() {
-                addr_fmt = radix.chars().next().unwrap_or('o');
+        if !flags_done && w == "--" {
+            flags_done = true;
+            continue;
+        }
+        if flags_done || w == "-" || !w.starts_with('-') {
+            if !file_path.is_empty() {
+                shell_println!("od: extra operand `{}' (one file)", w);
+                set_exit(1);
+                return;
             }
-        } else if w == "-t" {
-            if let Some(ty) = words.next() {
-                data_fmt = ty.chars().next().unwrap_or('o');
-            }
-        } else if w == "-N" {
-            if let Some(n) = words.next() {
-                max_bytes = n.parse::<usize>().unwrap_or(usize::MAX);
-            }
-        } else if let Some(n_str) = w.strip_prefix("-N") {
-            max_bytes = n_str.parse::<usize>().unwrap_or(usize::MAX);
-        } else {
             file_path = w;
+            continue;
+        }
+        // `-NCOUNT` attached, before the separated forms, so that the `-N`
+        // arm below does not have to distinguish them.
+        let attached_n = if w == "-N" {
+            None
+        } else {
+            w.strip_prefix("-N")
+        };
+        let (what, value) = if let Some(n_str) = attached_n {
+            ("a byte count", n_str)
+        } else {
+            let what = match w {
+                "-A" => "an address radix (o/d/x/n)",
+                "-t" => "a type (o1/x1/d1/u1/c)",
+                "-N" => "a byte count",
+                other => {
+                    shell_println!("od: unrecognized option `{}'", other);
+                    set_exit(1);
+                    return;
+                }
+            };
+            let Some(v) = words.next() else {
+                shell_println!("od: {} requires {}", w, what);
+                set_exit(1);
+                return;
+            };
+            (what, v)
+        };
+        if attached_n.is_some() || w == "-N" {
+            let Ok(n) = value.parse::<usize>() else {
+                shell_println!("od: -N: `{}' is not a byte count", value);
+                set_exit(1);
+                return;
+            };
+            max_bytes = n;
+            continue;
+        }
+        let Some(letter) = value.chars().next() else {
+            shell_println!("od: {} requires {}", w, what);
+            set_exit(1);
+            return;
+        };
+        if w == "-A" {
+            if !matches!(letter, 'o' | 'd' | 'x' | 'n') {
+                shell_println!("od: -A: `{}' is not an address radix (o/d/x/n)", value);
+                set_exit(1);
+                return;
+            }
+            addr_fmt = letter;
+        } else {
+            if !matches!(letter, 'o' | 'x' | 'd' | 'u' | 'c') {
+                shell_println!("od: -t: `{}' is not a type (o1/x1/d1/u1/c)", value);
+                set_exit(1);
+                return;
+            }
+            data_fmt = letter;
         }
     }
 
@@ -121929,11 +125608,28 @@ fn cmd_zip(args: &str) {
     let mut recursive = true; // Default: recurse into dirs (like Info-ZIP).
     let mut positional: Vec<&str> = Vec::new();
 
+    // Options are recognised wherever they appear, and `--` ends them.
+    //
+    // This used to be `positional.is_empty()` — options only before the archive
+    // name — which had two problems pulling the same way. `zip a.zip -zz f`
+    // silently filed `-zz` as a *file to compress*, so a typo'd option became a
+    // missing-file error about something the caller never named, and the option
+    // it was meant to be went unmentioned. And a file genuinely called
+    // `-weird.txt` could only be reached by accident, in the trailing position,
+    // with no way to say which reading was meant. Info-ZIP takes options
+    // anywhere (`zip -r a.zip d -x '*.o'`), so position-independence is also
+    // the faithful reading.
+    let mut flags_done = false;
     for token in args.split_whitespace() {
+        if flags_done {
+            positional.push(token);
+            continue;
+        }
         match token {
+            "--" => flags_done = true,
             "-0" => store_only = true,
             "-r" => recursive = true,
-            _ if token.starts_with('-') && positional.is_empty() => {
+            _ if token.starts_with('-') && token.len() > 1 => {
                 for ch in token.chars().skip(1) {
                     match ch {
                         '0' => store_only = true,
@@ -124401,7 +128097,7 @@ fn sed_addr_matches(addr: &SedAddr, line_num: usize, line: &[u8]) -> Result<bool
 ///   yet write anything of its own.
 fn sed_apply(text: &[u8], script: &[SedCmd], suppress: bool) -> Result<Vec<u8>, ere::MatchLimit> {
     let final_newline = text.last() == Some(&b'\n');
-    let lines = sed_lines(text);
+    let lines = split_lines(text);
     let total = lines.len();
     let mut output: Vec<u8> = Vec::new();
 
@@ -124458,19 +128154,25 @@ fn sed_apply(text: &[u8], script: &[SedCmd], suppress: bool) -> Result<Vec<u8>, 
 
 /// Split input into lines on `\n` alone, keeping every other byte.
 ///
-/// This replaces `str::lines`, which is wrong here in two separate ways. It
-/// **strips a trailing `\r`**, so a CRLF file run through `sed -i` came back
-/// with Unix endings whether or not any line had matched — a whole-file rewrite
-/// nobody asked for. To sed, `\r` is an ordinary character of the pattern
-/// space, matchable by `.` and by `[[:cntrl:]]`, and it must survive a round
-/// trip untouched. It also requires `&str`, which is the other half of the same
-/// bug: a file that is not UTF-8 had no lines at all.
+/// This replaces `str::lines`, which is wrong for a line-oriented utility in
+/// two separate ways. It **strips a trailing `\r`**, so a CRLF file run through
+/// `sed -i` came back with Unix endings whether or not any line had matched — a
+/// whole-file rewrite nobody asked for. To sed, `\r` is an ordinary character of
+/// the pattern space, matchable by `.` and by `[[:cntrl:]]`, and it must survive
+/// a round trip untouched. It also requires `&str`, which is the other half of
+/// the same bug: a file that is not UTF-8 had no lines at all.
 ///
 /// A trailing `\n` terminates the last line rather than starting an empty one,
 /// which is why `a\n` is one line and not two. Whether that newline was present
-/// is the caller's business — see `final_newline` — because it is what decides
-/// if the output owes a separator.
-fn sed_lines(text: &[u8]) -> Vec<&[u8]> {
+/// is the caller's business — see `sed_apply`'s `final_newline` — because it is
+/// what decides if the output owes a separator.
+///
+/// Shared rather than per-command on purpose. It arrived as `sed_lines`, and
+/// `diff` and `comm` then turned out to hold *the same two bugs* through their
+/// own `from_utf8_lossy(…).lines()` — which is the argument for one splitter
+/// with the reasoning written down once, rather than three that agree by
+/// coincidence until one of them is edited.
+fn split_lines(text: &[u8]) -> Vec<&[u8]> {
     let mut out: Vec<&[u8]> = Vec::new();
     let mut start = 0usize;
     for (i, &b) in text.iter().enumerate() {
@@ -124483,6 +128185,82 @@ fn sed_lines(text: &[u8]) -> Vec<&[u8]> {
         out.push(text.get(start..).unwrap_or(&[]));
     }
     out
+}
+
+/// Cells a byte string occupies when the console draws it.
+///
+/// This exists because `len()` is the wrong answer and `chars().count()` is a
+/// different wrong answer. A column that is padded to a *byte* count misaligns
+/// by two for every `é` and by one for every CJK ideograph in the field above
+/// it, which defeats the entire point of the command doing the padding.
+///
+/// It is a deliberate mirror of the console's own byte→cell rule
+/// ([`crate::console::putchar_normal`] plus its UTF-8 accumulator), because the
+/// only width that aligns a table is the width the thing is actually drawn at.
+/// The three rules, in the console's order:
+///
+/// * A lead byte whose [`crate::unicode::utf8_seq_len`] is ≥ 2 consumes that
+///   many bytes and draws **one** codepoint, whose width is
+///   [`crate::unicode::char_width`] — 2 for the wide ranges, 1 otherwise.
+///   Overlong and surrogate sequences decode to U+FFFD *having consumed the
+///   whole sequence*, exactly as [`crate::unicode::decode_utf8`] does.
+/// * An invalid lead byte, or a sequence cut short by a byte that is not a
+///   continuation, draws U+FFFD in one cell — and in the cut-short case the
+///   offending byte is then reconsidered from the top, which is why the loop
+///   does not advance past it.
+/// * Everything else is one cell per byte.
+///
+/// The exception, stated rather than hidden: `\t`, `\r`, `\x08` and `ESC` are
+/// cursor *motion*, not glyphs, so they have no width at all — where the cursor
+/// lands after a tab depends on where it started. They count 0 here, which is
+/// the closest a width can come, and a field containing one will misalign no
+/// matter what this function returns. GNU is in the same position and resolves
+/// it the same way: glibc's `wcwidth` returns −1 for a control character and
+/// util-linux's `column` skips it.
+fn display_width(bytes: &[u8]) -> usize {
+    let mut width = 0usize;
+    let mut i = 0usize;
+    while let Some(&lead) = bytes.get(i) {
+        let seq_len = crate::unicode::utf8_seq_len(lead);
+        if seq_len >= 2 {
+            let len = seq_len as usize;
+            let mut buf = [0u8; 4];
+            let mut got = 0usize;
+            while got < len {
+                match bytes.get(i.saturating_add(got)) {
+                    // The lead itself, then continuation bytes only.
+                    Some(&b) if got == 0 || b & 0xC0 == 0x80 => {
+                        if let Some(slot) = buf.get_mut(got) {
+                            *slot = b;
+                        }
+                        got = got.saturating_add(1);
+                    }
+                    _ => break,
+                }
+            }
+            if got == len {
+                let cp = crate::unicode::decode_utf8(buf, seq_len);
+                width = width.saturating_add(usize::from(crate::unicode::char_width(cp)));
+                i = i.saturating_add(len);
+            } else {
+                // Aborted sequence: one U+FFFD for what was started, and the
+                // byte that aborted it is left for the next iteration to judge
+                // on its own merits — the console re-processes it too.
+                width = width.saturating_add(1);
+                i = i.saturating_add(got.max(1));
+            }
+            continue;
+        }
+        // Cursor motion draws nothing; see the note above.
+        if matches!(lead, b'\t' | b'\r' | 0x08 | 0x1B) {
+            i = i.saturating_add(1);
+            continue;
+        }
+        // One cell: ASCII, or an invalid lead byte drawn as U+FFFD.
+        width = width.saturating_add(1);
+        i = i.saturating_add(1);
+    }
+    width
 }
 
 /// Write one copy of the pattern space, honouring a missing final newline.
@@ -126974,7 +130752,14 @@ fn cmd_tsession(args: &str) {
     use crate::termsession;
 
     if !termsession::is_initialized() {
+        // Nothing was done and nothing was answered, so this is a failure --
+        // found by reading the function rather than by the usage-status
+        // checker, which cannot see it: it prints no `Usage:` line, so it is
+        // invisible to a search keyed on that word. The general form of the
+        // rule is "a command that did not do what it was asked reports so",
+        // and `Usage:` is only the most common way of saying it.
         shell_println!("Terminal session system not initialized");
+        set_exit(1);
         return;
     }
 

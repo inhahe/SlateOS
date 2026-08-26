@@ -8,7 +8,7 @@
 # It is the same list `bind -l` prints, in the same order — sorted, because
 # readline sorts the funmap itself — which is the useful way to say what the
 # action is. `bind -l` warns first that line editing is not enabled and then
-# prints all 174 names regardless; `compgen -A binding` skips the warning and
+# prints every name regardless; `compgen -A binding` skips the warning and
 # prints the same names. A shell that cannot *perform* `yank-last-arg` still
 # knows the name of it.
 #

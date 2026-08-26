@@ -5478,7 +5478,32 @@ not cover it.
 
 ---
 
-### TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS. `kill -l` and `trap` model Linux's signal table; the development host's bash uses a BSD-ish MSYS one — 2026-08-04 — OPEN (unverifiable on this host)
+### TD-OILS-SIGNAL-NUMBERS-ARE-LINUXS-AND-CANNOT-BE-CHECKED-AGAINST-MSYS. `kill -l` and `trap` model Linux's signal table; the development host's bash uses a BSD-ish MSYS one — 2026-08-04 — **VERIFIED CORRECT 2026-08-25**; the premise "unverifiable on this host" is retired
+
+> **Measured against glibc bash, 2026-08-25.** `scripts/osh-diff.sh` compares
+> osh against `/usr/bin/bash` inside WSL, so the table below is now checkable
+> and has been checked. **osh's numbering for signals 1–31 is identical to
+> glibc bash's, name for name and number for number** — including the three
+> this entry called out as differing under MSYS:
+>
+> | signal | osh | glibc bash | MSYS bash (the old reference) |
+> |---|---|---|---|
+> | `SIGBUS` | 7 | **7** | 10 |
+> | `SIGUSR1` | 10 | **10** | — |
+> | `SIGUSR2` | 12 | **12** | — |
+> | `SIGSYS` | 31 | **31** | 12 |
+> | `SIGEMT` | rejected | **rejected** | 7 |
+>
+> Both shells reject `SIGEMT` with the same wording (`kill: EMT: invalid signal
+> specification`), so the agreement extends to the error path. Nothing here was
+> ever an osh defect, and it is no longer unverifiable — it is verified.
+>
+> **One real gap did surface**, which is what a correct reference is for:
+> osh's table stops at 31, while glibc bash exposes the 31 real-time signals
+> 34–64. `kill -l RTMIN` answers `34` in bash and `invalid signal
+> specification` in osh. That is an osh limitation rather than a reference
+> artifact, and it is tracked separately as
+> `TD-OILS-NO-REAL-TIME-SIGNALS` below.
 
 **Where:** `userspace/oils/src/interp.rs` — the signal name/number table behind
 `kill`, `trap` and `$?`'s 128+n encoding.
@@ -5528,6 +5553,64 @@ that was already installed by the host.
 **Why not waived instead.** An `# EXPECT-DIFF` would pin the artifact into the
 corpus as if it were behaviour. There is nothing to assert here: the host cannot
 represent the input the test wants.
+
+> **Gone as of 2026-08-25 — the host was the whole problem, and the host has
+> changed.** `scripts/osh-diff.sh` runs both shells inside WSL on ext4, where
+> mode bits are real. Re-measured:
+>
+> | shell | `test -x w.sh` after `chmod +x` | `type -a w.sh` |
+> |---|---|---|
+> | osh | `yes` | `w.sh is /tmp/…/w.sh` |
+> | glibc bash | `yes` | `w.sh is /tmp/…/w.sh` |
+>
+> Identical. **`type -a` is now usable in corpus cases**, including on files the
+> case creates itself, and the restriction this entry imposed on case authors is
+> lifted. `tests/corpus/path-prefix-assignment-search.sh`'s header still warns
+> against it; that warning is now stale and should be dropped when the file is
+> next touched.
+>
+> The WONTFIX stands as a judgement about osh — there was never a bug here — but
+> the *measurement* is no longer blocked.
+
+### TD-OILS-NO-REAL-TIME-SIGNALS. osh's signal table stops at 31; bash exposes SIGRTMIN..SIGRTMAX (34–64) — 2026-08-25 — OPEN
+
+**In short:** POSIX systems have two kinds of signal. The classic ones
+(`SIGINT`, `SIGTERM`, …) are numbered 1–31 and osh handles all of them
+correctly. Linux adds a second block, the *real-time* signals — 31 extra
+numbered slots (34–64) that programs use to send each other application-defined
+notifications. osh does not know they exist. A script that says `kill -RTMIN+2
+$pid` works under bash and fails under osh.
+
+**Found by** the reference-shell migration: this was invisible while the corpus
+measured against MSYS bash, whose own table is BSD-shaped and disagreed with
+osh's in so many places that the real-time block was lost in the noise. Against
+glibc bash the 1–31 range agrees exactly, which is what makes the tail visible.
+
+**Where:** `userspace/oils/src/interp.rs` — the signal name/number table behind
+`kill`, `trap` and `$?`'s 128+n encoding.
+
+**Measured:**
+
+```
+$ osh  -c 'kill -l RTMIN'   →  kill: RTMIN: invalid signal specification
+$ bash -c 'kill -l RTMIN'   →  34
+```
+
+`kill -l` output is identical up to `31) SIGSYS`, after which bash continues
+with 34–64 and osh stops.
+
+**Proper fix.** Extend the table with `SIGRTMIN` (34) through `SIGRTMAX` (64),
+and accept the `RTMIN+n` / `RTMAX-n` name forms in `kill`, `trap` and `kill -l`,
+which is how they are almost always written. Note that glibc reserves 32 and 33
+for its own threading use and bash lists neither, so the block genuinely starts
+at 34 — the numbers are not simply "32 onwards".
+
+**Risk of leaving it.** Low but real: real-time signals are rare in shell
+scripts, but a script that uses one fails with a confusing "invalid signal
+specification" rather than doing nothing, and the failure is at the point of
+use rather than at startup.
+
+---
 
 ### TD-OILS-PRINTF-Q-HIGH-BYTES. `%q`/`@Q` deliberately disagree with the reference bash about which *characters* are printable — 2026-08-03 — ⚠️ **KNOWN DEVIATION, NOT A BUG** — narrowed 2026-08-07
 
@@ -7102,7 +7185,30 @@ and the disagreement will close on its own.
 regenerate. Do not special-case the 74; they are a symptom of the granularity,
 not the rule.
 
-### TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST. A child spawned by osh sees `\xef\xbf\xbd` where bash's child sees `\xff` — 2026-08-08 — OPEN (host-only)
+### TD-OILS-A-NON-UTF-8-ARGUMENT-IS-REPLACED-ON-THE-WINDOWS-HOST. A child spawned by osh sees `\xef\xbf\xbd` where bash's child sees `\xff` — 2026-08-08 — **NOT REPRODUCIBLE OFF WINDOWS (confirmed 2026-08-25)**; the host-only claim is now measured rather than argued
+
+> **The "why it is host-only" section below was reasoning; this is the
+> measurement.** The `x86_64-unknown-linux-gnu` osh that `scripts/osh-diff.sh`
+> builds hands a child an argv vector, exactly as SlateOS will, and the bytes
+> survive. A child was given `\xff` three different ways and printed each byte
+> it received:
+>
+> | how the byte reached the child | osh | glibc bash |
+> |---|---|---|
+> | `showarg $(printf "\xff")` | `[ff]` | `[ff]` |
+> | `showarg $'\xff'` | `[ff]` | `[ff]` |
+> | `v=$(printf "\xff"); showarg "$v"` | `[ff]` | `[ff]` |
+>
+> No replacement character anywhere, and identical to bash in all three shapes.
+> So the corruption is confined to `wincmd.rs` and the Windows `CreateProcess`
+> command line, as argued — and the argument is now backed by a run rather than
+> by inspection of the spawn path.
+>
+> **The corpus restriction is lifted.** "Corpus cases must not route a byte that
+> is no character through a child's argv" was a rule imposed by the measuring
+> apparatus. Under `scripts/osh-diff.sh` such a case is legitimate and would
+> pass; keep it in mind only if a case is ever run against the Windows host
+> build directly.
 
 **Where:** `userspace/oils/src/wincmd.rs` and the `std::process::Command` spawn
 path in `userspace/oils/src/interp.rs` — Windows takes a UTF-16 command line,
@@ -7920,7 +8026,33 @@ and thread the shell start instant through so `%(…)T -2` is exact. Deferred:
 UTC formatting is correct and deterministic, and scripts that need a
 specific zone can compute the offset explicitly.
 
-### TD-OILS-HOST-ARGV0. External commands see the resolved absolute path as `argv[0]` on the *Windows host build* instead of the command word as typed (correct on the slateos/unix target) — NOT-A-BUG on target / host-only test artifact — 2026-07-20
+### TD-OILS-HOST-ARGV0. External commands see the resolved absolute path as `argv[0]` on the *Windows host build* instead of the command word as typed (correct on the slateos/unix target) — NOT-A-BUG on target / host-only test artifact — 2026-07-20 — **`cfg(unix)` path now measured, 2026-08-25**
+
+> **"Validate argv[0] behavior on the slateos target when a ring-3 exec
+> self-test exists" — partly discharged, sooner and more cheaply than that.**
+> `scripts/osh-diff.sh` builds osh for `x86_64-unknown-linux-gnu`, where
+> `cfg(unix)` is true, so the `CommandExt::arg0` override below is *compiled in
+> and exercised* — the same code the slateos target uses. Every host-only claim
+> in this entry, including the `exec -a`/`-l`/`-c` paragraph, was re-measured
+> against glibc bash:
+>
+> | probe | osh | glibc bash |
+> |---|---|---|
+> | `cat /nope` | `cat: /nope: No such file or directory` | identical |
+> | `sh -c 'echo $0'` | `sh` | identical |
+> | `exec -a myname sh -c 'echo $0'` | `myname` | identical |
+> | `exec -l sh -c 'echo $0'` | `-sh` | identical |
+> | `exec -c env` | (empty) | identical |
+>
+> So `argv[0]` is the word as typed, `exec -a` chooses it, `exec -l` prefixes
+> the `-`, and `exec -c` really does clear the environment. All five were
+> unobservable under the old apparatus and all five are correct.
+>
+> **What this does not prove:** slateos is not Linux, and the ring-3 exec
+> self-test is still the thing that would test *slateos'* exec. What is now
+> settled is that the code is right and the Windows host was the only thing
+> hiding it — the remaining risk is in the target's exec implementation, not in
+> osh's use of it.
 
 **Where:** `userspace/oils/src/interp.rs` (`exec_external`, the `PCommand`
 construction ~line 5664). The `arg0` override is `#[cfg(unix)]`.
@@ -8077,7 +8209,48 @@ an expansion. The only observable cost is this one blank-vs-`\` cell in the
 astronomically rare case of a range deliberately spanning `\`. No real script
 relies on it; no action needed.
 
-### TD-OILS10. `osh` `time` keyword / `times` builtin: user/sys CPU times are always reported as 0.00 — 2026-08-03 — ✅ **RESOLVED 2026-08-03 on Windows hosts** (still zero on other hosts, see below)
+### TD-OILS10. `osh` `time` keyword / `times` builtin: user/sys CPU times are always reported as 0.00 — 2026-08-03 — ✅ **RESOLVED**: Windows 2026-08-03, Linux/SlateOS 2026-08-25
+
+**Resolved on Linux too (2026-08-25),** which is the half that mattered, since
+SlateOS's target is Linux-flavoured (`toolchain/x86_64-slateos.json` sets
+`os = "linux"`, family `unix`) and the shell's reference comparisons now run
+against a glibc bash. The gap was invisible while the only host was Windows and
+surfaced the moment the unit suite was first run under Linux:
+`time_charges_cpu_to_the_command_that_used_it` reported `0.00` for a loop that
+burned **20.9 s of real time** — measured with `TIMEFORMAT=%3R/%3U/%3S`, osh
+`20.941/0.000/0.000` against bash's `0.551/0.601/0.000` on the same loop.
+
+The premise that had to go was "osh does not link libc's `rusage` bindings".
+osh already declares libc functions where it needs them — `parent_pid` has an
+`unsafe extern "C" { fn getppid() -> i32; }` a few hundred lines above — so
+`getrusage` is declared the same way, with `struct rusage` spelled as the two
+`timeval`s plus the fourteen `long` counters that follow them (named as a block
+and never read, but present, because the kernel writes the whole structure).
+
+**The two platforms now use the source each one actually keeps**, which is a
+real structural difference and not a portability shim:
+
+* **Windows** charges a *process*, and keeps the charge only while a handle to
+  it is open — so the shell must read each child as it reaps it and add up the
+  total itself. That is what `CHILD_USER_NS`/`CHILD_SYS_NS` and `account_child`
+  are, and they are now `#[cfg(windows)]`.
+* **Linux** keeps the running total in the kernel and hands it over on demand:
+  `getrusage(RUSAGE_CHILDREN)` *is* the total over children already waited for,
+  which is exactly the set `reap_child` has reaped. It is also the only route
+  available, because `std` reaps with `waitpid` and discards the `rusage` a
+  `wait4` would have returned — so there is nothing per-child to accumulate.
+
+`RUSAGE_SELF` is the right class for the shell's own line because it sums every
+thread in the process, and osh's subshells and pipeline stages *are* threads; a
+per-thread figure would miss most of what a `time` is asked about.
+
+**On SlateOS this is `posix`'s own `getrusage`** (`posix/src/resource.rs`),
+which fills the two times for `RUSAGE_SELF` from the kernel's aggregate CPU
+counters and leaves `RUSAGE_CHILDREN` zeroed until per-child accounting exists
+there. The shell asks the same question on both, so SlateOS's answer improves
+as the kernel's does with nothing in the shell to change.
+
+The historical Windows-only account follows.
 
 **Resolved:** the premise — "no per-child CPU accounting exists" — was only true
 of `std`. Windows exposes it: `GetProcessTimes` answers for the current process
@@ -8105,7 +8278,8 @@ totals its parent accumulated, where a forked bash's subshell starts from zero.
 And on non-Windows hosts `self_cpu_secs`/`child_cpu_times` still return zero:
 `getrusage` needs libc bindings osh does not have, and the SlateOS answer is
 the process-accounting syscall described under "Proper fix" below. Both are
-marked in the source.
+marked in the source. *(The second of those was closed on 2026-08-25 — see the
+head of this entry. The first still stands.)*
 
 **Where:** `userspace/oils/src/interp.rs` (`Shell::format_time_report`, called
 from `exec_pipeline` when a pipeline is prefixed with `time`; and
@@ -10365,7 +10539,7 @@ is the worst possible place to discover that your code can fault, and only a
 boot test finds it — this would have shipped clean under a "it compiles and
 clippy is quiet" standard.
 
-### [RESOLVED 2026-08-22] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang at the glibc `fork()`+`execl()`+`waitpid()` self-test — a freed PML4 was still live in CR3; fixed in `0ecd5ff03`, WATCH cleared after three consecutive clean boots — 2026-07-15
+### [REOPENED as WATCH 2026-08-25 — the PML4 cause is fixed and stays fixed; the *signature* recurred on a different rung] B-FORKEXEC-BOOT-HANG. Intermittent silent boot hang after the last thread of a just-reaped process exits — one cause (a freed PML4 still live in CR3) found and fixed in `0ecd5ff03`; a second, still-unidentified cause produced the same silence on 2026-08-25 — 2026-07-15
 
 **Symptom (1 occurrence, 2026-07-15):** During
 `self_test_linux_real_glibc_forkexec` (`spawn-test-glibc-forkexec`,
@@ -10618,6 +10792,142 @@ rather than something the caller is trusted to have arranged, and treating
 "the state that publishes an object as reclaimable" and "the last instant that
 object is in use" as one atomic step. Here they were separated by two serial
 prints.
+
+**[A] RECURRENCE 2026-08-25 — same silence, different rung, and the PML4 fix
+is definitely in the tree.** A boot went silent with the signature this entry
+was closed on, three days after it was closed.
+
+*In short:* the machine stopped dead, printing nothing further, immediately
+after a test program finished and the kernel started cleaning it up. It is the
+same *symptom* as the bug fixed on 2026-08-22, but not the same *cause* — the
+2026-08-22 fix is present and working. Something else in the few instructions
+after a process is reaped can still wedge the machine, roughly once in a few
+dozen boots. The very next boot of the identical tree was green.
+
+| | 2026-07-15 / 2026-08-22 | 2026-08-25 |
+|---|---|---|
+| Rung | `self_test_linux_real_glibc_forkexec` | Path-Z hosted-cc `inline-asm` (`spawn-test-tcc-hosted`, pid 420 / task 387) |
+| Last line printed | `[sched] Task 130 exiting` | `[sched] Task 387 exiting` |
+| Line that never came | the forkexec verdict | `hosted cc (inline-asm) — /hosted-prog is a 4026-byte dynamic ELF` |
+| Serial position | — | line 38 775 of an expected ~46 860 |
+| Diagnostics | none | none: 0 `!!` lines, no panic, no `#PF`, no stall report |
+| Timeout | 480 s | QEMU's 900 s fired; harness ran 1174 s |
+
+**The fixed path is present and is not the explanation.**
+`sched::detach_address_space` exists at `sched/mod.rs:1789` with both call
+sites live — `proc/thread.rs:708` (immediately after `on_thread_exit_hook`)
+and `sched/mod.rs:1837` (the idempotent backstop in `task_exit`). Per this
+entry's own instruction, the page-table path was *not* re-derived. This is a
+second cause wearing the first one's symptom.
+
+**What the new rung narrows.** `spawn_hosted_cc` (`proc/spawn.rs:28525`) has a
+different, shorter tail than the forkexec harness, and the missing line places
+the wedge inside it precisely. After the bounded poll loop breaks with
+`reaped = true`, the surviving steps are, in order:
+
+1. `pcb::state(pid)` / `pcb::exit_code(pid)`
+2. `thread::on_thread_exit(cc_result.task_id)`
+3. `pcb::destroy(cc_result.pid)`
+4. — return Ok — then the caller's `Vfs::read_file("/hosted-prog")`
+5. `assert_dynamic_elf`, whose **first statement prints the missing line**
+
+Step 5 printing nothing means the wedge is in steps 1–4. Steps 1 and 5 are
+cheap and lock-light; the weight is in 2–4. That is exactly where this entry
+said to start ("the remaining post-loop suspects … are `Vfs::read_file`/
+`Vfs::remove` on the capture file"), and the new rung sharpens it: **the file
+being read is the compiler's own output**, a ~4 KiB file that tcc created and
+wrote through the VFS and that was closed by the exiting process's fd
+teardown, read back on the very next line after that process was destroyed.
+"Read a file the dying process just wrote, immediately after destroying it" is
+the shape shared by both occurrences — the forkexec harness read a capture
+file with the same timing.
+
+**A lead that looked good and is RULED OUT — do not re-derive it.**
+Step 2 calls `thread::on_thread_exit(task_id)` on a task that has *already* run
+`on_thread_exit` itself: the log proves it, because `[thread] Process 420 has
+no threads left — now zombie` is printed from inside that very function and
+appears two lines before the freeze. So the function does run twice per
+hosted-cc rung, the second time against an address space the first pass
+detached — which looks exactly like a double-teardown bug. It is not. Reading
+the second pass end to end:
+
+- `thread_clone::on_thread_exit_hook` opens with an **AS-active guard**
+  (`thread_clone.rs:287`) computed from `thread::owner_process(task_id)`. The
+  first pass already removed the `THREAD_OWNERS` entry, so the second gets
+  `None` → `as_active = false` → every user-memory pass (the PI-futex handoff,
+  the robust-list walk, the ctid zero-write, the ctid futex wake) is skipped.
+  The three table removals that do run — `ROBUST_LIST`, `RSEQ`,
+  `CLEAR_CHILD_TID` — are `BTreeMap::remove`, idempotent by construction, and
+  the `CLEAR_CHILD_TID` miss returns early.
+- `sched::detach_address_space` documents and implements idempotence
+  (`sched/mod.rs:1789`): it only acts on `pml4_phys != 0`, and rewrites CR3
+  only when `task_id == load_current_task()` — which the harness's own task
+  is not.
+- `on_thread_exit` then hits `THREAD_OWNERS.lock().remove(&task_id)?` and
+  returns `None` on the missing entry, so `release_irqs_for_task`,
+  `pcb::remove_thread`, `exit_close_fds` and everything below never run twice.
+
+The second pass is a clean no-op. Cross it off.
+
+**[A] The decisive narrowing: the BSP stopped taking timer interrupts.**
+`sched::liveness_boot_deadline_check` (`sched/mod.rs:3049`) runs on **every BSP
+tick** — deliberately not on the 500-tick cadence — and prints a
+`[liveness] boot-window breadcrumb: Ns armed (…)` line each time armed-elapsed
+crosses a 30 s boundary. The healthy re-run emitted 11 of them, the last at
+`330s armed`. The hung boot sat for roughly 600 s past its freeze point and
+emitted **none**.
+
+Nothing between the interrupt entry and that breadcrumb can block: the tick
+path is `rcu::quiescent_state`, `PER_CPU_SCHED.tick`, some relaxed atomic
+counters, `hardlockup::kick` (a no-op unless armed), and a **`SCHED.try_lock()`**
+— explicitly non-blocking, with the comment saying a missed tick is fine. And
+`watchdog_diagnostic` is unconditional; it only counts the bytes the closure
+emits. So a breadcrumb is emitted unless the tick itself never happens.
+
+That rules out the whole family of hypotheses this entry has accumulated
+around *lock* wedges. A `crate::sync::Mutex`, a `PreemptSpinMutex` and a raw
+`spin::Mutex` all spin with **IF still set**; the timer keeps firing, and the
+breadcrumb keeps printing, whatever they are doing. Twenty missed breadcrumbs
+means the CPU was not taking interrupts at all — the "BSP-dead total-silence
+hang the timer-driven watchdogs cannot see" that `hardlockup::kick`'s own
+comment describes.
+
+**Where that points.** Look for an `IF=0` region on the post-reap path, not a
+lock. `pcb::destroy` → `destroy_user_address_space` frees every frame of the
+address space, and `kernel/src/mm/frame.rs` wraps its allocator critical
+sections in `cpu::without_interrupts` in fifteen places (plus six more in
+`mm/quarantine.rs`). A free-list walk that loops — a corrupted or cyclic list,
+which is history-dependent and therefore intermittent — inside one of those is
+silent by construction, cannot be preempted, cannot report itself, and freezes
+exactly where both occurrences froze. Neither `blkdev.rs` nor `virtio/` uses
+`without_interrupts` at all, so the `Vfs::read_file` suspect from the older
+narrowing is the *less* likely half of step 4; the frame-freeing half is the
+more likely.
+
+**The next occurrence must produce a RIP, and today's could not.** The only
+detectors that can see an `IF=0` wedge are host-side or NMI-driven, and both
+are opt-in: `--hard-lockup-watchdog` (§61, kept opt-in by operator decision so
+the guest's PCI topology is unchanged on shared runs) and `--stall-secs=N`
+(host-side `info registers` via the QEMU monitor, which changes nothing in the
+guest at all). Neither was on, because nobody knows in advance which boot will
+be the one in a few dozen that hangs.
+
+**Repro status: intermittent, ~1 in a few dozen.** The immediately-following
+boot of the *identical* tree, run with `--hard-lockup-watchdog` specifically to
+capture the wedged guest RIP, reached `BOOT_OK` in 395 s with the `inline-asm`
+
+**Repro status: intermittent, ~1 in a few dozen.** The immediately-following
+boot of the *identical* tree, run with `--hard-lockup-watchdog` specifically to
+capture the wedged guest RIP, reached `BOOT_OK` in 395 s with the `inline-asm`
+rung green — so **no RIP was captured** and the watchdog hint remains the right
+first move on the next occurrence. `bench/boot-history.jsonl` now records 425
+boots, 110 not clean.
+
+**Not caused by the change it surfaced under.** The tree under test was the
+kshell option-refusal sweep (`68d5483e6`), which touches only shell command
+parsers and a self-test rung that runs at serial line ~40 940 — some 2 000
+lines *after* the freeze point, and in a subsystem with no relationship to
+process teardown. As in 2026-07-15, the change only perturbed timing.
 
 ### D-SHM-MAP-NOCAP. `SYS_SHM_MAP`/`SYS_SHM_SIZE`/`SYS_SHM_CLOSE` do not verify the caller owns the handle — RESOLVED 2026-07-14
 
@@ -71751,12 +72061,13 @@ all three output formats, the escaping, every option error and prefix
 ambiguity, and the whole of `--check` including the layout latch, the
 `WARNING:` lines with their singular/plural forms, and the exit statuses.
 
-Run `PROG=md5sum OURS=/usr/bin/md5sum ./scripts/digest-diff.sh` to confirm the
-harness still discriminates; it reports the two xfails as XPASS and nothing
-else, which is what says the remaining 113 are comparisons and not
-coincidences. (`OURS` replaces a single binary, so the harness refuses it
-without a `PROG` saying which — rather than applying it to whichever program
-happened to run first.)
+Run `OURS=/usr/bin ./scripts/digest-diff.sh` to confirm the harness still
+discriminates; it reports all four xfails as XPASS and nothing else, which is
+what says the remaining 226 are comparisons and not coincidences. (`OURS` names
+a *directory*, as in every family harness here, so one run covers both
+programs. It named a single binary until 2026-08-25, which meant it also needed
+a `PROG=` beside it to say which — and so the discrimination check could only
+ever cover one of the two programs at a time.)
 
 ### What our own tests caught that the harness could not have
 
@@ -73545,20 +73856,422 @@ joined; `grep` wants words; `trap` wants word 1 as a command string and word 2
 as a signal. Each conversion is a small semantic decision, and there are no
 per-command tests to catch getting one wrong.
 
-### Two smaller bugs found in the same area, not yet fixed
+### Two smaller bugs found in the same area
 
-- **`parse_inline_assignment` splits the first word on raw whitespace**
-  (`line.find([' ', '\t'])`, kshell.rs 6131), so `FOO='a b'` is read as
-  `first_word = FOO='a`, `command = b'` — it tries to run `b'`. It was equally
-  broken before the quoting fix (it read `FOO=a` and ran `b`); the fix changed
-  the wrong answer, not its wrongness. It needs the same quote-aware scan
-  `expand_braces` now uses.
-- **`grep` with no arguments prints its usage and exits 0.** Its usage arm is a
-  `console_println!` followed by a bare `return`, never reaching `set_exit(1)`.
-  This is the same silent-success class as
-  `A-KSHELL-CAPTURE-DID-NOT-NEST` and the exit-status fixes before it, and is
-  very likely not unique to `grep` — the usage arms of the other ~750 commands
-  have not been audited.
+- ~~**`parse_inline_assignment` splits the first word on raw whitespace**~~
+  ✅ **FIXED 2026-08-25.** It read `FOO='a b' cmd` as `first_word = FOO='a`,
+  `command = b' cmd`, so the shell set `FOO` to the fragment `'a` and then ran
+  `b'` as a command — two wrong things, neither reported. It was equally broken
+  before the quoting fix (it read `FOO=a` and ran `b`); that fix changed the
+  wrong answer, not its wrongness.
+
+  The fix is the quote-aware scan the rest of the shell's parsers already use,
+  factored out as `first_unquoted_space`, sitting beside `unquoted_positions`
+  and `split_unquoted` and following the same convention (an unterminated quote
+  runs to the end of the string). Pinned by self-test rung 57.
+
+  **A bare quoted assignment went through the same door**, which is the part
+  that was easy to miss when this was written up: `ZZ='a b'` with no command
+  after it still contains a space, so the *inline* parser claimed it, set `ZZ`
+  to `'a`, and ran `b'`. `parse_bare_assignment` — which handles it correctly —
+  was never reached, because it is tried second. So the defect was not limited
+  to the construct it was found in; it swallowed the more common one too.
+
+  **Left alone deliberately:** the value still goes through `strip_quotes`
+  (outer pair only) rather than `remove_quotes` (all quoting), so
+  `A=x" "y cmd` keeps its interior quotes where bash would remove them. That is
+  a different, rarer defect in a different function, shared with
+  `parse_bare_assignment`, and it does not run the wrong command.
+- ~~**`grep` with no arguments prints its usage and exits 0.**~~ — ✅ **the
+  claim was already stale when it was written, and the audit it asked for has
+  now been done (2026-08-25).** `cmd_grep`'s two usage arms both call
+  `set_exit(2)` — deliberately 2 rather than 1, with a comment saying why:
+  within `grep`, exit 1 is the reserved meaningful answer "searched, found
+  nothing", so a usage error must not be spelled the same way as a successful
+  empty search.
+
+  The second half of the bullet — "very likely not unique to `grep`, the usage
+  arms of the other ~750 commands have not been audited" — was correct, and
+  the audit found **87 more sites**. They are a different shape from the 710
+  fixed in `A-KSHELL-A-MISTYPED-COMMAND-REPORTED-SUCCESS` below, which is why
+  that sweep did not catch them: those ended in a bare `return;`, whereas
+  these simply *fall out of a `match` arm*, so a search for the earlier
+  pattern could not see them. See
+  `A-KSHELL-A-USAGE-ARM-THAT-FALLS-OUT-OF-A-MATCH-REPORTED-SUCCESS`.
+
+---
+
+## A-KSHELL-A-USAGE-ARM-THAT-FALLS-OUT-OF-A-MATCH-REPORTED-SUCCESS — ✅ FIXED 2026-08-25 (lane A)
+
+**In short:** the same lie as
+`A-KSHELL-A-MISTYPED-COMMAND-REPORTED-SUCCESS` below, in the 87 places that
+one could not see. Give a kernel-shell *subcommand* a bad value or leave off
+its argument — `speech tts banana`, `dynlock grace`, `wallpaper bgcolor` — and
+it printed `Usage: …`, did nothing, and reported success. The diagnostic was
+on the screen the whole time; it was the exit status that lied, which is the
+worse half, because a script reads the status and not the screen. `cmd &&
+next` ran `next` after a typo; `set -e` did not stop.
+
+**Why the earlier sweep missed them.** That sweep matched a `Usage:` print
+followed by a bare `return;`. These have no `return` — they are the whole body
+of a `match` arm, so control leaves by falling off the end of the arm:
+
+```rust
+_ => shell_println!("Usage: dynlock autounlock <on|off>"),
+```
+
+A search for the fixed shape cannot see the broken one. The two are the same
+defect wearing different syntax, which is the general lesson: a sweep keyed on
+a *syntactic* pattern silently defines its own blind spot, and the way to find
+the blind spot is to re-derive the site list from the *semantic* property —
+here "a `Usage:` print that can be reached and left without a non-zero
+`set_exit`" — rather than from the shape that was fixed last time. That is
+what `scripts/check-usage-status.py` now does.
+
+**Where:** `kernel/src/kshell.rs`, 87 sites in three shapes:
+
+| Shape | Count | Example |
+|---|---|---|
+| `_ => println!("Usage: …"),` — unrecognised value | 37 | `dynlock autounlock` |
+| `None => println!("Usage: …"),` — argument omitted | 27 | `dynlock grace` |
+| the print inside a braced block, not the whole arm | 23 | `wallpaper bgcolor` |
+
+**Fix:** `set_exit(1)` after the diagnostic, in every one. The message is kept
+— the point was never that the shell said too little, it is that it then
+claimed to have succeeded.
+
+**The mirror-image defect — `A-KSHELL-A-QUERY-THAT-ANSWERED-CORRECTLY-REPORTED-FAILURE`,
+✅ FIXED 2026-08-25 alongside this one.** Searching the
+*patched* tree for "an inserted status sitting in a block that prints something
+before the usage line" turned up two sites where the **August sweep had already
+made this mistake and shipped it**:
+
+```rust
+"echo" => {
+    if parts.len() < 2 {
+        shell_println!("Serial echo level: {} (and above)", level.as_str());
+        shell_println!("Usage: elog echo <level>  to change");
+        set_exit(1);          // <- a query, answered correctly, reported failed
+        return;
+```
+
+`elog echo` and `fc algo` are not conflations at all: the branch is guarded by
+`parts.len() < 2`, so it is reached *only* with no argument — purely the query
+path. The usage line there is a hint appended to a correct answer, not a
+diagnostic; `elog echo`'s own text says "to change". Both have reported failure
+for a successful query since August. **Fixed** by deleting the `set_exit(1)` —
+the command did what was asked — and both are pinned by rung 58, which asserts
+the query prints its answer *and* exits 0. They are listed in the checker's
+`ALLOWED` rather than left to trip it, because the next person sweeping usage
+lines will find them again and that list is where the answer needs to be
+waiting.
+
+**The unmechanised half — ✅ MECHANISED 2026-08-25 as `scripts/check-query-status.py`.**
+`scripts/check-usage-status.py` checks one direction: a diagnostic that claims
+success. The other — a correct answer that claims failure — went unchecked, and
+was the direction that had produced both shipped bugs. It now has its own gate,
+run from `boot-test.sh` next to the first, and the gate found a third instance
+on its first run. See `A-KSHELL-A-BARE-QUOTA-ANSWERED-AND-REPORTED-FAILURE`
+below.
+
+**One case the mechanical pass had to be pulled back from,** because it is the
+shape where the obvious patch is a *regression*:
+
+```rust
+} else {
+    shell_println!("Current mode: {}", notifgroup::get_mode().label());
+    shell_println!("Usage: notifgroup mode <app|category|conversation|none>");
+}
+```
+
+That `else` is reached two ways: with no argument at all (a bare query — "what
+is the mode?" — correctly answered, and a success), and with an argument that
+did not parse (an error). Stapling `set_exit(1)` on would make the successful
+query report failure. Five sites have this shape — `notifgroup mode`,
+`faceunlock security`, `datausage metered`, `wallpaper offset`, `fhist
+autoversion` — and they are folded into the still-open item below rather than
+patched, since splitting query from error is the same decision.
+
+The last two of those were **patched by the mechanical pass and then
+reverted**, caught only by reading the diff line by line rather than skimming
+it. The script's guard was "only patch a print that ends its block", which is
+syntactic, and it passed all five. What distinguishes them is not visible in
+the shape of the arm at all — it is in the enclosing conditional, which decides
+whether "no argument" reaches this branch.
+
+**Tested by:** `kshell::self_test` rung 58, which pins one site per shape *and*
+the good path of a patched command — the way a mechanical insertion goes wrong
+is by landing in the sibling arm that succeeded, so the control is the part
+that actually earns its place.
+
+**The help-vs-unrecognised conflation (33 sites) — ✅ FIXED 2026-08-25**, see
+`A-KSHELL-A-HELP-ARM-AND-A-TYPO-REPORTED-THE-SAME-THING` below. These were the
+residue this sweep could not touch: a status could be added to them, but no
+*correct* status existed until the arm was split.
+
+**Deliberately excluded, and why** — these match a `Usage:` search but are not
+this defect: `cmd_usagetime`'s `"Usage time subsystem initialised."` and
+`cmd_memcg`'s `"  Usage:        {}"` report field (neither is a usage message
+at all); `cmd_scrollback`'s `""` arm and `cmd_ksyms` (bare invocation printing
+its own synopsis *is* the command's output, the documented `ksyms` precedent).
+
+---
+
+## A-KSHELL-A-HELP-ARM-AND-A-TYPO-REPORTED-THE-SAME-THING — ✅ FIXED 2026-08-25 (lane A)
+
+**In short:** `nat help` and `nat banana` produced identical output and an
+identical "it worked" answer. The first is a request that was granted; the
+second is a typo that did nothing. Because the shell said "success" for both,
+a script could not tell them apart — `nat banana && deploy` deployed. The fix
+gives the typo an extra line saying which word was not understood, and a
+failure status; the help request keeps its exit 0, because printing the help
+*is* what it asked for.
+
+**Why this could not be fixed by the previous sweep.** These 33 sites were
+found by `A-KSHELL-A-USAGE-ARM-THAT-FALLS-OUT-OF-A-MATCH-REPORTED-SUCCESS`
+(above) and deliberately left alone by it. That sweep's whole operation was
+"add `set_exit(1)` to a usage arm", and here there is no single value that is
+right: the arm serves two callers who deserve opposite answers. Adding a
+status would have converted a defect that under-reports failure into one that
+over-reports it, which is what happened *twice* to that sweep on sites it did
+patch. The arm had to be split before any status could be attached, which is
+why the debt was carried explicitly in the checker rather than fixed in place.
+
+**Where:** `kernel/src/kshell.rs`, 33 sites in three shapes.
+
+| Shape | Count | Treatment |
+|---|---|---|
+| Catch-all `_ => { …help… }` under a uniform `match sub {` | 25 | Bind the subcommand (`other => {`) and close the arm with `end_help_arm(cmd, other)` |
+| A subcommand branch whose `else`/`_` served both a no-argument *query* and a bad argument | 5 | Split into two branches, so the query answers and the bad argument fails |
+| Individually shaped — `cmd_lockdep` (a chain of `if`s, no catch-all), `cmd_tsession` (query arm already correct; its `_` arm already failed), `fsck` (a missing operand, never a query) | 3 | By hand |
+
+**The helper, and why the diagnostic goes last.** `end_help_arm(cmd, sub)`
+prints `cmd: unknown subcommand 'sub'` and sets the status, but only when
+`sub` is not one of `""`, `help`, `-h`, `--help`, `?`. The empty string counts
+as a request because a bare `swapcfg` reaches the arm through
+`parts.first().copied().unwrap_or("")` — fourteen commands do that and ten map
+the bare form to `"help"` instead, so both spellings must be treated as asking.
+The line prints *after* the help text, not before, because it is the line that
+stays next to the prompt when the help scrolls past, and it carries the one
+piece of information the help text cannot: that what you typed is not in it.
+
+**A command whose bare form is not the help arm.** `cmd_nat` maps no-argument
+to `"status"`, which its `"status" | "stats"` arm intercepts, so bare `nat`
+never reaches the catch-all and is never called a typo. This was checked per
+command rather than assumed; rung 59 pins it, because it is precisely the
+regression a shared predicate would introduce if the interception were absent.
+
+**Found while reading, not by the checker:** `cmd_tsession` returned without a
+status when the terminal-session subsystem was uninitialised — a command that
+did nothing, reporting success. It prints no `Usage:` line, so it is invisible
+to a search keyed on that word. The rule is "a command that did not do what it
+was asked says so"; `Usage:` is only its commonest phrasing. Fixed in the same
+change.
+
+**How the sites were located.** `scripts/_split_help_arms.py` (scratch, since
+deleted) *imported* `scripts/check-usage-status.py` and reused its `USAGE`
+regex, its `ALLOWED` table and its forward-walk verbatim, rather than
+restating the same rule a second time. The first draft did restate it — keyed
+on "the first `Usage:` line in the function whose governing arm is `_ => {`" —
+and in `cmd_wakesensor` it selected an inner `_ => { …; set_exit(1); return; }`
+that was already correct. Two rules meant to describe the same set, written
+out twice, differ silently. The transformer also refused any arm whose
+governing `match` was not the uniform `match sub {`, which is what separated
+`cmd_datausage` (an `Option<&str>` scrutinee whose `_` covered both the query
+and the error) from the 25 it could safely rewrite.
+
+**Verification.** All 25 arm bodies were confirmed to be pure help printing —
+no `return` that would strand the appended call, no existing `set_exit`, no
+side effects — before applying, and the whole 254-line diff was read line by
+line afterwards. The checker now reports `21 allowed, 0 known help/error
+conflations`; run against the pre-sweep revision it reports 131 raw sites,
+which reconciles exactly as 87 fall-out-of-a-match arms + 33 conflations + 11
+allowlisted sites, and its 21 allowlist entries exempt 21 sites one-for-one,
+so no entry is dead or double-counting.
+
+**Tested by:** `kshell::self_test` rung 59 — the pair of assertions the old arm
+could not have satisfied at once (`nat help` → exit 0 with no scolding;
+`nat zz_not_a_subcommand` → exit 1 *and* the naming line), plus the bare-form
+control (`swapcfg`), the not-a-typo control (`nat`), both halves of the
+`fhist autoversion` and `wallpaper offset` splits, and both halves of
+`lockdep`, whose unrecognised subcommand previously produced byte-identical
+output and status to the query.
+
+---
+
+## A-KSHELL-A-BARE-QUOTA-ANSWERED-AND-REPORTED-FAILURE — ✅ FIXED 2026-08-25 (lane A)
+
+**In short:** typing `quota` on its own printed "Quotas are currently enabled."
+— the correct answer to the question — and then told the shell the command had
+failed. A script that runs `quota && something` never ran `something`, even
+though nothing went wrong. Found by a new checker written for exactly this
+shape, which is the third instance of it after `elog echo` and `fc algo`.
+While fixing it, a second, opposite bug turned up one screen further down in
+the same command: `quota banana` scolded the user and reported *success*.
+
+**Where:** `kernel/src/kshell.rs`, `cmd_quota`.
+
+**The gate.** `scripts/check-usage-status.py` has since August guarded one
+direction — a diagnostic that reports success. Nothing guarded the other, and
+`A-KSHELL-A-QUERY-THAT-ANSWERED-CORRECTLY-REPORTED-FAILURE` recorded that gap
+explicitly, because it is the direction the August sweep itself got wrong twice.
+`scripts/check-query-status.py` closes it. Its rule:
+
+> A block that can only be reached by the user *asking* — no argument was given
+> — and that answers by printing program state must not set a failure status.
+
+Three questions per non-zero `set_exit`: is the enclosing block guarded on "no
+argument given"; does at least one print *directly* in that block interpolate
+program state (a `foo::bar()` call, not just literal text or the user's own
+words echoed back); does it then fail. All three, and the site is reported.
+Run from `boot-test.sh` immediately after the usage-status gate.
+
+**Deliberately a second script, not a second rule inside the first.** The two
+rules point in opposite directions — "this needs a status", "this must not have
+one" — and a single classifier holding both would resolve a disagreement between
+them silently. Kept apart, each states a property, and a site that trips both is
+a site whose author has to say which it is. `quota` is exactly that site: taking
+the status off for the query direction made it trip the usage-status gate, which
+is how its `ALLOWED` entry came to be written with a reason attached.
+
+**Verified in both directions before being trusted.** Run against the revision
+before the August fix (`git show 9251e5a3d^:kernel/src/kshell.rs`) it reports
+`cmd_fcompress` and `cmd_elog` — the two sites that actually shipped the bug —
+and `cmd_quota`. Run against the tree today it reports `cmd_quota` alone, which
+is how the bug was found. A checker nobody has watched fail is a checker nobody
+knows works, so the invocation is written into the script's docstring.
+
+**Fix, half one — the query.** Bare `quota` is a question and this is its
+answer, the same reading as `elog echo` and `fc algo`. The `set_exit(1)` is
+gone, and the two lines swapped: the state line leads and the synopsis follows
+it as a hint ending "to change". The order is part of the fix, not tidying —
+printed the other way round the output *reads* as a complaint, and the next
+person sweeping usage lines will put the status back.
+
+**Fix, half two — the typo, and a blind spot it exposes.** `cmd_quota`'s
+catch-all arm printed
+
+```rust
+shell_println!("Unknown subcommand '{}'. Use: on, off, set, …", parts[0]);
+```
+
+with no status at all: `quota banana` reported success. The usage-status gate
+never saw it because the gate keys on the *word* `Usage:`, and this arm says
+`Use:`. The arm now sets `set_exit(1)` and is worded `Usage:` so the gate can
+see it.
+
+**That blind spot is general** — and was closed the same day, one commit later.
+Re-running the usage-status
+walk with its trigger widened from `Usage:` to `Unknown…`/`Unrecognised…`/
+`Invalid…`/`Use: ` reports **49 further sites** in `kshell.rs` that print a
+diagnostic and report success — `cmd_container`'s seven `Invalid container ID`
+paths, `cmd_wakesensor`'s five `Unknown sensor` arms, `cmd_theme`, `cmd_progmgr`,
+`cmd_secpolicy`, and more. (Two of the 51 raw matches are report lines rather
+than diagnostics: `thumbcache`'s "Invalidated {} entries" and `vlan`'s "Unknown
+drops:" counter.) This is the same lesson a third time — a gate keyed on the
+shape of the last bug defines its own blind spot. All 49 are fixed and the
+trigger is widened; see
+`A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE` below and
+design-decisions.md §299.
+
+**Tested by:** `kshell::self_test` rung 60 — `quota` prints the state line and
+exits 0, the synopsis survives as a hint, and `quota zz_not_a_subcommand` names
+the word and exits 1.
+
+---
+
+## A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE — ✅ FIXED 2026-08-25 (lane A)
+
+**In short:** the shell has a build-time check that stops a command from
+printing an error message and then telling the caller it succeeded. The check
+found the message by looking for the word "Usage:". Messages that start
+"Unknown subcommand…", "Invalid port", "Unknown sensor" and so on say exactly
+the same thing in different words, and the check did not look for them — so 49
+of them scolded the user and then reported success. The check now fires on the
+*kind* of message rather than one word of it, and all 49 are fixed.
+
+**Where:** `kernel/src/kshell.rs`; the gate is
+`scripts/check-usage-status.py`, whose trigger was
+
+```python
+USAGE = re.compile(r'(?:console_println!|shell_println!)\s*\(\s*"\s*[Uu]sage\b')
+```
+
+and is now
+
+```python
+USAGE = re.compile(
+    r'(?:console_println!|shell_println!)\s*\(\s*"'
+    r'(?:\s*[Uu]sage\b|Unknown\b|Unrecogni[sz]ed\b|Invalid\b|Use:)'
+)
+```
+
+**How the 49 were counted, and where they were.** The checker's own forward
+walk, with only that regex widened, reported 51 sites. Two are report lines
+that merely begin with one of those words — `thumbcache`'s "Invalidated {}
+entries for: …" (a *success* line) and `vlan stats`' "  Unknown drops:    {}"
+(a field label). Both are excluded **structurally rather than by allowlist**:
+the new words must *start* the string (a field label is indented inside its
+report) and are matched with `\b` (so "Invalidated" is not an "Invalid"
+anything). `Usage` keeps its leading-whitespace tolerance because `cmd_memcg`
+has an indented one already sitting in `ALLOWED`, and removing the tolerance
+would have silently dropped a site the gate was watching.
+
+The remaining 49, in 29 functions: seven `Invalid container ID '{}'` paths in
+`cmd_container`, six `Unknown sensor`/`Unknown level`/`Invalid hours` arms in
+`cmd_wakesensor`, three `Invalid port` (`telnetd`, `sshd`, `netsyslog`),
+`cmd_theme` ×3, `cmd_progmgr` ×3, `cmd_swapcfg` ×2, `cmd_useracct` ×2,
+`cmd_sysdiag` ×2, `cmd_secpolicy` ×2, `cmd_kernelbuild` ×2, and singles in
+`cmd_colorscheme`, `cmd_overlay`, `cmd_fcompress`, `cmd_fspolicy`, `cmd_atime`,
+`cmd_fstrim`, `cmd_appregistry`, `cmd_hotkey`, `cmd_scriptlang`,
+`cmd_netsettings`, `cmd_parental`, `cmd_elog`, `cmd_logpersist`, `cmd_vmguest`,
+`cmd_taskbar`, `cmd_startmenu`, `cmd_container_network`.
+
+**Why this is the interesting part and not a footnote.** It is the third time
+the same methodological failure has produced shipped bugs in this one file. The
+710-site sweep keyed on "a `Usage:` print followed by `return;`" and missed 87
+that fall off the end of a `match` arm. The checker written to replace it keyed
+on the *semantic* property but kept the *lexical* trigger, so it inherited the
+blind spot one level down: it was complete over messages containing the word
+"Usage", which is not the set it is trying to guard. A gate's trigger is part
+of its rule, and a trigger derived from the wording of the last bug is a
+syntactic sweep wearing a semantic hat. Recorded as design-decisions.md §299.
+
+**How the fix was applied.** By a scratch script that **imported the checker
+and took its site list from the checker's own output**, rather than
+re-implementing "find the diagnostics" a second time — §297's rule, that two
+descriptions of one set maintained separately differ silently. Here the
+divergence would have been invisible in both directions: a site the sweep
+missed would look like a new bug, and one it fixed that the gate did not care
+about would look like nothing at all. The script also **refused shapes it did
+not recognise and printed the refusals** instead of trying its best; exactly one
+site came out as `MANUAL` — `cmd_fstrim`'s `Unknown mode`, whose print is the
+block's tail expression with no trailing `;` — and was fixed by hand. The
+script was deleted after use; the gate is what persists.
+
+**Verified in both directions.** After the sweep both gates are green
+(`check-usage-status.py`: 22 allowed, 0 conflations; `check-query-status.py`:
+2 allowed). Run against the *pre-sweep* tree the widened checker reports all 49,
+which is the positive control for the widened trigger — a checker nobody has
+watched fail is a checker nobody knows works. The original historical control
+still holds too: on `9251e5a3d^` it still reports `cmd_fcompress` and `cmd_elog`.
+
+**What is still not covered, stated rather than implied.** A diagnostic opening
+with none of the five words — `"no such mode: …"`, `"cannot parse …"`,
+`"expected a number"` — is not nominated and will pass. That residue is real.
+If a fourth instance of this defect appears, the question is not "which word do
+we add" but whether the trigger should become a property of the *block* (does
+this branch correspond to input the command rejected?) rather than of the
+string. §299 records the estimate of what that costs.
+
+**Tested by:** kshell self-test rung 61, which pins four of the 49 chosen for
+the four *shapes* the sweep had to handle rather than for the commands they
+live in — a `None =>` arm whose whole body was the print, the tail-expression
+variant that the mechanical pass refused, a `let … else { print; continue; }`
+inside a loop over arguments, and a catch-all `other =>`. Each is paired with
+the query reading next door (`fstrim mode`, `theme accent` with no argument)
+that must keep exit 0, because the failure mode of fixing this class is
+over-applying it.
 
 ---
 
@@ -78782,7 +79495,18 @@ indistinguishable from the diagnostic alone.
 
 ---
 
-## `A-KSHELL-CUT-AND-FOLD-HAVE-NO-END-OF-OPTIONS-MARKER` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-CUT-AND-FOLD-HAVE-NO-END-OF-OPTIONS-MARKER` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+> **Fixed, and wider than filed.** `cut` and `fold` are the two this entry
+> named, but the fix was preceded by a survey of *every* option parser in
+> `kshell.rs`, because a bug filed under the shape of where it was noticed
+> describes its own blind spot. The survey found the same missing `--` in
+> `grep`, `comm`, `zip`, `find`, `locate`, `dedup`, `undelete`, `batch` and
+> `mapfile` — and, in seven of those, a strictly worse defect that this entry
+> did not suspect: an option the command did not recognise was *discarded*
+> rather than refused. That half is written up separately as
+> `A-KSHELL-SEVEN-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE` below.
+> Both halves landed together, tested by self-test rung 63.
 
 **Where.** `kernel/src/kshell.rs` — `parse_cut_args`, `parse_fold_args`.
 
@@ -78896,7 +79620,7 @@ fixture that matched would have tested the smaller half of the bug.
 
 ---
 
-## `A-KSHELL-DIFF-BLAMES-THE-TRAILING-NEWLINE-FOR-ANY-DIFFERENCE-IT-CANNOT-SEE` (lane A, 2026-08-25) — **open**
+## `A-KSHELL-DIFF-BLAMES-THE-TRAILING-NEWLINE-FOR-ANY-DIFFERENCE-IT-CANNOT-SEE` (lane A, 2026-08-25) — ✅ **FIXED** (`6d8a057d7`, `fc1670be6`, 2026-08-25)
 
 **Where.** `kernel/src/kshell.rs` — `cmd_diff` (~98986), specifically the decode
 at ~99024 and the fallback message at ~99215.
@@ -78982,7 +79706,14 @@ reuse the helper that fix introduced:
   correct byte-level line diff of a binary file is correct but unreadable, and
   floods a serial console. GNU's rule is a NUL in the first buffer. This is a
   separate judgement from the correctness fix and should not be smuggled into
-  it.
+  it. ✅ **DONE 2026-08-25**, in its own commit as this note asked. Two
+  departures from GNU, both argued at the function: the test is a NUL
+  *anywhere* in the file (GNU's first-buffer rule is an artefact of streaming;
+  we already hold the whole file, so the answer becomes a property of the files
+  rather than of a buffer size), and the check runs *after* the byte-equality
+  early return, so two identical binary files stay silent with status 0 —
+  they do not differ, and saying they do would be a false positive no flag
+  could switch off. `-a`/`--text` restores GNU's line diff exactly.
 
 **`comm` has the identical defect** (~119460): `from_utf8_lossy` on both files,
 then `lines()`, then equality on the decoded lines. Two lines differing only in
@@ -79017,6 +79748,66 @@ mangled. It is still worth converting for consistency, last.
 (the CRLF case) with no unusual input required. Below sed's data destruction,
 above the option-wording items.
 
+### Fixed
+
+`6d8a057d7`, with the assertion repair in `fc1670be6`.
+
+| | was | is |
+|---|---|---|
+| `diff dos.txt unix.txt` | "(files differ only in trailing newline)" | every line shown, `-` carrying the `\r` |
+| `diff` on lines differing only in undecodable bytes | printed as shared context, with a leading space | shown as `-`/`+`, bytes intact |
+| `diff a b` where only the final newline differs | "(files differ only in trailing newline)" | names which of the two files has it |
+| `comm -12` on lines differing only in undecodable bytes | reported common to both | reported as neither's |
+| `comm` on a byte-sorted file | merge precondition broken, lines in wrong columns | `<[u8]>::cmp`, the ordering `sort` used |
+
+`sed_lines` was renamed `split_lines` and is now the one splitter for all
+three commands, since all three held the same two bugs.
+
+**The fallback is derived, not assumed**, which is the part worth keeping in
+mind if this code is touched again. "Same lines, different bytes" has exactly
+one cause under a byte-exact splitter, and the argument is written at the call
+site: `split_lines` discards nothing except whether the input ended in `\n`, so
+the pair (lines, final-newline) reconstructs the file, and therefore equal lines
+with unequal bytes force that flag to differ. The other branch is unreachable by
+that argument; it is kept rather than made an `unreachable!()` because the
+alternative to being wrong must not be panicking a shell, and it deliberately
+names **no** cause — if the splitter ever grows a second thing it discards, it
+prints instead of lying.
+
+**Two of the pinning assertions had to be repaired before they meant anything**,
+which is worth recording because it is the same defect one level up. `comm -12`
+forbade `\xfe\n` and `\xff\n` in the common column — but the decode being
+removed turned *both* into U+FFFD, so the broken build emitted `\xef\xbf\xbd`
+and neither forbidden string could ever appear. The assertion would have passed
+against the bug it named. It is now equality on the whole output. `diff`'s
+undecodable case had the same hole (` \xff\n`) and now forbids `\xef\xbf\xbd`
+anywhere, which states the real invariant: every byte of a diff is copied from
+one of the two files, and none is invented by a decoder.
+
+**Still open, deliberately left out of this change:**
+
+- ~~`comm` never checks that its input is sorted.~~ ✅ **DONE, 2026-08-25.**
+  It refuses now: three diagnostic lines naming the file, the line number and
+  the remedy, exit 1, and — unlike GNU, which warns and carries on — **nothing
+  of the merge is printed**, because a prefix of a merge that went wrong is
+  indistinguishable from a short but complete one. It also checks less than
+  "are both files sorted": only the adjacent pairs up to and including the index
+  the merge stopped at, so disorder confined to a tail (where every remaining
+  line goes to the same column regardless) is not refused. That boundary is not
+  a nicety — the pair *at* the exit index is the one an in-merge check cannot
+  see, and it is the one that misfiles a line. Rationale in
+  **design-decisions.md §295**; pinned by self-test rung 56, whose third case
+  exists to fail if the check is ever widened to whole files.
+- ~~`diff` has no `Binary files X and Y differ`.~~ ✅ **FIXED 2026-08-25.** A
+  byte-exact line diff of a binary file was *correct* but unreadable and
+  flooded a serial console. `diff` now reports `Binary files X and Y differ`
+  with status 1 when either file contains a NUL, and gained `-a`/`--text` to
+  force the line diff back on. Our test is a NUL anywhere in the file rather
+  than GNU's first-buffer rule, and it runs after the byte-equality early
+  return so identical binaries stay silent — see the two bullets above.
+- `column` still decodes lossily (~14868, ~14908). It is a display formatter
+  writing only to stdout, so a mangled character is visible as mangled rather
+  than mistaken for data — the lowest severity of the four and the last to do.
 ---
 
 ### Lesson 47: an app that keeps time but never receives the clock (lane C, 2026-08-25)
@@ -79108,3 +79899,1123 @@ in `A-GATES-SILENTLY-STOPPED-CHECKING` — four gates parsing a fraction of the
 tree and reporting "clean" — arrived at from the opposite direction: not a
 gate that stopped reading the files, but a gate that read them and was talked
 out of its finding by the evidence of its own success.
+
+---
+
+### Lesson 48: a gate must be measured on the tree it will gate, not the tree it was written on (lane A, 2026-08-25)
+
+**In short:** lane C wrote a pre-build check and measured it at "about a
+second". Lane A timed the same script, unmodified, on the tree it was about to
+be wired into: **5 minutes 44 seconds**. Nothing was wrong with either
+measurement. They were different trees, and the check's cost depended on a
+property of the source that differs wildly between them. A gate that slow does
+not fail loudly — it gets commented out six months later by someone who never
+reads why it was added.
+
+**The mechanism, because it is a trap and not a typo.** The two regexes that
+find a Rust `fn` began `^\s*`. Under `re.M` the `^` already anchors to a line
+start, so the `\s*` was there only to skip indentation — but `\s` matches a
+newline, so at a blank line it runs on through every following blank line and
+every following line's indentation, and then hands the whole run back one
+character at a time, retrying `pub`/`fn` at each step. That is O(w²) in the
+length of a whitespace run.
+
+In ordinary source that costs nothing, because whitespace runs are a few
+characters. What made it fire here is a *deliberate* feature of the checker:
+it blanks comments and `#[cfg(test)]` items **to spaces** rather than deleting
+them, so that reported line numbers still point at the file the reader will
+open. A file whose test module is a third of its bulk therefore hands the
+regex one whitespace run a quarter of a megabyte long. On
+`gui/compositor/src/lib.rs` — 733 KB, and the largest file in lane C's tree —
+finding its 243 `fn`s took **93 seconds** by itself.
+
+So the cost scaled with *the size of the largest file's test module*, which is
+exactly the kind of property no author thinks to hold constant between trees.
+`^[ \t]*` fixes it; the whole gate now runs in 10.9 seconds, most of that
+Python startup and reading 372 files.
+
+**What to take from it.**
+
+- **Time a gate where it will run, before wiring it.** Lane C's §6 listed four
+  kinds of verification — fixtures, whole-lane run, live falsification, and
+  executing the shell block — and every one of them was real work honestly
+  done. None of them was a measurement on the tree that would pay the cost.
+- **A performance bug in a gate is a correctness bug with a delay.** The build
+  still goes green; the gate is simply gone by the time it would have caught
+  something. This is the slow-motion form of `A-GATES-SILENTLY-STOPPED-CHECKING`.
+- **`^\s*` in a line-oriented regex is almost always a bug** — `^` has already
+  done the anchoring, so the only thing `\s`'s newline adds is the ability to
+  match across lines, which line-oriented patterns do not want. Here it also
+  produced a wrong answer, quietly: the match could *start* on an earlier blank
+  line, and the finding is reported at `m.start()`, so a `fn` preceded by a
+  blank line pointed the reader at the blank line rather than at the `fn`.
+- **When you change another lane's script, prove equivalence on their tree, not
+  on the fixtures.** The 13 fixture cases passing says the rewrite did not break
+  what the author thought to write down. Comparing old and new `inspect()` on
+  all 372 `.rs` files under the gate's roots — full per-file results, not the
+  summary line — says it did not break what they did not.
+
+---
+
+### Lesson 49: a filter that names one severity cannot see the other (lane A, 2026-08-25)
+
+**In short:** the kernel carries ~18k pedantic-level clippy warnings as known
+debt, so "did my change add any?" cannot be answered by the exit code — a clean
+change and a dirty one both leave the count in the eighteen-thousands. The
+established method is to `git stash`, re-measure, and compare. The pipeline used
+to do that was
+
+```bash
+cargo clippy -p kernel --message-format short 2>&1 | grep -E "^kernel" | grep warning
+```
+
+and that last `grep warning` is the whole lesson. **`clippy::all` is
+deny-level in this workspace, so a violation of it is emitted as `error:`, not
+as `warning:`.** The filter that made the comparison tractable was precisely
+the filter that made it blind to the only class of diagnostic that actually
+stops the build. The comparison came back "identical multiset — zero new
+warnings", which was *true* and useless: the change had introduced a deny-level
+`clippy::type_complexity` error, and the boot test refused to build 203 seconds
+later, before QEMU ever started.
+
+**The second half of the trap.** `scripts/boot-test.sh` runs its gates *before*
+booting, so a gate failure leaves `build/serial-test.txt` untouched — still
+holding the previous run's output, ending in `kshell::self_test PASSED`. The
+standing verification recipe (zero `!! ` lines, self-test passed, no unexpected
+faults) therefore reported **green on a run that never booted**. The recipe is
+not wrong; it just has no way to notice it is reading a file from an hour ago.
+
+**What to take from it.**
+
+- **Check the gate's own exit code before starting a run that will check it for
+  you.** `cargo clippy -p kernel; echo $?` costs one command and answers the
+  deny-level question exactly, with no filtering at all. Do that first; use the
+  stash-and-compare only for the warning-level delta it is actually for.
+- **When comparing diagnostics, filter by *file*, never by severity.** `grep -E
+  "^kernel"` alone is the right filter — it keeps errors and warnings both, and
+  the severity word is part of the text being compared rather than a
+  precondition for being compared.
+- **`rm` the artifact you are about to verify.** A verification that reads a
+  file the run may not have written is a verification that can pass without the
+  run happening. Deleting `build/serial-test.txt` first turns "stale pass" into
+  "file not found", which is unmistakable.
+- **Always read the tail of the harness log, not only the greps.** Every fact
+  needed to catch this was in `/tmp/bt-*.log`: no `BOOT_OK`, no
+  `=== Boot test PASSED ===`, and an explicit `ERROR: refusing to build`. Two
+  of those were already in the recipe as *positive* checks — their absence is
+  what carried the signal, and absence is easy to skim past when the other four
+  greps look right.
+
+---
+
+### Lesson 50: an outer timeout equal to the inner one can never let the inner one fire (lane A, 2026-08-25)
+
+**In short:** the standing recipe for a boot test was
+
+```bash
+python scripts/run-timeout.py --poll 30 900 ./scripts/boot-test.sh
+```
+
+and `scripts/boot-test.sh` runs QEMU under **its own 900 s timeout**. The outer
+budget has to cover the pre-build gates and the kernel build as well, so it is
+strictly the smaller of the two windows — the outer kill always wins. On
+2026-08-25 the gates plus build took 530 s (a full clippy recompile, because
+several `git stash` comparisons had invalidated the cache), leaving 370 s for a
+boot that reaches `BOOT_OK` at 370–405 s. `run-timeout` killed the tree at 900 s
+while the guest was running post-self-test diagnostics, perfectly healthy.
+
+**Why this is worse than one wasted cycle.** The inner timeout is not a
+duplicate of the outer one — it is the *diagnostic* one. When `boot-test.sh`'s
+own QEMU timeout expires it reports `SYSTEM HANG`, dumps the guest state, and
+(since `49496d935` made the HMP monitor on by default) reads back the faulting
+RIP. `run-timeout`'s expiry produces exit 124 and a killed process tree: no RIP,
+no task table, no serial marker saying where it stopped. So an outer budget at
+or below the inner one silently converts every genuine boot hang — the
+`B-FORKEXEC-BOOT-HANG` class, which is intermittent and expensive to catch —
+from a diagnosed fault into an anonymous kill. The one run where the
+instrumentation matters most is the run where it is guaranteed not to speak.
+
+**The rule.** The outer budget must be **inner QEMU timeout + worst-case gates
+and build**, not the inner timeout itself. Gates plus a cold-cache build have
+been observed at 530 s here, so:
+
+```bash
+python scripts/run-timeout.py --poll 30 1500 ./scripts/boot-test.sh
+```
+
+1500 s = 900 s inner + 600 s headroom. This does not weaken the hang protection
+`run-timeout` exists to provide: `boot-test.sh` bounds the guest itself, and the
+outer wrapper's real job is the one only it can do — killing the *whole process
+tree*, grandchildren included, if the harness or QEMU orphans something. That
+job is unaffected by the budget being generous.
+
+**Generalisation.** Whenever two timeouts nest, the outer one must exceed the
+inner one by the cost of everything the outer covers and the inner does not. Two
+equal timeouts are not belt-and-braces; they are one timeout, and it is the one
+with the less useful failure message.
+
+---
+
+### TOOL-DIFF-WSL-LIB-FRESHNESS-CHECK-IS-CURRENTLY-INERT. `diff_lib_artifacts` cannot tell "this package has no library" from "this package's library is gone", and today it answers the second with the first — 2026-08-25 — FIXED
+
+> **Correction, same day, before the fix landed.** This entry was filed with the
+> right symptom and the wrong cause. It blamed the missing `deps/` directory on
+> "the second occurrence" of an unexplained 2026-08-24 deletion. There was no
+> deletion: **cargo 1.100.0-nightly (e8cb624d5 2026-08-22) does not create
+> `deps/`**, and the original text is kept below with the correction marked, so
+> that the reasoning error stays visible rather than being quietly overwritten.
+> The corrected diagnosis, the evidence, and the fix as shipped are at the end.
+
+**In short:** the coreutils harnesses build their subject and then check that the
+build really happened. Part of that check — the part added specifically because
+a stale library once made a harness report sixteen differences against a fix
+that was correct and in the tree — is silently doing nothing at the moment. It
+looks for a file inside a directory that does not exist, finds nothing, and
+reads "nothing" as "nothing to worry about."
+
+**Where:** `scripts/diff-wsl.sh`, `diff_lib_artifacts` (~line 297) and its caller
+`diff_first_stale` (~line 336).
+
+```sh
+diff_lib_artifacts() {
+  for diff_p in $DIFF_PKG; do
+    ls -t "$target_dir/x86_64-unknown-linux-gnu/debug/deps/lib${diff_p}-"*.rlib \
+      2>/dev/null | head -1
+  done
+}
+```
+
+**Two independent faults, same shape.**
+
+*Fault 1 — the name is guessed from the package, not read from the target.*
+`lib${diff_p}` assumes a package's library artifact is named after the package.
+That holds only when `Cargo.toml` has no `[lib] name`:
+
+| package | `[lib] name` | actual artifact | guessed | matches |
+|---|---|---|---|---|
+| `coreutils` | absent | `libcoreutils-*.rlib` | `libcoreutils-*` | yes |
+| `dc` | no library at all | — | `libdc-*` | vacuously |
+| `oils` | `osh` | `libosh-*.rlib` | `liboils-*` | **no** |
+
+`oils` is the first package a harness has pointed `DIFF_PKG` at whose library is
+renamed, and it arrived today with `scripts/osh-diff.sh`. Left alone, that
+harness would carry a freshness check that can never fire.
+
+*Fault 2 — a missing artifact is indistinguishable from an absent one.* `ls …
+2>/dev/null` prints nothing both when the package legitimately has no library
+(`dc`) and when the library the build was supposed to produce is not there. Only
+the second is a problem, and it is exactly the problem the function was written
+for. Measured 2026-08-25, twice, once with a `cargo build` actively running
+against the directory:
+
+```
+$ ls -d $HOME/.cache/slateos-diff-target/x86_64-unknown-linux-gnu/debug/*/
+build/  examples/  incremental/
+deps exists? NO      fingerprint exists? NO
+```
+
+So `deps/` is gone — and with it every `*.rlib` the check reads — while `debug/`
+still holds 40-odd finished binaries (they survive as hardlinks when the
+`deps/` names are removed). That is verbatim the state `diff-wsl.sh`'s own
+comment records from 2026-08-24: *"a `debug/` full of finished binaries and no
+`deps/` at all, so something had removed the intermediates and left the
+fingerprints."* This is its second occurrence, and the cause is still not known.
+It is not disk space: the WSL root had 892 GiB free.
+
+> ~~**CORRECTED.**~~ Everything in the paragraph above after the first sentence
+> is wrong. `deps/` was never "gone"; this toolchain never makes one. See
+> **The corrected diagnosis** below.
+
+**Why it matters that the detector is the thing that broke.** The check exists
+because a green harness is the only evidence anyone reads, so a check that
+cannot fail is worse than no check — it is a green light wired to nothing.
+Both faults produce silence, and silence is this function's success signal.
+
+**What the proper fix looks like.** Do not add a knob for the harness author to
+set, because a knob is a second copy of a fact the tree already states, and a
+second copy is the one that drifts. Read it instead:
+
+1. For each package in `DIFF_PKG`, take the library target's name from
+   `userspace/<pkg>/Cargo.toml` — the `name` under `[lib]`, falling back to the
+   package name — so `oils` resolves to `osh` without anyone saying so.
+2. Decide whether a library is *expected* from whether `userspace/<pkg>/src/lib.rs`
+   exists. `dc` has none, so nothing is expected of it; `coreutils` and `oils`
+   both do.
+3. When one is expected and no artifact is found, report it as stale with the
+   existing `<the build left nothing here>` wording, which already routes into
+   `cargo clean -p` + rebuild + refuse. That path is correct; it is only never
+   reached.
+
+**Consolation, and the reason this is not urgent.** With `.fingerprint/` gone,
+cargo cannot judge anything fresh, so every harness in a sweep is currently
+doing a full from-scratch rebuild. Results gathered in this state are the
+*freshest* possible, not the stalest — the bug's cost is a check that would not
+warn if the directory returned to a half-populated state, not a wrong answer
+today. That is also why the sweep takes about a minute per harness.
+
+> ~~**CORRECTED.**~~ Also wrong, and wrong in the comforting direction, which is
+> why it is worth keeping. Cargo judges *everything* fresh: `cargo build -v`
+> reports all 12 crates `Fresh` and 0 `Compiling`. Nothing is being rebuilt from
+> scratch, so the "results are the freshest possible" consolation was unearned —
+> had the library genuinely been stale, this entry would have talked the reader
+> out of worrying about it. The minute per harness is 9p/DrvFs stat traffic
+> against `/mnt/d`, not compilation.
+
+**Risk of leaving it.** The 2026-08-24 incident cost a day of chasing sixteen
+imaginary differences in `interleave-diff.sh`. The check that was written so it
+could not happen twice is, as of today, not running.
+
+## The corrected diagnosis — 2026-08-25
+
+**In short:** the check looked for the library in `debug/deps/`, under a name
+built from the package name. Both halves were wrong at once. The folder is
+wrong because the current cargo puts libraries somewhere else entirely, and the
+name is wrong for `oils`, whose library is called `osh`. Two wrong inputs, one
+silent "found nothing", and a check that reported everything fine.
+
+**`deps/` was not deleted; this cargo does not create it.** Established by
+measurement, in this order, each step ruling out the previous explanation:
+
+| Step | Result |
+|---|---|
+| `CARGO_*` env overriding the layout? | none set |
+| `~/.cargo/config.toml`, or one in a parent dir? | neither exists |
+| Does `deps/` appear *during* a build? (polled every 4 s for 45 s) | never appears |
+| `cargo build -v` on the repo | 12 × `Fresh`, 0 × `Compiling` |
+| **Clean `cargo build` of a fresh hello-world** | produces `build/ examples/ incremental/ <bin> <bin>.d` — **no `deps/`, no `.fingerprint/`** |
+| `cargo build -v` on that hello-world | `--out-dir …/target/debug/build/layoutprobe/<hash>/out` |
+
+The last line is the whole answer. Cargo `1.100.0-nightly (e8cb624d5 2026-08-22)`
+emits units to `debug/build/<pkg>/<hash>/out/`, so a library artifact lives at
+`debug/build/<pkg>/<hash>/out/lib<libname>-<hash>.rlib`. Confirmed in the shared
+target dir:
+
+```
+debug/build/coreutils/a051f900598d42ca/out/libcoreutils-a051f900598d42ca.rlib
+debug/build/coreutils/49c74fa47cb46b3f/out/libcoreutils-49c74fa47cb46b3f.rlib
+debug/build/oils/d51545b5b76655c2/out/libosh-d51545b5b76655c2.rlib
+```
+
+It also retires the 2026-08-24 mystery as a mystery: the "no `deps/` at all"
+observation that was read as evidence of a deletion carried no information,
+because there was never going to be one. *What made cargo call a stale library
+fresh that day is still unexplained* — the correction removes a wrong answer, it
+does not supply a right one. The freshness check is the response to that, and it
+fires on the symptom, which is all anyone gets.
+
+**A near-miss worth recording.** The fix makes "a library was expected and the
+build produced none" fatal. Written against the belief that `deps/` had been
+deleted, the natural next step was to assume a rebuild would restore it — and
+shipping on that assumption would have made all 46 harnesses refuse to run,
+since no `deps/*.rlib` was ever going to exist again. What prevented it was
+holding the fix back for one decisive experiment (the hello-world build) instead
+of acting on a plausible story. A wrong diagnosis that predicts the same symptom
+is only distinguishable by an experiment that *could* have come out the other
+way.
+
+**Fixed as shipped.** `diff_lib_artifacts` is replaced by three functions in
+`scripts/diff-wsl.sh`:
+
+- `diff_manifest` — finds `<pkg>/Cargo.toml` with a *one-level* glob
+  (`$root/*/<pkg>/Cargo.toml`). Not a recursive search: `userspace/` holds
+  several thousand package directories and walking it costs minutes, far more
+  than the check it serves.
+- `diff_lib_name` — applies cargo's own two rules, in cargo's order: an explicit
+  `[lib] name` wins; failing that a package has a library iff `src/lib.rs`
+  exists, named after the package with dashes turned to underscores. Read from
+  the manifest rather than taken as a harness knob, because a knob is a second
+  copy of a fact the tree already states, and `oils` is the standing proof that
+  the copy nobody rereads is the one that goes wrong.
+- `diff_lib_artifact` — **searches** beneath `debug/` for `lib<libname>-*.rlib`
+  and takes the newest, rather than asserting a directory. Returns 0 with a path
+  when found, 0 with no output when the package has no library, 1 when a library
+  is expected and absent, and 2 when the package has no manifest at all. The
+  last two both route into the existing `cargo clean -p` + rebuild + refuse path,
+  which was always correct and merely never reached.
+
+Searching rather than naming is the actual lesson: a layout the next toolchain
+invents costs nothing as long as the file keeps its name, and if it ever does
+stop being found, the answer is now a refusal rather than a silent pass.
+
+Verified against all four cases before shipping — `coreutils` (implicit lib,
+newest of two hashes), `dc` (no library, correctly exempt), `oils` (`libosh`,
+the one the old code could never have matched), and a nonexistent package
+(rc=2 rather than a silent skip) — then end-to-end: `wc-diff.sh` 116 passed,
+0 differed.
+
+---
+
+## `A-KSHELL-COLUMN-PADS-TO-BYTES-AND-REWRITES-WHAT-IT-CANNOT-DECODE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+**In short:** `column -t` exists to make columns line up. It measured each
+field's width by counting **bytes**, so any field holding an accented letter
+was counted as wider than it is drawn and the next column started early — the
+one command whose entire job is alignment got the alignment wrong on any input
+that was not pure ASCII. Separately, it decoded its input as text with
+`from_utf8_lossy`, so a file or pipe that was not valid UTF-8 came back out
+with every undecodable byte replaced by `EF BF BD`, and a CRLF file came back
+with Unix line endings. All three are fixed: widths are console cells, and the
+data is never decoded at all.
+
+**Where.** `kernel/src/kshell.rs` — `cmd_column`, `cmd_column_input`,
+`column_format`, and the `"column"` arm of `dispatch_with_input`.
+
+**What.** Three defects, one root and two branches of it.
+
+```rust
+let text = alloc::string::String::from_utf8_lossy(&data);   // ×2
+let lines: Vec<&str> = text.lines().collect();
+if field.len() > widths[i] { widths[i] = field.len(); }
+```
+
+1. **The visible one — padding measured in bytes.** `field.len()` is a byte
+   count; the padding it drives is spaces on a console measured in cells. `é`
+   is two bytes and one cell, so a field holding it was padded one short and
+   the following column began a cell early. Worked example, the fixture rung 62
+   now uses:
+
+   | input row | old `widths[0]` | where column 2 started |
+   |---|---|---|
+   | `é x` | 2 (bytes of `é`) | cell 3 |
+   | `ab y` | 2 | cell 4 |
+
+   Two rows, two different column positions, from the command that is supposed
+   to produce one. A CJK ideograph fails the other way — three bytes, two
+   cells — so the error is not even consistently in one direction.
+
+2. **`from_utf8_lossy` on both the file and the pipe path.** `column` is a
+   *formatter*: it re-spaces its input and hands back every other byte of it.
+   A lossy decode therefore rewrites the exact thing it was asked to preserve.
+   This is the last live `from_utf8_lossy` in `kshell.rs` and a direct
+   violation of `CLAUDE.md`'s rule 7 ("No `from_utf8_lossy` — that's silent
+   data corruption").
+
+3. **`str::lines` strips a trailing `\r`.** The same half of the bug `sed`,
+   `diff` and `comm` each turned out to hold. A CRLF file run through `column`
+   came back with Unix endings, matched or not.
+
+**Why it survived.** Every `column` test in the suite used ASCII text with LF
+endings — the one shape in which all three defects are invisible. The identical
+sentence appears in the `sed` entry above, which is the point: this was the
+fourth command found holding the *same two* bugs behind the same
+`from_utf8_lossy(…).lines()` idiom, and it was found by grepping for the idiom
+rather than by any test noticing.
+
+### Fixed
+
+`column_format` takes `&[u8]`, uses the shared `split_lines` (the splitter the
+`sed` fix introduced and `diff`/`comm` then reused), and writes through
+`shell_write_bytes`. `dispatch_with_input` moves `column` out of the
+"still text-only" group into the byte-clean one.
+
+| | was | is |
+|---|---|---|
+| `column -t` on `é x` / `ab y` | second column at cell 3 vs. 4 | both at cell 4 |
+| `column -t photo.jpg` | every undecodable byte becomes `EF BF BD` | bytes pass through unchanged |
+| `column dos.txt` | `\r\n` becomes `\n` | endings survive |
+| `column -t` on `Mr.<NBSP>Smith x` | torn into three columns | two, as GNU gives |
+| `column -t -s →` | worked by luck (`str::split` on a `char`) | splits on the character's bytes |
+
+**The width function is the interesting part.** `display_width(&[u8])` is a
+deliberate mirror of the console's own byte→cell rule
+(`console::putchar_normal` plus its UTF-8 accumulator): a lead byte with
+`utf8_seq_len >= 2` consumes that many bytes and draws one codepoint at
+`unicode::char_width`; an invalid lead byte or an aborted sequence draws U+FFFD
+in one cell, with the aborting byte reconsidered rather than swallowed. It has
+to mirror it exactly, because a width that disagrees with what is drawn
+produces a table that disagrees with the screen — which is the bug this fixes,
+in a new place. The one honest gap is stated in its doc comment rather than
+hidden: `\t`, `\r`, `\x08` and `ESC` are cursor *motion*, not glyphs, so they
+have no width at all; they count 0, and a field containing one misaligns
+whatever the function returns. glibc's `wcwidth` returns −1 for these and
+util-linux's `column` skips them, so GNU is in the same position and answers
+the same way.
+
+**One deliberate behaviour change, and why it is a fix.** The default field
+split was `str::split_whitespace`, whose rule is Unicode `White_Space` and
+therefore includes U+00A0 NO-BREAK SPACE — the character whose entire purpose
+is *not* to be a break. `Mr.\u{a0}Smith` was silently torn into two columns.
+glibc's `iswspace(U+00A0)` is false and util-linux tokenises on `" \t"`, so GNU
+keeps it whole. `split_ascii_blanks` now splits on space and tab only, which is
+both byte-safe and more GNU-faithful — and has the second benefit of leaving a
+CRLF line's trailing `\r` attached to the last field, which is never padded, so
+the row comes back out `\r\n`.
+
+**Tested by:** `kshell::self_test` rung 62 — nine assertions covering cell
+alignment with a two-byte character, an undecodable byte surviving and counting
+as its one drawn cell, CRLF round-tripping in both modes, NBSP not splitting, a
+multi-byte `-s`, empty fields between two explicit separators, the file path as
+well as the pipe, and the supplied final newline.
+
+---
+
+## `A-KSHELL-COLUMN-S-TAKES-ONE-CHARACTER-WHERE-GNU-TAKES-A-SET` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25 (both halves); one cosmetic gap below remains open
+
+**In short:** `column -s` was documented and implemented as "use this one
+character as the delimiter". GNU treats the argument as a *set* — any one of
+the characters in it separates — so `column -t -s ',;'` split on a comma or a
+semicolon under GNU and on a comma only here. A user who typed the GNU form got
+a plausible-looking table built on the wrong split, with no diagnostic.
+
+**Where.** `kernel/src/kshell.rs` — `column_parse_args`, which did
+`s.chars().next()`.
+
+**What the proper fix looked like.** Carry the whole argument as a set of
+characters (as bytes, one entry per character, since a multi-byte one must
+still match as a unit) and split on any member. `split_on_bytes` becomes
+`split_on_any_of`. The empty-field rule is unchanged: an explicit separator
+keeps them.
+
+**How it was fixed** (`7cfbd2ac8`, in its own commit as this note asked). Exactly
+that. Three things worth carrying forward:
+
+- **It is a set of characters, not of bytes.** Each member is the bytes of one
+  character, matched as a unit, so `-s '→,'` splits on the whole `→`. Expanding
+  the argument byte-wise would make `E2`, `86` and `92` each a separator, so one
+  `→` would produce three breaks and two empty fields. Pinned by an assertion.
+- **Longest match wins** where two members could both match. For a set built
+  from characters that cannot happen — no character's UTF-8 encoding is a prefix
+  of another's — but "first member in the order the user typed them" would make
+  the output depend on argument order for no reason a user could predict, and
+  longest-match is the rule that stays right if this ever takes multi-character
+  separators.
+- **A second `-s` replaces the set rather than extending it**, matching
+  util-linux, where the option's argument *is* the set. Unioning would be just
+  as implementable, so there is an assertion on input where the two readings
+  differ visibly, to keep it a decision.
+
+The return type became a named `ColumnArgs` struct on the way: with the
+separator an `Option<Vec<Vec<u8>>>`, the old three-tuple tripped
+`clippy::type_complexity`, which is deny-level here and right — see Lesson 49
+for how that error nearly shipped past a delta check that filtered on
+`grep warning`.
+
+**Why it was filed rather than done at the time.** It is a behaviour change, not
+a correctness fix, and it was found while fixing
+`A-KSHELL-COLUMN-PADS-TO-BYTES-AND-REWRITES-WHAT-IT-CANNOT-DECODE` above.
+Smuggling it into that commit would have made a bug fix and a semantic change
+indistinguishable in the history — the same reason `diff`'s missing
+`Binary files X and Y differ` was kept out of the `diff` byte fix (and was
+then landed on its own, 2026-08-25).
+
+**A second, smaller gap in the same place — ✅ FIXED 2026-08-25** (`e4444e980`, its
+own commit). The flag walk was `args.split_whitespace()`, so a separator that
+*is* whitespace could not be expressed at all: `column -t -s ' '` lost the
+argument to the splitter and fell back to the default. Harmless in that one case
+because space is the default, but `column -t -s '<TAB>'` — meaning tab and *not*
+space, which is how one lines up a TSV whose fields contain spaces — was
+unreachable. Pre-existing; not introduced by the byte conversion or by the set
+fix.
+
+> **The fix was available and the earlier note was wrong to imply otherwise.**
+> This was previously written up as needing a quote-aware splitter that
+> `kshell.rs` did not have. It has one: `split_words`, and the mechanism for
+> reaching it is `command_parses_own_quotes`, the list of commands that receive
+> their arguments with the quoting still in place. `column -s` is *precisely* the
+> shape of `cut -d`, which was already on that list for the identical reason —
+> `cut -d' ' -f1` is how you say "split on spaces", and dequoted it became
+> `-d  -f1`, so the delimiter turned into the string `-f1`. `tr` is there for the
+> same reason and failed silently rather than loudly.
+
+**How the second half was fixed.** Exactly as that note said: `"column"` joined
+`command_parses_own_quotes`; `column_parse_args` moved from
+`args.split_whitespace()` to `split_words(args)` with an index-based loop
+modelled on `parse_cut_args`, since an option that takes a value has to look at
+the *next* word; `ColumnArgs::file_path` became a `String` (the words are owned
+now), which dropped the struct's lifetime parameter. Three things worth carrying
+forward:
+
+- **A control assertion is what proves the separator arrived**, not the
+  separator assertion. `column -t -s ' '` and `column -t` produce *different*
+  output on `zz_a  zz_b` — the explicit space separator keeps the empty field
+  between the two spaces, the default collapses runs of blanks — so the pair,
+  asserted together, distinguishes "the tab/space reached `-s`" from "`-s` was
+  lost and the default did the work". Asserting only the former would have
+  passed before this change too.
+- **`-s ''` is now refused, not silently defaulted**, because `split_words`
+  drops an empty word so `-s` arrives with nothing after it. That is the better
+  answer — a separator you asked for and did not get should say so — and the
+  paragraph in `column_parse_args`'s doc comment that described the old fallback
+  was rewritten in the same commit rather than left to contradict the code.
+- **The quoted *operand* comes free and was pinned anyway.** Once the line
+  arrives quoted, `column -t '/tmp/a file.txt'` names one file instead of
+  producing an "extra operand" error. It is a consequence of the same change,
+  not a separate feature, and an assertion holds it in place so a later revert
+  to `split_whitespace` cannot take it back quietly.
+
+Kept in its own commit, separate from the set fix, because they are different
+changes: one is what the separator *means*, the other is whether the separator
+*arrives*.
+
+**A third, smaller one, noted while reading `parse_cut_args` — STILL OPEN.**
+`column` takes `-s` only as two words. getopt also accepts the attached form,
+`column -s,;`, which `cut` supports via `cut_opt_value` (`cut -d:` and
+`cut -d :` are both legal). Not a wrong answer — `column -s,;` is refused as an
+unrecognised option, loudly — but it is a legal invocation this shell rejects.
+The fix is to route the `-s` branch of `column_parse_args` through
+`cut_opt_value` the way `parse_cut_args` does, which also picks up `--separator=`
+if that is ever wanted.
+
+**Severity.** Low, and lower again. Both halves that could produce a *wrong or
+unreachable* answer are fixed. What remains is one option *form* that is
+rejected rather than misread — the failure mode is a diagnostic, not a bad
+table.
+
+---
+
+## `A-KSHELL-SEVEN-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+**In short:** seven shell commands used to *throw away* any word starting with
+`-` that they did not recognise, and then carry on as if it had never been
+typed. So a misspelled flag did not produce an error — it produced a
+*different command*, run successfully. `batch delete --dry-runn a b` deleted
+`a` and `b` for real, because the typo matched no flag (so it was not a dry
+run) and was then filtered out of the file list (so it was not an error
+either). `find . -mtime -1` walked the whole tree with no filter at all and
+printed every file, exit 0. Every one of them now stops and says which word it
+did not understand.
+
+**Where.** All in `kernel/src/kshell.rs`:
+
+| Command | The discard | What it silently became |
+|---|---|---|
+| `find` | the `if`/`else if` predicate chain simply ended, with no `else` | an **unfiltered** walk: `find . -mtime -1` printed every file under `.`, exit 0 |
+| `find -size` | `num_str.parse::<i64>().unwrap_or(0)` in `parse_size_predicate` | `-size +abc` ≡ `-size +0` — matches nearly every file |
+| `locate` | `s => if !s.starts_with('-') { pattern = Some(s) }` | unknown option dropped; `--ext` with no value ≡ *every* extension; `--size abc` ≡ **no size filter** |
+| `dedup` | same catch-all; `parse_size_value(v).unwrap_or(default)` | `--min-size 1O` (letter O) ≡ the default bound — on a command whose other half is `--delete` |
+| `backup` | each flag tested independently with `contains` / `any` | `--dry-runn` ≡ not a dry run **and** not an error: the backup ran |
+| `undelete scan` | catch-all + `if i + 1 < parts.len()` on every value | any filter that failed to parse was simply not applied: the listing silently widened |
+| `batch` | whole-line flag scan **plus** `.filter(\|f\| !f.starts_with('-'))` in each operand list | the typo fell between the two and vanished: **files were deleted** |
+| `mapfile` | prefix loop `break`s on an unknown word | the word fell through into the *array name* slot: `mapfile -u 0 ARR` read a file called `0 ARR` |
+| `oci run` | `tok if tok.starts_with('-') => { i += 1 }`, deliberately | flag dropped **and its value became the container's command**: `oci run img --menory 512m` ran `512m` |
+
+**Why this is the worse half.** The `--` gap this sweep also closed is a
+*refusal*: the command fails loudly and nothing is misread. This one is a
+*silent guess*, and the guess is almost always in the direction of doing
+**more**: the dropped word was nearly always a filter or a restriction, so
+dropping it widens the search, enlarges the deletion set, or removes the
+containment the operator asked for. A wrong answer reported as success is
+strictly worse than a missing one, and here the wrong answer is the one that
+touches the disk.
+
+**On `oci run`'s comment, because it was not an oversight.** It read: *"Unknown
+option: skip it (and don't consume a value, since we don't know its arity)."*
+The reasoning is correct about the arity and wrong about the conclusion.
+Skipping is not the neutral act it looks like — every flag in that parser
+exists to *narrow* what the container may do (`--read-only`, `--memory`,
+`--user`, `--tmpfs`), so dropping one runs the container with more authority
+than was asked for, and prints a container ID as though the request had been
+honoured in full. And not knowing the arity is precisely the reason to stop:
+we cannot even say how much of the rest of the line we have misread. Its
+`parse` is now `-> Option<Self>` and the caller abandons the run.
+
+**How it was found.** Not by looking for it. The entry above named `cut` and
+`fold` because that is the shape of *where it was noticed*; §299 of
+`design-decisions.md` says a gate keyed on the shape of the last bug defines
+its own blind spot, so the fix began with a survey of every option parser in
+the file rather than with those two functions. The survey turned up the missing
+`--` in seven more commands — and this, which nothing in the original report
+suggested was there.
+
+**And the twin next door.** `find`'s `-maxdepth` `.unwrap_or(16)` had already
+been fixed, with a three-paragraph comment about why guessing at a search's
+bounds is unsafe. `parse_size_predicate`, three lines below it, still carried
+the identical `.unwrap_or(0)`. The fix had been applied to the *site* and not
+to the *category*, which is exactly how a twin survives its sibling's fix.
+
+**Tested by.** Self-test rung 63, which probes each command with a bogus
+option and asserts a non-zero exit *and*, for the two that write to the disk,
+that nothing was written: `batch delete --dry-runn` leaves its file in place
+and `backup create … --dry-runn` creates no backup directory. It also checks
+that `--` makes a file literally named `-empty` findable, and that a valid
+`-size` still selects — so the refusals cannot pass by having broken the
+options altogether.
+
+**Not a regression.** True of each command since it was written.
+
+**Sequel.** Nine was not the count. A checker written for the rule the next
+day found **fourteen more** — see
+`A-KSHELL-FOURTEEN-MORE-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE`.
+
+---
+
+## `A-KSHELL-FOURTEEN-MORE-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+**In short:** The sweep above fixed nine commands that threw away a word they
+did not understand. A checker written straight afterwards — asking not "does
+this look like the nine?" but "does this loop dispatch on option spellings and
+have no way to say no?" — found fourteen more, including two that erase disks.
+`mkfs.fat --labl NAME /dev/sda` formatted the device with no label and said
+nothing. All fourteen now refuse.
+
+**Where.** `kernel/src/kshell.rs`. Found by `scripts/check-option-refusal.py`,
+detector D3.
+
+| Command | The discard | What it silently became |
+|---|---|---|
+| `dmesg` | catch-all arm dropped the word; `-l` fell to `_ => 0` | every option *narrows* the log, so a typo printed the whole ring buffer |
+| `du` | `-d N` (separated) was never implemented | depth 0, then `N` became the path, then the real path overwrote it — three misreadings of one line |
+| `touch` | unknown option became the path | `touch -x f` created `f`; `touch a b` created `b` and never mentioned `a` |
+| `column` | unknown option, and a second operand, became the file | `column a b` formatted `b` |
+| `lsplus` | `--sort`/`--type` fell back to their defaults | `--type fil` listed directories too; the default *is* "everything" |
+| `recent` | `--type` fell back to `None` | `None` is not "no type given", it is "every type" |
+| `fswalk` | the trailing max-depth operand took 64 | `fswalk count / two` walked the whole filesystem |
+| `fileops` | operands were "everything that is not a flag" | `fileops copy a b --overwite` copied to a directory named `--overwite` |
+| `toolbar` | catch-all dropped the flag | every flag turns a button *on*, so the toolbar lacked exactly the button asked for |
+| `traceroute`/`traceroute6` | `-m`/`-q` `.ok()` on failure | `-m 5x` traced 30 hops and printed "max 30 hops" as if that were the request |
+| `mount` | `-t`/`-o` at end-of-line fell into the positional arm | `mount -t` tried to mount a device named `-t` |
+| `container ls` | printed "Ignoring filter …" and continued | `ls -q --filter status=stoped` inside `rm $(…)` would have listed every *running* container's id |
+| `container info` | second id dropped | `info 3 4` answered about 3 alone |
+| `oci build` | warned and continued for `-t`/`--target`/`--build-arg` | no `--target` builds the *last* stage instead of the named one — a different image, under the right name |
+| `mkfs.fat` | unknown option became the device, then the real device overwrote it | formatted the right device with the wrong options; the only evidence was a missing label |
+| `fsck.fat` | unknown option became the device | `--repar` looked like a repair and was a check |
+| `flock` | catch-all dropped the mode | the default is `query`, which takes no lock — a dropped `-x` declined to lock and printed a status line |
+| `od` | `-N` unreadable → `usize::MAX`; `-A`/`-t` unknown letter → octal | `usize::MAX` is the *absence* of a limit, the opposite of what `-N` is for |
+
+**Why this is the interesting half.** The nine in the entry above were found by
+a human reading code adjacent to a bug. These fourteen were found by asking the
+*category* question, which is what §299 says a gate's trigger must do. Had the
+checker been keyed on the nine's spellings — `.filter(|w| !w.starts_with('-'))`,
+`parse().unwrap_or(…)` — it would have caught two of these fourteen. Keyed on
+"a loop that dispatches on option spellings and contains no refusal", it caught
+all of them, plus `container ls` and `oci build`, which do not look like the
+original nine at all: they *print a message* and then carry on anyway, which is
+§600's explicitly-rejected middle option and reads as diligence in review.
+
+**Two false positives, and what they taught the checker.** `parse_tr_args` and
+`classify_sed_args` refuse properly — via `return Err(…)`, because their
+contract is a `Result`, not `set_exit`. The detector learned the shape rather
+than being given an allowlist entry: an allowlist entry would have exempted
+those two functions forever, including any *future* mute loop inside them.
+
+**Tested by.** Self-test rung 64, deliberately separate from rung 63 so that
+the checker-found set and the bug-found set can diverge visibly. It asserts a
+non-zero exit for each refusal, and for the two commands with an observable
+effect it asserts the effect did not happen: `touch -x path` leaves no file,
+and `fileops copy … --overwite` creates nothing named `--overwite`. It also
+asserts the *positive* direction — `du -d 1`, `od -A x -N 4`, `lsplus --type
+file` all still work — so the rung cannot pass by having broken the options.
+
+**Not a regression.** True of each command since it was written.
+
+---
+
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **282 of 334 remain**
+
+> **Burn-down log.** 2026-08-25: `cmd_installer` (18), `cmd_fstune` (17),
+> `cmd_certmgr` (10), `cmd_fontmgr` (6) and one stray `<top>` site cleared
+> together — 52 sites, five ledger lines deleted, 334 → 282 across 119 → 114
+> functions. They went as one change because they were one *idiom*: 42 of the
+> 52 were the character-for-character identical line
+> `let id: u64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);`,
+> now a shared `required_id` helper. The rest split into numeric operands
+> (`required_u32` / `optional_u32` — which is where the omitted-vs-mistyped
+> distinction described below finally lives in code rather than in this
+> paragraph) and fourteen `match … { _ => Default }` arms over user-typed
+> *names*, where the default variant is the guess.
+>
+> Worst instance found: `installer remove abc` did not refuse. The id became 0,
+> so it removed whatever session 0 was, printed `Removed`, and exited 0.
+> `remove` is the subcommand where "guess which object they meant" is least
+> defensible, and it had the same one-line idiom as `info`.
+>
+> See the sibling entry `A-KSHELL-TWO-CHECKERS-READ-COMMENTS-AS-CODE` for what
+> this sweep turned up inside the gates themselves.
+
+**In short:** 334 places in the shell read a word the user typed, fail to make
+sense of it, and quietly substitute a default. `theme set 300 0 0` sets the red
+channel to 0 rather than complaining that 300 is not a byte. This is the same
+defect as the two entries above — a wrong answer reported as a success — but it
+predates the rule by most of the shell's history, so it is being *pinned* and
+burned down rather than fixed in one commit. (`colorpicker rgb 300 0 0` is the
+concrete one: the red channel becomes 0, so asking for an out-of-range red
+gives you black.)
+
+**Where.** `kernel/src/kshell.rs`, in 119 functions. The exact per-function
+counts are in `scripts/option-refusal-ledger.txt`; the shape is
+`s.parse::<T>().unwrap_or(D)` or `parts.get(n).and_then(|s| s.parse().ok())
+.unwrap_or(D)`.
+
+**Why it is a defect and not a style.** `None` from `parts.get(n)` means the
+argument was *omitted*, and a default is then exactly right. `Err` from
+`parse` means it was *supplied and unreadable*, and a default is then a guess.
+Collapsing the two — which is what `and_then(…).unwrap_or(…)` does in one
+expression — makes the wrong case indistinguishable from the right one at
+every call site at once.
+
+Sampled instances, to show the range:
+
+| Site | The guess | Consequence |
+|---|---|---|
+| `cmd_colorpicker` RGB components (7 sites) | `.and_then(parse).unwrap_or(0)` | `colorpicker rgb 300 0 0` yields black, silently |
+| `cmd_namespace`, a mount-namespace id | `.unwrap_or(mount_ns::ROOT_NAMESPACE)` | an unreadable id operates on the *root* namespace |
+| `cmd_pidns`, a pid argument | `.unwrap_or(0)` | pid 0 is the idle task |
+| ~~`cmd_installer` (18 sites)~~ | ~~assorted~~ | fixed 2026-08-25; `installer remove abc` removed session 0 |
+| ~~`cmd_fstune` (17 sites)~~ | ~~assorted~~ | fixed 2026-08-25; tuning knobs that silently took 0 |
+
+**Why it is pinned rather than fixed now.** 334 edits across 119 functions is a
+sweep in its own right, and leaving the gate unwired while it is done would let
+*new* instances land ungated in the meantime. The ledger inverts that: the
+number is frozen today, a 335th site fails the build immediately, and the
+backlog can only shrink. §296 established this pattern; this is its second use.
+
+**How to burn it down.** Pick a function, split the two cases (`match
+parts.get(i) { None => default, Some(v) => v.parse().map_err(refuse)? }`),
+lower its count in `scripts/option-refusal-ledger.txt` — or delete the line
+when it reaches zero. The checker reports an entry that claims *more* sites
+than exist, so a fix that forgets to lower the count fails the build too; the
+ledger cannot silently rot into a rubber stamp.
+
+**Not a regression.** True since each site was written.
+
+---
+
+## `A-KSHELL-TWO-CHECKERS-READ-COMMENTS-AS-CODE` (lane A, 2026-08-25) — ✅ **FIXED** 2026-08-25
+
+**In short:** two of the build's own gate scripts searched the source with
+plain text matching and never skipped comments — so an English sentence
+*about* code counted as the code. One shell command had an option loop with no
+way to refuse an unknown flag, and the gate that exists to catch exactly that
+had been quietly passing it for as long as it existed, because a comment next
+to it contained the words it was grepping for.
+
+**Where.** `scripts/check-option-refusal.py` and `scripts/check-usage-status.py`.
+Both read `lines[i]` raw and ran a regex over it.
+
+**How it hid.** The comment in `cmd_fsck_ext4` read, in full:
+
+```rust
+// No `set_exit(1)`: `--help` succeeded at what it was asked.
+```
+
+`check-usage-status.py` looks for `set_exit(` near a usage message to decide
+the command reports failure. `check-option-refusal.py`'s D3 detector looks for
+the same token to decide an option loop can refuse. **A comment stating that
+there is deliberately no `set_exit(1)` here satisfied both greps for
+`set_exit(1)`.** The clearer the note, the more completely it defeated the
+check — and "explain why this arm deliberately does *not* do X" is exactly
+what a careful author writes.
+
+The same shape ran the other way in `check-option-refusal.py`'s `ALLOWED`
+table, which carried two exemptions whose stated reason was *"prose in the doc
+comment describing the bug that was removed, not code"*. Two hand-granted
+exemptions for the same root cause is the signal that it is a defect in the
+detector, not a series of special cases — and the workaround it was pushing
+toward (stop writing down what the bug was) would have deleted the single most
+valuable line in each of those fixes.
+
+**What it was hiding.** With comments stripped, the option-refusal checker
+immediately reported `cmd_fsck_ext4`'s flag loop, which had no refusal at all:
+
+| Invocation | What happened |
+|---|---|
+| `fsck.ext4 /dev/sda --verbse` | the typo fell through to `device = w`, so it checked a device *named* `--verbse` |
+| `fsck.ext4 --verbse /dev/sda` | worse — the real device overwrote the typo, so the check ran, verbosely-not-verbose, with nothing to say a flag had been ignored |
+| `fsck.ext4 /dev/sda /dev/sdb` | the second device silently replaced the first |
+
+All three now refuse. Pinned by rung 65.
+
+**The fix.** Both checkers strip comments before matching, blanking string
+literals first so the `//` inside a `"https://…"` is not mistaken for one.
+The two prose exemptions were deleted, since the detector no longer needs
+them: 3 allowed → 1.
+
+**One further consequence worth keeping.** Once the `--help` arm was correctly
+seen as a usage message that returns 0, it needed a real exemption — and it
+could not have one, because `check-usage-status.py`'s `ALLOWED` is keyed by
+enclosing function plus a fragment of the line, and the help arm and the
+missing-device arm printed *character-for-character the same* synopsis. One
+entry would have exempted both, so removing the `set_exit(1)` from the error
+arm later would have gone unnoticed. The text moved into an
+`fsck_ext4_usage()` formatter — the precedent six other entries in that table
+already follow — so the exemption names only the formatter, and the two
+callers differ in the one way that matters and that duplicated text cannot
+show: their exit status.
+
+**Residual.** Both checkers now strip comments with a *line-local* scanner,
+which does not understand `/* … */` block comments or raw strings. A block
+comment containing `set_exit(1)` would still fool them. `scripts/rust_scopes.py`
+already has a correct lexer (`_strip`) that tracks block-comment nesting and
+raw-string hash counts across lines — but it discards string literals too, and
+these detectors need those (`USAGE` matches `"Usage: …"`, `OPTION_LITERAL`
+matches `"-x"`, D2 matches `.starts_with('-')`). The proper fix is a
+`keep_strings` mode on `_strip` and a shared `code_only(lines)` helper that all
+the detector-style checkers use, replacing both ad-hoc copies. Filed as
+`TD-A-CHECKERS-STRIP-COMMENTS-WITH-A-LINE-LOCAL-SCANNER` below.
+
+**Not a regression.** Both checkers were blind from the day they were written.
+
+---
+
+## `TD-A-CHECKERS-STRIP-COMMENTS-WITH-A-LINE-LOCAL-SCANNER` (lane A, 2026-08-25) — **open**
+
+**In short:** the fix above taught two gate scripts to ignore comments, but
+each got its own small comment-stripper that only understands `// …` to
+end-of-line. Rust also has `/* … */` (which nests) and raw strings
+(`r#"…"#`). A `set_exit(1)` inside a block comment would still be read as
+code, which is the same bug in a rarer shape. A survey of the other twelve
+`scripts/check-*.py` (done 2026-08-25, read-only, while the boot test ran)
+found the problem is both **wider** and **worse** than that, in two ways
+recorded below.
+
+**Where.** `strip_comments` in `scripts/check-option-refusal.py` and in
+`scripts/check-usage-status.py` — two near-identical copies, which is itself
+the smell.
+
+### Finding 1 — there are five hand-rolled Rust lexers, not two
+
+| Script | Blanks | Preserves offsets | Raw strings | Char literals | Self-test |
+|---|---|---|---|---|---|
+| `check-recursive-locks.py::strip_noise` | comments **+ literals** | ✅ | ✅ | ✅ | ✅ |
+| `check-tick-wiring.py::strip_comments` | comments **+ literals** | ✅ | ❌ | ✅ | ❌ |
+| `check-variant-lists.py::strip_comments` | comments only | ❌ | ❌ | ❌ | ❌ |
+| `check-option-refusal.py::strip_comments` | comments only | ✅ | ❌ | ❌ | ❌ |
+| `check-usage-status.py::strip_comments` | comments only | ✅ | ❌ | ❌ | ❌ |
+
+So the shared implementation to converge on is **not**
+`scripts/rust_scopes.py::_strip` as this entry first proposed — it is
+`check-recursive-locks.py::strip_noise`, which is already the most complete of
+the five (nested block comments, raw strings, char literals, offsets exact,
+and a self-test that includes `apostrophe in block comment`). Three checkers —
+`check-selftest-skips.py`, `check-vfs-permission-gate.py`,
+`check-vfs-under-lock.py` — already import it by `importlib` (the filename's
+hyphens make it un-`import`able normally), so the borrowing convention exists
+and works.
+
+It cannot be used *as-is* by the two detectors above for the same reason
+`rust_scopes._strip` could not: it blanks string literals too, and these
+detectors match *on* string literals (`"Usage: …"`, `"-x"`,
+`.starts_with('-')`). The fix is one parameter — `strip_noise(src,
+keep_literals=False)` — plus a self-test case for the new mode, then delete
+the other four copies.
+
+### Finding 2 — the brace counters read comments as code, which fails silently
+
+This is the more serious half, and it is not the same shape as the bug fixed
+above. `check-query-status.py` — which its own docstring calls the mirror of
+`check-usage-status.py` — locates a block's start and end by **counting
+braces** over lines that have had *strings* removed but **not comments**:
+`strip_strings` there is one line (`"".join(s.split('"')[::2])`) and is applied
+to raw `lines[k]` at `:134`, `:149` and `:196`, scanning a ±400-line window.
+Two further reads on the same loop are not filtered at all — `PRINT.search(
+lines[k])` at `:198` will collect a `shell_println!` written *inside a comment*
+as one of the block's answers, and the hit guard at `:178`
+(`ln.lstrip().startswith("//")`) only recognises a comment that occupies the
+whole line, not a trailing one.
+
+`check-usage-status.py` had the identical defect and **no longer does** — its
+depth line reads `strip_strings(s)` where `s` is already
+`strip_comments(lines[k])`, so the fix recorded above closed its brace counter
+too, as a side effect rather than by intent. That is worth stating plainly:
+the mirror pair was written to stay in step, one of the two drifted out of it
+silently, and nothing in either script would have reported that.
+
+`kernel/src/kshell.rs` currently contains **26 comments holding an unbalanced
+brace**, which is precisely the thing a comment is allowed to contain:
+
+```rust
+i = i.saturating_add(1);  // skip `{`
+i = i.saturating_add(1);  // skip `}`
+/// Brace nesting depth.  Starts at 1 (the opening `{`).
+// Don't include the final `}` line in the body.
+```
+
+Any one of these falling inside a scan window shifts the computed block
+boundary, so the checker then examines *the wrong range of lines* — which can
+both miss a real finding and manufacture a false one, with no diagnostic
+either way. Two of the five lexers above already wrote this hazard down
+independently, in almost the same words — `check-variant-lists.py`: *"Done
+before any brace counting, because a comment is exactly the place an
+unbalanced brace or bracket is allowed to appear"*; `check-tick-wiring.py`:
+*"a `'{'` … in the source would otherwise throw the match off and swallow the
+rest of the file"*. The two checkers that most need the warning are the two
+that never received it.
+
+**Not yet proven to be biting.** The 26 comments are real and the scan is
+real, but no current finding has been traced to a window that contains one.
+That is a reason to fix it, not a reason to wait: the failure mode is a gate
+silently reading the wrong lines.
+
+**Why none of it was done in the same change.** A boot test was running
+against `scripts/` at the time, and editing a gate script mid-run invalidates
+it. The line-local version closes the case that actually occurred; this closes
+the class.
+
+**Severity.** Low-to-moderate. Finding 1 narrows a gate, and a gate that is
+too narrow fails open. Finding 2 lets a gate answer about lines it was not
+asked about, which is worse than failing open because the answer still looks
+authoritative.
+
+---
+
+## `A-KSHELL-FIND-SIZE-DEFAULT-UNIT-IS-BYTES-NOT-BLOCKS` (lane A, 2026-08-25) — **open**
+
+**In short:** `find . -size 100` means "100 bytes" here and "100 512-byte
+blocks" (i.e. up to 51 200 bytes) in GNU `find`. A command line copied from
+anywhere else therefore selects a completely different set of files, and says
+nothing about it. Nobody has been bitten by this yet because `-size` is young
+here, which is exactly why it is worth settling before scripts depend on it.
+
+**Where.** `kernel/src/kshell.rs` — `parse_size_predicate`, the final `else`
+arm: `(rest, 1i64) // default: bytes`.
+
+**What GNU does.** A bare number is 512-byte blocks, **rounded up**; `c` is
+bytes; `k`, `M`, `G` are the obvious binary multiples; `b` is 512-byte blocks
+explicitly; `w` is two-byte words. We implement `c`, `k`/`K`, `M`/`m`, `G`/`g`
+and treat a bare number as `c`. We have no `b` and no `w`.
+
+**Why it is not simply a bug.** The GNU default is a genuine historical wart —
+it surprises everyone once — and "bytes" is the reading a person actually
+expects. But a `find` that quietly disagrees with every other `find` about what
+a number means is worse than one that is merely surprising, because the
+disagreement is invisible: both produce a plausible list of files.
+
+**Three ways out, and the tradeoff.**
+
+| | *What changes* |
+|---|---|
+| Match GNU | `find . -size 100` selects files of ~50 KiB rather than 100 bytes. Portable; surprising; silently changes what existing local scripts select. |
+| Keep bytes, add `b` and `w` | Nothing changes today; `-size 100b` becomes available for people who want blocks. Still disagrees with GNU on the bare number. |
+| Keep bytes, **require** a suffix | `find . -size 100` becomes an error telling you to write `100c` or `100b`. Nobody is ever silently wrong; every existing bare-number use must be edited. |
+
+**Recommendation.** The third. This is the same principle the sweep above
+applied everywhere else: where two readings are both plausible and the
+difference is invisible in the output, refuse rather than pick. `-size` is new
+enough that the cost of requiring a suffix is close to zero.
+
+**If never answered.** Current behaviour is safe in itself — it is documented
+in the function's doc comment — and the risk grows only as scripts accumulate
+bare-number `-size` uses.
+
+---
+
+### A-SERIAL-REENTRANCY-FLAG-IS-CLEARED-ONE-STATEMENT-TOO-EARLY. `with_serial` drops its "this CPU is printing" flag *before* releasing the console lock, opening a window in which a nested exception would deadlock — for a cross-CPU reason that cannot exist — 2026-08-25 — ✅ **FIXED** 2026-08-25
+
+**In short:** The kernel's serial-print path has a safety net: if a CPU is
+already halfway through printing and something interrupts it and tries to print
+again, the second print must *not* wait for the first one's lock — it would wait
+forever, because the first one cannot finish until the second returns. The net
+is a per-CPU "I am printing" flag. The flag is currently cleared one statement
+*before* the lock is released, so for those few instructions the net is down
+while the trap it protects against is still armed. The comment justifying that
+order appeals to another CPU reading the flag, and no other CPU ever does — the
+flag is per-CPU by construction and the code says so ten lines below.
+
+**Where.** `kernel/src/serial.rs`, `fn with_serial`:
+
+```rust
+busy.store(true, Ordering::Relaxed);
+{
+    let mut guard = SERIAL.lock();
+    emit(&mut guard);
+    // Clear before the guard drops, so the flag is never observably
+    // stale while another CPU could already hold the lock.
+    busy.store(false, Ordering::Relaxed);
+    drop(guard);
+}
+```
+
+**Why the stated reason does not hold.** `IN_PRINT` is
+`[AtomicBool; MAX_CPUS]`, indexed only by `crate::smp::current_cpu_index()`, and
+its own doc comment says: *"Only ever read and written by the CPU that owns the
+slot (under `cli`), so `Relaxed` ordering suffices — there is no cross-CPU
+handoff to order against."* A flag no other CPU reads cannot be "observably
+stale" to another CPU. The ordering therefore buys nothing and costs a window.
+
+**What the window is.** Between `busy.store(false)` and `drop(guard)` this CPU
+holds `SERIAL` with the escape flag down. A nested `_print` from an exception
+taken in that window would see `busy == false`, take the normal path, and spin
+on a lock only the frame below it can release — the exact wedge
+`B-KASAN-INSTRUMENTED-BOOT-WEDGES-MID-PRINT-ON-A-PAGE-FAULT` documented and
+the exact wedge the flag was added to prevent.
+
+**How likely.** Low but not zero. The window spans `emit`'s return and a
+`MutexGuard` destructor (one atomic store); neither dereferences user memory,
+so a `#PF` is implausible. An NMI or a `#MC` is not scheduled by anything we
+control, and the injected-NMI path from `--hard-lockup-watchdog` lands wherever
+it lands. The point is that the window is free to close.
+
+**The fix.** Swap the two statements — `drop(guard); busy.store(false);` — and
+replace the comment with why *that* order is right: the flag must outlive the
+lock, because the condition it encodes is "this CPU is inside the critical
+section", and the CPU is still inside it until the guard is gone.
+
+**Fixed.** The two statements are swapped and the comment now states the rule
+(*the flag must outlive the guard, never the other way round*) together with
+why the old justification was unreachable. Boot-tested green: `BOOT_OK` after
+370 s, zero `!! ` lines, `kshell::self_test PASSED`. The existing
+`reentrancy_self_test` covers this path and still passes.
+
+**How it was found.** A survey (not a report) for the class of bug behind
+`B-FORKEXEC-BOOT-HANG`: a lock that is acquired inside
+`crate::cpu::without_interrupts` at some sites and bare at others in the same
+file, which is a file contradicting its own IRQ-safety declaration. Across all
+802 kernel sources exactly three (file, lock) pairs qualify, and the survey's
+value was in the reading rather than the count:
+
+| Pair | Verdict |
+|---|---|
+| `mm/frame.rs` : `ALLOCATOR` — 14 guarded, 2 bare | **Contract, unchecked.** The two bare sites are `pcpu_refill`/`pcpu_drain`, whose doc comments say "Called with interrupts disabled". True today; nothing enforces it. See the entry below. |
+| `sched/mod.rs` : `SCHED` — 3 guarded, 75 bare | Not a contradiction. `SCHED` is deliberately bare at task level and reached from the tick only via `try_lock`; the three guarded sites guard a *sequence*, not the lock. |
+| `serial.rs` : `SERIAL` — 1 guarded, 1 bare | The bare one is `init()`, once, in early boot before interrupts are on. Benign — but reading the guarded one turned up the flag-ordering defect above. |
+
+**What the survey does not cover, and why no checker was wired.** The rule it
+tests is *intra-file*: it can only see a lock whose own module already declared
+it IRQ-unsafe. The class that actually bites is a lock acquired bare in module X
+that an interrupt handler reaches through module Y, and finding that needs a
+call-graph closure with real path resolution (`crate::sched::schedule()` is a
+call this survey's regex does not even see). A first attempt at that closure
+resolved 31 functions out of 12814 — an under-approximation large enough that a
+clean result would have meant nothing. Per §299, a gate whose trigger cannot
+support its claim is worse than no gate: it would report "IRQ-safety OK" on a
+tree it barely looked at. Wiring one is deferred until the resolver exists.
+
+---
+
+### TD-A-PCPU-REFILL-AND-DRAIN-REQUIRE-INTERRUPTS-OFF-BUT-NOTHING-CHECKS-IT — 2026-08-25 — ✅ **FIXED** 2026-08-25
+
+**In short:** Two functions in the page allocator only work if the caller has
+already turned interrupts off. That requirement is written in a comment and
+nowhere else, so a future caller that forgets it introduces a hang that leaves
+no trace — the machine simply stops, with nothing on the serial line.
+
+**Where.** `kernel/src/mm/frame.rs`, `fn pcpu_refill` (~line 1184) and
+`fn pcpu_drain` (~line 1215). Both open with *"Called with interrupts disabled
+and the global lock NOT held"*, then take `allocator.lock()` bare — the only two
+of the sixteen `ALLOCATOR` acquisitions in the file that are not wrapped in
+`crate::cpu::without_interrupts`. They also index `PCPU_CACHES[cpu]` through
+`unsafe`, whose `// SAFETY:` comment cites the same unenforced premise
+("interrupts are disabled so no preemption").
+
+**Why it matters.** `frame::stats`'s doc comment records that this exact
+class already froze a boot once: *"the frag_history self-test hang in
+known-issues.md (observed 2026-06-07 during the post-F1/F2/F3 soak,
+`build/soak-hang-run18.txt`)"*. A same-CPU interrupt that re-enters the
+allocator while the lock is held spins with `IF=0` and never returns — no panic,
+no stall report, no serial output at all. Every other site in the file was fixed
+by wrapping; these two were fixed by documenting.
+
+**The fix.** `debug_assert!(!crate::cpu::interrupts_enabled())` at the top of
+both, and extend the `unsafe` block's `// SAFETY:` comment to cite the assertion
+rather than the caller's good intentions. `crate::cpu::interrupts_enabled()`
+already exists (`kernel/src/cpu.rs:164`) and is a single `pushfq`. This turns a
+comment into a check that fires on the first wrong call in a debug build, which
+is the build the boot test runs.
+
+**Why not `without_interrupts` like the other fourteen.** It would be correct
+but wasteful: these are the allocator's batch fast path, called from code that
+has *already* disabled interrupts, and `without_interrupts` costs a
+`pushfq`/`cli`/`popfq` per call on a path whose reason for existing is to avoid
+per-frame overhead. The assertion keeps the fast path and still makes the
+premise false-able.
+
+**Fixed.** Both functions now open with
+`debug_assert!(!crate::cpu::interrupts_enabled(), ...)`, each `// SAFETY:`
+comment cites the assertion rather than the caller's good intentions, and
+`pcpu_refill`'s doc comment records why the wrap is omitted so the omission
+stays a decision. Boot-tested green (`BOOT_OK` after 370 s) with **neither
+assertion firing** — which is the useful half of the result: the precondition
+was not merely documented-and-hoped-for, it holds at every call the boot path
+makes, and now a future call that breaks it says so instead of hanging.
+
+---

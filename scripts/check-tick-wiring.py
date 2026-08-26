@@ -74,9 +74,32 @@ import sys
 
 ROOTS = ["gui", "apps", "net", "pkg"]
 
+# The indentation before a `fn`, in the two regexes below.
+#
+# `[ \t]*` and not `\s*`, for two independent reasons, both of which bite hard.
+#
+# Speed: `\s` matches a newline, so `^\s*` at a blank line runs on through every
+# following blank line and every following indentation, then gives the whole run
+# back one character at a time, retrying `pub`/`fn` at each step. That is O(w^2)
+# in the length of a whitespace run -- and this scan runs over text that
+# [`strip_comments`] and [`strip_cfg_test`] have blanked *to spaces*, so a file
+# whose `#[cfg(test)] mod tests` is a third of its bulk presents one whitespace
+# run a quarter of a megabyte long. Measured on gui/compositor/src/lib.rs
+# (733 KB): 93s to find 243 `fn`s with `\s*`, 0.06s with `[ \t]*`, and the whole
+# gate went from 5m44s to under four seconds. `^` already anchors to a line
+# start under re.M, so crossing lines bought nothing to begin with.
+#
+# Correctness: with `\s*` the match could *start* on an earlier blank line, and
+# `timekeeping_functions` reports `text.count("\n", 0, m.start())` as the line
+# number -- so a finding preceded by a blank line pointed the reader at the
+# blank line rather than at the `fn`.
+INDENT = r"^[ \t]*"
+
 # The entry point the compositor calls. A type without one is driven by its
 # owner, which may well tick it directly -- not this check's business.
-HANDLE_EVENT_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+handle_event\s*[(<]", re.M)
+HANDLE_EVENT_RE = re.compile(
+    INDENT + r"(?:pub(?:\([^)]*\))?\s+)?fn\s+handle_event\s*[(<]", re.M
+)
 
 # The event that carries the clock. Matching the bare name is deliberate: an
 # app that names it anywhere -- a `use`, a match arm, a test -- has at least
@@ -92,22 +115,46 @@ TIME_PARAM_RE = re.compile(
     r"|\btime_ms\s*:\s*u\d+"
 )
 
-FN_RE = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+([a-z_]\w*)\s*(?:<[^>]*>)?\s*\(", re.M)
+FN_RE = re.compile(
+    INDENT + r"(?:pub(?:\([^)]*\))?\s+)?fn\s+([a-z_]\w*)\s*(?:<[^>]*>)?\s*\(", re.M
+)
 
 
 CFG_TEST_RE = re.compile(r"#\[cfg\((?P<args>[^\]]*)\)\]")
 
 
-def blank(text: str, start: int, end: int) -> str:
-    """`text` with `[start, end)` replaced by spaces, newlines kept.
+NOT_NEWLINE_RE = re.compile(r"[^\n]")
 
-    Blanking rather than deleting so that every offset in the result is still
-    the offset it was in the file. That is what lets a reported line number be
-    the line the reader can go and look at, and it is why the brace matching
-    below can run over the blanked text and still give useful positions.
+
+def blank_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
+    """`text` with each `[start, end)` in `ranges` replaced by spaces.
+
+    Newlines are kept, so every offset in the result is still the offset it was
+    in the file. That is what lets a reported line number be the line the reader
+    can go and look at, and it is why the brace matching below can run over the
+    blanked text and still give useful positions.
+
+    `ranges` must be sorted and non-overlapping, which is what [`strip_cfg_test`]
+    produces. Taking them all at once rather than one at a time is not a
+    micro-optimisation: a Python string is immutable, so blanking one range costs
+    a full copy of the file, and doing that once per `#[cfg(...)]` attribute made
+    the whole gate quadratic in a tree that has thousands of them.
     """
-    cut = "".join("\n" if c == "\n" else " " for c in text[start:end])
-    return text[:start] + cut + text[end:]
+    if not ranges:
+        return text
+    out: list[str] = []
+    pos = 0
+    for start, end in ranges:
+        out.append(text[pos:start])
+        out.append(NOT_NEWLINE_RE.sub(" ", text[start:end]))
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def blank(text: str, start: int, end: int) -> str:
+    """`text` with `[start, end)` replaced by spaces, newlines kept."""
+    return blank_ranges(text, [(start, end)])
 
 
 def strip_comments(text: str) -> str:
@@ -218,18 +265,37 @@ def strip_cfg_test(text: str) -> str:
 
     `#[cfg(not(test))]` is left alone: it marks code that runs everywhere
     *except* under test, which is production code by any reading.
+
+    One pass with a moving cursor, blanking once at the end. The earlier shape
+    -- blank, then re-`search` the rewritten text from offset 0 -- was
+    quadratic twice over, in the repeated scan and in the full string copy each
+    blank costs, and `CFG_TEST_RE` matches *every* `#[cfg(...)]`, not only the
+    test ones, so the iteration count is every conditional attribute in the
+    file. Over lane C's tree that was 6m24s, against the "about a second" a
+    pre-build gate is allowed to cost.
+
+    The cursor is exactly equivalent to restarting, not an approximation:
+    blanking only ever replaces characters with spaces, so it can destroy a
+    `#[cfg(` but never create one, and every match it does destroy lies inside
+    the range just blanked -- that is, behind the cursor. `item_end` likewise
+    reads only forward from the attribute, into text no earlier range has
+    touched, so computing it against the unblanked original gives the same
+    answer the old code got against the partially blanked copy.
     """
-    while True:
-        m = CFG_TEST_RE.search(text)
-        if m is None:
-            return text
+    ranges: list[tuple[int, int]] = []
+    pos = 0
+    while (m := CFG_TEST_RE.search(text, pos)) is not None:
         args = m.group("args")
         if not re.search(r"\btest\b", args) or re.search(r"\bnot\s*\(\s*test\b", args):
             # Not a test gate. Blank just the attribute so the scan moves on;
             # the item it decorates stays.
-            text = blank(text, m.start(), m.end())
+            ranges.append((m.start(), m.end()))
+            pos = m.end()
             continue
-        text = blank(text, m.start(), item_end(text, m.end()))
+        end = item_end(text, m.end())
+        ranges.append((m.start(), end))
+        pos = end
+    return blank_ranges(text, ranges)
 
 
 def item_end(text: str, start: int) -> int:

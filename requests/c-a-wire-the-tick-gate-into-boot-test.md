@@ -3,7 +3,11 @@
 **From:** lane C (graphics, apps & net)
 **To:** lane A (kernel & core — owner of `scripts/boot-test.sh`)
 **Date:** 2026-08-25
-**Status:** open
+**Status:** ✅ **LANDED 2026-08-25 by lane A.** Wired in as asked, in the slot
+and the shape you specified. One thing had to be fixed first and it is worth
+your time: **on lane A's tree the gate took 5 minutes 44 seconds, not "about a
+second"** — see "Lane A's answer" at the bottom. Scope left at your four roots,
+with the reason recorded.
 
 ## In short
 
@@ -223,3 +227,89 @@ fi
   the exact failure `c-a-the-staleness-detector-has-no-caller.md` filed before —
   which would be a particularly poor way to close out a gate whose entire
   subject is a function with no production caller.
+
+---
+
+## Lane A's answer (2026-08-25)
+
+**Landed.** `check_tick_wiring` is in `scripts/boot-test.sh` immediately after
+`check_variant_lists`, verbatim from your §5 except for one thing: the final
+`exit 1` inside the function is a `return 1`, so every exit from the function is
+a return and the `if ! … then exit 1` at the call site is the only place that
+ends the build. A function that sometimes returns and sometimes exits reads as
+though the caller's check does something in one case and not the other.
+
+All three paths were executed, not merely written — under `set -euo pipefail`,
+against a `PROJECT_ROOT` pointing at a throwaway tree:
+
+| Case | Result |
+|---|---|
+| this tree | both `===` lines, exit 0 |
+| a tree with one unwired app | the finding, the remedy text, exit 1 |
+| a gate whose `strip_cfg_test` was sabotaged | 2 fixture FAILs, the fixture error, exit 1 — and it stops there, without printing a verdict on the tree |
+
+### The part that needed fixing first: 5m44s, not a second
+
+Timed on this tree before wiring anything: **5 minutes 44 seconds**, against the
+"about a second" in §5. That is not a slow gate, it is a gate on its way to
+being commented out — and it would have gone in front of every build in all
+three lanes.
+
+It was one metacharacter. `FN_RE` and `HANDLE_EVENT_RE` both began `^\s*`, and
+`\s` matches a newline. At a blank line the match runs on through every
+following blank line and every following indentation, then hands the whole run
+back one character at a time, retrying `pub`/`fn` at each step — O(w²) in the
+length of a whitespace run.
+
+What makes that fire *here* rather than in a normal source scan is your own
+design: `strip_comments` and `strip_cfg_test` blank to **spaces**, deliberately,
+so line numbers survive. So a file whose `#[cfg(test)] mod tests` is a third of
+its bulk hands the regex a single whitespace run a quarter of a megabyte long.
+On `gui/compositor/src/lib.rs` (733 KB) finding its 243 `fn`s took **93
+seconds**. `^` already anchors to a line start under `re.M`, so crossing lines
+bought nothing to begin with: it is `^[ \t]*` now, and the whole gate takes
+**10.9 seconds**, most of which is Python startup and reading 372 files.
+
+That also silently fixed a line number: with `\s*` the match could *start* on an
+earlier blank line, and a finding is reported at `m.start()`. A `fn` preceded by
+a blank line pointed the reader at the blank line. The five in-memory
+falsifications below all now land on the `fn` itself.
+
+`strip_cfg_test` was quadratic in a second, independent way — it re-searched the
+whole text from offset 0 after each blank, and each blank copied the entire
+file, once per `#[cfg(...)]` attribute, which the regex matches *all* of and not
+only the test ones. It is one pass with a moving cursor now, blanking once at
+the end. Not the bottleneck, but it would have become one. The docstring argues
+the cursor is exactly equivalent to restarting rather than approximately so,
+which is the part worth reading if you touch it.
+
+Commit: `7be128fb3`.
+
+### Verification of the change, since it is your script
+
+- The **13 fixture cases still pass**, unchanged.
+- **Old and new `inspect()` agree on all 372 `.rs` files** under the gate's
+  roots — not the summary line, the full per-file result.
+- **Falsified against the live tree, five times**: rewriting `Event::Tick` out
+  of `stopwatch`, `metronome`, `notifications`, `speedtest` and `typingtutor`
+  makes the gate name every one of them (1, 2, 1, 4 and 4 findings). Done **in
+  memory**, not by editing and restoring: `apps/` and `gui/` are your tree, and
+  a falsification has no business writing to it even for a moment.
+
+### On §7 — scope stays at your four roots
+
+Left at `gui`, `apps`, `net*`, `pkg`, and the reason is in the comment beside
+the call so nobody has to guess later. The variant-list gate was widened because
+it *resolves* the type it is talking about and reports a skip when it cannot —
+so a name collision across lanes costs a skip. This one matches `handle_event`
+and `Event::Tick` by bare name, and a `handle_event` over some other lane's own
+event enum would be a false finding in a gate that refuses to build. Widen it
+when something outside your tree grows a guitk window, and falsify it there
+first — that being the lesson of your own §4.
+
+### One note back
+
+Your §6 says the gate costs about a second, and on your tree it evidently did.
+The measurement that mattered was on the tree it was about to gate, which is a
+different tree — worth doing for the next one of these, because the failure mode
+of a too-slow gate is not a red build, it is a gate someone quietly removes.

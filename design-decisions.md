@@ -64,6 +64,11 @@ citations for no gain. Lanes A and B: take §600–§699 and §700–§799 if yo
 overflow, and do not extend into §500–§599. (Entries from §499 onward drop the
 `§` from the heading; that is drift, not meaning. Match your neighbours.)
 
+**Lane A's band is now full too, and lane A has taken §600–§699 as invited
+above (noted 2026-08-25).** §200–§299 ran out at §299; the first overflow entry
+is 600, at end of file. No coordination was needed — lane C had already
+allotted the band — which is what the paragraph above was for.
+
 The numeric *order* is what makes the bands physically disjoint, and that —
 not the numbering by itself — is what makes this file merge cleanly between
 three lanes: each lane's insertion point is a different line offset, so git
@@ -6766,6 +6771,42 @@ configuration into osh as though it were readline's compiled-in default. The
 generator exports it, the module doc records the two numbers, and the corpus
 case exports it too — otherwise bash reads `/etc/inputrc` while osh does not and
 the two diverge for a reason that has nothing to do with osh.
+
+**Addendum 2026-08-25 — two more conditions, and the numbers above are the
+wrong reference's.** `INPUTRC` turned out to be one of *three* things a capture
+has to pin, and the original capture pinned only it. The reference bash was the
+MSYS one on the developer's PATH, and the locale was whatever the generator
+inherited:
+
+- **The platform decides the function list.** A Cygwin readline is configured
+  with `paste-from-clipboard`, a Windows clipboard call, and a Linux one is not
+  — 174 names against 173. osh answered `bind -l` with the Cygwin list for
+  three weeks.
+- **The locale decides `convert-meta`, and `convert-meta` decides the escape
+  spelling.** readline's `_rl_init_eightbit` takes the eight-bit branch for any
+  `LC_CTYPE` that is not exactly `C` or `POSIX` (nls.c:168-186), turning
+  `convert-meta` off, and that variable is what decides whether a listing names
+  the escape sub-map after the modifier it stands for (`\M-b`) or writes the
+  byte as itself (`\eb`). Measured four ways: MSYS bash and glibc bash agree
+  with each other in each locale and disagree with themselves across the two,
+  so this is *not* a platform difference — it was simply never pinned, which
+  made the capture irreproducible. The committed table had drifted into
+  describing both at once: its variables had been hand-corrected to the
+  eight-bit set while its key sequences were still C-locale captures.
+
+The generator now pins `LC_ALL=C.UTF-8` — the locale osh actually runs in,
+since osh is UTF-8-only (§104) — and **refuses** rather than warns: it asks the
+reference shell for `$MACHTYPE` and stops unless it says `linux`, and it reads
+`convert-meta` back out of the capture rather than trusting that the request
+took effect, because a system without `C.UTF-8` falls back to `C` silently. A
+warning would be the wrong instrument here: the output is committed and nobody
+re-derives it, so anything short of a refusal leaves a wrong table in the tree.
+
+Re-measured against glibc bash 5.2.21: 173 function names, 487 emacs bindings
+(494 with `/etc/inputrc` loaded, and `bind -s` empty either way rather than 10),
+46 variables. The tests now derive these from the table rather than spelling
+them out — nine assertions had the number 174 written into them, so re-capturing
+broke them all at once while saying nothing about which count was right.
 
 **Why its own module.** `interp.rs` is already large enough that adding ~1200
 lines of table to it ran rustc out of memory under `--test`
@@ -44015,3 +44056,760 @@ out right on all three brace shapes without a special case.
   Rejected as the more complicated of the two: it needs a second pass whose only
   purpose is to be consistent with a pass that already exists, and it leaves a
   measurable behaviour (GNU's dedup) unimplemented for no gain.
+
+## §295 — `comm` refuses unsorted input rather than warning and continuing, and checks exactly the pairs it relied on
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+**Where:** `kernel/src/kshell.rs` — `cmd_comm`, `comm_first_unsorted`; self-test rung 56.
+
+**In short:** `comm` compares two files that must already be in sorted order. If
+they are not, it does not notice — it walks the two files in step and puts lines
+under the wrong headings, then reports success. Two decisions here. First: when
+the shell's `comm` finds a file out of order it now prints an error and prints
+*nothing else*, rather than GNU's behaviour of printing a warning and then
+carrying on with the wrong answer. Second: it only complains about lines whose
+order actually mattered, so it never objects to a file whose answer came out
+right anyway.
+
+### The defect
+
+`comm` is a two-stream merge. It looks at the current line of each file,
+advances whichever one sorts lower, and never looks back. That is only correct
+if both files are sorted. Given
+
+```
+file1: zz_b zz_a zz_c        file2: zz_a zz_b zz_c
+```
+
+it emitted `zz_a` in the "only in file 1" column while `zz_a` was plainly in
+file 2 as well, and exited 0. Nothing in the output said the input was
+unusable. This is the silent-guess shape the shell has been working through: a
+wrong answer presented as a right one is strictly worse than no answer, because
+the reader has no signal to distrust it.
+
+### Decision 1 — refuse, and print nothing
+
+GNU's default is `--nocheck-order`'s opposite in name only: it warns via
+`error(0, 0, …)` on the first out-of-order line and keeps going, and only
+`--check-order` makes it fatal. Even fatal, it dies *where it noticed*, having
+already streamed everything before that point.
+
+Ours buffers the merge and discards it. The refusal prints three lines — which
+file, which line number, and what to do — and sets exit 1.
+
+The reason is the same one that motivated the change. A prefix of a merge that
+went wrong is indistinguishable from a short but complete merge: the columns
+look right, the lines look right, there is simply less of it than there should
+be. Emitting it beside a non-zero status hands the reader both halves of the
+worst combination — output that invites use, and a status that most callers
+never inspect. The whole value of refusing is that nothing survives which could
+be mistaken for an answer.
+
+The cost is a buffer the size of the two files. Both are already fully resident
+— `comm` reads them with `Vfs::read_file` and splits them into line slices
+before comparing anything — so the buffer is bounded by memory the command has
+already committed, and no streaming property is given up that this
+implementation ever had.
+
+### Decision 2 — check the pairs the merge relied on, and only those
+
+The naive check is "verify both files are sorted." That refuses inputs whose
+answer was correct. Once one file is exhausted, every remaining line of the
+other goes to the same column no matter what order they arrive in:
+
+```
+file1: zz_a zz_z zz_b        file2: zz_a
+```
+
+`zz_b` sorts before `zz_z`, and the answer — `zz_a` common, `zz_z` and `zz_b`
+only in file 1 — is right regardless. A check that refused this would be crying
+wolf, and a gate that refuses correct input is a gate that gets switched off.
+
+The opposite naive check — verify each line against its predecessor as the merge
+consumes it — is what the first draft did, and it has a hole at the other end.
+Consider
+
+```
+file1: zz_a zz_b zz_c        file2: zz_a zz_c zz_b
+```
+
+File 1 runs out on the pass that consumes `zz_c`, leaving file 2 sitting at
+`zz_b`. That line had already lost a comparison, and it sorts before the `zz_c`
+consumed just before it — so its twin in file 1 went past unmatched and `zz_b`
+appeared in *both* single-file columns. The loop exits before an in-loop check
+can look at it. The pair that matters most is exactly the one that straddles the
+loop's exit.
+
+So the check runs after the merge, over each file's adjacent pairs up to and
+including the index the merge stopped at (`comm_first_unsorted(lines, merged)`).
+That is precisely the set of pairs whose order determined a column assignment:
+one more than the lines consumed, because line `merged` lost the comparison that
+ended the loop and so was placed by it too. Pairs wholly inside a tail are
+exempt.
+
+Arriving at the rule from "what did the algorithm depend on" rather than from
+"what can a streaming implementation afford to check" is what makes it both
+tighter and looser than GNU's in the right places: it catches the straddling
+pair GNU's in-stream check reports only as a warning, and it stays quiet about
+tail disorder that changes nothing.
+
+### Alternatives rejected
+
+- **Warn and continue, as GNU does by default.** Rejected: this is the exact
+  silent-guess shape — the warning goes to a stream most callers discard, and
+  the wrong answer goes to the one they read.
+- **Sort the input ourselves.** Rejected: it makes `comm` quietly stop being
+  `comm`. Two files a user believes are sorted, that are not, indicate a bug
+  upstream; fixing it in the reader hides it. It would also be the only shell
+  command that rewrites its input's meaning to avoid an error.
+- **Emit the partial merge before the diagnostic, GNU-style.** Rejected under
+  decision 1 above.
+- **Check both files end to end.** Rejected under decision 2 — it refuses inputs
+  whose answers are correct.
+- **Check nothing and document the precondition.** That was the status quo, and
+  it is what `known-issues.md` recorded as deferred. The precondition was already
+  documented; documentation is not a check.
+
+---
+
+## §296 — The usage-status rule is guarded by a checker keyed on the property, not the pattern, and the checker carries the remaining debt with counts attached
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** when a shell command is used wrongly it prints `Usage: …`. It is
+supposed to also report failure, so that a script — which reads the exit
+status, not the screen — knows the command did not run. Eight hundred places
+in the kernel shell were getting this wrong. A sweep in August fixed 710 of
+them and declared the job done; it had in fact missed 87, because it searched
+for the *shape* the bug had rather than the *rule* being broken. This entry is
+about the two choices made when fixing the remaining 87: guard the rule with a
+script that runs on every build, and let that script also hold the list of
+places still knowingly wrong — with a count next to each, so the list can only
+shrink.
+
+### The defect, and why it recurred
+
+The rule is one sentence: **a `Usage:` message printed because the command
+could not do what was asked must be accompanied by a non-zero exit status.**
+
+The first sweep (`A-KSHELL-A-MISTYPED-COMMAND-REPORTED-SUCCESS`) found its
+sites by searching for a `Usage:` print followed by a bare `return;`. It fixed
+every one. But 87 sites are the entire body of a `match` arm and leave by
+falling off the end of it, with no `return` to match on:
+
+```rust
+_ => shell_println!("Usage: dynlock autounlock <on|off>"),
+```
+
+A sweep keyed on a syntactic pattern **defines its own blind spot and cannot
+report it**: the sites it cannot see are exactly the sites it does not count,
+so it finishes at 100%. That is the general lesson, and it is why the fix here
+is not just "patch the other 87."
+
+### Decision 1 — guard the rule with a checker, keyed on the property
+
+`scripts/check-usage-status.py` runs in `boot-test.sh` alongside the existing
+source-level gates. For each `Usage:` print it walks forward to wherever
+control leaves the enclosing block — a `return`, or the brace that closes it —
+and asks whether a non-zero `set_exit` happens first. That is the *semantic*
+property, so it does not care what shape the next offender is written in.
+
+Confirmation that this is not self-congratulatory: the checker takes an
+optional path argument, and run against the pre-sweep revision it reports
+exactly **87** sites — the number independently arrived at by fixing them. A
+checker nobody has watched fail is a checker nobody knows works, so the ability
+to point it at an old revision is part of the design rather than a convenience.
+
+**Alternatives rejected:**
+
+- **Fix the 87 and write it up, no checker.** Rejected: that is precisely what
+  was done last time, and the write-up said the job was complete. The defect
+  has now recurred once; the thing that failed was not diligence but the
+  method, and a third sweep would fail the same way.
+- **A runtime assertion instead of a source check.** Rejected: it can only fire
+  on a path a test actually exercises, and the whole population here is error
+  paths that nothing exercises. This defect survived precisely because nobody
+  runs `speech tts banana`.
+- **A clippy lint.** Better in principle — it would understand control flow
+  instead of approximating it by counting braces — but a custom lint needs a
+  driver built against the compiler's internals and pinned to the toolchain,
+  for one project-specific rule in one file. Reconsider if a second rule of
+  this kind appears.
+
+### Decision 2 — the checker also carries the known-open debt, with counts
+
+About 33 arms cannot be fixed by adding a `set_exit` at all, because they are
+reached from two directions at once. `cmd_nat`'s own comment admits it:
+`// "help" or any unrecognised subcommand falls through to the help text.` So
+`nat help` (a request, correctly answered — a success) and `nat banana` (an
+error) land in the same arm, and *whichever* status it sets, one of the two
+callers is told something false. Splitting the arm is a separate change.
+
+They are listed in the checker as `KNOWN_CONFLATED`, **as a mapping from
+function name to a count**, not as a set of exempted functions.
+
+- *For:* an exempted function is a hole that grows. Exempt `cmd_bluetooth`
+  because of one conflated arm and a genuinely new unfixed arm added there
+  tomorrow is swallowed by an entry that was never meant to cover it. With a
+  count, the debt can only shrink: fix one and the count must come down with
+  it, add one and the check trips. The checker also reports entries that match
+  *fewer* sites than claimed, since a stale entry is exempting something it was
+  not written for.
+- *Against:* the count is a second place the truth lives, so a legitimate fix
+  now requires editing the checker too. Accepted — that edit is the point. It
+  is a deliberate speed bump on the path that quietly re-grows the debt, and
+  the alternative is an allowlist that rots into a rubber stamp.
+
+**Alternatives rejected:**
+
+- **Keep the open sites only in `known-issues.md`.** Rejected: a markdown list
+  does not fail a build. The 87 were documented as "very likely not unique to
+  `grep`" for a day and nothing acted on it.
+- **Suppress by line number.** Rejected outright: line numbers drift on every
+  edit, so within a week the list exempts unrelated code.
+- **Fold the conflated sites into the ordinary allowlist.** Rejected: that
+  allowlist means "this is correct," and these are not correct — they are
+  wrong and known. Blurring "fine" with "broken, tracked" loses exactly the
+  distinction the file exists to keep.
+
+### Decision 3 — five sites were pulled back out, and the same mistake was found already shipped
+
+The sweep was mechanical, and mechanical is where a regression comes from.
+Five arms have this shape:
+
+```rust
+} else {
+    shell_println!("Current mode: {}", notifgroup::get_mode().label());
+    shell_println!("Usage: notifgroup mode <app|category|conversation|none>");
+}
+```
+
+The `else` is reached both by `notifgroup mode` with no argument — a query,
+correctly answered, a success — and by an argument that did not parse, an
+error. Stapling `set_exit(1)` on would make a *working query report failure*:
+a new bug, introduced by the fix for the old one, in the same class. They are
+the same conflation as decision 2 and are tracked with it.
+
+The generalisable part: the script's guard was "only patch a print that ends
+its block," which is a *syntactic* guard, and it passed all five of these.
+What caught them was reading the enclosing conditional. A mechanical sweep can
+be trusted to find candidates and cannot be trusted to approve them.
+
+**And it is not a hypothetical, which is the part worth keeping.** Two of the
+five were only noticed because the diff was read line by line rather than
+skimmed — `wallpaper offset` and `fhist autoversion`, both of which I had
+already patched. Re-running the search as a *query* over the patched tree
+("which inserted statuses sit in a block that prints something before the
+usage line?") then turned up two more sites where **the August sweep had
+already made this mistake and shipped it**:
+
+```rust
+"echo" => {
+    if parts.len() < 2 {
+        shell_println!("Serial echo level: {} (and above)", level.as_str());
+        shell_println!("Usage: elog echo <level>  to change");
+        set_exit(1);          // <- a query, answered correctly, reported as failed
+        return;
+```
+
+`elog echo` and `fc algo` are not even conflations: the branch is guarded by
+`parts.len() < 2`, so it is reached *only* with no argument — it is purely the
+query path, and the usage line is a hint appended to a correct answer, not a
+diagnostic. `elog echo`'s text says so outright: "to change". Both have
+reported failure for a successful query since August. Fixed separately, since
+that is the mirror-image defect and deserves its own change.
+
+So the fix for "prints a diagnostic, claims success" has now demonstrably
+produced instances of "answers correctly, claims failure" — in both sweeps,
+the first time undetected. The lesson is not "be careful"; it is that **a sweep
+needs a second search aimed at the damage the sweep itself can do**, run over
+the patched tree, before the result is believed. `scripts/check-usage-status.py`
+checks one direction only, and the other direction is not yet mechanised —
+recorded in `known-issues.md` as the remaining half.
+
+---
+
+## §297 — A help arm answers a request and a typo differently: same text, different last line, different status
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** dozens of kernel-shell commands end with a catch-all branch that
+prints the command's help. Two quite different things landed there: `nat help`,
+where printing the help is exactly what was asked for, and `nat banana`, a
+mistake. Both got the same output and the same "it worked" answer, so a script
+could not tell a deliberate request from a typo. The decision is that both keep
+getting the help text — it is the useful reply either way — but the typo also
+gets a line naming the word that was not understood, and a failure status,
+while the help request keeps exit 0.
+
+### The question this had to answer
+
+Every other option collapses one of the two callers into the other:
+
+| Option | What it costs |
+|---|---|
+| Exit 1 for the whole arm | `nat help` reports failure. A user asking for help is not making an error, and `nat help && …` would stop working. This is the mistake the previous sweep made twice on query branches, so it is not hypothetical. |
+| Exit 0 for the whole arm | The status quo — the typo is silent. |
+| Print help for `help`, print *only* an error for a typo | Withholds the one thing that would help someone who has just mistyped: the list of things they could have typed. |
+| Print help for `help`, print the error *before* the help for a typo | Correct, but the naming line scrolls off the top with the help beneath it. |
+
+**Chosen: identical help text for both, and for the typo an extra line
+afterwards plus exit 1.** The extra line goes last because that is where it
+survives — the help text is long, and the line that stays next to the prompt is
+the last one printed. It is also the only piece of information the help cannot
+supply on its own: that what you typed is not in it.
+
+### What counts as "asking"
+
+`end_help_arm` treats `""`, `help`, `-h`, `--help` and `?` as requests. The
+empty string has to be in that set because a bare `swapcfg` arrives at the arm
+as `""` — fourteen of these commands map no-argument that way, ten map it to
+`"help"` instead, and both spellings mean the same thing to the user.
+
+The risk in a shared predicate is a command whose bare form means something
+*other* than help. `cmd_nat` maps no-argument to `"status"`, so bare `nat`
+would be named as an unknown subcommand if its `"status" | "stats"` arm did not
+intercept it first. It does, and that was verified per command rather than
+assumed — a pinned test exists for it precisely because a future command
+without such an arm would inherit the bug silently.
+
+### Why a helper rather than 25 open-coded conditionals
+
+The predicate is a policy, not a detail: which words mean "I am asking for
+help" is the sort of thing that gets extended (`man`? `usage`?), and 25 copies
+would be extended in 3 places and drift in the other 22. It also gives the
+checker something to key on — `scripts/check-usage-status.py` now treats a call
+to `end_help_arm` as accounting for a site, matched *by name* rather than by
+inlining a copy of what the helper does, so the checker cannot drift away from
+the helper it is describing.
+
+**Against:** the status is now set somewhere other than the arm you are
+reading, which is exactly the indirection that makes `sed_usage`-style helpers
+need an allowlist entry explaining that their callers handle the status. The
+difference is that this helper sets the status itself rather than relying on
+callers to remember, which is the failure mode the allowlist entry exists to
+guard against. Accepted.
+
+### The methodological point, which is the same one as §296
+
+§296 concluded that a sweep needs a second search aimed at the damage the sweep
+itself can do. This one adds the other half: **a sweep must not restate the
+rule that found its targets.** The transformer's first draft wrote its own
+version of "an unaccounted usage site" instead of importing the checker's, and
+immediately disagreed with it — selecting, in `cmd_wakesensor`, an inner arm
+that already set the status correctly. Two descriptions of one set, maintained
+separately, differ silently and neither can report the difference. The rewrite
+imported the checker outright, which also meant the transformer's site count
+and the checker's debt count could not disagree: 33 and 33, by construction
+rather than by coincidence.
+
+The complementary rule is that the mechanical pass must be allowed to *refuse*.
+It rejected `cmd_datausage` because its governing match was
+`match parts.get(1).copied()` rather than the uniform `match sub`, which is the
+difference between an arm that discards a subcommand and one whose `_` covers
+both `None` (a query) and `Some(bad)` (an error). A transformer that had merely
+tried its best there would have produced a fourth instance of the mirror-image
+bug.
+
+---
+
+## §298 — The opposite direction gets its own checker, not a second rule inside the first
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** the shell has a build-time check that a command which prints an
+error message must also tell the caller it failed. Applied to a command that
+was *answering a question* rather than complaining, that rule produces the
+opposite bug — a correct answer reported as a failure — and it did, twice, in
+August. This decision adds a second checker for that opposite direction and
+keeps it in a separate file rather than folding it into the first, so the two
+rules can disagree out loud instead of silently.
+
+**The two rules.** `check-usage-status.py`: *if a block prints a usage message
+because it could not do what it was asked, it must set a non-zero status.*
+`check-query-status.py`: *if a block can only be reached by the user asking —
+no argument was given — and answers by printing program state, it must not.*
+They are not complements of one another; they are two rules over overlapping
+sets, and the overlap is where the bugs live.
+
+**Why not one script.** A single classifier would have to hold "this needs a
+status" and "this must not have one" together and decide which applies. It
+would therefore have to *resolve* the ambiguous case, and it would resolve it
+in whichever direction the code happened to be written — silently, with no
+output, because agreeing with the tree is what a passing check looks like. Two
+scripts cannot do that. A site the author has got wrong trips one of them; a
+site that is genuinely ambiguous trips *both*, and there is no way to make both
+green without writing down which reading is intended and why.
+
+That is not hypothetical: it is what happened to `quota` an hour after the
+second checker was written. Taking the failure status off bare `quota` (the
+query reading) made it trip the usage-status gate, which is how its `ALLOWED`
+entry came to exist with a reason attached instead of a status being flipped
+back and forth by whichever sweep ran last.
+
+| Option | Against |
+|---|---|
+| One script, two rules, internal precedence | Resolves the ambiguous case by fiat and prints nothing when it does. The precedence order becomes an undocumented policy. |
+| One script, report sites matching *either* | The two messages mean opposite things; a combined report is a list the reader has to re-classify by hand, every run. |
+| **Two scripts, both run, both must be green** | Two files and two `ALLOWED` lists to keep. Accepted: the duplication is small and the ambiguity is surfaced rather than swallowed. |
+| No second checker; rely on review | Already tried. `elog echo` and `fc algo` shipped the bug for a month and were found by a targeted search, not by reading. |
+
+**The checker is verified against a revision that had the bug.** Run on
+`9251e5a3d^` it reports `cmd_fcompress` and `cmd_elog`, the two sites that
+actually shipped; run on the tree today it reports only the new find. The
+invocation is in the script's docstring, because a checker nobody has watched
+fail is a checker nobody knows works — the same reason `check-usage-status.py`
+takes an optional path argument.
+
+**One implementation note worth keeping.** Braces are counted a character at a
+time, not a line at a time. `} else {` closes and opens on one line, so a
+line-granular depth count nets to zero and the walk sails past the brace that
+actually delimits the block — which makes a sibling `else` branch look like the
+guarded one. That single error accounted for 15 of the survey's first 18
+candidates, all of them `cmd_ulimit`-shaped: a genuine query branch next door to
+a genuine error branch, reported as one block.
+
+**And what it exposed, which is the larger point.** Fixing `quota`'s query half
+put the reader one screen away from its catch-all arm, which printed
+`"Unknown subcommand '{}'. Use: …"` with no status at all — the *first* rule's
+bug, in a command the first rule's gate had checked and passed. It passed
+because the gate finds a diagnostic by looking for the word `Usage:`, and that
+arm says `Use:`. Widening the trigger reports 49 more such sites. A gate's
+trigger is part of its rule; a trigger derived from the wording of the last bug
+is a syntactic sweep wearing a semantic hat, which is §296's lesson turning up
+one level below where §296 left it. Tracked as
+`A-KSHELL-DIAGNOSTICS-NOT-WORDED-USAGE-ESCAPE-THE-GATE`.
+
+## §299 — A gate's trigger is part of its rule: the usage-status checker fires on the category, not on the word `Usage`
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** the shell has a build-time check that a command which prints an
+error message must also tell the caller it failed. It found those messages by
+searching for the word `Usage:`, so a command that scolded the user with
+`Unknown mode: banana` instead passed the check while still reporting success —
+49 of them did. The check now looks for the *kind* of message rather than one
+word of it, and all 49 are fixed. What is being decided here is where that line
+is drawn: which words count, and why the answer is a structural rule rather
+than a longer list of exceptions.
+
+**The shape of the mistake, for the third time.** §296 already moved this
+checker's *walk* from a syntactic pattern to a semantic property — from "a
+`Usage:` print followed by `return;`" to "a diagnostic that can be reached and
+then left without a non-zero `set_exit`". That fixed the 87 sites the original
+sweep's `return;`-shaped pattern could not see. But the *trigger* — how a line
+gets nominated as a diagnostic in the first place — was left as the literal
+string `Usage:`, which is the wording the first bug happened to have. So the
+checker was complete over messages containing that word, and silent about every
+diagnostic worded any other way. `cmd_quota`'s catch-all said `Use:` and
+passed. Widening it turned up 49 more, in 29 further functions.
+
+A gate has two halves and both are its rule. Making the walk semantic while
+leaving the trigger lexical does not remove the blind spot; it moves it one
+level down, to a place that is harder to notice precisely because the visible
+half now looks principled.
+
+**What "the category" was taken to be.** The five openings that fire the
+trigger are `Usage`, `Unknown`, `Unrecognised`/`Unrecognized`, `Invalid`, and
+`Use:`. The category they are meant to stand for is *the shell naming
+something the user typed back at them as wrong* — which is exactly the
+condition under which a caller needs a non-zero status, because it is exactly
+when the command did not do what it was asked.
+
+| Option | Against |
+|---|---|
+| Keep `Usage:` and add words as bugs are found | This *is* the bug, iterated. Each addition is keyed to the last miss, and the list is only ever complete over the diagnostics someone has already tripped over. |
+| Trigger on *any* `shell_println!` in a block that can return without a status | Fires on every report, every progress line and every success message in the shell — thousands of sites, no signal. The rule would be deleted within a week. |
+| **Five category words, anchored to the start of the message** | Still a word list, and a diagnostic worded `"no such mode: banana"` escapes it. Accepted: it is a far larger net than one word, and the residue is recorded below rather than being pretended away. |
+| Classify by call-site semantics (does the block correspond to a rejected input?) | That is the `check-query-status.py` problem, and that checker needed a hand-written `ALLOWED` for two sites out of a tree this size. Doing it for *every* diagnostic is a much larger classifier with a much larger error budget, and its errors are silent. |
+
+**Two structural exclusions, chosen over allowlist entries.** Widening the
+trigger produced exactly two false positives, and both are killed by structure:
+
+* **The word must start the message.** `vlan stats` prints
+  `"  Unknown drops:    {}"` — a *field label*, indented inside its report.
+  A diagnostic starts at the beginning of the string. (`Usage` keeps its
+  leading-whitespace tolerance, because `cmd_memcg` has an indented one that
+  already sits in `ALLOWED`, and removing the tolerance would silently drop a
+  site the gate is currently watching.)
+* **The words are matched with `\b`.** `thumbcache` prints
+  `"Invalidated {} entries for: {}"` on *success*; without the word boundary
+  that is an `Invalid` anything.
+
+The reason to prefer structure here is that an `ALLOWED` entry is checked once,
+by the person adding it, and then never again — whereas a structural rule keeps
+applying to sites nobody has written yet. Two entries would have covered
+today's tree; the next indented `Unknown` field label would have been reported,
+and the temptation would be to add a third entry rather than to notice the
+pattern. The allowlist is for sites that are genuinely exceptions, not for
+categories the trigger should never have caught.
+
+**Why the sweep imported the checker instead of restating its rule.** The 49
+fixes were applied by a scratch script that loaded `check-usage-status.py` and
+took the site list from the checker's own output, rather than re-implementing
+"find the diagnostics" a second time. §297's rule: two descriptions of one set,
+maintained separately, differ silently — and here the difference would have
+been invisible, because a site the sweep missed and the gate found would look
+like a *new* bug, while a site the sweep fixed and the gate did not care about
+would look like nothing at all. The script also refused any shape it did not
+recognise and printed the refusal, rather than doing its best: one site
+(`cmd_fstrim`'s `Unknown mode`, whose print is a block's tail expression with no
+trailing semicolon) came out as `MANUAL` and was fixed by hand. A mechanical
+pass that guesses at an unfamiliar shape is how the mirror-image bug gets
+written. The script was deleted after use; the gate is what persists.
+
+**What is still not covered, stated rather than implied.** A diagnostic that
+opens with none of the five words — `"no such mode: banana"`, `"cannot parse
+…"`, `"expected a number"` — is not nominated, and the gate will pass it.
+That residue is real and this decision does not close it; what it closes is the
+much larger class where the shell says `Unknown X` and then claims success. If
+a fourth instance of this defect appears, the question to ask is not "which
+word do we add" but whether the trigger should become a property of the *block*
+(does this branch correspond to input the command rejected?) rather than of the
+*string* — with the `check-query-status.py` experience as the estimate of what
+that costs.
+
+---
+
+## 600. A command that meets a word it does not understand stops, rather than pretending the word was not there
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** nine shell commands used to silently throw away any argument
+starting with `-` that they did not recognise. A misspelled flag therefore did
+not fail — it ran a *different* command, successfully. The decision is that
+every option parser in the shell now stops and names the word instead, even
+though that makes some command lines which previously "worked" start failing.
+The alternative — keep ignoring, since ignoring never crashed anything — is
+what let `batch delete --dry-runn a b` delete `a` and `b` for real.
+
+**The decision.** In `kernel/src/kshell.rs`, a word beginning with `-` is
+either an option the command implements or an error. There is no third
+outcome. A parser may not:
+
+- end its `if`/`else if` chain without a final `else` that refuses;
+- write `s => if !s.starts_with('-') { … }`, which discards the rest;
+- fall back to a default when an option's *value* fails to parse;
+- proceed when an option's value is missing entirely;
+- filter `-`-leading words out of an operand list.
+
+The last of those is why `--` had to land in the same change: once dash-leading
+words are no longer quietly demoted to operands, a file literally named
+`-empty` has no other way to be named, and our paths permit every byte but `/`
+and NUL, so such files are real rather than theoretical.
+
+**Alternatives, and why they lost.**
+
+| | For | Against |
+|---|---|---|
+| **Keep ignoring** (status quo) | Never breaks a working line. Forward-compatible in the trivial sense: a script written for a newer shell still runs on an older one. | It runs it *wrongly*. The ignored word is nearly always a filter or a restriction, so ignoring it widens the search, enlarges the deletion set, or removes the containment that was asked for — and reports success. Forward compatibility bought by answering a different question is not compatibility. |
+| **Warn and continue** | Names the mistake; keeps existing lines working. | A warning on a command whose output is being consumed by another command is not seen. `batch delete` would still have deleted the files, with a line of stderr nobody read. The status is the only channel a script can act on, and "continue" means the status says success. |
+| **Refuse** (chosen) | The one channel a script can act on says what happened. A wrong answer reported as success is strictly worse than a missing one; this converts every instance of the former into the latter. | Breaks any existing line that passed an unknown-but-harmless flag. Also breaks the "pass the same flags to several tools, let each take what it knows" idiom — which nothing here does, and which is a bad idiom precisely because it hides typos. |
+
+**Why the cost is small here specifically.** These are the kernel's own shell
+builtins, used by the self-tests and by an operator at a serial console. There
+is no installed base of scripts, and the commands that changed are the ones
+whose flags *restrict* what they do, so anything that breaks was already doing
+something other than what it said.
+
+**What this does not settle.** Whether the rule should be mechanically
+enforced. §296, §298 and §299 built checkers for the neighbouring rules (a
+usage message must report failure; answering a query must report success), and
+the same argument applies: a rule that lives only in reviewers' heads decays,
+and this one was violated in nine places at once without anyone noticing. A
+`scripts/check-option-refusal.py` would look for the three shapes above —
+a predicate chain with no refusing `else`, a `starts_with('-')` catch-all that
+does nothing, and `unwrap_or` on an option's value. It is not written. §299's
+lesson applies to it in advance: key it on the *category* (does this branch
+correspond to an argument the command did not understand?) rather than on the
+literal spellings the nine happened to use, or it will pass the tenth.
+
+**How to reverse.** Each refusal is a self-contained `else` arm or `let …
+else`. Reverting the rule means restoring nine silent catch-alls, which is
+visible in the diff and would have to be argued for one command at a time —
+which is the right shape for a reversal of a rule like this.
+
+**Where it came from.** `A-KSHELL-CUT-AND-FOLD-HAVE-NO-END-OF-OPTIONS-MARKER`
+named two commands, because two is where the defect was *noticed*. Per §299,
+the fix started with a survey of every option parser in the file instead, and
+the survey found a strictly worse defect the report had not suspected. Full
+write-up:
+`known-issues.md` → `A-KSHELL-SEVEN-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE`.
+
+---
+
+## 601. The option-refusal gate is keyed on "can this loop say no?", and its backlog is pinned rather than exempted
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** §600 said a command must refuse a word it does not understand,
+and left open whether to build a checker. This is that checker, plus the two
+choices that decide whether it is worth having. First: it does not look for
+the *spellings* the known bugs used — it looks for a loop that dispatches on
+option names and contains no way to reject one. That is what let it find
+fourteen commands the original survey missed, including two that erase disks.
+Second: it found 334 pre-existing sites of a *second*, related defect that it
+cannot fix today, so those are frozen at their current count in a file that can
+only shrink — rather than being switched off, which is what an ordinary
+allowlist would have done.
+
+**The trigger, and why not the obvious one.** The nine commands fixed in §600
+shared two literal shapes: `.filter(|w| !w.starts_with('-'))` and
+`parse().unwrap_or(default)`. A checker built from those is trivial to write
+and passes the tenth command, because the tenth will misspell the defect
+differently. §299 makes this its whole point: *a gate's trigger is part of its
+rule, and a trigger derived from the last bug's spelling is a syntactic sweep
+wearing a semantic hat.*
+
+So the primary detector (D3) asks a structural question instead: **does this
+`while`/`for` body compare a word against two or more option spellings, and
+contain nothing that refuses?** No enumeration of flags, no knowledge of any
+particular command. Measured outcome — the literal-shape detectors would have
+caught 2 of the 14 new findings; the structural one caught all 14, plus two
+(`container ls`, `oci build`) that do not resemble the original nine at all,
+because they *print a warning and continue* — §600's explicitly-rejected middle
+option, which reads as diligence in code review.
+
+The literal detectors were kept anyway. They are exact, they cost nothing, and
+they see a value guessed *inside* an arm the loop does handle — which D3
+structurally cannot.
+
+| Trigger | Caught | Missed | Verdict |
+|---|---|---|---|
+| The nine bugs' literal shapes | 2/14 | 12, incl. `mkfs.fat` | passes the tenth command; rejected as the primary |
+| "Loop dispatches on options, cannot refuse" | 14/14 | — | primary (D3) |
+| Both | 14/14 + in-arm guesses | — | **chosen** |
+
+**What "refuses" means, and why it was widened rather than allowlisted.** Two
+parsers tripped D3 and were right: `parse_tr_args` and `classify_sed_args`
+refuse via `return Err(…)`, because their contract is a `Result`. The choice
+was between two entries in `ALLOWED` and one more alternative in the refusal
+pattern. The pattern won: an `ALLOWED` entry exempts the *function*, forever,
+including a genuinely mute loop added inside it next year. Teaching the
+detector a real refusal shape costs one line and generalises to every future
+`Result`-returning parser. **Prefer widening the definition of correct over
+exempting a site that meets it.**
+
+**The 334 pinned sites.** The second half of §600's rule — never invent a value
+for a word you could read but could not parse — has a backlog the size of the
+shell's history: 334 sites across 119 functions, of the form
+`s.parse().unwrap_or(D)`. Three options:
+
+| Option | *What changes* | Cost |
+|---|---|---|
+| Fix all 334 first, then wire the gate | nothing until it all lands | the gate is unwired for the duration, so new instances land ungated — the exact failure the gate exists to prevent |
+| Turn D1 off until later | the checker never mentions them | "later" never arrives, and the backlog grows silently |
+| **Pin the counts, burn down separately** | a 335th site fails the build today; the 334 are visible and enumerated | one sidecar file to maintain |
+
+Pinning was chosen, following §296's ledger pattern (its second use). The
+properties that make it a ledger rather than an allowlist are load-bearing:
+counts are **per function, never per line number** (line numbers drift on every
+edit, and an allowlist that rots is a rubber stamp), and an entry that matches
+*fewer* sites than it claims is **itself reported** — so a fix that forgets to
+lower its count fails the build, and a renamed function cannot leave behind an
+entry silently exempting something it was never meant to.
+
+**What this does not settle.** D3 sees `while`/`for` loops. A parser written as
+a recursive descent, or as an iterator chain with no loop keyword, is invisible
+to it. No such parser exists in `kshell.rs` today; if one is added, the honest
+response is another detector, not a wider regex — the checker's docstring says
+plainly that the real property needs dataflow it does not have, and that
+admission is worth more than a regex that pretends otherwise.
+
+**How to reverse.** Delete the `check_option_refusal` call from
+`scripts/boot-test.sh`. The script and ledger are inert without it.
+
+**Where it came from.** §600's own "What this does not settle" section, written
+minutes before: *"a rule violated in nine places at once without anyone
+noticing is a rule that wants a checker, and §299 says in advance what that
+checker must key on if it is to catch the tenth."* It caught fourteen.
+Write-ups: `known-issues.md` →
+`A-KSHELL-FOURTEEN-MORE-COMMANDS-DISCARD-AN-OPTION-THEY-DO-NOT-RECOGNISE` and
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+
+---
+
+## 602. The boot test's crash-dump socket is on by default; only the *device* stays opt-in
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** When a boot test freezes, the single most useful fact is *which
+instruction the frozen CPU is sitting on*. QEMU will tell us, over a small
+text-control socket called the **HMP monitor** (a host-side command channel
+into the emulator, invisible to the OS running inside it). Until now that
+socket was only attached when you also passed `--hard-lockup-watchdog` — so on
+every ordinary run, the code that reads the frozen address back was dead. A
+freeze on 2026-08-25 burned its whole 900-second timeout and produced no
+address at all. The socket is now attached on **every** run, with `--no-monitor`
+to turn it off. The watchdog *device* stays opt-in, unchanged.
+
+**Why the two were ever coupled, and why that was a category error.** §61
+(Operator, via Q20) kept the hard-lockup watchdog opt-in for a specific reason:
+it is `-device i6300esb`, and adding a device **changes the guest's PCI
+topology** — the list of hardware the OS enumerates at boot. Every run would
+then be booting a slightly different machine from the one we ship on, so the
+default had to be "absent."
+
+`-monitor tcp:127.0.0.1:<port>` is not a device. It adds nothing to the guest's
+address space, its PCI bus, or its device tree; it is a socket on the *host*
+side of the emulator, and no instruction the guest can execute observes it.
+§61's rationale therefore never applied to it. The coupling was an accident of
+how the flag was first written — the watchdog needed the monitor, so the
+monitor was put behind the watchdog's flag — not a decision anyone made.
+
+Checked rather than assumed: the 2026-08-25 pair of runs (one with the flag,
+one without) produced no difference in harness stdout, in particular no
+`(qemu)` prompt banner, because `-serial` already writes to a file rather than
+to stdio.
+
+**Why "default on" and not "on when it matters."** There is no such thing as
+"when it matters" for this fault. `B-FORKEXEC-BOOT-HANG` appears roughly once
+in a few dozen boots, and the run it appears on is not knowable in advance; the
+2026-08-25 re-run *with* the flag booted green, which is the expected outcome
+and exactly why arming after the fact does not work. **An opt-in detector for
+an intermittent fault is a detector that is off when the fault happens.**
+
+It also matters that this is the only detector that can see the specific wedge
+we are chasing. The evidence in `known-issues.md` narrows it to a CPU spinning
+with interrupts disabled (`IF=0`), which by construction cannot run any
+in-guest diagnostic — not the timer tick, not the stall reporter, not even an
+injected NMI handler if delivery itself is what broke. The emulator's own view
+of the register file is unaffected by any of that.
+
+| Option | *What changes* | Verdict |
+|---|---|---|
+| Leave it behind `--hard-lockup-watchdog` | nothing; the next hang is unreadable too | rejected — this is the status quo that just cost a diagnosis |
+| A separate `--monitor` opt-in flag | the flag exists but nobody passes it on the run that hangs | rejected for the same reason, one step removed |
+| **On by default, `--no-monitor` to opt out** | every run can report a wedged RIP; a listening loopback port exists for the run's duration | **chosen** |
+| On by default, *and* default the watchdog on too | guest PCI topology changes on every run | rejected — that would overturn §61, which this does not |
+
+**What it costs.** One `127.0.0.1` TCP port held for the life of the run, and
+one call to the port picker. The picker shells out to `netsh`/`netstat` on
+Windows (a second or two), so it now runs *inside* the enable test rather than
+unconditionally — a run that will not attach the monitor should not pay for an
+answer it discards. The port was already chosen defensively: Windows reserves
+whole ranges, and a bind into one makes QEMU exit ~2 s in, which previously
+wasted an entire wedge-soak.
+
+**The one interaction worth a warning.** `--hard-lockup-watchdog --no-monitor`
+arms a detector whose only output channel is switched off. That is almost
+certainly a mistake rather than an intent, so the harness says so on stderr and
+proceeds, rather than failing (it is legal — someone may be testing NMI
+delivery itself via the in-guest handler's serial output).
+
+**How to reverse.** Set `MONITOR_ENABLED=0` at its declaration in
+`scripts/boot-test.sh`, next to `HARD_LOCKUP_WATCHDOG=0`. The two RIP-capture
+call sites are already guarded on `${#MONITOR_ARGS[@]}`, so they go quiet on
+their own.
+
+**Where it came from.** `known-issues.md` → `B-FORKEXEC-BOOT-HANG`, the
+`[A] RECURRENCE 2026-08-25` and `[A] The decisive narrowing` sections: *"The
+next occurrence must produce a RIP, and today's could not."*

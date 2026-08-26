@@ -51,49 +51,55 @@
 # through `quotef`, which is what our `quotef_os` is, so the quoting cases pass
 # outright.
 #
-# Run `PROG=md5sum OURS=/usr/bin/md5sum ./scripts/digest-diff.sh` to confirm the
-# harness still discriminates: it should report every xfail as XPASS and nothing
-# else. `OURS` replaces one binary, so it requires a `PROG` to say which.
+# Run `OURS=/usr/bin ./scripts/digest-diff.sh` to confirm the harness still
+# discriminates: it should report every xfail as XPASS and nothing else. `OURS`
+# names a *directory* here, as in every family harness, because there is no
+# single subject for it to name — the whole point of this file is that there are
+# two. (It named one binary until 2026-08-25, which forced a `PROG=` alongside
+# it to say which; a directory needs no such disambiguation and lets the
+# discrimination check cover both programs in one run.)
 set -u
 
 export MSYS2_ARG_CONV_EXCL='*'
 
 # With `PROG` unset, both programs run — `scripts/all-diff.sh` reaches this
 # harness through a glob and cannot pass one, and a harness that silently
-# covered half of what it names is worse than no harness. `OURS` is a subject
-# override for a single binary, so setting it without a `PROG` to apply it to
-# is an error rather than a coin flip.
+# covered half of what it names is worse than no harness.
 PROGS=${PROG:-md5sum sha256sum}
-if [ -n "${OURS:-}" ] && [ -z "${PROG:-}" ]; then
-  echo "digest-diff: OURS names one binary, so PROG must say which" >&2
-  exit 2
-fi
 
 # Into WSL and build the family for Linux. See `scripts/diff-wsl.sh`.
 #
-# `DIFF_NO_REF` and `DIFF_NO_BINDIR`: this harness compares a *family*, so the
-# reference and the one-name-for-both-sides symlinks are per program and are
-# made inside the loop below rather than once up front. The one `cargo build`
-# covers every program in the run, rather than one per program: a second
-# invocation would be a no-op, but it would still print its own `Finished` line
-# and make the output read as though something were rebuilt between the two
-# halves of the run.
+# `DIFF_BINS` names the whole family even when `PROG` narrows the *run* to one
+# of them, for two separate reasons. It is what keeps `diff-wsl.sh` on its
+# multi-binary path, which finds each reference by its own name and builds
+# `$bindir/{ours,gnu}/NAME` for each — a single-name `DIFF_BINS` would take the
+# single-subject path instead and name the symlink after `DIFF_PROG`, which
+# here is the family word `digest` and not a program that exists. And it means
+# `PROG=md5sum` and no `PROG` at all build the same artifacts, so narrowing the
+# run cannot change what the run measures.
+#
+# `DIFF_NO_REF`, because a family has no single reference to name; each
+# program's is found by its own name, both in `$bindir` and again in
+# `run_program`, which needs the path itself to derive the digest width.
+#
+# The one `cargo build` covers every program in the run, rather than one per
+# program: a second invocation would be a no-op, but it would still print its
+# own `Finished` line and make the output read as though something were rebuilt
+# between the two halves of the run.
 #
 # The fixed UTF-8 locale is load-bearing: getopt renders an unknown or
 # ambiguous option with directional single quotes under a UTF-8 locale and
 # ASCII apostrophes under `C`, so the whole option-error family would disagree
 # for a reason that has nothing to do with this program.
 DIFF_PROG=digest
-DIFF_BINS=$PROGS
+DIFF_BINS="md5sum sha256sum"
 DIFF_FORWARD=PROG
 DIFF_NO_REF=1
-DIFF_NO_BINDIR=1
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
 scratch=$DIFF_TMP/scratch
-bindir=$DIFF_TMP/bin
-mkdir -p "$scratch" "$bindir"
+mkdir -p "$scratch"
 
 total_pass=0; total_fail=0; total_xfail=0; total_xpass=0
 ran=
@@ -154,13 +160,13 @@ compare() {
     # rather than a prefix on `eval`: `eval` is a special builtin, and a prefix
     # assignment on one of those has different persistence rules between
     # shells — here it would decide nothing, but only by accident.
-    ( cd "$dir" && PATH="$progbin/$side:$PATH" && eval "$SETUP" ) >/dev/null 2>&1
+    ( cd "$dir" && PATH="$bindir/$side:$PATH" && eval "$SETUP" ) >/dev/null 2>&1
     if [ -n "$STDIN_FILE" ]; then
-      ( cd "$dir" && timeout -k 2 60 env PATH="$progbin/$side" "$PROG" "$@" \
+      ( cd "$dir" && timeout -k 2 60 env PATH="$bindir/$side" "$PROG" "$@" \
           <"$STDIN_FILE" >"$out" 2>"$err" )
     else
       ( cd "$dir" && printf '%b' "$STDIN" \
-          | timeout -k 2 60 env PATH="$progbin/$side" "$PROG" "$@" >"$out" 2>"$err" )
+          | timeout -k 2 60 env PATH="$bindir/$side" "$PROG" "$@" >"$out" 2>"$err" )
     fi
     # Into `rc` on the very next line, before anything else runs. Writing
     # `if [ "$side" = ours ]; then o_rc=$?; ...` instead reads `$?` of the
@@ -240,31 +246,28 @@ run_program() {
   PROG=$1
   pass=0; fail=0; xfail=0; xpass=0
 
-  gnu_real=$(command -v "$PROG") || gnu_real=
-  if [ -z "$gnu_real" ]; then
-    echo "digest-diff: no GNU $PROG inside WSL; skipping it"
-    return 0
-  fi
-
-  ours=${OURS:-$(diff_ours "$PROG")}
-  if [ ! -x "$ours" ]; then
-    echo "digest-diff: $ours is not executable" >&2
-    return 1
-  fi
-  case $ours in
-    /*) ;;
-    *) ours=$(cd "$(dirname "$ours")" && pwd)/$(basename "$ours") ;;
-  esac
-
   # --- one name for both sides -----------------------------------------------
   # Each binary is reached through a symlink named after the program, in a
   # directory that is the whole of `PATH` for that one invocation, so `argv[0]`
   # is the bare word on both sides and the `md5sum: ` prefix on every diagnostic
-  # matches. Per program, because `bindir` outlives the loop.
-  progbin=$bindir/$PROG
-  mkdir -p "$progbin/ours" "$progbin/gnu"
-  ln -s "$ours" "$progbin/ours/$PROG"
-  ln -s "$gnu_real" "$progbin/gnu/$PROG"
+  # matches. `diff-wsl.sh` built those links, one pair per `DIFF_BINS` name, and
+  # this reads them back rather than resolving either side a second time: it
+  # looks in `/usr/bin` then `/bin` while `command -v` searches `$PATH`, so two
+  # lookups can name two different binaries — and then the banner below would
+  # describe one while every case ran the other.
+  #
+  # It creates both links or neither, so the presence of one answers for both —
+  # which is also why this cannot say *which* side was missing. `DIFF_SKIPPED`
+  # holds the same list; the message is here rather than in one tail line
+  # because `DIFF_SKIPPED` covers the whole of `DIFF_BINS` and a `PROG=`-narrowed
+  # run would otherwise be told about a program it was never going to examine.
+  if [ ! -e "$bindir/ours/$PROG" ]; then
+    echo "digest-diff: no GNU $PROG inside WSL, or nothing of ours to compare it"
+    echo "  with; skipping it."
+    return 0
+  fi
+  ours=$(readlink "$bindir/ours/$PROG")
+  gnu_real=$(readlink "$bindir/gnu/$PROG")
 
   # --- widths, taken from the reference rather than assumed -------------------
   # A digest of all zeros is a checksum that is wrong for every input, and one

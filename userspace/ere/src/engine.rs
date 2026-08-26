@@ -1588,9 +1588,7 @@ impl ThreadList {
 
     fn clear(&mut self) {
         self.threads.clear();
-        for s in &mut self.seen {
-            *s = false;
-        }
+        self.seen.fill(false);
     }
 }
 

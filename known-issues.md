@@ -81109,7 +81109,66 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **508 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **501 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-second batch): `cmd_groupmgr` (7)
+> cleared — 508 → 501 across 221 → 220 functions. Pinned by
+> `kshell::self_test` rung 90.
+>
+> **The severity that every earlier batch was one step away from: in an id space
+> of *security principals*, `0` is not an arbitrary member — it is the
+> superuser.** The selector batches (1–13) could fairly say "acts on the wrong
+> object, and you notice, because the object you meant is still there." That
+> reading depended on the id space being CPUs, shared-memory regions, quota
+> names — spaces where zero is just the first element. `groupmgr`'s ids are
+> users and groups, `init_defaults` seeds GID 0 as `root`, and **every one of
+> this function's guesses named root on whichever axis it sat.**
+>
+> | Typed | Asked for | Actually asked for |
+> |---|---|---|
+> | `groupmgr delete 1O` | delete group 10 | **delete the `root` group** |
+> | `groupmgr adduser 1O 500` | add UID 500 to group 10 | add UID 500 to the **root group** |
+> | `groupmgr adduser 100 5O0` | add UID 500 to group 100 | add **root** to group 100 |
+> | `groupmgr rmuser 1O 500` | remove UID 500 from group 10 | remove UID 500 from the **root group** |
+> | `groupmgr user 5O0` | which groups is 500 in? | which groups is **root** in? |
+>
+> **`delete` is the sharpest site in the entire burn-down**, because it is
+> destructive and unguarded: `delete_group` is a bare
+> `state.groups.retain(|g| g.gid != gid)` that consults neither `group_type` nor
+> membership. So `groupmgr delete 1O` — one mistyped character — destroyed the
+> root group and printed `Deleted group 0.` as a success.
+>
+> **Refusing the word does not make the operation safe, and this entry should
+> not be read as claiming it does.** A correctly typed `groupmgr delete 0` still
+> destroys `root`. That is a separate defect with a separate fix, filed as
+> `A-GROUPMGR-DELETE-HAS-NO-GUARD-AND-GROUPTYPE-SYSTEM-PROTECTS-NOTHING`. The
+> two compound; clearing the guess only removes the path that reached the
+> unguarded operation *by accident*.
+>
+> **Two non-numeric guesses in the same arm were fixed too, though the ledger
+> counts neither.** Leaving them would have been patching around the same defect
+> in the same twelve lines:
+>
+> - `create`'s **name** defaulted to `"newgroup"`, so `groupmgr create 1000`
+>   produced a real group indistinguishable from one somebody meant to call
+>   that. A guessed name is not a milder guessed number.
+> - `create`'s **type** ran through `parse_groupmgr_type`, whose `_ =>
+>   GroupType::User` fallback meant `groupmgr create 1000 devs sistem` created a
+>   plain user group while the operator believed they had asked for a system
+>   one. **This guess points the wrong way in the opposite sense from `delete`:**
+>   a request for *more* privilege quietly answered with *less*. Both directions
+>   from one function is the same lesson `diskquota` taught one batch earlier —
+>   the guess is not biased toward safety, because it was never reasoning about
+>   safety.
+>
+> `parse_groupmgr_type` now returns `Option`, and the caller decides separately
+> what an *absent* word means (`User`, the documented default, §607) from what an
+> unreadable one means (a refusal). Those are different questions and the
+> fallback answered both with one value.
+>
+> Rung 90 pins all seven refusals, both `create` controls, and — the assertion
+> that pins the *severity* rather than the wording — that `groupmgr get 0` still
+> finds `root` after a refused `delete`.
 
 > **Burn-down log.** 2026-08-26 (twenty-first batch): `cmd_diskquota` (7)
 > cleared — 515 → 508 across 222 → 221 functions. Pinned by

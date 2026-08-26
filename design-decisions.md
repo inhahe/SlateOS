@@ -46971,3 +46971,188 @@ omitted-offset form still copies to the start.
 
 **Where it came from.** The fourteenth burn-down batch of
 `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
+
+---
+
+## 569. A window says which program it belongs to, once, in one field — and that is what a window rule matches
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** The Settings panel has always let you write rules like *"the
+terminal should reopen where I left it"*. None of them could ever fire, because
+a rule matched on a "process name" or a "window class" and no window on this
+system had either — the compositor knew a window's title and nothing else about
+what program it was. So a window now carries an **app id**: a short name the
+program chooses for itself (`terminal`, `slateos-editor`) that is the same for
+every window that program opens, and never changes while it runs. Rules match
+on that. The two old ways of naming a program are gone, replaced by one.
+
+### The problem
+
+`window_rules.rs` offered five ways to match a window: exact title, title
+substring, `ProcessName`, `WindowClass`, and `Any`. The three default rules
+shipped in every new profile used `ProcessName` twice and `WindowClass` once.
+All three were dead on arrival — `WindowInfo`, the compositor's description of
+a window, carried an id, a pid, a title, a rectangle, some state flags and a
+workspace number. Nothing that answers "which program is this?". The engine's
+`evaluate` took a process name and a class as arguments and every conceivable
+caller would have had to pass `""` for both.
+
+### The decision
+
+One field, `app_id`, declared by the client when it creates the window and
+reported back in every window list. `MatchCriteria::ProcessName` and
+`MatchCriteria::WindowClass` collapse into a single `MatchCriteria::AppId`.
+
+**Why not two fields, the way X11 has them.** `WM_CLASS` carries an *instance*
+and a *class* — nominally "this copy" and "this kind" — and thirty years of
+practice is that nobody can remember which is which, applications set them
+inconsistently, and rule-writing tools show both and let the user guess. Wayland
+looked at that and shipped one `app_id`. The duality is not information; it is a
+question every client answers differently. Copying it into a system that had
+neither would be importing a known defect for compatibility with nothing.
+
+**Why not derive it from the process name.** A process name is a fact about the
+kernel's process table, not about the window, and the shell would have to ask a
+service it does not talk to in order to learn it. Worse, it is the wrong grain:
+one browser process opens twenty windows of what the user thinks of as
+different things, and twenty terminal windows may be one process or twenty.
+
+**Why not derive it from the title.** A title answers *which document*; an app
+id answers *which program*. They change on different schedules — the title
+changes as the user works — and deriving one from the other would give each of
+a program's windows a different id, which is precisely the thing an app id
+exists not to do.
+
+**Why it is fixed at creation.** No request changes it. A program able to rename
+itself mid-session could walk out from under a rule the user wrote about it:
+"make the chat window skip the taskbar" would be defeated by the chat program
+calling itself something else. Fixing it at creation costs a program nothing —
+it knows what it is before it opens a window — and removes the whole class of
+evasion.
+
+**Why an empty id matches nothing.** A window may decline to name itself, and a
+rule may be written with the value box untouched (the settings panel lets you
+press Save on an empty string). Both are the empty string, and the tempting
+reading — "empty means unset, so match anything" — is wrong in both directions.
+An unnamed program is not *every* program; a rule about no program is not a
+rule about the whole desktop. One stray Save would otherwise rearrange every
+window on the screen.
+
+**Why it is advisory and never a security claim.** The client declares it, so a
+client can lie. Nothing may gate a capability on it. `WindowInfo::pid` comes
+from the connection and cannot be forged, and stays for exactly the cases where
+the answer has to be true rather than merely useful. An app id is for *the
+user's* rules about *the user's* programs, and a program that lies about its
+name to escape the user's own window rule has achieved nothing.
+
+### What it costs
+
+`CONTROL_VERSION` 3 → 4 and `WINDOW_LIST_VERSION` 3 → 4, because both records
+grew a length-prefixed string. The three default rules are rewritten; the two
+that named processes now name app ids, and the third — "Dialogs: no resize",
+keyed on a window class — had no honest translation at all, because a dialog is
+not a program. The compositor knows dialogs by `Layer`, which this engine does
+not match on. It is replaced by a rule that both matches something real and can
+be carried out: the shell's own four surfaces say `slateos-shell` and are not
+applications.
+
+The config-file spellings `process:` and `class:` are replaced by `app:` with
+no compatibility shim, and an unrecognised criterion is now a **refusal** rather
+than a silent fall-through to `Any`. That is the sharper half of the change: a
+rule that silently widens from one program to every window is far worse than a
+rule that fails to load, because the file still says `process:vim` while every
+window on the desktop is being made always-on-top. The engine had no callers, so
+no user could have such a file — but the parser will see one the first time a
+config outlives a version bump.
+
+### Where it lives
+
+`gui/remote/src/control.rs` (`WindowSpec::app_id`), `gui/remote/src/window_list.rs`
+(`WindowInfo::app_id`), `gui/window/src/app.rs` (`App::app_id`, defaulting to the
+executable's stem, lower-cased), `gui/compositor/src/lib.rs` (`Window::app_id`),
+`gui/desktop/src/window_rules.rs` (`MatchCriteria::AppId`),
+`gui/desktop/src/lib.rs` (`ManagedWindow::app_id`).
+
+---
+
+## 570. A window rule fires once, when the window arrives — and the shell hands the requests back rather than sending them
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** Window rules say things like *"open the editor maximised"*. The
+compositor tells the shell what windows exist several times a second, so the
+shell has to decide **how often** to consult the rules. Consulting them every
+time would mean a window you just un-maximised snaps back within the frame, and
+a "do this once" rule would be used up on the first frame after you wrote it.
+So the rules are consulted exactly once per window, the first time that window
+is seen. And the shell does not send the resulting requests itself — it returns
+them to whoever is holding the connection.
+
+### Once per arrival, not once per list
+
+`WindowRulesManager::evaluate` is `&mut self` and is not a pure query: it
+increments each rule's match count, and it *deletes* one-shot rules. That makes
+the calling frequency a correctness question rather than a performance one.
+
+- **Per list** (the naive reading of "apply the rules to the windows"): a
+  one-shot rule is destroyed on the very next frame, spent on whichever windows
+  happened to be open when it was written. `initial_state` is re-sent on every
+  frame, so a window the user restores is re-maximised before the next repaint
+  and cannot be restored at all. Match counts climb at the frame rate and mean
+  nothing.
+- **Per newly-arrived window** (chosen): a rule fires once for the window it is
+  about. "Initial state" means the state it *starts* in, and stops being the
+  shell's business the moment the user touches it.
+
+"Newly arrived" is read off `previous.is_none()` — the shell keeps its windows
+in a map keyed by id, and the compositor's ids come from an `IdSeq` and are
+never reused, so absence from the previous map is a sound test and no second
+"already seen" set is needed.
+
+The consequence is that the two shell-local answers, `skip_taskbar` and
+`skip_alt_tab`, must be **carried across lists** the way the taskbar icon is.
+Nothing in a window list could confirm them later — they are not facts about
+the window, they are the answer a rule gave about it once.
+
+`remember_state` is the deliberate exception: it is fed from **every** list,
+because "remember the last position" means the position the window was last
+*at*, and a window moves long after it arrives. It is skipped while the window
+is minimised or maximised, because the rectangle then belongs to the state
+rather than to the window, and restoring a window to its maximised rectangle
+would be a window that looks maximised but is not.
+
+### Requests out, not sent
+
+`apply_window_list` returns `Vec<ShellRequest>` rather than sending anything.
+
+- **For:** `DesktopShell` stays connectionless — it is a pure function of window
+  lists and input, which is what lets ~30 existing tests drive it with no
+  compositor at all. The session, which already owns the connection and already
+  translates `ShellRequest`s onto the wire for taskbar clicks and hotkeys, gains
+  one more source of the same thing. Errors are handled in one place.
+- **Against:** the caller can drop the value, and the compiler will not say so —
+  `#[must_use]` is deliberately *not* on it, because the demo binary in
+  `main.rs` has no compositor to send to and the ~30 test call sites have
+  nothing to send. A shell that evaluated rules and dropped the answer looks
+  identical from either end, which is the failure this trades for; it is covered
+  instead by an end-to-end session test that asserts a rule reaches the wire.
+
+### Two lists, one filter
+
+`skip_taskbar` and `skip_alt_tab` are separate actions because users mean
+different things by them: a chat window kept out of the taskbar is still
+somewhere you want to Alt+Tab to, and a monitoring window you never switch to
+still wants a button. But `taskbar_windows()` was serving the taskbar, the
+overview *and* the Alt+Tab index at once, so honouring both flags from one list
+would have made each flag silently mean the other.
+
+They are now `taskbar_windows()` and `switcher_windows()`, both derived from one
+`listed_windows(also)` helper with one sort. Written twice they would be free to
+drift in *order*, and `alt_tab_index` counts into the switcher's list: an index
+into a differently-ordered list activates a window the user was not looking at.
+
+**Where it lives.** `gui/desktop/src/lib.rs` — `DesktopShell::apply_window_list`,
+`rule_requests`, `listed_windows`; `gui/desktop/src/session.rs` `pump`.

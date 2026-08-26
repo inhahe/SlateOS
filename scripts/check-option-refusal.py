@@ -130,20 +130,12 @@ REFUSAL = re.compile(
 # Each needs a reason; adding one is meant to require saying why.
 # --------------------------------------------------------------------------
 ALLOWED = {
-    # D1: the value does not come from the command line.
-    ("parse_size_predicate", "`num_str.parse::<i64>().unwrap_or(0) * multiplier`"):
-        "prose in the doc comment describing the bug that was removed, not code",
-
     # D2: not an operand filter.  `backup restore`'s optional manifest id sits
     # between the positionals and the flags, so it is identified by *not*
     # beginning with a dash -- the dash-leading word is passed on to the flag
     # parser rather than dropped.
     ("cmd_backup", "let manifest_id = parts.get(3).copied().filter"):
         "selects the manifest id; the dash-leading word goes to backup_parse_flags, not the bin",
-    # A doc comment sits *above* its function, so its enclosing scope is the
-    # module, not the function it documents.
-    ("<top>", "its operand list with `.filter(|f| !f.starts_with('-'))`"):
-        "prose in batch_split_args' doc comment describing the bug that was removed, not code",
 }
 
 # --------------------------------------------------------------------------
@@ -203,6 +195,26 @@ def strip_strings(line: str) -> str:
     return "".join(out)
 
 
+def strip_comments(line: str) -> str:
+    """Line with any trailing `//` comment removed, so no detector reads prose.
+
+    Two of the three entries this file's ALLOWED table used to carry were
+    doc-comment prose describing the very bug the detector looks for -- the
+    explanation of what was fixed tripped the check that the fix was still in
+    place.  That is a defect in the detector, not an exemption to grant: a
+    checker whose only workaround is "stop writing down what the bug was"
+    teaches you to delete the explanation, which is the most valuable line in
+    the fix.  Both entries were dropped when this function was added.
+
+    String literals are blanked first, so the `//` in a `"https://..."` is not
+    mistaken for the start of a comment.  The *original* text is returned,
+    truncated -- callers that look for string literals (OPTION_LITERAL) need
+    them intact.
+    """
+    idx = strip_strings(line).find("//")
+    return line if idx < 0 else line[:idx]
+
+
 def loop_bodies(lines: list[str]):
     """Yield `(open_index, close_index)` for every `while`/`for` block."""
     for i, ln in enumerate(lines):
@@ -240,16 +252,21 @@ def main(argv: list[str]) -> int:
         if not is_production(i):
             continue
         fn = outer_fn(stacks[i])
+        code = strip_comments(ln)
         text = ln.strip()
-        if D1.search(ln) and not allowed(fn, text):
+        if D1.search(code) and not allowed(fn, text):
             guessed.append((i + 1, fn, text[:96]))
-        if D2.search(ln) and not allowed(fn, text):
+        if D2.search(code) and not allowed(fn, text):
             dropped.append((i + 1, fn, text[:96]))
 
     for open_i, close_i in loop_bodies(lines):
         if not is_production(open_i):
             continue
-        body = "\n".join(lines[open_i:close_i + 1])
+        # Comments are stripped here too, and in both directions: an option
+        # spelling quoted in a comment would push a loop over the two-spelling
+        # threshold it never reached in code, and the word `set_exit` in a
+        # comment would silence a loop that has no refusal at all.
+        body = "\n".join(strip_comments(x) for x in lines[open_i:close_i + 1])
         spellings = {m.group(1) for m in OPTION_LITERAL.finditer(body)}
         if len(spellings) < 2:
             continue

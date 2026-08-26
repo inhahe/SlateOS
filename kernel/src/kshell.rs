@@ -122032,6 +122032,23 @@ fn cmd_fsck_fat(args: &str) {
     }
 }
 
+/// The `fsck.ext4` synopsis, printed both by `--help` — which succeeded at what
+/// it was asked — and by the missing-device error, which did not.
+///
+/// It is one function rather than two copies of the text because the two differ
+/// only in the exit status, and that is precisely what a reader comparing two
+/// identical `shell_println!` blocks cannot see. It also keeps
+/// `scripts/check-usage-status.py`'s exemption honest: that table is keyed by
+/// enclosing function plus a fragment of the line, so an entry naming the help
+/// arm would have covered the error arm too — the two lines were character-for-
+/// character the same. With the text in a formatter, the exemption names the
+/// formatter, and neither caller is exempted by accident.
+fn fsck_ext4_usage() {
+    shell_println!("Usage: fsck.ext4 [-v] DEVICE");
+    shell_println!("  Check ext4 filesystem consistency (read-only).");
+    shell_println!("  -v  Verbose output (show all phases)");
+}
+
 /// `fsck.ext4 [-v] DEVICE` — check ext4 filesystem consistency.
 ///
 /// Performs read-only checks: superblock validation, bitmap free count
@@ -122045,18 +122062,36 @@ fn cmd_fsck_ext4(args: &str) {
         if w == "-v" || w == "--verbose" {
             verbose = true;
         } else if w == "-h" || w == "--help" {
-            shell_println!("Usage: fsck.ext4 [-v] DEVICE");
-            shell_println!("  Check ext4 filesystem consistency (read-only).");
-            shell_println!("  -v  Verbose output (show all phases)");
-            // No `set_exit(1)`: `--help` succeeded at what it was asked.
+            fsck_ext4_usage();
+            // Asking for help and getting it is a success, so the status stays
+            // at whatever the previous command left. Do not write the reason
+            // for that as a sentence containing `set_exit(1)`: the one that
+            // used to sit here read as a refusal to two different checkers.
             return;
-        } else {
+        } else if w.starts_with('-') && w != "-" {
+            // This arm used to fall through to `device = w`, so a misspelled
+            // flag became the *device name*. `fsck.ext4 /dev/sda --verbse`
+            // checked a device called `--verbse`; `fsck.ext4 --verbse /dev/sda`
+            // was worse, because the real device overwrote the typo and the
+            // check ran, verbosely-not-verbose, with no sign anything was
+            // ignored.
+            shell_println!("fsck.ext4: unrecognized option `{}'", w);
+            set_exit(1);
+            return;
+        } else if device.is_empty() {
             device = w;
+        } else {
+            // Silently keeping the last of several devices is the same class of
+            // guess: the user named two and got one, chosen by position.
+            shell_println!("fsck.ext4: extra operand `{}'", w);
+            set_exit(1);
+            return;
         }
     }
 
     if device.is_empty() {
-        shell_println!("Usage: fsck.ext4 [-v] DEVICE");
+        shell_println!("fsck.ext4: missing DEVICE operand");
+        fsck_ext4_usage();
         set_exit(1);
         return;
     }

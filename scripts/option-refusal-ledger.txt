@@ -20,7 +20,6 @@
 #
 # Burn-down is tracked in known-issues.md as
 # `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`.
-<top> 1
 cmd_apppermissions 1
 cmd_appstore 1
 cmd_assoc 1

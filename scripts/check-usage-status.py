@@ -110,6 +110,22 @@ ALLOWED = {
         "same shape, found by check-query-status.py: bare `quota` reports whether "
         "enforcement is on, and the synopsis under it says how to change that",
 
+    # This one was invisible to the check until `strip_comments` was added: the
+    # `--help` arm carried the note `// No set_exit(1): --help succeeded at what
+    # it was asked`, and the checker read the `set_exit(1)` *inside that comment*
+    # as the failure status it was looking for. A note saying "there is
+    # deliberately no X here" is exactly what defeats a checker that greps for X,
+    # and it is exactly what a careful author writes.
+    #
+    # Exempting it in place would not have worked either: this table is keyed by
+    # function plus a fragment of the line, and both the help arm and the
+    # missing-device arm printed the identical synopsis, so one entry would have
+    # covered both. The text moved into `fsck_ext4_usage` so the entry can name
+    # only the formatter.
+    ("fsck_ext4_usage", "Usage: fsck.ext4 [-v] DEVICE"):
+        "formatter; `--help` calls it and returns 0, the missing-device caller "
+        "calls it and sets 1",
+
     # Helpers whose callers set the status. Listed rather than silently
     # skipped, because "the caller does it" is a claim that can stop being
     # true, and an entry here is where someone will look when it does.
@@ -208,6 +224,37 @@ def strip_strings(s):
     return "".join(s.split('"')[::2])
 
 
+def strip_comments(s):
+    """Drop any trailing `//` comment, so prose is never read as code.
+
+    Without this, a *comment* mentioning `set_exit(` satisfied the search
+    below for a failure status. The site that exposed it said, in full,
+    `// No set_exit(1): --help succeeded at what it was asked.` -- a comment
+    explaining that there is deliberately no refusal here was read as proof
+    that there was one. Any note of the form "no X here" defeats a checker
+    that greps for X, and the shape of that note is exactly what a careful
+    author writes.
+
+    Strings are blanked first so the `//` in a URL literal is not taken for a
+    comment. `scripts/check-option-refusal.py` carries the same function for
+    the same reason; both were added the same day, after the first one turned
+    up a real unrefused option loop that a comment had been hiding.
+    """
+    in_str = False
+    esc = False
+    for i in range(len(s) - 1):
+        ch = s[i]
+        if esc:
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == '"':
+            in_str = not in_str
+        elif not in_str and ch == "/" and s[i + 1] == "/":
+            return s[:i]
+    return s
+
+
 def main(argv):
     # An explicit path is how this checker gets tested: run it against an older
     # revision of kshell.rs (`git show <rev>:kernel/src/kshell.rs`) and it must
@@ -230,14 +277,14 @@ def main(argv):
     unaccounted = []
     seen_conflated = {}
     for i, ln in enumerate(lines):
-        if not USAGE.search(ln):
+        if not USAGE.search(strip_comments(ln)):
             continue
 
         # Walk to wherever control leaves this block, looking for a failure status.
         depth = 0
         raised = False
         for k in range(i, min(i + 300, len(lines))):
-            s = lines[k]
+            s = strip_comments(lines[k])
             if "set_exit(" in s and "set_exit(0)" not in s:
                 raised = True
                 break

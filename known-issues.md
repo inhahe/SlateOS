@@ -85390,7 +85390,7 @@ a feature gap, not a bug.
 
 ---
 
-## BUG-C-PARTMANAGER-DECIDES-WHAT-YOU-CONFIRMED-BY-READING-THE-TITLE — open
+## BUG-C-PARTMANAGER-DECIDES-WHAT-YOU-CONFIRMED-BY-READING-THE-TITLE — fixed in `e8e46e7c3`
 
 **In short:** The partition manager asks "are you sure?" before it deletes a
 partition, wipes a partition table, or writes queued changes to disk. When you
@@ -85432,10 +85432,18 @@ than a silent no-op. This is planned as part of migrating the app off its
 hand-rolled dialog onto `guitk::modal::AlertDialog`, which is where the intent
 value has to live anyway once the app stops owning the dialog struct.
 
-**If it is never fixed:** it works today, because the three titles happen to
-contain the three words. It is a trap for the next edit, not a live failure —
-but the failure mode when it springs is the worst kind: a destructive action's
-confirmation appearing to succeed while doing nothing.
+**Why it was worth fixing before it fired:** it worked, because the three
+titles happened to contain the three words. It was a trap for the next edit,
+not a live failure — but the failure mode when it sprang is the worst kind: a
+destructive action's confirmation appearing to succeed while doing nothing.
+
+**The fix**, landed with the migration onto `guitk::modal::AlertDialog`: the
+`ConfirmIntent` enum described above, stored as `ActiveDialog::Confirm {
+dialog, intent }`, and a wildcard-free `match intent` in
+`handle_confirm_accepted`. A regression test —
+`a_reworded_title_does_not_change_what_the_confirmation_does` — opens a delete
+confirmation titled `"Remove Volume"`, which contains none of the three magic
+words, and asserts the delete is still queued.
 
 ---
 

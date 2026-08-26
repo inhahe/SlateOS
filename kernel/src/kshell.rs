@@ -16083,33 +16083,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The control must not print a synopsis: it proves the command still
         // gets past its arity guard and fails for the real reason, so the rung
         // cannot pass by having broken the command outright.
-        let arity_cases: &[(&str, &str)] = &[
+        //
+        // The third column is the fragment the complaint must contain. It is
+        // not always `Usage:`, and hard-coding that word was a mistake this
+        // rung actually made: when `vd remove` and `tile add` were later
+        // converted to the `required_id`/`required_num` helpers they began
+        // saying `vd: remove: missing desktop id` -- a strictly better
+        // diagnostic, since it names the operand rather than reprinting a
+        // synopsis -- and the rung failed the kernel for an improvement. The
+        // rule being pinned is "a missing operand is *reported* and the
+        // status reaches the caller", not "the report is worded `Usage:`".
+        let arity_cases: &[(&str, &str, &[u8])] = &[
             // `parts.len() < N`, the 111-site majority, at N = 2, 3 and 5.
-            ("useracct remove", "useracct remove 4294967295"),
-            ("scriptlang addext", "scriptlang addext 999999 .zz"),
+            ("useracct remove", "useracct remove 4294967295", b"Usage:"),
+            (
+                "scriptlang addext",
+                "scriptlang addext 999999 .zz",
+                b"Usage:",
+            ),
             (
                 "kernelbuild register",
                 "kernelbuild register zz n kernel /zz",
+                b"Usage:",
             ),
             // An emptiness test on a word pulled out with `unwrap_or("")`.
-            ("soundmixer rmdev", "soundmixer rmdev nosuchdevice"),
-            ("cred get", "cred get nosuchapp nosuchsvc"),
-            // `if <id> == 0`, where the zero is `unwrap_or(0)`'s and so means
-            // both "absent" and "unreadable".
-            ("vd remove", "vd remove 999999"),
-            ("tile add", "tile add 999999"),
+            (
+                "soundmixer rmdev",
+                "soundmixer rmdev nosuchdevice",
+                b"Usage:",
+            ),
+            ("cred get", "cred get nosuchapp nosuchsvc", b"Usage:"),
+            // Formerly `if <id> == 0`, where the zero was `unwrap_or(0)`'s and
+            // so meant both "absent" and "unreadable" -- the two now have
+            // separate wordings, and this is the "absent" one.
+            ("vd remove", "vd remove 999999", b"missing desktop id"),
+            ("tile add", "tile add 999999", b"Usage:"),
             // The `} else if` form: the branch the gate mis-read is followed
             // by a chain rather than a plain `else`.
-            ("netsettings dns", "netsettings dns nosuchif auto"),
-            ("perfmon dismiss", "perfmon dismiss 999999"),
+            (
+                "netsettings dns",
+                "netsettings dns nosuchif auto",
+                b"Usage:",
+            ),
+            ("perfmon dismiss", "perfmon dismiss 999999", b"Usage:"),
         ];
-        for (bare, control) in arity_cases {
+        for (bare, control, marker) in arity_cases {
             let out = capture_command(bare);
-            assert_output_contains("a missing operand is reported", &out, b"Usage:");
+            assert_output_contains("a missing operand is reported", &out, marker);
             assert_eq!(last_exit(), 1, "a usage complaint must report failure");
 
             let out = capture_command(control);
-            assert_output_lacks("naming the operand clears the arity guard", &out, b"Usage:");
+            assert_output_lacks("naming the operand clears the arity guard", &out, marker);
         }
 
         // `bright set [display_id] <level>` is the one synopsis here whose
@@ -16262,27 +16286,52 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // broken the command outright. The controls assert only the absence of
         // the synopsis: the ids are deliberately ones that do not exist, so the
         // command is expected to fail afterwards -- for the real reason.
-        let refusal_cases: &[(&str, &str)] = &[
-            ("wsnap snap 999 zznosuch", "wsnap snap 999 left"),
-            ("quicknote color 999 zznosuch", "quicknote color 999 yellow"),
-            ("appnotify display zzapp", "appnotify display zzapp banner"),
+        //
+        // As in the arity table above, the third column is the fragment the
+        // complaint must contain, because the wording is not the rule. When
+        // `wsnap snap` was converted it stopped reprinting a synopsis and
+        // began naming the word instead, which is the outcome this whole
+        // burn-down is *for*; a rung that spelled `Usage:` into the assertion
+        // would have failed the kernel for getting better.
+        let refusal_cases: &[(&str, &str, &[u8])] = &[
+            (
+                "wsnap snap 999 zznosuch",
+                "wsnap snap 999 left",
+                b"is not a snap position",
+            ),
+            (
+                "quicknote color 999 zznosuch",
+                "quicknote color 999 yellow",
+                b"Usage:",
+            ),
+            (
+                "appnotify display zzapp",
+                "appnotify display zzapp banner",
+                b"Usage:",
+            ),
             (
                 "sysresource setalert zznosuch 50",
                 "sysresource setalert cpu 50",
+                b"Usage:",
             ),
             (
                 "usagetime category zzapp zznosuch",
                 "usagetime category zzapp dev",
+                b"Usage:",
             ),
-            ("startupopt category zznosuch", "startupopt category kernel"),
+            (
+                "startupopt category zznosuch",
+                "startupopt category kernel",
+                b"Usage:",
+            ),
         ];
-        for (bad, control) in refusal_cases {
+        for (bad, control, marker) in refusal_cases {
             let out = capture_command(bad);
-            assert_output_contains("an unusable operand is reported", &out, b"Usage:");
+            assert_output_contains("an unusable operand is reported", &out, marker);
             assert_eq!(last_exit(), 1, "an unusable operand must report failure");
 
             let out = capture_command(control);
-            assert_output_lacks("a usable operand is not refused", &out, b"Usage:");
+            assert_output_lacks("a usable operand is not refused", &out, marker);
         }
 
         // Shape 4 -- the status was set, but *above* the line explaining it.

@@ -576,6 +576,40 @@ fn path_is_executable(p: &std::path::Path) -> bool {
     }
 }
 
+/// Whether a command word *spells a path* rather than naming a command to look
+/// up — the question behind every "a name with a slash is used as-is" rule:
+/// `$PATH` is not searched for it, it is never hashed, `$EXECIGNORE` reaches it
+/// differently, and a failure is reported against the word rather than against a
+/// search that never happened.
+///
+/// The separator is the host's, and on every host but Windows that is `/` alone.
+/// **A backslash is an ordinary filename byte there** — SlateOS included, whose
+/// paths allow every byte but `/` and NUL — so a word carrying one is a plain
+/// command name and is searched for like any other. Measured, bash 5.2.21 on
+/// Linux: `nosuch\` is `command not found` and 127, not a stat of a file; and a
+/// file genuinely named `we\ird.sh` is found on `$PATH` by that name, run, and
+/// reported by `type -P` as `./we\ird.sh`. osh read the backslash as a separator
+/// on every host, so it answered `No such file or directory` for the first and
+/// could not run the second at all.
+fn word_is_path(word: BStr<'_>) -> bool {
+    word.contains(&b'/') || (cfg!(windows) && word.contains(&b'\\'))
+}
+
+/// Which answers a `$PATH` walk is allowed to give back.
+///
+/// The two differ only when the walk turns up nothing executable but *did* pass
+/// a file of that name it could not execute; see [`Shell::find_in_path`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathSearch {
+    /// bash's own search, and what a command word gets: a file the shell could
+    /// not execute is still the answer, so the failure is reported against *it*
+    /// rather than as "command not found".
+    Runnable,
+    /// Executables only. What `hash NAME` and a POSIX-mode `type`/`command -v`
+    /// ask — both measured; see [`Shell::find_in_path`].
+    ExecutableOnly,
+}
+
 /// An external command about to be started: the word the shell was given, and
 /// the file its `$PATH` (and `hash`) lookup made of it — `None` when the lookup
 /// found nothing and the OS is to be handed the word to locate for itself.
@@ -706,6 +740,22 @@ fn no_options_error(args: &[Str]) -> Option<u8> {
 /// 2)". Mapping by `ErrorKind` (not the raw OS code) keeps the text stable and
 /// bash-compatible on both the Windows dev host and the SlateOS target. Kinds
 /// without a canonical POSIX spelling fall back to the platform message.
+/// `strerror(0)` — the text a C library gives for "no error at all".
+///
+/// It is a diagnostic here only because bash prints one: `exec` reports `errno`
+/// for its second line having already cleared the one it printed the first line
+/// from, so the line says nothing went wrong. Which is an artifact, but a
+/// visible one, and it is not the same text everywhere — glibc says `Success`
+/// where newlib says `No error` — so it has to be asked of the host rather than
+/// written down. `Display` appends ` (os error 0)`, which `strerror` does not.
+fn strerror_ok() -> String {
+    let mut s = std::io::Error::from_raw_os_error(0).to_string();
+    if let Some(i) = s.find(" (os error") {
+        s.truncate(i);
+    }
+    s
+}
+
 fn io_error_message(e: &std::io::Error) -> String {
     use std::io::ErrorKind;
     match e.kind() {
@@ -754,18 +804,32 @@ fn open_error(path: &std::path::Path, e: io::Error) -> io::Error {
 /// leak into `$PWD`, `$OLDPWD`, `pwd`, `$DIRSTACK` and `dirs` output and silently
 /// break all of the above. Windows accepts `/` in every path API, so the
 /// converted form still round-trips as a real path.
+///
+/// Off that host it really is the identity, and has to be: a backslash is an
+/// ordinary filename byte everywhere else — SlateOS included, whose paths admit
+/// every byte but `/` and NUL — so rewriting one would not tidy a path but name
+/// a different file. It did: a `$PATH` hit called `we\ird.sh` came back as
+/// `we/ird.sh`, which is two components neither of which exists (measured
+/// against bash 5.2.21, which runs the file).
 fn shell_path(p: &std::path::Path) -> Str {
     let s = bytes::path_to_bytes(p);
-    // `canonicalize` on Windows returns the `\\?\` (or `\\?\UNC\`) form; strip
-    // it so the reported path is the one the user could have typed.
-    let s = if let Some(rest) = s.strip_prefix(br"\\?\UNC\".as_slice()) {
-        bfmt![br"\\", rest]
-    } else if let Some(rest) = s.strip_prefix(br"\\?\".as_slice()) {
-        rest.to_vec()
-    } else {
+    #[cfg(not(windows))]
+    {
         s
-    };
-    s.replace(b"\\", b"/")
+    }
+    #[cfg(windows)]
+    {
+        // `canonicalize` on Windows returns the `\\?\` (or `\\?\UNC\`) form;
+        // strip it so the reported path is the one the user could have typed.
+        let s = if let Some(rest) = s.strip_prefix(br"\\?\UNC\".as_slice()) {
+            bfmt![br"\\", rest]
+        } else if let Some(rest) = s.strip_prefix(br"\\?\".as_slice()) {
+            rest.to_vec()
+        } else {
+            s
+        };
+        s.replace(b"\\", b"/")
+    }
 }
 
 /// A program path in the spelling the *host* wants to launch it by.
@@ -1240,7 +1304,20 @@ impl Interposed {
 ///
 /// One kind of text is still left to the OS: a `.bat`/`.cmd` file on the Windows
 /// host, which is text that host does run.
+///
+/// **A file the caller may not execute is not interposed on at all.** `execve`
+/// refuses it before it ever looks at the contents, so `ENOEXEC` — the answer
+/// this whole fallback exists to handle — is one a file without the bit can
+/// never give, and bash therefore never reaches `shell_execve`'s script branch
+/// for one. osh has to ask outright, because it decides *before* the spawn
+/// where bash decides after a failed one; without the question it ran a script
+/// the user had deliberately un-marked. Measured, bash 5.2.21: `./nox.sh` on a
+/// `chmod -x` text file is `Permission denied` and 126, which is exactly what
+/// `None` here produces — the OS refuses and [`spawn_error_message`] words it.
 fn shell_script_indirection(path: &std::path::Path) -> Option<Interposed> {
+    if !path_is_executable(path) {
+        return None;
+    }
     #[cfg(windows)]
     if path
         .extension()
@@ -1340,7 +1417,7 @@ enum SpawnDiag {
 /// answer: a trailing `/` demands that the name in front of it resolve to a
 /// directory, so a missing name is ENOENT and a plain file is ENOTDIR. Those
 /// are the two errnos this reconstructs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 enum SpawnTarget {
     /// `file_isdir (command)` — a directory, whatever the host error said.
     Dir,
@@ -1348,9 +1425,35 @@ enum SpawnTarget {
     Missing,
     /// A trailing separator on something that is not a directory: ENOTDIR.
     NotDir,
+    /// A file the caller *may* execute, which the OS refused anyway — bash's
+    /// `executable_file (command) != 0`, the case its ladder keeps going for.
+    /// The payload is the interpreter its `#!` line names, when it has one:
+    /// where the kernel honours such a line, a refusal is usually about the
+    /// interpreter rather than about this file, and only the line says which.
+    /// See [`spawn_error_message`].
+    Executable(Option<Str>),
     /// Not asked, or nothing the host's own error needs correcting by.
     #[default]
     Other,
+}
+
+/// The interpreter a file's `#!` line names, read back off the file to explain
+/// a refusal — bash's `getinterp` on the `sample` it re-reads in `shell_execve`.
+///
+/// A trailing `\r` is rendered `^M`, as bash renders it: a CRLF script names an
+/// interpreter whose last byte is invisible, and the failure is unreadable
+/// without saying so. Measured, bash 5.2.21, with a directory named `adir\r`:
+/// `./cr.sh: ./adir^M: bad interpreter: Permission denied`.
+fn file_interpreter(path: &std::path::Path) -> Option<Str> {
+    let mut head = [0u8; 128];
+    let n = File::open(path).and_then(|mut f| f.read(&mut head)).ok()?;
+    let head = head.get(..n)?;
+    let (mut program, _) = shebang(head)?;
+    if program.last() == Some(&b'\r') {
+        program.pop();
+        program.extend_from_slice(b"^M");
+    }
+    Some(program)
 }
 
 /// Ask the filesystem what the program path a failed spawn named is.
@@ -1363,12 +1466,18 @@ enum SpawnTarget {
 fn spawn_target(cwd: BStr<'_>, word: BStr<'_>, resolved: Option<&std::path::Path>) -> SpawnTarget {
     let path: Str = match resolved {
         Some(p) => bytes::path_to_bytes(p),
-        None if word.contains(&b'/') || word.contains(&b'\\') => exec_path_name(cwd, word),
+        None if word_is_path(word) => exec_path_name(cwd, word),
         None => return SpawnTarget::Other,
     };
-    if let Ok(m) = std::fs::metadata(bytes::bytes_to_path(&path)) {
+    let probe = bytes::bytes_to_path(&path);
+    if let Ok(m) = std::fs::metadata(&probe) {
         return if m.is_dir() {
             SpawnTarget::Dir
+        } else if path_is_executable(&probe) {
+            // Only now is the `#!` line worth reading, and only because the
+            // spawn already failed: on a host that honours one the shell never
+            // looks, and bash likewise re-reads the file only here.
+            SpawnTarget::Executable(file_interpreter(&probe))
         } else {
             SpawnTarget::Other
         };
@@ -1421,13 +1530,37 @@ fn spawn_target(cwd: BStr<'_>, word: BStr<'_>, resolved: Option<&std::path::Path
 ///     required file not found`, 127. The interpreter is not even named: from
 ///     the caller's side the script is what would not run.
 ///   * an interpreter that is there and will not run — `SCRIPT: INTERP: bad
-///     interpreter: REASON`, 126. An `exec` adds a second line to that one, and
-///     bash's reads `SCRIPT: No error`: it reports `errno` having already
-///     cleared it to print the line above. That is an artifact, and `strerror(0)`
-///     is not the same string everywhere — but this whole reading is only
-///     reached where the OS does *not* honour a `#!` line (see
-///     [`shell_script_indirection`]), which is one host, whose wording is
-///     therefore the only one there is to match.
+///     interpreter: REASON`, 126.
+///
+/// Which side read that line is the *host's* business and changes nothing here.
+/// Where the OS does not honour a `#!` line the shell stands in for it, spawns
+/// the interpreter itself and knows its name going in (`interp`); where the OS
+/// does honour it, the kernel's refusal is the only sign anything was wrong and
+/// the line is read back off the file afterwards to explain it
+/// (`SpawnTarget::Executable`). bash is always in the second position and this
+/// is its ladder, from `shell_execve`: a directory first, then a file the caller
+/// may not execute (whose errno stands as it came), then the errors that are not
+/// about the file at all (`E2BIG`, `ENOMEM`), then `ENOENT` — which cannot be
+/// about a file that is right there and executable, so it is the interpreter's —
+/// and only then the file's contents.
+///
+/// `exec` adds a second line to any 126 it did not exit on, and there are two
+/// wordings. The two verdicts bash reaches *by reading the file* — `bad
+/// interpreter` and `cannot execute binary file` — are followed by a bare
+/// `WORD: strerror(0)`, because bash prints an `errno` it has already cleared;
+/// every other refusal is followed by `exec: WORD: cannot execute: REASON`.
+/// Measured, bash 5.2.21 (glibc), where `strerror(0)` is `Success`:
+///
+/// ```text
+/// exec ./elf.bin    D/elf.bin: cannot execute binary file: Exec format error
+///                   D/elf.bin: Success
+/// exec ./isdir.sh   D/isdir.sh: ./adir: bad interpreter: Permission denied
+///                   D/isdir.sh: Success
+/// exec ./adir       D/adir: Is a directory
+///                   exec: D/adir: cannot execute: Is a directory
+/// exec ./nox.sh     D/nox.sh: Permission denied
+///                   exec: D/nox.sh: cannot execute: Permission denied
+/// ```
 ///
 /// The returned lines have no prologue; the caller prepends the one each asks
 /// for.
@@ -1439,8 +1572,30 @@ fn spawn_error_message(
     as_exec: bool,
 ) -> (Vec<SpawnDiag>, i32) {
     use std::io::ErrorKind;
-    let is_path = word.contains(&b'/') || word.contains(&b'\\');
-    if let Some(interp) = interp {
+    let is_path = word_is_path(word);
+    // The two `#!` verdicts, whichever side read the line. `interp` is this
+    // shell having stood in for a host that would not read it; the other is the
+    // line read back off the file to explain a kernel's refusal — which is only
+    // worth consulting for a file the caller may execute and the OS refused for
+    // a reason that is about *running* it. `ENOEXEC` is not such a reason: it
+    // is the fall-through to the script/binary branch, taken further down. Nor
+    // are the two errors bash calls "not involving the path argument".
+    let file_says = match &target {
+        SpawnTarget::Executable(shebang)
+            if !is_exec_format_error(e)
+                && !matches!(
+                    e.kind(),
+                    ErrorKind::ArgumentListTooLong | ErrorKind::OutOfMemory
+                ) =>
+        {
+            Some(shebang.as_deref())
+        }
+        _ => None,
+    };
+    if let Some(shebang) = file_says.or(interp.map(Some)) {
+        // A file that is there and executable cannot itself be what ENOENT is
+        // about; the interpreter its `#!` line named is. bash does not name it
+        // — from the caller's side the script is what would not run.
         if e.kind() == ErrorKind::NotFound {
             return (
                 vec![SpawnDiag::Line(bfmt![
@@ -1450,19 +1605,19 @@ fn spawn_error_message(
                 127,
             );
         }
-        let mut lines = vec![SpawnDiag::Bare(bfmt![
-            word,
-            b": ",
-            interp,
-            b": bad interpreter: ",
-            &io_error_message(e)
-        ])];
-        if as_exec {
-            // bash's stale `errno`, spelled the way the one host that reaches
-            // here spells `strerror(0)`. See the doc comment.
-            lines.push(SpawnDiag::Line(bfmt![word, b": No error"]));
+        if let Some(interp) = shebang {
+            let mut lines = vec![SpawnDiag::Bare(bfmt![
+                word,
+                b": ",
+                interp,
+                b": bad interpreter: ",
+                &io_error_message(e)
+            ])];
+            if as_exec {
+                lines.push(SpawnDiag::Line(bfmt![word, b": ", &strerror_ok()]));
+            }
+            return (lines, 126);
         }
-        return (lines, 126);
     }
     // ENOENT, whether the host said so or the trailing separator did (see
     // [`SpawnTarget`]) — and the only errno bash exits 127 for.
@@ -1486,20 +1641,16 @@ fn spawn_error_message(
     // after the failed `execve` and osh before the spawn. bash words the line
     // against the file rather than against the errno the OS actually gave.
     //
-    // An `exec` adds its own second line, and does so with EACCES: bash
-    // overwrites `errno` before returning its "binary file" verdict, so that
-    // line reads "Permission denied" and says nothing about the format.
+    // An `exec` adds its own second line, and this is one of the two verdicts
+    // bash reaches by *reading the file*, so that line is the cleared-`errno`
+    // one rather than the `cannot execute` form. See the doc comment.
     if !is_dir && target != SpawnTarget::NotDir && is_exec_format_error(e) {
         let mut lines = vec![SpawnDiag::Line(bfmt![
             word,
             b": cannot execute binary file: Exec format error"
         ])];
         if as_exec {
-            lines.push(SpawnDiag::Line(bfmt![
-                b"exec: ",
-                word,
-                b": cannot execute: Permission denied"
-            ]));
+            lines.push(SpawnDiag::Line(bfmt![word, b": ", &strerror_ok()]));
         }
         return (lines, 126);
     }
@@ -1545,7 +1696,7 @@ fn spawn_resolved(
     resolved: Option<&std::path::Path>,
     closed: ClosedStd,
 ) -> std::io::Result<std::process::Child> {
-    if resolved.is_none() && !word.contains(&b'/') && !word.contains(&b'\\') {
+    if resolved.is_none() && !word_is_path(word) {
         return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
     }
     spawn_with_closed_std(pc, closed)
@@ -21022,8 +21173,7 @@ impl Shell {
         // …) instead of reporting "command not found". The cheap function-
         // existence check comes first so the common case never scans `$PATH`
         // twice.
-        if !name.contains(&b'/')
-            && !name.contains(&b'\\')
+        if !word_is_path(&name)
             && self.funcs.contains_key(b"command_not_found_handle".as_slice())
             // Against the same `$PATH` the run itself will use, prefix included:
             // `PATH=dir cmd` must not reach the handler when `dir` holds `cmd`.
@@ -23180,8 +23330,7 @@ impl Shell {
         // describing command is the exception: it asks about a *different*
         // search, so the table has nothing to say about it (measured).
         if temp_path.is_none()
-            && !target.contains(&b'/')
-            && !target.contains(&b'\\')
+            && !word_is_path(target)
             && let Some(ps) = self.hashed_description(target)
         {
             let line = if verbose {
@@ -23332,28 +23481,81 @@ impl Shell {
     }
 
     /// [`Shell::find_in_path`] as `type` and `command -v` ask it: the same
-    /// search, plus `$EXECIGNORE` applied to a word that already spelled a path.
+    /// search, plus `$EXECIGNORE` applied to a word that already spelled a path,
+    /// and the execute bit demanded of one.
     ///
     /// bash reaches that word through `file_status`, which consults
     /// `$EXECIGNORE`, while *running* it goes straight to `shell_execve`, which
     /// does not — so `EXECIGNORE=bin/x` makes `command -v bin/x` say nothing
     /// about a `bin/x` that still runs perfectly well.
+    ///
+    /// `file_status` also answers about *executability*, where running a word
+    /// that spelled a path just hands the file to the OS. So `./x` with the bit
+    /// off is a command that runs (and fails, `Permission denied`) but that
+    /// `type` will not admit exists — measured, bash 5.2.21: `type ./nox.sh`,
+    /// `command -v ./nox.sh`, `type -P ./nox.sh` and `type -a ./nox.sh` are all
+    /// `not found` and status 1 for a mode-0644 `nox.sh`.
+    ///
+    /// Under `set -o posix` the description drops the losing `$PATH` candidate
+    /// too — the file the search settled on having found nothing executable (see
+    /// [`Shell::find_in_path`]). Measured: with `a/only` mode 0644 the sole
+    /// match, default bash says `only is DIR/a/only`, POSIX-mode bash says `not
+    /// found`; *running* `only` is `Permission denied` and 126 either way.
     fn find_in_path_described(
         &mut self,
         name: BStr<'_>,
         temp_path: Option<BStr<'_>>,
     ) -> Option<std::path::PathBuf> {
-        let hit = self.find_in_path(name, temp_path)?;
-        if (name.contains(&b'/') || name.contains(&b'\\'))
-            && self.exec_name_ignored(&bytes::path_to_bytes(&hit))
-        {
-            return None;
+        let hit = if self.shell_option_enabled("posix") {
+            self.find_executable_in_path(name, temp_path)?
+        } else {
+            self.find_in_path(name, temp_path)?
+        };
+        if word_is_path(name) {
+            let bytes = bytes::path_to_bytes(&hit);
+            if self.exec_name_ignored(&bytes) || !path_is_executable(&self.probe_path(&bytes)) {
+                return None;
+            }
         }
         Some(hit)
     }
 
-    /// Search `$PATH` for an executable named `name`. A name containing a slash
-    /// is checked directly. Returns the first matching regular file.
+    /// Search `$PATH` for a command named `name`. A name containing a slash is
+    /// checked directly.
+    ///
+    /// The obvious rule — return the first candidate the shell can execute — is
+    /// only half of bash's. `find_user_command_in_path` also keeps the *first*
+    /// candidate that exists and is not executable (`file_to_lose_p`), and
+    /// answers with that one when the walk ends having found nothing runnable,
+    /// with `errno` set to `EACCES`. So a name matched only by a file whose
+    /// execute bit is off is not "not found" at all: it is that file, and the
+    /// spawn of it is what fails. Measured, bash 5.2.21, `a/only` mode 0644 the
+    /// sole match:
+    ///
+    /// | asked | bash |
+    /// |---|---|
+    /// | `only` | `bash: DIR/a/only: Permission denied`, status 126 |
+    /// | `type only` / `command -v only` / `type -P only` | the path, status 0 |
+    /// | after running it, `hash` | one entry, `DIR/a/only` |
+    /// | `type -a only` | `not found`, status 1 |
+    /// | `hash only` | `hash: only: not found`, status 1, table still empty |
+    /// | `type only` under `set -o posix` | `not found`, status 1 |
+    /// | `command_not_found_handle` | **not** called |
+    ///
+    /// The losing slot is first-come and takes anything `stat` answers for,
+    /// directories included — but a directory cannot *be* the answer, so a name
+    /// whose first match is a directory is not found even when a plain
+    /// unexecutable file of that name follows in a later entry (measured: `both`
+    /// with `a/both/` a directory and `b/both` mode 0644 is `command not
+    /// found`, 127, while the same layout with `b/dx` executable runs `b/dx`).
+    /// A candidate `stat` cannot answer for at all — a dangling symlink — is
+    /// skipped without claiming the slot, and an executable hidden by
+    /// `$EXECIGNORE` is skipped without claiming it either (both measured).
+    ///
+    /// None of this is reachable on the Windows host, where
+    /// [`path_is_executable`] is `is_file()`: every non-directory candidate is
+    /// executable there, so the slot can only ever hold a directory, which is
+    /// then refused.
     ///
     /// `temp_path` is a `PATH=` from the command's assignment prefix; see
     /// [`Shell::search_dirs`].
@@ -23362,7 +23564,27 @@ impl Shell {
         name: BStr<'_>,
         temp_path: Option<BStr<'_>>,
     ) -> Option<std::path::PathBuf> {
-        if name.contains(&b'/') || name.contains(&b'\\') {
+        self.path_search(name, temp_path, PathSearch::Runnable)
+    }
+
+    /// [`Shell::find_in_path`] restricted to files the shell can actually
+    /// execute — the question `hash NAME` and a POSIX-mode `type` ask.
+    fn find_executable_in_path(
+        &mut self,
+        name: BStr<'_>,
+        temp_path: Option<BStr<'_>>,
+    ) -> Option<std::path::PathBuf> {
+        self.path_search(name, temp_path, PathSearch::ExecutableOnly)
+    }
+
+    /// The walk both of the above are: see [`Shell::find_in_path`] for the rule.
+    fn path_search(
+        &mut self,
+        name: BStr<'_>,
+        temp_path: Option<BStr<'_>>,
+        mode: PathSearch,
+    ) -> Option<std::path::PathBuf> {
+        if word_is_path(name) {
             // The word itself is the answer — it already said which file, and
             // bash reports it back unedited (`command -v ./x` is `./x`). Only
             // the *question* is asked of the resolved path.
@@ -23371,20 +23593,36 @@ impl Shell {
                 .is_file()
                 .then(|| bytes::bytes_to_path(name));
         }
+        // The first candidate that exists but cannot be run, kept in case the
+        // walk ends without an executable one. `true` for a directory, which
+        // claims the slot but may not be returned from it.
+        let mut lost: Option<(Str, bool)> = None;
         for dir in self.search_dirs(temp_path) {
             let cand = Self::path_candidate(&dir, name);
-            // bash's PATH search skips files it cannot execute (it probes with
-            // `access(X_OK)`), so a non-executable data file (e.g. a `*.json`
-            // config) sharing a name with a real command in an earlier PATH dir
-            // does not shadow the executable found later. Mirror that: require
-            // the exec bit on unix. On the Windows host executability is by
-            // extension, so an exact `is_file()` match plus the extension probe
-            // below is the closest analogue.
-            // `$EXECIGNORE` is asked last, of the candidate that would otherwise
-            // have won: it makes a file *stop counting as executable*, so the
-            // search goes on to the next directory rather than ending here.
-            if path_is_executable(&self.probe_path(&cand)) && !self.exec_name_ignored(&cand) {
-                return Some(bytes::bytes_to_path(&cand));
+            // `$EXECIGNORE` is asked first, of the candidate itself: a hidden
+            // name is one the walk never saw, so it neither ends the search nor
+            // claims the losing slot below. Measured, bash 5.2.21, with `a/ign`
+            // executable and `b/ign` mode 0644: hiding only `a/ign` answers
+            // `b/ign: Permission denied` and 126, and hiding both answers
+            // `command not found` and 127 — which it could not if `b/ign` were
+            // still eligible to lose.
+            if !self.exec_name_ignored(&cand) {
+                let probe = self.probe_path(&cand);
+                // bash's PATH search skips files it cannot execute (it probes
+                // with `access(X_OK)`), so a non-executable data file (e.g. a
+                // `*.json` config) sharing a name with a real command in an
+                // earlier PATH dir does not shadow the executable found later.
+                // Mirror that: require the exec bit on unix. On the Windows host
+                // executability is by extension, so an exact `is_file()` match
+                // plus the extension probe below is the closest analogue.
+                if path_is_executable(&probe) {
+                    return Some(bytes::bytes_to_path(&cand));
+                }
+                if lost.is_none()
+                    && let Ok(md) = std::fs::metadata(&probe)
+                {
+                    lost = Some((cand.clone(), md.is_dir()));
+                }
             }
             // Host convenience: try common Windows executable extensions.
             #[cfg(windows)]
@@ -23395,7 +23633,12 @@ impl Shell {
                 }
             }
         }
-        None
+        match lost {
+            Some((cand, false)) if mode == PathSearch::Runnable => {
+                Some(bytes::bytes_to_path(&cand))
+            }
+            _ => None,
+        }
     }
 
     /// Search `$PATH` for a *readable* file named `name`, which is the lookup
@@ -23477,7 +23720,7 @@ impl Shell {
     /// Returns `None` when the name cannot be resolved — the caller then falls
     /// back to letting the OS attempt the spawn (preserving prior behavior).
     fn resolve_external(&mut self, name: BStr<'_>) -> Option<std::path::PathBuf> {
-        if name.contains(&b'/') || name.contains(&b'\\') {
+        if word_is_path(name) {
             return self.find_in_path(name, None);
         }
         if let Some((path, hits)) = self.cmd_hash.get_mut(name) {
@@ -23550,8 +23793,7 @@ impl Shell {
         if let Some(p) = Self::temp_path(assigns) {
             return self.find_in_path(name, Some(p));
         }
-        if !name.contains(&b'/')
-            && !name.contains(&b'\\')
+        if !word_is_path(name)
             && let Some((path, _)) = self.cmd_hash.get(name)
         {
             return Some(path.clone());
@@ -23567,10 +23809,17 @@ impl Shell {
     /// search — `$EXECIGNORE` included, since `type -a` must agree with what
     /// would actually run, so the first entry it prints is by construction what
     /// [`Shell::find_in_path_described`] returns.
+    ///
+    /// Executables *only*: unlike a command word's search this keeps no losing
+    /// candidate, so a name matched solely by a file the shell cannot run is
+    /// absent here even while plain `type` names it and running it reaches it.
+    /// Measured, bash 5.2.21, `a/only` mode 0644 the sole match: `type -a only`
+    /// is `not found` and status 1 — and stays so after the name has been
+    /// hashed by a run.
     fn find_all_in_path(&mut self, name: BStr<'_>) -> Vec<std::path::PathBuf> {
         let mut out: Vec<std::path::PathBuf> = Vec::new();
-        if name.contains(&b'/') || name.contains(&b'\\') {
-            if self.probe_path(name).is_file() && !self.exec_name_ignored(name) {
+        if word_is_path(name) {
+            if path_is_executable(&self.probe_path(name)) && !self.exec_name_ignored(name) {
                 out.push(bytes::bytes_to_path(name));
             }
             return out;
@@ -23627,11 +23876,18 @@ impl Shell {
         // `sh_makepath (…, MP_RMDOT)` drops it. A bare word is reported as the
         // file `$PATH` found, and one that found nothing was never a path at
         // all, so it keeps its spelling.
+        //
+        // An ordinary command names the `$PATH` hit too, just without the
+        // absolutising — bash hands `shell_execve` whatever the search built,
+        // and reports the failure against that. It is the *candidate*, not a
+        // tidied form of it: measured, bash 5.2.21, with a mode-0644 `only`
+        // reached through `PATH=DIR/a` the message is `DIR/a/only: Permission
+        // denied`, and through an empty `$PATH` element it is `./only`, not
+        // `only` and not the absolute path.
         let reported: Str = match (&resolved, xopts) {
-            (_, Some(_)) if argv[0].contains(&b'/') || argv[0].contains(&b'\\') => {
-                exec_path_name(&self.cwd, &argv[0])
-            }
+            (_, Some(_)) if word_is_path(&argv[0]) => exec_path_name(&self.cwd, &argv[0]),
             (Some(p), Some(_)) => exec_path_name(&self.cwd, &shell_path(p)),
+            (Some(p), None) if !word_is_path(&argv[0]) => shell_path(p),
             _ => argv[0].clone(),
         };
         let (mut cmd, interp) =
@@ -38395,19 +38651,46 @@ impl Shell {
         bytes::bytes_to_path(&self.resolve_str(path))
     }
 
-    /// The program path to hand to `Command::new`.
+    /// The program path to hand to `Command::new` for a word nothing was found
+    /// for — the word itself, since only the OS can now say why it will not run.
     ///
-    /// A name containing a separator is a path and resolves against this
-    /// shell's directory; a bare name is left alone so the OS runs its own
-    /// `$PATH` search. Resolving here rather than relying on `Command::current_dir`
-    /// is required on the Windows host, where `CreateProcess` looks a relative
-    /// application name up against the *calling* process's directory rather
-    /// than the one handed to the child.
+    /// See [`Shell::program_image`] for why the *host* is the only reason a
+    /// relative one is ever rewritten.
     fn resolve_program(&self, name: BStr<'_>) -> Str {
-        if name.contains(&b'/') || name.contains(&b'\\') {
+        if cfg!(windows) && word_is_path(name) {
             self.resolve_str(name)
         } else {
             name.to_vec()
+        }
+    }
+
+    /// The image path to hand `Command::new` for a file the lookup did find,
+    /// spelled the way the *child* should see it.
+    ///
+    /// bash `execve`s exactly the string its search produced: a relative `$PATH`
+    /// entry yields a relative image path, and a word that spelled a path goes
+    /// over as typed. That string is not private to the shell — the kernel hands
+    /// it to a `#!` interpreter as that interpreter's first argument — so
+    /// absolutising it rewrites an argument the script can see. Measured, bash
+    /// 5.2.21: `./show.sh` with `#!./pf.exe [%s]\n` prints `[./show.sh]`, where
+    /// osh printed `[/tmp/…/show.sh]`.
+    ///
+    /// Nothing is lost by leaving it relative, because the child is given
+    /// [`Shell::cwd`] as its working directory (every caller of
+    /// [`Shell::external_command`] sets it) and resolves the path against the
+    /// same directory the shell resolved it against.
+    ///
+    /// The Windows development host cannot be left to do that: `CreateProcess`
+    /// looks a relative application name up against the *calling* process's
+    /// directory rather than the one handed to the child, so there the path must
+    /// be resolved before the spawn. What the child then sees of it is that
+    /// host's business regardless — there is no argv to hand over and the
+    /// runtime underneath rebuilds one (see [`Shell::push_child_args`]).
+    fn program_image(&self, path: BStr<'_>) -> Str {
+        if cfg!(windows) {
+            self.host_path(path)
+        } else {
+            map_device_path(path).to_vec()
         }
     }
 
@@ -38451,7 +38734,7 @@ impl Shell {
             .and_then(shell_script_indirection);
         let (program, args) = match (&indirect, resolved) {
             (Some(via), Some(path)) => {
-                let script = if word.contains(&b'/') || word.contains(&b'\\') {
+                let script = if word_is_path(word) {
                     word.to_vec()
                 } else {
                     shell_path(path)
@@ -38474,14 +38757,15 @@ impl Shell {
                 (program, a)
             }
             _ => (
-                // A `$PATH` hit is spelled the way `$PATH` spelled it — possibly
-                // relative to the *shell's* directory, which is not the
-                // process's — so the image to launch is that hit resolved. A
-                // word nothing was found for goes over as typed, for the OS to
-                // look up ([`Shell::resolve_program`]).
+                // A `$PATH` hit is spelled the way `$PATH` spelled it, and is
+                // launched in that spelling — the child is given the shell's
+                // directory to resolve it against, and a `#!` interpreter is
+                // handed the spelling itself ([`Shell::program_image`]). A word
+                // nothing was found for goes over as typed, for the OS to look
+                // up ([`Shell::resolve_program`]).
                 resolved.map_or_else(
                     || self.resolve_program(word),
-                    |p| self.host_path(&bytes::path_to_bytes(p)),
+                    |p| self.program_image(&bytes::path_to_bytes(p)),
                 ),
                 args.to_vec(),
             ),
@@ -38736,7 +39020,7 @@ impl Shell {
     /// variable in bash — `export _` does not make it one — which is also why an
     /// imported `_` must be stripped of its exported mark at startup.
     fn child_underscore(prog: ChildProgram<'_>) -> Str {
-        if prog.word.contains(&b'/') || prog.word.contains(&b'\\') {
+        if word_is_path(prog.word) {
             return prog.word.to_vec();
         }
         prog.resolved.map_or_else(|| prog.word.to_vec(), shell_path)
@@ -43166,7 +43450,7 @@ impl Shell {
             // it — and skips it silently for *every* remaining mode, including
             // `-d` and `-p`. (`-l` with names is not a listing at all: the
             // names fall through to the search below, as in bash.)
-            if name.contains(&b'/') || name.contains(&b'\\') {
+            if word_is_path(name) {
                 continue;
             }
             if delete {
@@ -43187,8 +43471,15 @@ impl Shell {
                 continue;
             }
             // Bare name: forget any old entry and force a fresh `$PATH` search.
+            //
+            // Executables only, unlike the search a command word gets: `hash
+            // NAME` refuses a name matched solely by a file it could not run,
+            // even though *running* that name resolves to the file and hashes
+            // it. Measured, bash 5.2.21, `a/only` mode 0644 the sole match:
+            // `hash only` is `hash: only: not found` and 1 with the table still
+            // empty, where `only; hash` lists `DIR/a/only`.
             self.cmd_hash.remove(name.as_slice());
-            match self.find_in_path(name, None) {
+            match self.find_executable_in_path(name, None) {
                 Some(path) => self.hash_remember(name.clone(), path, 0),
                 None => {
                     self.berrln(&bfmt![self.err_prefix(), b"hash: ", name, b": not found"]);
@@ -54093,7 +54384,7 @@ impl Shell {
         // not conditioned on the shell being non-interactive.
         //
         // A name with a separator was never a search, in either mode.
-        let resolved: Str = if path.contains(&b'/') || path.contains(&b'\\') {
+        let resolved: Str = if word_is_path(path) {
             path.clone()
         } else if let Some(hit) = self.find_source_in_path(path) {
             // The hit, not the operand: `$BASH_SOURCE` and `caller` report the
@@ -55651,10 +55942,23 @@ impl Shell {
                 || mode_a
                 || mode_t
                 || (alias.is_none() && !is_kw && !is_fn && !is_bi);
-            let files = if need_files {
+            // `-a` asks a different search from every other form: it lists what
+            // *would run*, so it sees executables and nothing else, while the
+            // single-answer forms ask the search a command word asks and so also
+            // see a file the shell could not execute — bash's `file_to_lose_p`,
+            // described at [`Shell::find_in_path`]. Measured, bash 5.2.21, with
+            // `a/only` mode 0644 the sole match: `type only`, `type -p only`,
+            // `type -P only` and `type -t only` answer `a/only`/`a/only`/
+            // `a/only`/`file` and status 0, while `type -a only` is
+            // `type: only: not found` and status 1.
+            let files = if !need_files {
+                Vec::new()
+            } else if mode_a {
                 self.find_all_in_path(name)
             } else {
-                Vec::new()
+                self.find_in_path_described(name, None)
+                    .into_iter()
+                    .collect()
             };
             // A command remembered in the hash table counts as found even when a
             // fresh PATH search comes up empty — but only in the forms that
@@ -85056,9 +85360,12 @@ st=1
 
     #[test]
     fn path_search_skips_non_executable_files() {
-        // A PATH search must resolve to a genuine executable, mirroring bash's
+        // A PATH search steps *past* a file it cannot execute, mirroring bash's
         // `access(X_OK)` probe: a non-executable data file sharing a command's
-        // name must not be treated as that command.
+        // name must not shadow the real command in a later entry. What it does
+        // when nothing executable turns up at all is the separate question
+        // `a_path_search_that_found_only_an_unexecutable_file_answers_with_it`
+        // asks.
         use std::io::Write as _;
         let dir = ScratchDir::new("path_test");
 
@@ -85087,8 +85394,8 @@ st=1
         );
 
         // A non-executable, plain-named data file. On Unix the missing exec bit
-        // must make the search skip it (returning None); on Windows executability
-        // is by extension, so this assertion is Unix-specific.
+        // must keep the search going; on Windows executability is by extension,
+        // so this half is Unix-specific.
         #[cfg(not(windows))]
         {
             let data = dir.join("mydata");
@@ -85099,10 +85406,104 @@ st=1
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o644));
             assert!(
-                sh.find_in_path(b"mydata", None).is_none(),
-                "non-executable file was resolved as a command"
+                sh.find_executable_in_path(b"mydata", None).is_none(),
+                "non-executable file was resolved as an executable"
+            );
+            // …and, put in front of a real one, it does not shadow it: the walk
+            // goes on to the later entry. Measured, bash 5.2.21: with `a/foo`
+            // mode 0644 and `b/foo` executable, `PATH=a:b foo` runs b's.
+            let early = ScratchDir::new("path_test_early");
+            {
+                let mut f = std::fs::File::create(early.join("mytool")).expect("create shadow");
+                let _ = f.write_all(b"x");
+            }
+            let _ = std::fs::set_permissions(
+                early.join("mytool"),
+                std::fs::Permissions::from_mode(0o644),
+            );
+            sh.vars.insert(
+                "PATH".to_string(),
+                bfmt![
+                    bytes::path_to_bytes(early.path()),
+                    b":",
+                    bytes::path_to_bytes(dir.path())
+                ],
+            );
+            assert_eq!(
+                sh.find_in_path(b"mytool", None),
+                Some(exe.clone()),
+                "a non-executable earlier match shadowed the executable one"
             );
         }
+    }
+
+    /// A `$PATH` walk that found nothing it could execute answers with the
+    /// *first* file it could not, rather than with "not found" — bash's
+    /// `file_to_lose_p`. Only some of the callers see that answer; the table in
+    /// [`Shell::find_in_path`] records which, all measured against bash 5.2.21.
+    ///
+    /// A unit test rather than a corpus case for the parts that need a
+    /// *directory* standing where the file should be, which is awkward to set up
+    /// in a script and easy to state here.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_path_search_that_found_only_an_unexecutable_file_answers_with_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = ScratchDir::new("path_lose");
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::create_dir_all(&a).expect("mkdir a");
+        std::fs::create_dir_all(&b).expect("mkdir b");
+        let plain = |p: &std::path::Path| {
+            std::fs::write(p, b"echo hi\n").expect("write");
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644)).expect("chmod -x");
+        };
+        // `only`: unexecutable in both entries — the *first* is the answer.
+        plain(&a.join("only"));
+        plain(&b.join("only"));
+        // `both`: a directory first, an unexecutable file second. The directory
+        // claims the losing slot and cannot be returned from it, so the name is
+        // not found at all (measured).
+        std::fs::create_dir_all(a.join("both")).expect("mkdir a/both");
+        plain(&b.join("both"));
+        // `dx`: a directory first, a real executable second — still found.
+        std::fs::create_dir_all(a.join("dx")).expect("mkdir a/dx");
+        std::fs::write(b.join("dx"), b"echo hi\n").expect("write dx");
+        std::fs::set_permissions(b.join("dx"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x");
+
+        let mut sh = new_shell();
+        sh.vars.insert(
+            "PATH".to_string(),
+            bfmt![bytes::path_to_bytes(&a), b":", bytes::path_to_bytes(&b)],
+        );
+        assert_eq!(sh.find_in_path(b"only", None), Some(a.join("only")));
+        assert_eq!(sh.find_in_path(b"both", None), None);
+        assert_eq!(sh.find_in_path(b"dx", None), Some(b.join("dx")));
+        // The executable-only search — `hash NAME`, POSIX-mode `type` — keeps
+        // no losing candidate.
+        assert_eq!(sh.find_executable_in_path(b"only", None), None);
+        assert_eq!(sh.find_executable_in_path(b"dx", None), Some(b.join("dx")));
+        // Nor does `type -a`, which lists what would run and nothing else.
+        assert!(sh.find_all_in_path(b"only").is_empty());
+        assert_eq!(sh.find_all_in_path(b"dx"), vec![b.join("dx")]);
+        // Plain `type` does see it, and stops seeing it under `set -o posix`.
+        assert_eq!(
+            sh.find_in_path_described(b"only", None),
+            Some(a.join("only"))
+        );
+        // (Posix mode *is* `$POSIXLY_CORRECT`; see `shell_option_enabled`.)
+        sh.vars.insert("POSIXLY_CORRECT".to_string(), b"y".to_vec());
+        assert_eq!(sh.find_in_path_described(b"only", None), None);
+        sh.vars.remove("POSIXLY_CORRECT");
+        // A word that already spelled a path is described only when it is
+        // executable, though running it still reaches the file.
+        let word = bytes::path_to_bytes(&a.join("only"));
+        assert_eq!(sh.find_in_path_described(&word, None), None);
+        assert!(sh.find_all_in_path(&word).is_empty());
+        assert_eq!(
+            sh.find_in_path(&word, None),
+            Some(bytes::bytes_to_path(&word))
+        );
     }
 
     /// What `.`/`source` look for on `$PATH` is a *readable* file, not an
@@ -85140,9 +85541,12 @@ st=1
         assert!(sh.find_source_in_path(b"only1.sh").is_some());
         assert!(sh.find_source_in_path(b"nosuch.sh").is_none());
         // A command lookup asks a different question of the same directories:
-        // these are readable, not executable, so it turns nothing up.
+        // these are readable, not executable, so nothing here can be *run*.
+        // What a command word's search does with such a file — settle on it and
+        // let the spawn fail — is
+        // `a_path_search_that_found_only_an_unexecutable_file_answers_with_it`.
         #[cfg(not(windows))]
-        assert!(sh.find_in_path(b"only1.sh", None).is_none());
+        assert!(sh.find_executable_in_path(b"only1.sh", None).is_none());
     }
 
     /// The directories a `$PATH` search visits: each entry exactly as written,
@@ -94345,7 +94749,24 @@ st=1
         assert_eq!(t(b"./reg/"), SpawnTarget::NotDir);
         // Without one the host's own error is left to speak.
         assert_eq!(t(b"./nosuch"), SpawnTarget::Other);
-        assert_eq!(t(b"./reg"), SpawnTarget::Other);
+        // A file the caller may run is named as such, so that a refusal can be
+        // worded off the file rather than off the errno. `reg` was written
+        // without an execute bit, which only exists to be missing off Windows.
+        let plain = if cfg!(windows) {
+            SpawnTarget::Executable(None)
+        } else {
+            SpawnTarget::Other
+        };
+        assert_eq!(t(b"./reg"), plain);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir.path.join("reg"), std::fs::Permissions::from_mode(0o755))
+                .expect("chmod +x");
+            assert_eq!(t(b"./reg"), SpawnTarget::Executable(None));
+            std::fs::set_permissions(dir.path.join("reg"), std::fs::Permissions::from_mode(0o644))
+                .expect("chmod -x");
+        }
         // A word with no separator in it named no file to ask about.
         assert_eq!(t(b"sub"), SpawnTarget::Other);
         assert_eq!(t(b""), SpawnTarget::Other);
@@ -94401,8 +94822,8 @@ st=1
         assert_eq!(
             diag_text(&as_exec),
             [
-                "!/a/s.sh: /tmp: bad interpreter: Permission denied",
-                "/a/s.sh: No error"
+                "!/a/s.sh: /tmp: bad interpreter: Permission denied".to_string(),
+                format!("/a/s.sh: {}", strerror_ok()),
             ]
         );
         assert_eq!(as_exec.1, 126);
@@ -94419,6 +94840,87 @@ st=1
             ["/a/s.sh: cannot execute: required file not found"]
         );
         assert_eq!(miss_exec.1, 127);
+    }
+
+    /// The same two verdicts reached from the other side: where the OS *does*
+    /// honour a `#!` line the shell never spawns the interpreter, so the only
+    /// sign anything was wrong is the kernel's refusal of the script — and the
+    /// line is read back off the file to explain it. bash is always in this
+    /// position, and these are its answers, measured against 5.2.21 (glibc).
+    #[test]
+    fn a_kernel_refusing_a_script_is_read_off_the_file_not_the_errno() {
+        use std::io::{Error, ErrorKind};
+        let exec = |i: Option<&[u8]>| SpawnTarget::Executable(i.map(<[u8]>::to_vec));
+        let call = |t: SpawnTarget, e: ErrorKind, as_exec: bool| {
+            spawn_error_message(b"./s.sh", None, &Error::from(e), t, as_exec)
+        };
+        // ENOENT cannot be about a file that is right there and executable, so
+        // it is the interpreter's — and bash does not name it.
+        let miss = call(exec(Some(b"./nope")), ErrorKind::NotFound, false);
+        assert_eq!(
+            diag_text(&miss),
+            ["./s.sh: cannot execute: required file not found"]
+        );
+        assert_eq!(miss.1, 127);
+        // …including for an executable with no `#!` at all, which is the shape
+        // a dynamically linked binary missing its loader takes.
+        assert_eq!(
+            diag_text(&call(exec(None), ErrorKind::NotFound, false)),
+            ["./s.sh: cannot execute: required file not found"]
+        );
+        // Anything else names the interpreter, under the prologue-less printer.
+        let bad = call(exec(Some(b"./adir")), ErrorKind::PermissionDenied, false);
+        assert_eq!(
+            diag_text(&bad),
+            ["!./s.sh: ./adir: bad interpreter: Permission denied"]
+        );
+        assert_eq!(bad.1, 126);
+        // `exec` follows it with the `errno` bash has already cleared.
+        let as_exec = call(exec(Some(b"./adir")), ErrorKind::PermissionDenied, true);
+        assert_eq!(
+            diag_text(&as_exec),
+            [
+                "!./s.sh: ./adir: bad interpreter: Permission denied".to_string(),
+                format!("./s.sh: {}", strerror_ok()),
+            ]
+        );
+        // With no `#!` line to name, the errno stands as it came.
+        let plain = call(exec(None), ErrorKind::PermissionDenied, false);
+        assert_eq!(diag_text(&plain), ["./s.sh: Permission denied"]);
+        assert_eq!(plain.1, 126);
+        // And a file the caller may *not* execute is not on this ladder at all:
+        // bash stops one rung above it, at `executable_file (command) == 0`.
+        let nox = call(SpawnTarget::Other, ErrorKind::PermissionDenied, false);
+        assert_eq!(diag_text(&nox), ["./s.sh: Permission denied"]);
+        let nox_miss = call(SpawnTarget::Other, ErrorKind::NotFound, false);
+        assert_eq!(diag_text(&nox_miss), ["./s.sh: No such file or directory"]);
+        assert_eq!(nox_miss.1, 127);
+    }
+
+    /// A `#!` interpreter read back off a file, for a message about it.
+    #[test]
+    fn a_files_interpreter_is_read_with_a_carriage_return_made_visible() {
+        let dir = ScratchDir::new("file_interp");
+        let w = |name: &str, body: &[u8]| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).expect("write probe file");
+            p
+        };
+        assert_eq!(
+            file_interpreter(&w("a.sh", b"#!/bin/awk -f\nBODY\n")).as_deref(),
+            Some(b"/bin/awk".as_slice())
+        );
+        // A CRLF script names an interpreter whose last byte is invisible, so
+        // bash spells it out. Measured, bash 5.2.21, with a directory `adir\r`:
+        // `./cr.sh: ./adir^M: bad interpreter: Permission denied`.
+        assert_eq!(
+            file_interpreter(&w("cr.sh", b"#!./adir\r\nBODY\n")).as_deref(),
+            Some(b"./adir^M".as_slice())
+        );
+        // No line, or a line naming nothing, is not an interpreter.
+        assert_eq!(file_interpreter(&w("n.sh", b"echo hi\n")), None);
+        assert_eq!(file_interpreter(&w("e.sh", b"#!\necho hi\n")), None);
+        assert_eq!(file_interpreter(&dir.join("absent")), None);
     }
 
     #[test]
@@ -94472,7 +94974,7 @@ st=1
         // Reaching `spawn_error_message` with ENOEXEC means the file is binary:
         // text is handed to this shell before the spawn instead. bash words the
         // line against the file, not the errno the OS gave, and `exec` adds a
-        // second line about EACCES — see the doc comment for why.
+        // bare second line naming no error at all — see the doc comment for why.
         let e = std::io::Error::from_raw_os_error(if cfg!(windows) { 193 } else { 8 });
         let text = |m: &(Vec<SpawnDiag>, i32)| diag_text(m);
         let plain = spawn_error_message(b"./bin.elf", None, &e, SpawnTarget::Other, false);
@@ -94485,8 +94987,8 @@ st=1
         assert_eq!(
             text(&ex),
             [
-                "/a/bin.elf: cannot execute binary file: Exec format error",
-                "exec: /a/bin.elf: cannot execute: Permission denied",
+                "/a/bin.elf: cannot execute binary file: Exec format error".to_string(),
+                format!("/a/bin.elf: {}", strerror_ok()),
             ]
         );
         assert_eq!(ex.1, 126);
@@ -94511,9 +95013,18 @@ st=1
         // is the OS's business wherever the OS honours the line and this
         // shell's where it does not — see [`shell_script_indirection`].
         let d = ScratchDir::new("osh_shbang");
+        // Every probe below is marked executable, because the question this
+        // function answers only arises for a file the caller may run at all —
+        // see the no-`+x` case at the end.
         let write = |name: &str, body: &[u8]| {
             let p = d.join(name);
             std::fs::write(&p, body).expect("write probe file");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod +x probe file");
+            }
             p
         };
         let me = own_binary().expect("current_exe");
@@ -94570,6 +95081,25 @@ st=1
         // A file that is not there at all is nobody's script; the caller lets
         // the OS report it.
         assert_eq!(shell_script_indirection(&d.join("nosuch")), None);
+        // Nor is one the caller may not execute. `execve` refuses it before it
+        // ever reads the contents, so the `ENOEXEC` this fallback exists to
+        // handle is an answer such a file can never give — measured, bash
+        // 5.2.21: `./nox.sh` on a `chmod -x` text file is `Permission denied`
+        // and 126, never `hi`. Returning `None` is what produces that: the OS
+        // refuses the spawn and [`spawn_error_message`] words the refusal.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let p = write("nox.sh", b"echo hi\n");
+            assert_eq!(
+                shell_script_indirection(&p),
+                Some(Interposed::Shell(me.clone())),
+                "the same file with the bit is this shell's"
+            );
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644))
+                .expect("chmod -x probe file");
+            assert_eq!(shell_script_indirection(&p), None);
+        }
         // On the Windows host a batch file is text the OS itself runs.
         #[cfg(windows)]
         {

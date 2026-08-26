@@ -80600,7 +80600,43 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **282 of 334 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **240 of 334 remain**
+
+> **Burn-down log.** 2026-08-25 (second batch): `cmd_monitors` (13),
+> `cmd_userns` (10), `cmd_reslimit` (10) and `cmd_splitview` (9) cleared —
+> 42 sites, four more ledger lines deleted, 282 → 240 across 114 → 110
+> functions. Pinned by `kshell::self_test` rung 66, each refusal paired with a
+> control running the same command with a readable operand.
+>
+> These four were picked for one property the first batch did not have: their
+> defaults are not merely wrong, they are **inverted**.
+>
+> * `reslimit` documents `0` as *unlimited*, so `.unwrap_or(0)` answered a
+>   mistyped memory/CPU/IO/process limit by removing the limit entirely.
+>   `reslimit setmem 5 abc` asked for a cap and got none, and said `Memory
+>   limits set for group 5`.
+> * `userns uidmap <ns> <inner> <outer> <count>` mapped a mistyped `outer` to
+>   `0` — which is **root's UID in the parent namespace**. The one mapping that
+>   must never be produced by accident was the one an unreadable word produced,
+>   and it printed `Added UID mapping`.
+> * `monitors add` defaulted to `1920x1080@60`: a guess plausible enough that
+>   the wrong monitor looked like the right one.
+> * `splitview orient <id> <h|v>` was `if parts[2] == "v" { V } else { H }`, so
+>   the spelled-out `vertical` — the form a reader would expect to work —
+>   silently meant *horizontal*.
+>
+> Three defects outside the counted shape were found in the same read and fixed
+> with it, because each is the same rule in a different disguise:
+> `reslimit setio … lwo` tested `== "low"` and so made every other spelling
+> mean "not low priority"; `splitview add <id> <win>` used
+> `and_then(parse().ok())`, collapsing *no window named* and *unreadable
+> window* into one `None`, so a typo added an empty pane; and `monitors add`
+> with too few words printed its usage and exited **0**.
+>
+> One helper was added: `required_i32`, for `monitors pos`. A monitor position
+> is signed — the desktop origin is the primary display, so a screen to its
+> left has negative `x` — and reusing `required_u32` would have refused exactly
+> the coordinates that are correct. Rung 66 asserts the negative case.
 
 > **Burn-down log.** 2026-08-25: `cmd_installer` (18), `cmd_fstune` (17),
 > `cmd_certmgr` (10), `cmd_fontmgr` (6) and one stray `<top>` site cleared

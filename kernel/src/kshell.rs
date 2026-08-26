@@ -15856,6 +15856,208 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 66: a limit, a coordinate and a mapping are refused, not guessed"
+    );
+    // The same rule as rung 65, in the four commands where guessing was most
+    // expensive. What separates these from `fstune`/`fontmgr` is that their
+    // defaults are not merely wrong but *inverted*: `reslimit` documents `0` as
+    // "unlimited", so `.unwrap_or(0)` answered a mistyped limit by removing the
+    // limit; `userns` maps to UID `0`, which is root in the parent namespace,
+    // so a mistyped `outer` produced the one mapping that must never happen.
+    // Both printed a success line and exited 0.
+    //
+    // Each refusal below is paired with a control that runs the *same* command
+    // with a readable operand, asserting the refusal text is absent. Without
+    // the control, a rung like this also passes when the command has been
+    // broken outright -- which is the failure mode a checker cannot see.
+    {
+        // `0` here means "no memory limit at all", so this is the sharpest
+        // inversion in the family: the operator asked for a cap and got none.
+        let out = capture_command("reslimit setmem 999 abc");
+        assert_output_contains(
+            "reslimit refuses a memory limit it cannot read",
+            &out,
+            b"is not a size in MiB",
+        );
+        assert_eq!(last_exit(), 1, "reslimit setmem: an unreadable size errors");
+        assert_output_lacks(
+            "and does not also claim to have set the limits",
+            &out,
+            b"Memory limits set",
+        );
+
+        // The control: a readable limit gets past the parse. Group 1 may or may
+        // not exist, so the assertion is on the *diagnosis*, not the exit code
+        // -- what must be true is that the refusal above is not this line's
+        // reason for whatever it does.
+        let out = capture_command("reslimit setmem 999 64");
+        assert_output_lacks(
+            "a readable memory limit is not refused as unreadable",
+            &out,
+            b"is not a size in MiB",
+        );
+
+        // The optional soft limit must stay optional: refusing the typo is only
+        // correct if omitting the word still means "use the default".
+        let out = capture_command("reslimit setmem 999 64 zz");
+        assert_output_contains(
+            "reslimit refuses an unreadable soft limit",
+            &out,
+            b"is not a size in MiB",
+        );
+        assert_eq!(last_exit(), 1, "reslimit setmem: soft limit is checked too");
+
+        // `low` is the only word this position takes, and `== "low"` made every
+        // other spelling mean "not low priority" -- the opposite request.
+        let out = capture_command("reslimit setio 999 10 10 lwo");
+        assert_output_contains(
+            "reslimit refuses a word that is not `low'",
+            &out,
+            b"is not `low'",
+        );
+        assert_eq!(last_exit(), 1, "reslimit setio: a stray word is an error");
+
+        let out = capture_command("reslimit setio 999 10 10 low");
+        assert_output_lacks(
+            "and `low' itself still means low priority",
+            &out,
+            b"is not `low'",
+        );
+
+        // The privilege case. A mistyped `outer` became 0 = root's UID in the
+        // parent namespace, and `userns` reported the mapping as added.
+        let out = capture_command("userns uidmap 999 0 abc 100");
+        assert_output_contains(
+            "userns refuses an outer UID it cannot read",
+            &out,
+            b"is not a UID",
+        );
+        assert_eq!(last_exit(), 1, "userns uidmap: an unreadable UID errors");
+        assert_output_lacks(
+            "and does not also claim to have added the mapping",
+            &out,
+            b"Added UID mapping",
+        );
+
+        let out = capture_command("userns uidmap 999 0 100000 100");
+        assert_output_lacks(
+            "a readable outer UID is not refused as unreadable",
+            &out,
+            b"is not a UID",
+        );
+
+        // A monitor position is signed: the desktop origin is the primary
+        // display, so a screen to its left has a negative `x`. Parsing this as
+        // `u32` would refuse exactly the coordinates that are correct, which is
+        // why `required_i32` exists rather than reusing `required_u32`.
+        let out = capture_command("monitors pos 999 -1920 0");
+        assert_output_lacks(
+            "a negative monitor coordinate is a coordinate",
+            &out,
+            b"is not a coordinate",
+        );
+
+        let out = capture_command("monitors pos 999 -19o0 0");
+        assert_output_contains(
+            "monitors refuses a coordinate it cannot read",
+            &out,
+            b"is not a coordinate",
+        );
+        assert_eq!(last_exit(), 1, "monitors pos: an unreadable x is an error");
+
+        // `_ => Hdmi` and `_ => Normal` are the enum half of the same rule: a
+        // misspelling produced a *plausible* setting rather than a complaint.
+        // Neither reaches `monitors` state, so no display is created here.
+        let out = capture_command("monitors add zz zznosuch OUT-1 1920 1080 60");
+        assert_output_contains(
+            "monitors refuses a connector it does not know",
+            &out,
+            b"is not a connector",
+        );
+        assert_eq!(last_exit(), 1, "monitors add: an unknown connector errors");
+        assert_output_lacks(
+            "and does not also claim to have added a monitor",
+            &out,
+            b"Added monitor",
+        );
+
+        // The old default width/height/refresh were 1920x1080@60 -- a monitor
+        // so ordinary that the wrong one looked like the right one.
+        let out = capture_command("monitors add zz hdmi OUT-1 19o0 1080 60");
+        assert_output_contains(
+            "monitors refuses a width it cannot read",
+            &out,
+            b"is not a width in pixels",
+        );
+        assert_eq!(last_exit(), 1, "monitors add: an unreadable width errors");
+
+        // `monitors add` with too few words printed its usage and exited 0,
+        // so a script could not tell a complaint from a completed request.
+        let out = capture_command("monitors add zz");
+        assert_output_contains(
+            "monitors add prints its usage",
+            &out,
+            b"Usage: monitors add",
+        );
+        assert_eq!(last_exit(), 1, "monitors add: a short line is an error");
+
+        let out = capture_command("monitors rotate 999 upside-down");
+        assert_output_contains(
+            "monitors refuses a rotation it does not know",
+            &out,
+            b"is not a rotation",
+        );
+        assert_eq!(
+            last_exit(),
+            1,
+            "monitors rotate: an unknown rotation errors"
+        );
+
+        let out = capture_command("monitors rotate 999 inverted");
+        assert_output_lacks(
+            "and a rotation it does know is still accepted",
+            &out,
+            b"is not a rotation",
+        );
+
+        // `if parts[2] == "v" { V } else { H }`: every word that was not `v`
+        // meant horizontal, so the spelled-out `vertical` silently did the
+        // opposite of what it says. The fix accepts both spellings of both.
+        let out = capture_command("splitview orient 999 zz");
+        assert_output_contains(
+            "splitview refuses an orientation it does not know",
+            &out,
+            b"is not `h' or `v'",
+        );
+        assert_eq!(last_exit(), 1, "splitview orient: an unknown word errors");
+
+        let out = capture_command("splitview orient 999 vertical");
+        assert_output_lacks(
+            "and `vertical' now means vertical rather than horizontal",
+            &out,
+            b"is not `h' or `v'",
+        );
+
+        // `parts.get(2).and_then(parse().ok())` gave `None` for both "no window
+        // was named" and "the name is unreadable", so a typo added an empty
+        // pane. Omitted must still mean omitted -- that is the control.
+        let out = capture_command("splitview add 999 abc");
+        assert_output_contains(
+            "splitview refuses a window id it cannot read",
+            &out,
+            b"is not a window ID",
+        );
+        assert_eq!(last_exit(), 1, "splitview add: an unreadable window errors");
+
+        let out = capture_command("splitview add 999");
+        assert_output_lacks(
+            "and naming no window at all is still not a parse failure",
+            &out,
+            b"is not a window ID",
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -40363,6 +40565,70 @@ fn optional_u32(
     Some(v)
 }
 
+/// The [`required_u32`] rule for a 64-bit operand.
+///
+/// Separate from `required_u32` only because kshell has no generic numeric
+/// parse helper and a `T: FromStr` bound would pull `core::str::FromStr` into a
+/// signature that every call site would then have to name.
+fn required_u64(parts: &[&str], idx: usize, cmd: &str, sub: &str, noun: &str) -> Option<u64> {
+    let Some(word) = parts.get(idx) else {
+        shell_println!("{}: {}: missing {}", cmd, sub, noun);
+        set_exit(1);
+        return None;
+    };
+    let Ok(v) = word.parse::<u64>() else {
+        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
+/// The [`optional_u32`] rule for a 64-bit operand.
+///
+/// The `reslimit` commands are why this exists, and they are the sharpest case
+/// in the whole family: their limits use `0` as the sentinel for *unlimited*,
+/// so `…parse().ok().unwrap_or(0)` turned a mistyped limit into **no limit at
+/// all** — the exact inverse of what the operator asked for, reported as
+/// success.
+fn optional_u64(
+    parts: &[&str],
+    idx: usize,
+    cmd: &str,
+    sub: &str,
+    noun: &str,
+    default: u64,
+) -> Option<u64> {
+    let Some(word) = parts.get(idx) else {
+        return Some(default);
+    };
+    let Ok(v) = word.parse::<u64>() else {
+        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
+/// The [`required_u32`] rule for an operand that may be negative.
+///
+/// Monitor positions are the case that needs it: a desktop's origin is wherever
+/// the primary display is, so a secondary display to its left has a negative
+/// `x`, and `parse::<u32>()` would refuse the very coordinates that are correct.
+fn required_i32(parts: &[&str], idx: usize, cmd: &str, sub: &str, noun: &str) -> Option<i32> {
+    let Some(word) = parts.get(idx) else {
+        shell_println!("{}: {}: missing {}", cmd, sub, noun);
+        set_exit(1);
+        return None;
+    };
+    let Ok(v) = word.parse::<i32>() else {
+        shell_println!("{}: {}: `{}' is not a {}", cmd, sub, word, noun);
+        set_exit(1);
+        return None;
+    };
+    Some(v)
+}
+
 /// `fstune` — filesystem tuning profiles and parameters.
 fn cmd_fstune(args: &str) {
     use crate::fs::fstune;
@@ -51563,12 +51829,30 @@ fn cmd_monitors(args: &str) {
                     "vga" => monitors::ConnectorType::Vga,
                     "dvi" => monitors::ConnectorType::Dvi,
                     "usbc" => monitors::ConnectorType::UsbC,
-                    _ => monitors::ConnectorType::Hdmi,
+                    other => {
+                        shell_println!(
+                            "monitors: {}: `{}' is not a connector (hdmi, dp, vga, dvi, usbc)",
+                            sub,
+                            other
+                        );
+                        set_exit(1);
+                        return;
+                    }
                 };
                 let output = parts[3];
-                let w: u32 = parts[4].parse().unwrap_or(1920);
-                let h: u32 = parts[5].parse().unwrap_or(1080);
-                let hz: u32 = parts[6].parse().unwrap_or(60);
+                // The old defaults were a *plausible* monitor -- 1920x1080@60 --
+                // so a mistyped size produced a monitor that looked deliberate
+                // and was not the one asked for.
+                let Some(w) = required_u32(&parts, 4, "monitors", sub, "width in pixels") else {
+                    return;
+                };
+                let Some(h) = required_u32(&parts, 5, "monitors", sub, "height in pixels") else {
+                    return;
+                };
+                let Some(hz) = required_u32(&parts, 6, "monitors", sub, "refresh rate in Hz")
+                else {
+                    return;
+                };
                 match monitors::add_monitor(name, conn, output, w, h, hz) {
                     Ok(id) => {
                         shell_println!("Added monitor #{}: {} {}x{}@{}Hz", id, name, w, h, hz)
@@ -51582,6 +51866,7 @@ fn cmd_monitors(args: &str) {
                 shell_println!(
                     "Usage: monitors add <name> <hdmi|dp|vga|dvi|usbc> <output> <w> <h> <hz>"
                 );
+                set_exit(1);
             }
         }
         "rm" | "remove" => {
@@ -51601,10 +51886,19 @@ fn cmd_monitors(args: &str) {
         "mode" | "res" => {
             // monitors mode <id> <w> <h> [hz]
             if parts.len() >= 4 {
-                let id: u32 = parts[1].parse().unwrap_or(0);
-                let w: u32 = parts[2].parse().unwrap_or(0);
-                let h: u32 = parts[3].parse().unwrap_or(0);
-                let hz: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(60);
+                let Some(id) = required_u32(&parts, 1, "monitors", sub, "monitor ID") else {
+                    return;
+                };
+                let Some(w) = required_u32(&parts, 2, "monitors", sub, "width in pixels") else {
+                    return;
+                };
+                let Some(h) = required_u32(&parts, 3, "monitors", sub, "height in pixels") else {
+                    return;
+                };
+                let Some(hz) = optional_u32(&parts, 4, "monitors", sub, "refresh rate in Hz", 60)
+                else {
+                    return;
+                };
                 match monitors::set_mode(id, w, h, hz) {
                     Ok(()) => shell_println!("Monitor #{}: {}x{}@{}Hz", id, w, h, hz),
                     Err(e) => {
@@ -51619,9 +51913,15 @@ fn cmd_monitors(args: &str) {
         }
         "pos" | "position" => {
             if parts.len() >= 4 {
-                let id: u32 = parts[1].parse().unwrap_or(0);
-                let x: i32 = parts[2].parse().unwrap_or(0);
-                let y: i32 = parts[3].parse().unwrap_or(0);
+                let Some(id) = required_u32(&parts, 1, "monitors", sub, "monitor ID") else {
+                    return;
+                };
+                let Some(x) = required_i32(&parts, 2, "monitors", sub, "coordinate") else {
+                    return;
+                };
+                let Some(y) = required_i32(&parts, 3, "monitors", sub, "coordinate") else {
+                    return;
+                };
                 match monitors::set_position(id, x, y) {
                     Ok(()) => shell_println!("Monitor #{}: position ({},{})", id, x, y),
                     Err(e) => {
@@ -51636,8 +51936,12 @@ fn cmd_monitors(args: &str) {
         }
         "scale" => {
             if parts.len() >= 3 {
-                let id: u32 = parts[1].parse().unwrap_or(0);
-                let pct: u32 = parts[2].parse().unwrap_or(100);
+                let Some(id) = required_u32(&parts, 1, "monitors", sub, "monitor ID") else {
+                    return;
+                };
+                let Some(pct) = required_u32(&parts, 2, "monitors", sub, "percentage") else {
+                    return;
+                };
                 match monitors::set_scale(id, pct) {
                     Ok(()) => shell_println!("Monitor #{}: scale {}%", id, pct),
                     Err(e) => {
@@ -51652,13 +51956,24 @@ fn cmd_monitors(args: &str) {
         }
         "rotate" => {
             if parts.len() >= 3 {
-                let id: u32 = parts[1].parse().unwrap_or(0);
+                let Some(id) = required_u32(&parts, 1, "monitors", sub, "monitor ID") else {
+                    return;
+                };
                 let rot = match parts[2] {
                     "normal" | "0" => monitors::Rotation::Normal,
                     "right" | "90" => monitors::Rotation::Right,
                     "inverted" | "180" => monitors::Rotation::Inverted,
                     "left" | "270" => monitors::Rotation::Left,
-                    _ => monitors::Rotation::Normal,
+                    other => {
+                        shell_println!(
+                            "monitors: {}: `{}' is not a rotation \
+                             (normal, right, inverted, left)",
+                            sub,
+                            other
+                        );
+                        set_exit(1);
+                        return;
+                    }
                 };
                 match monitors::set_rotation(id, rot) {
                     Ok(()) => shell_println!("Monitor #{}: rotation {}", id, rot.label()),
@@ -59258,7 +59573,13 @@ fn cmd_reslimit(args: &str) {
         }
         "create" => {
             if let Some(name) = parts.get(1) {
-                let parent: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                // `0` is the root group, so a mistyped parent used to silently
+                // create the group at the top of the tree -- outside whatever
+                // group the operator meant to nest it under, and so outside
+                // that group's limits.
+                let Some(parent) = optional_u32(&parts, 2, "reslimit", sub, "group ID", 0) else {
+                    return;
+                };
                 match reslimit::create_group(name, parent) {
                     Ok(id) => shell_println!("Created group '{}' (id={})", name, id),
                     Err(e) => {
@@ -59332,8 +59653,19 @@ fn cmd_reslimit(args: &str) {
             // reslimit setmem <group-id> <max-rss-mib> [soft-rss-mib]
             if let Some(gid_str) = parts.get(1) {
                 if let Ok(gid) = gid_str.parse::<u32>() {
-                    let max_mib: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let soft_mib: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    // `0` is a documented value here ("0 = unlimited"), which is
+                    // exactly why an unreadable word must not become one: the
+                    // old `.parse().ok().unwrap_or(0)` turned `setmem 5 abc`
+                    // into "unlimited", the precise opposite of the request,
+                    // and reported it as success.
+                    let Some(max_mib) = required_u64(&parts, 2, "reslimit", sub, "size in MiB")
+                    else {
+                        return;
+                    };
+                    let Some(soft_mib) = optional_u64(&parts, 3, "reslimit", sub, "size in MiB", 0)
+                    else {
+                        return;
+                    };
                     let max_rss = if max_mib == 0 {
                         reslimit::UNLIMITED
                     } else {
@@ -59373,8 +59705,16 @@ fn cmd_reslimit(args: &str) {
             // reslimit setcpu <group-id> <max-percent> [weight]
             if let Some(gid_str) = parts.get(1) {
                 if let Ok(gid) = gid_str.parse::<u32>() {
-                    let max_pct: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let weight: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+                    // `0` means unlimited, so an unreadable percentage used to
+                    // lift the CPU cap entirely rather than being refused.
+                    let Some(max_pct) = required_u64(&parts, 2, "reslimit", sub, "percentage")
+                    else {
+                        return;
+                    };
+                    let Some(weight) = optional_u32(&parts, 3, "reslimit", sub, "weight", 100)
+                    else {
+                        return;
+                    };
                     let limits = reslimit::CpuLimits {
                         max_cpu_percent: max_pct,
                         affinity_mask: 0,
@@ -59402,9 +59742,29 @@ fn cmd_reslimit(args: &str) {
             // reslimit setio <group-id> <read-mbps> <write-mbps> [low-priority]
             if let Some(gid_str) = parts.get(1) {
                 if let Ok(gid) = gid_str.parse::<u32>() {
-                    let read_mbps: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let write_mbps: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let low_pri = parts.get(4).is_some_and(|s| *s == "low");
+                    // `0` means unlimited, so an unreadable rate used to remove
+                    // the I/O cap instead of being refused.
+                    let Some(read_mbps) = required_u64(&parts, 2, "reslimit", sub, "rate in Mbps")
+                    else {
+                        return;
+                    };
+                    let Some(write_mbps) = required_u64(&parts, 3, "reslimit", sub, "rate in Mbps")
+                    else {
+                        return;
+                    };
+                    // The only word this position accepts is `low`.  Testing for
+                    // it with `== "low"` alone made every other word mean "not
+                    // low priority", so `setio 1 10 10 lwo` quietly did the
+                    // opposite of what was asked.
+                    let low_pri = match parts.get(4) {
+                        None => false,
+                        Some(&"low") => true,
+                        Some(other) => {
+                            shell_println!("reslimit: {}: `{}' is not `low'", sub, other);
+                            set_exit(1);
+                            return;
+                        }
+                    };
                     let read_bps = if read_mbps == 0 {
                         reslimit::UNLIMITED
                     } else {
@@ -59444,9 +59804,18 @@ fn cmd_reslimit(args: &str) {
             // reslimit setproc <group-id> <max-procs> <max-threads> <max-files>
             if let Some(gid_str) = parts.get(1) {
                 if let Ok(gid) = gid_str.parse::<u32>() {
-                    let max_procs: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let max_threads: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    let max_files: u64 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    // `0` means unlimited, so a mistyped count used to remove the
+                    // very limit the operator was setting.
+                    let Some(max_procs) = required_u64(&parts, 2, "reslimit", sub, "count") else {
+                        return;
+                    };
+                    let Some(max_threads) = required_u64(&parts, 3, "reslimit", sub, "count")
+                    else {
+                        return;
+                    };
+                    let Some(max_files) = required_u64(&parts, 4, "reslimit", sub, "count") else {
+                        return;
+                    };
                     let limits = reslimit::ProcessLimits {
                         max_processes: if max_procs == 0 {
                             reslimit::UNLIMITED
@@ -81849,8 +82218,21 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let split_id = parts[1].parse::<u32>().unwrap_or(0);
-            let win_id = parts.get(2).and_then(|s| s.parse::<u32>().ok());
+            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+                return;
+            };
+            // `and_then(parse().ok())` collapsed "no window was named" and "the
+            // window named is unreadable" into the same `None`, so a typo
+            // silently added an *empty* pane and called it success.
+            let win_id = match parts.get(2) {
+                None => None,
+                Some(_) => {
+                    let Some(id) = required_u32(&parts, 2, "splitview", sub, "window ID") else {
+                        return;
+                    };
+                    Some(id)
+                }
+            };
             match splitview::add_pane(split_id, win_id) {
                 Ok(pane_id) => shell_println!("Added pane #{} to split #{}", pane_id, split_id),
                 Err(e) => {
@@ -81865,8 +82247,12 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let split_id = parts[1].parse::<u32>().unwrap_or(0);
-            let pane_id = parts[2].parse::<u32>().unwrap_or(0);
+            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+                return;
+            };
+            let Some(pane_id) = required_u32(&parts, 2, "splitview", sub, "pane ID") else {
+                return;
+            };
             match splitview::remove_pane(split_id, pane_id) {
                 Ok(()) => shell_println!("Removed pane #{} from split #{}", pane_id, split_id),
                 Err(e) => {
@@ -81881,9 +82267,15 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let split_id = parts[1].parse::<u32>().unwrap_or(0);
-            let pane_id = parts[2].parse::<u32>().unwrap_or(0);
-            let ratio = parts[3].parse::<u32>().unwrap_or(50);
+            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+                return;
+            };
+            let Some(pane_id) = required_u32(&parts, 2, "splitview", sub, "pane ID") else {
+                return;
+            };
+            let Some(ratio) = required_u32(&parts, 3, "splitview", sub, "percentage") else {
+                return;
+            };
             match splitview::resize_pane(split_id, pane_id, ratio) {
                 Ok(()) => shell_println!("Resized pane #{} to {}%", pane_id, ratio),
                 Err(e) => {
@@ -81898,8 +82290,12 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let split_id = parts[1].parse::<u32>().unwrap_or(0);
-            let pane_id = parts[2].parse::<u32>().unwrap_or(0);
+            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+                return;
+            };
+            let Some(pane_id) = required_u32(&parts, 2, "splitview", sub, "pane ID") else {
+                return;
+            };
             match splitview::focus_pane(split_id, pane_id) {
                 Ok(()) => shell_println!("Focused pane #{}", pane_id),
                 Err(e) => {
@@ -81914,11 +82310,20 @@ fn cmd_splitview(args: &str) {
                 set_exit(1);
                 return;
             }
-            let split_id = parts[1].parse::<u32>().unwrap_or(0);
-            let orient = if parts[2] == "v" {
-                splitview::Orientation::Vertical
-            } else {
-                splitview::Orientation::Horizontal
+            let Some(split_id) = required_u32(&parts, 1, "splitview", sub, "split ID") else {
+                return;
+            };
+            // The old `if == "v" { V } else { H }` made every word that was not
+            // `v` mean horizontal, so `orient 1 vertical` -- the spelled-out
+            // form a reader would expect to work -- silently did the opposite.
+            let orient = match parts[2] {
+                "v" | "vertical" => splitview::Orientation::Vertical,
+                "h" | "horizontal" => splitview::Orientation::Horizontal,
+                other => {
+                    shell_println!("splitview: {}: `{}' is not `h' or `v'", sub, other);
+                    set_exit(1);
+                    return;
+                }
             };
             match splitview::set_orientation(split_id, orient) {
                 Ok(()) => shell_println!("Split #{}: {}", split_id, orient.label()),
@@ -105816,8 +106221,16 @@ fn cmd_userns(args: &str) {
             }
         }
         "create" => {
-            let parent: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let owner: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // Both defaults are the most privileged value there is -- namespace
+            // 0 is the root namespace and UID 0 is root -- so a mistyped word
+            // here used to hand the new namespace *more* authority than was
+            // asked for, and say it had succeeded.
+            let Some(parent) = optional_u32(&parts, 1, "userns", cmd, "namespace ID", 0) else {
+                return;
+            };
+            let Some(owner) = optional_u32(&parts, 2, "userns", cmd, "UID", 0) else {
+                return;
+            };
             match userns::create(parent, owner) {
                 Ok(id) => shell_println!(
                     "Created user namespace {} (parent: {}, owner UID: {})",
@@ -105857,10 +106270,21 @@ fn cmd_userns(args: &str) {
                 set_exit(1);
                 return;
             }
-            let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
-            let inner = parts[2].parse::<u32>().unwrap_or(0);
-            let outer = parts[3].parse::<u32>().unwrap_or(0);
-            let count = parts[4].parse::<u32>().unwrap_or(0);
+            // A mistyped `outer` used to become 0, which is root's UID in the
+            // parent namespace: the mapping the operator got was the one
+            // mapping they must never get, and it was reported as success.
+            let Some(ns) = required_u32(&parts, 1, "userns", cmd, "namespace ID") else {
+                return;
+            };
+            let Some(inner) = required_u32(&parts, 2, "userns", cmd, "UID") else {
+                return;
+            };
+            let Some(outer) = required_u32(&parts, 3, "userns", cmd, "UID") else {
+                return;
+            };
+            let Some(count) = required_u32(&parts, 4, "userns", cmd, "count") else {
+                return;
+            };
             match userns::add_uid_mapping(ns, inner, outer, count) {
                 Ok(()) => shell_println!(
                     "Added UID mapping: ns {} inner {}..{} → outer {}..{}",
@@ -105883,10 +106307,20 @@ fn cmd_userns(args: &str) {
                 set_exit(1);
                 return;
             }
-            let ns = parts[1].parse::<u32>().unwrap_or(u32::MAX);
-            let inner = parts[2].parse::<u32>().unwrap_or(0);
-            let outer = parts[3].parse::<u32>().unwrap_or(0);
-            let count = parts[4].parse::<u32>().unwrap_or(0);
+            // As for `uidmap`: a mistyped `outer` used to become 0, which is
+            // root's GID in the parent namespace.
+            let Some(ns) = required_u32(&parts, 1, "userns", cmd, "namespace ID") else {
+                return;
+            };
+            let Some(inner) = required_u32(&parts, 2, "userns", cmd, "GID") else {
+                return;
+            };
+            let Some(outer) = required_u32(&parts, 3, "userns", cmd, "GID") else {
+                return;
+            };
+            let Some(count) = required_u32(&parts, 4, "userns", cmd, "count") else {
+                return;
+            };
             match userns::add_gid_mapping(ns, inner, outer, count) {
                 Ok(()) => shell_println!(
                     "Added GID mapping: ns {} inner {}..{} → outer {}..{}",

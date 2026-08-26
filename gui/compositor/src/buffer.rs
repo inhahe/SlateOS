@@ -84,6 +84,89 @@ impl BufferFormat {
 /// comfortably in `usize` on the 64-bit targets the compositor runs on.
 const MAX_BUFFER_PIXELS: u64 = MAX_FB_WIDTH as u64 * MAX_FB_HEIGHT as u64;
 
+/// Validate a client's declared geometry and normalise its bytes into densely
+/// packed ARGB8888, `width * height` entries, row-major.
+///
+/// Shared by [`SharedBuffer::import`] and [`ImageAsset::import`] because the two
+/// differ only in *lifetime* — a surface buffer is re-attached every frame and
+/// acknowledged back to the client, an image asset is uploaded once and retained
+/// — and not at all in what makes a client's pixels safe to read. A second copy
+/// of this function is a second place for the stride check to be got wrong, and
+/// only one of them would have the tests.
+fn normalize(
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: BufferFormat,
+    bytes: &[u8],
+) -> CompositorResult<Vec<u32>> {
+    if width == 0 || height == 0 {
+        return Err(CompositorError::InvalidBuffer(format!(
+            "degenerate dimensions {width}x{height}"
+        )));
+    }
+
+    let bpp = format.bytes_per_pixel();
+    // Minimum bytes a single row must contain for the declared width.
+    let min_row_bytes = (width as u64)
+        .checked_mul(bpp as u64)
+        .ok_or_else(|| CompositorError::InvalidBuffer("row size overflow".into()))?;
+    if (stride as u64) < min_row_bytes {
+        return Err(CompositorError::InvalidBuffer(format!(
+            "stride {stride} < required {min_row_bytes} bytes/row"
+        )));
+    }
+
+    let pixel_count = (width as u64)
+        .checked_mul(height as u64)
+        .ok_or_else(|| CompositorError::InvalidBuffer("pixel count overflow".into()))?;
+    if pixel_count > MAX_BUFFER_PIXELS {
+        return Err(CompositorError::BufferTooLarge { width, height });
+    }
+
+    // The mapped region must cover every full row. The last row only needs
+    // `min_row_bytes`; preceding rows need a full stride to step past.
+    let required_bytes = (stride as u64)
+        .checked_mul((height as u64).saturating_sub(1))
+        .and_then(|v| v.checked_add(min_row_bytes))
+        .ok_or_else(|| CompositorError::InvalidBuffer("buffer size overflow".into()))?;
+    if (bytes.len() as u64) < required_bytes {
+        return Err(CompositorError::InvalidBuffer(format!(
+            "mapped {} bytes < required {required_bytes}",
+            bytes.len()
+        )));
+    }
+
+    // Normalize into densely-packed ARGB8888, honoring stride and format.
+    let mut pixels = Vec::with_capacity(pixel_count as usize);
+    let stride_us = stride as usize;
+    let force_opaque = !format.has_alpha();
+    for row in 0..height as usize {
+        // `row * stride` cannot overflow usize here: required_bytes (which
+        // bounds the same product plus a row) already fit in u64 and was
+        // checked against bytes.len(), itself a usize. Computed saturating
+        // anyway, so that proof is not load-bearing — every read below is
+        // `.get()`-guarded, so a saturated offset yields the same zero the
+        // out-of-range case already yields, where a wrapped one would name
+        // a real byte at the wrong place and silently transpose the image.
+        let row_off = row.saturating_mul(stride_us);
+        for col in 0..width as usize {
+            let off = row_off.saturating_add(col.saturating_mul(4));
+            // Bounds-checked 4-byte little-endian read; never indexes blind.
+            let b0 = *bytes.get(off).unwrap_or(&0);
+            let b1 = *bytes.get(off.saturating_add(1)).unwrap_or(&0);
+            let b2 = *bytes.get(off.saturating_add(2)).unwrap_or(&0);
+            let b3 = *bytes.get(off.saturating_add(3)).unwrap_or(&0);
+            let mut px = u32::from_le_bytes([b0, b1, b2, b3]);
+            if force_opaque {
+                px |= 0xFF00_0000;
+            }
+            pixels.push(px);
+        }
+    }
+    Ok(pixels)
+}
+
 /// An imported, validated, client-shared pixel buffer.
 ///
 /// Pixels are stored normalized: exactly `width * height` entries in
@@ -130,71 +213,7 @@ impl SharedBuffer {
         format: BufferFormat,
         bytes: &[u8],
     ) -> CompositorResult<Self> {
-        if width == 0 || height == 0 {
-            return Err(CompositorError::InvalidBuffer(format!(
-                "degenerate dimensions {width}x{height}"
-            )));
-        }
-
-        let bpp = format.bytes_per_pixel();
-        // Minimum bytes a single row must contain for the declared width.
-        let min_row_bytes = (width as u64)
-            .checked_mul(bpp as u64)
-            .ok_or_else(|| CompositorError::InvalidBuffer("row size overflow".into()))?;
-        if (stride as u64) < min_row_bytes {
-            return Err(CompositorError::InvalidBuffer(format!(
-                "stride {stride} < required {min_row_bytes} bytes/row"
-            )));
-        }
-
-        let pixel_count = (width as u64)
-            .checked_mul(height as u64)
-            .ok_or_else(|| CompositorError::InvalidBuffer("pixel count overflow".into()))?;
-        if pixel_count > MAX_BUFFER_PIXELS {
-            return Err(CompositorError::BufferTooLarge { width, height });
-        }
-
-        // The mapped region must cover every full row. The last row only needs
-        // `min_row_bytes`; preceding rows need a full stride to step past.
-        let required_bytes = (stride as u64)
-            .checked_mul((height as u64).saturating_sub(1))
-            .and_then(|v| v.checked_add(min_row_bytes))
-            .ok_or_else(|| CompositorError::InvalidBuffer("buffer size overflow".into()))?;
-        if (bytes.len() as u64) < required_bytes {
-            return Err(CompositorError::InvalidBuffer(format!(
-                "mapped {} bytes < required {required_bytes}",
-                bytes.len()
-            )));
-        }
-
-        // Normalize into densely-packed ARGB8888, honoring stride and format.
-        let mut pixels = Vec::with_capacity(pixel_count as usize);
-        let stride_us = stride as usize;
-        let force_opaque = !format.has_alpha();
-        for row in 0..height as usize {
-            // `row * stride` cannot overflow usize here: required_bytes (which
-            // bounds the same product plus a row) already fit in u64 and was
-            // checked against bytes.len(), itself a usize. Computed saturating
-            // anyway, so that proof is not load-bearing — every read below is
-            // `.get()`-guarded, so a saturated offset yields the same zero the
-            // out-of-range case already yields, where a wrapped one would name
-            // a real byte at the wrong place and silently transpose the image.
-            let row_off = row.saturating_mul(stride_us);
-            for col in 0..width as usize {
-                let off = row_off.saturating_add(col.saturating_mul(4));
-                // Bounds-checked 4-byte little-endian read; never indexes blind.
-                let b0 = *bytes.get(off).unwrap_or(&0);
-                let b1 = *bytes.get(off.saturating_add(1)).unwrap_or(&0);
-                let b2 = *bytes.get(off.saturating_add(2)).unwrap_or(&0);
-                let b3 = *bytes.get(off.saturating_add(3)).unwrap_or(&0);
-                let mut px = u32::from_le_bytes([b0, b1, b2, b3]);
-                if force_opaque {
-                    px |= 0xFF00_0000;
-                }
-                pixels.push(px);
-            }
-        }
-
+        let pixels = normalize(width, height, stride, format, bytes)?;
         Ok(Self {
             handle,
             width,
@@ -299,6 +318,116 @@ impl SharedBuffer {
         } else {
             None
         }
+    }
+}
+
+/// A client's uploaded image, named by an id its render commands refer to.
+///
+/// # Why this is not a [`SharedBuffer`]
+///
+/// The two hold the same thing — validated, normalised ARGB8888 pixels from an
+/// untrusted client — and share [`normalize`] for exactly that reason. What
+/// differs is the *contract around* the pixels, and it differs in every respect:
+///
+/// | | [`SharedBuffer`] | `ImageAsset` |
+/// |---|---|---|
+/// | how many per window | one | many, each with an id |
+/// | lifetime | until the next attach | until unregistered or the window dies |
+/// | placed by | the window's own geometry | a [`RenderCommand::Image`](guitk::render::RenderCommand::Image) |
+/// | scaled | never — one buffer pixel per screen pixel | yes; the command names a destination rect |
+/// | release protocol | yes, per frame | no — the compositor keeps its copy |
+///
+/// A surface buffer whose release notification never fired would deadlock a
+/// client waiting to draw its next frame; an image asset has no such
+/// notification because there is nothing to wait for. Merging the two types
+/// would mean one of those two contracts being carried by a field the other half
+/// of the callers must remember to ignore.
+#[derive(Clone, Debug)]
+pub struct ImageAsset {
+    /// Width in pixels.
+    width: u32,
+    /// Height in pixels.
+    height: u32,
+    /// Source pixel format, retained for [`Self::is_opaque`].
+    src_format: BufferFormat,
+    /// Normalized ARGB8888 pixels, row-major, length `width * height`.
+    pixels: Vec<u32>,
+}
+
+impl ImageAsset {
+    /// Import and validate an image from a client's bytes.
+    ///
+    /// `stride` is the client's bytes-per-row, which may exceed
+    /// `width * bytes_per_pixel` for alignment.
+    ///
+    /// # Errors
+    ///
+    /// The same conditions as [`SharedBuffer::import`], which shares this
+    /// validation: [`CompositorError::InvalidBuffer`] for degenerate geometry, a
+    /// stride too small for the declared width, or a short byte slice;
+    /// [`CompositorError::BufferTooLarge`] beyond the pixel cap.
+    pub fn import(
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: &[u8],
+    ) -> CompositorResult<Self> {
+        let pixels = normalize(width, height, stride, format, bytes)?;
+        Ok(Self {
+            width,
+            height,
+            src_format: format,
+            pixels,
+        })
+    }
+
+    /// Width in pixels.
+    #[must_use]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Height in pixels.
+    #[must_use]
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// The pixel format the client uploaded in.
+    #[must_use]
+    pub const fn format(&self) -> BufferFormat {
+        self.src_format
+    }
+
+    /// Normalized ARGB8888 pixels (row-major, `width * height` entries).
+    #[must_use]
+    pub fn pixels(&self) -> &[u32] {
+        &self.pixels
+    }
+
+    /// Whether every pixel is fully opaque, letting a blit skip alpha blending.
+    #[must_use]
+    pub const fn is_opaque(&self) -> bool {
+        matches!(self.src_format, BufferFormat::Xrgb8888)
+    }
+
+    /// Bounds-checked single-pixel read in normalized ARGB8888.
+    #[must_use]
+    pub fn pixel(&self, x: u32, y: u32) -> Option<u32> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+        let idx = (y as usize)
+            .checked_mul(self.width as usize)
+            .and_then(|v| v.checked_add(x as usize))?;
+        self.pixels.get(idx).copied()
+    }
+
+    /// Normalized size in bytes (`width * height * 4`).
+    #[must_use]
+    pub fn size_bytes(&self) -> usize {
+        self.pixels.len().saturating_mul(4)
     }
 }
 
@@ -445,5 +574,80 @@ mod tests {
         assert_eq!(buf.take_release(), Some(42));
         assert!(!buf.is_released());
         assert_eq!(buf.take_release(), None);
+    }
+
+    // --- image assets ---
+
+    #[test]
+    fn an_image_asset_normalises_stride_padding_away_exactly_as_a_surface_does() {
+        // The point of sharing `normalize` is that the two cannot drift. Import
+        // the same padded bytes both ways and demand the same pixels out.
+        let pixels = [0xFF11_2233, 0xFF44_5566, 0xFF77_8899, 0xFFAA_BBCC];
+        let bytes = make_bytes(2, 2, 16, &pixels);
+        let surface =
+            SharedBuffer::import(1, 2, 2, 16, BufferFormat::Argb8888, &bytes).expect("surface");
+        let image = ImageAsset::import(2, 2, 16, BufferFormat::Argb8888, &bytes).expect("image");
+        assert_eq!(image.pixels(), surface.pixels());
+        assert_eq!(image.pixels(), &pixels);
+    }
+
+    #[test]
+    fn an_image_asset_forces_opacity_for_a_format_without_alpha() {
+        // A client that uploads Xrgb has not said "transparent"; it has said
+        // "the top byte is not mine". Reading it as alpha would make the image
+        // vanish, since the padding is conventionally zero.
+        let bytes = make_bytes(1, 1, 4, &[0x0012_3456]);
+        let image = ImageAsset::import(1, 1, 4, BufferFormat::Xrgb8888, &bytes).expect("image");
+        assert_eq!(image.pixel(0, 0), Some(0xFF12_3456));
+        assert!(image.is_opaque());
+        assert_eq!(image.format(), BufferFormat::Xrgb8888);
+    }
+
+    #[test]
+    fn an_image_asset_rejects_what_a_surface_rejects() {
+        // Not an exhaustive re-test of `normalize` — that lives above — but a
+        // guard that `ImageAsset::import` actually calls it rather than
+        // trusting the client's numbers.
+        assert!(matches!(
+            ImageAsset::import(0, 4, 16, BufferFormat::Argb8888, &[0u8; 64]),
+            Err(CompositorError::InvalidBuffer(_))
+        ));
+        // Stride below one row's worth.
+        assert!(matches!(
+            ImageAsset::import(4, 4, 8, BufferFormat::Argb8888, &[0u8; 64]),
+            Err(CompositorError::InvalidBuffer(_))
+        ));
+        // Honest stride, short slice.
+        assert!(matches!(
+            ImageAsset::import(4, 4, 16, BufferFormat::Argb8888, &[0u8; 32]),
+            Err(CompositorError::InvalidBuffer(_))
+        ));
+        assert!(matches!(
+            ImageAsset::import(
+                MAX_FB_WIDTH,
+                MAX_FB_HEIGHT + 1,
+                MAX_FB_WIDTH * 4,
+                BufferFormat::Argb8888,
+                &[],
+            ),
+            Err(CompositorError::BufferTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn an_image_assets_pixel_read_is_bounded_on_both_axes() {
+        let bytes = make_bytes(2, 1, 8, &[0xFF00_0001, 0xFF00_0002]);
+        let image = ImageAsset::import(2, 1, 8, BufferFormat::Argb8888, &bytes).expect("image");
+        assert_eq!(image.width(), 2);
+        assert_eq!(image.height(), 1);
+        assert_eq!(image.pixel(0, 0), Some(0xFF00_0001));
+        assert_eq!(image.pixel(1, 0), Some(0xFF00_0002));
+        // Past the width, past the height, and past both. A read that only
+        // checked the flat index would let (0, 1) wrap onto the next row of a
+        // taller image rather than reporting that there is no such row here.
+        assert_eq!(image.pixel(2, 0), None);
+        assert_eq!(image.pixel(0, 1), None);
+        assert_eq!(image.pixel(u32::MAX, u32::MAX), None);
+        assert_eq!(image.size_bytes(), 8);
     }
 }

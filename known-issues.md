@@ -81540,3 +81540,43 @@ twelve to `scratchdir::ScratchDir`, which also gets cleanup on the *failing*
 path — `Drop` runs during unwind where a trailing `remove_dir_all` does not.
 
 ---
+
+---
+
+## `TD-C-AN-IMAGE-CAN-ONLY-BE-UPLOADED-IN-PROCESS` (lane C, 2026-08-25) — **open**
+
+**What it is.** The compositor now has an image store and paints
+`RenderCommand::Image` for real (design-decisions.md → 554). But the only way to
+get pixels *into* that store is `Compositor::register_image`, a Rust method — so
+only code linked into the compositor process can upload one. A GUI program in a
+separate process, which is every real GUI program, still cannot.
+
+**Why it did not block the fix.** The compositor is the thing that draws, and it
+could not draw an image at all before this; the in-process path is what the
+rasteriser and the store are tested through, and it is what the desktop shell
+(which *is* in-process today) can use immediately. The wire request is a
+separate, smaller piece of work with its own trust-boundary questions.
+
+**Where it lives.** `gui/remote/src/control.rs` → `RequestBody` is the client
+request enum; the compositor's handler dispatches on it. An
+`UploadImage { window, image_id, width, height, stride, format, bytes }` variant
+and a `DropImage { window, image_id }` beside it are what is missing.
+`ImageAsset::import` already performs the whole validation the untrusted path
+needs, so the handler is a decode and a call.
+
+**What the proper fix must decide, and does not yet.**
+
+1. **A per-window byte budget.** `Compositor::image_bytes()` exists and reports
+   the total, but nothing enforces a ceiling. Over a wire request, a client can
+   upload until the compositor is out of memory — the per-image
+   `MAX_BUFFER_PIXELS` cap bounds one asset, not their number. A budget, and a
+   defined behaviour on exceeding it (refuse the upload, versus evict the
+   window's least-recently-drawn asset), is required before the request is
+   exposed.
+2. **Whether the bytes travel inline or by shared mapping.** The surface path
+   already maps rather than copies. A thumbnail is small enough that inline is
+   tolerable; a full-resolution photo in an image viewer is not.
+
+**How you would notice.** `apps/explorer`'s icon view will draw correctly under
+the in-process compositor and draw nothing under a remote one, with no error
+either way — the unresolved-id case is silent by design.

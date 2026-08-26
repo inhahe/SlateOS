@@ -9220,9 +9220,14 @@ verified against MSYS bash). Still **missing** relative to bash:
   made more visible by the more-faithful real-var model used for EUID/UID. The
   proper long-term fix is to migrate the remaining readonly-integer specials
   (`PPID`, and `BASHPID` for readonly-ness) to the same real-var model.
-- **`PPID`** (parent process id, readonly in bash). Needs a parent-pid source;
+- **`PPID`** (parent process id, readonly in bash). ~~Needs a parent-pid source;
   `std::process` doesn't expose it portably on the host and the SlateOS syscall
-  isn't wired. Deferred until a `getppid`-equivalent exists.
+  isn't wired. Deferred until a `getppid`-equivalent exists.~~ **Superseded:** the
+  *source* exists — `parent_pid()` (`interp.rs`) calls `NtQueryInformationProcess`
+  on Windows and libc `getppid` on unix, and `$PPID` reads correctly on both. What
+  remains is only the *model*: `PPID` is a dynamic `param_value` case rather than a
+  real readonly var, which is the "latent inconsistency" described in the `EUID`
+  bullet above, not a missing-value problem.
 - **`HOSTNAME`** — **RESOLVED 2026-07-20.** Now synthesized inside
   `import_environment` (after the `SHLVL` block) via the free function
   `system_hostname()`: on unix it reads `/proc/sys/kernel/hostname` then
@@ -9240,6 +9245,56 @@ verified against MSYS bash). Still **missing** relative to bash:
 **Proper fix:** once SlateOS credential/`getuid`/`getppid` syscalls exist, wire
 `EUID`/`UID`/`PPID` as dynamic `param_value` cases (readonly). The identity
 *default* (for host runs and pre-login target state) needs the operator's call.
+
+**Update 2026-08-25 — the *host* half of that is done (commits `60a63c49f`,
+`c10a69c24`).** On unix, `reported_identity` no longer consults a policy at all:
+it asks libc, via `unsafe extern "C" { fn getuid() -> u32; fn geteuid() -> u32; }`,
+and a sibling `os_egid()` declares `getegid` for `-G`. The shell now reports the
+process's real credential on any unix-family target.
+
+This was not cosmetic: with the identity pinned at root, `[ -O file ]` answered
+*backwards* on a host — every file the user owned tested false and every
+root-owned file true — and three corpus cases were failing on it.
+
+**Why `extern "C"` and not `/proc/self/status`.** The first cut of this fix
+(`60a63c49f`) read procfs, on the reasoning that `std` exposes no `getuid` and
+`oils` deliberately carries no `libc` dependency, with `system_hostname`'s
+`/proc/sys/kernel/hostname` read as precedent. That was rewritten in `c10a69c24`
+for two reasons, both discovered by checking rather than recalling:
+
+1. **The file already had the precedent, and it was the other one.**
+   `parent_pid()` declares `unsafe extern "C" { fn getppid() -> i32; }` for unix.
+   Two different mechanisms for "ask the OS a credential question," in one file,
+   is a bug waiting for whoever adds the third.
+2. **The failure modes are not comparable.** SlateOS mounts no procfs, so on the
+   actual target the `/proc` read *fails*, and the caller falls back to the Q28
+   default — a shell that answers "yes, you own it" about every file on the
+   machine. A missing symbol is a link error, which is loud and immediate; a
+   missing `/proc` is a silent lie about privilege. `system_hostname` is not a
+   counter-example: its fallback is to leave `$HOSTNAME` unset, which lies about
+   nothing.
+
+The symbols resolve on SlateOS: `posix/src/unistd.rs` exports `getuid` (620),
+`geteuid` (628), `getgid` (638) and `getegid` (646), each
+`#[cfg_attr(target_os = "none", unsafe(no_mangle))]`, reading the credentials the
+kernel recorded at spawn. So the Q28 decision survives on the target *by asking
+the system* rather than by assuming — which is what the decision was always
+standing in for. (`toolchain/x86_64-slateos.json` sets `"os": "linux"`, so
+`#[cfg(unix)]` covers the target as well as the host.)
+
+The Q28 fallback survives as the pure function `configured_identity(uid, euid)`,
+still honouring `OSH_UID`/`OSH_EUID`, still defaulting to root, and reachable now
+only on non-unix (the Windows host build). It takes its inputs as arguments
+rather than reading the environment so that it stays testable on unix — where it
+is never the answer — and so that its test does not write process-global state
+that no parallel test can safely share.
+
+**`-G` asks the effective gid and nothing else.** Measured against bash 5.2.21,
+not recalled: a file `chgrp`ed to a group the caller genuinely belongs to (group
+24, for a member of 24) is `[ -G f ]` **false**. The supplementary group list is
+not consulted, so the earlier implementation — which derived a gid from the passwd
+entry — was answering a different question. `reported_groups()` (which backs
+`${GROUPS[@]}`) is unaffected and was verified against `id -G` separately.
 
 **Sub-issue — several `BASH_*` internal variables are still absent.** `${!BASH*}`
 diverges from bash because osh does not define `BASH_LOADABLES_PATH`.
@@ -77925,7 +77980,7 @@ failure class, and because fixing any one of them in isolation would leave a
 rung, no script — so the stricter parser cannot turn something green red.
 
 
-### TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH. `scripts/osh-bash-diff.py` compares a Windows `osh.exe` against Git-for-Windows bash, so every osh behaviour it certifies was learned from a Cygwin port — 2026-08-25 — OPEN
+### TD-B-THE-SHELL-HARNESS-STILL-MEASURES-AGAINST-MSYS-BASH. `scripts/osh-bash-diff.py` compares a Windows `osh.exe` against Git-for-Windows bash, so every osh behaviour it certifies was learned from a Cygwin port — 2026-08-25 — **FIXED 2026-08-25** (harness migrated; triage of what it exposed is in progress, see below)
 
 **Where:** `scripts/osh-bash-diff.py`. Two lists decide what is compared:
 
@@ -78012,6 +78067,76 @@ the migration is another case written against the wrong reference, and every
 `# EXPECT-DIFF` waiver added is a divergence pinned into the corpus as though
 it were behaviour. `sort` is the precedent: eleven option cases sat green for
 weeks while the implementation faithfully copied a Windows porting artifact.
+
+### FIXED 2026-08-25 — and what the migration found
+
+**The harness is migrated.** `scripts/osh-diff.sh` (commit `45fe3300c`) runs the
+corpus with a `x86_64-unknown-linux-gnu` osh against `/usr/bin/bash` inside WSL.
+
+**The fix was not the one predicted above.** The six-step plan was to port
+`diff-wsl.sh` into Python. None of that was needed: `osh-bash-diff.py` already
+took `--osh` and `--bash`, so a ten-line `sh` wrapper that *does* match the
+`*-diff.sh` glob inherits all six steps — the WSL re-exec, the shared target
+dir, the build-every-run, the freshness assert, the locale pin — from the same
+copy the twenty-five coreutils harnesses source. The diagnosis above ("not part
+of that migration only because it is Python and does not match the `*-diff.sh`
+glob") named the cause correctly and then reached for the expensive remedy: the
+thing that did not match the glob was a *file name*, and the cheap fix is to add
+a file that matches it. Worth remembering the next time a harness needs the same
+plumbing.
+
+**The first measurement, which the entry rightly demanded first: it builds.**
+`userspace/oils` compiled for `x86_64-unknown-linux-gnu` on the first attempt
+with no source change. Its tests pass there too — 1460 lib tests on
+`x86_64-unknown-linux-gnu` against 1486 on `x86_64-pc-windows-gnu` (the
+difference is `cfg`-gated cases, not failures).
+
+**First full sweep against glibc: 641 matched, 0 waived, 21 failed**, plus 2
+cases that exceeded their budget on a busy host and so were never measured.
+
+**The `0 waived` is the finding, not the good news.** `git grep EXPECT-DIFF`
+over every corpus case, at every commit in this repo's history, matches
+`README.md` and nothing else: **the waiver mechanism was never once used.** So
+`TOOL-OSH-BASH-DIFF`'s stated resolution — "cases hitting those need an
+`# EXPECT-DIFF` waiver" — describes a policy that was never exercised, and the
+picture in the entry above (MSYS-isms parked in visible waivers) is wrong in the
+worse direction. Nothing was parked. Every Cygwin behaviour the corpus met was
+*implemented in osh and certified green*, because that is what a differential
+harness does with a wrong reference: it does not fail, it agrees. The 21
+failures are the first time any of it became visible, and each one is a place
+where osh was shaped by a port nobody runs.
+
+**The four dependent entries came out as predicted** — all four re-examined the
+same day:
+
+| entry | outcome |
+|---|---|
+| `TD-OILS-SIGNAL-NUMBERS-…-AGAINST-MSYS` | now checkable, and checked: **VERIFIED CORRECT**; the "unverifiable on this host" premise is retired |
+| `TD-OILS-MSYS-CHMOD-TYPE-A` | **WONTFIX** — confirmed a dev-host measurement artifact, not an osh bug |
+| `TD-OILS-HOST-ARGV0` | subject-side; the `cfg(unix)` path is now **measured** rather than argued |
+| `TD-OILS-A-NON-UTF-8-ARGUMENT-…` | subject-side; **not reproducible off Windows**, now measured |
+
+**Triage of the 21, in progress.** Closed so far: the GNU-`time` page-fault
+leak (2 cases); the Cygwin-isms osh had transcribed — `pwd -W`, `shopt igncr`,
+the `paste-from-clipboard` bind name — plus the two `help test` paragraphs bash
+5.2 has and osh did not; `compgen` ordering; the POSIX `time` path; child CPU
+accounting on unix (`TD-OILS10`); and `-O`/`-G`, which asked an invented root
+identity and therefore answered *backwards* on every file (commit `60a63c49f`).
+Remaining groups: job-death announcements osh makes and bash does not
+(`job-death-notice`, `jobs-listing`, `kill-dispositions`); shebang handling
+(`shebang-interpreter-line`, `exec-shebangless-script`,
+`a-command-path-that-will-not-run…`); and ten one-off defects (`enable -f`, an
+arithmetic subscript expanded in place, a debug trap's `PIPESTATUS`, `nounset`
+array length, `printf`'s `strtod` float parsing, the status of a fatal expansion
+abort, `TIMEFORMAT`, a std fd bound to a read-only source, `compgen` actions,
+and pipeline `xtrace` ordering).
+
+**One guard added so this cannot recur silently.** The harness now asks the
+reference shell for its own `$MACHTYPE` — baked in at bash's configure time, so
+a copy, a symlink or an explicit `--bash` cannot fool it the way a path
+heuristic would — and prints a warning above the first case when the answer is
+not a Linux triple. A wrong reference announces itself as a green run, so it now
+gets announced somewhere the reader will still be paying attention.
 
 ---
 

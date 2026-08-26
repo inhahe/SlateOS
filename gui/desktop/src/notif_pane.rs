@@ -409,7 +409,8 @@ pub enum PaneState {
 
 impl PaneState {
     /// Returns the fraction of the pane that is currently visible (0.0 = hidden, 1.0 = full).
-    fn visibility(self) -> f32 {
+    #[must_use]
+    pub fn visibility(self) -> f32 {
         match self {
             Self::Hidden => 0.0,
             Self::SlideIn(p) => p,
@@ -418,7 +419,17 @@ impl PaneState {
         }
     }
 
-    fn is_visible(self) -> bool {
+    /// Whether any part of the pane is on screen.
+    ///
+    /// This *is* the pane's open flag, and there is deliberately no second
+    /// `notifications_open: bool` beside it anywhere — see
+    /// `design-decisions.md` §493, where the calendar's second flag was the
+    /// thing that let the popup be drawn and not clickable.
+    ///
+    /// True throughout the slide out, because a pane that is still painted is
+    /// still a pane that has to be hit-tested where it is painted.
+    #[must_use]
+    pub const fn is_visible(self) -> bool {
         !matches!(self, Self::Hidden)
     }
 }
@@ -804,6 +815,22 @@ impl NotificationPane {
     /// Number of unread notifications.
     pub fn unread_count(&self) -> usize {
         self.notifications.iter().filter(|n| !n.read).count()
+    }
+
+    /// The history, newest first.
+    ///
+    /// Read-only, and a slice rather than a `Vec`: the pane owns the order (a
+    /// push goes to the front) and the eviction rule (the oldest goes when
+    /// `MAX_NOTIFICATIONS` is reached), and a caller handed a copy could not
+    /// change either but could easily believe it had.
+    ///
+    /// This exists because for a long time nothing outside this file could ask
+    /// what the pane was holding — [`unread_count`](Self::unread_count) was the
+    /// whole of its readable state — which is the same reason nothing could ask
+    /// it to draw: see `design-decisions.md` §493.
+    #[must_use]
+    pub fn notifications(&self) -> &[Notification] {
+        &self.notifications
     }
 
     /// Set the current timestamp (for time grouping).

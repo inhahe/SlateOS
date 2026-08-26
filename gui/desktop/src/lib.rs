@@ -842,6 +842,20 @@ pub struct DesktopShell {
     /// missed assignment away from a popup that is drawn and not clickable, or
     /// the reverse. See `design-decisions.md` §493.
     pub calendar: calendar::CalendarView,
+    /// The notification pane the tray bell opens: the desktop's only place for
+    /// a message the user did not ask for.
+    ///
+    /// `notif_pane.rs` was the same kind of island `calendar.rs` was — a full
+    /// pane with quick settings, per-app rules, a history and 130 tests, and
+    /// nothing anywhere that constructed a `NotificationPane`. The shell could
+    /// therefore *notice* things and had nowhere to say them: the wallpaper
+    /// that failed to decode set `ShellSession::wallpaper_error` and the user
+    /// saw a plain colour with no explanation.
+    ///
+    /// As with the calendar, the pane's own
+    /// [`PaneState::is_visible`](notif_pane::PaneState::is_visible) **is** the
+    /// open flag. See `design-decisions.md` §493.
+    pub notifications: notif_pane::NotificationPane,
     /// The events the popup marks and lists.
     ///
     /// Empty until something fills it. It lives on the shell rather than
@@ -1070,6 +1084,7 @@ impl DesktopShell {
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
+            notifications: notif_pane::NotificationPane::new(),
             events: calendar::EventStore::new(),
             // Placeholder: the real area needs `taskbar_rect()`, which needs
             // the appearance scaling that is only set two fields up. Seeded
@@ -1584,6 +1599,28 @@ impl DesktopShell {
     ///
     /// Returns what the caller should do with it — see [`ShellAction`].
     pub fn handle_mouse(&mut self, event: &MouseEvent) -> ShellAction {
+        // Before the match, and before `handle_press`'s own overview check: the
+        // notification pane draws a scrim across the whole screen, so while it
+        // is up every event landed on it — including one over the strip the
+        // taskbar occupies, which is *under* the scrim.
+        //
+        // Consumed unconditionally rather than forwarding the pane's
+        // `Ignored`. The pane ignores motion outside its column because it has
+        // no hover state out there, not because the event belongs to whatever
+        // is behind it; passing that through would light a button under an
+        // overlay, which is exactly what the overview arm below guards against.
+        if self.notifications.pane_state().is_visible() {
+            // Result deliberately discarded: see the paragraph above. Whether
+            // the pane found something under the cursor does not change the
+            // answer, which is that the click cannot reach past the scrim.
+            let _ = self.notifications.handle_mouse_event(
+                event,
+                self.screen_width as f32,
+                self.screen_height as f32,
+            );
+            return ShellAction::Consumed;
+        }
+
         match event.kind {
             // The two are the same event to this shell. Nothing it draws does
             // anything on the second click that it did not do on the first:
@@ -2271,6 +2308,22 @@ impl DesktopShell {
             return self.key_on_overview(key);
         }
 
+        // The notification pane is modal for the same reason and gets presses
+        // on the same terms — with the same one-way-toggle exception, so that
+        // the chord that opened it closes it again.
+        if self.notifications.pane_state().is_visible() {
+            if DesktopAction::for_chord(key.modifiers, key.key)
+                == Some(DesktopAction::ToggleNotifications)
+            {
+                return self.run_desktop_action(DesktopAction::ToggleNotifications);
+            }
+            // Result deliberately discarded: consumed even when the pane had no
+            // meaning for the key, because a press the overlay did not use is
+            // not therefore the desktop's.
+            let _ = self.notifications.handle_key_event(key);
+            return HotkeyOutcome::consumed();
+        }
+
         match DesktopAction::for_chord(key.modifiers, key.key) {
             Some(action) => self.run_desktop_action(action),
             None => HotkeyOutcome::ignored(),
@@ -2424,6 +2477,14 @@ impl DesktopShell {
                 self.toggle_zone_overlay();
                 HotkeyOutcome::consumed()
             }
+            // Consumed unconditionally, like the two above: Super+N is the
+            // shell's chord whether or not there is anything in the pane, and a
+            // shortcut that sometimes types an `n` into the focused window is
+            // worse than one that sometimes opens an empty panel.
+            DesktopAction::ToggleNotifications => {
+                self.toggle_notifications();
+                HotkeyOutcome::consumed()
+            }
             DesktopAction::RestoreOrMinimize => {
                 // Which of the two it is depends on the state the *compositor*
                 // last reported, not on anything the shell decided: Super+Down
@@ -2509,6 +2570,13 @@ enum DesktopAction {
     /// presses away the window is — or which desktop it is on, which Alt-Tab
     /// cannot answer at all.
     ToggleOverview,
+    /// Open (or close) the notification pane.
+    ///
+    /// The pane is the only surface that holds a message the user did not ask
+    /// for, so it needs a way in that does not depend on having noticed a tray
+    /// icon change — a notification posted while the user was away is one they
+    /// will never see a transient hint for.
+    ToggleNotifications,
     RestoreOrMinimize,
     PreviousDesktop,
     NextDesktop,
@@ -2553,6 +2621,9 @@ impl DesktopAction {
             // and is not one of the four above. Alt+Tab is deliberately left
             // alone: the two are complements, not alternatives.
             (false, false, false, true, Key::Tab) => Some(Self::ToggleOverview),
+            // Super+N, as in "notifications" — the chord Windows uses for the
+            // same panel, and free here: none of the bindings above claim `N`.
+            (false, false, false, true, Key::N) => Some(Self::ToggleNotifications),
             (false, true, false, true, Key::Left) => Some(Self::PreviousDesktop),
             (false, true, false, true, Key::Right) => Some(Self::NextDesktop),
             // Bare Escape. The shell had no binding for it at all, so the only
@@ -3138,6 +3209,36 @@ impl DesktopShell {
         self.calendar.set_visible(true);
     }
 
+    /// Open the notification pane, or close it if it is already open.
+    ///
+    /// Lands the pane on its destination immediately; a caller with a frame
+    /// clock follows this with [`NotificationPane::begin_slide`] to rewind the
+    /// jump into an animation. See `design-decisions.md` §520 and §562.
+    ///
+    /// [`NotificationPane::begin_slide`]: notif_pane::NotificationPane::begin_slide
+    pub fn toggle_notifications(&mut self) {
+        if self.notifications.pane_state().is_visible() {
+            self.notifications.hide();
+            return;
+        }
+        // Same rule the calendar states: two panels over one taskbar at once is
+        // a state the user cannot have asked for.
+        self.start_menu_open = false;
+        self.power_menu_open = false;
+        self.calendar.set_visible(false);
+        self.notifications.show();
+    }
+
+    /// Post a notification, opening nothing.
+    ///
+    /// The pane is the *history*; this puts a message into it whether or not
+    /// anyone is looking. A message that could only arrive while the pane was
+    /// open would be a message the user can only read by already knowing it is
+    /// there.
+    pub fn notify(&mut self, notif: notif_pane::Notification) -> u64 {
+        self.notifications.push_notification(notif)
+    }
+
     /// Close whatever popup is open. Returns whether anything was.
     ///
     /// The return value is what keeps Escape from being swallowed: a press
@@ -3147,11 +3248,16 @@ impl DesktopShell {
         let any = self.start_menu_open
             || self.power_menu_open
             || self.calendar.visible
+            || self.notifications.pane_state().is_visible()
             || self.snap.is_overlay_visible()
             || self.overview.visible;
         self.start_menu_open = false;
         self.power_menu_open = false;
         self.calendar.set_visible(false);
+        // The pane's own Escape handling closes it too; this is the path for a
+        // press that dismissed something else at the same time, and for a
+        // caller dismissing everything without a key at all.
+        self.notifications.hide();
         self.snap.hide_overlay();
         // Escape closes the overview along with everything else. It is a
         // fullscreen overlay that covers the whole desktop, so it is the
@@ -3182,6 +3288,28 @@ impl DesktopShell {
             self.calendar_scale(),
             now,
             &self.events,
+        ));
+        Some(tree)
+    }
+
+    /// Render the notification pane, if it is open.
+    ///
+    /// Screen-sized, because the pane draws a scrim over the whole desktop and
+    /// sizes its own column from the right edge. The same two numbers are given
+    /// to [`NotificationPane::handle_mouse_event`], which is what keeps the
+    /// pane hit-tested where it is painted.
+    ///
+    /// [`NotificationPane::handle_mouse_event`]: notif_pane::NotificationPane::handle_mouse_event
+    #[must_use]
+    pub fn render_notifications(&self) -> Option<RenderTree> {
+        if !self.notifications.pane_state().is_visible() {
+            return None;
+        }
+        let mut tree = RenderTree::new();
+        tree.commands.extend(self.notifications.render(
+            &Palette::from_settings(&self.appearance),
+            self.screen_width as f32,
+            self.screen_height as f32,
         ));
         Some(tree)
     }
@@ -4770,7 +4898,7 @@ mod overview_wiring_tests {
     use super::{
         DesktopShell, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
         RenderTree, ShellAction, ShellControlAction, ShellRequest, WindowId, WindowInfo,
-        WindowList, overview,
+        WindowList, notif_pane, overview,
     };
     use guitk::render::RenderCommand;
 
@@ -5081,5 +5209,165 @@ mod overview_wiring_tests {
         s.overview.show(overview::OverviewMode::AllWindows);
         s.dismiss_popups();
         assert!(!s.overview.visible);
+    }
+
+    // ======================================================================
+    // The notification pane
+    //
+    // `notif_pane.rs` was an island: a full pane with 130 tests and nothing
+    // anywhere that built one, so the shell could notice a failure and had
+    // nowhere to report it. These tests are the ones that would have failed
+    // while it was unreachable.
+    // ======================================================================
+
+    fn super_n() -> KeyEvent {
+        key(
+            Key::N,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn super_n_opens_the_notification_pane_the_whole_way() {
+        let mut s = shell();
+        assert!(!s.notifications.pane_state().is_visible());
+        assert!(s.handle_hotkey(&super_n()).consumed);
+        // Not merely open: *fully* open. A shell with no frame clock — which is
+        // every caller but `ShellSession` — must not be left with a pane at
+        // zero progress, which draws off the right edge of the screen.
+        assert_eq!(
+            s.notifications.pane_state(),
+            notif_pane::PaneState::Visible,
+            "the pane opened but was left waiting for a frame that never comes"
+        );
+    }
+
+    #[test]
+    fn super_n_closes_the_pane_it_opened() {
+        // A toggle you cannot press twice is a trap: while the pane is open it
+        // swallows every key, so without the explicit exception the chord would
+        // be one-way.
+        let mut s = shell();
+        assert!(s.handle_hotkey(&super_n()).consumed);
+        assert!(s.handle_hotkey(&super_n()).consumed);
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
+    }
+
+    #[test]
+    fn an_open_pane_is_drawn_and_a_closed_one_is_not() {
+        let mut s = shell();
+        assert!(s.render_notifications().is_none());
+        s.toggle_notifications();
+        let tree = s
+            .render_notifications()
+            .expect("an open notification pane draws");
+        assert!(!tree.commands.is_empty(), "an open pane drew no commands");
+    }
+
+    #[test]
+    fn the_pane_swallows_presses_over_the_taskbar() {
+        // The scrim covers the whole screen, taskbar included. A press that
+        // reached the start button through it would raise a menu behind an
+        // overlay the user cannot see past.
+        let mut s = shell();
+        s.toggle_notifications();
+        let action = press(&mut s, 20.0, 1080.0 - 24.0);
+        assert_eq!(action, ShellAction::Consumed);
+        assert!(
+            !s.start_menu_open,
+            "a press through the scrim opened a menu"
+        );
+    }
+
+    #[test]
+    fn the_pane_swallows_motion_over_what_it_covers() {
+        // Same rule for hover: forwarding motion would light a button under an
+        // opaque overlay, which is the defect the overview arm guards against.
+        let mut s = shell();
+        s.toggle_notifications();
+        let action = s.handle_mouse(&MouseEvent {
+            x: 40.0,
+            y: 40.0,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(action, ShellAction::Consumed);
+    }
+
+    #[test]
+    fn a_key_the_pane_has_no_use_for_does_not_reach_the_desktop() {
+        // Super+D shows the desktop. Pressed into an open pane it must do
+        // nothing at all: a modal surface is modal about keys as well as
+        // clicks.
+        let mut s = shell();
+        s.toggle_notifications();
+        let outcome = s.handle_hotkey(&key(
+            Key::D,
+            Modifiers {
+                super_key: true,
+                ..Modifiers::NONE
+            },
+            None,
+        ));
+        assert!(outcome.consumed);
+        assert!(
+            outcome.requests.is_empty(),
+            "a shortcut fired through an open pane"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_pane() {
+        let mut s = shell();
+        s.toggle_notifications();
+        assert!(
+            s.handle_hotkey(&key(Key::Escape, Modifiers::NONE, None))
+                .consumed
+        );
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
+    }
+
+    #[test]
+    fn dismissing_popups_dismisses_the_pane() {
+        let mut s = shell();
+        s.toggle_notifications();
+        assert!(s.dismiss_popups(), "an open pane is something to dismiss");
+        assert_eq!(s.notifications.pane_state(), notif_pane::PaneState::Hidden);
+    }
+
+    #[test]
+    fn opening_the_pane_closes_the_other_panels() {
+        // Two panels over one taskbar at once is a state the user cannot have
+        // asked for.
+        let mut s = shell();
+        s.toggle_start_menu();
+        s.toggle_calendar();
+        s.toggle_notifications();
+        assert!(!s.start_menu_open);
+        assert!(!s.calendar.visible);
+        assert!(s.notifications.pane_state().is_visible());
+    }
+
+    #[test]
+    fn a_notification_arrives_without_the_pane_being_open() {
+        // The pane is the history. A message that could only arrive while
+        // someone was looking is a message nobody ever reads.
+        let mut s = shell();
+        assert_eq!(s.notifications.unread_count(), 0);
+        let _ = s.notify(notif_pane::Notification {
+            id: 0,
+            app_name: "Desktop".to_owned(),
+            title: "Wallpaper could not be shown".to_owned(),
+            body: "/pictures/torn.png: truncated IDAT".to_owned(),
+            timestamp: 0,
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+        });
+        assert!(!s.notifications.pane_state().is_visible());
+        assert_eq!(s.notifications.unread_count(), 1);
     }
 }

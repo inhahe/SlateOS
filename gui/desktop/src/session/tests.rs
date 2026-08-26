@@ -69,6 +69,17 @@ fn key(k: Key) -> guitk::event::Event {
     })
 }
 
+/// Super+N — the chord that opens and closes the notification pane.
+fn super_n() -> guitk::event::Event {
+    chord(
+        Key::N,
+        Modifiers {
+            super_key: true,
+            ..Modifiers::NONE
+        },
+    )
+}
+
 /// A press with modifiers held — a desktop shortcut rather than a bare key.
 fn chord(k: Key, modifiers: Modifiers) -> guitk::event::Event {
     guitk::event::Event::Key(KeyEvent {
@@ -1439,5 +1450,263 @@ fn a_compositor_that_refuses_the_picture_still_gets_a_painted_desktop() {
     assert!(
         why.contains("image budget exhausted"),
         "the compositor's reason was thrown away: {why}"
+    );
+}
+
+// ============================================================================
+// The wallpaper failure the user can actually read
+//
+// `wallpaper_error` had four writers and one reader — a getter nothing called.
+// A wallpaper that failed to decode therefore left the user looking at a plain
+// colour with no way at all to find out why. These are the tests that would
+// have failed while that was true.
+// ============================================================================
+
+/// Every notification the pane is holding, newest first, as `(title, body)`.
+fn posted(session: &Session) -> Vec<(String, String)> {
+    session
+        .shell()
+        .notifications
+        .notifications()
+        .iter()
+        .map(|n| (n.title.clone(), n.body.clone()))
+        .collect()
+}
+
+#[test]
+fn a_wallpaper_that_will_not_decode_says_so_where_the_user_can_read_it() {
+    let (mut session, _desktop) = session();
+    let path = scratch("says-so.png", b"\x89PNG\r\n\x1a\nand then nonsense");
+    session
+        .wallpaper_mut()
+        .set_image(&path, crate::wallpaper::ImageFit::Fill);
+
+    session.paint_background().expect("the harness refused");
+
+    let notes = posted(&session);
+    assert_eq!(
+        notes.len(),
+        1,
+        "a failure the shell noticed is a failure it must say: {notes:?}"
+    );
+    assert!(
+        notes[0].1.contains("says-so.png"),
+        "the notification does not name the file: {:?}",
+        notes[0]
+    );
+    // The same reason, not a second wording of it. Two strings for one failure
+    // is two strings that can drift apart.
+    assert_eq!(
+        Some(notes[0].1.as_str()),
+        session.wallpaper_error(),
+        "the notification and the recorded error disagree"
+    );
+}
+
+#[test]
+fn a_failure_is_reported_once_and_not_once_per_repaint() {
+    // `paint_background` runs on every repaint, so an unconditional post would
+    // put one notification per mouse click into the history for as long as a
+    // corrupt file stayed selected.
+    let (mut session, _desktop) = session();
+    let path = scratch("once-only.png", b"\x89PNG\r\n\x1a\nand then nonsense");
+    session
+        .wallpaper_mut()
+        .set_image(&path, crate::wallpaper::ImageFit::Fill);
+
+    for _ in 0..5 {
+        session.paint_background().expect("the harness refused");
+    }
+
+    assert_eq!(
+        posted(&session).len(),
+        1,
+        "one failure produced one notification per repaint"
+    );
+}
+
+#[test]
+fn reporting_a_failure_does_not_shove_the_pane_over_the_screen() {
+    // A wallpaper that did not load is a thing to explain, not an emergency to
+    // interrupt with. The desktop is fully usable; a panel that opened itself
+    // at login over a missing file would be worse than the missing file.
+    let (mut session, _desktop) = session();
+    session.wallpaper_mut().set_image(
+        &scratch("quiet.png", b"\x89PNG\r\n\x1a\nnonsense"),
+        crate::wallpaper::ImageFit::Fill,
+    );
+
+    session.paint_background().expect("the harness refused");
+
+    assert!(
+        !session.shell().notifications.pane_state().is_visible(),
+        "a failed wallpaper opened the notification pane"
+    );
+    assert_eq!(session.shell().notifications.unread_count(), 1);
+}
+
+#[test]
+fn a_wallpaper_that_loads_reports_nothing() {
+    let (mut session, _desktop) = session();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+
+    session.paint_background().expect("the harness refused");
+
+    assert_eq!(session.wallpaper_error(), None);
+    assert!(
+        posted(&session).is_empty(),
+        "a wallpaper that worked still filed a complaint"
+    );
+}
+
+#[test]
+fn a_second_broken_wallpaper_gets_its_own_notification() {
+    // Deduplicating on "is there already an error" rather than on "is it this
+    // error" would silence every failure after the first, so a user who fixed
+    // one path and mistyped the next would get no word about the second.
+    let (mut session, _desktop) = session();
+    session.wallpaper_mut().set_image(
+        &scratch("first-bad.png", b"\x89PNG\r\n\x1a\nnonsense"),
+        crate::wallpaper::ImageFit::Fill,
+    );
+    session.paint_background().expect("the harness refused");
+
+    session.wallpaper_mut().set_image(
+        &scratch("second-bad.png", b"\x89PNG\r\n\x1a\nnonsense"),
+        crate::wallpaper::ImageFit::Fill,
+    );
+    session.paint_background().expect("the harness refused");
+
+    let notes = posted(&session);
+    assert_eq!(
+        notes.len(),
+        2,
+        "the second failure was swallowed: {notes:?}"
+    );
+    assert!(notes.iter().any(|(_, body)| body.contains("first-bad.png")));
+    assert!(
+        notes
+            .iter()
+            .any(|(_, body)| body.contains("second-bad.png"))
+    );
+}
+
+// ============================================================================
+// The notification pane's slide
+// ============================================================================
+
+#[test]
+fn opening_the_pane_from_a_key_rewinds_it_into_a_slide() {
+    // The session is the caller that owns a clock, so it puts the pane back
+    // where it started and lets the frame clock carry it. Every other caller
+    // gets the pane fully open. See design-decisions.md 520 and 562.
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_n())]);
+
+    session.pump().expect("the harness refused");
+
+    assert!(
+        session.shell().notifications.is_sliding(),
+        "the pane snapped open instead of sliding"
+    );
+    assert!(
+        session.shell().notifications.pane_state().is_visible(),
+        "a sliding pane is still a pane that is on screen"
+    );
+}
+
+#[test]
+fn the_slide_finishes_and_then_the_desktop_goes_quiet() {
+    // The condition that keeps an idle desktop idle: once nothing is moving,
+    // no wake-up is registered and the loop parks with no bound at all. A pane
+    // missing from `anything_moving` is a pane that stops mid-slide.
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_n())]);
+    session.pump().expect("the harness refused");
+
+    // Well past the pane's own animation length at any plausible frame rate.
+    for _ in 0..200 {
+        session.step_frame(16);
+    }
+
+    assert!(!session.anything_moving(), "the desktop never went quiet");
+    assert_eq!(
+        session.shell().notifications.pane_state(),
+        crate::notif_pane::PaneState::Visible,
+        "the slide stopped somewhere other than fully open"
+    );
+}
+
+#[test]
+fn closing_the_pane_slides_it_out_and_it_stays_out() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_n())]);
+    session.pump().expect("the harness refused");
+    for _ in 0..200 {
+        session.step_frame(16);
+    }
+
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_n())]);
+    session.pump().expect("the harness refused");
+    assert!(
+        session.shell().notifications.pane_state().is_visible(),
+        "the close snapped instead of sliding"
+    );
+
+    for _ in 0..200 {
+        session.step_frame(16);
+    }
+
+    assert_eq!(
+        session.shell().notifications.pane_state(),
+        crate::notif_pane::PaneState::Hidden
+    );
+    assert!(!session.anything_moving());
+}
+
+#[test]
+fn a_frame_tick_does_not_restart_the_slide_it_just_finished() {
+    // The slide *ends* by changing the same open flag the session watches to
+    // decide a gesture happened. Watching a tick as well would read the end of
+    // the slide as a fresh gesture and start it over, for ever.
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_n())]);
+    session.pump().expect("the harness refused");
+    for _ in 0..200 {
+        session.step_frame(16);
+    }
+    // Close it, let the slide-out run to completion *through the event path*,
+    // which is where the sampling lives.
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(panel, super_n())]);
+    session.pump().expect("the harness refused");
+
+    for _ in 0..200 {
+        session
+            .dispatch(panel, guitk::event::Event::Tick { elapsed_ms: 16 })
+            .expect("a tick failed");
+    }
+
+    assert_eq!(
+        session.shell().notifications.pane_state(),
+        crate::notif_pane::PaneState::Hidden,
+        "the pane bounced back open when its slide finished"
     );
 }

@@ -169,7 +169,6 @@ cmd_notifcenter 1
 cmd_oomkiller 5
 cmd_pacct 1
 cmd_parentaltime 4
-cmd_peninput 10
 cmd_pftrack 3
 cmd_pgtable 1
 cmd_pidfd 5

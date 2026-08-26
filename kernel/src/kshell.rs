@@ -17260,6 +17260,110 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "bare `scap recent` succeeds");
     }
 
+    serial_println!(
+        "  kshell::self_test 76: a pen that cannot read an operand says so instead of \
+         binding the wrong button"
+    );
+    // `cmd_peninput` (10 ledger sites), plus the two neighbours the ledger
+    // could not see, which are the ones worth the rung:
+    //
+    //   * `pen rm abc` printed *nothing* and exited 0. The parse sat in an
+    //     `if let Ok(..)` with no `else`, so an unreadable id fell out of the
+    //     bottom of the arm. That is §600's first prohibited shape rather than
+    //     its second, and it is the worse of the two here: silence plus exit 0
+    //     is what a quiet success looks like, so the user has no way to learn
+    //     the pen is still registered.
+    //   * `pen map 3 x click` bound button *0* and announced
+    //     `Button 0 → 'click'`. This site had no `== 0` guard because, unlike a
+    //     pen id, button 0 is perfectly legitimate — there was nothing for a
+    //     sentinel check to key on, which is precisely why the wrong binding
+    //     was reported in the words of a right one.
+    //
+    // The controls matter for the same reason they did in rung 75: three of
+    // these operands have documented defaults (`pen sim 1 contact` with no
+    // coordinates, `pen events` with no count, `pen add wacom` with no type),
+    // and the way this conversion fails is by making an *absent* word an error.
+    {
+        // Set up a pen to act on; the id is whatever `register` hands back, so
+        // the assertions below use the diagnostics rather than a fixed id
+        // wherever they can.
+        let _ = capture_command("pen init");
+
+        let out = capture_command("pen rm zzbogus");
+        assert_output_contains(
+            "pen rm names the id it could not read",
+            &out,
+            b"`zzbogus' is not a pen id",
+        );
+        assert_eq!(last_exit(), 1, "pen rm: an unreadable id errors");
+
+        let out = capture_command("pen rm");
+        assert_output_contains(
+            "pen rm says which operand is missing",
+            &out,
+            b"missing pen id",
+        );
+        assert_eq!(last_exit(), 1, "pen rm: a missing id errors");
+
+        let out = capture_command("pen sim 1o contact");
+        assert_output_contains(
+            "pen sim names the pen id it could not read",
+            &out,
+            b"`1o' is not a pen id",
+        );
+        assert_eq!(last_exit(), 1, "pen sim: an unreadable pen id errors");
+        assert_output_lacks("and simulates nothing", &out, b"Contact at");
+
+        let out = capture_command("pen sim 1 contact 4o96");
+        assert_output_contains(
+            "pen sim names the coordinate it could not read",
+            &out,
+            b"`4o96' is not a horizontal coordinate",
+        );
+        assert_eq!(last_exit(), 1, "pen sim: an unreadable coordinate errors");
+        assert_output_lacks("and simulates nothing", &out, b"Contact at");
+
+        let out = capture_command("pen map 3 x click");
+        assert_output_contains(
+            "pen map names the button it could not read",
+            &out,
+            b"`x' is not a button number",
+        );
+        assert_eq!(last_exit(), 1, "pen map: an unreadable button errors");
+        assert_output_lacks("and binds nothing", &out, b"Button 0");
+
+        let out = capture_command("pen events zz");
+        assert_output_contains(
+            "pen events names the count it could not read",
+            &out,
+            b"`zz' is not a count",
+        );
+        assert_eq!(last_exit(), 1, "pen events: an unreadable count errors");
+
+        let out = capture_command("pen add zzpen airbrsh");
+        assert_output_contains(
+            "pen add names the type it could not read",
+            &out,
+            b"`airbrsh' is not a pen type",
+        );
+        assert_eq!(last_exit(), 1, "pen add: an unreadable type errors");
+        assert_output_lacks("and registers nothing", &out, b"Registered pen");
+
+        // The controls: every one of these omits an operand that is genuinely
+        // optional, and must still work.
+        let out = capture_command("pen add zzpen");
+        assert_output_contains(
+            "a type-less `pen add` still registers",
+            &out,
+            b"Registered pen",
+        );
+        assert_eq!(last_exit(), 0, "bare `pen add <name>` succeeds");
+
+        let out = capture_command("pen events");
+        assert_output_lacks("bare `pen events` still lists", &out, b"is not a count");
+        assert_eq!(last_exit(), 0, "bare `pen events` succeeds");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -72349,138 +72453,185 @@ fn cmd_peninput(args: &str) {
         }
         "register" | "add" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let type_str = parts.get(2).copied().unwrap_or("stylus");
-            let pen_type = match type_str {
-                "airbrush" => peninput::PenType::AirBrush,
-                "artpen" => peninput::PenType::ArtPen,
-                "eraser" => peninput::PenType::Eraser,
-                "touch" => peninput::PenType::Touch,
-                _ => peninput::PenType::Stylus,
-            };
             if name.is_empty() {
-                shell_println!("Usage: pen add <name> [stylus|airbrush|artpen|eraser|touch]");
+                shell_println!("pen: {}: missing pen name", sub);
                 set_exit(1);
-            } else {
-                let caps = peninput::PenCapabilities {
-                    pressure: true,
-                    tilt: true,
-                    rotation: false,
-                    eraser_tip: pen_type == peninput::PenType::Eraser,
-                    buttons: 2,
-                };
-                match peninput::register_pen(name, pen_type, caps) {
-                    Ok(id) => shell_println!("Registered pen {} '{}'.", id, name),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            }
+            // The non-numeric member of the same family. The type word was
+            // matched with a catch-all `_ => Stylus`, so `pen add wacom airbrsh`
+            // registered a *stylus* and said `Registered pen 3 'wacom'` — the
+            // eraser tip silently absent from a device the user asked to have
+            // one. An omitted type still means stylus, which is the documented
+            // default; a type that was typed and not understood is refused.
+            let pen_type = match parts.get(2).copied() {
+                None | Some("stylus") => peninput::PenType::Stylus,
+                Some("airbrush") => peninput::PenType::AirBrush,
+                Some("artpen") => peninput::PenType::ArtPen,
+                Some("eraser") => peninput::PenType::Eraser,
+                Some("touch") => peninput::PenType::Touch,
+                Some(other) => {
+                    shell_println!("pen: {}: `{}' is not a pen type", sub, other);
+                    shell_println!("Types: stylus, airbrush, artpen, eraser, touch");
+                    set_exit(1);
+                    return;
+                }
+            };
+            let caps = peninput::PenCapabilities {
+                pressure: true,
+                tilt: true,
+                rotation: false,
+                eraser_tip: pen_type == peninput::PenType::Eraser,
+                buttons: 2,
+            };
+            match peninput::register_pen(name, pen_type, caps) {
+                Ok(id) => shell_println!("Registered pen {} '{}'.", id, name),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "rm" | "unregister" => {
-            if let Some(id_str) = parts.get(1) {
-                if let Ok(id) = id_str.parse::<u32>() {
-                    match peninput::unregister_pen(id) {
-                        Ok(()) => shell_println!("Unregistered pen {}.", id),
+            // This arm carried the *other* prohibited shape from §600: the
+            // inner `if let Ok(id)` had no `else`, so `pen rm abc` fell out of
+            // both conditionals, printed nothing at all, and exited 0. A
+            // dropped word is worse than a guessed one here, because "no
+            // output, exit 0" is indistinguishable from a removal that
+            // succeeded quietly — the user has no way to learn the pen is
+            // still registered short of listing again.
+            let Some(id) = required_num::<u32>(&parts, 1, "pen", sub, "pen id") else {
+                return;
+            };
+            match peninput::unregister_pen(id) {
+                Ok(()) => shell_println!("Unregistered pen {}.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        "sim" | "simulate" => {
+            // `unwrap_or(0)` guarded by `if pen_id == 0` is the sentinel shape:
+            // zero was never a pen id the user could be refused *for*, it was
+            // the value invented for a word that could not be read — and the
+            // synopsis it printed in response never mentioned that word. So
+            // `pen sim 1o contact` answered with a usage dump that said nothing
+            // about `1o`, exactly as if the operand had been omitted.
+            let Some(pen_id) = required_num::<u32>(&parts, 1, "pen", sub, "pen id") else {
+                return;
+            };
+            let action = parts.get(2).copied().unwrap_or("contact");
+            // The coordinates and pressure below genuinely are optional — a
+            // bare `pen sim 1 contact` is the documented way to plant a
+            // mid-tablet touch — so they take `optional_num`, which keeps the
+            // default for an *absent* word and refuses an unreadable one.
+            match action {
+                "proxin" => match peninput::proximity_in(pen_id) {
+                    Ok(()) => shell_println!("Proximity in."),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
+                },
+                "proxout" => match peninput::proximity_out(pen_id) {
+                    Ok(()) => shell_println!("Proximity out."),
+                    Err(e) => {
+                        shell_println!("Error: {:?}", e);
+                        set_exit(1);
+                    }
+                },
+                "contact" => {
+                    let Some(x) =
+                        optional_num::<u16>(&parts, 3, "pen", sub, "horizontal coordinate", 16000)
+                    else {
+                        return;
+                    };
+                    let Some(y) =
+                        optional_num::<u16>(&parts, 4, "pen", sub, "vertical coordinate", 8000)
+                    else {
+                        return;
+                    };
+                    let Some(p) = optional_num::<u16>(&parts, 5, "pen", sub, "pressure", 2048)
+                    else {
+                        return;
+                    };
+                    match peninput::contact(pen_id, x, y, p) {
+                        Ok(()) => shell_println!("Contact at ({},{}) pressure {}.", x, y, p),
                         Err(e) => {
                             shell_println!("Error: {:?}", e);
                             set_exit(1);
                         }
                     }
                 }
-            } else {
-                shell_println!("Usage: pen rm <id>");
-                set_exit(1);
-            }
-        }
-        "sim" | "simulate" => {
-            let pen_id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let action = parts.get(2).copied().unwrap_or("contact");
-            if pen_id == 0 {
-                shell_println!("Usage: pen sim <pen_id> <proxin|proxout|contact|release|move>");
-                set_exit(1);
-            } else {
-                match action {
-                    "proxin" => {
-                        peninput::proximity_in(pen_id).ok();
-                        shell_println!("Proximity in.");
-                    }
-                    "proxout" => {
-                        peninput::proximity_out(pen_id).ok();
-                        shell_println!("Proximity out.");
-                    }
-                    "contact" => {
-                        let x = parts
-                            .get(3)
-                            .and_then(|s| s.parse::<u16>().ok())
-                            .unwrap_or(16000);
-                        let y = parts
-                            .get(4)
-                            .and_then(|s| s.parse::<u16>().ok())
-                            .unwrap_or(8000);
-                        let p = parts
-                            .get(5)
-                            .and_then(|s| s.parse::<u16>().ok())
-                            .unwrap_or(2048);
-                        peninput::contact(pen_id, x, y, p).ok();
-                        shell_println!("Contact at ({},{}) pressure {}.", x, y, p);
-                    }
-                    "release" => {
-                        peninput::release(pen_id).ok();
-                        shell_println!("Released.");
-                    }
-                    "move" => {
-                        let x = parts
-                            .get(3)
-                            .and_then(|s| s.parse::<u16>().ok())
-                            .unwrap_or(16000);
-                        let y = parts
-                            .get(4)
-                            .and_then(|s| s.parse::<u16>().ok())
-                            .unwrap_or(8000);
-                        let p = parts
-                            .get(5)
-                            .and_then(|s| s.parse::<u16>().ok())
-                            .unwrap_or(2048);
-                        peninput::report_move(pen_id, x, y, p, 0, 0).ok();
-                        shell_println!("Moved to ({},{}).", x, y);
-                    }
-                    _ => {
-                        shell_println!("pen: sim: `{}' is not an action", action);
-                        shell_println!("Actions: proxin, proxout, contact, release, move");
-                        set_exit(1);
-                    }
-                }
-            }
-        }
-        "map" => {
-            let pen_id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let btn = parts.get(2).and_then(|s| s.parse::<u8>().ok()).unwrap_or(0);
-            let action = parts.get(3).copied().unwrap_or("");
-            if pen_id == 0 || action.is_empty() {
-                shell_println!("Usage: pen map <pen_id> <button> <action>");
-                set_exit(1);
-            } else {
-                match peninput::set_button_mapping(pen_id, btn, action) {
-                    Ok(()) => shell_println!("Button {} → '{}'.", btn, action),
+                "release" => match peninput::release(pen_id) {
+                    Ok(()) => shell_println!("Released."),
                     Err(e) => {
                         shell_println!("Error: {:?}", e);
                         set_exit(1);
                     }
+                },
+                "move" => {
+                    let Some(x) =
+                        optional_num::<u16>(&parts, 3, "pen", sub, "horizontal coordinate", 16000)
+                    else {
+                        return;
+                    };
+                    let Some(y) =
+                        optional_num::<u16>(&parts, 4, "pen", sub, "vertical coordinate", 8000)
+                    else {
+                        return;
+                    };
+                    let Some(p) = optional_num::<u16>(&parts, 5, "pen", sub, "pressure", 2048)
+                    else {
+                        return;
+                    };
+                    match peninput::report_move(pen_id, x, y, p, 0, 0) {
+                        Ok(()) => shell_println!("Moved to ({},{}).", x, y),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
+                    }
+                }
+                _ => {
+                    shell_println!("pen: sim: `{}' is not an action", action);
+                    shell_println!("Actions: proxin, proxout, contact, release, move");
+                    set_exit(1);
+                }
+            }
+        }
+        "map" => {
+            let Some(pen_id) = required_num::<u32>(&parts, 1, "pen", sub, "pen id") else {
+                return;
+            };
+            // The button number is the site with no guard at all: it was read
+            // with `unwrap_or(0)` and then checked by nothing, because 0 is a
+            // perfectly legitimate button. So `pen map 3 x click` bound the
+            // *first* button, reported `Button 0 → 'click'`, and exited 0 — a
+            // wrong binding announced in the words of a right one, which is
+            // the failure the whole ledger exists to remove.
+            let Some(btn) = required_num::<u8>(&parts, 2, "pen", sub, "button number") else {
+                return;
+            };
+            let action = parts.get(3).copied().unwrap_or("");
+            if action.is_empty() {
+                shell_println!("pen: {}: missing action", sub);
+                set_exit(1);
+                return;
+            }
+            match peninput::set_button_mapping(pen_id, btn, action) {
+                Ok(()) => shell_println!("Button {} → '{}'.", btn, action),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "events" => {
-            let count = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(20);
+            let Some(count) = optional_num::<usize>(&parts, 1, "pen", sub, "count", 20) else {
+                return;
+            };
             let events = peninput::list_events(count);
             if events.is_empty() {
                 shell_println!("No pen events.");

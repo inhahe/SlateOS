@@ -2368,6 +2368,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32"
+version = "0.1.0"
+
+[[package]]
 name = "crda-cli"
 version = "0.1.0"
 
@@ -6077,6 +6081,7 @@ name = "kernel"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "crc32",
  "ere",
  "log",
  "netipc",

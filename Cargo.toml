@@ -97,6 +97,14 @@ members = [
     # one call) and still be wrong for an input that ends 55 bytes into a
     # block. That is the part worth having exactly one copy of.
     "blockbuf",
+    # CRC-32 (ISO 3309 / IEEE 802.3) — gzip, ZIP, PNG, RAR, 7-Zip, F2FS. It
+    # lived in the kernel's `crypto` module, whose own comment recorded that
+    # four private copies of the polynomial had already been consolidated onto
+    # it. The consolidation could not reach past the kernel's edge, because a
+    # module of a *binary* crate cannot be depended on: `deflate` needs it for
+    # the gzip trailer and `gui/imagecodec` needs it for PNG chunk CRCs, and
+    # neither can name `crate::crypto`.
+    "crc32",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

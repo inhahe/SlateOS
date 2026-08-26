@@ -32,6 +32,14 @@ tzrules = { path = "../tzrules" }
 # fixed-size -- which is what lets the kernel link it. See requests/
 # c-a-sha2-crate-exists-now.md and the reply beside it.
 sha2 = { path = "../sha2" }
+# The shared CRC-32 (ISO 3309 / IEEE 802.3) -- gzip, ZIP, PNG, RAR, 7-Zip and
+# F2FS. `kernel/src/crypto.rs` used to carry the table and the three functions,
+# and its own comment recorded that four private copies inside this crate had
+# already been consolidated onto them. That consolidation could not reach past
+# the kernel's edge, because a module of a binary crate cannot be depended on
+# -- so the next callers outside it started copies five and six. no_std with no
+# `alloc`: the state is one u32 and the table is a `const`.
+crc32 = { path = "../crc32" }
 # The shared POSIX regular-expression engine, used by userspace's grep, sed,
 # awk and expr. The kernel shell carries its own awk and sed, and they were
 # matching `/regex/` with `str::contains` -- so `awk '/^err/'` matched lines

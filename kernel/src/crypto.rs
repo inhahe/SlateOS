@@ -309,77 +309,29 @@ pub fn self_test_crc32c() -> Result<(), crate::error::KernelError> {
 // CRC-32 (ISO 3309 / IEEE 802.3) — a *different* polynomial from CRC32C
 // ===========================================================================
 
-/// CRC-32 lookup table for the reflected IEEE polynomial 0xEDB88320
-/// (bit-reversed 0x04C11DB7).
+/// CRC-32 (ISO 3309 / IEEE 802.3), re-exported from the `crc32` crate.
 ///
 /// This is the CRC of gzip, ZIP, PNG, Ethernet, RAR, 7-Zip and F2FS — *not*
-/// the Castagnoli CRC32C above, which uses 0x82F63B78 and produces entirely
+/// the Castagnoli CRC32C above, which uses `0x82F63B78` and produces entirely
 /// different values. The two are easy to confuse and impossible to confuse
-/// safely: a checksum computed with the wrong one verifies against nothing.
-const CRC32_TABLE: [u32; 256] = {
-    const POLY: u32 = 0xEDB8_8320;
-    let mut table = [0u32; 256];
-    let mut i = 0u32;
-    while i < 256 {
-        let mut crc = i;
-        let mut bit = 0;
-        while bit < 8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ POLY;
-            } else {
-                crc >>= 1;
-            }
-            bit += 1;
-        }
-        table[i as usize] = crc;
-        i += 1;
-    }
-    table
-};
-
-/// Compute CRC-32 (ISO 3309 / IEEE 802.3) over a byte slice.
+/// safely: a checksum computed with the wrong one verifies against nothing,
+/// and the failure looks like data corruption rather than like a bug. Keeping
+/// them adjacent in this file is deliberate for that reason, and the
+/// re-export keeps the adjacency after the move.
 ///
-/// Initial value `!0`, final value inverted — the conventional framing, so
-/// this matches what `gzip -l`, `unzip -v` and Python's `zlib.crc32` report.
+/// The table and the three functions used to live here. The comment on them
+/// already recorded that four private bit-at-a-time copies of this polynomial
+/// (`rar.rs`, `sevenz.rs`, `properties.rs`, `compress.rs`) had been
+/// consolidated onto this one — but a module of a *binary* crate cannot be
+/// depended on, so the consolidation stopped at the kernel's edge and the
+/// next two callers outside it (`deflate`'s gzip trailer, `gui/imagecodec`'s
+/// PNG chunk CRCs) each had to start a fifth and sixth copy. Hence a leaf
+/// crate, on the model of `sha2`, `sha1` and `md5`.
 ///
-/// # Examples
-///
-/// ```ignore
-/// assert_eq!(crc32(b"123456789"), 0xCBF43926);
-/// ```
-pub fn crc32(data: &[u8]) -> u32 {
-    crc32_seed(!0u32, data)
-}
-
-/// Compute CRC-32 with a custom initial seed, inverting the result.
-///
-/// Chains with [`crc32_raw`]: feed a raw accumulator in, get a finished CRC
-/// out, so a checksum over a discontiguous byte range can be computed in
-/// pieces without materialising the concatenation.
-pub fn crc32_seed(seed: u32, data: &[u8]) -> u32 {
-    crc32_raw(seed, data) ^ !0u32
-}
-
-/// Compute CRC-32 without the final inversion.
-///
-/// Returns the bare accumulator. Two callers need this rather than [`crc32`]:
-/// anyone chaining a CRC across separate slices, and F2FS — whose metadata
-/// checksums are Linux's `crc32_le()` seeded with the F2FS magic and with
-/// *neither* inversion applied, so the conventional framing would produce a
-/// value that is wrong by exactly `!0` on both ends.
-pub fn crc32_raw(seed: u32, data: &[u8]) -> u32 {
-    let mut crc = seed;
-    for &byte in data {
-        let idx = ((crc ^ u32::from(byte)) & 0xFF) as usize;
-        // The index is masked to 8 bits, so it is always in range; `get` here
-        // would force a `KernelResult` on a function that cannot fail.
-        #[allow(clippy::indexing_slicing)]
-        {
-            crc = CRC32_TABLE[idx] ^ (crc >> 8);
-        }
-    }
-    crc
-}
+/// [`self_test_crc32`] below stays in the kernel: the crate has its own
+/// `#[cfg(test)]` vectors, but `kernel/Cargo.toml` sets `test = false`, so the
+/// boot battery is the only thing that ever runs an assertion here.
+pub use crc32::{crc32, crc32_raw, crc32_seed};
 
 /// Self-test for CRC-32 (ISO 3309).
 ///

@@ -249,105 +249,108 @@ fn bash_compat_enabled() -> bool {
     }
 }
 
-/// The kernel's own answer for one of `/proc/self/status`'s credential lines —
-/// `Uid:` or `Gid:`, each `real  effective  saved  fs` — as `(real, effective)`.
+/// The process's real and effective user IDs, from the OS.
 ///
-/// This is the same shape of source as [`system_hostname`]'s
-/// `/proc/sys/kernel/hostname`: a fact the kernel knows, read from the file it
-/// publishes it in, because `std` exposes no `getuid`/`getgid` and this crate
-/// deliberately has no `libc` dependency (see `Cargo.toml`). A kernel that does
-/// not mount procfs — which today includes SlateOS itself — returns `None` and
-/// the caller falls back, so this never lies and never panics.
+/// Asked of libc, exactly as [`parent_pid`] asks it for `getppid`, and for the
+/// same reasons: `std` exposes no `getuid`, this crate deliberately carries no
+/// `libc` dependency (see `Cargo.toml`), and the four functions involved are
+/// nullary, infallible and already linked. SlateOS's own libc exports them
+/// (`posix::unistd::{getuid, geteuid, getgid, getegid}`, reading the process
+/// credentials the kernel set at spawn), so this answers on the target as well
+/// as on the development host.
+///
+/// Deliberately *not* `/proc/self/status`, which would have been the other
+/// obvious source and is how [`system_hostname`] works: SlateOS mounts no
+/// procfs, so on the target that read would fail and the caller would fall back
+/// to reporting **root** — a shell that says "you own this file" about every
+/// file on a machine that knows better. A missing symbol is a link error, which
+/// is loud; a missing `/proc` is a silent lie about privilege.
 #[cfg(unix)]
-fn proc_self_credential(key: &str) -> Option<(u32, u32)> {
-    let text = std::fs::read("/proc/self/status").ok()?;
-    for line in text.split(|b| *b == b'\n') {
-        let Some(rest) = line.strip_prefix(key.as_bytes()) else {
-            continue;
-        };
-        let mut fields = rest
-            .split(|b: &u8| b.is_ascii_whitespace())
-            .filter(|f| !f.is_empty())
-            .filter_map(|f| core::str::from_utf8(f).ok()?.parse::<u32>().ok());
-        let real = fields.next()?;
-        // A `Uid:`/`Gid:` line always carries all four IDs, but treat a short
-        // one as "effective == real" rather than discarding the line: a
-        // truncated read is worth less than a partial truth, not more.
-        let effective = fields.next().unwrap_or(real);
-        return Some((real, effective));
+fn os_uids() -> (u32, u32) {
+    // SAFETY: `getuid`/`geteuid` are the POSIX libc functions: no arguments, no
+    // side effects, no failure mode, returning `uid_t` (a 32-bit unsigned int on
+    // every platform this builds for).
+    unsafe extern "C" {
+        fn getuid() -> u32;
+        fn geteuid() -> u32;
     }
-    None
+    // SAFETY: nullary calls into libc, as above.
+    unsafe { (getuid(), geteuid()) }
+}
+
+/// The process's effective group ID, from the OS. See [`os_uids`].
+#[cfg(unix)]
+fn os_egid() -> u32 {
+    // SAFETY: `getegid` is the POSIX libc function: no arguments, no side
+    // effects, no failure mode, returning `gid_t`.
+    unsafe extern "C" {
+        fn getegid() -> u32;
+    }
+    // SAFETY: nullary call into libc, as above.
+    unsafe { getegid() }
 }
 
 /// The `(uid, euid)` identity `osh` reports via readonly `$UID`/`$EUID`
 /// (open-questions Q28), and the credential every ownership and permission
 /// primary (`-O`, `-r`/`-w`/`-x`) is judged against.
 ///
-/// **The kernel wins when it has an answer.** On a host with procfs this is the
-/// process's real `getuid`/`geteuid`, which is what makes `[ -O file ]` agree
-/// with bash instead of inverting it. It is deliberately checked *before* the
-/// `OSH_UID` override, even though that override is the operator's Q28
-/// configurability: the override exists to stand in for a credential the kernel
-/// cannot yet supply, and honouring it over a kernel that *can* would let any
-/// parent process redefine `$UID` by exporting a variable — precisely the
-/// spoofing bash refuses when it ignores an inherited `UID=` from the
-/// environment.
+/// **The OS answers on any unix**, via [`os_uids`] — the process's real
+/// `getuid`/`geteuid`. That is what makes `[ -O file ]` agree with bash instead
+/// of inverting it, and it holds on SlateOS as well as on the development host,
+/// because SlateOS's libc reports the credentials the kernel recorded at spawn.
+/// The Q28 default therefore survives where it was actually aimed: a SlateOS
+/// that spawns its shell as root still reports root, but it does so because the
+/// system said so rather than because the shell assumed it.
 ///
-/// Below the kernel: numeric `OSH_UID` (and optionally `OSH_EUID`, defaulting to
-/// `OSH_UID`) from the environment, so a SlateOS login/session layer can inject
-/// an identity. Below that, `(0, 0)` — **root**, option A — for the current
-/// single-user, pre-privilege-model bring-up, so root-gated scripts
-/// (`if [ "$EUID" -ne 0 ]; then echo "run as root"; fi`) correctly take their
-/// privileged path while the shell genuinely *is* the all-powerful system.
+/// Everywhere else — Windows, and any future non-unix target — the answer is
+/// [`configured_identity`]: numeric `OSH_UID` (and optionally `OSH_EUID`,
+/// defaulting to `OSH_UID`) from the environment, else `(0, 0)`, **root**,
+/// option A, so root-gated scripts (`if [ "$EUID" -ne 0 ]; then echo "run as
+/// root"; fi`) take their privileged path.
+///
+/// So on unix the `OSH_UID` override is not merely outranked — it is gone,
+/// even though it was the operator's Q28 configurability. That override existed
+/// to stand in for a credential the system could not supply; consulting it at
+/// all on a system that *can* would let any parent process redefine `$UID` by
+/// exporting a variable, which is precisely the spoofing bash refuses when it
+/// ignores an inherited `UID=` from the environment.
 fn reported_identity() -> (u32, u32) {
     #[cfg(unix)]
-    if let Some(ids) = proc_self_credential("Uid:") {
-        return ids;
-    }
+    return os_uids();
+    #[cfg(not(unix))]
     configured_identity(
         std::env::var("OSH_UID").ok().as_deref(),
         std::env::var("OSH_EUID").ok().as_deref(),
     )
 }
 
-/// The half of [`reported_identity`] that does not ask the kernel: the Q28
-/// default and the `OSH_UID`/`OSH_EUID` override that adjusts it.
+/// The half of [`reported_identity`] that does not ask the OS: the Q28 default
+/// and the `OSH_UID`/`OSH_EUID` override that adjusts it.
 ///
 /// Split out and taking its two inputs as arguments rather than reading the
-/// environment itself so that the operator's Q28 policy stays testable. Once
-/// the host has procfs, the policy is unreachable through `reported_identity`
-/// — every call is answered by the kernel before it gets here — and a rule
-/// that can only be exercised on the platform that does not implement it is a
-/// rule with no test. Arguments also keep those tests off the process-global
-/// environment, which no parallel test can safely write.
+/// environment itself so that the operator's Q28 policy stays testable. On unix
+/// the policy is not merely unpreferred but *unreachable* — every call is
+/// answered by `getuid` before it gets here — so the `cfg` below compiles it
+/// there only under `test`, which is what keeps a rule that unix does not use
+/// from being a rule no unix run ever exercises. Arguments also keep those
+/// tests off the process-global environment, which no parallel test can safely
+/// write.
+///
+/// The corollary is worth stating plainly, because it retires a documented
+/// knob: on unix — which includes SlateOS, whose target spec says
+/// `"os": "linux"` — `OSH_UID`/`OSH_EUID` no longer do anything. A session
+/// layer that wants the shell to report a user sets the *process credentials*,
+/// which is both what bash reads and what `posix::unistd::getuid` returns.
 ///
 /// An unparseable value is *ignored*, not an error: this is read from an
 /// inherited environment, and a shell that refused to start because some
 /// ancestor exported `OSH_UID=root` would be worse than one that reports the
 /// default.
+#[cfg(any(not(unix), test))]
 fn configured_identity(uid: Option<&str>, euid: Option<&str>) -> (u32, u32) {
     let parse = |v: Option<&str>| v.and_then(|v| v.trim().parse::<u32>().ok());
     let uid = parse(uid).unwrap_or(0);
     (uid, parse(euid).unwrap_or(uid))
-}
-
-/// The effective group ID `[ -G file ]` is judged against — bash's `current_user
-/// .egid`, not its group *list*. Measured against bash 5.2.21: a file whose
-/// group is a supplementary group we genuinely belong to (`chgrp 24 f` for a
-/// member of group 24) is `-G` **false**, so the list is the wrong thing to ask.
-///
-/// Same precedence as [`reported_identity`]: the kernel first, then whatever
-/// [`reported_groups`] derived from `OSH_GROUPS` or the passwd/group tables,
-/// whose first entry is the primary group.
-///
-/// `unix` only, because `-G` is: the Windows [`unary_owner`] has no GID to
-/// compare against and answers from the file's mere existence instead.
-#[cfg(unix)]
-fn reported_egid() -> u32 {
-    if let Some((_, egid)) = proc_self_credential("Gid:") {
-        return egid;
-    }
-    reported_groups().first().copied().unwrap_or(0)
 }
 
 /// The variables bash marks `att_noassign`: the shell maintains them, so a
@@ -68364,9 +68367,12 @@ fn unary_mode_bit(_path: &std::path::Path, _op: BStr<'_>) -> bool {
     false
 }
 
-/// `-O`/`-G` — the file is owned by our effective UID / GID. bash compares
-/// against the effective credential only, never the supplementary group list;
-/// see [`reported_egid`] for the measurement that settles which.
+/// `-O`/`-G` — the file is owned by our effective UID / GID.
+///
+/// The *effective* credential and nothing else — not the supplementary group
+/// list. Measured against bash 5.2.21: a file `chgrp`ed to a group we genuinely
+/// belong to (group 24, for a member of 24) is `-G` **false**, so asking the
+/// group list would answer a different question from the one bash answers.
 #[cfg(unix)]
 fn unary_owner(path: &std::path::Path, op: BStr<'_>) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -68376,7 +68382,7 @@ fn unary_owner(path: &std::path::Path, op: BStr<'_>) -> bool {
     if op == b"-O" {
         md.uid() == reported_identity().1
     } else {
-        md.gid() == reported_egid()
+        md.gid() == os_egid()
     }
 }
 

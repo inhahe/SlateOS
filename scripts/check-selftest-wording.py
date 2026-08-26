@@ -222,6 +222,20 @@ ALLOWED: dict[tuple[str, bytes], str] = {
         "od's offset column, formatted from a counter -- `{:07o}`-style output "
         "whose fixed part is the empty string"
     ),
+    ("scap", b"(1920x1080)"): (
+        "`Captured full screen #{} ({}x{})` with the *defaults* substituted in. "
+        "The fixed frame around them is `(`, `x`, `)` -- below the fixed-run "
+        "floor, and rightly so: nothing distinguishes it from a placeholder "
+        "swallowing the fragment whole. The assertion is still worth making, "
+        "because it is the only thing pinning `optional_num`'s default to the "
+        "documented 1920x1080, so it is paired in the rung with a "
+        "`Captured full screen` check the gate *can* derive"
+    ),
+    ("scap", b"(800x600)"): (
+        "the same, for `scap window`'s trailing optional dimensions -- the "
+        "control that converting the *id* to `required_id` did not make the "
+        "dimensions required too"
+    ),
     ("pmgr", b"selftestdisk 4GB"): (
         "`Disk #{}: {} {}GB` filled with two operands from the command line. "
         "The literal frame between them is one space and the two letters `GB`, "

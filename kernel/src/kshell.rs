@@ -16148,10 +16148,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // brightness module is lazily initialised and only the `""|show|list`
         // arm calls `init_defaults()`, so on a fresh boot `bright set 50` has no
         // display 1 to set and answers `Error: NotFound`. Asserting the success
-        // sentence without this line asserts it of a path that cannot reach it
-        // -- which is also why the old `lacks Usage:` spelling survived so long:
-        // `Error: NotFound` lacks `Usage:` just as happily as a working run
-        // does, so the guard passed while testing nothing.
+        // sentence without this line is asserting it of a path that cannot
+        // reach it -- which is precisely why the old `lacks Usage:` spelling
+        // survived so long: `Error: NotFound` lacks `Usage:` just as happily as
+        // a working run does, so the guard passed while testing nothing.
         let _ = capture_command("bright show");
         let out = capture_command("bright set 50");
         assert_output_contains(
@@ -17151,6 +17151,109 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             b"is not a workspace id",
         );
         assert_eq!(last_exit(), 0, "bare `tile windows` succeeds");
+    }
+
+    serial_println!(
+        "  kshell::self_test 75: a screen capture names the word it could not read instead of \
+         capturing something else"
+    );
+    // `cmd_screenshot` (10 ledger sites). The batch is worth a rung for the
+    // *guard* it let go of, not just the reads it fixed: `window` checked
+    // `wid == 0` and reprinted a synopsis, which looks like validation and is
+    // not. No module in the tree allocates or validates window ids and none
+    // reserves 0 -- zero was purely `unwrap_or(0)`'s sentinel, so the guard
+    // fired for exactly one thing (a word that could not be read) and described
+    // it in the one way that says neither which operand nor why.
+    //
+    // The controls below are the load-bearing half. Three of these operands
+    // have documented defaults, so the risk in this conversion is not that a
+    // typo slips through, it is that an *absent* operand starts being refused
+    // -- which would break `scap full`, `scap recent` and `scap window 7` for
+    // everyone while the rung about typos still passed.
+    {
+        // A dimension with a default: a typo is refused, an absent word is not.
+        let out = capture_command("scap full 384o 2160");
+        assert_output_contains(
+            "scap names the width it could not read",
+            &out,
+            b"`384o' is not a width in pixels",
+        );
+        assert_eq!(last_exit(), 1, "scap full: an unreadable width errors");
+        assert_output_lacks("and captures nothing", &out, b"Captured full screen");
+
+        let out = capture_command("scap full");
+        assert_output_contains("bare `scap full` still captures", &out, b"Captured full screen");
+        assert_output_contains(
+            "and does so at the documented default resolution",
+            &out,
+            b"(1920x1080)",
+        );
+        assert_eq!(last_exit(), 0, "bare `scap full` succeeds");
+
+        // The id `window` used to guess. `0` is now a value, not a sentinel, so
+        // the missing and the unreadable cases are named separately.
+        let out = capture_command("scap window");
+        assert_output_contains(
+            "scap window says which operand is missing",
+            &out,
+            b"missing window id",
+        );
+        assert_eq!(last_exit(), 1, "scap window: a missing id errors");
+
+        let out = capture_command("scap window 4o96");
+        assert_output_contains(
+            "scap window names the id it could not read",
+            &out,
+            b"`4o96' is not a window id",
+        );
+        assert_eq!(last_exit(), 1, "scap window: an unreadable id errors");
+        assert_output_lacks("and captures nothing", &out, b"Captured window");
+
+        // The control for the dropped `wid == 0` guard, and for the trailing
+        // optional dimensions still being optional.
+        let out = capture_command("scap window 7");
+        assert_output_contains("a readable window id captures", &out, b"Captured window");
+        assert_output_contains(
+            "and the trailing dimensions are still optional",
+            &out,
+            b"(800x600)",
+        );
+        assert_eq!(last_exit(), 0, "scap window: a readable id succeeds");
+
+        // `get` answered about screenshot #0, which cannot exist -- the id space
+        // starts at 1 -- so a typo and a genuine miss read identically.
+        let out = capture_command("scap get abc");
+        assert_output_contains(
+            "scap get names the id it could not read",
+            &out,
+            b"`abc' is not a screenshot id",
+        );
+        assert_eq!(last_exit(), 1, "scap get: an unreadable id errors");
+        assert_output_lacks("and does not report a miss instead", &out, b"not found");
+
+        // The destructive one, the `vd remove` shape: a fixed id on a bad read.
+        let out = capture_command("scap delete abc");
+        assert_output_contains(
+            "scap delete names the id it could not read",
+            &out,
+            b"`abc' is not a screenshot id",
+        );
+        assert_eq!(last_exit(), 1, "scap delete: an unreadable id errors");
+        assert_output_lacks("and deletes nothing", &out, b"Deleted #");
+
+        // A count with a default, where the default is not a sentinel for a
+        // query -- so the absent case must still list, not complain.
+        let out = capture_command("scap recent 1o");
+        assert_output_contains(
+            "scap recent names the count it could not read",
+            &out,
+            b"`1o' is not a count",
+        );
+        assert_eq!(last_exit(), 1, "scap recent: an unreadable count errors");
+
+        let out = capture_command("scap recent");
+        assert_output_lacks("bare `scap recent` still lists", &out, b"is not a count");
+        assert_eq!(last_exit(), 0, "bare `scap recent` succeeds");
     }
 
     serial_println!("  kshell::self_test PASSED");
@@ -35770,14 +35873,21 @@ fn cmd_screenshot(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "full" | "screen" => {
-            let w = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1920);
-            let h = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1080);
+            // 1920x1080 is a documented default for an *absent* dimension, so
+            // these are `optional_num`, not `required_num`. What the old
+            // `…parse().ok().unwrap_or(1920)` could not distinguish is the case
+            // that matters: `scap full 38400 2160` (a fat-fingered 3840) is a
+            // word that was typed and could not be read, and capturing at the
+            // default resolution while reporting "(1920x1080)" tells the caller
+            // a size they did not ask for, in a sentence that looks like success.
+            let Some(w) = optional_num::<u32>(&parts, 1, "scap", sub, "width in pixels", 1920)
+            else {
+                return;
+            };
+            let Some(h) = optional_num::<u32>(&parts, 2, "scap", sub, "height in pixels", 1080)
+            else {
+                return;
+            };
             match screenshot::capture_full(w, h) {
                 Ok(id) => shell_println!("Captured full screen #{} ({}x{})", id, w, h),
                 Err(e) => {
@@ -35787,28 +35897,30 @@ fn cmd_screenshot(args: &str) {
             }
         }
         "window" | "win" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let w = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(800);
-            let h = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(600);
-            if wid == 0 {
-                shell_println!("Usage: scap window <window_id> [w] [h]");
-                set_exit(1);
-            } else {
-                match screenshot::capture_window(wid, w, h) {
-                    Ok(id) => shell_println!("Captured window #{} ({}x{})", id, w, h),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            // The `wid == 0` guard this replaces was not a validity check: no
+            // module in the tree allocates or validates window ids, and none
+            // treats 0 as reserved. Zero was the *sentinel* `unwrap_or(0)` used
+            // for a word it could not read -- so the guard caught the guess and
+            // nothing else, and it caught the guess by reprinting a synopsis,
+            // which says the operand is wrong without saying which one or why.
+            // With the read itself refusing, a readable `0` is a value like any
+            // other and is passed through (design-decisions.md §600).
+            let Some(wid) = required_id(&parts, "scap", sub, "window") else {
+                return;
+            };
+            let Some(w) = optional_num::<u32>(&parts, 2, "scap", sub, "width in pixels", 800)
+            else {
+                return;
+            };
+            let Some(h) = optional_num::<u32>(&parts, 3, "scap", sub, "height in pixels", 600)
+            else {
+                return;
+            };
+            match screenshot::capture_window(wid, w, h) {
+                Ok(id) => shell_println!("Captured window #{} ({}x{})", id, w, h),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -35834,14 +35946,14 @@ fn cmd_screenshot(args: &str) {
         }
         "monitor" | "mon" => {
             let mid = parts.get(1).copied().unwrap_or("");
-            let w = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1920);
-            let h = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1080);
+            let Some(w) = optional_num::<u32>(&parts, 2, "scap", sub, "width in pixels", 1920)
+            else {
+                return;
+            };
+            let Some(h) = optional_num::<u32>(&parts, 3, "scap", sub, "height in pixels", 1080)
+            else {
+                return;
+            };
             if mid.is_empty() {
                 shell_println!("Usage: scap monitor <id> [w] [h]");
                 set_exit(1);
@@ -35856,10 +35968,13 @@ fn cmd_screenshot(args: &str) {
             }
         }
         "get" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // `scap get abc` reported "Screenshot #0 not found" -- a confident
+            // sentence about an object the user never named. The id space starts
+            // at 1, so #0 never exists and the message was always this shape:
+            // the typo was indistinguishable from a genuine miss.
+            let Some(id) = required_id(&parts, "scap", sub, "screenshot") else {
+                return;
+            };
             if let Some(s) = screenshot::get(id) {
                 shell_println!(
                     "#{}: {} {}x{} {} {}",
@@ -35893,10 +36008,9 @@ fn cmd_screenshot(args: &str) {
             }
         }
         "recent" => {
-            let n = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(5);
+            let Some(n) = optional_num::<usize>(&parts, 1, "scap", sub, "count", 5) else {
+                return;
+            };
             let shots = screenshot::recent(n);
             for s in &shots {
                 shell_println!(
@@ -35910,10 +36024,11 @@ fn cmd_screenshot(args: &str) {
             }
         }
         "delete" | "rm" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // The `vd remove` shape, one subsystem over: a destructive verb
+            // whose operand fell back to a fixed id when it could not be read.
+            let Some(id) = required_id(&parts, "scap", sub, "screenshot") else {
+                return;
+            };
             match screenshot::delete(id) {
                 Ok(()) => shell_println!("Deleted #{}", id),
                 Err(e) => {

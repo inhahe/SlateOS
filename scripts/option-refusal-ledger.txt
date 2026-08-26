@@ -201,7 +201,6 @@ cmd_rundialog 1
 cmd_schedclass 1
 cmd_schedwait 1
 cmd_screensaver 1
-cmd_screenshot 10
 cmd_secpolicy 1
 cmd_secureboot 1
 cmd_secureerase 1

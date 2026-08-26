@@ -560,16 +560,22 @@ fn register_defaults(reg: &mut HotkeyRegistry) {
             Hotkey::new(Key::S, mods(false, false, true, true)),
             HotkeyAction::ScreenshotRegion,
         ),
-        // Media keys (mapped as bare keys with no modifiers, since hardware
-        // media keys generate dedicated key codes).
-        (Hotkey::bare(Key::Unknown(0xAF)), HotkeyAction::VolumeUp),
-        (Hotkey::bare(Key::Unknown(0xAE)), HotkeyAction::VolumeDown),
-        (Hotkey::bare(Key::Unknown(0xAD)), HotkeyAction::VolumeMute),
-        (Hotkey::bare(Key::Unknown(0xE0)), HotkeyAction::BrightnessUp),
-        (
-            Hotkey::bare(Key::Unknown(0xE1)),
-            HotkeyAction::BrightnessDown,
-        ),
+        // Media keys, bare: hardware media keys are keys of their own and no
+        // modifier is involved. These were `Key::Unknown(0xAF)` and its
+        // neighbours — Windows virtual key codes, which nothing in this system
+        // emits — so the three volume bindings could never fire. They are named
+        // variants now (`gui/compositor/src/keymap.rs` translates the scan
+        // codes that do arrive).
+        (Hotkey::bare(Key::VolumeUp), HotkeyAction::VolumeUp),
+        (Hotkey::bare(Key::VolumeDown), HotkeyAction::VolumeDown),
+        (Hotkey::bare(Key::VolumeMute), HotkeyAction::VolumeMute),
+        // `HotkeyAction::BrightnessUp`/`BrightnessDown` deliberately have no
+        // default binding. A laptop's brightness pair sends no scancode at all
+        // — the firmware answers it over ACPI or vendor WMI — so there is no
+        // key to bind, and the two bindings that used to be here bound codes
+        // that never arrive. The actions stay so that a user can put them on a
+        // chord of their own. See known-issues.md →
+        // `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
     ];
 
     for (hotkey, action) in defaults {
@@ -791,17 +797,23 @@ fn key_display_name(key: Key) -> &'static str {
         Key::Equals => "Equals",
         Key::Apostrophe => "Apostrophe",
         Key::Grave => "Grave",
-        Key::Unknown(code) => {
-            // Media keys use well-known codes; for others we return a generic label.
-            match code {
-                0xAF => "VolumeUp",
-                0xAE => "VolumeDown",
-                0xAD => "VolumeMute",
-                0xE0 => "BrightnessUp",
-                0xE1 => "BrightnessDown",
-                _ => "Unknown",
-            }
-        }
+        Key::VolumeUp => "VolumeUp",
+        Key::VolumeDown => "VolumeDown",
+        Key::VolumeMute => "VolumeMute",
+        Key::MediaPlayPause => "MediaPlayPause",
+        Key::MediaNextTrack => "MediaNextTrack",
+        Key::MediaPrevTrack => "MediaPrevTrack",
+        Key::MediaStop => "MediaStop",
+        // The media keys used to be named here, by matching `Unknown` against
+        // 0xAF/0xAE/0xAD/0xE0/0xE1 — *Windows virtual key codes*, which nothing
+        // in this system produces. What does arrive is scan code set 1 with the
+        // extended prefix folded into the high byte (0xE030 and friends), so
+        // the arms matched nothing and the names were unreachable for the whole
+        // life of the module. They are real `Key` variants now; see
+        // `gui/compositor/src/keymap.rs`. Brightness has no arm at all, because
+        // it has no scancode to arrive as — see
+        // known-issues.md → `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+        Key::Unknown(_) => "Unknown",
     }
 }
 
@@ -901,11 +913,19 @@ fn parse_key_name(name: &str) -> Result<Key, HotkeyError> {
         "rightctrl" => Ok(Key::RightCtrl),
         "leftalt" => Ok(Key::LeftAlt),
         "rightalt" => Ok(Key::RightAlt),
-        "volumeup" => Ok(Key::Unknown(0xAF)),
-        "volumedown" => Ok(Key::Unknown(0xAE)),
-        "volumemute" => Ok(Key::Unknown(0xAD)),
-        "brightnessup" => Ok(Key::Unknown(0xE0)),
-        "brightnessdown" => Ok(Key::Unknown(0xE1)),
+        "volumeup" => Ok(Key::VolumeUp),
+        "volumedown" => Ok(Key::VolumeDown),
+        "volumemute" => Ok(Key::VolumeMute),
+        "mediaplaypause" => Ok(Key::MediaPlayPause),
+        "medianexttrack" => Ok(Key::MediaNextTrack),
+        "mediaprevtrack" => Ok(Key::MediaPrevTrack),
+        "mediastop" => Ok(Key::MediaStop),
+        // "brightnessup"/"brightnessdown" are gone rather than remapped: they
+        // parsed to Windows virtual key codes this system never emits, and
+        // there is no scancode to point them at instead. A config file naming
+        // one now fails loudly, which is the honest answer — the binding it
+        // asked for could not have worked. See known-issues.md →
+        // `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
         _ => Err(HotkeyError::UnknownKey(name.to_string())),
     }
 }
@@ -1190,6 +1210,96 @@ mod tests {
     use super::*;
     use crate::palette_check::assert_drawn_from;
     use guitk::color::Color;
+
+    /// No default binding names a key by its raw code.
+    ///
+    /// The defect this pins is the one the media bindings had for the whole
+    /// life of this module: three of them were `Key::Unknown(0xAF)` and its
+    /// neighbours — *Windows* virtual key codes — and this system's keyboard
+    /// path emits scan code set 1 with the extended prefix in the high byte, so
+    /// the codes never arrived and the bindings never fired. Nothing said so,
+    /// because a binding that matches nothing looks exactly like a binding
+    /// nobody has pressed.
+    ///
+    /// A `Key::Unknown` in the *defaults* is always this mistake. A user is
+    /// welcome to bind a raw code — that is what `Unknown` carries it for, and
+    /// what a remapper wants — but a default has to be a key the system is
+    /// known to produce, and the named variants are the ones the keymap
+    /// promises.
+    #[test]
+    fn no_default_binding_names_a_key_by_its_raw_code() {
+        for (hotkey, action) in HotkeyRegistry::defaults().all_bindings() {
+            assert!(
+                !matches!(hotkey.key, Key::Unknown(_)),
+                "default binding for {action:?} is a raw code: {:?}",
+                hotkey.key
+            );
+        }
+    }
+
+    /// The volume keys are bound bare, and to the named variants the keymap
+    /// actually produces.
+    #[test]
+    fn the_volume_keys_have_working_defaults() {
+        let reg = HotkeyRegistry::defaults();
+        for (key, expected) in [
+            (Key::VolumeUp, HotkeyAction::VolumeUp),
+            (Key::VolumeDown, HotkeyAction::VolumeDown),
+            (Key::VolumeMute, HotkeyAction::VolumeMute),
+        ] {
+            assert_eq!(
+                reg.lookup(key, &Modifiers::NONE),
+                Some(&expected),
+                "{key:?} should be bound bare"
+            );
+        }
+    }
+
+    /// Brightness keeps its *actions* and loses its *bindings*.
+    ///
+    /// There is no scancode for a laptop's brightness pair — the firmware
+    /// answers it over ACPI or vendor WMI — so the two default bindings that
+    /// used to exist could not fire, and a binding that cannot fire is worse
+    /// than none: it tells a settings panel the key is spoken for. The actions
+    /// stay, because a user may put them on a chord of their own.
+    #[test]
+    fn brightness_has_no_default_binding_because_it_has_no_key() {
+        let bound: Vec<_> = HotkeyRegistry::defaults()
+            .all_bindings()
+            .filter(|(_, a)| matches!(a, HotkeyAction::BrightnessUp | HotkeyAction::BrightnessDown))
+            .map(|(h, _)| h.key)
+            .collect();
+        assert!(
+            bound.is_empty(),
+            "brightness should be unbound, got {bound:?}"
+        );
+        // Still nameable, so a config file can ask for it.
+        assert_eq!(
+            HotkeyAction::from_config_value("brightness_up").ok(),
+            Some(HotkeyAction::BrightnessUp)
+        );
+    }
+
+    /// Every key `key_display_name` can name round-trips through the parser.
+    ///
+    /// The two tables are written out by hand and face each other, so the
+    /// failure they invite is a name that displays one way and parses another
+    /// — or, as with the media keys, displays a name the parser then rejects.
+    #[test]
+    fn every_media_key_name_survives_display_and_parse() {
+        for key in [
+            Key::VolumeUp,
+            Key::VolumeDown,
+            Key::VolumeMute,
+            Key::MediaPlayPause,
+            Key::MediaNextTrack,
+            Key::MediaPrevTrack,
+            Key::MediaStop,
+        ] {
+            let name = key_display_name(key);
+            assert_eq!(parse_key_name(name).ok(), Some(key), "name {name:?}");
+        }
+    }
 
     /// The config line splits at its *first* `=`, and the position of that
     /// separator is never carried in a variable that a later expression has to

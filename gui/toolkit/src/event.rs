@@ -294,6 +294,37 @@ pub enum Key {
     Pause,
     CapsLock,
     NumLock,
+    // ---- Media keys ----
+    //
+    // The extra block on a multimedia keyboard. They are named here rather
+    // than left as `Unknown(0xE030)` for the reason every other variant
+    // exists: a client that wants "volume up" should not have to know that
+    // this system's raw codes are scan code set 1 with the extended prefix in
+    // the high byte, which is a fact about the PS/2 controller and not about
+    // the key. `gui/desktop/src/hotkeys.rs` had bound them by raw code and
+    // bound them to *Windows virtual key codes* — 0xAF, 0xAE, 0xAD — which
+    // this system never produces, so the bindings could not fire.
+    //
+    // There is deliberately no `BrightnessUp`/`BrightnessDown` here. A laptop's
+    // brightness keys do not send a scancode at all: they are Fn combinations
+    // the firmware answers over ACPI or a vendor WMI interface, so nothing in
+    // the keyboard path could ever produce such a variant, and a `Key` no
+    // producer can emit is a binding that silently never fires. See
+    // known-issues.md → `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+    /// Raise the system volume.
+    VolumeUp,
+    /// Lower the system volume.
+    VolumeDown,
+    /// Toggle system mute.
+    VolumeMute,
+    /// Toggle playback in whatever is playing.
+    MediaPlayPause,
+    /// Skip to the next track.
+    MediaNextTrack,
+    /// Go back to the previous track.
+    MediaPrevTrack,
+    /// Stop playback.
+    MediaStop,
     /// Unknown/unmapped key.
     Unknown(u32),
 }

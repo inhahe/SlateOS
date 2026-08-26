@@ -51,7 +51,14 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 
 /// Input protocol version. Bump on any incompatible layout change; never reuse
 /// a number.
-pub const INPUT_VERSION: u8 = 1;
+///
+/// **2** — the key table gained the multimedia block (`VolumeUp` and its six
+/// neighbours, wire codes `0x59`–`0x5F`). The frame layout did not change, but
+/// an unrecognised key byte is [`DecodeError::BadKey`] rather than a key
+/// dropped, so a version-1 peer handed a volume key would reject the whole
+/// frame. "Incompatible" is about what the other end can read, not only about
+/// where the bytes sit.
+pub const INPUT_VERSION: u8 = 2;
 
 /// Input-frame header: magic + version + flags + event count.
 const INPUT_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -243,6 +250,13 @@ key_table! {
     // Locks and the rest
     0x54 => PrintScreen, 0x55 => ScrollLock, 0x56 => Pause, 0x57 => CapsLock,
     0x58 => NumLock,
+    // The multimedia block. Added in `INPUT_VERSION` 2: an unknown code is a
+    // hard `BadKey` here rather than a key quietly dropped, so a v1 decoder
+    // handed one of these would fail the whole frame — which is exactly the
+    // incompatibility the version byte exists to catch, and why it moved.
+    0x59 => VolumeUp, 0x5A => VolumeDown, 0x5B => VolumeMute,
+    0x5C => MediaPlayPause, 0x5D => MediaNextTrack, 0x5E => MediaPrevTrack,
+    0x5F => MediaStop,
 }
 
 // ============================================================================
@@ -621,7 +635,7 @@ mod tests {
                 events.push(InputEvent::key(1, key(k), u32::from(code)));
             }
         }
-        assert_eq!(events.len(), 88, "the key table should have 88 named keys");
+        assert_eq!(events.len(), 95, "the key table should have 95 named keys");
         let decoded = roundtrip(&events);
         assert_eq!(decoded, events);
     }
@@ -872,6 +886,41 @@ mod tests {
         assert_eq!(
             decode_input_frame(&bytes),
             Err(DecodeError::UnsupportedVersion(INPUT_VERSION + 1))
+        );
+    }
+
+    /// A vocabulary change is a version change.
+    ///
+    /// Adding the media block to the key table did not move a single byte of
+    /// the frame layout, which is the thing the version doc used to talk about
+    /// — so the tempting reading was "compatible, leave it at 1". It is not:
+    /// an unknown key byte is [`DecodeError::BadKey`] and kills the whole
+    /// frame, so a version-1 peer handed a volume key rejects everything sent
+    /// with it. This pins the pair — the version and the fact that made it move
+    /// — so that a later table growth is not waved through on the same
+    /// reasoning.
+    #[test]
+    fn a_peer_that_cannot_read_the_key_table_is_a_different_version() {
+        // Stated as "not 1" rather than "at least 2" so that a later, unrelated
+        // bump does not fail this test: what is being pinned is that the table
+        // growth moved the version off the one that predates the media block.
+        assert_ne!(
+            INPUT_VERSION, 1,
+            "the media block was added in version 2; version 1 cannot decode it"
+        );
+        for code in [0x59u8, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F] {
+            assert!(
+                key_from_code(code).is_some(),
+                "code {code:#x} should name a media key"
+            );
+        }
+        // The shape of the incompatibility, stated rather than assumed: an
+        // unknown byte is fatal, which is why growing the table needed the
+        // version and not just a comment.
+        assert_eq!(
+            key_from_code(0x60),
+            None,
+            "0x60 is the next free code; if it is taken, extend this test"
         );
     }
 

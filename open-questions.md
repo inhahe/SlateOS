@@ -1255,6 +1255,89 @@ Nothing is blocked and nothing degrades. The two dialects are documented in
 a recorded decision rather than an accident. The only ongoing cost is that a user
 who learns one pattern language may assume the other works the same way.
 
+## C-Q10 — [C] To make Alt+Tab work at all, programs must be able to claim a key combination for themselves. Should any program be allowed to, or only the desktop? — Status: OPEN
+
+**In short:** right now a keystroke goes only to the window you are typing in,
+and nowhere else. That means every desktop-wide shortcut is dead whenever you
+are actually using a program: Alt+Tab, Super+D, the volume keys — none of them
+work unless you first click on the taskbar, which defeats the point. The fix is
+standard and I am going to build it: a program can ask the compositor (the part
+that owns the screen and the keyboard) to send it one specific combination no
+matter which window is focused. The question is **who is allowed to ask**.
+Whatever we allow, a program that claims Alt+Tab takes it away from everyone
+else for the rest of the session.
+
+**Where it bites:** `gui/compositor/src/lib.rs` (`handle_key`, ~line 6640) begins
+`let Some(window_id) = self.focused_window else { return; };` and there is no
+other path a key can take. The consequences are written up in
+`known-issues.md` → `TD-C-A-SHORTCUT-ONLY-WORKS-WHEN-THE-DESKTOP-IS-FOCUSED`.
+
+### Why this needs you and not just me
+
+The mechanism is uncontroversial — every windowing system has one, and its shape
+here is settled (two requests, `GrabKey`/`UngrabKey`; the compositor checks a
+chord→client map before the focus lookup; grabs die with the connection). What
+is not settled is that the same mechanism is how you write a keylogger for one
+chord, or a convincing fake lock screen: claim Super+L, and when the user
+presses it they get your window instead of the real one, typing their password
+into it. Nothing about that is theoretical — it is the known cost of the design
+every other system ships.
+
+There is currently **no way to tell the shell apart from any other program.**
+The compositor has no capability plumbing to its clients: a client declares
+which stacking band it wants (`Layer::Overlay`, where the taskbar and menus
+live) in the same struct as its title and size, and the compositor honours it.
+Any program can say `Layer::Overlay`. So "only the shell may grab keys" is not
+something the existing code can express — it has to be built.
+
+### The options
+
+**A — Any program may grab any combination; first to ask wins.** *What changes:*
+nothing visible, until a program you installed claims a key. This is what X11
+and Windows' `RegisterHotKey` do. Media players registering the media keys, and
+screenshot tools registering PrintScreen, work with no further design.
+*Cost:* a hostile or merely careless program can take Alt+Tab, or impersonate
+the lock screen.
+
+**B — A short list of combinations only the desktop may have; everything else is
+first-come.** *What changes:* a program that asks for Super+L or Alt+Tab gets an
+error; one that asks for Ctrl+Shift+M gets it. *Cost:* we have to guess the list
+now, and it becomes a compatibility surface — a chord added to it later starts
+failing for a program that already worked.
+
+**C — Grabbing requires a permission the session manager hands out, and it hands
+it only to the desktop.** *What changes:* third-party programs cannot register
+global shortcuts at all until we design a way to grant them — so no third-party
+screenshot key, no media-player key handling. *Cost:* the honest one; this is
+roughly Wayland's position, and the reason Wayland desktops needed years of
+extra protocols to get screenshot tools working again.
+
+**D — C, plus asking the user.** The first time a program asks for a global
+shortcut, a prompt appears. *Cost:* prompts users click through, and it overlaps
+Q57 (whether programs may ask for permission at all), which is itself open.
+
+### My recommendation
+
+**A now, with the door left open to B.** The immediate problem is that the
+desktop's own shortcuts do not work, and A fixes that with the least machinery.
+The security cost is real but is not *new* — a program that wants to fake a lock
+screen can already put an `Overlay` window over the whole screen without asking
+anyone, so key-grabbing is not the weak link; the missing client-capability
+system is, and that is a larger piece of work that should be designed once, for
+everything, rather than invented here for one feature. B is a small addition on
+top of A later (a list checked at grab time) and does not change the protocol,
+so choosing A now does not foreclose it.
+
+**Unless you say otherwise I will build A**, since the shortcuts are unusable
+until something exists, and A is the option that the other three are refinements
+of rather than alternatives to.
+
+### If this is never answered
+
+I build A and the shortcuts start working. Nothing degrades with time, but the
+longer it stands the more programs may come to rely on being able to grab, which
+makes a later move to C harder — B stays cheap indefinitely.
+
 
 # Resolved
 

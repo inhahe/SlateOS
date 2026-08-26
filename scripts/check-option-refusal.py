@@ -74,6 +74,16 @@ exempting something it was never meant to).
 A count is per enclosing function, not per line number, because line numbers
 drift on every edit and an allowlist that rots is a rubber stamp.
 
+What is matched against, and why it is not a line
+-------------------------------------------------
+D1 and D2 are both regexes that span method calls, so they are matched against
+a **statement** -- `check-recursive-locks.py::statements` -- never against a
+line. The author does not decide where a chain's newlines go; `cargo fmt` does,
+based on how long the surrounding names happen to be. Matching by the line
+published 240 D1 findings and hid 466 more of the identical shape, and, exactly
+like the `} else {` bug next door, an undercount has no symptom: the gate
+prints a smaller number and looks like progress.
+
 Exit status: 0 clean, 1 unaccounted sites found.
 """
 
@@ -242,16 +252,21 @@ def main(argv: list[str]) -> int:
     dropped: list[tuple[int, str, str]] = []
     mute: list[tuple[int, str, str]] = []
 
-    for i, ln in enumerate(lines):
-        if not is_production(i):
+    # D1 and D2 are matched per *statement*, not per line, because both regexes
+    # span method calls and `cargo fmt` -- not the author -- decides where the
+    # newlines fall. Matching by the line published 240 D1 findings and hid 466
+    # more of the exact same shape, whose only difference was that the names
+    # around them were long enough to make rustfmt wrap the chain. See
+    # `statements` for the full argument and known-issues.md
+    # `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`.
+    for start, stmt in _rl.statements(code_lines, struct):
+        if not is_production(start):
             continue
-        fn = outer_fn(stacks[i])
-        code = code_lines[i]
-        shown = ln.strip()
-        if D1.search(code) and not allowed(fn, shown):
-            guessed.append((i + 1, fn, shown[:96]))
-        if D2.search(code) and not allowed(fn, shown):
-            dropped.append((i + 1, fn, shown[:96]))
+        fn = outer_fn(stacks[start])
+        if D1.search(stmt) and not allowed(fn, stmt):
+            guessed.append((start + 1, fn, stmt[:96]))
+        if D2.search(stmt) and not allowed(fn, stmt):
+            dropped.append((start + 1, fn, stmt[:96]))
 
     for open_i, close_i in loop_bodies(struct):
         if not is_production(open_i):

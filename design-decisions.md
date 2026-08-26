@@ -44932,6 +44932,628 @@ next occurrence must produce a RIP, and today's could not."*
 
 ---
 
+## 554. A render command with no backend is a command that draws nothing; the compositor now owns an image store
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** The GUI toolkit has always let a program say "draw picture number
+7 in this rectangle." The compositor — the program that actually paints the
+screen — never learned how, so every such instruction was quietly thrown away
+and nothing appeared. That is why the file manager's icon view is blank. The
+compositor can now be handed a picture along with a number to call it by, and it
+paints it, scaled, wherever the instruction asks. The alternative was to keep
+routing around the hole, which would have meant shipping a view that is known
+not to work.
+
+### What was wrong
+
+`RenderCommand::Image { x, y, width, height, image_id }` has existed in
+`gui/toolkit/src/render.rs` since the command list was designed. Three places
+emit it (`gui/toolkit/src/grid.rs` twice, `apps/explorer/src/thumbs.rs` once).
+The compositor's executor arm for it read, in full:
+
+```rust
+RenderCommand::Image { .. } => {
+    // Image rendering requires an asset store — stub for now.
+}
+```
+
+So the command was *accepted* — no error, no log line, no failed frame — and
+drew nothing. This is Lesson 45 ("a feature with no production caller is a
+feature that does not exist") at a level below the caller: here there *were*
+callers, and a seam that swallowed them. A missing implementation that returns
+an error is a bug someone finds in a minute; one that silently succeeds is a
+bug that survives until somebody looks at a blank pane and wonders why.
+
+### The decision
+
+Give the compositor an image store, at the same trust boundary as the existing
+shared-buffer path, and implement the command.
+
+**Alternative considered: carry the pixels in the command.** `RenderCommand`
+would gain the bytes, and no store would be needed. Rejected because **upload
+and draw have opposite frequencies.** A thumbnail is produced once and drawn on
+every frame the folder is visible; a protocol that carried its megabytes
+alongside the draw would re-send them at 60 Hz. This is the same split as a
+texture upload versus a textured quad, and it is a split for the same reason.
+
+**Alternative considered: route the explorer around it** — have the icon view
+draw only `render_placeholder` and emit `Image` commands that provably draw
+nothing. Rejected outright: it ships a known-broken view and leaves the defect
+in place for the next caller to trip over. `CLAUDE.md`: *"Never defer a
+fundamental fix for a convenient hack."* Both `gui/toolkit` and `gui/compositor`
+are lane C, so nothing about the fix was out of reach.
+
+### The four calls that shape it
+
+**1. `ImageAsset` is a distinct type from `SharedBuffer`, but they share their
+validator.** The two hold the same thing — validated, normalised ARGB8888 pixels
+from an untrusted client — so `SharedBuffer::import`'s entire body became a
+free function `normalize()` that both call. A second copy of that function would
+be a second place for the stride check to be got wrong, and only one of the two
+would have the tests. What they do *not* share is the contract around the
+pixels, which differs in every respect: one per window versus many-with-ids;
+lifetime-until-next-attach versus until-unregistered; placed by the window's own
+geometry versus by a render command; never scaled versus scaled; a per-frame
+release protocol versus none. Merging them would make the release notification —
+whose absence deadlocks a client waiting to draw — ride on a field half the
+callers must remember to ignore.
+
+**2. Image ids are scoped to the window, not the compositor.** The id is the
+*client's* to choose, so two independent programs that both number from 1 must
+not collide — and a compositor-wide map would make them collide. Window
+ownership also means a client that exits without unregistering does not strand
+its pixels: they drop with the window. `HashMap` costs nothing until used, and
+almost every window has none.
+
+**3. The destination rectangle crosses the seam unclipped, with the clip
+alongside.** `RenderTarget::draw_image(image, dest, clip, opacity)`. Shrinking
+`dest` to the visible part first would resample the image at a scale that
+depended on how much of it happened to be on screen, so a window sliding off the
+edge would visibly squash and ripple rather than slide.
+
+**4. The software rasteriser iterates the destination and samples the source.**
+Cost is then proportional to pixels actually painted — an icon-view thumbnail is
+a 256×256 image drawn at 64×64, and the source walk would read sixteen pixels
+for every one it kept. It is also the only order that fills without gaps when
+the image is drawn *larger* than itself. All the coordinate arithmetic is in
+`i64`: `dest` reaches the compositor from a client render command by way of an
+`f32` cast, and `py - dest.y` in `i32` overflows outright for a `dest.y` near
+`i32::MIN`, with the multiply by source height overflowing for far less.
+
+### What an unresolved id does
+
+Nothing, silently. A client whose upload is still in flight, or whose asset was
+dropped to reclaim memory, is in an ordinary transient state rather than a
+fault — and a log line per unresolved id would be one *per frame* for as long as
+it lasted. This is deliberate and is the one place the new code keeps the old
+stub's behaviour; the difference is that it is now the documented handling of a
+specific case rather than the handling of every case.
+
+### Where it lives
+
+`gui/compositor/src/buffer.rs` (`normalize`, `ImageAsset`),
+`gui/compositor/src/render.rs` (`RenderTarget::draw_image` and the backend
+forwarding arm), `gui/compositor/src/lib.rs` (`Window::images`, the
+`Framebuffer` rasteriser, and `Compositor::{register_image, unregister_image,
+image_count, image_bytes}`).
+
+### What is still missing
+
+`register_image` is reachable in-process only. The client-facing wire protocol
+(`gui/remote/src/control.rs` → `RequestBody`) has no image-upload request, so a
+program in a *separate process* still cannot upload one. That is the next step
+and is logged in `known-issues.md`.
+
+## 555. One glob matcher for the two search tools, two dialects for the desktop
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop shipped with four separate pieces of code that each
+decided, in their own way, what a search pattern like `report-*.txt` or
+`[a-z]*.log` means. Two of them — the file-search window and the background
+indexer — are the same feature seen twice, and they *disagreed*: measured over
+730,236 patterns, the search window got 646 of them wrong. They now share a
+single implementation, so the desktop can only hold one opinion about what a
+pattern means. The backup tool's patterns deliberately stay separate, because
+they are a genuinely different language and merging them would silently change
+what people's existing exclude lists exclude.
+
+### The four dialects that existed
+
+| Location | `*` | `?` | bracket expressions | negation | element |
+|---|---|---|---|---|---|
+| `apps/indexer` | any run | one char | yes | `!` only | `char` |
+| `apps/filesearch` | any run | one char | yes, but broken | `!` and `^` | `char` |
+| `apps/backup` | stops at `/`, `**` spans | one char, not `/` | **none** | — | `u8` |
+| `gui/toolkit` `context_ext` | any run | — | none | — | `char` |
+
+Two of these are not four-fifths of a duplication problem. They are two
+*different* problems:
+
+- **`apps/indexer` and `apps/filesearch` are the same user-facing feature.** A
+  user types a pattern into the search window and expects the indexer to have
+  found the same files. Two implementations of one concept are not redundancy,
+  they are a disagreement waiting to be found by a user — and neither test suite
+  could ever see it, because each was tested only against itself.
+- **`apps/backup` is a different language.** Its patterns are gitignore-shaped:
+  they match *paths*, `*` stops at a `/`, `**` spans segments, and `[` is an
+  ordinary character. That is not a worse fnmatch; it is the right dialect for
+  "exclude this subtree."
+- **`gui/toolkit`'s `context_ext`** matches file *extensions*, not paths, and
+  its patterns come from a settings file rather than a user's keyboard.
+
+### The decision
+
+`apps/globmatch` is a new library crate holding one implementation, consumed by
+`apps/indexer` and `apps/filesearch`. `apps/backup` keeps its own.
+
+**The alternative — one matcher for all four — was rejected, not deferred.** It
+would mean `apps/backup` gaining bracket expressions, which changes the meaning
+of every existing exclude list containing a `[` from "a path with a literal
+bracket in it" to "a character class". That is a user-visible change to data
+users already wrote, so it is the operator's call rather than a refactor; it is
+filed as `open-questions.md` → **C-Q9**.
+
+**The opposite alternative — leave both matchers, just fix the bugs — was also
+rejected.** It fixes the 646 known disagreements and leaves the mechanism that
+produced them fully intact. The next bug fixed in one and not the other is the
+same bug again.
+
+### The one deliberate departure from POSIX
+
+`globmatch` accepts `^` as a synonym for `!` at the start of a bracket
+expression, so `[^0-9]` means "not a digit". POSIX and CPython's `fnmatch`
+accept only `!`; bash, ksh and zsh accept both.
+
+This is not a coin flip. `apps/filesearch` already accepted `^`, and its own
+test suite asserts it (`("[^0-9]*", "hello", true)`). Dropping it would not have
+been "conforming to POSIX" from a user's point of view — it would have silently
+turned every negated class a user had already written into a class that matches
+a literal caret, which is close to the exact inverse of what they asked for.
+Adding `^` to the indexer, by contrast, can only *widen* what the indexer
+understands: no pattern that worked before changes meaning, because `[^…]`
+previously meant "matches a caret or one of …", which nobody types on purpose.
+
+Cost: one construct where we differ from `fnmatch`. Measured: of 1,911,679
+pattern/text pairs, 1,911,520 are identical to CPython `fnmatch`, and every one
+of the 159 that differ is a `^`-negation — where we agree with bash instead. The
+two disagreement sets are disjoint and both are documented in the crate's module
+docs.
+
+### The three rules that look like bugs and are not
+
+All three are POSIX 2.13.1, all three are what CPython does, and all three are
+now tested:
+
+1. **`[]abc]` — a `]` in the first member position is a literal `]`**, not an
+   empty class. A bracket expression has no escape character, so this is the
+   only way to put a `]` in a class at all.
+2. **`[a-]` — a `-` in final position is a literal `-`**, not a half-written
+   range. The old indexer read `pattern[i+2]` after checking only that index
+   `i+2` *exists*, so it built the range `a`..`]`.
+3. **`[abc` — an unterminated `[` is an ordinary character.** POSIX:
+   *"Otherwise, the open bracket shall be treated as an ordinary character."*
+   bash disagrees here, but inconsistently with itself: it falls back to a
+   literal `[` when its scan runs out at a member position and hard-fails when
+   it runs out at a range-end position, so `[-` matches itself and `[a-` matches
+   nothing. That is an implementation artifact, not a rule, and it is the one
+   place where bash — not us — is the outlier against both POSIX and CPython.
+
+### Where it lives
+
+`apps/globmatch/src/lib.rs` (`glob_match`, `glob_match_chars`,
+`match_char_class`), consumed by `apps/indexer/src/main.rs` and
+`apps/filesearch/src/main.rs`, which re-exports it so its callers are unchanged.
+The defect inventory and the measurement method are in `known-issues.md` →
+`C-FILESEARCH-COMPARED-A-BRACKET-LITERALLY-BEFORE-PARSING-IT-AS-A-CLASS`.
+
+---
+
+## 556. A program in another process can hand the compositor a picture, and is refused rather than throttled when it hands over too many
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** The compositor could draw pictures, but the only way to give it
+one was to be part of the compositor program itself — so no ordinary
+application could show an icon, a thumbnail or a photo. It can now: a program
+sends the pixels once, under a number of its own choosing, and afterwards its
+drawing instructions just name that number. Because the pixels stay in the
+compositor's memory until the program says otherwise, a program could otherwise
+keep sending pictures until the machine ran out of memory, so each connection
+gets a memory allowance and an upload that would exceed it is turned down. Four
+choices had a real case on both sides; this records them.
+
+### 1. Upload is a separate request from drawing
+
+A window's picture — its *render tree* — is re-sent whenever anything about the
+window changes, which for an animation or a text cursor is every frame. A
+protocol that carried the pixels alongside the drawing instructions would
+therefore push a megabyte down the socket sixty times a second to keep one
+still photograph on screen. So the pixels are uploaded once and given an id,
+and each frame names the id.
+
+The cost is that the compositor now holds state on the client's behalf between
+frames, which is exactly what creates the budget problem below. The alternative
+— stateless frames — has no budget problem at all, and would have made a
+picture unaffordable to display. Not a close call, but worth writing down,
+because the memory limit that follows exists *only* because of this choice.
+
+### 2. The budget is per connection, not per window
+
+*What the alternative would look like:* each window gets, say, 64 MiB of image
+memory, and a program with three windows gets 192 MiB.
+
+That is trivially defeated: a program that wants more memory opens another
+window. Windows are cheap and a client may have as many as it likes, so a
+per-window limit is a limit on nothing. A connection is the unit that has an
+identity the compositor can hold responsible — it is already the unit that owns
+windows (design-decisions.md → 458), and it is the thing that goes away, taking
+its memory with it, when the program exits.
+
+The cost is real: one program with twenty windows gets the same allowance as
+one with a single window, so a document editor with many open files may hit the
+ceiling sooner than a photo viewer with one. That is the correct direction to
+be wrong in — the alternative is a ceiling that no program can hit.
+
+The limit is a **field on the link** (`ClientLink::set_image_budget`), not a
+bare constant, because the right number depends on the machine and on what the
+connection is: a trusted desktop shell running the wallpaper is not a web page's
+worth of thumbnails. It is the *server's* to set and not the client's — nothing
+on the wire can change it, which is what keeps it a limit rather than a
+suggestion. The default is 256 MiB.
+
+### 3. An upload over the budget is refused; nothing is evicted
+
+*What the alternative would look like:* the compositor drops the connection's
+least-recently-drawn image to make room, and the upload succeeds.
+
+Eviction sounds kinder and is worse, for one specific reason: **it succeeds.** A
+drawing instruction naming an id with no pixels behind it renders nothing —
+silently, by design, because that is what makes a window that drops an image
+mid-frame not a crash. So an evicted thumbnail is a picture that stops appearing
+with no error anywhere: not at the upload (it worked), not at the draw (drawing
+nothing is legal), and not in any log the application can see. The application
+has no way to learn that it needs to re-upload, and no event to learn it from.
+
+A refusal, by contrast, arrives at the call that caused it, names the numbers,
+and leaves everything exactly as it was. The client can then decide — downscale,
+drop its own cache, or show a placeholder — which is a decision it can actually
+make and the compositor cannot.
+
+This is also what `design.txt` already says about memory generally: *committed
+memory by default, no silent overcommit.* An eviction policy is overcommit with
+a cleanup crew. And it would put least-recently-used bookkeeping on the draw
+path, which runs per image per frame.
+
+The cost: a client that legitimately needs more than its budget fails rather
+than degrading. Accepted, because "fails visibly" is the whole point.
+
+### 4. The bytes travel inline, not by shared mapping
+
+The `known-issues.md` entry that asked for this feature suggested a shared
+mapping instead, on the grounds that "the surface path already maps rather than
+copies". **That premise is false of the wire.** `SharedBuffer` and
+`attach_buffer` appear nowhere in `gui/remote/`: there is no surface-attach
+request on the protocol at all, and the compositor's own module doc says the IPC
+layer is stubbed and `SharedBuffer::import` takes bytes someone else already
+mapped. In-process, "mapping" is a `&[u8]` that was never copied.
+
+The transport is a TCP connection (design-decisions.md → 460) whose far end need
+not be on this machine. There is nothing to map across it. A mapping fast path
+would work over loopback and silently not exist otherwise — which is worse than
+no fast path, because the performance of the display protocol would then depend
+on where the client happens to be running, invisibly.
+
+So the bytes go inline, bounded by `MAX_IMAGE_BYTES` (7680×4320×4 ≈ 126 MiB —
+the compositor's largest framebuffer). If a local fast path is wanted later it
+belongs at the transport, not in this request: the request would be unchanged
+and only the bytes' journey would differ.
+
+### 5. `BufferFormat` moved to the wire crate
+
+The compositor declared its own `BufferFormat` enum. That was tenable while
+pixels could only be handed over in-process — the enum and its only callers were
+compiled together. The moment an upload can arrive from another process, the
+pixel format is part of the *wire*, and two enums would mean two orderings for
+the byte-per-variant mapping with nothing to keep them agreeing but a reviewer
+noticing.
+
+This is the same rule that left `guiremote::control::CursorShape` the tree's
+only cursor enum (design-decisions.md → f2): **the wire owns shared
+vocabulary.** The compositor re-exports it, so all 61 existing references
+compiled unchanged — the move cost nothing and removed a whole class of future
+divergence.
+
+### Where it lives
+
+`gui/remote/src/control.rs` (`RequestBody::UploadImage`/`DropImage`,
+`BufferFormat`), `gui/remote/src/lib.rs` (`MAX_IMAGE_BYTES`, `write_bytes`),
+`gui/remote/src/reader.rs` (`read_bytes`), `gui/remote/src/client.rs`
+(`Connection::upload_image`/`drop_image`), `gui/compositor/src/wire.rs`
+(`MAX_IMAGE_BYTES_PER_LINK`, `ClientLink::image_budget`,
+`Compositor::image_budget_refusal`), `gui/compositor/src/lib.rs`
+(`CompositorRequest::RegisterImage`/`UnregisterImage`, `window_image_bytes`,
+`image_size_bytes`).
+
+**Numbering note.** Lane C's allocated band ended at 499; this continues the
+documented overflow past it.
+
+## 557. A wallpaper that cannot be shown costs a wallpaper, not a desktop — and the shell, not the wallpaper model, is what opens the file
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop can now actually display a picture as the wallpaper.
+Two things had to be settled to get there. First, *who opens the file*: the
+object that holds the wallpaper settings deliberately never touches the disk, so
+the code that reads and decodes the `.png` was put in the shell session — the
+layer that already talks to the display server — rather than in the settings
+object. Second, *what happens when the file is unreadable*: a missing, corrupt
+or oversized wallpaper now records an error and lets the rest of the desktop
+paint normally, instead of aborting the whole repaint. So a bad wallpaper leaves
+you with a plain coloured background and a working taskbar, rather than a
+desktop that draws nothing.
+
+### The setting
+
+`WallpaperManager` (`gui/desktop/src/wallpaper.rs`) allocates an *image id* — a
+number the display server uses to look up stored pixels — and emits a draw
+command naming it. The display server draws nothing, silently, for an id it has
+no pixels for. Nothing in the tree had ever stored any, which is
+known-issues.md `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING`.
+With `gui/imagecodec` written, the remaining question was where to put the read.
+
+### Decision 1 — the read lives in `ShellSession`, not in `WallpaperManager`
+
+`WallpaperManager` performs no I/O, and says so in its own doc comments in three
+places; `populate_slideshow_paths` exists precisely because the *caller* is
+expected to scan the directory. Its ~2000 lines of tests all run with no
+filesystem at all, and its `get_render_commands` is a pure function of settings
+plus a clock.
+
+*Alternative considered:* give the manager a `&dyn Fs`-style hook and let it
+load its own picture. That would put the decision in one obvious place and
+remove the need for a caller to remember to refresh.
+
+*Why not:* it would make every one of those tests either take a stub filesystem
+or stop covering the loading path, and it would give an object whose whole
+character is "settings plus arithmetic" a dependency on a decoder and a socket.
+The session already owns the connection — uploading is a method on a window
+handle — so putting the read there adds no new dependency edge at all.
+
+*Cost accepted:* `paint_background` must call `refresh_wallpaper_image` first,
+and a future second painter of the background would have to remember to do the
+same. Mitigated by making it the first statement of the only method that paints
+that surface, with a comment saying why, and by making it cheap to call — it
+compares a remembered `(image id, path)` pair and returns immediately when
+nothing changed.
+
+### Decision 2 — an unshowable wallpaper is recorded, not propagated
+
+`refresh_wallpaper_image` returns `Ok(())` for three failures — the file cannot
+be read, it cannot be decoded, and the display server *refuses* it (over the
+per-connection image budget of §556) — storing the reason in
+`ShellSession::wallpaper_error()`. Every other error still propagates.
+
+*Alternative considered:* propagate all of them, so `repaint()` fails loudly and
+the caller decides.
+
+*Why not:* the caller is a shell's main loop, and the only thing it can sensibly
+do with "your wallpaper is corrupt" is carry on painting. Propagating means the
+taskbar, the clock and the start menu do not draw because of a `.png` — a
+strictly worse outcome than a plain background, and one the wallpaper's own
+design already anticipates: `render_image` always pushes a colour underlay
+first, commented *"visible through letterboxing or if image fails to load"*.
+
+*Where the line is drawn:* a `Refused` reply means the display server considered
+the request and said no — a fact about this picture. A transport error, a closed
+connection or a protocol mismatch is a fact about the *connection*, and the
+`submit` two statements later would fail on it anyway; swallowing those would
+only move the report somewhere less useful.
+
+*Cost accepted:* the failure is silent to the user until something renders
+`wallpaper_error()`, and nothing does yet. Logged in known-issues.md under the
+same entry. This is a strictly better position than before — the failure was
+previously not merely unreported but *unrepresented*.
+
+### Decision 3 — the failed attempt is remembered, so it is not retried per frame
+
+The remembered pair is written *before* the read, so a wallpaper that fails is
+attempted once rather than on every repaint. `paint_background` runs on every
+repaint, and a repaint happens on every click that changes anything, so the
+alternative is re-reading and re-inflating a 4K file per click — a stutter with
+no visible cause.
+
+*Cost accepted:* a user who repairs the file in place, without changing the
+path, gets no new attempt until the wallpaper id changes (any `set_image`, any
+slideshow step, or a settings reload). Judged the right trade: the failure mode
+of retrying is a permanent frame-rate cost on a broken configuration, and the
+failure mode of not retrying is one extra click on a repair that is itself rare.
+
+### Decision 4 — a slideshow step drops before it uploads
+
+`refresh_wallpaper_image` releases the previous id *before* reading the next
+file, not after uploading it. Uploading first would charge §556's
+per-connection image budget for two full-screen pictures simultaneously, so a
+budget sized to fit one wallpaper would refuse every slide after the first. The
+cost is a window of a few milliseconds in which the old id is gone and the new
+one is not there yet — invisible, because the frame that would draw either of
+them is submitted after both.
+
+### Where it lives
+
+`gui/desktop/src/session.rs` (`ShellSession::refresh_wallpaper_image`,
+`release_wallpaper_image`, `wallpaper_error`, the `wallpaper_image` field),
+`gui/desktop/Cargo.toml` (the `imagecodec` dependency),
+`gui/window/src/lib.rs` (`WindowHandle::upload_image`/`drop_image`),
+`gui/desktop/src/session/tests.rs` (the eight `wallpaper` tests).
+
+**Numbering note.** Lane C's allocated band ended at 499; this continues the
+documented overflow past it.
+
+## 558. Every application gets one route for pixels, and the image viewer is the first to use it: one id reused, a queue that supersedes, and a window that opens even when the file will not
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** the image viewer now actually shows the photograph you opened.
+Until this change it drew a grey checkerboard for *every* file — a comment in
+the source said "in a real implementation, this would decode the image" — and
+the whole test suite passed over it, because nothing anywhere in the tree could
+turn a file into pixels. Four things had to be settled. (1) Applications had no
+way at all to hand pixels to the display server: the one method they implement
+returns a *drawing* (which can name a picture by number but never carries the
+picture), so a new hook was added to the shared application strap. (2) That hook
+takes one ordered list of "start holding this / stop holding this" rather than
+two separate methods, because the order between the two matters. (3) The viewer
+reuses a single picture number for every file it opens, instead of one per file.
+(4) A file the viewer cannot read no longer stops it from opening its window —
+it opens, and says on screen what went wrong.
+
+### Decision 1 — the hook lives on the `App` trait, drained per *frame*
+
+`oswindow::app::App` is the strap ~140 application crates share: connect, open
+one window, run until it closes. Its `render` returns a `RenderTree`, and a
+`RenderTree`'s `RenderCommand::Image` carries an image *id* — a number the
+compositor looks up stored pixels under — and never the pixels themselves.
+Uploading is `WindowHandle::upload_image`, and an app implementing `App` never
+sees a `WindowHandle`. So there was no route, for any application, at any price.
+`App::take_images() -> Vec<ImageChange>` is that route.
+
+*Alternative considered:* hand `render` the window handle, or the event loop, so
+an app can upload inline while drawing.
+
+*Why not:* it makes `render` a method that can perform I/O and fail, which
+propagates a `Result` and a transport type parameter into every one of those 140
+`render` implementations, and it makes every render test need a connection.
+Today they are pure `(width, height) -> RenderTree` functions testable with no
+compositor at all, and that is the property that makes the app tests in this
+tree runnable on a build machine. The drain-a-queue shape keeps it.
+
+*Cadence:* drained immediately after `render` and before the frame is submitted,
+**once per frame** — not once per event, which is what the existing
+`take_reloads` does. The two differ for a reason worth recording: a settings
+file rewritten by the last click before a window closes must be announced even
+though no frame follows, so reloads drain per event; a picture with no frame
+behind it has nothing to be early for, and an upload still queued at exit is
+freed with the window. Draining images per event would mean uploading pictures
+for frames that never get drawn.
+
+*Cost accepted:* an application that queues a picture and then never renders
+again never uploads it. This is the correct outcome — that picture had no frame
+naming it — but it is a real difference from `take_reloads` and is documented at
+both methods.
+
+### Decision 2 — one ordered list, not `take_uploads()` + `take_drops()`
+
+*Alternative considered:* two methods, which is the more obvious API and needs
+no enum.
+
+*Why not:* §557 established that a slideshow must drop the outgoing picture
+*before* uploading the incoming one, or the per-connection image budget of §556
+is charged for two full-screen pictures at once and refuses every slide after
+the first. Two methods cannot express "this drop precedes that upload" — the
+caller has to pick an order between the two calls, and whichever it picks is
+wrong for someone. One `Vec<ImageChange>` makes the ordering the application's
+to state and the loop's to preserve, and the test that guards it
+(`a_drop_queued_before_an_upload_goes_out_before_it`) is order-sensitive rather
+than a presence check.
+
+### Decision 3 — the viewer reuses one image id for every file
+
+`ImageData` used to carry an id hashed from the file's path, so each picture got
+its own number.
+
+*Alternative considered:* keep per-path ids, so a picture already uploaded could
+be re-shown without decoding again.
+
+*Why not:* nothing evicts. The compositor holds what it is given until the id is
+dropped or the window closes (§556 refuses rather than evicting), so per-path
+ids mean a session that pages through a directory of 400 photographs holds all
+400 in the compositor and is refused somewhere in the middle. A cache would need
+its own eviction policy, its own budget accounting, and a way to know the
+compositor agrees with it — three new mechanisms to save a decode that takes
+milliseconds.
+
+*What one id buys, exactly:* re-registering an existing id is arithmetically a
+*replacement* in the compositor's budget check (`gui/compositor/src/wire.rs`,
+`image_budget_refusal`: `after = held - freed + incoming`, where `freed` is what
+that same `(window, id)` already holds). So a single fixed id gives §557's
+never-hold-two property for free, with no explicit drop at all — the wallpaper
+had to arrange it by hand because it genuinely uses two ids.
+
+*Cost accepted:* pressing Left then Right decodes the same file twice. A PNG
+decode is bounded and fast, and the alternative is a cache that can disagree
+with the compositor about what is stored.
+
+### Decision 4 — the pending queue is *cleared* before the new picture is pushed
+
+`display_image` does `pending_images.clear()` and then pushes. A user holding
+the arrow key crosses a directory faster than the loop draws frames, and an
+appending queue would upload every file passed over — each one immediately
+replaced by the next, so every upload but the last is pure cost. Because the id
+is fixed (Decision 3) the superseded entries are provably redundant: they all
+write the same slot. Failure does the same thing in reverse — `fail_with` clears
+the queue and pushes a single `Drop`, so a file that will not open stops paying
+for the picture that is no longer on screen.
+
+### Decision 5 — a file that cannot be shown still opens a window
+
+`main` used to `process::exit(1)` when the file named on the command line could
+not be read, with a comment saying so.
+
+*Alternative considered:* keep exiting, on the grounds that a viewer with
+nothing to view is pointless.
+
+*Why not:* that argument was made when there was no window at all — the program
+was a render-tree factory with a `main` that printed. Now `render_image` has a
+purpose-built "Cannot display this image" state that names the file and the
+reason, and `open_file` builds the directory listing whether or not the file
+decodes. So a user who double-clicks a corrupt photograph gets a window that
+says which file is broken and an arrow key that carries them off it, instead of
+a window that flashes and vanishes with a message on a stderr nobody is reading.
+The reason is still printed to stderr for a shell user, and the exit code is
+still non-zero only for *usage* errors (an unparseable argument, more than one
+file), which are the ones a script can act on.
+
+### Decision 6 — "no decoder claims these bytes" is not the same message as "this is not a picture"
+
+`imagecodec::decode` answers `UnknownFormat` both for a text file and for a
+JPEG, since only PNG is implemented. `ImageFormat::detect` in the viewer reads
+the signature *independently* of the decoder, so the viewer can tell the two
+apart: signature says JPEG **and** no decoder claims it means *unsupported*, and
+`decode_failure` says "JPEG images cannot be displayed yet". Reporting the
+decoder's own wording — "not a picture format this system reads" — for a valid
+photograph would send a user looking for a corrupt disk.
+
+### Where it lives
+
+`gui/window/src/app.rs` (`ImageChange`, `App::take_images`, `apply_images`, the
+five tests under "Getting a picture's pixels to the compositor"),
+`apps/imageviewer/src/main.rs` (`VIEWER_IMAGE_ID`,
+`ViewerState::pending_images`, `display_image`, `fail_with`, `decode_failure`,
+`impl App for ViewerState`, `main`, and the eight tests under "Getting the
+picture to the compositor"), `apps/imageviewer/Cargo.toml` (the `imagecodec` and
+`oswindow` dependencies).
+
+**Test-fixture note.** `png_bytes` in the viewer's tests used to emit a bare
+13-byte header, which was sufficient *precisely because* nothing decoded. It is
+now a real encoder — stored deflate blocks, CRC-32 per chunk, Adler-32 over the
+stream — so the four scratch-directory tests that were already written kept
+their exact signatures and now run against a genuine picture rather than a stub.
+Upgrading the fixture rather than weakening the new tests is the whole reason
+`the_pixels_are_the_files_own_and_not_a_pattern` can assert a specific pixel's
+bytes.
+
+**Numbering note.** Lane C's allocated band ended at 499; this continues the
+documented overflow past it.
+
+---
+
 ## 603. The shell's operand parsers are one generic `required_num<T>`, not one function per integer width
 
 **Date:** 2026-08-25

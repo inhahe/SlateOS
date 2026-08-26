@@ -390,6 +390,43 @@ mod tests {
     }
 
     #[test]
+    fn an_encoded_record_is_the_bytes_the_kernel_itself_would_have_written() {
+        // The mirror of `every_field_is_at_the_offset_the_abi_puts_it_at`,
+        // which pins only the *decoder*. Round-tripping `encode` through
+        // `decode` does not close the gap: in
+        // `a_record_survives_the_round_trip_through_its_own_bytes` the `kind`
+        // and `value` fields are both 1, so an encoder that wrote each into
+        // the other's slot would round-trip perfectly -- and every synthetic
+        // event stream in this module's tests is built by `encode`, so a
+        // wrong encoder would quietly agree with a wrong decoder and the
+        // whole suite would stay green while the compositor read nothing the
+        // kernel sent.
+        //
+        // These are the same hand-written bytes the decoder test uses, so the
+        // two directions are pinned to one statement of `struct input_event`.
+        let mut expected = [0u8; EVENT_SIZE];
+        expected[0] = 0x07; // tv_sec  = 7
+        expected[8] = 0x09; // tv_usec = 9
+        expected[16] = 0x02; // type    = EV_REL
+        expected[18] = 0x01; // code    = REL_Y
+        expected[20] = 0xFF; // value   = -1, sign-extended
+        expected[21] = 0xFF;
+        expected[22] = 0xFF;
+        expected[23] = 0xFF;
+
+        let encoded = Record {
+            sec: 7,
+            usec: 9,
+            kind: EV_REL,
+            code: 1,
+            value: -1,
+        }
+        .encode();
+
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
     fn a_short_slice_decodes_to_nothing_rather_than_reading_past_it() {
         for len in 0..EVENT_SIZE {
             assert_eq!(

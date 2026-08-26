@@ -53,7 +53,7 @@
 //! with, resolving the choice with a single predictable branch per primitive
 //! rather than a vtable per pixel.
 
-use crate::buffer::SharedBuffer;
+use crate::buffer::{ImageAsset, SharedBuffer};
 use crate::{CompositorResult, Framebuffer, Rect};
 use osfont::raster::GlyphMask;
 
@@ -171,6 +171,21 @@ pub trait RenderTarget {
         rows: u32,
         opacity: f32,
     );
+
+    /// A registered image as a textured quad filling `dest`, clipped to `clip`.
+    ///
+    /// Unlike [`blit_buffer`](Self::blit_buffer) the quad is *scaled*: `dest` is
+    /// the size the client's [`RenderCommand::Image`](guitk::render::RenderCommand::Image)
+    /// asked for and need not match the image's own. It is passed unclipped, with
+    /// the clip alongside, because the source-to-destination mapping is defined
+    /// by the full quad — shrinking `dest` to the visible part first would
+    /// resample the image at a different scale depending on how much of it
+    /// happened to be on screen, so a window sliding off the edge would ripple.
+    ///
+    /// A CPU backend samples nearest-neighbour; a GPU one binds a texture and
+    /// draws two triangles. Neither is described here, which is the point of the
+    /// seam.
+    fn draw_image(&mut self, image: &ImageAsset, dest: Rect, clip: Option<&Rect>, opacity: f32);
 
     // -- presentation -------------------------------------------------------
 
@@ -352,6 +367,13 @@ impl RenderTarget for RenderBackend {
     }
 
     #[inline]
+    fn draw_image(&mut self, image: &ImageAsset, dest: Rect, clip: Option<&Rect>, opacity: f32) {
+        match self {
+            Self::Software(fb) => RenderTarget::draw_image(fb, image, dest, clip, opacity),
+        }
+    }
+
+    #[inline]
     fn present(&mut self) {
         match self {
             Self::Software(fb) => RenderTarget::present(fb),
@@ -406,8 +428,11 @@ mod tests {
     //! - a line is handed over whole, so a client cannot make the compositor
     //!   walk four billion steps on its behalf whichever backend is installed.
 
+    use std::collections::HashMap;
+
     use super::*;
     use crate::RenderEngine;
+    use crate::buffer::BufferFormat;
     use guitk::color::Color;
     use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
     use guitk::style::CornerRadii;
@@ -444,6 +469,15 @@ mod tests {
             size: (u32, u32),
             opacity: f32,
         },
+        /// A textured quad from a registered image. The destination is recorded
+        /// unclipped, with the clip beside it, because that is exactly the pair
+        /// the seam promises — see [`RenderTarget::draw_image`].
+        Image {
+            dest: Rect,
+            src: (u32, u32),
+            clip: Option<Rect>,
+            opacity: f32,
+        },
         Present,
     }
 
@@ -476,6 +510,7 @@ mod tests {
                     Primitive::Line { .. } => "line",
                     Primitive::Glyph { .. } => "glyph",
                     Primitive::Blit { .. } => "blit",
+                    Primitive::Image { .. } => "image",
                     Primitive::Present => "present",
                 })
                 .collect()
@@ -577,6 +612,21 @@ mod tests {
             });
         }
 
+        fn draw_image(
+            &mut self,
+            image: &ImageAsset,
+            dest: Rect,
+            clip: Option<&Rect>,
+            opacity: f32,
+        ) {
+            self.ops.push(Primitive::Image {
+                dest,
+                src: (image.width(), image.height()),
+                clip: clip.copied(),
+                opacity,
+            });
+        }
+
         fn present(&mut self) {
             self.ops.push(Primitive::Present);
         }
@@ -593,10 +643,28 @@ mod tests {
     /// Run a client's command list through the real engine into a recorder,
     /// with the window at (100, 50) and 200x100 of client area.
     fn record(commands: &[RenderCommand]) -> Recorder {
+        record_with_images(commands, &HashMap::new())
+    }
+
+    /// As [`record`], for a window that has registered some images.
+    fn record_with_images(
+        commands: &[RenderCommand],
+        images: &HashMap<u64, ImageAsset>,
+    ) -> Recorder {
         let mut rec = Recorder::default();
         let mut engine = RenderEngine::new();
-        engine.execute(&mut rec, commands, 100, 50, 200, 100, 1.0);
+        engine.execute(&mut rec, commands, images, 100, 50, 200, 100, 1.0);
         rec
+    }
+
+    /// A solid `width`x`height` image, registered under `id`.
+    fn one_image(id: u64, width: u32, height: u32) -> HashMap<u64, ImageAsset> {
+        let bytes = vec![0xFFu8; (width as usize) * (height as usize) * 4];
+        let image = ImageAsset::import(width, height, width * 4, BufferFormat::Argb8888, &bytes)
+            .expect("image import");
+        let mut map = HashMap::new();
+        map.insert(id, image);
+        map
     }
 
     fn white() -> Color {
@@ -654,6 +722,87 @@ mod tests {
             "a fully-clipped fill reached the backend: {:?}",
             rec.ops
         );
+    }
+
+    #[test]
+    fn an_image_crosses_the_seam_as_one_textured_quad_in_screen_space() {
+        let images = one_image(7, 16, 16);
+        let rec = record_with_images(
+            &[RenderCommand::Image {
+                x: 10.0,
+                y: 20.0,
+                width: 64.0,
+                height: 64.0,
+                image_id: 7,
+            }],
+            &images,
+        );
+        // Translated by the window origin, carrying the *unscaled* source size:
+        // the destination and the source are both handed over, because scaling
+        // is the backend's to do — nearest-neighbour on a CPU, a sampler on a
+        // GPU — and neither can do it without being told both.
+        assert_eq!(
+            rec.ops,
+            vec![Primitive::Image {
+                dest: Rect::new(110, 70, 64, 64),
+                src: (16, 16),
+                clip: Some(Rect::new(100, 50, 200, 100)),
+                opacity: 1.0,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_image_id_the_window_never_registered_draws_nothing() {
+        // Not an error and not a fallback: a client whose upload is still in
+        // flight would otherwise get a placeholder rectangle flashing on the
+        // frame before its pixels land.
+        let rec = record_with_images(
+            &[RenderCommand::Image {
+                x: 0.0,
+                y: 0.0,
+                width: 32.0,
+                height: 32.0,
+                image_id: 7,
+            }],
+            &one_image(8, 4, 4),
+        );
+        assert!(
+            rec.ops.is_empty(),
+            "an unregistered id reached the backend: {:?}",
+            rec.ops
+        );
+    }
+
+    #[test]
+    fn an_image_keeps_its_full_destination_when_the_clip_cuts_it() {
+        // The clip is the left half of a 64-wide quad. `dest` must still be the
+        // whole 64, or the backend would resample the image to fit 32 pixels and
+        // a window sliding under a clip edge would visibly squash.
+        let rec = record_with_images(
+            &[
+                RenderCommand::PushClip {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 32.0,
+                    height: 100.0,
+                },
+                RenderCommand::Image {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 64.0,
+                    height: 64.0,
+                    image_id: 1,
+                },
+                RenderCommand::PopClip,
+            ],
+            &one_image(1, 8, 8),
+        );
+        let Some(Primitive::Image { dest, clip, .. }) = rec.ops.first() else {
+            panic!("expected one image primitive, got {:?}", rec.ops);
+        };
+        assert_eq!(*dest, Rect::new(100, 50, 64, 64));
+        assert_eq!(*clip, Some(Rect::new(100, 50, 32, 100)));
     }
 
     #[test]

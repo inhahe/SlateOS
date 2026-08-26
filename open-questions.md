@@ -904,6 +904,50 @@ the on-screen volume overlay, the print manager and the login screen — is draw
 only by its own unit tests. Full detail is in `known-issues.md` →
 `TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
 
+**Measured 2026-08-25, and it is worse than "two copies".** A new scan
+(`scripts/scan-orphan-modules.py`) asks, for every module in my tree, whether
+*any* other file in the repository so much as names one of the things it
+defines. **Fifty-seven modules — 113,132 lines — are named by nothing, and
+thirty-nine of them are in the shell**, a crate that declares fifty-nine. (The
+scan first reported 21; three separate ways of accidentally crediting a module
+with a caller it does not have were found and fixed the same day, each by
+hand-checking a module the scan had cleared. 57 is the corrected figure.)
+
+That the shell has 39 modules with no caller, arrived at mechanically, and
+"the shell paints four of its fifty-seven modules", arrived at by hand two
+days earlier, are the same fact counted two ways.
+
+Three findings in that list change what this question is asking:
+
+- **The shell duplicates itself, not just the app.**
+  `gui/desktop/src/a11y.rs` (2,292 lines: a screen magnifier, four
+  high-contrast schemes, sticky/filter/mouse keys, a colourblind filter) and
+  `gui/desktop/src/accessibility_settings.rs` are two models of the same
+  settings, six type names apart, in the same crate. `a11y.rs` is the copy
+  nobody calls. Same shape for notifications: `notif_pane.rs` and
+  `focus_assist.rs` share two types, both unreached, and
+  `gui/notifications/src/main.rs` says in its own comment that it shows the
+  same notifications — a **third** copy.
+- **Option A does not by itself de-duplicate.** File-type associations are
+  modelled in `gui/desktop/src/default_apps.rs` (2,314 lines) *and*
+  `apps/settings/src/associations.rs` (1,748) — and **neither is reachable**.
+  Deleting the shell's copy would leave an unreachable one behind.
+- **Only the app copy has ever been connected to storage.** `gui/desktop`
+  contains no file write of any kind; it reads `appearance.yaml` and stops.
+  `apps/settings` already saves two settings families through
+  `gui/settingsfile`. Meanwhile six shell modules (`a11y`, `power`,
+  `display_settings`, `input_method`, `tray_dnd`, `user_accounts`) hand-write
+  their settings into a string — four of them with a matching parser and a
+  passing round-trip test, two with no parser at all — and nothing calls any
+  of it. What they emit is **`key=value` and pipe-delimited text, not YAML**,
+  which `design.txt` requires for configuration.
+
+None of this decides the question, and it does not change my recommendation.
+It sharpens two things: whichever copy survives, **de-duplication has to
+happen inside the survivor too**; and if the deciding factor is "which copy is
+closer to working for a user", that is the app, on the evidence that it is the
+only one that has ever written a settings file.
+
 ### The options
 
 **A. The standalone app is the real one; delete the shell's settings panels.**
@@ -1123,6 +1167,88 @@ It does not get worse, and nothing else is blocked on it — but it does not get
 better either, and the failure it leaves in place is the quiet kind: a clock that
 is confidently wrong. It has already been stuck nine days for want of one
 sentence from you. Everything else about the feature is finished.
+
+
+## C-Q9 — [C] The backup tool and the search tools read the same-looking patterns by different rules. Should they be made the same? — Status: OPEN
+
+**In short:** when you tell the backup program which folders to skip, you type a
+pattern like `*.tmp` or `build/**`. When you search for a file, you type a
+pattern that looks the same. They are not the same: the search tools understand
+`[a-z]` to mean "any lowercase letter", and the backup tool understands it to
+mean "a folder whose name literally contains a square bracket". Both behaviours
+are defensible. The question is whether to make the backup tool agree with the
+search tools — which would change what the exclude lists people have *already
+written* actually exclude.
+
+**Where it bites:** `apps/backup/src/main.rs` (`glob_matches`,
+`glob_match_recursive`, `glob_match_simple` — lines 40–215) versus
+`apps/globmatch/src/lib.rs`, which `apps/indexer` and `apps/filesearch` now
+share. The reasoning behind the split is `design-decisions.md` §555.
+
+### What is actually different
+
+The desktop used to contain four separate pattern matchers. The two that are the
+same feature seen twice — the search window and the background indexer — have
+been merged into one shared implementation, because they disagreed with each
+other on 646 of 730,236 test patterns and no test either of them had could ever
+have noticed. That part needed no decision; it was a bug.
+
+The backup tool is the case that does need one. It is not a broken copy of the
+search matcher; it is a different pattern language, the one `.gitignore` uses:
+
+| | search tools (`apps/globmatch`) | backup (`apps/backup`) |
+|---|---|---|
+| `*` | matches any run of characters, including `/` | stops at a `/` |
+| `**` | nothing special — two stars, same as one | spans folder boundaries |
+| `?` | any one character | any one character except `/` |
+| `[a-z]` | any lowercase letter | the six characters `[`, `a`, `-`, `z`, `]` |
+| works on | text, character by character | raw path bytes |
+
+The first three rows are *correct as they stand*: an exclude list matches paths,
+so `*.tmp` should not match `logs/a.tmp`, and `build/**` should. Nobody is
+proposing to change those. The only row in dispute is the fourth.
+
+### The options
+
+**A — Leave it. Two dialects, written down.** *What changes:* nothing. Backup
+patterns keep treating `[` as an ordinary character; search patterns keep
+treating it as the start of a character class. Someone who learns one and
+assumes the other is surprised once.
+
+**B — Teach the backup tool character classes.** *What changes:* an existing
+exclude line like `cache[1]/` stops excluding the folder literally named
+`cache[1]` and starts excluding a folder named `cache1`. Everything else keeps
+working. Gains: one rule to learn instead of two, and `*.[ch]` becomes a way to
+skip C sources. Costs: a silent change of meaning in data users already wrote —
+the backup that quietly starts including a folder it used to skip is not an error
+anyone will see.
+
+**C — Teach the backup tool character classes, but only for new patterns.**
+*What changes:* the same as B for anything written from now on; existing exclude
+files are read under the old rules until edited. *What it costs:* a file format
+that means two different things depending on its age, which is the kind of thing
+that is impossible to explain and impossible to remove later. Listed for
+completeness; I do not recommend it.
+
+### My recommendation
+
+**A.** The two search tools had to be unified because they are one feature with
+two implementations — a disagreement with no upside. Backup is not that: its
+dialect is the right one for its job and matches what every developer already
+knows from `.gitignore`, where `[` is likewise not special in the common case.
+The gain from B is small (a shorter way to write a few exclude patterns) and the
+cost lands on data that already exists and that nobody will re-read to check.
+
+If you prefer B, the change itself is small — `apps/backup` would call
+`globmatch`'s class parser for the segment-matching step — and the real work is
+deciding whether to warn about existing patterns containing a `[`.
+
+### If this is never answered
+
+Nothing is blocked and nothing degrades. The two dialects are documented in
+`design-decisions.md` §555 and in `apps/globmatch`'s module docs, so the split is
+a recorded decision rather than an accident. The only ongoing cost is that a user
+who learns one pattern language may assume the other works the same way.
 
 
 # Resolved

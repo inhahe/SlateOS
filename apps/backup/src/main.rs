@@ -129,13 +129,18 @@ fn utf8_char_len(text: &[u8], i: usize) -> usize {
 
 fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
     // Check for ** at the start — matches any number of path segments
-    if pattern.len() >= 2 && pattern[0] == b'*' && pattern[1] == b'*' {
-        let rest = if pattern.len() > 2 && pattern[2] == b'/' {
-            &pattern[3..]
+    if pattern.starts_with(b"**") {
+        let rest = if pattern.get(2) == Some(&b'/') {
+            pattern.get(3..).unwrap_or_default()
         } else if pattern.len() == 2 {
-            &pattern[2..]
+            // `**` with nothing after it: there is no remainder to match.
+            &[]
         } else {
-            // "**" followed by something other than "/" — treat as literal
+            // `**` followed by something other than `/` is not a globstar.
+            // Handing it back to `glob_match_simple` is safe now that
+            // `glob_match_simple` agrees about that and degrades it to a
+            // single `*`; while the two disagreed this line was half of an
+            // infinite mutual recursion. See the note there.
             return glob_match_simple(pattern, text);
         };
 
@@ -144,10 +149,12 @@ fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
             return true;
         }
 
-        // Try matching rest against every suffix of text starting at path boundaries
+        // Try matching rest against every suffix of text starting at path
+        // boundaries. `i` runs to `text.len()` inclusive, so the suffix may be
+        // empty — that is the zero-segment case.
         for i in 0..=text.len() {
-            if (i == 0 || (i > 0 && text[i - 1] == b'/')) && glob_match_recursive(rest, &text[i..])
-            {
+            let at_boundary = i == 0 || i.checked_sub(1).and_then(|k| text.get(k)) == Some(&b'/');
+            if at_boundary && glob_match_recursive(rest, text.get(i..).unwrap_or_default()) {
                 return true;
             }
         }
@@ -159,45 +166,82 @@ fn glob_match_recursive(pattern: &[u8], text: &[u8]) -> bool {
 }
 
 fn glob_match_simple(pattern: &[u8], text: &[u8]) -> bool {
-    let mut pi = 0;
-    let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = 0;
+    let mut pi = 0usize;
+    let mut ti = 0usize;
+    // `None` until a single `*` has been seen. This was `usize::MAX` as a
+    // sentinel, which is a valid index the loop could in principle reach;
+    // `Option` says the same thing without borrowing a value from the range.
+    let mut star_pi: Option<usize> = None;
+    let mut star_ti = 0usize;
 
-    while ti < text.len() {
-        if pi < pattern.len() && pattern[pi] == b'?' && text[ti] != b'/' {
-            pi += 1;
-            // One character, not one byte — see `utf8_char_len`.
-            ti += utf8_char_len(text, ti);
-        } else if pi < pattern.len() && pattern[pi] == b'*' {
-            // Handle ** in the middle of a pattern
-            if pi + 1 < pattern.len() && pattern[pi + 1] == b'*' {
-                // Delegate to recursive handler for **
-                return glob_match_recursive(&pattern[pi..], &text[ti..]);
+    // Matching `text.get(ti)` rather than testing `ti < text.len()` and then
+    // indexing gives the loop its bound and its byte in one step, so there is
+    // no window in which the two could disagree.
+    while let Some(&t) = text.get(ti) {
+        match pattern.get(pi) {
+            // `?` matches one character that is not a separator.
+            Some(&b'?') if t != b'/' => {
+                pi = pi.saturating_add(1);
+                // One character, not one byte — see `utf8_char_len`.
+                ti = ti.saturating_add(utf8_char_len(text, ti));
             }
-            // Single * — match anything except /
-            star_pi = pi;
-            star_ti = ti;
-            pi += 1;
-        } else if pi < pattern.len() && pattern[pi] == text[ti] {
-            pi += 1;
-            ti += 1;
-        } else if star_pi != usize::MAX {
-            // Backtrack to last star
-            star_ti += 1;
-            if star_ti > text.len() || text[star_ti - 1] == b'/' {
-                return false; // * doesn't cross /
+            Some(&b'*') => {
+                // Hand `**` to the recursive matcher, but only for a `**` that
+                // is a whole path segment — `**` at the end of the pattern, or
+                // `**/`. That is exactly the condition
+                // `glob_match_recursive` accepts, and the two MUST agree.
+                //
+                // They did not. This delegated on any `**` while
+                // `glob_match_recursive` accepted only a whole segment, so
+                // `**a` bounced between the two forever: `recursive` saw a `**`
+                // it would not handle and passed the pattern to `simple`
+                // unchanged, `simple` saw `**` and passed it straight back, and
+                // neither consumed a byte. `backup create --exclude '**a'`
+                // overflowed the stack and took the backup down with it.
+                //
+                // A `**` that is not a whole segment is not a globstar; bash's
+                // `globstar` and gitignore both degrade it to a single `*`, and
+                // falling through to the ordinary-star arm below does that —
+                // `**a` behaves as `*a`, which also guarantees progress because
+                // `pi` advances every time.
+                let is_whole_segment = pattern.get(pi.saturating_add(1)) == Some(&b'*')
+                    && matches!(pattern.get(pi.saturating_add(2)), None | Some(&b'/'));
+                if is_whole_segment {
+                    return glob_match_recursive(
+                        pattern.get(pi..).unwrap_or_default(),
+                        text.get(ti..).unwrap_or_default(),
+                    );
+                }
+                // Single * — match anything except /
+                star_pi = Some(pi);
+                star_ti = ti;
+                pi = pi.saturating_add(1);
             }
-            ti = star_ti;
-            pi = star_pi + 1;
-        } else {
-            return false;
+            Some(&p) if p == t => {
+                pi = pi.saturating_add(1);
+                ti = ti.saturating_add(1);
+            }
+            // Either the pattern ran out or this byte does not match. Both are
+            // recoverable only by making the last single `*` swallow one more
+            // byte — and `None` here (no star yet) is the outright failure.
+            _ => {
+                let Some(resume_at) = star_pi else {
+                    return false;
+                };
+                star_ti = star_ti.saturating_add(1);
+                let swallowed = star_ti.checked_sub(1).and_then(|k| text.get(k));
+                if star_ti > text.len() || swallowed == Some(&b'/') {
+                    return false; // * doesn't cross /
+                }
+                ti = star_ti;
+                pi = resume_at.saturating_add(1);
+            }
         }
     }
 
     // Consume trailing stars
-    while pi < pattern.len() && pattern[pi] == b'*' {
-        pi += 1;
+    while pattern.get(pi) == Some(&b'*') {
+        pi = pi.saturating_add(1);
     }
 
     pi == pattern.len()
@@ -299,10 +343,25 @@ impl fmt::Display for JsonValue {
             JsonValue::Null => write!(f, "null"),
             JsonValue::Bool(b) => write!(f, "{}", if *b { "true" } else { "false" }),
             JsonValue::Number(n) => {
-                if *n == (*n as u64) as f64 && *n >= 0.0 {
+                // The exact comparison is the point, and clippy's suggested
+                // epsilon would be a bug: this asks "is this float an integer,
+                // so I may print it without a decimal point?", and only an
+                // exact round-trip answers it. Within a margin of error,
+                // 3.0000001 would print as `3` and the manifest would claim a
+                // file size, mtime or block count that was never measured.
+                // `as u64` saturates rather than wrapping, so a value too large
+                // for u64 round-trips to u64::MAX-as-f64, compares unequal, and
+                // correctly takes the float branch; NaN fails every comparison
+                // and does the same.
+                #[allow(
+                    clippy::float_cmp,
+                    reason = "exactness is the question being asked; see comment"
+                )]
+                let integral = *n == (*n as u64) as f64 && *n >= 0.0;
+                if integral {
                     write!(f, "{}", *n as u64)
                 } else {
-                    write!(f, "{}", n)
+                    write!(f, "{n}")
                 }
             }
             JsonValue::Str(s) => {
@@ -352,41 +411,49 @@ fn json_pretty(value: &JsonValue, indent: usize) -> String {
 }
 
 fn json_pretty_inner(value: &JsonValue, indent: usize, depth: usize, out: &mut String) {
-    let prefix = " ".repeat(indent * depth);
-    let inner_prefix = " ".repeat(indent * (depth + 1));
+    // Saturating because `depth` is recursion depth over attacker-shaped input:
+    // a manifest nested a few thousand deep would overflow the multiplication
+    // long before it produced a line anyone would read.
+    let prefix = " ".repeat(indent.saturating_mul(depth));
+    let inner_depth = depth.saturating_add(1);
+    let inner_prefix = " ".repeat(indent.saturating_mul(inner_depth));
 
     match value {
+        // The separator is written *before* every entry but the first rather
+        // than after every entry but the last. Both produce the same bytes, but
+        // the leading form needs no lookahead to the container's length, so
+        // there is no `i + 1` to compare against it.
         JsonValue::Object(entries) if !entries.is_empty() => {
             out.push_str("{\n");
             for (i, (key, val)) in entries.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
                 out.push_str(&inner_prefix);
                 out.push('"');
                 out.push_str(key);
                 out.push_str("\": ");
-                json_pretty_inner(val, indent, depth + 1, out);
-                if i + 1 < entries.len() {
-                    out.push(',');
-                }
-                out.push('\n');
+                json_pretty_inner(val, indent, inner_depth, out);
             }
+            out.push('\n');
             out.push_str(&prefix);
             out.push('}');
         }
         JsonValue::Array(items) if !items.is_empty() => {
             out.push_str("[\n");
             for (i, item) in items.iter().enumerate() {
-                out.push_str(&inner_prefix);
-                json_pretty_inner(item, indent, depth + 1, out);
-                if i + 1 < items.len() {
-                    out.push(',');
+                if i > 0 {
+                    out.push_str(",\n");
                 }
-                out.push('\n');
+                out.push_str(&inner_prefix);
+                json_pretty_inner(item, indent, inner_depth, out);
             }
+            out.push('\n');
             out.push_str(&prefix);
             out.push(']');
         }
         _ => {
-            out.push_str(&format!("{}", value));
+            out.push_str(&value.to_string());
         }
     }
 }
@@ -399,20 +466,22 @@ fn json_parse(input: &str) -> Result<JsonValue, String> {
     }
     let (val, rest) = parse_value(trimmed)?;
     if !rest.trim().is_empty() {
-        return Err(format!(
-            "trailing characters: {:?}",
-            &rest[..rest.len().min(20)]
-        ));
+        // Take twenty *characters*, not twenty bytes. `&rest[..20]` panics if
+        // byte 20 lands inside a multi-byte character, and trailing garbage is
+        // precisely where a stray non-ASCII byte turns up — so the diagnostic
+        // for a corrupt manifest would itself have been the crash.
+        let shown: String = rest.chars().take(20).collect();
+        return Err(format!("trailing characters: {shown:?}"));
     }
     Ok(val)
 }
 
 fn parse_value(input: &str) -> Result<(JsonValue, &str), String> {
     let s = input.trim_start();
-    if s.is_empty() {
+    let Some(&lead) = s.as_bytes().first() else {
         return Err("unexpected end of input".to_string());
-    }
-    match s.as_bytes()[0] {
+    };
+    match lead {
         b'"' => parse_string(s),
         b'{' => parse_object(s),
         b'[' => parse_array(s),
@@ -508,8 +577,11 @@ fn parse_unicode_escape(input: &str, start: usize) -> Result<(char, usize), Stri
         && (0xDC00..0xE000).contains(&lo)
         // Bounded by the two range checks above: at most 0x10000 + 0xFFC00 +
         // 0x3FF = 0x10FFFF, so neither the shift nor the sums can overflow.
-        && let Some(c) =
-            char::from_u32(0x1_0000 + (hi.saturating_sub(0xD800) << 10) + lo.saturating_sub(0xDC00))
+        && let Some(c) = char::from_u32(
+            0x1_0000_u32
+                .saturating_add(hi.saturating_sub(0xD800) << 10)
+                .saturating_add(lo.saturating_sub(0xDC00)),
+        )
     {
         return Ok((c, after_lo));
     }
@@ -610,34 +682,42 @@ fn parse_null(input: &str) -> Result<(JsonValue, &str), String> {
 }
 
 fn parse_number(input: &str) -> Result<(JsonValue, &str), String> {
-    let mut end = 0;
     let bytes = input.as_bytes();
-    if end < bytes.len() && bytes[end] == b'-' {
-        end += 1;
+    let mut end = 0usize;
+
+    // Reading through `get` carries the bound with the byte, so the "am I still
+    // inside the string?" test cannot drift apart from the byte it guards.
+    if bytes.get(end) == Some(&b'-') {
+        end = end.saturating_add(1);
     }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
+    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        end = end.saturating_add(1);
     }
-    if end < bytes.len() && bytes[end] == b'.' {
-        end += 1;
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
+    if bytes.get(end) == Some(&b'.') {
+        end = end.saturating_add(1);
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end = end.saturating_add(1);
         }
     }
-    if end < bytes.len() && (bytes[end] == b'e' || bytes[end] == b'E') {
-        end += 1;
-        if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
-            end += 1;
+    if matches!(bytes.get(end), Some(&b'e' | &b'E')) {
+        end = end.saturating_add(1);
+        if matches!(bytes.get(end), Some(&b'+' | &b'-')) {
+            end = end.saturating_add(1);
         }
-        while end < bytes.len() && bytes[end].is_ascii_digit() {
-            end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end = end.saturating_add(1);
         }
     }
-    let num_str = &input[..end];
+
+    // Every byte the scan accepted is ASCII, so `end` is always on a character
+    // boundary and neither split can panic — but `get` states that rather than
+    // relying on the reader to re-derive it.
+    let num_str = input.get(..end).unwrap_or_default();
+    let rest = input.get(end..).unwrap_or_default();
     let num: f64 = num_str
         .parse()
-        .map_err(|_| format!("invalid number: {}", num_str))?;
-    Ok((JsonValue::Number(num), &input[end..]))
+        .map_err(|_| format!("invalid number: {num_str}"))?;
+    Ok((JsonValue::Number(num), rest))
 }
 
 // ============================================================================
@@ -1177,7 +1257,7 @@ fn relative_path(full: &Path, base: &Path) -> PathBuf {
     for comp in rel.components() {
         match comp {
             Component::Prefix(prefix) => {
-                out.extend_from_slice(prefix.as_os_str().as_encoded_bytes())
+                out.extend_from_slice(prefix.as_os_str().as_encoded_bytes());
             }
             Component::RootDir => out.push(b'/'),
             _ => {
@@ -1426,8 +1506,12 @@ fn scan_dir_recursive(
                 }
             };
 
-            progress.processed_files += 1;
-            progress.processed_bytes += meta.len();
+            // Saturating rather than wrapping: these two counters are only ever
+            // read to print a progress line and a summary, so a total that stops
+            // climbing is a wrong number a human notices, whereas one that wraps
+            // to zero mid-backup reads as "nothing has been copied yet".
+            progress.processed_files = progress.processed_files.saturating_add(1);
+            progress.processed_bytes = progress.processed_bytes.saturating_add(meta.len());
             progress.current_file = rel.display().to_string();
 
             // Report progress every 100 files
@@ -1492,8 +1576,8 @@ fn estimate_recursive(
             if meta.is_dir() {
                 estimate_recursive(root, &path, excludes, files, bytes);
             } else if meta.is_file() {
-                *files += 1;
-                *bytes += meta.len();
+                *files = files.saturating_add(1);
+                *bytes = bytes.saturating_add(meta.len());
             }
         }
     }
@@ -1716,7 +1800,7 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     let mut total_size: u64 = 0;
 
     for entry in &files_to_backup {
-        total_size += entry.size;
+        total_size = total_size.saturating_add(entry.size);
 
         if entry.is_symlink {
             // Symlinks don't need blob storage
@@ -1727,8 +1811,8 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
         // Store blob in CAS
         let file_path = source.join(&entry.path);
         match store.store_file(&file_path, &entry.hash) {
-            Ok(true) => new_blobs += 1,
-            Ok(false) => dedup_blobs += 1,
+            Ok(true) => new_blobs = new_blobs.saturating_add(1),
+            Ok(false) => dedup_blobs = dedup_blobs.saturating_add(1),
             Err(e) => {
                 eprintln!("warning: failed to store {}: {}", entry.path.display(), e);
                 continue;
@@ -1788,7 +1872,17 @@ fn cmd_create(opts: CreateOptions) -> io::Result<()> {
     println!("  New blobs: {}", new_blobs);
     println!("  Deduplicated: {}", dedup_blobs);
     if dedup_blobs > 0 {
-        let saved_pct = (dedup_blobs * 100) / (new_blobs + dedup_blobs);
+        // Widened to `u128` so the `* 100` is exact rather than saturated: both
+        // operands are file counts, so the product cannot come close to the
+        // range, and a ratio that saturates would print a percentage nobody
+        // could tell apart from a real one.  The divisor is non-zero because
+        // this branch is only reached when `dedup_blobs > 0`, but `checked_div`
+        // states that instead of leaving the reader to re-derive it.
+        let total_blobs = u128::from(new_blobs).saturating_add(u128::from(dedup_blobs));
+        let saved_pct = u128::from(dedup_blobs)
+            .saturating_mul(100)
+            .checked_div(total_blobs)
+            .unwrap_or(0);
         println!("  Dedup ratio: {}%", saved_pct);
     }
 
@@ -2088,25 +2182,25 @@ fn cmd_verify(dest: &Path, backup_id: &str) -> io::Result<()> {
 
     for entry in &manifest.files {
         if entry.is_symlink {
-            ok += 1;
+            ok = ok.saturating_add(1);
             continue;
         }
 
         if !store.has_blob(&entry.hash) {
             eprintln!("  MISSING: {} (hash: {})", entry.path.display(), entry.hash);
-            missing += 1;
+            missing = missing.saturating_add(1);
             continue;
         }
 
         match store.verify_blob(&entry.hash) {
-            Ok(true) => ok += 1,
+            Ok(true) => ok = ok.saturating_add(1),
             Ok(false) => {
                 eprintln!("  CORRUPT: {} (hash: {})", entry.path.display(), entry.hash);
-                corrupt += 1;
+                corrupt = corrupt.saturating_add(1);
             }
             Err(e) => {
                 eprintln!("  ERROR: {} — {}", entry.path.display(), e);
-                corrupt += 1;
+                corrupt = corrupt.saturating_add(1);
             }
         }
     }
@@ -2239,7 +2333,7 @@ fn cmd_prune(opts: PruneOptions) -> io::Result<()> {
     for blob_hash in &all_blobs {
         if !referenced_hashes.contains(blob_hash) {
             store.remove_blob(blob_hash)?;
-            removed_blobs += 1;
+            removed_blobs = removed_blobs.saturating_add(1);
         }
     }
 
@@ -2485,8 +2579,17 @@ fn cmd_diff(dest: &Path, id1: &str, id2: &str) -> io::Result<()> {
     if !diff.modified.is_empty() {
         println!("Modified ({}):", diff.modified.len());
         for (old, new) in &diff.modified {
-            let size_change = new.size as i64 - old.size as i64;
-            let sign = if size_change >= 0 { "+" } else { "" };
+            // Going through `i64` was two lossy casts and a subtraction that
+            // overflows for a large enough pair of sizes — and a file bigger
+            // than `i64::MAX` is not the absurdity it sounds like once a
+            // manifest can be hand-edited or corrupted.  `abs_diff` is exact
+            // for every pair of `u64`, and the sign is already known from the
+            // comparison that chose which way round to subtract.
+            let (sign, size_change) = if new.size >= old.size {
+                ("+", new.size.abs_diff(old.size))
+            } else {
+                ("-", old.size.abs_diff(new.size))
+            };
             println!("  ~ {} ({}{} bytes)", new.path.display(), sign, size_change);
         }
         println!();
@@ -2559,8 +2662,8 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
             |e| e.to_string_lossy().into_owned(),
         );
         let (count, size) = by_ext.entry(ext).or_insert((0, 0));
-        *count += 1;
-        *size += entry.size;
+        *count = count.saturating_add(1);
+        *size = size.saturating_add(entry.size);
     }
 
     if !by_ext.is_empty() {
@@ -2576,7 +2679,7 @@ fn cmd_info(dest: &Path, backup_id: &str) -> io::Result<()> {
             );
         }
         if sorted.len() > 10 {
-            println!("    ... and {} more types", sorted.len() - 10);
+            println!("    ... and {} more types", sorted.len().saturating_sub(10));
         }
     }
 
@@ -2616,24 +2719,82 @@ enum Command {
     Help,
 }
 
+/// A one-pass reader over one command's arguments.
+///
+/// Every `parse_*_args` function below walks its slice the same way: take an
+/// argument, and if it is a flag that carries a value, take the following one
+/// too. Written by hand that is an index and a counter — `args[i]`, `i += 1` —
+/// and there were forty-five of them across the nine parsers. Each is a panic
+/// if the counter passes the end and an overflow if it wraps, but the real cost
+/// was that every parser re-implemented the advance, so a new option could be
+/// added that stepped the counter in one branch and forgot it in another. That
+/// bug does not announce itself: the parser silently reads a flag's value as
+/// the next flag, and `backup prune --keep-last 5 --dest /d` quietly prunes
+/// somewhere else.
+///
+/// Holding an iterator makes both problems unstatable — there is no index to
+/// run off the end, no counter to increment, and advancing is the only way to
+/// read. [`value`](Self::value) and [`number`](Self::number) additionally put
+/// the "flag requires an argument" wording in one place, so a tenth option
+/// cannot arrive phrased differently from its nine neighbours.
+struct ArgCursor<'a> {
+    rest: std::slice::Iter<'a, String>,
+}
+
+impl<'a> ArgCursor<'a> {
+    fn new(args: &'a [String]) -> Self {
+        Self { rest: args.iter() }
+    }
+
+    /// The next argument, or `None` once they are exhausted.
+    fn next(&mut self) -> Option<&'a str> {
+        self.rest.next().map(String::as_str)
+    }
+
+    /// The next argument, required, because `flag` carries a value.
+    ///
+    /// `what` completes the sentence "`--dest` requires …": pass `"a path"`,
+    /// `"a pattern"`, `"a value"`.
+    fn value(&mut self, flag: &str, what: &str) -> Result<&'a str, String> {
+        self.next().ok_or_else(|| format!("{flag} requires {what}"))
+    }
+
+    /// The next argument parsed as a count, required, because `flag` carries
+    /// one. Kept distinct from [`value`](Self::value) so that the four
+    /// `--keep-*` retention options cannot disagree about how a non-number is
+    /// reported.
+    fn number(&mut self, flag: &str) -> Result<u64, String> {
+        self.value(flag, "a number")?
+            .parse::<u64>()
+            .map_err(|_| format!("{flag} must be a number"))
+    }
+}
+
 fn parse_args() -> Result<Command, String> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 2 {
+    // `split_first` drops argv[0] without naming an index, and its `None` arm
+    // covers the argv[0]-less case that `args[1]` would have panicked on
+    // instead. A process can be spawned with an empty argv; a backup tool that
+    // aborts rather than printing its usage in that case is a worse answer.
+    let Some((_program, rest)) = args.split_first() else {
         return Ok(Command::Help);
-    }
+    };
+    let Some((command, options)) = rest.split_first() else {
+        return Ok(Command::Help);
+    };
 
-    match args[1].as_str() {
+    match command.as_str() {
         "help" | "--help" | "-h" => Ok(Command::Help),
-        "create" => parse_create_args(&args[2..]),
-        "restore" => parse_restore_args(&args[2..]),
-        "list" => parse_list_args(&args[2..]),
-        "verify" => parse_verify_args(&args[2..]),
-        "prune" => parse_prune_args(&args[2..]),
-        "schedule" => parse_schedule_args(&args[2..]),
-        "diff" => parse_diff_args(&args[2..]),
-        "info" => parse_info_args(&args[2..]),
-        cmd => Err(format!("unknown command: {}", cmd)),
+        "create" => parse_create_args(options),
+        "restore" => parse_restore_args(options),
+        "list" => parse_list_args(options),
+        "verify" => parse_verify_args(options),
+        "prune" => parse_prune_args(options),
+        "schedule" => parse_schedule_args(options),
+        "diff" => parse_diff_args(options),
+        "info" => parse_info_args(options),
+        cmd => Err(format!("unknown command: {cmd}")),
     }
 }
 
@@ -2644,30 +2805,18 @@ fn parse_create_args(args: &[String]) -> Result<Command, String> {
     let mut exclude: Vec<String> = Vec::new();
     let mut follow_symlinks = false;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
             "--full" => backup_type = BackupType::Full,
             "--incremental" => backup_type = BackupType::Incremental,
             "--differential" => backup_type = BackupType::Differential,
             "--follow-symlinks" => follow_symlinks = true,
-            "--source" => {
-                i += 1;
-                source = Some(PathBuf::from(
-                    args.get(i).ok_or("--source requires a path")?,
-                ));
-            }
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--exclude" => {
-                i += 1;
-                exclude.push(args.get(i).ok_or("--exclude requires a pattern")?.clone());
-            }
-            other => return Err(format!("unknown option for create: {}", other)),
+            "--source" => source = Some(PathBuf::from(cur.value("--source", "a path")?)),
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--exclude" => exclude.push(cur.value("--exclude", "a pattern")?.to_string()),
+            other => return Err(format!("unknown option for create: {other}")),
         }
-        i += 1;
     }
 
     let source = source.ok_or("--source is required")?;
@@ -2683,33 +2832,23 @@ fn parse_create_args(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_restore_args(args: &[String]) -> Result<Command, String> {
-    if args.is_empty() {
-        return Err("restore requires a BACKUP_ID".to_string());
-    }
+    let mut cur = ArgCursor::new(args);
+    let backup_id = cur
+        .next()
+        .ok_or("restore requires a BACKUP_ID")?
+        .to_string();
 
-    let backup_id = args[0].clone();
     let mut backup_dest: Option<PathBuf> = None;
     let mut restore_dest: Option<PathBuf> = None;
     let mut file_pattern: Option<String> = None;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                restore_dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--from" => {
-                i += 1;
-                backup_dest = Some(PathBuf::from(args.get(i).ok_or("--from requires a path")?));
-            }
-            "--files" => {
-                i += 1;
-                file_pattern = Some(args.get(i).ok_or("--files requires a pattern")?.clone());
-            }
-            other => return Err(format!("unknown option for restore: {}", other)),
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => restore_dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--from" => backup_dest = Some(PathBuf::from(cur.value("--from", "a path")?)),
+            "--files" => file_pattern = Some(cur.value("--files", "a pattern")?.to_string()),
+            other => return Err(format!("unknown option for restore: {other}")),
         }
-        i += 1;
     }
 
     let backup_dest = backup_dest.ok_or("--from is required (backup repository path)")?;
@@ -2727,27 +2866,17 @@ fn parse_list_args(args: &[String]) -> Result<Command, String> {
     let mut dest: Option<PathBuf> = None;
     let mut source: Option<String> = None;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--source" => {
-                i += 1;
-                source = Some(args.get(i).ok_or("--source requires a path")?.clone());
-            }
-            other => {
-                // Positional: treat as dest
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for list: {}", other));
-                }
-            }
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--source" => source = Some(cur.value("--source", "a path")?.to_string()),
+            // The first bare word is the destination, so `backup list /backups`
+            // works without the flag. A second one is a typo, not a second
+            // destination, and saying so beats silently backing up elsewhere.
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for list: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("destination path is required")?;
@@ -2755,29 +2884,16 @@ fn parse_list_args(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_verify_args(args: &[String]) -> Result<Command, String> {
-    if args.is_empty() {
-        return Err("verify requires a BACKUP_ID".to_string());
-    }
-
-    let backup_id = args[0].clone();
+    let mut cur = ArgCursor::new(args);
+    let backup_id = cur.next().ok_or("verify requires a BACKUP_ID")?.to_string();
     let mut dest: Option<PathBuf> = None;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            other => {
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for verify: {}", other));
-                }
-            }
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for verify: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("--dest is required")?;
@@ -2791,58 +2907,17 @@ fn parse_prune_args(args: &[String]) -> Result<Command, String> {
     let mut keep_weekly: Option<u64> = None;
     let mut keep_monthly: Option<u64> = None;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--keep-last" => {
-                i += 1;
-                keep_last = Some(
-                    args.get(i)
-                        .ok_or("--keep-last requires a number")?
-                        .parse::<u64>()
-                        .map_err(|_| "--keep-last must be a number")?,
-                );
-            }
-            "--keep-daily" => {
-                i += 1;
-                keep_daily = Some(
-                    args.get(i)
-                        .ok_or("--keep-daily requires a number")?
-                        .parse::<u64>()
-                        .map_err(|_| "--keep-daily must be a number")?,
-                );
-            }
-            "--keep-weekly" => {
-                i += 1;
-                keep_weekly = Some(
-                    args.get(i)
-                        .ok_or("--keep-weekly requires a number")?
-                        .parse::<u64>()
-                        .map_err(|_| "--keep-weekly must be a number")?,
-                );
-            }
-            "--keep-monthly" => {
-                i += 1;
-                keep_monthly = Some(
-                    args.get(i)
-                        .ok_or("--keep-monthly requires a number")?
-                        .parse::<u64>()
-                        .map_err(|_| "--keep-monthly must be a number")?,
-                );
-            }
-            other => {
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for prune: {}", other));
-                }
-            }
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--keep-last" => keep_last = Some(cur.number("--keep-last")?),
+            "--keep-daily" => keep_daily = Some(cur.number("--keep-daily")?),
+            "--keep-weekly" => keep_weekly = Some(cur.number("--keep-weekly")?),
+            "--keep-monthly" => keep_monthly = Some(cur.number("--keep-monthly")?),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for prune: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("--dest is required")?;
@@ -2860,24 +2935,14 @@ fn parse_schedule_args(args: &[String]) -> Result<Command, String> {
     let mut dest: Option<PathBuf> = None;
     let mut interval: Option<String> = None;
 
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--source" => {
-                i += 1;
-                source = Some(args.get(i).ok_or("--source requires a path")?.clone());
-            }
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            "--interval" => {
-                i += 1;
-                interval = Some(args.get(i).ok_or("--interval requires a value")?.clone());
-            }
-            other => return Err(format!("unknown option for schedule: {}", other)),
+    let mut cur = ArgCursor::new(args);
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--source" => source = Some(cur.value("--source", "a path")?.to_string()),
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            "--interval" => interval = Some(cur.value("--interval", "a value")?.to_string()),
+            other => return Err(format!("unknown option for schedule: {other}")),
         }
-        i += 1;
     }
 
     let source = source.ok_or("--source is required")?;
@@ -2892,30 +2957,23 @@ fn parse_schedule_args(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_diff_args(args: &[String]) -> Result<Command, String> {
-    if args.len() < 2 {
-        return Err("diff requires two BACKUP_IDs".to_string());
-    }
-
-    let id1 = args[0].clone();
-    let id2 = args[1].clone();
+    let mut cur = ArgCursor::new(args);
+    let id1 = cur
+        .next()
+        .ok_or("diff requires two BACKUP_IDs")?
+        .to_string();
+    let id2 = cur
+        .next()
+        .ok_or("diff requires two BACKUP_IDs")?
+        .to_string();
     let mut dest: Option<PathBuf> = None;
 
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            other => {
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for diff: {}", other));
-                }
-            }
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for diff: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("--dest is required")?;
@@ -2923,29 +2981,16 @@ fn parse_diff_args(args: &[String]) -> Result<Command, String> {
 }
 
 fn parse_info_args(args: &[String]) -> Result<Command, String> {
-    if args.is_empty() {
-        return Err("info requires a BACKUP_ID".to_string());
-    }
-
-    let backup_id = args[0].clone();
+    let mut cur = ArgCursor::new(args);
+    let backup_id = cur.next().ok_or("info requires a BACKUP_ID")?.to_string();
     let mut dest: Option<PathBuf> = None;
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--dest" => {
-                i += 1;
-                dest = Some(PathBuf::from(args.get(i).ok_or("--dest requires a path")?));
-            }
-            other => {
-                if dest.is_none() {
-                    dest = Some(PathBuf::from(other));
-                } else {
-                    return Err(format!("unknown option for info: {}", other));
-                }
-            }
+    while let Some(arg) = cur.next() {
+        match arg {
+            "--dest" => dest = Some(PathBuf::from(cur.value("--dest", "a path")?)),
+            other if dest.is_none() => dest = Some(PathBuf::from(other)),
+            other => return Err(format!("unknown option for info: {other}")),
         }
-        i += 1;
     }
 
     let dest = dest.ok_or("--dest is required")?;
@@ -4097,7 +4142,7 @@ mod tests {
 
     #[test]
     fn test_json_parse_array() {
-        let val = json_parse(r#"[1, 2, 3]"#).unwrap();
+        let val = json_parse(r"[1, 2, 3]").unwrap();
         let arr = val.as_array().unwrap();
         assert_eq!(arr.len(), 3);
         assert_eq!(arr[0].as_u64(), Some(1));
@@ -4427,5 +4472,310 @@ mod tests {
             restore_path_within(dest, Path::new("\\\\server\\share\\file.txt")),
             None
         );
+    }
+
+    // --- Glob matching ---
+
+    /// `glob_match_recursive` and `glob_match_simple` disagreed about which
+    /// `**` was a globstar: `simple` delegated on any `**`, `recursive`
+    /// accepted only a whole path segment and handed anything else straight
+    /// back. Neither consumed a byte, so `--exclude '**a'` recursed until the
+    /// stack ran out and killed the backup mid-run.
+    ///
+    /// Every pattern here reached that loop before the fix. The test asserts
+    /// results rather than merely returning, but the real assertion is that it
+    /// terminates at all — a regression hangs the suite rather than failing it,
+    /// which is the loudest signal available for this shape of bug.
+    #[test]
+    fn a_double_star_that_is_not_a_path_segment_terminates() {
+        // Degraded to a single `*`, per bash's `globstar` and gitignore.
+        assert!(glob_matches("**a", "ba"));
+        assert!(glob_matches("**a", "a"));
+        assert!(!glob_matches("**a", "b"));
+        assert!(glob_matches("**.tmp", "scratch.tmp"));
+        assert!(!glob_matches("**.tmp", "scratch.txt"));
+        // A single `*` does not cross a separator, and the degraded `**`
+        // inherits that.
+        assert!(!glob_matches("**a", "x/a"));
+        assert!(glob_matches("***", "ab"));
+    }
+
+    /// The whole-segment forms must keep their globstar meaning — the fix
+    /// narrowed which `**` is special, so this pins that it did not narrow it
+    /// to nothing.
+    #[test]
+    fn a_double_star_that_is_a_path_segment_still_spans_directories() {
+        assert!(glob_matches("**/*.txt", "a/b/c/note.txt"));
+        assert!(glob_matches("src/**/mod.rs", "src/a/b/mod.rs"));
+        assert!(glob_matches("src/**/mod.rs", "src/mod.rs"));
+        assert!(glob_matches("src/**", "src/a/b"));
+        assert!(!glob_matches("src/**/mod.rs", "lib/a/mod.rs"));
+    }
+
+    // --- JSON pretty-printing ---
+
+    /// The manifest round-trip tests cannot see this: the parser discards
+    /// whitespace, so a printer that lost an indent, doubled a comma or put the
+    /// closing brace in the wrong column would still parse back to an equal
+    /// value. A manifest is a file a person opens when a backup goes wrong, so
+    /// its shape is a feature. Pinned exactly.
+    #[test]
+    fn the_pretty_printer_lays_a_manifest_out_readably() {
+        let value = JsonValue::Object(vec![
+            ("name".to_string(), JsonValue::Str("backup-42".to_string())),
+            (
+                "files".to_string(),
+                JsonValue::Array(vec![
+                    JsonValue::Str("a.txt".to_string()),
+                    JsonValue::Str("b.txt".to_string()),
+                ]),
+            ),
+            ("count".to_string(), JsonValue::Number(2.0)),
+        ]);
+        assert_eq!(
+            json_pretty(&value, 2),
+            "{\n  \"name\": \"backup-42\",\n  \"files\": [\n    \"a.txt\",\n    \"b.txt\"\n  ],\n  \"count\": 2\n}"
+        );
+    }
+
+    /// An empty container has no entries to separate, so it never reaches the
+    /// indenting arms at all — it must still print as valid JSON rather than as
+    /// an open brace waiting for a newline.
+    #[test]
+    fn empty_containers_print_flat() {
+        assert_eq!(json_pretty(&JsonValue::Object(vec![]), 2), "{}");
+        assert_eq!(json_pretty(&JsonValue::Array(vec![]), 2), "[]");
+    }
+
+    /// The byte-offset truncation this replaced would panic here: the twentieth
+    /// byte of the trailing text lands inside a two-byte character.
+    #[test]
+    fn trailing_garbage_is_reported_without_splitting_a_character() {
+        let err = json_parse("{} ééééééééééééééééééé").unwrap_err();
+        assert!(
+            err.starts_with("trailing characters:"),
+            "unexpected message: {err}"
+        );
+    }
+
+    // --- Argument parsing ---
+    //
+    // The nine `parse_*_args` functions had no tests at all, which is how they
+    // came to share forty-five hand-written `args[i]` / `i += 1` pairs: nothing
+    // would have noticed a parser that stepped its counter in one branch and
+    // forgot it in another. `ArgCursor` removed the counter; these pin the
+    // behaviour it replaced, and in particular that a flag's *value* is
+    // consumed rather than re-read as the next flag.
+
+    /// Builds an argument slice the way `parse_args` hands one over — the
+    /// command word already stripped.
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The rejection message from a parse that was supposed to fail.
+    ///
+    /// `Result::unwrap_err` would need `Command: Debug`, and deriving one on
+    /// four production types so that a test can phrase an assertion is the
+    /// tail wagging the dog. This asks the same question without the bound.
+    fn parse_err(result: Result<Command, String>) -> String {
+        match result {
+            Ok(_) => panic!("expected the parse to be rejected, but it succeeded"),
+            Err(message) => message,
+        }
+    }
+
+    #[test]
+    fn create_reads_every_option() {
+        let args = argv(&[
+            "--incremental",
+            "--source",
+            "/home/u",
+            "--dest",
+            "/backups",
+            "--exclude",
+            "*.tmp",
+            "--exclude",
+            "*.log",
+            "--follow-symlinks",
+        ]);
+        let Ok(Command::Create(opts)) = parse_create_args(&args) else {
+            panic!("expected a create command");
+        };
+        assert!(matches!(opts.backup_type, BackupType::Incremental));
+        assert_eq!(opts.source, PathBuf::from("/home/u"));
+        assert_eq!(opts.dest, PathBuf::from("/backups"));
+        assert_eq!(opts.exclude, vec!["*.tmp".to_string(), "*.log".to_string()]);
+        assert!(opts.follow_symlinks);
+    }
+
+    /// The bug the cursor makes unstatable. A parser that consumed `--dest`'s
+    /// value but forgot to step past it would read `/backups` as an option and
+    /// reject it — or worse, read a *later* flag's value as a flag and prune
+    /// somewhere the user never named. Every value-taking option is followed
+    /// here by another option, so a missed advance cannot pass.
+    #[test]
+    fn a_flag_value_is_consumed_not_reparsed_as_a_flag() {
+        let args = argv(&[
+            "--keep-last",
+            "5",
+            "--keep-daily",
+            "7",
+            "--keep-weekly",
+            "4",
+            "--keep-monthly",
+            "12",
+            "--dest",
+            "/backups",
+        ]);
+        let Ok(Command::Prune(opts)) = parse_prune_args(&args) else {
+            panic!("expected a prune command");
+        };
+        assert_eq!(opts.keep_last, Some(5));
+        assert_eq!(opts.keep_daily, Some(7));
+        assert_eq!(opts.keep_weekly, Some(4));
+        assert_eq!(opts.keep_monthly, Some(12));
+        assert_eq!(opts.dest, PathBuf::from("/backups"));
+    }
+
+    #[test]
+    fn a_flag_with_no_value_left_names_itself() {
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--source"]))),
+            "--source requires a path"
+        );
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--exclude"]))),
+            "--exclude requires a pattern"
+        );
+        assert_eq!(
+            parse_err(parse_prune_args(&argv(&["--keep-last"]))),
+            "--keep-last requires a number"
+        );
+        assert_eq!(
+            parse_err(parse_schedule_args(&argv(&["--interval"]))),
+            "--interval requires a value"
+        );
+    }
+
+    #[test]
+    fn a_retention_count_that_is_not_a_number_is_refused() {
+        assert_eq!(
+            parse_err(parse_prune_args(&argv(&["--keep-daily", "weekly"]))),
+            "--keep-daily must be a number"
+        );
+        // Negative counts parse as `u64` failures rather than as flags, which
+        // is the honest answer: "keep the last -1 backups" has no meaning.
+        assert_eq!(
+            parse_err(parse_prune_args(&argv(&["--keep-last", "-1"]))),
+            "--keep-last must be a number"
+        );
+    }
+
+    #[test]
+    fn create_requires_a_source_and_a_destination() {
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--dest", "/backups"]))),
+            "--source is required"
+        );
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--source", "/home/u"]))),
+            "--dest is required"
+        );
+    }
+
+    #[test]
+    fn an_unknown_option_names_the_command_it_was_given_to() {
+        assert_eq!(
+            parse_err(parse_create_args(&argv(&["--verbose"]))),
+            "unknown option for create: --verbose"
+        );
+        assert_eq!(
+            parse_err(parse_schedule_args(&argv(&["--daily"]))),
+            "unknown option for schedule: --daily"
+        );
+    }
+
+    /// The commands that take an operand must not read the following option as
+    /// one. `restore`, `verify`, `info` take one; `diff` takes two.
+    #[test]
+    fn an_operand_is_read_before_the_options() {
+        let Ok(Command::Restore(opts)) = parse_restore_args(&argv(&[
+            "backup-42",
+            "--from",
+            "/backups",
+            "--dest",
+            "/restore",
+            "--files",
+            "*.txt",
+        ])) else {
+            panic!("expected a restore command");
+        };
+        assert_eq!(opts.backup_id, "backup-42");
+        assert_eq!(opts.backup_dest, PathBuf::from("/backups"));
+        assert_eq!(opts.restore_dest, PathBuf::from("/restore"));
+        assert_eq!(opts.file_pattern, Some("*.txt".to_string()));
+
+        let Ok(Command::Diff { id1, id2, dest }) =
+            parse_diff_args(&argv(&["a", "b", "--dest", "/backups"]))
+        else {
+            panic!("expected a diff command");
+        };
+        assert_eq!(id1, "a");
+        assert_eq!(id2, "b");
+        assert_eq!(dest, PathBuf::from("/backups"));
+    }
+
+    #[test]
+    fn a_missing_operand_says_which_one() {
+        assert_eq!(
+            parse_err(parse_restore_args(&argv(&[]))),
+            "restore requires a BACKUP_ID"
+        );
+        assert_eq!(
+            parse_err(parse_verify_args(&argv(&[]))),
+            "verify requires a BACKUP_ID"
+        );
+        assert_eq!(
+            parse_err(parse_info_args(&argv(&[]))),
+            "info requires a BACKUP_ID"
+        );
+        assert_eq!(
+            parse_err(parse_diff_args(&argv(&["only-one"]))),
+            "diff requires two BACKUP_IDs"
+        );
+    }
+
+    /// `backup list /backups` and `backup list --dest /backups` mean the same
+    /// thing, but a *second* bare word is a typo rather than a second
+    /// destination — silently ignoring it would list the wrong repository.
+    #[test]
+    fn a_bare_word_is_the_destination_but_only_the_first() {
+        let Ok(Command::List { dest, source }) = parse_list_args(&argv(&["/backups"])) else {
+            panic!("expected a list command");
+        };
+        assert_eq!(dest, PathBuf::from("/backups"));
+        assert_eq!(source, None);
+
+        assert_eq!(
+            parse_err(parse_list_args(&argv(&["/backups", "/other"]))),
+            "unknown option for list: /other"
+        );
+    }
+
+    /// `--dest --source` takes `--source` as the destination rather than
+    /// reporting a missing value. That is what the hand-written parsers did and
+    /// what most Unix tools do: an option's value is the next word, whatever it
+    /// looks like, so a path that genuinely begins with `-` stays reachable.
+    /// Pinned because it is a decision, not an accident.
+    #[test]
+    fn a_flags_value_may_itself_look_like_a_flag() {
+        let Ok(Command::Create(opts)) =
+            parse_create_args(&argv(&["--source", "--dest", "--dest", "/backups"]))
+        else {
+            panic!("expected a create command");
+        };
+        assert_eq!(opts.source, PathBuf::from("--dest"));
+        assert_eq!(opts.dest, PathBuf::from("/backups"));
     }
 }

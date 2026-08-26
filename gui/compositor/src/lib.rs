@@ -36,6 +36,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -63,7 +64,7 @@ use osfont::raster::GlyphMask;
 use osfont::system::{Family, FontCache, Weight};
 
 mod buffer;
-pub use buffer::{BufferFormat, SharedBuffer};
+pub use buffer::{BufferFormat, ImageAsset, SharedBuffer};
 // The rendering-backend seam. Everything from `compose_frame` down to a
 // primitive is written against `RenderTarget`, so the CPU rasterizer below is a
 // *choice* rather than the only thing the compositor can do — which is what a
@@ -832,6 +833,16 @@ pub struct Window {
     /// compositor blits these pixels into the client area instead of replaying
     /// `render_tree`; the client renders directly into shared memory.
     pub buffer: Option<SharedBuffer>,
+    /// Images this window has uploaded, by the id its render commands name.
+    ///
+    /// Owned by the window rather than by the compositor for two reasons that
+    /// both come down to the id being the *client's* to choose. Two clients that
+    /// each pick id 1 must not collide, and a compositor-wide map would make
+    /// them; and a client that exits without unregistering must not leave its
+    /// pixels resident forever, which dropping with the window is what prevents.
+    ///
+    /// Empty for almost every window, so the map costs nothing until used.
+    pub images: HashMap<u64, ImageAsset>,
     /// Whether the window is in true fullscreen mode: it owns the entire
     /// display with no decorations. Distinct from `maximized` (which keeps the
     /// title bar/borders and respects panel reservations). Fullscreen is the
@@ -985,6 +996,7 @@ impl Window {
             client_pid,
             render_tree: RenderTree::new(),
             buffer: None,
+            images: HashMap::new(),
             fullscreen: false,
             fs_restore_rect: None,
             restore_rect: None,
@@ -2414,6 +2426,90 @@ impl RenderTarget for Framebuffer {
         }
     }
 
+    /// Nearest-neighbour resample of `image` into `dest`.
+    ///
+    /// Iterating the *destination* and sampling the source, rather than walking
+    /// the source and scattering, is what makes the cost proportional to the
+    /// pixels actually painted: an icon-view thumbnail is a 256×256 image drawn
+    /// at 64×64, and the source walk would read sixteen pixels for every one it
+    /// kept. It is also the only order that fills the destination without gaps
+    /// when the image is drawn *larger* than itself.
+    ///
+    /// The source coordinate is computed from the unclipped `dest` origin, so a
+    /// window sliding off the left edge keeps sampling the same source column
+    /// for a given screen column instead of the image shifting as it is revealed.
+    ///
+    /// All of the coordinate arithmetic is in `i64`. `dest` comes from a client's
+    /// render command by way of an `f32` cast and is not the compositor's to
+    /// trust: `py - dest.y` in `i32` overflows outright for a `dest.y` near
+    /// `i32::MIN`, and the multiply by the source height overflows for far less
+    /// than that.
+    fn draw_image(&mut self, image: &ImageAsset, dest: Rect, clip: Option<&Rect>, opacity: f32) {
+        let (src_w, src_h) = (image.width(), image.height());
+        if dest.width == 0 || dest.height == 0 || src_w == 0 || src_h == 0 {
+            return;
+        }
+
+        // Visible portion: the quad, the draw clip, and the surface. The frame
+        // clip is applied per pixel by `blend_pixel`, as it is for every other
+        // primitive.
+        let visible = match clip {
+            Some(c) => match dest.intersect(c) {
+                Some(r) => r,
+                None => return,
+            },
+            None => dest,
+        };
+        let x0 = visible.x.max(0);
+        let y0 = visible.y.max(0);
+        let x1 = visible
+            .right()
+            .min(i32::try_from(self.width).unwrap_or(i32::MAX));
+        let y1 = visible
+            .bottom()
+            .min(i32::try_from(self.height).unwrap_or(i32::MAX));
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+
+        let (dest_x, dest_y) = (i64::from(dest.x), i64::from(dest.y));
+        let (dest_w, dest_h) = (i64::from(dest.width), i64::from(dest.height));
+        let (sw, sh) = (i64::from(src_w), i64::from(src_h));
+
+        // The last source index, so a destination pixel exactly on the far edge
+        // (which the division can reach when `dest` extends past the clip)
+        // samples the final row/column rather than one past it.
+        let sx_max = sw.saturating_sub(1);
+        let sy_max = sh.saturating_sub(1);
+
+        // `checked_div`'s `None` arm is unreachable — both extents were rejected
+        // as zero above, and an `i64` built from a `u32` cannot be the `-1` that
+        // makes the other overflow case possible — but writing the division as
+        // fallible costs nothing and keeps the loop free of an operation the
+        // reader has to prove safe from context.
+        for py in y0..y1 {
+            let sy = i64::from(py)
+                .saturating_sub(dest_y)
+                .saturating_mul(sh)
+                .checked_div(dest_h)
+                .unwrap_or(0)
+                .clamp(0, sy_max);
+            for px in x0..x1 {
+                let sx = i64::from(px)
+                    .saturating_sub(dest_x)
+                    .saturating_mul(sw)
+                    .checked_div(dest_w)
+                    .unwrap_or(0)
+                    .clamp(0, sx_max);
+                // Both are in `0..src_*` by the clamp, so the casts are exact and
+                // the read cannot miss; `pixel` bounds-checks regardless.
+                if let Some(texel) = image.pixel(sx as u32, sy as u32) {
+                    self.blend_pixel(px as u32, py as u32, texel, opacity);
+                }
+            }
+        }
+    }
+
     fn present(&mut self) {
         self.swap();
     }
@@ -2827,6 +2923,29 @@ pub enum CompositorRequest {
     /// Like [`ShellControl`](Self::ShellControl) it names somebody else's
     /// window and is therefore not resolved against the sender's own.
     SetWindowWorkspace { window_id: WindowId, workspace: u32 },
+    /// Give a window's image store some pixels under a client-chosen id, so
+    /// that its [`RenderCommand::Image`] commands naming that id can draw.
+    /// Answered with [`CompositorResponse::Ok`].
+    ///
+    /// See [`Compositor::register_image`] for what it does and why uploading is
+    /// a separate step from drawing. Resolved against the sender's own windows
+    /// in the ordinary way — an image store belongs to a window, and a client
+    /// filling somebody else's would be both a memory attack and a way to
+    /// change what another application draws.
+    RegisterImage {
+        window_id: WindowId,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: Vec<u8>,
+    },
+    /// Forget one of a window's images. Answered with
+    /// [`CompositorResponse::Ok`] whether or not one was there — see
+    /// [`guiremote::control::RequestBody::DropImage`] for why the absent case is
+    /// not an error.
+    UnregisterImage { window_id: WindowId, image_id: u64 },
 }
 
 /// Responses from the compositor to clients.
@@ -3368,6 +3487,7 @@ impl RenderEngine {
         &mut self,
         fb: &mut T,
         commands: &[RenderCommand],
+        images: &HashMap<u64, ImageAsset>,
         window_x: i32,
         window_y: i32,
         window_width: u32,
@@ -3384,7 +3504,7 @@ impl RenderEngine {
         self.translate_stack.push(window_x as f32, window_y as f32);
 
         for cmd in commands {
-            self.execute_command(fb, cmd, opacity);
+            self.execute_command(fb, cmd, images, opacity);
         }
 
         self.clip_stack.clear();
@@ -3399,6 +3519,7 @@ impl RenderEngine {
         &mut self,
         fb: &mut T,
         cmd: &RenderCommand,
+        images: &HashMap<u64, ImageAsset>,
         opacity: f32,
     ) {
         let (tx, ty) = self.translate_stack.offset();
@@ -3548,8 +3669,25 @@ impl RenderEngine {
             RenderCommand::PopFont => {
                 self.font_stack.pop();
             }
-            RenderCommand::Image { .. } => {
-                // Image rendering requires an asset store — stub for now.
+            RenderCommand::Image {
+                x,
+                y,
+                width,
+                height,
+                image_id,
+            } => {
+                // An id the window never registered draws nothing. Silently: a
+                // client whose upload is still in flight, or whose asset was
+                // dropped to reclaim memory, is in an ordinary transient state,
+                // not a fault, and a log line per unresolved id would be one per
+                // frame for as long as it lasted.
+                if let Some(image) = images.get(image_id) {
+                    let px = (*x + tx) as i32;
+                    let py = (*y + ty) as i32;
+                    let dest = Rect::new(px, py, *width as u32, *height as u32);
+                    let clip = self.clip_stack.current().copied();
+                    fb.draw_image(image, dest, clip.as_ref(), opacity);
+                }
             }
             RenderCommand::BoxShadow {
                 x,
@@ -5977,6 +6115,134 @@ impl Compositor {
     }
 
     // -----------------------------------------------------------------------
+    // Image assets
+    // -----------------------------------------------------------------------
+
+    /// Register an image under `image_id` for one window, so that the window's
+    /// [`RenderCommand::Image`] commands naming that id have pixels to draw.
+    ///
+    /// Uploading is separate from drawing because the two have opposite
+    /// frequencies: a file manager's thumbnail is produced once and drawn on
+    /// every frame the folder is on screen, and a protocol that carried the
+    /// pixels alongside the draw would re-send a megabyte sixty times a second
+    /// to show a still picture. It is the same split as a texture upload and a
+    /// textured quad, and for the same reason.
+    ///
+    /// Re-registering an existing id replaces it, which is how a client updates
+    /// a picture in place — a video frame, a re-rendered chart — without the
+    /// intervening frame where the id names nothing and the image blinks out.
+    ///
+    /// The id is the *client's* to choose and is scoped to the window: two
+    /// clients may both use id 1 without either seeing the other's pixels.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window is gone, or any error
+    /// from [`ImageAsset::import`] if the client's geometry is invalid. Both
+    /// leave the window's existing images untouched — the import happens before
+    /// any state is written, so a rejected upload cannot destroy the picture
+    /// that was there.
+    pub fn register_image(
+        &mut self,
+        window_id: WindowId,
+        image_id: u64,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat,
+        bytes: &[u8],
+    ) -> CompositorResult<()> {
+        let image = ImageAsset::import(width, height, stride, format, bytes)?;
+        let window = self
+            .window_mut(window_id)
+            .ok_or(CompositorError::WindowNotFound(window_id))?;
+        window.images.insert(image_id, image);
+        window.dirty = true;
+        self.damage_window(window_id);
+        Ok(())
+    }
+
+    /// Drop one of a window's images. Returns whether an image was there.
+    ///
+    /// The window is damaged either way when one was removed: commands still
+    /// naming the id now draw nothing, and the pixels they used to cover have to
+    /// be repainted by whatever is behind them.
+    pub fn unregister_image(&mut self, window_id: WindowId, image_id: u64) -> bool {
+        let removed = match self.window_mut(window_id) {
+            Some(window) => {
+                let gone = window.images.remove(&image_id).is_some();
+                if gone {
+                    window.dirty = true;
+                }
+                gone
+            }
+            None => false,
+        };
+        if removed {
+            self.damage_window(window_id);
+        }
+        removed
+    }
+
+    /// How many images a window currently has registered, or `None` if there is
+    /// no such window.
+    ///
+    /// `None` rather than `0` for a missing window because the two are different
+    /// answers, and a client's own bookkeeping wants to tell them apart.
+    #[must_use]
+    pub fn image_count(&self, window_id: WindowId) -> Option<usize> {
+        self.window_ref(window_id).map(|w| w.images.len())
+    }
+
+    /// Total bytes held by every window's registered images.
+    ///
+    /// The compositor keeps clients' image pixels resident for as long as the
+    /// windows live, so this is the size of a resource no client can see the
+    /// total of. It exists to be reported.
+    #[must_use]
+    pub fn image_bytes(&self) -> usize {
+        self.windows
+            .iter()
+            .flat_map(|w| w.images.values())
+            .map(ImageAsset::size_bytes)
+            .fold(0usize, usize::saturating_add)
+    }
+
+    /// Bytes held by one window's registered images, or `None` if there is no
+    /// such window.
+    ///
+    /// The per-window half of [`image_bytes`](Self::image_bytes), and the one
+    /// the wire layer adds up across a connection's windows to decide whether an
+    /// upload fits its budget. `None` rather than `0` for a missing window, for
+    /// the same reason [`image_count`](Self::image_count) does it: a window that
+    /// is gone and a window holding nothing are different answers, and a caller
+    /// summing a budget wants to know it asked about a window that is not there.
+    #[must_use]
+    pub fn window_image_bytes(&self, window_id: WindowId) -> Option<usize> {
+        self.window_ref(window_id).map(|w| {
+            w.images
+                .values()
+                .map(ImageAsset::size_bytes)
+                .fold(0usize, usize::saturating_add)
+        })
+    }
+
+    /// Bytes held by one registered image, or `None` if that window has no image
+    /// under that id.
+    ///
+    /// Exists for the budget arithmetic: re-registering an id *replaces* it, so
+    /// an upload that overwrites a 40 MiB asset with a 41 MiB one costs one
+    /// megabyte and not forty-one. A budget computed without subtracting what is
+    /// about to be freed would refuse every in-place update — a video frame, a
+    /// re-rendered chart — from the moment the client passed half its allowance.
+    #[must_use]
+    pub fn image_size_bytes(&self, window_id: WindowId, image_id: u64) -> Option<usize> {
+        self.window_ref(window_id)
+            .and_then(|w| w.images.get(&image_id))
+            .map(ImageAsset::size_bytes)
+    }
+
+    // -----------------------------------------------------------------------
     // Input routing
     // -----------------------------------------------------------------------
 
@@ -7141,9 +7407,29 @@ impl Compositor {
             }
 
             // 5. Execute client render commands.
+            //
+            // The image store is borrowed straight out of `self.windows` rather
+            // than cloned with the command list above: a window's images are
+            // measured in megabytes and are drawn, not consumed, so copying them
+            // once per window per frame would cost more than the compositing.
+            // Three disjoint field borrows — `windows` shared, `render_engine`
+            // and `backend` unique — which is why `images` is resolved by
+            // searching the field directly and not through the `window_ref`
+            // method, which would borrow the whole of `self`.
+            //
+            // `no_images` cannot actually be reached (the window was found a few
+            // lines above, and nothing since could have removed it) and costs
+            // nothing when it is not: an empty `HashMap` does not allocate.
+            let no_images = HashMap::new();
+            let images = self
+                .windows
+                .iter()
+                .find(|w| w.id == window_id)
+                .map_or(&no_images, |w| &w.images);
             self.render_engine.execute(
                 &mut self.backend,
                 &commands,
+                images,
                 win_x,
                 win_y,
                 win_width,
@@ -7593,6 +7879,32 @@ impl Compositor {
                         message: CompositorError::StreamNotFound(stream_id).to_string(),
                     }
                 }
+            }
+            CompositorRequest::RegisterImage {
+                window_id,
+                image_id,
+                width,
+                height,
+                stride,
+                format,
+                bytes,
+            } => match self
+                .register_image(window_id, image_id, width, height, stride, format, &bytes)
+            {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::UnregisterImage {
+                window_id,
+                image_id,
+            } => {
+                // Deliberately not reporting whether anything was there: see
+                // `RequestBody::DropImage`. A client tidying up every id it ever
+                // used should not have to know which ones it already dropped.
+                self.unregister_image(window_id, image_id);
+                CompositorResponse::Ok
             }
         }
     }
@@ -9453,6 +9765,7 @@ mod tests {
                 color: Color::rgba(255, 255, 255, 255),
                 corner_radii: CornerRadii::ZERO,
             }],
+            &HashMap::new(),
             0,
             0,
             64,
@@ -11288,6 +11601,260 @@ mod tests {
         // After compositing, the buffer is released exactly once.
         assert_eq!(comp.take_released_buffer_handles(), vec![0xABCD]);
         assert!(comp.take_released_buffer_handles().is_empty());
+    }
+
+    // -- image assets -------------------------------------------------------
+
+    /// A four-pixel image whose quadrants are four distinguishable colours, so
+    /// a resample that transposes, mirrors or shifts shows up as a wrong colour
+    /// rather than as a plausible blur.
+    ///
+    /// ```text
+    /// R G
+    /// B W
+    /// ```
+    const IMG_R: u32 = 0xFFFF_0000;
+    const IMG_G: u32 = 0xFF00_FF00;
+    const IMG_B: u32 = 0xFF00_00FF;
+    const IMG_W: u32 = 0xFFFF_FFFF;
+
+    fn quadrant_image_bytes() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(16);
+        for px in [IMG_R, IMG_G, IMG_B, IMG_W] {
+            bytes.extend_from_slice(&px.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// A window with the quadrant image registered under id 1 and a single
+    /// `Image` command drawing it at `(0, 0)` in client space at `size`x`size`.
+    fn image_window(comp: &mut Compositor, size: f32) -> WindowId {
+        let id = comp.create_window("Img".to_string(), 64, 64, 1);
+        comp.register_image(
+            id,
+            1,
+            2,
+            2,
+            8,
+            BufferFormat::Argb8888,
+            &quadrant_image_bytes(),
+        )
+        .expect("register");
+        comp.submit_render(
+            id,
+            vec![RenderCommand::Image {
+                x: 0.0,
+                y: 0.0,
+                width: size,
+                height: size,
+                image_id: 1,
+            }],
+        )
+        .expect("submit");
+        id
+    }
+
+    #[test]
+    fn a_registered_image_is_scaled_into_the_quad_the_command_asked_for() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        // 2x2 source drawn at 8x8: each source pixel becomes a 4x4 block.
+        let id = image_window(&mut comp, 8.0);
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+
+        let front = comp.backend.presented_pixels();
+        let stride = 400usize;
+        let at = |dx: usize, dy: usize| -> u32 {
+            front[(cy as usize + dy) * stride + (cx as usize + dx)]
+        };
+        // One probe per quadrant, and one just inside each boundary, which is
+        // what catches an off-by-one in the source index.
+        assert_eq!(at(0, 0), IMG_R, "top-left quadrant");
+        assert_eq!(at(3, 3), IMG_R, "last pixel still in the top-left quadrant");
+        assert_eq!(at(4, 0), IMG_G, "first pixel of the top-right quadrant");
+        assert_eq!(at(0, 4), IMG_B, "first pixel of the bottom-left quadrant");
+        assert_eq!(at(7, 7), IMG_W, "far corner of the bottom-right quadrant");
+    }
+
+    #[test]
+    fn an_image_drawn_smaller_than_itself_still_covers_its_quad() {
+        // 2x2 into 1x1. The degenerate direction: a destination smaller than the
+        // source must not divide by zero or drop the pixel.
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 1.0);
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+        let front = comp.backend.presented_pixels();
+        assert_eq!(front[cy as usize * 400 + cx as usize], IMG_R);
+    }
+
+    #[test]
+    fn an_image_id_that_was_never_registered_leaves_the_client_area_alone() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = comp.create_window("Img".to_string(), 64, 64, 1);
+        comp.submit_render(
+            id,
+            vec![RenderCommand::Image {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0,
+                image_id: 99,
+            }],
+        )
+        .expect("submit");
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+        // The compositor's own white undercoat, untouched: an unresolved id
+        // draws nothing rather than a black hole where the picture would be.
+        let front = comp.backend.presented_pixels();
+        assert_eq!(front[cy as usize * 400 + cx as usize], 0xFF_FF_FF_FF);
+    }
+
+    #[test]
+    fn registering_the_same_id_twice_replaces_the_picture() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        assert_eq!(comp.image_count(id), Some(1));
+
+        // A second upload under the same id: one solid colour, no quadrants.
+        let solid = solid_buffer_bytes(2, 2, IMG_G);
+        comp.register_image(id, 1, 2, 2, 8, BufferFormat::Argb8888, &solid)
+            .expect("re-register");
+        assert_eq!(comp.image_count(id), Some(1), "replaced, not accumulated");
+
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+        let front = comp.backend.presented_pixels();
+        assert_eq!(front[cy as usize * 400 + cx as usize], IMG_G);
+    }
+
+    #[test]
+    fn two_windows_may_use_the_same_image_id_without_seeing_each_others_pixels() {
+        // The id is the client's to choose, so a compositor-wide namespace would
+        // make two independent programs collide on id 1 — which every program
+        // that numbers its images from one would pick.
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let a = image_window(&mut comp, 8.0);
+        let b = comp.create_window("Other".to_string(), 64, 64, 2);
+        let solid = solid_buffer_bytes(2, 2, IMG_G);
+        comp.register_image(b, 1, 2, 2, 8, BufferFormat::Argb8888, &solid)
+            .expect("register");
+
+        // A's image still has its red top-left quadrant.
+        let img = comp
+            .window_ref(a)
+            .expect("window a")
+            .images
+            .get(&1)
+            .expect("image 1");
+        assert_eq!(img.pixel(0, 0), Some(IMG_R));
+        let img = comp
+            .window_ref(b)
+            .expect("window b")
+            .images
+            .get(&1)
+            .expect("image 1");
+        assert_eq!(img.pixel(0, 0), Some(IMG_G));
+    }
+
+    #[test]
+    fn unregistering_reports_whether_anything_was_there() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        assert!(comp.unregister_image(id, 1));
+        assert!(
+            !comp.unregister_image(id, 1),
+            "second removal finds nothing"
+        );
+        assert_eq!(comp.image_count(id), Some(0));
+        assert!(
+            !comp.unregister_image(WindowId(424242), 1),
+            "a window that does not exist has nothing to remove"
+        );
+        assert_eq!(comp.image_count(WindowId(424242)), None);
+    }
+
+    #[test]
+    fn a_rejected_upload_leaves_the_existing_picture_in_place() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        // Stride too small for the declared width.
+        assert!(matches!(
+            comp.register_image(id, 1, 4, 4, 8, BufferFormat::Argb8888, &[0u8; 64]),
+            Err(CompositorError::InvalidBuffer(_))
+        ));
+        let img = comp
+            .window_ref(id)
+            .expect("window")
+            .images
+            .get(&1)
+            .expect("the original image survived");
+        assert_eq!((img.width(), img.height()), (2, 2));
+        assert_eq!(img.pixel(0, 0), Some(IMG_R));
+
+        assert!(matches!(
+            comp.register_image(
+                WindowId(424242),
+                1,
+                2,
+                2,
+                8,
+                BufferFormat::Argb8888,
+                &quadrant_image_bytes()
+            ),
+            Err(CompositorError::WindowNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_windows_images_are_freed_with_the_window() {
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 8.0);
+        assert_eq!(comp.image_bytes(), 16, "2x2 at four bytes a pixel");
+        comp.destroy_window(id).expect("destroy");
+        assert_eq!(
+            comp.image_bytes(),
+            0,
+            "a client that exits without unregistering must not strand its pixels"
+        );
+    }
+
+    #[test]
+    fn an_image_clipped_by_its_window_keeps_its_scale() {
+        // The quad is twice the client area. What is visible must be the
+        // *top-left* of a 128x128 rendering — the red quadrant filling all 64
+        // visible pixels — and not a 64x64 rendering of the whole image, which
+        // is what clipping before resampling would produce.
+        let mut comp = Compositor::new(400, 300, 60).unwrap();
+        let id = image_window(&mut comp, 128.0);
+        let (cx, cy) = {
+            let win = comp.window_ref(id).expect("window");
+            (win.x, win.y)
+        };
+        assert!(comp.compose_frame());
+        let front = comp.backend.presented_pixels();
+        let at =
+            |dx: usize, dy: usize| -> u32 { front[(cy as usize + dy) * 400 + (cx as usize + dx)] };
+        assert_eq!(at(0, 0), IMG_R);
+        assert_eq!(
+            at(63, 63),
+            IMG_R,
+            "the far corner of the client area is still inside the source's \
+             top-left quadrant, because the quad was 128 wide"
+        );
     }
 
     #[test]
@@ -13617,7 +14184,16 @@ mod tests {
         ];
 
         let (mut engine, mut fb) = round_canvas();
-        engine.execute(&mut fb, &commands, BOX_X, BOX_Y, BOX_SIDE, BOX_SIDE, 1.0);
+        engine.execute(
+            &mut fb,
+            &commands,
+            &HashMap::new(),
+            BOX_X,
+            BOX_Y,
+            BOX_SIDE,
+            BOX_SIDE,
+            1.0,
+        );
 
         #[allow(clippy::cast_sign_loss, reason = "the box is at a positive origin")]
         let (bx, by) = (BOX_X as u32, BOX_Y as u32);

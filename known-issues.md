@@ -68003,6 +68003,305 @@ the day they discover what it assumed. Nothing breaks in the meantime, which is
 exactly why it has gone unnoticed for so long — a module nobody draws also
 never looks wrong.
 
+### Measured 2026-08-25 — `scripts/scan-orphan-modules.py`, and what it found
+
+The paragraphs above counted `pub fn render` by hand. There is now an
+instrument: for every library module in lane C's tree, it asks whether any
+other file in the *repository* names one of its top-level public items or its
+module path, outside tests and bare re-exports. A `pub` item must be named to
+be used, so a "no" is sound — which is what makes this answerable at module
+scale when the function-level question (`scan-unwired.py`) is not.
+
+**57 island modules, 113,132 lines, out of 200 library modules scanned** — and
+**39 of the 57 are in `gui/desktop`, a crate whose `lib.rs` declares 59.**
+
+*(Corrected the same day. The first run of the instrument said 21 / 39,060,
+and that was wrong three separate times over: an associated `fn` sharing a
+free item's spelling, an item name matched against a same-named type in a lane
+that has never heard of this crate, and an identifier inside a string literal
+each alibi'd a slice of the list. All three were found by disbelieving a
+clearance and checking the module by hand; see commit `26f8eecd5`. The
+lesson generalises past this script: **a scan of this kind is not finished
+when it runs, it is finished when its clearances survive being disbelieved.**
+Do not cite the 21.)*
+
+The 39-of-59 figure is worth pausing on. The paragraphs above reached "four of
+its fifty-seven modules are drawn" by hand-counting `pub fn render` call
+sites — a completely different method, asking a narrower question. The two
+agree: four modules drawn, thirty-nine with no caller of any kind. That
+agreement is the best evidence either number is right.
+
+The largest islands:
+
+| Module | Lines | What is in it |
+|---|---|---|
+| `gui/toolkit/src/modal.rs` | 4,630 | modal dialog / sheet infrastructure |
+| `gui/desktop/src/network_settings.rs` | 4,172 | the whole network settings page |
+| `gui/desktop/src/osd.rs` | 3,457 | volume/brightness/lock on-screen display |
+| `gui/toolkit/src/svg.rs` | 3,393 | an SVG path/transform/colour parser |
+| `gui/desktop/src/notif_pane.rs` | 3,374 | the notification pane and quick settings |
+| `gui/toolkit/src/menubar.rs` | 3,337 | the menu bar widget |
+| `gui/desktop/src/touchpad.rs` | 2,841 | touchpad gestures and settings |
+| `gui/desktop/src/window_rules.rs` | 2,605 | per-application window placement rules |
+| `gui/desktop/src/backup_settings.rs` | 2,591 | backup settings page |
+| `gui/desktop/src/notification_settings.rs` | 2,539 | notification settings page |
+| `apps/procexplorer/src/features.rs` | 2,517 | process-explorer feature set |
+| `apps/imageviewer/src/video.rs` | 2,436 | video playback in the image viewer |
+| `gui/desktop/src/hotkeys.rs` | 2,431 | global hotkey binding |
+| `gui/desktop/src/login_screen.rs` | 2,417 | the login screen |
+
+Two smaller entries are worth naming because they are a *different* failure
+from "written but not yet wired":
+
+- `apps/explorer/src/main.rs` writes `mod columns; mod dropzone; mod thumbs;`
+  and then never mentions any of the three again — 5,611 lines compiled into
+  the binary by an explicit declaration and reachable from nothing.
+  (`columns.rs`, 2,372 of those lines, was wired up on 2026-08-25 — see
+  "Repayment log" at the end of this entry.)
+- `gui/compositor/src/server.rs` (1,334) reaches `lib.rs` only through
+  `pub use server::{Disconnect, Server, ServerStats};`, and no file in the
+  tree consumes any of the three names. A re-export is plumbing, not a
+  caller; it is exactly the shape that makes an island look connected.
+
+**Three of these are duplication, not merely absence** — and that is the part
+that bears on the decision in `open-questions.md` → C-Q6:
+
+- `gui/desktop/src/a11y.rs` and `gui/desktop/src/accessibility_settings.rs`
+  are two accessibility models **in the same crate**, sharing six type names
+  (`ColorFilter`, `MagnifierConfig`, `StickyKeys`, `FilterKeys`, `MouseKeys`,
+  `Magnifier`). `a11y.rs` is the unreached one.
+- `gui/desktop/src/default_apps.rs` (2,314) and
+  `apps/settings/src/associations.rs` (1,748) both model file-type
+  associations, and **neither is reachable**. Deleting one does not fix this.
+- `gui/toolkit/src/context_ext.rs` (1,605) and `gui/desktop/src/context_ext.rs`
+  (2,043) are two files of the same name in two crates sharing four names
+  (`ContextMenuExtension`, `ExtensionId`, `build_context_menu`,
+  `render_context_menu`), and **neither is reachable** — the desktop copy was
+  the module whose false clearance exposed the `member_names` hole. They are
+  not even the same design: the toolkit's `ExtensionId` is a newtype
+  `pub struct ExtensionId(u64)`, the desktop's is `pub type ExtensionId = u64`.
+  The toolkit copy has the lazy-loading and timeout machinery
+  (`TimeoutPolicy`, `LoadingEntry`, `check_timeouts`, `loading_placeholder`)
+  the desktop copy lacks entirely; the desktop copy has the rendering and
+  targeting machinery (`render_context_menu`, `TargetKind`, `ContextTarget`,
+  `MenuPosition`, `ExtensionSettingsUI`) the toolkit copy lacks. Between them
+  they are one feature, and there is a **third** implementation of the same
+  subject in lane A's `kernel/src/fs/contextmenu.rs`.
+
+**And a sub-finding the module scan does not itself report:** six shell
+modules serialise settings that nothing ever stores.
+
+| Module | Writer | Reader | Emits |
+|---|---|---|---|
+| `a11y.rs` | `:1067 to_config_string` | `:1117 from_config_string` | `key=value` text |
+| `power.rs` | `:263 to_config_string` | `:313 from_config_string` | `key=value` text |
+| `user_accounts.rs` | `:744 to_config_text` | `:758 from_config_text` | pipe records, `USER\|…` |
+| `tray_dnd.rs` | `:410 to_config` | `:427 from_config` | a `TrayArrangementConfig` struct |
+| `display_settings.rs` | `:746 to_config_text` | **none** | `key=value` text |
+| `input_method.rs` | `:426 to_config_text` | **none** | `key=value` text |
+
+Every caller of all ten functions is inside a `#[cfg(test)]` module, and each
+has a passing round-trip test — except the last two, which have no reader to
+round-trip against and so serialise to a format nothing in the tree can parse.
+Three further problems:
+
+1. **`gui/desktop` performs no file I/O at all.** `fs::write`, `fs::read`,
+   `File::open` and `File::create` return nothing across the whole crate. It
+   reads `appearance.yaml` via `config::load` at `lib.rs:1148` and never
+   writes anything, so there is no path by which any of this text could reach
+   a disk.
+2. **The text formats are not YAML**, which `design.txt` requires for
+   configuration. `power.rs` emits `profile=performance\ndim_timeout=…`;
+   `user_accounts.rs` emits `USER|` followed by pipe-delimited fields.
+3. **`gui/settingsfile` already exists** and does this correctly — atomic
+   temp-file-and-rename, comment- and order-preserving splices into the user's
+   own file — and `apps/settings` already uses it for two families.
+
+Note `power.rs` is *not* in the island table: `lib.rs` draws its power menu, so
+the module is reached. `PowerManager`, `PowerConfig`, `ScreenSaver` and the
+config pair inside it still have no caller. A module absent from the table is
+not a clean bill of health for its contents.
+
+**Do not wire these up before C-Q6 is answered.** Adding `load()`/`save()` to
+six models that may be deleted is lesson 45 at a larger size — a bigger unused
+feature, with the same round-trip tests making it look covered.
+
+### Repayment log
+
+The ledger is a ratchet, not a monument: `scripts/orphan-modules-baseline.txt`
+shrinks as entries are paid off, and `--check` prints "reached now, drop from
+the baseline" when one is. Entries C-Q6 does not gate are being paid down while
+it sits.
+
+- **2026-08-25 — `apps/explorer/src/columns.rs` (2,372 lines) is reached.**
+  The detail view's three hardcoded x-offsets are gone; it now draws through
+  `render_column_header` / `render_column_values_from`, so a folder of images
+  grows a Dimensions column and a folder of source grows Language and Lines.
+  Two defects had to be fixed to make the wiring safe rather than merely
+  possible, and both are the same shape as lesson 45 one level down — *a
+  provider written for a caller that never arrived is never found out*:
+  - `StandardColumns::value` returned `ColumnValue::Empty` for **Size, Date
+    Modified, Date Created and Attributes**, with the comment "In a real
+    implementation this would stat the file. Return empty as a stub; the
+    explorer already has size info." Routing the view through it as-written
+    would have silently deleted the two columns the explorer already showed.
+    They stat now.
+  - `ColumnManager` had only `sort_by`, a three-state header-click toggle
+    (asc → desc → **none**). The explorer's own sort is two-state, so no
+    number of toggles reliably lands on the state it wants. Added
+    `set_sort(id, order)`, with `sort_by` rewritten in terms of it — the
+    toggle for a header click, the setter for a caller that already owns the
+    sort.
+
+  A third hazard was designed around rather than fixed: every `columns.rs`
+  lookup takes a `&str` path, which a name that is not valid UTF-8 cannot
+  become without loss. `ExplorerState::row_values` therefore builds the
+  standard cells from the `FileEntry` it already has — which also takes a
+  per-cell `stat` off the per-frame path — and only falls back to the path for
+  columns a *provider* owns. A non-UTF-8 name costs a blank Dimensions cell,
+  never a wrong one and never a dropped row.
+
+  Still pinned from this app: `dropzone.rs` (1,259) and `thumbs.rs` (1,980).
+  `thumbs.rs` has an obvious home — `ViewMode::Icons` currently renders an
+  empty pane, because `render_file_list` only ever drew the `Details` case.
+
+- **2026-08-25 — `apps/explorer/src/thumbs.rs` (1,980 lines) is reached.**
+  `render_file_list` is now a three-arm match: `ViewMode::Icons` draws a
+  wrapping grid of captioned cells and `ViewMode::List` a single column of
+  rows, both through one `push_thumb` so the two cannot drift apart in the one
+  decision that matters. Queueing follows the view — switching into a picture
+  view fills the queue, switching out empties it — so a folder of ten thousand
+  files stops decoding the moment the user stops looking at the pictures.
+
+  Wiring it turned up the same shape of defect one level deeper, and this time
+  in the *compositor*: `RenderCommand::Image` had three emitters and a backend
+  arm that was a bare `// stub for now`. That is fixed separately (§554,
+  `ImageAsset`), and its consequence shapes the explorer's design here — an
+  `Image` naming an id the compositor does not hold draws nothing and reports
+  nothing, so a thumbnail must be both **generated** and **registered** before
+  a command may name it. `ExplorerState` therefore tracks the two states
+  separately: `pump_thumbnails` files a result into the cache *and* a pending-
+  upload list, `take_pending_uploads` hands them to the host, and only
+  `mark_uploaded` makes an entry drawable. An upload that fails, or an image
+  the host later drops, falls back to the primitive-only placeholder rather
+  than to an empty white frame nobody can diagnose.
+
+  Two defects in `thumbs.rs` itself had to be fixed first:
+  - **The generator never touched the disk cache.** `DiskCache` was complete
+    and unreachable: `process_batch` called `generate_thumbnail` and nothing
+    else, so a restart re-decoded every file. `ThumbnailGenerator` now owns an
+    optional `DiskCache` and consults it before generating, populates it after.
+  - **The disk cache could not tell two sizes apart.** Its filename was
+    `{hash(path, mtime)}.thumb`, with no record of the size cap the entry was
+    made at, so a 256px view was served a 64px entry. Fixing it by comparing
+    the *stored dimensions* against the cap does not work — `fit_dimensions`
+    does not upscale, so a source smaller than the cap yields the same
+    dimensions at every cap and every small thumbnail would look stale
+    forever. The cap is part of the key instead: `{hash:016x}-{cap}.thumb`,
+    with `purge_stale` matching on the hash prefix so a live file keeps its
+    entries at *every* cap.
+
+  The in-memory cache gained `peek(&self, …)` beside the promoting
+  `get(&mut self, …)`. A renderer reading the cache on every frame must not
+  reorder it, or eviction becomes "whatever was last on screen" rather than
+  "whatever was last wanted"; `render` taking `&self` is the same guarantee
+  spelled by the compiler.
+
+  Still pinned from this app: `dropzone.rs` (1,259).
+
+- **2026-08-25 — `apps/explorer/src/dropzone.rs` (1,259 lines) is reached, and
+  `apps/explorer` is off the ledger entirely.** All three of the app's pinned
+  islands — `columns.rs` (2,372), `thumbs.rs` (1,980), `dropzone.rs` (1,259),
+  5,611 lines — are now called by the app that `mod`-declared them. 54 remain
+  repo-wide, from 57.
+
+  A drop zone is a claim about *where something is on screen*, so registration
+  belongs to the pass that decides where things go and to no other. `render`
+  therefore took `&mut self` and now rebuilds the zone list as it draws: each
+  row registers its own rectangle, the sidebar registers its five quick-access
+  strips, and the pane registers itself as the fallback. A second pass
+  computing the same layout would be a second layout to keep in agreement with
+  the first, and it is exactly that kind of shadow layout that goes stale
+  without anyone finding out.
+
+  The borrow this needs does not exist: the per-view helpers read
+  `self.entries` while writing `self.dropzone`, and a `&self` borrow will not
+  split that way. The manager is `mem::replace`d out for the frame and put
+  back. That is not only a borrow trick — a *fresh* manager per frame would
+  reset `current_hover`, so every frame of a stationary hover would re-fire
+  `DragEnter` for a zone the pointer had never left.
+
+  Three defects the wiring exposed:
+  - **The module keyed everything by `String`.** Paths, sources, targets: all
+    `String`, reached from `PathBuf` by `to_string_lossy`, which maps every
+    undecodable unit to U+FFFD and so merges two distinct filenames into one
+    target. The same trust-boundary defect class as `columns.rs`'s `&str`
+    lookups, and fixed the same way — `Path`/`PathBuf` throughout. The one
+    surviving lossy conversion is in `operation_label`, which is drawn for a
+    human and never used to reach a file; there, U+FFFD on screen is right and
+    hiding the label would be wrong.
+  - **The sidebar's rows were their own labels.** They were five strings,
+    `"/ (Root)"` among them — harmless while a label was only ever drawn, and
+    a drop into a directory literally named `/ (Root)` the moment it was not.
+    Label and path are now separate fields of `SIDEBAR_ITEMS`.
+  - **A move into the folder the file is already in would have conjured a
+    duplicate.** The manager's verdict cannot see this, because it is a fact
+    about the *executor*: `fileops`' conflict policy here is `Rename`, so
+    moving `notes.txt` into its own directory produces `notes (2).txt` from a
+    drag the user meant as a no-op. `ExplorerState::evaluate_drop` wraps
+    `handle_drop` and refuses it. A *copy* into the same folder is not the
+    same case and still duplicates — people do that on purpose.
+
+  The drop itself runs through `OperationPlan` + `OperationExecutor`, the same
+  engine as paste, so a drag-and-drop is undoable, journalled and reports
+  per-file errors. A second copy engine behind a drag would have had none of
+  those, which is the state paste itself was rescued from.
+
+  **Known limitation, deliberately not fixed here:** `fileops` has no link
+  operation, so Alt-drag is *refused* — red feedback and "Links are not
+  supported yet" — rather than reported as `Link` and then quietly not
+  performed. The proper fix is a `FileOperation::Link` with its own plan,
+  journal entry and undo (`unlink` the created link), which is a `fileops`
+  feature rather than a wiring one. Until it exists, the refusal is at least
+  visible before the user releases the button. See
+  `TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE` below.
+
+## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25)
+
+**In short:** Holding Alt while dragging a file is the standard way to ask for
+a *symbolic link* — a small stand-in file that points at the real one, so the
+same file appears in two places without being copied. The explorer understands
+the request and the file-operation engine cannot carry it out, so the explorer
+refuses it to the user's face instead of pretending. Nothing is broken; a
+feature is missing and says so.
+
+**Where it lives.** `apps/explorer/src/dropzone.rs` computes
+`DropOperation::Link` from the Alt modifier, correctly — that part is done.
+`apps/explorer/src/fileops.rs`'s `FileOperation` enum has `Copy`, `Move`,
+`Delete`, `Recycle` and `Restore`, and no `Link`; there is no `plan_link`.
+`ExplorerState::evaluate_drop` (`apps/explorer/src/main.rs`) closes the gap by
+marking a `Link` drop invalid with the reason `"Links are not supported yet"`,
+which the hover feedback shows in red and the status bar repeats on release.
+Covered by `an_alt_drag_is_refused_rather_than_silently_doing_nothing`.
+
+**Why it is refused rather than downgraded.** Silently doing a Copy instead
+would be worse than doing nothing: the user asked for a stand-in and would get
+a second independent file, which then drifts out of step with the original with
+no sign that it ever was one.
+
+**The proper fix.** Add `FileOperation::Link` to `fileops` with the same
+apparatus every other operation has: an `OperationPlan::plan_link`, a journal
+entry so a crash mid-batch is recoverable, per-file error collection, and an
+undo entry whose reverse is `remove_file` on the link (never on its target).
+Then delete the special case in `evaluate_drop`. The one real design question
+is what to do on a filesystem that refuses symlinks — Windows needs a
+privilege for them, so the host test suite cannot assume they work — which
+argues for `ErrorPolicy::SkipAndContinue` reporting a per-file failure rather
+than a plan that refuses up front.
+
+**Cost of leaving it.** One gesture is unavailable and says so. It does not
+get worse with time and blocks nothing.
+
 ## TD-B-FIVE-COPIES-OF-THE-FILE-TYPE-HALF-OF-A-MODE-WORD (lane B, 2026-08-22) — RESOLVED 2026-08-22
 
 **In short:** A file's *mode* is one integer holding two unrelated things: what
@@ -81948,6 +82247,86 @@ path — `Drop` runs during unwind where a trailing `remove_dir_all` does not.
 
 ---
 
+## `TD-C-AN-IMAGE-CAN-ONLY-BE-UPLOADED-IN-PROCESS` (lane C, 2026-08-25) — **FIXED** 2026-08-26
+
+**In short:** the compositor could draw pictures, but the only way to hand it
+one was to be *inside* the compositor program. Every real application is a
+separate program, so none of them could show a picture at all — the file
+manager's icons would simply not appear, with no error to say why. There is now
+a request on the wire (`UploadImage`, and `DropImage` to take it back again), a
+`Connection::upload_image` / `Connection::drop_image` pair for applications to
+call, and a per-connection memory limit so that a program which uploads without
+end is refused rather than allowed to exhaust the machine.
+
+**What was built.**
+
+| Piece | Where |
+|---|---|
+| `RequestBody::UploadImage` / `DropImage` (tags `0x15`/`0x16`) | `gui/remote/src/control.rs` |
+| `MAX_IMAGE_BYTES`, `write_bytes`, `Reader::read_bytes`, `DecodeError::{ImageTooLarge, BadBufferFormat}` | `gui/remote/src/{lib.rs, reader.rs}` |
+| `BufferFormat` moved to `guiremote::control` and re-exported by the compositor | `gui/remote/src/control.rs`, `gui/compositor/src/buffer.rs` |
+| `CompositorRequest::{RegisterImage, UnregisterImage}` and the two byte-count accessors the budget needs | `gui/compositor/src/lib.rs` |
+| `ClientLink::image_budget` / `set_image_budget`, `MAX_IMAGE_BYTES_PER_LINK`, the refusal gate | `gui/compositor/src/wire.rs` |
+| `Connection::upload_image` / `drop_image` | `gui/remote/src/client.rs` |
+
+**How the two open questions were answered** — see design-decisions.md → 556.
+The budget is **per connection, not per window** (a per-window one is bypassed
+by opening a second window) and an upload over it is **refused, not evicted**
+(eviction "succeeds": a draw naming an id with no pixels behind it renders
+nothing, silently and by design, so an evicted thumbnail is a picture that stops
+appearing with no error anywhere). The bytes travel **inline**.
+
+**The entry's own premise about mapping was wrong.** It said "the surface path
+already maps rather than copies", and offered that as a reason an image might
+too. It does not: `SharedBuffer` and `attach_buffer` appear nowhere in
+`gui/remote/` — there is no surface-attach request on the wire at all, and
+`buffer.rs`'s own module doc says the IPC layer is "currently stubbed" and
+`SharedBuffer::import` takes bytes already mapped by someone else. In-process,
+"mapping" is a `&[u8]` that was never copied. Over a TCP connection
+(design-decisions.md → 460) whose far end need not be on this machine, there is
+nothing to map, and a fast path that only exists over loopback would be a fast
+path that silently is not there.
+
+**Original entry follows.**
+
+**What it is.** The compositor now has an image store and paints
+`RenderCommand::Image` for real (design-decisions.md → 554). But the only way to
+get pixels *into* that store is `Compositor::register_image`, a Rust method — so
+only code linked into the compositor process can upload one. A GUI program in a
+separate process, which is every real GUI program, still cannot.
+
+**Why it did not block the fix.** The compositor is the thing that draws, and it
+could not draw an image at all before this; the in-process path is what the
+rasteriser and the store are tested through, and it is what the desktop shell
+(which *is* in-process today) can use immediately. The wire request is a
+separate, smaller piece of work with its own trust-boundary questions.
+
+**Where it lives.** `gui/remote/src/control.rs` → `RequestBody` is the client
+request enum; the compositor's handler dispatches on it. An
+`UploadImage { window, image_id, width, height, stride, format, bytes }` variant
+and a `DropImage { window, image_id }` beside it are what is missing.
+`ImageAsset::import` already performs the whole validation the untrusted path
+needs, so the handler is a decode and a call.
+
+**What the proper fix must decide, and does not yet.**
+
+1. **A per-window byte budget.** `Compositor::image_bytes()` exists and reports
+   the total, but nothing enforces a ceiling. Over a wire request, a client can
+   upload until the compositor is out of memory — the per-image
+   `MAX_BUFFER_PIXELS` cap bounds one asset, not their number. A budget, and a
+   defined behaviour on exceeding it (refuse the upload, versus evict the
+   window's least-recently-drawn asset), is required before the request is
+   exposed.
+2. **Whether the bytes travel inline or by shared mapping.** The surface path
+   already maps rather than copies. A thumbnail is small enough that inline is
+   tolerable; a full-resolution photo in an image viewer is not.
+
+**How you would notice.** `apps/explorer`'s icon view will draw correctly under
+the in-process compositor and draw nothing under a remote one, with no error
+either way — the unresolved-id case is silent by design.
+
+---
+
 ## `A-KSHELL-THE-USAGE-GATE-CANNOT-SEE-A-SYNOPSIS-RUSTFMT-PUT-ON-ITS-OWN-LINE` (lane A, 2026-08-25) — **FIXED** 2026-08-25, all 95 defects resolved
 
 **In short:** the gate that checks "if a command prints its usage line because
@@ -82131,3 +82510,426 @@ inside the kernel, but a command that complains and exits 0 tells `&&` and
 manager whose subcommands create and delete partitions.
 
 ---
+## `C-BACKUP-AN-EXCLUDE-PATTERN-CAN-HANG-THE-BACKUP` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26
+
+**In short:** `backup create --exclude '**a'` never finished. It did not fail
+with a message, it did not skip the pattern — it recursed until the stack ran
+out and the process died, part-way through a backup. Any exclude pattern
+containing `**` that was not a whole path segment did this: `**.tmp`,
+`**cache`, `***`. The fix makes such a pattern behave as a plain `*`, which is
+what bash's `globstar` and gitignore already do.
+
+**Where it lived:** `apps/backup/src/main.rs`, `glob_match_recursive` and
+`glob_match_simple`.
+
+**The defect.** The two functions disagreed about which `**` was a globstar.
+`glob_match_simple` delegated to `glob_match_recursive` on *any* `**`;
+`glob_match_recursive` accepted only a `**` that was a whole path segment
+(`**` at the end, or `**/`) and handed anything else straight back to
+`glob_match_simple`. Neither consumed a byte before delegating, so the two
+bounced the identical `(pattern, text)` pair back and forth forever:
+
+    glob_match_simple("**a", "b")  -> glob_match_recursive("**a", "b")
+    glob_match_recursive("**a", "b") -> glob_match_simple("**a", "b")   // no progress
+
+Each side was locally reasonable. The bug lived in the gap between them, which
+is why reading either function alone did not show it.
+
+**Why it went unseen.** The five existing glob tests all used well-formed
+patterns (`*.txt`, `**/*.rs`, `a?c`). A malformed one was never tried, and the
+failure mode is a hang rather than a wrong answer, so no assertion could have
+caught it in passing.
+
+**How it was found and verified.** Not by reading — by differential fuzzing.
+The rewrite that removed this file's `indexing_slicing` warnings was checked
+against the previous implementation over an exhaustive space of patterns and
+texts up to four bytes (alphabets `*?/ab` and `/ab`). The old implementation
+was depth-limited so non-termination could be *counted* rather than hang the
+harness. Result over 94,501 pairs:
+
+| | count |
+|---|---|
+| agree exactly | 90,841 |
+| differ | **0** |
+| old code did not terminate | **3,660** (3.9%) |
+
+So the rewrite is behaviour-preserving everywhere the old code produced an
+answer at all, and the 3.9% is the bug's true reach — this was not an exotic
+corner.
+
+**The fix.** `glob_match_simple` now delegates only when the `**` is a whole
+path segment — exactly the condition `glob_match_recursive` accepts. The two
+agree, so the loop cannot form. A `**` that is not a whole segment falls
+through to the ordinary single-`*` arm, which always advances `pi`, so progress
+is structural rather than argued. Regression tests
+`a_double_star_that_is_not_a_path_segment_terminates` and
+`a_double_star_that_is_a_path_segment_still_spans_directories` pin both halves;
+the first hangs the suite rather than failing it if the bug returns, which is
+the loudest signal this shape of defect allows.
+
+**Lesson worth keeping.** Two functions that delegate to each other must agree
+on the condition that decides *which* of them handles a case, and the agreement
+has to be written down in both places or it will drift. Mutual recursion with
+no argument shrinking on some path is a hang waiting for the right input.
+
+## `C-INDEXER-A-BRACKET-EXPRESSION-ENDING-IN-A-DASH-MATCHED-NOTHING` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26
+
+**In short:** `indexer search` lets you use shell-style wildcards, including
+`[abc]` to mean "any one of these characters". If you ended that bracket with a
+dash — `[a-]`, meaning "an `a` or a dash" — it silently matched no files at
+all, rather than the files it should have. You would see an empty result list
+and no error, and conclude the files were not indexed. Fixed; the pattern now
+behaves the way it does in every shell.
+
+**Where it lived.** `apps/indexer/src/main.rs` → `match_char_class`.
+
+**The defect.** The range arm was guarded by:
+
+```rust
+if i + 2 < pattern.len() && pattern[i + 1] == '-' {
+```
+
+That asks whether a third character *exists*, not whether it is a range end.
+For `[a-]` the third character is the closing `]`. So the parser took the range
+arm, read `]` as the upper bound of the range `a..=]` (empty, since `]` is 0x5D
+and `a` is 0x61), advanced past it, and then ran to the end of the pattern
+looking for a closing bracket it had already consumed. Falling out of the loop
+with no `]` in hand, it returned `None` — "malformed class" — and a malformed
+class never matches. `[a-]`, `[b-]` and `[--]` therefore matched nothing.
+
+**Why it went unseen.** The five existing glob tests all used well-formed,
+conventional patterns: `[abc]`, `[a-z]`, `[!abc]`. Every one of those has a
+character after the `-`, or no `-` at all, so none of them enters the arm the
+bug lives in. This is the same reason `apps/backup`'s `**` hang went unseen —
+see `C-BACKUP-AN-EXCLUDE-PATTERN-CAN-HANG-THE-BACKUP`, found the same day. A
+test suite written from the documentation exercises the shapes the
+documentation describes, which are exactly the shapes that work.
+
+**The oracle.** POSIX and `fnmatch(3)` make a `-` in final position of a bracket
+expression an ordinary character, because there is nothing after it for it to
+be a range to. Confirmed against bash directly rather than from memory:
+
+```
+case a in [a-]) ;; esac   # matches
+case - in [a-]) ;; esac   # matches
+case - in [--]) ;; esac   # matches
+case - in [a-z]) ;; esac  # does NOT match
+```
+
+**The fix.** The range arm now requires the character after the `-` to exist
+*and not be the closing bracket*, and the whole class parser reads through
+`get` rather than indexing, so each access carries its own bound instead of
+borrowing one from a comparison two lines up.
+
+**Evidence the rewrite changed nothing else.** The old and new implementations
+were run against each other over an exhaustive product of 4,681 patterns × 85
+texts = 397,885 pairs, from an alphabet chosen to reach every arm (`*`, `?`,
+`[`, `]`, `!`, `-`, `a`, `b`):
+
+| Result | Count |
+|---|---|
+| agree | 397,877 |
+| differ | 8 |
+
+All eight differences are the trailing-dash case (`[a-]`, `[b-]`, `[--]`,
+`[*-]`, `[?-]`, `[[-]`), and in all eight bash agrees with the new behaviour.
+Pinned by `a_trailing_dash_in_a_class_is_a_literal_dash`.
+
+**Lesson worth keeping.** A bounds check that asks "does an element exist here?"
+is not the same question as "is the element here the one I need?", and the two
+diverge exactly at the end of the input. `i + 2 < len` was true; `pattern[i+2]`
+was still the wrong character. Reading through `get` does not by itself fix
+that — but it forces the second question to be written down, because there is
+no index to silently answer the first one instead.
+
+---
+
+## C-FILESEARCH-COMPARED-A-BRACKET-LITERALLY-BEFORE-PARSING-IT-AS-A-CLASS (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**In short:** The desktop had two file-search tools — the background indexer and
+the Search application — and each contained its own, separately written code for
+interpreting search patterns like `*.txt` or `[a-z]`. They did not agree. Typing
+the same pattern into the two tools could give you two different sets of files,
+and in the worst cases one of them silently found nothing at all and said so as
+"no results" rather than as an error. Both tools now use one shared piece of
+code, checked against Python's and bash's implementations on 1.9 million
+patterns.
+
+**Where it lived.** `apps/filesearch/src/main.rs` → `glob_match_impl` and
+`char_class_matches`; `apps/indexer/src/main.rs` → `glob_match_chars` and
+`match_char_class`. Both are now `apps/globmatch`.
+
+**How it was measured.** Each matcher was extracted verbatim into a scratch
+binary, run over an exhaustive product of every pattern of length ≤ 4 and every
+text of length ≤ 3 drawn from the metacharacter alphabet (`* ? [ ] ! - a b` for
+patterns, `[ ] - a b` for texts) — 4,681 × 156 = **730,236 pairs** — and every
+verdict compared against CPython's `fnmatch`, which implements POSIX 2.13.1.
+
+| Matcher | Disagreements with `fnmatch` |
+|---|---|
+| `apps/indexer`, after `698afd7cd` | **0** |
+| `apps/filesearch` | **646** |
+
+**The three defects in `filesearch`.**
+
+1. **Literal comparison ran before the class parse** (338 of the 646). The
+   `if`/`else if` chain tested `pattern[pi] == text[ti]` *first*, so whenever
+   the text happened to contain a `[`, the pattern's `[` matched it as an
+   ordinary character and the bracket expression was never parsed. `[*]` — the
+   only way to search for a literal asterisk — matched `[]`, `[a]` and `[b]`,
+   and did not match `*`. The same ordering bug applies to `*`: `*a` failed
+   against `*ba`, because the pattern's star was spent matching the text's.
+
+2. **A `]` in the first member position terminated the class.** `class_end` was
+   `position(|&b| b == ']')` from the `[`, which for `[]]` finds the `]` at
+   offset 1 and yields an *empty* class. POSIX carves out that one position as
+   a literal member precisely because a bracket expression has no escape
+   character — without the rule there is no way to write a pattern matching a
+   `]` at all. So the pattern that means "a bracket" matched nothing.
+
+3. **…and therefore `[!]` was a negated empty class**, which matches every
+   character. A user typing `[!]` got every file in the index.
+
+**Why it went unseen.** Same reason as the two sibling bugs found the same day
+(`C-INDEXER-A-BRACKET-EXPRESSION-ENDING-IN-A-DASH-MATCHED-NOTHING`,
+`C-BACKUP-AN-EXCLUDE-PATTERN-CAN-HANG-THE-BACKUP`): every test used a
+well-formed, conventional pattern — `[abc]`, `[a-z]`, `[!a-z]`, `src/*.rs` — and
+none of those reaches the arms the bugs live in. A metacharacter never appeared
+in a *text*, so defect 1 could not fire; no pattern contained a `]` as a member,
+so defects 2 and 3 could not fire.
+
+**The deeper finding, which is why the fix was a new crate rather than a patch.**
+Lane C had **four** glob matchers with four different definitions of a glob:
+
+| Location | `*` | `?` | classes | negation | element |
+|---|---|---|---|---|---|
+| `apps/indexer` | any run | one char | yes | `!` only | `char` |
+| `apps/filesearch` | any run | one char | yes (buggy) | `!` and `^` | `char` |
+| `apps/backup` | stops at `/`, `**` spans | one char, not `/` | **none** | — | `u8` |
+| `gui/toolkit` `context_ext` | any run | — | none | — | `char` |
+
+The first two are both user-facing search tools in the same desktop, both
+document `*`, `?` and `[a-z]`, and disagreed — including on whether `[^abc]`
+negates, which worked in one and was a literal `^` in the other. That is not a
+duplication smell; it is a user-visible inconsistency.
+
+**The fix.** `apps/globmatch`: POSIX `fnmatch` without `FNM_PATHNAME`, over
+`&[char]`, with `^` negation carried over from `filesearch` as the single
+deliberate extension. Both search tools now depend on it and their private
+copies are deleted (−4,498 and −6,205 bytes).
+
+**Evidence.** Over an alphabet extended with `^` — 7,381 patterns × 259 texts =
+**1,911,679 pairs** — every verdict is adjudicated by an independent
+implementation, and the two disagreement families are disjoint and explained:
+
+| Oracle | Agrees | Differs | The differences |
+|---|---|---|---|
+| CPython `fnmatch` | 1,911,520 | 159 | all `^`-negation, which `fnmatch` does not implement; all 159 confirmed correct by bash |
+| bash 5.2 | 730,167 of 730,236 (no-`^` alphabet) | 69 | all unterminated-`[` at a range-end position; all 69 confirmed correct by `fnmatch` |
+
+The bash divergence is worth recording so nobody "fixes" it: bash falls back to
+a literal `[` only when its scanner runs out of pattern at a *member* position,
+and hard-fails when it runs out at a *range-end* position — so `[-` and `[a-b-`
+match themselves but `[a-` and `[ab-` do not. POSIX 2.13.1 is explicit
+("Otherwise, the open bracket shall be treated as an ordinary character") and
+CPython agrees with us, not with bash.
+
+**Lesson worth keeping.** Two implementations of the same user-facing concept
+are not redundant — they are a *disagreement waiting to be discovered by a
+user*, and neither one's test suite can see it, because each is tested only
+against itself. The differential is what makes the disagreement visible, and it
+needs a third-party oracle: had the two been compared only to each other, all
+646 differences would have looked like a coin-flip over which was right.
+
+---
+
+## `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING` (lane C, 2026-08-26) — **mostly fixed 2026-08-26: the decoder exists and the wallpaper and the image viewer use it; explorer thumbnails do not yet**
+
+**In short (update):** there is a PNG decoder now — `gui/imagecodec`, a
+dependency-free `no_std` crate that turns a `.png` on disk into the exact
+`0xAARRGGBB` pixels the compositor stores. The missing link in the table below
+is therefore no longer missing. Two of the callers are wired to it: a wallpaper
+the user picks appears, and the image viewer shows the photograph you opened
+instead of a grey checkerboard. What remains is `apps/explorer`'s thumbnails,
+and the image viewer's own filmstrip, both of which need a bounded scheduler for
+decoding many files at once. The entry stays open until they are.
+
+**What was built.**
+
+| | |
+|---|---|
+| Crate | `gui/imagecodec` — `no_std` + `alloc`, zero dependencies |
+| Coverage | PNG (RFC 2083) in full: all five colour types, bit depths 1/2/4/8/16, `PLTE`, `tRNS`, all five scanline filters, Adam7 interlacing |
+| Also written | `imagecodec::inflate` — DEFLATE (RFC 1951) and zlib (RFC 1950) from scratch, because PNG pixel data is a zlib stream. See `requests/c-a-two-inflates.md` for why this is a *second* copy and what it would take to have one |
+| Not covered | JPEG (the next thing this crate should grow); colour management (`gAMA`/`cHRM`/`iCCP`/`sRGB` are parsed past, not applied); APNG animation (decodes to the first frame, as the APNG spec requires of a decoder that does not animate) |
+| Output contract | densely packed `0xAARRGGBB`, **straight** alpha — matching `BufferFormat::Argb8888` and the compositor's `blend_pixel`, so no conversion pass stands between a file and a screen |
+| Safety | nothing panics for any input; nothing is allocated on the strength of a header field — `Limits` is checked against the header *before* the pixel buffer exists, and the decompressor is given the exact output size the header implies |
+
+**How it is known to be right, and not merely self-consistent.** 51 unit tests
+plus a 6-test conformance suite over **15 real PNG files this repository did not
+write** (`gui/imagecodec/tests/data/`, regenerated by `generate.py`). Pillow —
+libpng underneath, the reference implementation — wrote eleven of them and
+ImageMagick wrote the four Adam7 ones, because Pillow silently ignores its own
+`interlace=True`. The expected pixels beside each file are Pillow's *decoder's*
+answer, so no single library both writes a fixture and grades it. Those files
+carry things our own test helpers cannot produce: a filter chosen per row,
+dynamic Huffman tables, and `gAMA`/`cHRM`/`bKGD`/`tIME`/`tEXt` chunks that must
+be skipped. Fourteen of the fifteen matched on the first run; the fifteenth was
+Pillow's `convert()` clipping 16-bit samples rather than reducing their depth —
+a quirk of that API, not a disagreement about PNG, and its raw sample values
+agreed with ours exactly. The suite also truncates every real file at every
+length and flips a bit in every byte of every one, asserting only that nothing
+unwinds.
+
+**What is left.** Wire the remaining caller below to it — `apps/explorer`'s
+thumbnails, and the image viewer's filmstrip, which are the same problem.
+
+**Wired so far — the wallpaper (2026-08-26).**
+`ShellSession::refresh_wallpaper_image` (`gui/desktop/src/session.rs`) runs at
+the top of every `paint_background`, reads the file `WallpaperManager` names,
+decodes it and uploads it under the id the render tree is about to draw. The
+manager itself is untouched and still performs no I/O — that is what keeps its
+two thousand lines of tests runnable with no filesystem — and the session is the
+layer that owns the connection, so that is where the read belongs. Behaviour
+worth knowing:
+
+- It does nothing on all but the first paint after a change: it remembers the
+  `(image id, path)` pair it last acted on, and the id is freshly allocated by
+  every `set_image` and every slideshow step, which is exactly the signal
+  needed. Without that, a full-screen `.png` would be re-read and re-inflated on
+  every mouse click that caused a repaint.
+- A slideshow step **drops the old id before uploading the new one**, so the
+  link's per-connection image budget is never charged for two full-screen
+  pictures at once. Uploading first would make a budget that fits one wallpaper
+  refuse every slide after the first.
+- A file that cannot be read, cannot be decoded, or is refused by the compositor
+  sets `ShellSession::wallpaper_error()` and **does not fail the repaint**: the
+  wallpaper's colour underlay still paints and so does the taskbar. A shell that
+  refused to draw its chrome because a `.png` was corrupt would be strictly
+  worse than a plain background. Every *other* connection error still propagates
+  — a dead socket is not a wallpaper problem.
+- The failed pair is remembered too, so a corrupt wallpaper is attempted once
+  rather than on every repaint.
+- Eight tests in `gui/desktop/src/session/tests.rs` cover it, driven against the
+  offline `oswindow::testing` compositor and reading the sibling crate's real
+  libpng-written fixtures rather than a copy of them.
+
+Nothing yet reads `wallpaper_error()` — no surface shows it to the user. That is
+the next small piece: a notification, or a line in the wallpaper settings panel.
+
+**Wired so far — the image viewer (2026-08-26).**
+`apps/imageviewer` opened every photograph as the same 16-pixel grey
+checkerboard, with a comment in `display_image` reading "in a real
+implementation, this would decode the image". It now decodes the file and
+uploads the pixels. Getting there needed a piece that did not exist for *any*
+application, so this half of the fix is reusable by all ~140 of them:
+
+- **`App::take_images()`** (`gui/window/src/app.rs`) is the route an application
+  now has to the compositor's image store. `App::render` returns a `RenderTree`,
+  and a `RenderTree`'s `RenderCommand::Image` carries an image *id* and never
+  the pixels — so before this, an app implementing `App` had no way to upload at
+  any price, because it never sees a `WindowHandle`. The new method returns an
+  ordered `Vec<ImageChange>` (`Upload { id, width, height, stride, format,
+  bytes }` / `Drop(id)`) which the loop applies **after `render` and before the
+  frame is submitted**, so a picture queued while drawing reaches the compositor
+  ahead of the frame that names it. One ordered list rather than two methods
+  because drop-before-upload ordering is load-bearing (design-decisions.md
+  §557 — a slideshow that uploads first is charged for two full-screen pictures
+  at once). Drained per *frame*, not per event, unlike `take_reloads`; the
+  reasoning for the difference is at both methods and in §558.
+- **The viewer uses one image id for every file it opens** (`VIEWER_IMAGE_ID`),
+  replacing an id hashed from the path. Nothing evicts — the compositor holds
+  what it is given until the id is dropped — so per-path ids meant a session
+  paging through a directory accumulated every picture it had ever shown and was
+  eventually refused. Re-registering an id is a *replacement* in
+  `image_budget_refusal`'s arithmetic, so one id gives the never-hold-two
+  property for free.
+- **Failures are shown, not fatal.** A file that cannot be read or decoded drops
+  the picture, records the reason, and paints the existing "Cannot display this
+  image" state; `main` no longer exits when the file on the command line is
+  broken, so the window opens and the arrow keys carry the user off it.
+  `decode_failure` distinguishes "these bytes are not a picture" from "this is a
+  JPEG and no decoder claims it yet", using the viewer's own signature sniffing.
+- **`parse_png_dimensions` no longer reads two integers out of raw offsets 16
+  and 20** — a truncated download used to report whatever bytes sat there. It
+  delegates to `imagecodec::dimensions`, which validates the IHDR as a chunk.
+- Eight tests under "Getting the picture to the compositor", plus five in
+  `gui/window/src/app.rs` for the strap itself. The viewer's `png_bytes` test
+  fixture was upgraded from a bare 13-byte header to a real encoder (stored
+  deflate blocks, CRC-32, Adler-32), so the tests that already existed now run
+  against a genuine picture instead of a stub.
+
+**Still placeholder inside the viewer.** The filmstrip along the bottom
+(`render_thumbnail_strip`, ~line 1631) still draws a grey `FillRect` per entry
+under a comment reading "would use actual thumbnails". Decoding every file in a
+directory to fill it needs a bounded, off-the-draw-path scheduler and a
+per-thumbnail image id with an eviction rule — the same problem
+`apps/explorer` has, and it should be solved once for both rather than twice.
+The **video** path in `apps/imageviewer/src/video.rs` is also still frameless:
+`imagecodec` decodes stills only, and no MP4/Matroska video decoder exists.
+
+**Still unwired.** `apps/explorer` (thumbnails). It does not depend on
+`oswindow` yet, which is what carries an upload to the compositor, so it needs
+that dependency before it can upload anything it decodes; `thumbs.rs` ~1313 says
+outright that "the caller is responsible for registering the pixel data with the
+compositor under this ID" and no caller does.
+`gui/toolkit/src/grid.rs` takes the caller's id and is correct as it stands.
+
+**Original entry follows.**
+
+**In short:** the desktop can now draw a picture and, as of today, a program in
+another process can send one. Nothing in the tree can turn a `.png` or `.jpg`
+file into the pixels either of those needs. Five places already ask for a
+picture to be drawn and every one of them names an id that no pixels were ever
+stored under — and drawing an unknown id renders *nothing, silently, by design*,
+so a wallpaper the user chose simply does not appear and no error is produced
+anywhere. This is the last missing link in the chain, not a corner case in it.
+
+**The chain, and where it breaks.**
+
+| Link | State |
+|---|---|
+| A file on disk → pixels | **missing — there is no image decoder in the tree** |
+| Pixels → the compositor's store, in-process | `Compositor::register_image` ✅ |
+| Pixels → the compositor's store, from another process | `RequestBody::UploadImage` ✅ (today) |
+| An id → pixels on screen | `RenderCommand::Image`, rasterised ✅ (design-decisions.md → 554) |
+
+**The five callers that already draw one.**
+
+| Site | Where its id comes from |
+|---|---|
+| `gui/desktop/src/wallpaper.rs:993` | `alloc_image_id()` — a counter bumped by `set_image`; the file at `config.image_path` is never opened |
+| `apps/explorer/src/thumbs.rs:1317` | `thumbnail_image_id(thumb)`, a hash of the source path. Its own comment says *"The caller is responsible for registering the pixel data with the compositor under this ID"* — and no caller does |
+| `apps/imageviewer/src/main.rs:1225` | the decoded image — except `Image::load` synthesises a grey checkerboard (`main.rs:194–208`) rather than reading the file |
+| `apps/imageviewer/src/video.rs:1242` | a frame id from the video path, which is likewise not decoded |
+| `gui/toolkit/src/grid.rs:1483,1516` | the caller's, passed through |
+
+**Why it is not simply a bug in each of them.** All five are correct code
+waiting on a dependency that does not exist. Writing five ad-hoc PNG readers
+would be the glob-matcher mistake (design-decisions.md → 555) made five times
+over: one user-facing concept, five implementations, each tested only against
+itself.
+
+**What the proper fix is.** A decoder crate under `gui/` — PNG first, since it
+is the format the icons, the cursors and most wallpapers are in, it is lossless,
+and its spec is small and completely specified (RFC 2083; the compression is
+DEFLATE, RFC 1951). JPEG second, for photographs. Then each of the five call
+sites gains an upload: in-process for the desktop shell, and
+`Connection::upload_image` for the applications once they are converted to
+`oswindow::app`.
+
+**Two things that must be true of it, because the input is untrusted.** A
+wallpaper or a thumbnail is a file the user was handed by someone else, so the
+decoder is an attack surface in the same way the wire decoder is:
+
+1. **It must not panic on malformed input**, on any byte sequence, the way
+   `guiremote`'s `Reader` must not — a corrupt icon in a directory listing must
+   not take down the file manager, let alone the shell.
+2. **It must bound what it will allocate before allocating it.** A PNG header
+   declaring 65535×65535 is 17 GB, and the declaration costs the attacker eight
+   bytes. The compositor's `MAX_BUFFER_PIXELS` bounds what may be *stored*;
+   nothing yet bounds what may be *decoded*.
+
+**How you would notice.** Set a wallpaper in Settings: the desktop stays the
+background colour. Open a folder of photographs in the file manager: every icon
+is the generic file glyph. Neither reports an error.

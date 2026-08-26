@@ -182,6 +182,22 @@ impl<'a> Reader<'a> {
             .to_string())
     }
 
+    /// Read a length-prefixed run of raw bytes, capped at
+    /// [`MAX_IMAGE_BYTES`](crate::MAX_IMAGE_BYTES).
+    ///
+    /// The cap is checked before `take` for the same reason `read_string`
+    /// checks its own first: an absurd length is a protocol violation the
+    /// caller must give up on, whereas `UnexpectedEof` means "read more from
+    /// the transport and try again" — and a client that reported EOF here would
+    /// sit forever waiting for bytes the sender never intends to send.
+    pub(crate) fn read_bytes(&mut self) -> Result<Vec<u8>, DecodeError> {
+        let len = self.read_u32()?;
+        if len > crate::MAX_IMAGE_BYTES {
+            return Err(DecodeError::ImageTooLarge(len));
+        }
+        Ok(self.take(len as usize)?.to_vec())
+    }
+
     pub(crate) fn read_optional_f32(&mut self) -> Result<Option<f32>, DecodeError> {
         let tag = self.read_u8()?;
         match tag {

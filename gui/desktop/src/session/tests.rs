@@ -1114,3 +1114,330 @@ fn a_window_animation_runs_off_the_same_clock() {
         "the animation finished and the clock kept running"
     );
 }
+
+// ---- the wallpaper's pixels ----
+//
+// `WallpaperManager` allocates an image id and emits a `RenderCommand::Image`
+// naming it; the compositor draws whatever bytes are stored under that id, and
+// silently nothing if none are. Until `refresh_wallpaper_image` existed nothing
+// in the tree ever stored any, so every wallpaper set to a file painted the
+// colour underlay and stopped. These tests are about the half that was missing:
+// that the bytes go up, that they go up *once*, and that a file which cannot be
+// read costs a wallpaper rather than a desktop.
+
+/// A real PNG, written by libpng rather than by anything in this tree.
+///
+/// Reached across to the sibling crate's conformance fixtures rather than
+/// copied here, because the property that makes the file worth using is that
+/// *nothing in this repository chose its bytes* — and a copy inherits the bytes
+/// without inheriting the property, then goes stale the first time the fixture
+/// is regenerated. The pictures are 9x7; see `gui/imagecodec/tests/data/`.
+fn fixture(name: &str) -> String {
+    format!(
+        "{}/../imagecodec/tests/data/{name}.png",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// A file with contents of our choosing, for the cases no valid fixture covers.
+///
+/// Named per test rather than randomly: a leftover from a crashed run is
+/// overwritten by the next run, whereas a name that cannot collide leaves one
+/// file per run in the temp directory forever.
+fn scratch(name: &str, bytes: &[u8]) -> String {
+    let mut path = std::env::temp_dir();
+    path.push(format!("slateos-wallpaper-{name}"));
+    std::fs::write(&path, bytes).expect("the temp directory is not writable");
+    path.to_string_lossy().into_owned()
+}
+
+/// Every image upload the session sent, as `(window, image_id, width, height,
+/// stride, byte count)`.
+fn uploads(desktop: &Desktop) -> Vec<(u64, u64, u32, u32, u32, usize)> {
+    desktop
+        .borrow()
+        .seen
+        .iter()
+        .filter_map(|r| match &r.body {
+            RequestBody::UploadImage {
+                window,
+                image_id,
+                width,
+                height,
+                stride,
+                bytes,
+                ..
+            } => Some((*window, *image_id, *width, *height, *stride, bytes.len())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every image release the session sent, as `(window, image_id)`.
+fn drops(desktop: &Desktop) -> Vec<(u64, u64)> {
+    desktop
+        .borrow()
+        .seen
+        .iter()
+        .filter_map(|r| match r.body {
+            RequestBody::DropImage { window, image_id } => Some((window, image_id)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The names of every request the session has sent, in order.
+///
+/// Separate from the typed helpers above because two of these tests are about
+/// *sequence* rather than payload — a drop that arrives after the upload it was
+/// meant to make room for is a correct-looking pair in the wrong order.
+fn order(desktop: &Desktop) -> Vec<&'static str> {
+    desktop.borrow_mut().asked()
+}
+
+#[test]
+fn a_wallpaper_file_is_uploaded_under_the_id_the_render_tree_names() {
+    let (mut session, desktop) = session();
+    let background = session.background().window();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    let id = session.wallpaper_mut().current_image_id();
+    assert_ne!(id, 0, "setting an image did not allocate an id");
+
+    session.paint_background().expect("the harness refused");
+
+    assert_eq!(session.wallpaper_error(), None);
+    assert_eq!(
+        uploads(&desktop),
+        vec![(background, id, 9, 7, 9 * 4, 9 * 7 * 4)],
+        "the wallpaper did not reach the compositor, or reached it padded"
+    );
+}
+
+#[test]
+fn the_picture_goes_up_before_the_frame_that_draws_it() {
+    // Order, not just presence. The compositor draws nothing — silently — for
+    // an id it has no bytes for, so a frame that overtook its upload would be
+    // one blank repaint with no error anywhere to explain it.
+    let (mut session, desktop) = session();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    // Flush whatever `start` drew, so the count below moves only for this paint.
+    let before = desktop.borrow_mut().drawn().len();
+
+    session.paint_background().expect("the harness refused");
+
+    // The upload is a round trip and the frame is not, so at this instant the
+    // compositor has necessarily read and answered the upload, while the frame
+    // is still unread in the pipe. That asymmetry is what makes the order
+    // observable from here at all — hence `seen` and `submitted` read directly,
+    // rather than through the helpers, which absorb the pipe and destroy it.
+    assert!(
+        desktop
+            .borrow()
+            .seen
+            .iter()
+            .any(|r| matches!(r.body, RequestBody::UploadImage { .. })),
+        "the frame was built before the upload reached the compositor"
+    );
+    assert_eq!(
+        desktop.borrow().submitted.len(),
+        before,
+        "the frame overtook its own upload"
+    );
+    assert_eq!(
+        desktop.borrow_mut().drawn().len(),
+        before + 1,
+        "the background surface drew nothing, or drew twice"
+    );
+}
+
+#[test]
+fn painting_the_background_twice_uploads_the_picture_once() {
+    // `paint_background` runs on every repaint, and a repaint happens on every
+    // click that changes anything. Re-reading and re-inflating a 4K wallpaper
+    // per click would be a stutter with no visible cause.
+    let (mut session, desktop) = session();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("rgba8"), crate::wallpaper::ImageFit::Fill);
+
+    session.paint_background().expect("the harness refused");
+    session.paint_background().expect("the harness refused");
+    session.paint_background().expect("the harness refused");
+
+    assert_eq!(uploads(&desktop).len(), 1, "one picture, one upload");
+    assert!(
+        drops(&desktop).is_empty(),
+        "nothing changed and a drop went out"
+    );
+}
+
+#[test]
+fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
+    // The order is the point, not just the pair. A shell that uploaded first
+    // and dropped afterwards would charge the compositor's per-link image
+    // budget for two full-screen pictures at once, so a budget that fits one
+    // wallpaper would refuse every slide after the first.
+    let (mut session, desktop) = session();
+    let background = session.background().window();
+    session.wallpaper_mut().set_slideshow("/pics", 60, false);
+    session
+        .wallpaper_mut()
+        .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
+    let first = session.wallpaper_mut().current_image_id();
+    session.paint_background().expect("the harness refused");
+
+    session.wallpaper_mut().next_wallpaper();
+    let second = session.wallpaper_mut().current_image_id();
+    assert_ne!(first, second, "a slideshow step reused the image id");
+    session.paint_background().expect("the harness refused");
+
+    assert_eq!(drops(&desktop), vec![(background, first)]);
+    let sent = uploads(&desktop);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].1, first);
+    assert_eq!(sent[1].1, second);
+
+    let names = order(&desktop);
+    let dropped = names
+        .iter()
+        .position(|n| *n == "DropImage")
+        .expect("no drop was sent");
+    let second_upload = names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n == "UploadImage")
+        .map(|(i, _)| i)
+        .nth(1)
+        .expect("no second upload was sent");
+    assert!(
+        dropped < second_upload,
+        "the new slide went up while the old one was still charged: {names:?}"
+    );
+}
+
+#[test]
+fn a_wallpaper_that_is_not_there_costs_a_picture_and_not_a_desktop() {
+    // The failure a user actually hits: a config carried over from another
+    // machine, naming a path that does not exist here. The taskbar still has to
+    // draw.
+    let missing = format!(
+        "{}/slateos-wallpaper-nowhere-at-all.png",
+        std::env::temp_dir().display()
+    );
+    // Not merely assumed absent: a leftover from an earlier run under this name
+    // would make the test pass for the wrong reason.
+    let _ = std::fs::remove_file(&missing);
+    let (mut session, desktop) = session();
+    session
+        .wallpaper_mut()
+        .set_image(&missing, crate::wallpaper::ImageFit::Fill);
+    let before = desktop.borrow_mut().drawn().len();
+
+    session
+        .paint_background()
+        .expect("a missing wallpaper failed the whole repaint");
+
+    let why = session.wallpaper_error().expect("no error was recorded");
+    assert!(
+        why.contains("nowhere-at-all.png"),
+        "the error does not say which file: {why}"
+    );
+    assert!(uploads(&desktop).is_empty());
+    assert_eq!(
+        desktop.borrow_mut().drawn().len(),
+        before + 1,
+        "the background surface drew nothing at all"
+    );
+}
+
+#[test]
+fn a_corrupt_wallpaper_is_attempted_once_and_not_on_every_repaint() {
+    let (mut session, desktop) = session();
+    let path = scratch("corrupt.png", b"\x89PNG\r\n\x1a\nand then nonsense");
+    session
+        .wallpaper_mut()
+        .set_image(&path, crate::wallpaper::ImageFit::Fill);
+
+    session
+        .paint_background()
+        .expect("a corrupt wallpaper failed the repaint");
+    let first = session
+        .wallpaper_error()
+        .expect("no error was recorded")
+        .to_owned();
+    session
+        .paint_background()
+        .expect("a corrupt wallpaper failed the repaint");
+
+    assert_eq!(session.wallpaper_error(), Some(first.as_str()));
+    assert!(uploads(&desktop).is_empty());
+    assert!(
+        first.contains("corrupt.png"),
+        "the error does not say which file: {first}"
+    );
+    // A second attempt is not directly observable — a failed read sends no
+    // request — so the proxy is that removing the file entirely between the two
+    // paints changes nothing: a session that went back to disk would report a
+    // *different* reason the second time.
+    std::fs::remove_file(&path).expect("the scratch file vanished");
+    session
+        .paint_background()
+        .expect("a corrupt wallpaper failed the repaint");
+    assert_eq!(
+        session.wallpaper_error(),
+        Some(first.as_str()),
+        "the file was read again on a repaint that changed nothing"
+    );
+}
+
+#[test]
+fn going_back_to_a_solid_colour_gives_the_picture_back() {
+    // An id of zero means the render tree emits no `Image` command at all, so
+    // anything still uploaded is unreachable — and unreachable bytes still
+    // count against the link's budget.
+    let (mut session, desktop) = session();
+    let background = session.background().window();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("palette8_trns"), crate::wallpaper::ImageFit::Fill);
+    let id = session.wallpaper_mut().current_image_id();
+    session.paint_background().expect("the harness refused");
+
+    session
+        .wallpaper_mut()
+        .set_solid_color(guitk::color::Color::rgb(20, 20, 30));
+    session.paint_background().expect("the harness refused");
+
+    assert_eq!(drops(&desktop), vec![(background, id)]);
+    assert_eq!(uploads(&desktop).len(), 1);
+    assert_eq!(session.wallpaper_error(), None);
+}
+
+#[test]
+fn a_compositor_that_refuses_the_picture_still_gets_a_painted_desktop() {
+    // The refusal `RequestBody::UploadImage` is documented to give: a picture
+    // over this link's image budget. Survivable on exactly the same terms as a
+    // corrupt file — the colour underlay paints either way — and distinctly
+    // *not* on the same terms as a dead connection, which propagates.
+    let (mut session, desktop) = session();
+    session
+        .wallpaper_mut()
+        .set_image(&fixture("rgb8"), crate::wallpaper::ImageFit::Fill);
+    desktop.borrow_mut().refuse = Some("image budget exhausted".to_string());
+
+    session
+        .paint_background()
+        .expect("a refused upload failed the whole repaint");
+
+    let why = session
+        .wallpaper_error()
+        .expect("a refusal recorded no error");
+    assert!(
+        why.contains("image budget exhausted"),
+        "the compositor's reason was thrown away: {why}"
+    );
+}

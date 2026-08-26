@@ -41304,7 +41304,7 @@ fn cmd_useracct(args: &str) {
                 // complains about `abc' rather than about a toggle that is
                 // perfectly fine -- a diagnostic naming the wrong operand sends
                 // the reader to the wrong end of their command line.
-                let Some(uid) = required_num::<u64>(parts, 1, "useracct", "autologin", "uid")
+                let Some(uid) = required_num::<u64>(parts, 1, "useracct", "autologin", "a UID")
                 else {
                     return;
                 };
@@ -92385,7 +92385,7 @@ fn cmd_groupmgr(args: &str) {
             let Some(gid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "group id") else {
                 return;
             };
-            let Some(uid) = required_num::<u32>(&parts, 2, "groupmgr", sub, "user id") else {
+            let Some(uid) = required_num::<u32>(&parts, 2, "groupmgr", sub, "a user id") else {
                 return;
             };
             match groupmgr::add_member(gid, uid) {
@@ -92405,7 +92405,7 @@ fn cmd_groupmgr(args: &str) {
             let Some(gid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "group id") else {
                 return;
             };
-            let Some(uid) = required_num::<u32>(&parts, 2, "groupmgr", sub, "user id") else {
+            let Some(uid) = required_num::<u32>(&parts, 2, "groupmgr", sub, "a user id") else {
                 return;
             };
             match groupmgr::remove_member(gid, uid) {
@@ -92423,7 +92423,7 @@ fn cmd_groupmgr(args: &str) {
             // specifically. `groupmgr user 5O0` printed root's group list under
             // a heading naming UID 0, which reads as a correct answer to a
             // question nobody asked.
-            let Some(uid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "user id") else {
+            let Some(uid) = required_num::<u32>(&parts, 1, "groupmgr", sub, "a user id") else {
                 return;
             };
             let groups = groupmgr::groups_for_user(uid);

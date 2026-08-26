@@ -768,8 +768,20 @@ impl<T: Transport> ShellSession<T> {
             // Whole, not just the windows: which desktop is showing arrives
             // in the same frame, and a shell that read the two separately
             // could read them from different frames.
-            if let Some(list) = self.events.desktop() {
-                self.shell.apply_window_list(list);
+            //
+            // The requests are collected rather than sent inside the `if`
+            // because sending borrows `self.events` mutably and the list is a
+            // borrow *of* it. They are what the user's window rules asked for
+            // about windows that arrived in this list: a rule can only be
+            // carried out by asking the compositor, and the shell is the only
+            // thing here holding a connection.
+            let requests = if let Some(list) = self.events.desktop() {
+                self.shell.apply_window_list(list)
+            } else {
+                Vec::new()
+            };
+            for request in requests {
+                self.request(request)?;
             }
             self.dirty = true;
             worked = true;

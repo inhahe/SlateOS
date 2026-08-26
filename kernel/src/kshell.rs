@@ -96294,6 +96294,44 @@ fn cmd_kconsole(args: &str) {
     }
 }
 
+/// Map a signal number as typed at the shell onto a [`signalq::Signal`].
+///
+/// This exists because `send` and `block` each did the mapping themselves and
+/// **did it differently**, which made `signalq block` silently not block. `send`
+/// translated the CPU-exception numbers (`13` → `SegmentFault`) and fell through
+/// to `UserDefined(n)`; `block` skipped the translation entirely and always
+/// built `UserDefined(n)`. Those are not two spellings of one signal:
+/// `Signal::number()` returns `13` for `SegmentFault` but `32 + n` for
+/// `UserDefined(n)`, and the blocked-signal mask is indexed by `number()`. So
+/// `signalq block 1 13` set bit 45 while `signalq send 1 13` tested bit 13 —
+/// the block was recorded against a signal that cannot be sent, the send was
+/// never blocked, and the shell printed `Signal 13 blocked for pid 1` either
+/// way. Every number `send` treats as an exception (0, 3, 4, 6, 13, 14) was
+/// wrong in `block` for the same reason.
+///
+/// One mapping, three callers, so the two cannot drift apart again.
+fn signal_from_number(n: u32) -> crate::fs::signalq::Signal {
+    use crate::fs::signalq::Signal;
+    match n {
+        0 => Signal::DivideError,
+        3 => Signal::Breakpoint,
+        4 => Signal::Overflow,
+        5 => Signal::BoundRange,
+        6 => Signal::InvalidOpcode,
+        7 => Signal::DeviceNotAvail,
+        8 => Signal::DoubleFault,
+        13 => Signal::SegmentFault,
+        14 => Signal::PageFault,
+        16 => Signal::FloatingPoint,
+        17 => Signal::AlignmentCheck,
+        18 => Signal::MachineCheck,
+        // Not an architectural vector, so it is a user-defined signal. The
+        // module numbers those from 32 up, which is why they cannot simply
+        // share the integer with the exception vectors.
+        other => Signal::UserDefined(other),
+    }
+}
+
 /// `signalq` / `sigq` — signal/exception queue.
 fn cmd_signalq(args: &str) {
     use crate::fs::signalq;
@@ -96315,12 +96353,14 @@ fn cmd_signalq(args: &str) {
         }
         "pending" => {
             signalq::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // A guessed pid is quieter here than anywhere else in this command:
+            // `pending` on a process that does not exist returns an empty list,
+            // and the arm below prints "No pending signals for pid 0." That is
+            // a *reassuring* answer to a question that was never asked -- the
+            // one shape of wrong output an operator has no reason to doubt.
+            let Some(pid) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
+            };
             let signals = signalq::pending(pid);
             if signals.is_empty() {
                 shell_println!("No pending signals for pid {}.", pid);
@@ -96338,27 +96378,30 @@ fn cmd_signalq(args: &str) {
         }
         "send" => {
             signalq::init_defaults();
-            let target = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let sig_num = parts
-                .get(2)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let signal = match sig_num {
-                0 => signalq::Signal::DivideError,
-                3 => signalq::Signal::Breakpoint,
-                4 => signalq::Signal::Overflow,
-                6 => signalq::Signal::InvalidOpcode,
-                13 => signalq::Signal::SegmentFault,
-                14 => signalq::Signal::PageFault,
-                _ => signalq::Signal::UserDefined(sig_num),
+            // `send` is the only write in this module that *creates* the record
+            // it writes to -- `deliver`, `block` and `unblock` all return
+            // NotFound for a pid they cannot find, while `send` pushes a new
+            // process entry. That is batch 29's forged receipt with the forging
+            // and the checking one function apart in the same module, and it is
+            // why `signalq send` with no arguments manufactured **pid 0** and
+            // queued it a DivideError -- after which `deliver 0`, which had no
+            // process to find a moment earlier, succeeded.
+            //
+            // The auto-create itself stays: with the seeded table gone there is
+            // no `register` arm and no other way for a process to enter this
+            // accounting, so creating on first signal is the intended entry
+            // point. The guessed key was doing all the damage on its own.
+            let Some(target) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
             };
+            // The guessed 0 did not mean "unspecified": it mapped to
+            // DivideError, a real and alarming fault. A mistyped signal number
+            // filed a divide-by-zero against a process.
+            let Some(sig_num) = required_num::<u32>(&parts, 2, "signalq", sub, "signal number")
+            else {
+                return;
+            };
+            let signal = signal_from_number(sig_num);
             match signalq::send(0, target, signal, 0) {
                 Ok(()) => shell_println!("Signal {} sent to pid {}.", signal.label(), target),
                 Err(e) => {
@@ -96369,12 +96412,13 @@ fn cmd_signalq(args: &str) {
         }
         "deliver" => {
             signalq::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
+            // `deliver` is destructive and unrepeatable: it clears the whole
+            // pending queue and folds the count into `total_delivered`. A
+            // guessed pid did not report the wrong process's backlog, it
+            // *discarded* it, and nothing retracts a delivery.
+            let Some(pid) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
+            };
             match signalq::deliver(pid) {
                 Ok(n) => shell_println!("Delivered {} signals to pid {}.", n, pid),
                 Err(e) => {
@@ -96385,21 +96429,59 @@ fn cmd_signalq(args: &str) {
         }
         "block" => {
             signalq::init_defaults();
-            let pid = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let sig_num = parts
-                .get(2)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let signal = signalq::Signal::UserDefined(sig_num);
+            let Some(pid) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
+            };
+            let Some(sig_num) = required_num::<u32>(&parts, 2, "signalq", sub, "signal number")
+            else {
+                return;
+            };
+            // Was `Signal::UserDefined(sig_num)` unconditionally, which is the
+            // bug `signal_from_number` exists to close: it masked bit 32+n while
+            // `send` tested bit n, so blocking a signal by the number you send
+            // it with did not block it. See the helper's doc comment.
+            let signal = signal_from_number(sig_num);
             match signalq::block(pid, signal) {
-                Ok(()) => shell_println!("Signal {} blocked for pid {}.", sig_num, pid),
+                // Report the signal the module actually masked, not the integer
+                // that was typed -- the old wording was `Signal {sig_num}
+                // blocked`, which is what made the mismatch invisible.
+                Ok(()) => shell_println!(
+                    "Signal {} (#{}) blocked for pid {}.",
+                    signal.label(),
+                    signal.number(),
+                    pid
+                ),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+        // `signalq` had no `unblock` arm, so `signalq::unblock` was reachable
+        // only from the module's own self-test and `blocked_mask` was
+        // **monotonic from the shell**: a signal could be blocked and never
+        // unblocked. That is the fourth batch running in which the subcommand
+        // that was missing is the one that *undoes* -- rqstat's creation
+        // (batch 30), zramstat's discard (batch 31), and now this. The pattern
+        // is not coincidence: these arms were written to demonstrate a feature,
+        // and demonstrating means showing a counter go up.
+        "unblock" => {
+            signalq::init_defaults();
+            let Some(pid) = required_num::<u32>(&parts, 1, "signalq", sub, "pid") else {
+                return;
+            };
+            let Some(sig_num) = required_num::<u32>(&parts, 2, "signalq", sub, "signal number")
+            else {
+                return;
+            };
+            let signal = signal_from_number(sig_num);
+            match signalq::unblock(pid, signal) {
+                Ok(()) => shell_println!(
+                    "Signal {} (#{}) unblocked for pid {}.",
+                    signal.label(),
+                    signal.number(),
+                    pid
+                ),
                 Err(e) => {
                     shell_println!("Error: {:?}", e);
                     set_exit(1);
@@ -96421,8 +96503,12 @@ fn cmd_signalq(args: &str) {
         }
         _ => {
             shell_println!(
-                "Usage: signalq [list|pending <pid>|send <pid> <sig>|deliver <pid>|block <pid> <sig>|stats|test]"
+                "Usage: signalq [list|pending <pid>|send <pid> <sig>|deliver <pid>|block <pid> <sig>|unblock <pid> <sig>|stats|test]"
             );
+            shell_println!(
+                "  <sig> is a vector number: 0 DIV, 3 BP, 4 OF, 5 BR, 6 UD, 7 NM, 8 DF,"
+            );
+            shell_println!("  13 GP, 14 PF, 16 MF, 17 AC, 18 MC; anything else is a user signal.");
             end_help_arm("signalq", sub);
         }
     }

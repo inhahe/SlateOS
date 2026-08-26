@@ -81109,8 +81109,140 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **445 of 800 remain**
+## `A-SIGNALQ-BLOCK-MASKS-A-DIFFERENT-SIGNAL-THAN-SEND-SENDS` (lane A, 2026-08-26) — **fixed 2026-08-26**
 
+**In short:** the kernel shell's `signalq` command can send a signal to a
+process and can block one. Blocking signal 13 did not block signal 13. The
+command said it had, the next `send 1 13` went through anyway, and nothing in
+either message hinted that the two commands disagreed about which signal was
+meant.
+
+`cmd_signalq`'s `send` arm translated the CPU exception vectors by hand — `13`
+→ `SegmentFault`, `14` → `PageFault`, and so on — and fell through to
+`Signal::UserDefined(n)` for anything else. Its `block` arm did no translation
+at all and always built `Signal::UserDefined(sig_num)`. Those are different
+signals, not two spellings of one, because `Signal::number()` returns the
+vector for a named exception but `32 + n` for `UserDefined(n)`, and the
+blocked-signal mask is indexed by `number()`:
+
+| you type | `send` masks/tests | `block` sets |
+|---|---|---|
+| `13` | bit 13 (`SegmentFault`) | bit 45 (`UserDefined(13)`) |
+| `0`  | bit 0 (`DivideError`)   | bit 32 (`UserDefined(0)`) |
+
+So every number `send` recognises as an exception — 0, 3, 4, 6, 13, 14 — was
+blocked at the wrong bit, and the block was recorded against a signal that
+`send` has no way to produce. Both halves fail silently: the block does
+nothing, and the mask accumulates bits for signals nobody can send.
+
+**What made it invisible** was the confirmation message. `block` printed
+`Signal {sig_num} blocked for pid {pid}` using the integer that was *typed*
+rather than the signal that was *masked*, so the output agreed with the
+operator's intent no matter what the module did.
+
+**Fixed** by factoring the mapping into a single `signal_from_number` used by
+`send`, `block` and the new `unblock` arm, so the two cannot drift again, and
+by printing the signal's own label and number in the confirmation instead of
+the raw operand. The mapping was also completed while it was being moved — the
+`send` arm had omitted vectors 5, 7, 8, 16, 17 and 18, which it silently
+turned into user signals.
+
+**Not a regression.** True since `cmd_signalq` was written.
+
+---
+
+## `A-SIGNALQ-INIT-DEFAULTS-SEEDS-SEVEN-DELIVERIES-THAT-NEVER-HAPPENED` (lane A, 2026-08-26) — **open**
+
+**In short:** `signalq` reports how many signals each process has been sent and
+delivered. Before anything runs, it already claims seven deliveries. They are
+made up — written into the table at startup so the command would have something
+to print.
+
+`kernel/src/fs/signalq.rs`, `init_defaults()`: the state is seeded with two
+`ProcessSignalState` entries, pid 1 with `total_delivered: 5` and pid 100 with
+`total_delivered: 2`, plus a global `total_delivered: 7`. Nothing sent those
+signals. `signalq stats` and `signalq list` present them in the same columns,
+and the same formatting, as figures that were actually measured.
+
+**This is a defect the tree has already named and fixed once, elsewhere.**
+`kernel/src/fs/zramstat.rs` carries a doc comment recording that its own seeded
+fixtures were "displayed as if they were real measured compressed-swap usage.
+That demo data was removed; the self-test now builds its own fixtures explicitly
+via the real API." `signalq` is the same module shape with the same seed still
+in place — so the precedent for the fix, and the wording for it, already exist.
+
+**The proper fix** is zramstat's: seed `processes: Vec::new()` with all totals
+at zero, and rebuild the self-test's fixtures through the real API. That is not
+a mechanical edit, which is why it is filed rather than done in the same commit
+as the burn-down batch: `self_test` currently depends on the seed, e.g.
+`unblock(1, Signal::Breakpoint)` at `signalq.rs:359` assumes pid 1 already
+exists. The test must create its own process first — `send` auto-creates its
+target, so a single `send` before the block/unblock steps is enough — and the
+`[1/8]` step should then assert the table is empty after init, the way
+zramstat's does.
+
+**Why it is worth doing rather than tolerating:** every other counter in this
+module is now trustworthy after batch 32, so the seeded seven are the only
+fabricated numbers left in `signalq`'s output — and they sit in `total_delivered`,
+the one column an operator would use to decide whether signal delivery is
+working at all.
+
+---
+
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **439 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (thirty-second batch): `cmd_signalq` (6)
+> cleared — 445 → 439 across 211 → 210 functions. Not pinned by a rung.
+>
+> **In short:** `signalq` tracks signals queued to processes. Where it could not
+> read a number it used **pid 0** and **signal 0**. Two of its six guesses were
+> unlike anything earlier in this burn-down, and fixing the arms surfaced two
+> defects that are not guesses at all (filed separately, above).
+>
+> * **The purest instance of batch 29's rule yet.** `send` is the only write in
+>   this module that *creates* the record it writes to; `deliver`, `block` and
+>   `unblock` all return `NotFound` for a pid they cannot find. The forging and
+>   the checking are one function apart in the same file. `signalq send` with no
+>   arguments manufactured **pid 0** and queued it a `DivideError` — after which
+>   `deliver 0`, which had nothing to find a moment earlier, succeeded.
+>
+>   **The auto-create is not the bug here, and was deliberately left.** Once the
+>   fabricated seed goes (see the entry above) there is no `register` arm and no
+>   other way for a process to enter this accounting, so creating on first
+>   signal is the intended entry point. The guessed key was doing all the damage
+>   by itself — which is a useful sharpening of the rule: *what makes a
+>   create-on-write path dangerous is not that it creates, but that it can be
+>   reached with a key nobody supplied.*
+> * **A guessed default that is not "unspecified" but a specific alarming
+>   fault.** `send`'s `sig_num` fell back to `0`, and `0` maps to `DivideError`.
+>   A mistyped signal number therefore filed a divide-by-zero against a process
+>   rather than recording something obviously blank.
+> * **`pending`'s guess produced a reassuring answer to a question nobody
+>   asked.** `pending` on a nonexistent process returns an empty list, so the
+>   arm printed `No pending signals for pid 0.` — well-formed, calm, and about
+>   the wrong process. `deliver`'s is the opposite and the worst of the six: it
+>   is destructive and unrepeatable, clearing the entire pending queue and
+>   folding the count into `total_delivered`, so a guessed pid did not misreport
+>   a backlog, it *discarded* one.
+>
+> **The missing subcommand was the undo, for the fourth batch running.**
+> `signalq::unblock` was reachable only from the module's own self-test, so
+> `blocked_mask` was monotonic from the shell — a signal could be blocked and
+> never unblocked. With rqstat's creation (batch 30) and zramstat's discard
+> (batch 31), that is three consecutive batches plus this one, which is enough
+> to stop calling it a coincidence:
+>
+> > **The subcommand that is missing is the one that undoes.** These arms were
+> > written to demonstrate a feature, and demonstrating means showing a counter
+> > go up. The operation that brings it back down has no demo value, so it was
+> > never wired — and the column it governs is monotonic by construction, which
+> > looks like data rather than like a gap.
+>
+> This is now a *screen* in its own right, and a cheaper one than batch 29's:
+> for each remaining module, list its `pub fn`s and check every mutator has a
+> shell arm. An unreachable `pub fn` in one of these accounting modules is the
+> signature.
+>
 > **Burn-down log.** 2026-08-26 (thirty-first batch): `cmd_zramstat` (6, plus
 > one uncounted) cleared — 451 → 445 across 212 → 211 functions. Not pinned by
 > a rung; nothing asserts on `zramstat` shell output. Predicted by the batch-29

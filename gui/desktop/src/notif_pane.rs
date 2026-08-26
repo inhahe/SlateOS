@@ -505,6 +505,15 @@ pub struct NotificationPane {
     show_settings: bool,
     /// Animation speed (fraction per second).
     anim_speed: f32,
+    /// How far out the pane was when [`show`](Self::show) or
+    /// [`hide`](Self::hide) last landed it on its destination.
+    ///
+    /// Only [`begin_slide`](Self::begin_slide) reads it, and only to reverse a
+    /// slide from the position the pane was actually drawn at. Kept here rather
+    /// than handed to `begin_slide` as an argument because it is a fact about
+    /// what just happened to this pane, and a caller passing it in would be a
+    /// caller free to pass the wrong one.
+    slide_from: f32,
     /// Height of the screen the pane was last drawn on, or last handed for a
     /// hit test.
     ///
@@ -532,6 +541,7 @@ impl NotificationPane {
             hovered_notif: None,
             show_settings: false,
             anim_speed: 5.0, // complete slide in ~0.2s
+            slide_from: 0.0,
             screen_height: DEFAULT_SCREEN_HEIGHT,
         }
     }
@@ -540,41 +550,97 @@ impl NotificationPane {
     // Public API
     // ========================================================================
 
-    /// Show the pane (begin slide-in animation).
+    /// Open the pane, at once.
+    ///
+    /// **Lands on the destination rather than starting the slide**, which is
+    /// the opposite of what this used to do and is the whole reason the pane
+    /// was unusable. `show` set `SlideIn(0.0)`, and both
+    /// [`render`](Self::render) and [`handle_mouse_event`](Self::handle_mouse_event)
+    /// place the pane at `screen_width - PANE_WIDTH * visibility` — so at
+    /// progress zero it drew entirely off the right edge under a fully
+    /// transparent scrim, and hit-tested there too. A caller with no frame
+    /// clock got a pane that was invisible *and* unclickable, with nothing to
+    /// suggest it had opened.
+    ///
+    /// That is the defect `OverviewState` had and `design-decisions.md` §520
+    /// resolved: a feature must not depend on an animation to be usable,
+    /// because a test, an embedder, or a session with reduced motion turned on
+    /// has no frame to give it. A caller that *does* own a clock calls
+    /// [`begin_slide`](Self::begin_slide) straight after this to play the
+    /// animation, exactly as `ShellSession::begin_overview_fade` does.
     pub fn show(&mut self) {
-        match self.state {
-            PaneState::Hidden => {
-                self.state = PaneState::SlideIn(0.0);
-            }
-            PaneState::SlideOut(p) => {
-                // Reverse: convert remaining slide-out progress to slide-in.
-                self.state = PaneState::SlideIn(1.0 - p);
-            }
-            _ => {}
-        }
+        self.slide_from = self.state.visibility();
+        self.state = PaneState::Visible;
         self.show_settings = false;
     }
 
-    /// Hide the pane (begin slide-out animation).
+    /// Close the pane, at once. See [`show`](Self::show) for why this does not
+    /// start the slide.
+    ///
+    /// Emits [`NotifPaneEvent::Closed`] here rather than when a slide-out
+    /// finishes. "The user closed the pane" is true at the gesture, not a fifth
+    /// of a second later, and a consumer that acts on it — releasing a grab,
+    /// clearing an unread badge — should not be made to wait for an animation
+    /// that may not be running at all.
     pub fn hide(&mut self) {
-        match self.state {
-            PaneState::Visible => {
-                self.state = PaneState::SlideOut(0.0);
-            }
-            PaneState::SlideIn(p) => {
-                // Reverse: convert remaining slide-in progress to slide-out.
-                self.state = PaneState::SlideOut(1.0 - p);
-            }
-            _ => {}
+        if self.state != PaneState::Hidden {
+            self.slide_from = self.state.visibility();
+            self.state = PaneState::Hidden;
+            self.events.push(NotifPaneEvent::Closed);
         }
     }
 
-    /// Toggle visibility.
+    /// Toggle visibility, at once.
     pub fn toggle(&mut self) {
-        match self.state {
-            PaneState::Hidden | PaneState::SlideOut(_) => self.show(),
-            PaneState::Visible | PaneState::SlideIn(_) => self.hide(),
+        if self.state.is_visible() {
+            self.hide();
+        } else {
+            self.show();
         }
+    }
+
+    /// Rewind a just-finished open or close into the slide that would have
+    /// produced it, for a caller that owns a frame clock.
+    ///
+    /// [`show`](Self::show), [`hide`](Self::hide) and [`toggle`](Self::toggle)
+    /// land immediately, so the pane is correct with no clock at all. This
+    /// puts the animation back: call it directly after one of them, then drive
+    /// [`tick`](Self::tick) until [`is_sliding`](Self::is_sliding) goes false.
+    ///
+    /// Note that rewinding a *close* leaves the state `SlideOut`, which still
+    /// reports visible and still hit-tests — that is what makes the closing
+    /// pane stay on screen while it slides away. `Closed` has already been
+    /// emitted by then, so a consumer is not kept waiting on it.
+    ///
+    /// **Rewinds to where the pane actually was, not to zero.** Toggling
+    /// halfway through a slide has to reverse from the position on screen; a
+    /// rewind to `0.0` would snap the pane to fully open and *then* slide it
+    /// out, which is a visible jump in the one case the animation exists to
+    /// smooth. `slide_from` is what the preceding [`show`](Self::show) or
+    /// [`hide`](Self::hide) recorded on its way past.
+    ///
+    /// A no-op mid-slide: a second call must not restart an animation that is
+    /// already playing, or a held key would leave the pane permanently at the
+    /// first frame.
+    pub fn begin_slide(&mut self) {
+        self.state = match self.state {
+            // Already `slide_from` of the way in, so that much of the slide is
+            // done.
+            PaneState::Visible => PaneState::SlideIn(self.slide_from),
+            // `SlideOut`'s progress counts *down* from full visibility, so the
+            // part already played is the part not yet visible.
+            PaneState::Hidden => PaneState::SlideOut(1.0 - self.slide_from),
+            already_moving => already_moving,
+        };
+    }
+
+    /// Whether a slide is playing, and so whether another frame is owed.
+    ///
+    /// The session's `anything_moving` reads this. A moving thing that is not
+    /// named there stops the moment nothing else is moving.
+    #[must_use]
+    pub const fn is_sliding(&self) -> bool {
+        matches!(self.state, PaneState::SlideIn(_) | PaneState::SlideOut(_))
     }
 
     /// Push a new notification into the pane.
@@ -621,8 +687,11 @@ impl NotificationPane {
             PaneState::SlideOut(p) => {
                 let next = (p + step).min(1.0);
                 if next >= 1.0 {
+                    // No `Closed` here: `hide` emitted it when the user asked.
+                    // Emitting it again at the end of the slide would deliver
+                    // the event twice to a session that animates and once to a
+                    // session that does not.
                     self.state = PaneState::Hidden;
-                    self.events.push(NotifPaneEvent::Closed);
                 } else {
                     self.state = PaneState::SlideOut(next);
                 }
@@ -2899,81 +2968,163 @@ mod tests {
         assert_eq!(pane.pane_state(), PaneState::Hidden);
     }
 
+    /// The property that makes the pane usable by a caller with no clock, and
+    /// the one the old `show` broke: after `show`, the pane is *all the way*
+    /// open. At `SlideIn(0.0)` it drew and hit-tested off the right edge of the
+    /// screen, so a session that never ticked showed nothing and consumed
+    /// nothing. See `design-decisions.md` §520.
     #[test]
-    fn show_starts_slide_in() {
+    fn showing_opens_the_pane_the_whole_way_without_a_single_frame() {
         let mut pane = NotificationPane::new();
         pane.show();
-        assert!(matches!(pane.pane_state(), PaneState::SlideIn(_)));
+        assert_eq!(pane.pane_state(), PaneState::Visible);
+        assert!((pane.pane_state().visibility() - 1.0).abs() < f32::EPSILON);
     }
 
+    /// A clock-owning caller gets the animation back by rewinding.
     #[test]
-    fn tick_advances_slide_in() {
+    fn a_caller_with_a_clock_rewinds_the_open_into_a_slide() {
         let mut pane = NotificationPane::new();
         pane.show();
+        pane.begin_slide();
+        assert_eq!(pane.pane_state(), PaneState::SlideIn(0.0));
+        assert!(pane.is_sliding());
+
         pane.tick(0.05); // 5.0 * 0.05 = 0.25
         match pane.pane_state() {
             PaneState::SlideIn(p) => assert!((p - 0.25).abs() < 0.001),
-            other => panic!("Expected SlideIn, got {:?}", other),
+            other => panic!("Expected SlideIn, got {other:?}"),
         }
+    }
+
+    /// A second rewind must not restart the slide — a held key would otherwise
+    /// pin the pane at its first frame for as long as it was held.
+    #[test]
+    fn rewinding_a_slide_that_is_already_playing_does_nothing() {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        pane.begin_slide();
+        pane.tick(0.1);
+        let midway = pane.pane_state();
+        pane.begin_slide();
+        assert_eq!(pane.pane_state(), midway);
     }
 
     #[test]
     fn slide_in_completes_to_visible() {
         let mut pane = NotificationPane::new();
         pane.show();
+        pane.begin_slide();
         pane.tick(1.0); // 5.0 * 1.0 = 5.0, clamped to 1.0
         assert_eq!(pane.pane_state(), PaneState::Visible);
+        assert!(!pane.is_sliding());
     }
 
     #[test]
-    fn hide_from_visible_starts_slide_out() {
+    fn hiding_closes_the_pane_the_whole_way_without_a_single_frame() {
         let mut pane = NotificationPane::new();
-        pane.state = PaneState::Visible;
+        pane.show();
         pane.hide();
-        assert!(matches!(pane.pane_state(), PaneState::SlideOut(_)));
-    }
-
-    #[test]
-    fn slide_out_completes_to_hidden_with_event() {
-        let mut pane = NotificationPane::new();
-        pane.state = PaneState::Visible;
-        pane.hide();
-        pane.tick(1.0); // completes
         assert_eq!(pane.pane_state(), PaneState::Hidden);
-        let events = pane.drain_events();
-        assert!(events.iter().any(|e| matches!(e, NotifPaneEvent::Closed)));
+    }
+
+    /// The closing pane must stay on screen while it slides away, so a rewound
+    /// close still reports visible — and `Closed` has already gone out, so
+    /// nothing is waiting on the animation to finish.
+    #[test]
+    fn a_rewound_close_keeps_drawing_until_the_slide_ends() {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        pane.hide();
+        assert!(
+            pane.drain_events()
+                .iter()
+                .any(|e| matches!(e, NotifPaneEvent::Closed)),
+            "Closed is emitted at the gesture, not at the end of the slide"
+        );
+
+        pane.begin_slide();
+        assert_eq!(pane.pane_state(), PaneState::SlideOut(0.0));
+        assert!((pane.pane_state().visibility() - 1.0).abs() < f32::EPSILON);
+
+        pane.tick(1.0);
+        assert_eq!(pane.pane_state(), PaneState::Hidden);
+        assert!((pane.pane_state().visibility()).abs() < f32::EPSILON);
+    }
+
+    /// Whether the session animates or not, the user closing the pane must
+    /// produce exactly one `Closed`.
+    #[test]
+    fn closing_announces_itself_exactly_once_either_way() {
+        for animate in [false, true] {
+            let mut pane = NotificationPane::new();
+            pane.show();
+            let _ = pane.drain_events();
+
+            pane.hide();
+            if animate {
+                pane.begin_slide();
+                pane.tick(1.0);
+            }
+            let closed = pane
+                .drain_events()
+                .iter()
+                .filter(|e| matches!(e, NotifPaneEvent::Closed))
+                .count();
+            assert_eq!(closed, 1, "animate = {animate}");
+        }
+    }
+
+    /// Hiding an already-hidden pane is not a close, so it announces nothing.
+    #[test]
+    fn hiding_a_pane_that_was_never_open_announces_nothing() {
+        let mut pane = NotificationPane::new();
+        pane.hide();
+        assert!(
+            !pane
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, NotifPaneEvent::Closed))
+        );
     }
 
     #[test]
     fn toggle_from_hidden_shows() {
         let mut pane = NotificationPane::new();
         pane.toggle();
-        assert!(matches!(pane.pane_state(), PaneState::SlideIn(_)));
+        assert_eq!(pane.pane_state(), PaneState::Visible);
     }
 
     #[test]
     fn toggle_from_visible_hides() {
         let mut pane = NotificationPane::new();
-        pane.state = PaneState::Visible;
+        pane.show();
         pane.toggle();
-        assert!(matches!(pane.pane_state(), PaneState::SlideOut(_)));
+        assert_eq!(pane.pane_state(), PaneState::Hidden);
     }
 
+    /// Toggling halfway through a slide reverses from where the pane is, not
+    /// from the end it was heading for. Rewinding to zero instead would snap
+    /// the pane fully open and then slide it out — a visible jump in exactly
+    /// the case the animation exists to smooth.
     #[test]
-    fn reverse_slide_in_to_slide_out() {
+    fn a_slide_reversed_midway_resumes_from_the_position_on_screen() {
         let mut pane = NotificationPane::new();
         pane.show();
+        pane.begin_slide();
         pane.tick(0.1); // progress = 0.5
-        let progress_before = match pane.pane_state() {
-            PaneState::SlideIn(p) => p,
-            _ => panic!("expected SlideIn"),
-        };
-        pane.hide(); // should reverse
+        let visible_before = pane.pane_state().visibility();
+        assert!((visible_before - 0.5).abs() < 0.001);
+
+        pane.hide();
+        pane.begin_slide();
+        assert!(
+            (pane.pane_state().visibility() - visible_before).abs() < 0.001,
+            "the pane must not jump when the slide reverses"
+        );
         match pane.pane_state() {
-            PaneState::SlideOut(p) => {
-                assert!((p - (1.0 - progress_before)).abs() < 0.001);
-            }
-            other => panic!("Expected SlideOut, got {:?}", other),
+            PaneState::SlideOut(p) => assert!((p - 0.5).abs() < 0.001),
+            other => panic!("Expected SlideOut, got {other:?}"),
         }
     }
 
@@ -2992,7 +3143,7 @@ mod tests {
     #[test]
     fn escape_key_hides_pane() {
         let mut pane = NotificationPane::new();
-        pane.state = PaneState::Visible;
+        pane.show();
         let event = KeyEvent {
             key: Key::Escape,
             pressed: true,
@@ -3001,7 +3152,34 @@ mod tests {
         };
         let result = pane.handle_key_event(&event);
         assert_eq!(result, EventResult::Consumed);
+        // Escape closes the pane outright, exactly as `hide` does: a session
+        // with no frame clock must not be left with a pane that is still on
+        // screen because nothing ever advanced the slide.
+        assert_eq!(pane.pane_state(), PaneState::Hidden);
+        assert!(!pane.pane_state().is_visible());
+        assert!(
+            pane.drain_events()
+                .iter()
+                .any(|e| matches!(e, NotifPaneEvent::Closed)),
+            "escape is a close gesture and must announce itself like one"
+        );
+    }
+
+    #[test]
+    fn escape_can_be_rewound_into_a_slide_by_a_caller_with_a_clock() {
+        let mut pane = NotificationPane::new();
+        pane.show();
+        let event = KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        };
+        assert_eq!(pane.handle_key_event(&event), EventResult::Consumed);
+        pane.begin_slide();
         assert!(matches!(pane.pane_state(), PaneState::SlideOut(_)));
+        // Still drawn, because the slide has not played yet.
+        assert!(pane.pane_state().visibility() > 0.0);
     }
 
     #[test]

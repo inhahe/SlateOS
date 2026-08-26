@@ -65,7 +65,6 @@ cmd_devfreq 5
 cmd_dictation 1
 cmd_directio 3
 cmd_diskhealth 1
-cmd_diskquota 7
 cmd_diskstat 4
 cmd_display 3
 cmd_displayarrange 4

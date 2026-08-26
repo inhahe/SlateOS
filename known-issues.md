@@ -81109,7 +81109,64 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **515 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **508 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-first batch): `cmd_diskquota` (7)
+> cleared — 515 → 508 across 222 → 221 functions. Pinned by
+> `kshell::self_test` rung 89.
+>
+> **The first batch where the same guessed constant is wrong in two opposite
+> directions inside one function.** Every previous entry could state a single
+> bias: `cputhr` always guessed the *reassuring* value, `cgiostat` always
+> guessed the *inverting* one. `diskquota` substituted `0` for any unreadable
+> number, and `0` is an extreme of this operand's range at **both** ends — as a
+> *limit* it is the strictest value there is, as a *request* it is the emptiest.
+>
+> | Typed | `0` stood in for | What it means there | Result |
+> |---|---|---|---|
+> | `diskquota set alice user 100 2O0` | the **hard limit** | the strictest possible | alice cannot write one byte |
+> | `diskquota check alice user 5OO` | the **size asked about** | the emptiest possible | `ALLOWED` — to a question nobody asked |
+> | `diskquota update alice user 1O` | the **byte delta** | the identity | usage silently stops tracking reality |
+>
+> So the guess is not biased toward safety, and not biased toward permissiveness
+> either. It is biased toward **whatever the surrounding code happens to make
+> `0` mean** — which the shell never considered, because it was not choosing a
+> value at all, only filling a hole.
+>
+> **Why the `set` case is a lockout and not merely a wrong number.**
+> `QuotaEntry::status` asks `bytes_used >= hard_limit_bytes`, so a hard limit of
+> zero reports `HardExceeded` on an entry storing *nothing* — zero is not less
+> than zero. `check_quota` asks `new_usage > hard_limit_bytes`, so every write
+> of a single byte is denied. What completes it is the state being replaced:
+> `check_quota` returns `Ok(true)` for a name with **no entry at all**. One
+> mistyped character therefore moved a user from *unrestricted* to *cannot write
+> one byte*, and reported it as a quota successfully set. Rung 89 pins this
+> directly — after a refused `set`, `diskquota check` must still answer for an
+> unquotaed name, proving the refusal left nothing half-configured.
+>
+> **The honest mitigation, recorded because the last three entries earned the
+> habit.** Unlike `cputhr temp` — where the guess wrote back the value already
+> in the field, leaving the state byte-for-byte unchanged — `diskquota set`
+> echoes the guess in its success line: `soft=100 hard=0`. A reader who checks
+> the numbers can see it. The defect is that nothing *makes* them look, and the
+> line's grammar asserts success.
+>
+> **`update`'s deltas are `i64`, deliberately, not by default.** Freeing space
+> is a negative delta, so reaching for `u64` here would refuse exactly the
+> arguments that are correct — the point made in `required_num`'s own doc
+> comment. Rung 89 asserts `diskquota update … -50` still succeeds, so a later
+> "tightening" that swallows the minus sign fails the build.
+>
+> **§607 holds:** `update`'s synopsis brackets `[file_delta]`, so an omitted
+> file delta still means zero; only a word that is present and unreadable is
+> refused.
+>
+> **Scope note.** The `files` arm's two sites are fixed on the same terms, but
+> their damage is *latent*: nothing in the tree reads `soft_limit_files` or
+> `hard_limit_files`, so a guessed file limit of zero locks nobody out today. It
+> becomes the same lockout as `set` the moment that enforcement is written,
+> which is the argument for refusing the word now rather than when it bites. See
+> `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.
 
 > **Burn-down log.** 2026-08-26 (twentieth batch): `cmd_shmem` (7) cleared —
 > 522 → 515 across 223 → 222 functions. Pinned by `kshell::self_test` rung 88.

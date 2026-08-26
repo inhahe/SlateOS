@@ -18561,6 +18561,115 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "bare `shmem` is output, not a complaint");
     }
 
+    serial_println!(
+        "  kshell::self_test 89: one guessed zero was the strictest limit in one arm and the \
+         emptiest question in another"
+    );
+    // `diskquota` is the first batch where the same guessed constant is wrong in
+    // two opposite directions inside one function. `0` was substituted for any
+    // unreadable number, and `0` is an extreme of this operand's range at both
+    // ends: as a *limit* it is the strictest one there is, and as a *request* it
+    // is the emptiest. So `set` locked the user out and `check` cleared them,
+    // and both printed a success line.
+    {
+        // `with_state` answers `NotSupported` until `init_defaults` has run, and
+        // `init_defaults` returns early when state exists, so this is safe to
+        // repeat and cannot disturb an earlier rung.
+        let _ = capture_command("diskquota init");
+
+        // Two numeric operands in adjacent positions: each is now named on its
+        // own, so which of the two was mistyped is part of the answer.
+        let out = capture_command("diskquota set zzrung89 user 1O0 200");
+        assert_output_contains(
+            "an unreadable soft limit is named as the soft limit",
+            &out,
+            b"`1O0' is not a soft limit in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable soft limit errors");
+
+        let out = capture_command("diskquota set zzrung89 user 100 2O0");
+        assert_output_contains(
+            "and an unreadable hard limit beside it is named as the hard limit",
+            &out,
+            b"`2O0' is not a hard limit in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable hard limit errors");
+
+        // This is the assertion that pins the severity. `check_quota` answers
+        // `Ok(true)` for a name it has no entry for, so an unquotaed user may
+        // write freely — and that is precisely the state the old guessed
+        // `hard = 0` replaced with a total lockout. Refusing the word has to
+        // leave the name *unrestricted*, not half-configured.
+        let out = capture_command("diskquota check zzrung89 user 4096");
+        assert_output_contains(
+            "a refused `set' stores no quota, so the name is still unrestricted",
+            &out,
+            b"write of 4096 bytes",
+        );
+        assert_eq!(last_exit(), 0, "checking a name with no quota succeeds");
+
+        // The control: the same line with both numbers spelled correctly sets
+        // the quota, so the two refusals above cannot be passing by having
+        // broken `set`.
+        let out = capture_command("diskquota set zzrung89 user 100 200");
+        assert_output_contains(
+            "while a readable pair sets both limits",
+            &out,
+            b"soft=100 hard=200",
+        );
+        assert_eq!(last_exit(), 0, "`diskquota set' succeeds");
+
+        // The other direction. `check` is asked *before* a write, so answering
+        // the zero-byte question with the reassuring word is the worse of the
+        // two even though it changes no state.
+        let out = capture_command("diskquota check zzrung89 user 5OO");
+        assert_output_contains(
+            "an unreadable size is refused, not answered as a question about zero bytes",
+            &out,
+            b"`5OO' is not a size in bytes",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable size errors");
+
+        let out = capture_command("diskquota update zzrung89 user 1O");
+        assert_output_contains(
+            "an unreadable byte delta is named",
+            &out,
+            b"`1O' is not a byte delta",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable byte delta errors");
+
+        // The deltas are `i64` on purpose: freeing space is a negative delta, so
+        // a refusal that swallowed the minus sign would refuse correct input.
+        let out = capture_command("diskquota update zzrung89 user -50");
+        assert_output_contains(
+            "while a negative delta is a release of space, not a typo",
+            &out,
+            b"bytes=-50",
+        );
+        assert_eq!(last_exit(), 0, "a negative byte delta succeeds");
+
+        // §607: the synopsis brackets `[file_delta]`, so omitting it keeps
+        // meaning zero. Only a word that is present and unreadable is refused.
+        let out = capture_command("diskquota update zzrung89 user 2048");
+        assert_output_contains(
+            "an omitted file delta keeps its documented default",
+            &out,
+            b"files=+0",
+        );
+        assert_eq!(last_exit(), 0, "an omitted file delta succeeds");
+
+        let out = capture_command("diskquota update zzrung89 user 2048 3o");
+        assert_output_contains(
+            "but a present, unreadable one is refused rather than defaulted",
+            &out,
+            b"`3o' is not a file delta",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable file delta errors");
+
+        // Leave the table as this rung found it, so rung order cannot matter.
+        let _ = capture_command("diskquota remove zzrung89 user");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -84576,8 +84685,29 @@ fn cmd_diskquota(args: &str) {
             } else {
                 diskquota::QuotaTarget::User
             };
-            let soft = parts[3].parse::<u64>().unwrap_or(0);
-            let hard = parts[4].parse::<u64>().unwrap_or(0);
+            // `0` is the most punitive value this operand has, and it was the
+            // one substituted for any word that would not parse. `QuotaEntry::
+            // status` asks `bytes_used >= hard_limit_bytes`, so a hard limit of
+            // zero reports `HardExceeded` on an entry that has stored *nothing*
+            // — zero is not less than zero — and `check_quota` asks
+            // `new_usage > hard_limit_bytes`, so every write of a single byte
+            // is denied.
+            //
+            // What makes it a lockout rather than merely a wrong number is the
+            // state it replaces: `check_quota` returns `Ok(true)` for a name
+            // with no entry at all. So `diskquota set alice user 100 2O0` moves
+            // alice from *unrestricted* to *cannot write one byte*, on one
+            // mistyped character, and reports it as a quota successfully set.
+            let Some(soft) =
+                required_num::<u64>(&parts, 3, "diskquota", sub, "soft limit in bytes")
+            else {
+                return;
+            };
+            let Some(hard) =
+                required_num::<u64>(&parts, 4, "diskquota", sub, "hard limit in bytes")
+            else {
+                return;
+            };
             match diskquota::set_quota(name, target, soft, hard) {
                 Ok(id) => shell_println!(
                     "Quota #{} for {} '{}': soft={} hard={}",
@@ -84605,8 +84735,22 @@ fn cmd_diskquota(args: &str) {
             } else {
                 diskquota::QuotaTarget::User
             };
-            let soft = parts[3].parse::<u64>().unwrap_or(0);
-            let hard = parts[4].parse::<u64>().unwrap_or(0);
+            // The same guess as `set`, but its damage is *latent*: nothing in
+            // the tree ever reads `soft_limit_files` or `hard_limit_files`, so
+            // a file limit of zero locks nobody out today. It becomes the same
+            // lockout as `set` the moment that enforcement is written, which is
+            // the reason to refuse the word now rather than when it bites. See
+            // `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.
+            let Some(soft) =
+                required_num::<u64>(&parts, 3, "diskquota", sub, "soft file-count limit")
+            else {
+                return;
+            };
+            let Some(hard) =
+                required_num::<u64>(&parts, 4, "diskquota", sub, "hard file-count limit")
+            else {
+                return;
+            };
             match diskquota::set_file_limits(name, target, soft, hard) {
                 Ok(()) => shell_println!(
                     "File limits for {} '{}': soft={} hard={}",
@@ -84633,7 +84777,21 @@ fn cmd_diskquota(args: &str) {
             } else {
                 diskquota::QuotaTarget::User
             };
-            let bytes = parts[3].parse::<u64>().unwrap_or(0);
+            // The same guessed `0` as `set`, at the *opposite* extreme. Here it
+            // is the emptiest possible request: `check_quota` tests
+            // `bytes_used + bytes > hard_limit_bytes`, so asking about zero
+            // bytes asks whether the user is already over — which for anyone
+            // inside their quota answers `ALLOWED`, unconditionally.
+            //
+            // `check` exists to be asked before a write. Answering the question
+            // nobody asked with the reassuring word is the worst of the two
+            // directions, even though it is the one that changes no state: a
+            // caller who types `diskquota check alice user 5OO` is told the
+            // write is fine, and it is not.
+            let Some(bytes) = required_num::<u64>(&parts, 3, "diskquota", sub, "size in bytes")
+            else {
+                return;
+            };
             match diskquota::check_quota(name, target, bytes) {
                 Ok(allowed) => shell_println!(
                     "{} write of {} bytes: {}",
@@ -84661,11 +84819,28 @@ fn cmd_diskquota(args: &str) {
             } else {
                 diskquota::QuotaTarget::User
             };
-            let bdelta = parts[3].parse::<i64>().unwrap_or(0);
-            let fdelta = parts
-                .get(4)
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0);
+            // Signed, and `i64` rather than a width that "looks safe": these are
+            // deltas, and a release of space is a negative one. `u64` here would
+            // refuse exactly the arguments that are correct.
+            //
+            // The guessed `0` was the identity for both, so a mistyped delta was
+            // a no-op reported as an update — `Updated user 'alice': bytes=+0`.
+            // That is the accounting equivalent of the `check` case: the usage
+            // figure the whole subsystem gates on silently stops tracking
+            // reality, and every later `status`, denial and grace-period start
+            // is computed from a total that is missing whatever this call was
+            // supposed to add.
+            let Some(bdelta) = required_num::<i64>(&parts, 3, "diskquota", sub, "byte delta")
+            else {
+                return;
+            };
+            // Genuinely optional per the synopsis — `[file_delta]` — so an
+            // absent word still means "no file-count change" (§607). An
+            // unreadable one no longer does.
+            let Some(fdelta) = optional_num::<i64>(&parts, 4, "diskquota", sub, "file delta", 0)
+            else {
+                return;
+            };
             match diskquota::update_usage(name, target, bdelta, fdelta) {
                 Ok(()) => shell_println!(
                     "Updated {} '{}': bytes={:+} files={:+}",

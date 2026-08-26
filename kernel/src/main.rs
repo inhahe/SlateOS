@@ -911,6 +911,17 @@ extern "C" fn kernel_main() -> ! {
             // may be corrupt, so halt with a clear diagnostic rather than limp on.
             check_boot_stack_canary();
 
+            // Open the futex accounting table before any futex runs, so that
+            // /proc/futexstat covers the whole boot rather than starting at
+            // whenever someone first typed `futexstat`.  Until now the only
+            // caller of init_defaults() was that kshell handler's lazy init, so
+            // on a system where nobody ran the command the table stayed
+            // uninitialised, every record_* returned NotSupported, and
+            // /proc/futexstat reported zeros for the life of the machine —
+            // indistinguishable from a system with no futex contention.  Same
+            // reasoning, and same idempotence, as the sysuptime init below.
+            fs::futexstat::init_defaults();
+
             // Step 12: Initialize futex subsystem.
             // Futexes enable fast userspace synchronization: the uncontended
             // path is pure atomic CAS (no syscall), the contended path uses
@@ -4399,11 +4410,16 @@ extern "C" fn kernel_main() -> ! {
             // evictions/readahead and derived hit-rate/readahead-rate).  Its
             // init_defaults() previously seeded two fictional devices (sda/nvme0n1) with
             // 600M fabricated hits and a conjured 97.5% hit rate; that demo data was
-            // removed (real devices are wired via register_device + the record_hit/
-            // record_miss/record_eviction/record_readahead functions).  The residue-free
-            // self_test builds its fixtures via the real API with exact assertions
-            // (including hit_rate/readahead_rate) and resets the table afterward, so it
-            // is safe at boot.
+            // removed.  The live numbers now come from a read-time projection of
+            // mm::page_cache (the real file-backed cache behind vfs reads and demand
+            // paging), reported as a reserved "kernel" row -- not from record_hit and
+            // friends, which would put this module's spin lock and a per-device string
+            // compare on the cache's fast path; those remain for a future per-device
+            // source.  The residue-free self_test builds its fixtures via the real API,
+            // asserts the recorded side exactly and the projected side as bounds (the
+            // projected cache is live and can advance mid-test), and clears its fixtures
+            // afterward, so it is safe at boot.  Note this call is also what leaves the
+            // table initialised: nothing else calls pagecache::init_defaults().
             fs::pagecache::self_test();
             // taskio backs /proc/taskio (per-process read/write bytes, syscall counts,
             // cancelled writes, io-wait time, major faults).  Its init_defaults()

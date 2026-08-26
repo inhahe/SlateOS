@@ -597,11 +597,13 @@ pub fn self_test() {
         serial_println!("[taskmon]  11. Enum label methods — OK");
     }
 
-    // Leave NO residue: a diagnostic self-test must not populate the live
-    // /proc/taskmon table with its fixtures (the original test left `testapp`
-    // and `daemon` in STATE).  Reset to the uninitialised state so production
-    // reads report an empty table until proc::spawn / scheduler accounting wire
-    // real task tracking.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     *STATE.lock() = None;
+    init_defaults();
     serial_println!("[taskmon] All 11 self-tests passed.");
 }

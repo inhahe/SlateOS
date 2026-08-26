@@ -5,6 +5,16 @@ edition = "2024"
 description = "SlateOS Notification Daemon — system notification management and display"
 [dependencies]
 guitk = { path = "../toolkit" }
+# The window and its event loop. Without this the daemon was unreachable:
+# `fn main` built a `NotificationDaemon`, installed a quiet-hours schedule on
+# it, and dropped it.
+oswindow = { path = "../window" }
+# The zone the quiet-hours clock is read through. UTC today, explicitly and
+# greppably -- see `set_time_from_utc`. Without a clock at all, the daemon's
+# `current_minutes` sat at 0 forever and the 22:00-07:00 schedule `main`
+# installs read as permanently active, so every non-critical notification was
+# suppressed. See known-issues.md.
+tzrules = { path = "../../tzrules" }
 
 [lints]
 workspace = true

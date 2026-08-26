@@ -81306,7 +81306,128 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 520 of 1940
+## `A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT` (lane A, 2026-08-26) — **fixed**, 0 of 146
+
+**In short:** the kernel has ~430 little modules that each keep a table of
+numbers for `/proc` to print. Each has an `init_defaults()` that opens its
+table, and a `self_test()` that runs at boot to check the module works. The
+self-test *closed the table again when it finished* and nobody opened it back
+up — so for the rest of the boot the module refused every write and `/proc`
+printed zeros. Reading `/proc/cpustat` on a busy machine got you the same
+output as reading it on an idle one.
+
+**Fixed 2026-08-26** in 117 files: the teardown now re-opens the table instead
+of leaving it dead. Pinned by `scripts/check-selftest-reinit.py`. The
+measurement table and module lists below are kept as the record of what the
+defect was, and are no longer a description of the tree.
+
+**The mechanism, exactly.** Each of these modules keeps its data in
+`static STATE: Mutex<Option<State>>`. `init_defaults()` sets it to `Some(...)`;
+every writer goes through a `with_state` helper that returns
+`KernelError::NotSupported` when it is `None`. The self-tests end with:
+
+```rust
+    // Leave NO residue: reset to the uninitialised state ...
+    *STATE.lock() = None;
+```
+
+which is the right *intent* — a diagnostic must not leave its fixtures in the
+live table — but the wrong *end state*. It leaves the table dead rather than
+empty. `init_defaults()` is not idempotent-and-re-called; it is called once, and
+for most of these modules the once is *inside the self-test itself*.
+
+**Measured** (both counts are from a scan of `kernel/src/fs/*.rs` against
+`main.rs` and `kshell.rs`; re-run it before trusting them):
+
+| | modules | what `/proc` shows after boot |
+|---|---|---|
+| null `STATE` at the end of `self_test` | 146 | — |
+| …re-opened at boot in `main.rs` | **4** | live |
+| …opened only by the kshell command's lazy init | **124** | zeros until someone types the command, then live |
+| …opened by *nothing* but their own self-test | **18** | zeros forever; not even the shell can open them |
+
+The 18 that nothing can open: `binfmt`, `blkqueue`, `cpucache`, `cpustat`,
+`inodestat`, `iolatency`, `kprobes`, `mempress`, `migstat`, `netdev`,
+`netsock`, `pidstat`, `pipestat`, `powerstat`, `schedlat`, `sockbuf`,
+`taskstats`, `writeback`.
+
+**Why this is the prerequisite for the other burn-down, not a separate chore.**
+That list is almost exactly the set of category-3 modules named as the
+high-value targets in
+`A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` — the accounting tables a real
+subsystem ought to be feeding. **Wiring a recorder into any of them today would
+be a no-op**: the call would run, `with_state` would return `NotSupported`, and
+the caller (which must discard accounting errors, or statistics could fail a
+real operation) would drop it. The number in `/proc` would not move, and nothing
+would say why. Fix the table's lifetime first, or the recorder work is invisible
+and looks like it did not work.
+
+**How it stayed hidden.** For the same reason as everything else in this family:
+nothing wrote to these tables, so a table that refused writes and a table that
+had no writers produced identical output. The two defects concealed each other.
+It surfaced only when `futexstat` got a real writer and the writes still did not
+appear — see the fix in `fs/futexstat.rs` and `main.rs`.
+
+**The fix that was applied.** Every `self_test` now ends with the clear **and**
+a re-`init_defaults()`, so the table is left empty rather than dead:
+
+```rust
+    *STATE.lock() = None;
+    init_defaults();
+```
+
+Two lines, identical in all 117 sites, and safe because `init_defaults()` opens
+with `if guard.is_some() { return; }` — it is idempotent, so it can never
+double-seed a table.
+
+Do **not** fix it by deleting the reset: the fixtures genuinely must not survive
+into the live table, and rungs like `pagecache`'s "empty after init" depend on
+starting clean.
+
+**Step 2 turned out to be unnecessary, which is the useful finding here.** The
+original plan called for a second pass adding boot-time `init_defaults()` calls
+to `main.rs` for everything `/proc` publishes, on the theory that the 18
+never-opened modules had no boot-time opener. They do: **all 18 already call
+`self_test()` from `main.rs` at boot** — and so do the other 128. The self-test
+*was* the boot-time initialiser all along. It opened the table, exercised it,
+and then switched it off on the way out. So repairing the teardown does the
+whole job, and the entire 146-module family goes live at boot from this one
+change. No `main.rs` edit was needed.
+
+**What the seeded tables do now.** Five of the 117 `init_defaults()` bodies
+genuinely populate rows rather than leaving empty `Vec`s, and each was checked
+individually before trusting the re-call — because re-opening a table that seeds
+*fabricated* rows would publish fake data to `/proc`, which is exactly what the
+"leave no residue" comment was protecting against (that is the real defect in
+`A-SIGNALQ-INIT-DEFAULTS-SEEDS-SEVEN-DELIVERIES-THAT-NEVER-HAPPENED`). None of
+the five do: `cputopo` reads `smp::cpu_count()`/`cpu_topology::cpu_topo()`,
+`devicemgr` reads `pci::scan_bus0()`, `monitors` reads
+`console::framebuffer_info()`, and `pagestat`/`softirq` lay out per-order and
+per-type rows with every counter at zero. All observed or structural; none
+invented. (`battery`, `webcam` and `oomkiller` tripped the first scan only in
+their *comments*, which explain at length why they deliberately seed nothing.)
+
+**The gate:** `scripts/check-selftest-reinit.py`, wired into `boot-test.sh`'s
+`check-*.py` glob. Its baseline is **empty** — the burn-down reached zero in one
+pass, so there is no shrinking backlog to pin, unlike `check-option-refusal.py`.
+
+**Scope it to `self_test`, or it fires on correct code.** The first draft of the
+migration matched on the statement shape alone and would have rewritten
+`viewstate.rs`, whose `*GLOBAL_DEFAULTS.lock() = None;` sits in
+`pub fn clear_global_defaults()` — where `None` is a *meaningful value* ("revert
+to built-in"), not a dead table. Injecting `init_defaults()` there would have
+inverted what a public API does. `net/dhcp.rs` clearing `*PENDING_OFFER.lock()`
+to return its state machine to Idle is the same shape and equally correct. The
+gate therefore only looks inside functions whose name contains `self_test`, and
+the migration script was rewritten to consume the gate's `violations()` rather
+than re-derive the target list — two heuristics for "which resets are wrong" is
+one too many.
+
+**Not a regression.** True of each module since its self-test was written.
+
+---
+
+## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 516 of 1940
 
 **In short:** the kernel has ~430 small modules that each keep a table of numbers
 and print it — how much swap is compressed, which signals a process has blocked,
@@ -81357,6 +81478,14 @@ increasing order of harm:
    exists to count**, while still printing totals of zero as though zero were
    measured.
 
+**Check the table is even open before wiring a recorder into it.** Most of these
+modules' `self_test`s close their `STATE` when they finish and nothing reopens
+it, so a newly-wired `record_*` returns `NotSupported` and is discarded, and the
+number in `/proc` does not move — see
+`A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT`, which lists the 18
+modules nothing can open at all. That list and the high-value targets below are
+nearly the same set, so for most of them it is the first step, not a footnote.
+
 **The proper fix is per-module and is a burn-down, not a patch.** For each
 module, decide which of the two it is: an accounting table a *subsystem* should
 be feeding — in which case wire the call site in the subsystem, which is the
@@ -81371,6 +81500,68 @@ invent an operand they could not read; this one is about operations no command
 offers at all. They keep appearing together because both come from the same
 habit — writing the arm that shows the feature working — but they are counted
 separately and cleared separately.
+
+**If you wire a registrar at boot, check it runs AFTER the self-test.** The
+obvious wiring for a `register_*` mutator is to call it from the owning
+subsystem's `init()`. That is right in principle and silently wrong in most
+cases, because these `self_test`s begin *and end* by resetting their table —
+which destroys rows a real subsystem registered earlier, not just the test's own
+fixtures. `main.rs` line numbers decide it, and they mostly go the wrong way:
+
+| registrar | self-test | result if wired naively |
+|---|---|---|
+| `net::init()` — main.rs:1311 | `fs::netdev::self_test()` — main.rs:4459 | row wiped, table empty for the boot |
+| `numa::init()` — main.rs:6324 | `fs::numastat::self_test()` — main.rs:4185 | survives (registrar runs later) |
+
+So before writing `fs::foo::register_x()` into a subsystem's `init`, grep both
+line numbers in `main.rs`. If the registrar loses, the options are: move the
+call to a later boot step; have the self-test restore rather than wipe (as
+`fs::associations::self_test` already does — it snapshots `stats()` and does not
+reset, which is why `register_defaults()` on the line above it survives); or
+project at read time and register nothing, which is what `netdev` and
+`pagecache` do and is usually best when the subsystem already keeps the numbers.
+This is design-decisions.md §612's accepted liability showing up in the very
+next task; it has not bitten anything yet because nothing has been wired the
+naive way.
+
+**Burn-down log.** Count at the head of this entry is
+`scripts/find-unreachable-mutators.py`'s, not hand arithmetic.
+
+| date | module | 520 → | what changed |
+|---|---|---|---|
+| 2026-08-26 | `pagecache` | 516 (unchanged, and that is the point) | category 3, fixed *without* moving this count. `mm/page_cache.rs` carries the comment "Counters (monitoring; mirror what fs::pagecache exposes for stats)" above its `STAT_HITS`/`STAT_MISSES`/`STAT_EVICTIONS` — the two halves of one intent, never joined, so `/proc/pagecache` reported a 0.00% hit rate while the cache served VFS reads and demand paging. Joined at *read* time (a projected `kernel` row) rather than by calling `record_hit` on the cache's fast path, which would put this module's spin lock and a per-device string compare inside an operation whose purpose is to beat the disk. The four `record_*` stay unreachable and now legitimately so, reserved for a per-device source that does not exist. **Lesson for the metric: it counts functions, but the defect is an unfed table.** Where the subsystem already keeps free counters, projection is the fix and the count will not move. Do not read a flat count as no progress. |
+| 2026-08-26 | `futexstat` | 516 | category 3, the sharpest instance found so far. `procfs.rs` publishes `futexstat::stats()` and `hotspots(10)` under `/proc`, and the `futexstat` shell command prints the same table — while all four of `record_wait` / `record_wake` / `record_timeout` / `record_contention` were unreachable. So `/proc`'s futex hotspot list was permanently empty and its wait/wake/timeout totals permanently zero, on a kernel whose futex implementation works. A reader takes that as *measured* zero contention. Fixed by wiring the four recorders into `kernel/src/ipc/futex.rs` at the real blocking and waking points. |
+| 2026-08-26 | `netdev` | 516 (unchanged, and that is the point) | category 3, the second projection. `/proc/netdev` listed no interfaces and reported `total_rx_bytes: 0` on a kernel that had just completed a DHCP exchange, because all six of `record_rx`/`record_tx`/`record_error`/`record_drop`/`register_iface`/`set_link_state` were unreachable -- while `net::interface` counted every frame in six relaxed atomics that `netstat -i` was already printing. The two halves of one intent, never joined, exactly as with `pagecache`. Joined at *read* time (a projected `kernel` row) rather than by calling `record_rx` per frame, which would put this module's spin lock and a string compare per interface on the path of every packet. The six `record_*`/`register_*` stay unreachable and now legitimately so, reserved for a per-NIC source that does not exist. **New finding while naming the row:** `net::interface`'s counters are not one NIC's -- `net::veth::poll` records into the same atomics, so the total includes frames that never reached the wire. The projected row is therefore named `kernel` and not `eth0`, and the conflation is logged separately as `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`. |
+
+The futexstat fix is worth reading before doing the next category-3 module,
+because it ran into the constraint that shapes all of them: **you usually cannot
+put the accounting call beside the existing counter.** `ipc::stats::futex_*` are
+plain relaxed atomics and every one of their call sites bumps them while
+`FUTEX_TABLE` is held; `fs::futexstat` keeps a `Vec` behind a spin lock, so the
+same placement would take a second lock inside the futex table's critical
+section and invert a lock order (`scripts/check-recursive-locks.py` is the live
+gate for that). The wiring therefore went in as four named `note_*` helpers with
+a module note saying they must only be called from outside the lock, placed at
+the points that are provably outside it: after the enqueue block in
+`futex_wait_bitset` and `futex_wait_bitset_timeout`, after the wake loop in
+`futex_wake_bitset` and `requeue_inner`.
+
+Two smaller judgment calls recorded there, in case a later reader disagrees:
+`requeue_inner` attributes its wake to `addr1` only, because the requeued tasks
+are still blocked (now on `addr2`) and so are not a wake of anything; and the
+`timeout_ns == 0` non-blocking "try" return is not counted as a wait *or* a
+timeout, because it never enqueued and never blocked, so counting it would
+report contention that did not happen.
+
+**Still unwired in that file, deliberately:** `futex_wait_multiple` and the
+priority-inheritance paths (`lock_pi_inner`, `futex_wait_requeue_pi`,
+`futex_cmp_requeue_pi`), whose `ipc::stats::futex_*` sites sit at roughly lines
+461, 630, 2363 and 2666. They are not instrumented because their enclosing lock
+scope was not read closely enough to prove a call would be outside
+`FUTEX_TABLE`, and a wrong answer there is a lock-order inversion rather than a
+wrong number. The consequence while they stay unwired is bounded and known:
+`/proc`'s futex table under-counts PI and multi-wait contention, rather than
+reporting zero for everything.
 
 **Not a regression.** True of each module since it was written.
 
@@ -87364,3 +87555,849 @@ by the time `main` runs the distinction is gone: `/dev/null` on fd 0 looks the
 same whether std put it there or the caller did. Detecting it would require a
 pre-`main` constructor in `.init_array`, which trades a real safety property
 for a corner case no script can reach.
+---
+
+## `C-LOCKSCREEN-HAD-NO-WINDOW-NO-CLOCK-AND-NO-WAY-TO-CHECK-A-PASSWORD` (lane C, 2026-08-26) — ✅ **FIXED** 2026-08-26
+
+**In short:** the lock screen — the program that guards a machine while its
+owner is away — could not be run, could not tell the time, and had nothing that
+could check a password. `fn main` was empty, so the whole file was unreachable.
+The clock was set once, at construction, to a hard-coded 12:00:00 and never
+moved. And the trait it uses to ask "is this the right password?" had exactly
+one implementor, a test one; the only thing a real `main` could have passed was
+"nobody can answer", which the screen correctly treats as *refuse everyone* —
+i.e. a screen that locks a session nothing can ever unlock. All three are fixed.
+
+### What changed
+
+**1. It opens a window.** `impl oswindow::app::App for LockScreen` plus a real
+`main`. `render` takes the granted width and height and writes them into the
+fields every hit test on this screen reads, rather than keeping the 1920×1080 it
+asked for — the first frame goes out before any `Event::Resize`, so a screen
+that trusted its own request would draw the password field in one place and
+accept clicks for it in another. `resizable()` is `false`: a user who could drag
+the corner of a lock screen could drag the desktop out from behind it. An
+`Event::Key` that authorises an unlock returns `Response::Exit`, which is what
+actually dismisses the screen; `take_unlock_request` is collected after *every*
+event, not only after a key, because the flag authorises exactly one unlock and
+one left uncollected is one the next person at the keyboard spends.
+
+**2. The clock is a clock.** `set_time_from_utc(i64)` is pure and assertable;
+`refresh_clock()` is the single impure wall-clock read, called from the
+`Event::Tick` arm and once before the first frame. Same split, for the same
+reason, as the desktop's `clock_string_at` / `current_clock_string`.
+`tick_interval()` is never `None` — one second while only the clock is moving,
+16 ms while the shake animation or the lockout countdown is. One second rather
+than one minute even with seconds hidden: a 60-second timer started at an
+arbitrary moment turns the minute over up to 59 seconds late, and a lock screen
+that is a minute wrong is indistinguishable from a machine that has been sitting
+untouched. Zone is an explicit `Tz::utc()` via `lookup().gmtoff`, which is the
+tree's convention (`rg 'Tz::utc' apps/ gui/` lists every surface that renders an
+instant) and is what makes a real zone a one-line change.
+
+**3. It can check a password, against the system's real stores.** `SystemAuthority`
+wraps `authlib::Authenticator` — `/etc/users.yaml`, `/etc/shadow`, and the shared
+faillock tally, so a failure here counts against a failure at `su`. The screen's
+`AuthOutcome` was already written against `authlib::Outcome`: six variants, same
+meanings, documented in terms of each other, so the translation is an exhaustive
+`match` with no wildcard. A seventh verdict in `authlib` therefore breaks the
+build rather than being silently folded into "rejected".
+
+**4. The user list comes from the same store the authority resolves against**
+(`system_users`), so a name offered on the screen is a name that can be answered
+for. System accounts are filtered by uid, and the filter is a *range* —
+`1000..=60000` — not a floor: `nobody` is conventionally 65534, i.e. **above**
+the range, so the obvious `uid >= 1000` keeps the one account the filter most
+exists to hide. Locked accounts stay listed; hiding them would make an
+administrator's lock look like a deletion.
+
+### The bug this wiring nearly shipped, and the rule that stops it
+
+`LockScreen::submit_password` short-circuits on `!has_password` and returns
+`AuthOutcome::NoPassword` **without asking the authority anything at all**, and
+`unlocks_for` currently accepts that verdict. So `has_password` is not a display
+hint. It is a decision about who gets in.
+
+The natural implementation gets it exactly backwards. `/etc/shadow` is
+root-owned and readable by nobody else, and this screen runs as the logged-in
+user — so `shadow::lookup(...).is_some_and(|e| !e.password_hash.is_empty())`
+answers `false` on every correctly-configured machine, and **the lock screen
+opens on the first Enter.** The failure is silent, it is on the default path,
+and a test suite built on synthetic `UserInfo::new(..., true)` values cannot
+see it, because the field is a *parameter* in every test and a *reading* only
+in production.
+
+So `account_has_password` is fail-closed: only a positive reading that the
+stored entry is empty returns `false`. Unreadable file, unknown user, missing
+store, locked account — all `true`. A passwordless account pays one prompt it
+can answer; an unreadable store pays nothing except that the authority, which
+runs where it *can* read the file, gets asked. `an_unreadable_store_does_not_mean_there_is_no_password`
+drives it end to end through the screen and asserts the Enter is refused.
+
+The store precedence deliberately mirrors `authlib`'s private `resolve` —
+native database first, `shadow(5)` second, and it *stops* at the native database
+once it finds the user, exactly as `resolve` does — so the account this screen
+calls passwordless is the account `authlib` would. The single divergence is the
+final `None`, where `resolve` says "unknown user" and this says "assume a
+password". The policy is stated once, in `record_has_password`, and shared by
+both the by-name lookup and the list walk: two copies of "does this account have
+a password?" would be two copies of a rule that decides who gets in.
+
+### Cost
+
+82 → 100 tests, still under a second. New dependencies: `authlib` and `userdb`
+(both lane B's, both already in the workspace, both build for
+`x86_64-slateos`); `scratchdir` and `posix` as dev-dependencies, the latter so
+the end-to-end test computes its `$6$` entry with the hasher `authlib` will
+recompute it with rather than pasting a literal that keeps passing after the
+hasher has changed. `scripts/check-window-wiring.py` ratcheted 129 → 128.
+
+### What is still owed
+
+- **The screen still reads the credential store itself.** `PasswordAuthority`'s
+  doc says the screen should hold *a connection, not a hash*, precisely because
+  `apps/lockscreen` runs as the logged-in user and is the process most likely to
+  be attacked. `authlib` removes the second copy of the *policy*, which was the
+  dangerous half (design-decisions §329 is three hashers that disagreed about
+  what a stored entry means), but the process still needs read access to the
+  store. The replacement is `logind`'s `AuthenticateSession`, which is written
+  and blocked: it answers `UnknownCaller` to everyone because the kernel gives a
+  service no way to learn its caller's uid. **Trigger:** when
+  `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md` lands, delete
+  `SystemAuthority`'s body in favour of a bus connection. Nothing above the
+  trait moves.
+- **There are now two rate limits.** The screen's own `LockoutTimer` is checked
+  before `authlib`'s faillock tally is consulted, so the screen's thresholds
+  fire first. That is not a regression — it is the behaviour the screen has
+  always had — but it is duplication, and the tally that belongs to the system
+  is the one that should win. Deliberately not changed here: a rework that
+  quietly alters who can unlock a machine is two changes wearing one commit
+  message.
+- **`unlocks_for(NoPassword) == true` is still an open question**, unchanged and
+  untouched by any of the above. See `open-questions.md`.
+
+### The lesson
+
+**A boolean that gates an authentication short-circuit is not a display hint,
+and it must be read fail-closed.** `has_password` looked like presentation — it
+decides whether to draw a password field — and it was also the whole
+authorisation check for one of the six outcomes. The tell is structural and
+worth looking for elsewhere: a field that every test *sets* and only production
+*reads* has no test coverage at all, however many tests mention it.
+
+---
+
+## C-NOTIFICATION-DAEMON-HAD-NO-WINDOW-AND-A-CLOCK-STUCK-AT-MIDNIGHT (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**In short:** the notification daemon — the thing that pops up "battery low",
+"download finished", "new mail" — never opened a window, so none of it ran. And
+underneath that was a worse bug: the daemon has a "quiet hours" feature (don't
+interrupt me between 22:00 and 07:00), and it had no clock. Its idea of the
+current time was fixed at midnight, forever, because the one method that sets
+the time had no caller anywhere in the codebase. Midnight is inside 22:00–07:00,
+so quiet hours were permanently on, and every notification that was not marked
+Critical was silently thrown away. The user would have seen a notification
+system that never notified. Both are fixed: the daemon now opens a window and
+reads the wall clock every second.
+
+### What changed
+
+1. **The window.** `gui/notifications` gained `oswindow` and an
+   `impl oswindow::app::App for NotificationDaemon`. `fn main` used to build a
+   daemon, install a quiet-hours schedule on it, and drop it (`let _ = daemon;`);
+   it now calls `oswindow::app::launch("notifications", &mut daemon)`.
+   `render(&mut self, width, height)` calls `set_viewport(width, height)` before
+   rendering, so the overlay believes the size it is *granted* rather than the
+   1920×1080 it asks for — toasts are placed against the right edge, so a daemon
+   that kept believing in 1920 on an 800-wide screen would draw them off the side
+   *and* hit-test their close buttons there.
+
+2. **The clock.** New `set_time_from_utc(i64)` (pure, assertable) and
+   `refresh_clock()` (reads `SystemTime::now`), mirroring the split the desktop
+   clock and the lock screen already use. The zone is an explicit
+   `tzrules::Tz::utc()` read through `lookup(t).gmtoff`, not `secs % 86_400`, so
+   `rg 'Tz::utc' apps/ gui/` still finds every surface that renders an instant.
+   `rem_euclid`, not `%`, so a pre-1970 instant is a time of day rather than a
+   negative number that would clamp back to midnight — i.e. back into quiet
+   hours, which is the exact failure this is about. `refresh_clock` is called
+   from the `Event::Tick` arm of `on_event` and once more before the first frame,
+   so the daemon never answers a quiet-hours question from its seeded midnight.
+
+3. **The tick cadence.** `tick_interval` is never `None`: 16 ms while a toast is
+   on screen (it animates and ages), one second otherwise. One second and not one
+   minute even though the clock is read in whole minutes — a 60-second timer
+   started at an arbitrary moment turns the minute over up to 59 seconds late, so
+   quiet hours would begin somewhere in the minute *after* 22:00. Returning
+   `None` when the last toast leaves would have been the trap: the daemon would
+   never see 22:00 arrive, and having asked for no more ticks, would never get
+   another chance to.
+
+4. **`Idle` versus `Redraw`.** `handle_event` returns `Option<DaemonAction>`, and
+   an action is *not* the same question as "did the display move". Three events
+   move it without producing one — a tick (toasts age; the centre's "2 minutes
+   ago" labels move with `current_time_ms`), a resize, and a scroll of the centre
+   — and everything else that moves it does return an action. What is left (a
+   mouse move, an unbound key, a focus change) leaves the tree byte-identical, so
+   it maps to `Idle` rather than asking the compositor to redraw the same pixels
+   sixty times a second while the pointer crosses the screen. The condition is
+   sampled *before* the event is handled, because the tick that removes the last
+   toast still has to be drawn — there is a test named for exactly that.
+
+### The bug this nearly kept, and how it hid
+
+`set_time_of_day` was correct, public, documented, and covered: seven tests call
+it. Not one of them was a *product* test — they all set the time and then asked
+about DND, which is the same shape as the lock screen's `has_password` hazard
+recorded above. The tell is the same one and is worth looking for again: **a
+method that only tests call is a method production does not call.** Grep for the
+setter, not the getter.
+
+`scripts/check-tick-wiring.py` did not catch it either, and could not: the daemon
+*does* route `Event::Tick`, straight into `tick(delta_ms)`, which advances the
+monotonic animation clock. There were two clocks here — a monotonic one that was
+wired and a wall-clock one that was not — and a gate that asks "is there a tick
+arm?" sees the first and is satisfied. The gate is not wrong; it measures what it
+says it measures.
+
+### Cost
+
+- 47 → 59 tests in the crate; new deps `oswindow`, `tzrules`.
+- `scripts/check-window-wiring.py` `BASELINE` 128 → 127.
+- Two of the twelve new tests failed on their first run, both usefully: a toast
+  measured immediately after arrival is still off the right edge mid-slide-in
+  (so the size test measures the animation, not the placement), and expiry takes
+  two ticks — one to mark the toast dismissing, one to finish its exit animation.
+
+### What is still owed
+
+- **The daemon has no IPC endpoint.** `handle_request` is the whole service API
+  and nothing calls it in production; notifications can only arrive from inside
+  the process. Wiring it needs the channel-IPC service registration that lane A
+  owns, and is the same blocker as `requests/c-a-*`. The window is a
+  prerequisite, not a substitute.
+- **Quiet hours are UTC**, like every other lane-C clock, because no per-process
+  zone exists (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`). A user whose day is not
+  UTC gets quiet hours at the wrong time of day. That is one fix in one place
+  once the zone exists, and `Tz::utc()` is greppable so the place is findable.
+- **The 22:00–07:00 default is hardcoded in `main`** and cannot be changed
+  without a rebuild. It belongs in the settings store next to the rest of the
+  user's preferences.
+
+### The lesson
+
+**Two clocks in one struct is two clocks to wire, and wiring one of them makes
+the gate green.** `current_time_ms` (monotonic, for animation) and
+`current_minutes` (wall clock, for quiet hours) are different quantities that
+both look like "the time"; the tick arm advanced the first and the second sat at
+its initial value for the life of the process. When a struct holds more than one
+notion of "now", check each one's setter for a production caller separately — a
+passing tick-wiring check tells you about the arm, not about everything the arm
+should be doing.
+
+---
+
+## C-LAUNCHER-HAD-NO-EVENT-LOOP-NO-MOUSE-AND-A-FRECENCY-CLOCK-AT-THE-EPOCH (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**In short:** the app launcher — the Spotlight-style box you type a program's
+name into — never opened a window, so none of it ran. It also had no mouse
+support at all: you could not click a result, only arrow to it. And its ranking
+was broken in a way that would have looked plausible forever: the launcher sorts
+by "frecency" (how often *and* how recently you have launched something), and its
+clock was stuck at 1 January 1970. Every launch was recorded with that timestamp,
+so every program you had ever run counted as "launched seconds ago", permanently
+— the recency half of the ranking did nothing. All three are fixed, and clicking
+a program that will not start now says so instead of silently closing the dialog.
+
+### What changed
+
+1. **The window.** `apps/launcher` gained `oswindow` and an
+   `impl oswindow::app::App for LauncherState`. `fn main` used to build a
+   launcher, call `show()`, render one frame into a `let _`, and return.
+   `handle_key` was correct and had 20 tests; nothing routed a key to it.
+
+2. **A `handle_event`, which did not exist.** Keys go to the existing
+   `handle_key`; `Resize` sets the viewport; `Tick` reads the clock; and mouse
+   events go to a new `handle_mouse`.
+
+3. **The mouse, which did not exist either.** Click a row to launch it, hover a
+   row to select it, click outside the dialog to dismiss it — and click *inside*
+   the dialog's own chrome (the search box, the padding) and nothing happens,
+   which is the case a naive "not on a row means outside" hit-test gets wrong.
+
+4. **`struct Layout`, shared by the renderer and the hit-test.** The row
+   positions are measured once and used by both. Two copies of that arithmetic
+   is how a launcher comes to open the program *above* the one you clicked, and
+   it is a bug that survives review because both copies look right.
+
+5. **The frecency clock.** `set_now` (pure) gained `refresh_now` (reads
+   `SystemTime::now`), called from the `Event::Tick` arm and once before the
+   first frame. Deliberately *not* routed through `tzrules`: `now_secs` is only
+   ever used in differences against stored timestamps, so it is an instant and
+   not a time of day, and dressing it as a wall-clock reading would invite the
+   next reader to display it.
+
+6. **A visible failure path.** `LauncherAction::Launch(path)` now actually spawns
+   the program. On success the window exits; on failure the dialog *stays up*
+   with a red banner naming the path and the reason. Exiting on failure would be
+   the worst of both — the program did not start, and the window that could say
+   so is gone.
+
+### How the tests were wrong before they were right
+
+The first version of the hit-test tests measured each row with `Layout` and then
+hit-tested it with `Layout`, so they agreed no matter how wrong `Layout` was. The
+second version read the row positions out of the **render output** — the
+dialog's own `PushTranslate`, then the 24×24 category icon every row draws — but
+still only checked row *centres*, and a deliberately introduced 8-pixel error in
+`row_at` passed all 51 tests. Rows are 44 pixels tall, so a centre-only assertion
+proves the hit-test correct to ±22 pixels, which is to say it proves nothing
+about the boundary that actually decides which row you clicked.
+
+The version that is committed reads each row's drawn highlight (the one
+`FillRect` a row's height tall, which only the *selected* row emits) and asserts
+the first pixel, the last pixel, and the pixel above the top. Both mutations —
+the 8-pixel offset, and a `Layout` that ignores the error banner's height — now
+fail. **A geometry test that only checks centres is a geometry test that does not
+check geometry.**
+
+### Cost
+
+- 34 → 51 tests in the crate; new dep `oswindow`.
+- `scripts/check-window-wiring.py` `BASELINE` 127 → 126.
+- Five pre-existing `arithmetic_side_effects` warnings in `handle_key`,
+  `update_results` and the renderer fixed while here (`saturating_*`), and the
+  test module gained the defensive-lint waiver every other crate in this tree
+  carries.
+
+### What is still owed
+
+- **The app database is a hardcoded `builtin_app_database()`.** The launcher
+  offers a fixed list rather than reading `.desktop`-equivalent entries from the
+  package store, so a newly installed program is not launchable from it. That
+  needs `pkg`'s installed-program index, which exists; wiring it is its own task.
+- **The launch history is not persisted.** Frecency is now computed against a
+  real clock, and then thrown away when the process exits — which is every time
+  you launch something. Until the history is written somewhere, the recency half
+  still contributes nothing *across* sessions. This is the more interesting half
+  of the frecency fix and is deliberately a separate change.
+- **`spawn_program` uses `std::process::Command`**, matching what
+  `apps/installer` already does. When SlateOS has a session/service manager that
+  owns process launch, this is the one call site to move.
+
+### The lesson
+
+**A frozen clock does not look like a bug; it looks like a preference.** The lock
+screen's clock froze at 12:00 and was obvious the moment anyone looked. This one
+froze at the epoch and produced *plausible* output — a launcher that ranks by
+launch count, which is a perfectly reasonable-looking launcher. Nothing about the
+result says "the clock is broken". That is the third instance of the same defect
+in this lane in two days (lock screen, notification daemon, launcher), and all
+three had the same fingerprint: **a public, documented, well-tested `set_*` for a
+clock, with no production caller.** Grepping for callers of a setter is now the
+first thing to do on any struct that holds a notion of "now".
+
+---
+
+## C-SYSTRAY-HAD-NO-WINDOW-NO-INTERACTIVE-POPUPS-AND-A-DATE-FROZEN-IN-MAY (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**In short:** the system tray — the strip of little icons at the bottom-right
+corner with the clock, the volume, the battery — never opened a window, so none
+of it ran. Everything it draws when you click an icon (the quick-settings panel
+with its six switches, the volume mixer with its sliders, the network panel, the
+calendar, the power menu) was *drawn but dead*: clicking a switch did not flip
+it, dragging a slider did nothing, and the calendar's arrows did not change the
+month. And its clock told the time but not the date — the time of day advanced
+correctly while the date sat on 17 May 2026 for the life of the process, so the
+calendar was permanently stuck on that May. All three are fixed.
+
+### What changed
+
+1. **The window.** `apps/systray` gained `oswindow` and an
+   `impl oswindow::app::App for SystemTray`. `fn main` used to build a tray,
+   render one frame into a `let _`, and return. `handle_click` was correct and
+   had ten tests; nothing routed a click to it.
+
+2. **A `handle_event`, which did not exist.** Mouse presses go to the (renamed
+   and extended) `handle_click_at`; `Move` and `Release` drive slider drags;
+   `Escape` closes the open popup; `Resize` re-anchors the tray to the new
+   bottom-right corner; `Tick` reads the clock once a second.
+
+3. **The popups became interactive.** A click inside a popup used to do exactly
+   one thing — dismiss it. Now the six quick-settings switches flip (with
+   airplane mode turning the radios off and wifi turning airplane mode off), the
+   four sliders (brightness, master volume, and one per application) set
+   themselves to where they were clicked and then *follow the pointer*, the
+   calendar's arrows move the month and its title comes back to today, the
+   network panel's "Network settings" link reports `OpenNetworkSettings`, and
+   every menu item returns the action it names.
+
+4. **A layout struct per popup, shared by the renderer and the hit-test.** Six
+   renderers used to walk a running `y` inline; the hit-test could not have
+   agreed with them because there was nothing to agree with. Each popup now
+   measures itself once into a `…Layout`, and both the renderer and
+   `click_in_popup` read that. Two copies of the same arithmetic is how a click
+   lands on the row above the one you aimed at, and it survives review because
+   both copies look right.
+
+5. **Popup heights fall out of their content** instead of being hardcoded, which
+   fixed two pre-existing clipping bugs nobody had reported: the network popup
+   was a fixed 160px against ~166px of content and clipped its last row, and the
+   calendar was a fixed 280px, which fits five week-rows — a six-row month (like
+   August 2026) drew its last week over the events separator. Quick settings was
+   the opposite, 340px for 305px of content, 35px of dead space.
+
+6. **The clock.** `set_time_from_utc(i64)` (pure, assertable) and
+   `refresh_clock()` (reads `SystemTime::now`) replace the date that never moved.
+   The zone is read explicitly and greppably through `tzrules::Tz::utc()` and
+   `zone.lookup(t).gmtoff` rather than a bare `secs % 86_400`, and the
+   seconds-into-day arithmetic uses `rem_euclid` so that a pre-epoch instant is
+   still a time of day rather than a negative one.
+
+7. **`tick` lost its second copy of the clock.** It now advances only the battery
+   estimate. It used to carry seconds into minutes and minutes into hours and
+   stop there — which is precisely why the failure was invisible: the time
+   *looked* alive. A clock with two writers is a clock that disagrees with
+   itself, so `set_time_from_utc` is now the only one.
+
+### How the tests were written so they could fail
+
+The trap this lane has now fallen into twice is a test that measures a control
+with the same `Layout` the hit-test uses, and therefore agrees with it however
+wrong both are. Here, nothing in the new geometry tests consults `Layout`:
+
+- **Landmarks are read out of the render output.** The popup frame is the
+  `BoxShadow`; the switches are the `FillRect`s exactly `TOGGLE_WIDTH` by
+  `TOGGLE_HEIGHT`; the slider tracks are the `SLIDER_TRACK_HEIGHT`-tall fills in
+  `SURFACE0`; the calendar's grid boundary is the only 1px-tall fill.
+- **Clickable bands are discovered behaviourally**, by clicking a *fresh* tray at
+  a point and diffing the six-switch snapshot.
+  `the_toggle_rows_tile_without_a_gap_or_an_overlap` walks the whole list a pixel
+  at a time and asserts the six bands appear in order, once each, with no dead
+  pixel between them.
+- **Every pill is checked at its top edge, its bottom edge and its middle**, not
+  just its centre — the launcher's 8-pixel error passed a centre-only assertion.
+
+That probe needs one deliberate arrangement to mean anything: it primes the tray
+with both radios already off, because turning airplane mode *on* turns wifi and
+bluetooth off, so on a default tray a click on the airplane row moves three
+switches and the first one that moved is not the one under the pointer. Reading
+the first difference would have named the wrong control.
+
+The probe caught a bug introduced *by this change*: the pill was centred against
+`POPUP_FONT_SIZE` rather than against its own row's height, which put its top
+2.5px above the row rect, so the top sliver of every switch would have toggled
+the switch above it.
+
+Four mutations were run against the committed tests and all four fail: the
+pill's original mis-centring; an 8px offset between the drawn row and the clicked
+row; `CalendarLayout::rows_needed` losing its ceiling (a six-row month laid out
+in five); and `rem_euclid` degraded to `%`. The third is worth recording because
+it initially *survived*: a five-row grid still fits inside its own popup, since
+the sixth row lands in the space reserved for the events section and is merely
+drawn on top of it. Containment was not enough, and the test now asserts that no
+day crosses the rule under the grid.
+
+### Cost
+
+- 36 → 67 tests in the crate; new deps `oswindow` and `tzrules`.
+- `scripts/check-window-wiring.py` `BASELINE` 126 → 125.
+- `#![allow(dead_code)]` removed from the crate. `DateTime::civil` was genuinely
+  unreachable and is deleted; `days_in_month` and `first_weekday_of_month` were
+  about to become tests-only, so `calendar_layout` was re-routed through them via
+  a new `displayed_month()` — production now runs the code the tests cover.
+  `mod palette` keeps a scoped `#[allow(dead_code)]`, because a palette is a
+  table and an unused colour in it is not dead code.
+
+### What is still owed
+
+- **Nothing behind the tray is real.** The switches, sliders and network panel
+  move state inside the process and nothing else: brightness does not reach a
+  backlight, the mixer does not reach the audio server, wifi does not reach a
+  network service. The tray is now a correct *front end* to state that has no
+  back end, which is the same position `apps/diskcleanup` was in before its back
+  end was made real.
+- **`TrayAction::OpenApp` and `OpenNetworkSettings` are returned and dropped.**
+  `main` has nowhere to send them until there is a session bus or a launcher
+  service to ask. They are returned rather than swallowed precisely so that the
+  wiring is a one-line change when there is one.
+- **`PowerAction` is reported, not performed.** Shut down and sign out close the
+  window; restart, sleep and lock do nothing. Performing them needs the service
+  manager, which is lane B's.
+- **The zone is hardcoded to UTC**, like every other clock in this lane, pending
+  the tzdata-ownership question (C-Q8 in `open-questions.md`). It is one call to
+  `tzrules::Tz::utc()` and the only line that changes when that is answered.
+
+### The lesson
+
+**This is the fourth frozen clock in this lane, and the first one that was partly
+working.** The lock screen froze at 12:00, the notification daemon at midnight,
+the launcher at the epoch — all three were stopped dead. This one *ran*: `tick`
+carried seconds into minutes and minutes into hours, so the time of day was
+right, and only the date never moved. A test named `test_tick_advances_time`
+asserted the carry and passed, which is why it survived four months of May. The
+test was not wrong about what it checked; it was structurally blind to the thing
+underneath it that never moved. **When a clock has a carry chain, test the end of
+it** — the assertion that would have caught this is one second either side of
+midnight, and it is now `the_clock_rolls_the_day_over_at_midnight`.
+
+---
+
+## `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR` (lane A, 2026-08-26)
+
+**Status:** OPEN
+
+**In short:** the kernel counts network traffic in one set of counters and
+labels them `eth0`. Traffic between two containers on a virtual cable — which
+never reaches the network card — is added to the same counters. So a machine
+that is busy only between its own containers reports a busy *NIC*, and there is
+no way from the output to tell how much of it, if any, actually went out on the
+wire.
+
+`kernel/src/net/interface.rs` keeps six relaxed atomics — `TX_BYTES`,
+`RX_BYTES`, `TX_PACKETS`, `RX_PACKETS`, `TX_ERRORS`, `RX_DROPS` — and exposes
+them through `stats()`. They are fed from two genuinely different places:
+
+| caller | what it is | what it should count as |
+|---|---|---|
+| `net::mod::poll` / `net::mod::send_frame*` (lines ~110, ~201–239) | frames in and out of the real NIC (virtio-net, e1000 or rtl8139) | the NIC's traffic |
+| `net::veth::poll` (lines 577, 584) | frames drained from a virtual-ethernet endpoint, delivered inside the kernel | a veth pair's traffic |
+
+`netstat -i` then prints `Interface: eth0` above the sum
+(`net/netstat.rs:240`), and `netstat -s` prints the same numbers as "packets
+received" / "packets sent" (lines 365–368). Neither says the total includes
+frames that never touched the wire.
+
+**Why it is not merely cosmetic.** These counters are what an operator uses to
+answer "is the network the bottleneck?" A conflated total answers that question
+wrongly in a specific direction — always *over*-reporting NIC load — and the
+error grows with exactly the workload (containers talking to each other) where
+the NIC is least involved. It also cannot be corrected after the fact, because
+the two contributions are summed at record time and nothing retains the split.
+
+**The proper fix** is per-source counters rather than a flag: give
+`net::interface` a small set of counter groups keyed by source (the NIC, and
+one per veth endpoint or at least a `veth` aggregate), have each recorder name
+its source, and have `stats()` return the NIC's group. `netstat -i` should then
+grow a row per source rather than one row labelled `eth0`. Do **not** fix it by
+removing the `record_rx` calls from `veth::poll` — the veth traffic is real and
+someone will want it; it is the *labelling* that is wrong, and deleting the
+calls would replace an over-count with a silent under-count of the machine's
+actual frame rate.
+
+**Where it bites, beyond netstat.** `fs::netdev` projects these counters into
+`/proc/netdev` as the row named `kernel` — deliberately *not* named `eth0`,
+precisely because of this conflation; see that module's docs. When this is
+fixed, `netdev::kernel_row` should project the NIC group and the name can
+become `eth0` honestly.
+
+**How it was found.** Reading `net::interface` while wiring the `/proc/netdev`
+projection, to decide what the projected row could truthfully be called.
+
+**Not a regression.** True since `veth::poll` was written.
+
+---
+
+## `A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS` (lane A, 2026-08-26)
+
+**Status:** OPEN
+
+**In short:** the `counters` command reports `irq.timer_irqs: 0` on a machine
+whose timer has fired millions of times, and reports `irq.total_interrupts` as a
+number that counts no interrupts at all — only CPU *exceptions* (page faults,
+breakpoints and the like). Neither says so. A reader takes the first as "the
+timer is not firing" and the second as an interrupt rate.
+
+**The mechanism.** `kernel/src/idt.rs` keeps `VECTOR_COUNTS: [AtomicU64; 48]`
+and bumps it from `count_vector(v)`. Every call site is an *exception* handler:
+vectors 0–19, and not even all of those (9 and 15 are unused, 20–31 reserved).
+Nothing ever calls `count_vector` for a hardware vector. But the IDT installs
+plenty of them:
+
+| vector(s) | installed handler | counted? |
+|---|---|---|
+| 0–19 | CPU exception ISRs | yes |
+| 32 | `isr_timer` — APIC timer | **no** |
+| 33–56 | `isr_irq0`..`isr_irq23` — IOAPIC inputs, into `ioapic::handle_device_irq` | **no**, and 48–56 are past the end of the array |
+| 251, 252 | TLB-shootdown IPI, reschedule IPI | **no**, out of range |
+| 255 | APIC spurious | **no**, out of range |
+
+`kernel/src/kcounters.rs:280–290` then publishes
+`irq.total_interrupts = irq_counts.iter().sum()` and
+`irq.timer_irqs = irq_counts[32]`. The first is a sum over a mostly-dead array;
+the second reads slot 32, which nothing writes, so it is a **hard zero for the
+life of the kernel** even though `apic::tick_count()` sitting one module away
+holds the true figure.
+
+**Why it is worse than a missing number.** A zero here is not blank — it is a
+measurement claim. `timer_irqs: 0` is the exact signature an operator would look
+for to diagnose a wedged timer, so the counter is most misleading precisely when
+someone is using it for the thing it is named after. And `total_interrupts` is
+wrong in a direction that flatters the machine: it will read as a quiet system
+under any interrupt load whatsoever.
+
+**Knock-on: `/proc/irqstat` has no source.** `fs::irqstat` is a
+`/proc/interrupts` equivalent — per-line counts, per-CPU totals, spurious counts
+— and all six of its mutators are unreachable (see
+`A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH`). The projection fix that
+worked for `pagecache` and `netdev` cannot be applied here yet, because the
+thing it would project from does not count hardware interrupts either. This
+entry is therefore a prerequisite for that one, not a duplicate of it.
+
+**The proper fix**, in order:
+
+1. Call `count_vector` from the hardware paths: `isr_timer`, `handle_device_irq`
+   (which knows its IRQ number), the two IPI ISRs and `isr_spurious`. One
+   relaxed `fetch_add` per interrupt, which is what the exception paths already
+   pay and is noise beside the ISR itself.
+2. Widen `VECTOR_STATS_SIZE` from 48 to 256 so vectors 48–56, 251, 252 and 255
+   have somewhere to land. At 8 bytes a vector that is 2 KiB of `.bss`, against
+   an array that currently cannot represent a third of the installed handlers.
+3. Point `kcounters`' `timer_irqs` at the now-live slot 32 (cross-check it
+   against `apic::tick_count()` in the self-test — they should agree, and a
+   drift means a missed EOI path), and let `total_interrupts` become true rather
+   than relabelling it.
+4. Only then project `fs::irqstat`'s per-line counts from `idt::vector_counts()`.
+
+**Per-CPU attribution is a separate question** and should not be smuggled into
+step 1. `VECTOR_COUNTS` is a flat global array, so `irqstat::per_cpu()` still
+has no source afterwards. Making it per-CPU would arguably be *faster* (no
+cross-CPU contention on a shared cache line) but it changes an interrupt hot
+path and deserves its own change and its own benchmark.
+
+**How it was found.** Looking for a real counter to project into
+`/proc/irqstat`, after the same search succeeded for `pagecache` and `netdev`.
+
+**Not a regression.** True since the IOAPIC device vectors were installed.
+
+## C-NETMANAGER-HAD-NO-WINDOW-AND-NO-EVENT-HANDLER-AT-ALL (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**In short:** the Network Manager — the program you open to pick a Wi-Fi
+network, set a static IP address, reorder your DNS servers or switch a VPN on —
+never opened a window, so none of it ran. `fn main` was literally `fn main() {}`.
+Worse than the other unwired apps in this batch: those at least had a
+`handle_click` sitting unreachable, whereas netmanager had **no event handler of
+any kind** — eight tabs' worth of buttons, a Wi-Fi list, four editable text
+fields and a DNS priority list existed only as pixels, with nothing anywhere in
+the program that could have turned a click into an action. It now opens a
+window, and every control on all eight tabs works, with a keyboard and a mouse
+wheel. Two real bugs fell out of writing the tests: the Profiles tab hid the
+only button that can create your first profile, and a Wi-Fi selection could
+silently move to a *different* network across a scan, so Connect would have
+joined the wrong one.
+
+### What changed
+
+1. **The window.** `apps/netmanager` gained `oswindow` and an
+   `impl oswindow::app::App for NetManagerApp`, and `fn main` is now
+   `app::launch("netmanager", &mut app)`.
+
+2. **An interaction layer, built from nothing.** `Target` (21 variants) names
+   every control in the program; `activate(Target)` is the one place an action
+   happens; `handle_click`, `handle_key`, `handle_event` route to it. There was
+   no prior version of any of this to extend.
+
+3. **The geometry has exactly one copy, by construction.** The other apps in
+   this batch got a `…Layout` struct measured once and read by both the renderer
+   and the hit-test. That does not scale to netmanager: it is ~1200 lines of
+   running-`y` rendering across eight tabs, and a `Layout` for it would be a
+   second 1200-line transcription of the same arithmetic — which is precisely
+   the failure mode the systray entry above describes, just bigger. Instead the
+   renderer *records* each clickable box as it paints it (`frame.hit(target,
+   rect)`), and the hit-test runs the renderer and reads `Frame::hits` back to
+   front so the topmost control wins. The drawing helpers
+   (`render_button`, `render_mini_button`, `render_toggle_row`,
+   `render_editable_field`) return the rect they drew, so the call site can only
+   register the box that was actually painted. There is no second copy to
+   disagree with.
+
+4. **A keyboard, with a visible caret.** Tab walks the IP/mask/gateway fields,
+   typing lands in the focused one, Backspace deletes, Enter in the DNS box adds
+   the address without reaching for the button, Escape puts the caret away (and,
+   with no caret out, closes the window). The caret is drawn *into the field's
+   text* rather than as a separate command, because the render tree is the only
+   thing a test can see — a focus state that leaves no mark in the output is a
+   focus state no test can assert.
+
+5. **A wheel and a resize.** The sidebar scrolls through
+   `guitk::wheel::Accumulator`, which keeps the fraction of a row a trackpad
+   sends; rounding per event would discard slow scrolling entirely. `render`
+   believes the width and height it is handed and stores them, because the
+   first frame goes out *before* any `Event::Resize` — so `render` is the only
+   place the true size is known on frame one, and a hit-test that trusted the
+   constant would be wrong for exactly one frame at every startup.
+
+### The two product bugs the tests found
+
+- **The Profiles tab hid its own Add button when there were no profiles.** The
+  empty-list branch printed "No profiles" and `return`ed, which skipped the
+  Add-Profile button below it — so the control that creates your first profile
+  was unreachable in precisely the state that needs it. It now falls through.
+  Caught by `add_profile_is_reachable_when_there_are_no_profiles_yet`.
+
+- **A Wi-Fi selection was tracked by list index across a rescan.** `refresh()`
+  rebuilt the network list and merely clamped the stored index into range. A
+  scan reorders the air — signal strengths change, networks appear and vanish —
+  so the surviving index quietly pointed at a *different* network, and Connect
+  would have joined that one. The selection now follows its **SSID**: if the
+  chosen network is no longer on the air, neither is the selection. Caught by
+  `a_wifi_selection_follows_its_network_across_a_scan`, which failed on the
+  first run; the fix went into the production code, not the test.
+
+### How the tests were written so they could fail
+
+136 tests, all green. Nothing in the geometry tests recomputes a position from a
+layout constant — a test that recomputes geometry agrees with the renderer only
+by accident. Instead:
+
+- **`rect_of(app, target)` reads the rect out of the rendered `Frame`**, and
+  `click(app, target)` clicks its centre, so a test that clicks a button clicks
+  wherever the renderer actually put it.
+- **Boundaries are asserted, not assumed.** `Rect::contains` is half-open on
+  both axes, so adjacent rows cannot both claim a boundary pixel;
+  `the_far_edge_of_a_row_belongs_to_the_row_below_it` pins that down by clicking
+  `x + w - 0.5`, never `x + w`.
+- **`no_two_controls_claim_the_same_pixel_on_any_tab`** walks every tab and
+  checks every pair of recorded rects for overlap, which is the assertion that
+  makes "the topmost wins" a design rather than a coincidence.
+- **`render_believes_the_size_it_is_handed_on_the_very_first_frame`** and
+  `a_resize_is_believed_and_the_hit_test_follows_the_window` cover the frame-one
+  case above, which no amount of clicking at the default size would reach.
+
+## C-ARCHIVEMANAGER-HAD-NO-WINDOW-AND-NO-EVENT-HANDLER-AT-ALL (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**In short:** the Archive Manager drew a complete-looking window — toolbar, a
+folder tree down the left, sortable columns, a file list, a progress strip — and
+none of it could be touched. `fn main` was empty, so the program started and
+immediately exited without ever opening a window. Every button existed only for
+the unit tests to call. It now opens a real window and everything in it responds
+to the mouse and the keyboard. What it still cannot do is *read an archive* —
+see the entry below this one.
+
+### What changed
+
+1. **`oswindow` dependency and a real `fn main`.** `apps/archivemanager` now
+   depends on `gui/window` and `main` ends in `app::launch("archivemanager",
+   &mut state)`. `AppState` implements the `App` trait: `title` (which names the
+   open archive), `app_id`, `initial_size`, `on_event`, `render`.
+
+2. **One renderer, which records where it put things.** The eight `render_*`
+   functions used to append to a `Vec<RenderCommand>`; they now take a `&mut
+   Frame`, which is that vector plus a list of `(Target, Rect)` pairs recorded
+   as the drawing happens. `AppState::hit_test` answers a click by *running the
+   renderer* and reading the list back-to-front. There is no second copy of the
+   layout arithmetic for the two to disagree about, which is the failure mode a
+   separate `Layout` struct would have had in a 3,700-line running-`y` renderer.
+
+3. **The hit list is clip-aware.** `Frame::push` watches for `PushClip`/`PopClip`
+   and keeps a clip stack; `Frame::hit` trims each rect to the clip in force and
+   drops it if it falls outside. Without this a row scrolled off the top of the
+   list would still take clicks from the column header painted over it.
+
+4. **Rows are addressed by identity, not by position.** `Target::FileRow` carries
+   the entry's stable `id` and `Target::TreeRow` is resolved through the
+   flattened tree at click time, because both lists reorder under the pointer —
+   the file list when a column header is clicked, the tree when a node is
+   expanded. `re_sorting_does_not_move_the_selection_to_a_different_file` is the
+   test that pins this.
+
+5. **`content_band` is the single copy of the vertical layout.** The height of
+   the file list was computed once in the renderer and again wherever a scroll
+   limit was needed. Those two copies disagreed as soon as the progress strip
+   appeared, which would have let the last rows be scrolled behind it and stay
+   there. `build_frame` now `debug_assert!`s its own `y` against `content_band`
+   rather than recomputing it.
+
+6. **Pre-existing clippy debt cleared.** The crate had 32 `arithmetic_side_effects`
+   / `indexing_slicing` / `slicing` errors that predate this work — unchecked
+   `+= 1` on every counter, `&parts[..parts.len() - 1]`, `self.nav_history[i]`.
+   All are now `saturating_*`/`checked_*`/`get`/`split_last`. The one remaining
+   suppression is on `get_or_create_child`, where every safe `Vec` accessor
+   returns an `Option` and there is no honest `TreeNode` to put in the `None`
+   arm; the index is established by a `push` two lines above.
+
+### Two things the wiring work found and fixed
+
+- **`navigate_back` and `navigate_forward` indexed `nav_history` directly.** A
+  `nav_position` that ever got out of step with the history — which
+  `navigate_to`'s truncate-then-push could produce — would have panicked the
+  program rather than refusing to navigate. Both now read through `get` and
+  return `false` on a miss.
+- **Home and End moved the cursor by `isize::MIN / 2`.** "Move very far" is a
+  worse way to say "go to the first row", and `-isize::MIN` is an overflow that
+  only the `/ 2` was hiding. There is now a `set_cursor(index)` that Home and
+  End name a row with directly.
+
+### How the tests were written so they could fail
+
+142 tests, all green. The 40 new interaction tests find their coordinates by
+rendering and reading the recorded hit boxes back — `centre_of(&state, pred,
+what)` panics rather than skipping if the control it wants was never drawn, so a
+test cannot quietly pass against a program that has no such button. Four
+deliberate mutations were run against the finished suite to check the tests
+actually bite:
+
+| Mutation | Test that caught it |
+|---|---|
+| `Frame::hit` records the untrimmed rect | `a_row_scrolled_off_the_top_is_not_clickable_where_it_used_to_be` |
+| `hit_test` searches front-to-back | `the_tree_arrow_collapses_without_navigating` |
+| `on_event` drops the resize scroll re-clamp | `resizing_updates_the_size_and_reclamps_both_scrolls` |
+| `render` trusts the stored size instead of its argument | `the_first_frame_is_drawn_at_the_size_the_window_gives_it` |
+
+`scripts/check-window-wiring.py` baseline lowered 124 → 123.
+
+## C-ARCHIVEMANAGER-CANNOT-ACTUALLY-READ-AN-ARCHIVE (lane C, 2026-08-26)
+
+**In short:** the Archive Manager can now be clicked, but it has nothing to click
+*on* except a hard-coded sample listing. Pressing Open, Extract All, Extract
+Selected, Add or Test does not read or write a single byte of any file on disk —
+each one just writes "not yet implemented — no archive back end" into the status
+bar. The window, the tree, the sorting and the selection are all real; the
+archive behind them is a fiction.
+
+**Where it lives:** `apps/archivemanager/src/main.rs`, `AppState::run_toolbar`
+(the `other =>` arm) and `AppState::open_entry` (the non-directory branch).
+`create_sample_archive()` is what populates the list at startup.
+
+**What a user sees:** the program opens showing a listing of files that are not
+on their computer, and every button that would touch a real archive politely
+declines. Nothing lies about having succeeded — that was deliberate — but
+nothing works either.
+
+**What the proper fix looks like:** a ZIP reader built on the two crates already
+in the tree, `deflate/` (lane A's inflate implementation, already used by
+`gui/imagecodec`) and `crc32/`. Concretely:
+
+1. Parse the end-of-central-directory record, then the central directory, into
+   `ArchiveEntry` values — the struct already has every field the format
+   carries (`crc32`, `compressed_size`, `method`, `modified`).
+2. `Open` reads a real path and replaces `create_sample_archive()`. This needs a
+   file-picker; `guitk::dialog::FileDialog` exists but has no `handle_click` and
+   no `read_dir`, so embedding it is its own piece of work (see
+   `TD-C-FILEDIALOG-PATHS-ARE-STRINGS…`).
+3. `Test` inflates each entry and compares the CRC-32 it computes against the
+   one in the directory. `ArchiveTestResults` and `TestResult::CrcMismatch`
+   already exist to receive the answer, and `OperationProgress` already exists
+   to report the sweep.
+4. `Extract All` / `Extract Selected` write the inflated bytes out. Paths must
+   be validated against `..` traversal before anything is written — a ZIP is an
+   untrusted input and an entry named `../../etc/passwd` is the oldest bug in
+   the format.
+5. Writing (`Add`, `Delete` against the file rather than the list) needs a
+   deflate *compressor*, which the `deflate/` crate may not have; storing
+   uncompressed (method 0) is a correct first cut if not.
+
+**Filed with lane A:** `requests/c-a-zip-is-trapped-in-the-kernel-binary.md`.
+`kernel/src/fs/zip.rs` is already a complete 799-line ZIP reader *and* writer
+with ZIP64 and a boot self-test -- but it is a module of a binary crate, so
+nothing outside the kernel can depend on it. Writing a second ZIP parser here
+would be the same mistake `requests/c-a-two-inflates.md` documents, with more
+force: a ZIP parser reads untrusted input, so a second copy is a second attack
+surface for `..` traversal, the backwards end-of-central-directory scan and the
+ZIP64 shadow fields. **This entry stays open until that crate exists**, and the
+"proper fix" above is then a matter of calling it rather than writing it.
+
+**Why the window was wired first rather than waiting:** the window and the back end
+fail independently and are tested completely differently — one against rendered
+geometry, the other against archive bytes. This mirrors what was done for
+`apps/diskcleanup`, which was wired first and given a real back end in the
+following commit.

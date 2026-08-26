@@ -529,9 +529,14 @@ pub fn self_test() {
     unpin(PinLocation::Desktop, "rawapp").expect("unpin raw");
     crate::serial_println!("  [9/9] non-UTF-8 exec and icon paths: OK");
 
-    // Back to the uninitialised state a fresh boot has, so the suite does not
-    // leave its reorder and launch counts in a table the user then reads.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     *STATE.lock() = None;
+    init_defaults();
 
     crate::serial_println!("pinnedapps::self_test() — all 9 tests passed");
 }

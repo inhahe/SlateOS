@@ -29,7 +29,11 @@ use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::{Color, Event, KeyEvent, MouseButton, MouseEvent, RenderCommand, RenderTree};
 
+use oswindow::app::Response;
+
 use std::collections::HashMap;
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Catppuccin Mocha theme colors
@@ -543,6 +547,55 @@ impl NotificationDaemon {
     /// Set the current time of day (for DND scheduling).
     pub fn set_time_of_day(&mut self, minutes_from_midnight: u16) {
         self.current_minutes = minutes_from_midnight;
+    }
+
+    /// Set the quiet-hours clock from a Unix instant.
+    ///
+    /// This is the pure half of the clock: it is handed the instant rather
+    /// than reading one, so a test can assert what a given moment means to
+    /// the schedule. [`Self::refresh_clock`] is the impure half.
+    ///
+    /// # Why the daemon needs a clock at all
+    ///
+    /// [`Self::set_time_of_day`] existed, was correct, and had no caller
+    /// anywhere in the tree, so `current_minutes` stayed at its initial `0` —
+    /// midnight — for the life of the process. `main` installs a 22:00–07:00
+    /// quiet-hours window, and midnight is inside it, so
+    /// [`Self::is_dnd_active`] answered `true` forever and
+    /// `should_show_toast` refused every notification that was not Critical.
+    /// A notification daemon that shows no notifications is a daemon that
+    /// looks like it is working: the messages are all in the history, the
+    /// tests all pass, and nothing ever appears on screen.
+    ///
+    /// # The zone
+    ///
+    /// UTC, named explicitly rather than assumed, so that `rg 'Tz::utc'`
+    /// finds every surface that renders an instant when the system gains a
+    /// per-process zone. Going through `lookup(t).gmtoff` rather than
+    /// `secs % 86_400` is what keeps this correct the day that stops being
+    /// UTC — the taskbar clock shipped the latter and read five hours out.
+    pub fn set_time_from_utc(&mut self, utc_secs: i64) {
+        let zone = tzrules::Tz::utc();
+        let local = utc_secs.saturating_add(i64::from(zone.lookup(utc_secs).gmtoff));
+        // `rem_euclid`, not `%`: a pre-1970 instant with `%` gives a negative
+        // remainder, which is not a time of day at all.
+        let minutes_into_day = local.rem_euclid(86_400) / 60;
+        // In `0..=1439` by construction, so the fallback is unreachable; it is
+        // written rather than unwrapped because an unreachable panic in a
+        // daemon is still a panic in a daemon.
+        self.set_time_of_day(u16::try_from(minutes_into_day).unwrap_or(0));
+    }
+
+    /// Read the wall clock and set the quiet-hours time of day from it.
+    ///
+    /// The impure half of the clock. Called on every tick, and once before
+    /// the first frame so the daemon does not spend its first second
+    /// believing it is midnight.
+    pub fn refresh_clock(&mut self) {
+        if let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        {
+            self.set_time_from_utc(i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX));
+        }
     }
 
     /// Update viewport dimensions (e.g., on resize).
@@ -1698,30 +1751,109 @@ pub enum DaemonAction {
 // Entry point
 // ---------------------------------------------------------------------------
 
-fn main() {
-    // The notification daemon runs as a system service. On startup it:
-    // 1. Registers with the compositor for overlay rendering privileges.
-    // 2. Opens an IPC endpoint for receiving notification requests.
-    // 3. Enters the main event loop: processing IPC messages, ticking
-    //    animations, and rendering the overlay each frame.
+/// One animation frame. Toasts slide in, fade out and age against this.
+const ANIMATION_TICK: Duration = Duration::from_millis(16);
 
-    let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+/// The idle cadence. One second, not one minute, even though the only thing
+/// it advances is a clock read in whole minutes: a one-minute timer started at
+/// an arbitrary moment turns the minute over up to 59 seconds late, so quiet
+/// hours would begin somewhere in the minute after 22:00 rather than at it.
+const CLOCK_TICK: Duration = Duration::from_secs(1);
 
-    // Set a default DND schedule (10 PM - 7 AM).
+/// The size the overlay asks for when the compositor has no opinion.
+///
+/// It is a full-screen overlay, so this is a screen; the real size arrives as
+/// the `width`/`height` handed to [`oswindow::app::App::render`], which is
+/// what the daemon actually places from.
+const DEFAULT_VIEWPORT: (u32, u32) = (1920, 1080);
+
+impl oswindow::app::App for NotificationDaemon {
+    fn title(&self) -> String {
+        String::from("Notifications")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        DEFAULT_VIEWPORT
+    }
+
+    /// Never `None`.
+    ///
+    /// Two independent things here move on the clock and on nothing else: a
+    /// toast ages towards its timeout and animates while it does, and the
+    /// quiet-hours window opens and closes at wall-clock times. A daemon that
+    /// stopped ticking once its last toast left would never notice 22:00
+    /// arriving, and would then never tick again because no event would wake
+    /// it. See known-issues.md lesson 47 and `scripts/check-tick-wiring.py`.
+    fn tick_interval(&self) -> Option<Duration> {
+        if self.toasts.is_empty() {
+            Some(CLOCK_TICK)
+        } else {
+            Some(ANIMATION_TICK)
+        }
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::Tick { .. }) {
+            self.refresh_clock();
+        }
+        // Decided *before* the event is handled, because two of these
+        // conditions are about the state the event is going to change: the
+        // tick that removes the last toast changes the display and then
+        // leaves `toasts` empty.
+        //
+        // Three things move the display without producing a `DaemonAction`:
+        // a tick (toasts age and animate, and the centre's "2 minutes ago"
+        // labels move with `current_time_ms`), a resize (everything is placed
+        // from the viewport), and a scroll of the centre. Every other user
+        // action that changes the display returns an action. What is left --
+        // a mouse move, a key the daemon does not bind, a focus change --
+        // leaves the tree byte-identical, and asking for a frame for those
+        // would be asking the compositor to redraw the same pixels sixty
+        // times a second while the pointer crosses the screen.
+        let moves_the_display = match event {
+            Event::Tick { .. } => !self.toasts.is_empty() || self.center.visible,
+            Event::Resize { .. } => true,
+            Event::Mouse(mouse) => {
+                matches!(mouse.kind, MouseEventKind::Scroll { .. }) && self.center.visible
+            }
+            _ => false,
+        };
+        let action = self.handle_event(event);
+        if action.is_some() || moves_the_display {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The granted size, not the requested one. The first frame goes out
+        // before any `Event::Resize`, and the hit-tests read the same
+        // viewport fields the renderer places from, so a daemon that drew its
+        // toasts against 1920 on an 800-wide screen would also mis-locate
+        // every close button.
+        self.set_viewport(width, height);
+        NotificationDaemon::render(self)
+    }
+}
+
+fn main() -> ExitCode {
+    let mut daemon = NotificationDaemon::new(
+        f32::from(u16::try_from(DEFAULT_VIEWPORT.0).unwrap_or(u16::MAX)),
+        f32::from(u16::try_from(DEFAULT_VIEWPORT.1).unwrap_or(u16::MAX)),
+    );
+
+    // Default quiet hours, 22:00-07:00. This is only safe to install because
+    // the daemon now has a clock; before `refresh_clock` existed it meant
+    // "suppress everything, forever". See `set_time_from_utc`.
     daemon.set_dnd_schedule(22, 0, 7, 0);
 
-    // Main loop placeholder — in production this integrates with the
-    // compositor's event loop and IPC message dispatch.
-    //
-    // In the real implementation we would:
-    // 1. Poll IPC channel for NotificationRequest messages.
-    // 2. Handle compositor events (mouse, keyboard, tick).
-    // 3. Call daemon.tick(delta_ms) to advance animations.
-    // 4. Call daemon.render() and submit to compositor.
-    //
-    // For now we just return: there is no loop to run without the OS
-    // service infrastructure.
-    let _ = daemon;
+    // Before the first frame, and before the first notification can arrive,
+    // so the daemon never answers a quiet-hours question from the midnight
+    // `NotificationDaemon::new` seeds it with.
+    daemon.refresh_clock();
+
+    oswindow::app::launch("notifications", &mut daemon)
 }
 
 // ---------------------------------------------------------------------------
@@ -2535,5 +2667,280 @@ mod tests {
             }
             _ => panic!("Expected HistoryList"),
         }
+    }
+
+    // ========================================================================
+    // The quiet-hours clock
+    //
+    // `set_time_of_day` had no caller in the whole tree, so `current_minutes`
+    // was 0 -- midnight -- for the life of the process, and the 22:00-07:00
+    // schedule `main` installs contains midnight. Everything below exists
+    // because that made the daemon suppress every non-critical notification
+    // it was ever sent, silently, with all of its tests passing.
+    // ========================================================================
+
+    /// The daemon exactly as `main` builds it.
+    fn daemon_as_main_builds_it() -> NotificationDaemon {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        assert!(
+            daemon.set_dnd_schedule(22, 0, 7, 0),
+            "22:00-07:00 is a real window"
+        );
+        daemon
+    }
+
+    /// Minutes from midnight, computed here rather than by the code under
+    /// test, so the two can disagree.
+    fn wall_clock_minutes() -> u16 {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the host clock is after 1970")
+            .as_secs();
+        u16::try_from((secs % 86_400) / 60).expect("under 1440")
+    }
+
+    #[test]
+    fn the_quiet_hours_clock_reads_the_instant_it_is_given() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        // 2026-08-26 13:45:07 UTC.
+        daemon.set_time_from_utc(1_787_751_907);
+        assert_eq!(daemon.current_minutes, 13 * 60 + 45);
+    }
+
+    #[test]
+    fn the_clock_reads_midnight_as_midnight_not_as_the_end_of_the_day() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        // 2026-01-01 00:00:00 UTC.
+        daemon.set_time_from_utc(1_767_225_600);
+        assert_eq!(daemon.current_minutes, 0);
+    }
+
+    #[test]
+    fn a_pre_epoch_instant_is_still_a_time_of_day() {
+        // 1969-12-31 23:59:59 UTC. With `%` instead of `rem_euclid` this is a
+        // negative number of seconds into the day, which is not a time at all
+        // and would clamp to midnight -- putting the daemon back inside quiet
+        // hours, which is the failure this whole section is about.
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        daemon.set_time_from_utc(-1);
+        assert_eq!(daemon.current_minutes, 23 * 60 + 59);
+    }
+
+    #[test]
+    fn the_default_quiet_hours_do_not_suppress_a_midday_notification() {
+        // The regression test for the shipped bug. Before the daemon had a
+        // clock this failed: `current_minutes` was 0, 0 is inside
+        // 22:00-07:00, and `should_show_toast` returned false.
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_787_745_600); // 2026-08-26 12:00:00 UTC
+        assert!(!daemon.is_dnd_active(), "noon is not inside 22:00-07:00");
+
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+        assert_eq!(
+            daemon.toasts.len(),
+            1,
+            "a midday notification produced no toast"
+        );
+    }
+
+    #[test]
+    fn the_default_quiet_hours_still_suppress_a_night_notification() {
+        // The other half: the fix must not have turned quiet hours off, only
+        // made them depend on the time.
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_787_785_200); // 2026-08-26 23:00:00 UTC
+        assert!(daemon.is_dnd_active(), "23:00 is inside 22:00-07:00");
+
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+        assert!(daemon.toasts.is_empty(), "quiet hours showed a toast");
+        assert_eq!(
+            daemon.history.len(),
+            1,
+            "a suppressed notification must still be in the history"
+        );
+    }
+
+    #[test]
+    fn the_wall_clock_read_moves_the_daemon_off_its_seeded_midnight() {
+        let mut daemon = NotificationDaemon::new(1920.0, 1080.0);
+        assert_eq!(daemon.current_minutes, 0, "seeded at midnight");
+        let before = wall_clock_minutes();
+        daemon.refresh_clock();
+        let after = wall_clock_minutes();
+        // A range, because the minute can turn over between the two reads.
+        assert!(
+            daemon.current_minutes == before || daemon.current_minutes == after,
+            "clock read {} but the wall clock says {before}..={after}",
+            daemon.current_minutes
+        );
+    }
+
+    // ========================================================================
+    // The window: `impl oswindow::app::App`
+    // ========================================================================
+
+    #[test]
+    fn a_daemon_that_shows_a_clock_never_stops_ticking() {
+        // Quiet hours open and close on wall-clock times and on nothing else.
+        // A daemon that returned `None` here once its last toast left would
+        // never see 22:00 arrive, and -- having asked for no more ticks --
+        // would never get another chance to.
+        let mut daemon = daemon_as_main_builds_it();
+        assert!(daemon.toasts.is_empty());
+        assert_eq!(
+            oswindow::app::App::tick_interval(&daemon),
+            Some(CLOCK_TICK),
+            "an idle daemon stopped ticking"
+        );
+
+        daemon.set_time_from_utc(1_787_745_600); // noon, so the toast appears
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+        assert_eq!(
+            oswindow::app::App::tick_interval(&daemon),
+            Some(ANIMATION_TICK),
+            "a live toast must animate at frame rate"
+        );
+    }
+
+    #[test]
+    fn render_believes_the_size_it_is_given_not_the_one_it_asked_for() {
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_787_745_600);
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+
+        // Past the slide-in: a toast that has just arrived is deliberately
+        // still off the right edge, so measuring one mid-animation would
+        // measure the animation rather than the placement.
+        daemon.tick(ANIMATION_DURATION_MS + 1);
+
+        // Not `daemon.render()`: the inherent one takes no size, so this has
+        // to name the trait to reach the method that does.
+        let tree = oswindow::app::App::render(&mut daemon, 800.0, 600.0);
+        assert_eq!(daemon.viewport_width, 800.0);
+        assert_eq!(daemon.viewport_height, 600.0);
+
+        // Toasts are placed against the right edge, so a daemon that kept
+        // believing in 1920 would draw them ~1120 pixels off the side of an
+        // 800-wide screen -- and would hit-test their close buttons there too.
+        let mut right_edge = f32::MIN;
+        for cmd in &tree.commands {
+            if let RenderCommand::FillRect { x, width, .. } = cmd {
+                right_edge = right_edge.max(x + width);
+            }
+        }
+        assert!(
+            right_edge > f32::MIN && right_edge <= 800.0,
+            "the toast reaches x={right_edge} on an 800-wide screen"
+        );
+    }
+
+    #[test]
+    fn an_event_the_daemon_ignores_does_not_ask_for_a_frame() {
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_787_745_600);
+
+        // A mouse move crosses the screen sixty times a second and changes
+        // nothing the daemon draws.
+        let moved = Event::Mouse(MouseEvent {
+            x: 100.0,
+            y: 100.0,
+            kind: MouseEventKind::Move,
+        });
+        assert_eq!(
+            oswindow::app::App::on_event(&mut daemon, &moved),
+            Response::Idle
+        );
+
+        // A resize replaces every coordinate in the tree.
+        let resized = Event::Resize {
+            width: 1280,
+            height: 720,
+        };
+        assert_eq!(
+            oswindow::app::App::on_event(&mut daemon, &resized),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn a_tick_asks_for_a_frame_only_when_something_is_moving() {
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_787_745_600);
+
+        let tick = Event::Tick { elapsed_ms: 16 };
+        assert_eq!(
+            oswindow::app::App::on_event(&mut daemon, &tick),
+            Response::Idle,
+            "an idle daemon redrew an empty overlay"
+        );
+
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+        assert_eq!(
+            oswindow::app::App::on_event(&mut daemon, &tick),
+            Response::Redraw,
+            "an ageing toast did not ask to be redrawn"
+        );
+    }
+
+    #[test]
+    fn a_tick_that_removes_the_last_toast_still_asks_for_a_frame() {
+        // The reason `moves_the_display` is sampled before the event is
+        // handled: after this tick there are no toasts left, but the frame
+        // that erases the last one still has to be drawn.
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_787_745_600);
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+        assert_eq!(daemon.toasts.len(), 1);
+
+        // Expiry takes two ticks: the first marks the toast dismissing, the
+        // second finishes its exit animation and drops it.
+        daemon.tick(100_000);
+        assert!(daemon.toasts[0].dismissing);
+
+        let response = oswindow::app::App::on_event(
+            &mut daemon,
+            &Event::Tick {
+                elapsed_ms: ANIMATION_DURATION_MS + 1,
+            },
+        );
+        assert!(daemon.toasts.is_empty(), "the toast should have expired");
+        assert_eq!(response, Response::Redraw);
+    }
+
+    #[test]
+    fn a_tick_advances_the_quiet_hours_clock_through_the_event_loop() {
+        // `refresh_clock` is only correct if something calls it. The lock
+        // screen and five other apps shipped a frozen clock because the
+        // method existed and the tick arm did not call it.
+        let mut daemon = daemon_as_main_builds_it();
+        daemon.set_time_from_utc(1_767_225_600); // midnight, deliberately wrong
+        assert_eq!(daemon.current_minutes, 0);
+
+        let before = wall_clock_minutes();
+        let _ = oswindow::app::App::on_event(&mut daemon, &Event::Tick { elapsed_ms: 16 });
+        let after = wall_clock_minutes();
+        assert!(
+            daemon.current_minutes == before || daemon.current_minutes == after,
+            "the tick left the clock at {}, wall clock {before}..={after}",
+            daemon.current_minutes
+        );
     }
 }

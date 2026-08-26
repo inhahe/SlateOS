@@ -82,6 +82,87 @@ fn current_addr_space() -> u64 {
     crate::proc::pcb::get_pml4(pid).unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// Per-address accounting for /proc
+// ---------------------------------------------------------------------------
+//
+// `fs::futexstat` keeps the per-address and per-process futex table that
+// `/proc` publishes (`procfs.rs`, `futexstat::stats()` and `hotspots(10)`) and
+// that the `futexstat` shell command prints.  Nothing called its four
+// `record_*` functions, so both readers reported an empty hotspot list and
+// zeroed wait/wake/timeout totals for the whole life of the system, while this
+// module ran a fully working futex implementation underneath them.  Zero is
+// indistinguishable from "measured zero contention", which is the reading a
+// user would take from it -- see known-issues.md,
+// `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH`.
+//
+// **Why these are separate from `super::stats::futex_*` rather than folded into
+// them.**  The `super::stats` counters are plain relaxed atomics, so they are
+// safe to bump while `FUTEX_TABLE` is held -- and every one of their call sites
+// does exactly that.  `futexstat` keeps a `Vec` behind a spin lock, so calling
+// it from those same points would take a second lock inside the futex table's
+// critical section and invert a lock order.  The helpers below therefore exist
+// to be called from points that are provably *outside* the `FUTEX_TABLE` lock,
+// and must stay that way: if you add a call, check the enclosing scope first.
+//
+// All four discard their `Result`.  `record_wait` returns `ResourceExhausted`
+// once the table reaches its address cap, and the others return `NotFound` for
+// an address that was never waited on.  Neither is a futex failure and neither
+// may be propagated: statistics must never be able to make a lock operation
+// fail.  Dropping them is the whole error policy for this file's accounting.
+
+/// The pid to attribute a futex operation to, or 0 for a kernel task.
+///
+/// Deliberately delegates to [`current_user_pid`] rather than repeating the
+/// `owner_process(current_task_id()).unwrap_or(0)` lookup, which is what this
+/// originally did.  `ipc::waiters` says plainly why, next to that function: two
+/// copies of one rule give someone the chance to "fix" one alone, and
+/// `BUG-PIPE-SINGLE-WAITER-SLOT` is what that looks like when it happens.  The
+/// narrowing to `u32` is this function's own business — `fs::futexstat` keys
+/// its per-process table on `u32` — and is where the two legitimately differ.
+fn accounting_pid() -> u32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let pid = current_user_pid() as u32;
+    pid
+}
+
+/// Note that the current task is about to block on `addr`.
+///
+/// Call only from outside the `FUTEX_TABLE` lock.
+fn note_wait(addr: u64) {
+    // Discarded deliberately: see the module note above.
+    let _ = crate::fs::futexstat::record_wait(accounting_pid(), addr);
+}
+
+/// Note that `count` waiters on `addr` were woken.
+///
+/// Call only from outside the `FUTEX_TABLE` lock.
+fn note_wake(addr: u64, count: u32) {
+    // Discarded deliberately: see the module note above.
+    let _ = crate::fs::futexstat::record_wake(accounting_pid(), addr, count);
+}
+
+/// Note that a timed wait on `addr` expired without a wake.
+///
+/// Call only from outside the `FUTEX_TABLE` lock.
+fn note_timeout(addr: u64) {
+    // Discarded deliberately: see the module note above.
+    let _ = crate::fs::futexstat::record_timeout(addr);
+}
+
+/// Note that the current task was blocked on `addr` for `ns` nanoseconds.
+///
+/// This is what makes the hotspot table meaningful: `hotspots()` ranks by wait
+/// count, but the per-address `total_wait_ns` is what distinguishes a lock that
+/// is taken often from one that is *held* too long, and only a real blocking
+/// caller can measure it.
+///
+/// Call only from outside the `FUTEX_TABLE` lock.
+fn note_contention(addr: u64, ns: u64) {
+    // Discarded deliberately: see the module note above.
+    let _ = crate::fs::futexstat::record_contention(accounting_pid(), addr, ns);
+}
+
 /// Remove this task's lingering futex waiter from whatever bucket holds it,
 /// scoped to `addr_space`, and report whether one was found.
 ///
@@ -362,11 +443,21 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
         // Drop the table lock before blocking.
     }
 
+    // Outside the FUTEX_TABLE lock (the block above ended), which is the
+    // requirement for touching `futexstat` — see the accounting note near
+    // `note_wait`. Recorded here rather than beside `super::stats::futex_wait()`
+    // above for exactly that reason, and recorded *before* blocking so the
+    // hotspot table shows a contended address while tasks are still parked on
+    // it, not only once they are released.
+    note_wait(addr);
+    let blocked_at = crate::hpet::elapsed_ns();
+
     let pid = current_user_pid();
     if pid == 0 {
         // Kernel task (boot self-test, etc.): no signal context — park
         // uninterruptibly.  Woken only by futex_wake.
         sched::block_current();
+        note_contention(addr, crate::hpet::elapsed_ns().saturating_sub(blocked_at));
         return Ok(true);
     }
 
@@ -388,6 +479,13 @@ pub fn futex_wait_bitset(addr: u64, expected: u32, bitset: u32) -> KernelResult<
 
     sched::block_current();
     crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
+    // Every exit below this point has been parked, so the elapsed time is a
+    // real blocked interval whether the wake was a futex_wake, a signal or
+    // spurious. Recorded before the branch so an interrupted wait still
+    // contributes the time it actually spent waiting -- undercounting a
+    // contended address because its waiter was signalled would bias the
+    // hotspot table away from exactly the locks that are causing trouble.
+    note_contention(addr, crate::hpet::elapsed_ns().saturating_sub(blocked_at));
 
     // Woken.  If futex_wake removed us we are no longer queued -> a real wake.
     // If we are still queued, the wake came from a signal (or was spurious):
@@ -477,6 +575,15 @@ pub fn futex_wait_bitset_timeout(
         });
     }
 
+    // Queued and about to park: the FUTEX_TABLE lock is dropped, so this is the
+    // first point at which the spin-locked accounting table may be touched.
+    // The `timeout_ns == 0` "try" return above is deliberately not counted --
+    // it never enqueued and never blocked, so counting it as a wait (and, on
+    // its `TimedOut` return, as a timeout) would report contention that did not
+    // happen.
+    note_wait(addr);
+    let blocked_at = crate::hpet::elapsed_ns();
+
     // Schedule a timer to wake us at the deadline.
     let deadline_ns = crate::hrtimer::now_ns().saturating_add(timeout_ns);
 
@@ -512,6 +619,10 @@ pub fn futex_wait_bitset_timeout(
         crate::proc::signal::deregister_signalfd_waiter(pid, current_task);
     }
     crate::hrtimer::cancel(timer_handle);
+    // Every path out of the park below passes through here, so this is the one
+    // place that sees the blocked interval regardless of *why* we woke -- and a
+    // wait that ended in a timeout is still time spent blocked on `addr`.
+    note_contention(addr, crate::hpet::elapsed_ns().saturating_sub(blocked_at));
 
     // Why did we wake?  A waker (futex_wake / requeue) dequeues us, so if we are
     // still queued the wake came from the timer or a signal.  remove_self_waiter
@@ -532,6 +643,7 @@ pub fn futex_wait_bitset_timeout(
     }
 
     if crate::hrtimer::now_ns() >= deadline_ns {
+        note_timeout(addr);
         Err(KernelError::TimedOut)
     } else {
         // Spurious early wake with neither signal nor deadline — report woken;
@@ -812,6 +924,9 @@ pub fn futex_wake_bitset(addr: u64, max_wake: u32, bitset: u32) -> u32 {
     #[allow(clippy::cast_possible_truncation)]
     let result = wake_count as u32;
     super::stats::futex_wake(result);
+    // Safe here: the comment above records that the FUTEX_TABLE lock was
+    // already dropped before the wake loop.
+    note_wake(addr, result);
     result
 }
 
@@ -988,6 +1103,11 @@ fn requeue_inner(
     #[allow(clippy::cast_possible_truncation)]
     let woken = wake_count as u32;
     super::stats::futex_wake(woken);
+    // Safe here: the comment above records that the FUTEX_TABLE lock was
+    // dropped before the wake loop.  Attributed to `addr1`, which is the
+    // address the woken tasks were waiting on -- the `requeued` tasks are
+    // still blocked, now on `addr2`, and so are not a wake of anything.
+    note_wake(addr1, woken);
     Ok(woken.saturating_add(requeued))
 }
 
@@ -2706,8 +2826,53 @@ pub fn self_test() -> KernelResult<()> {
     test_owner_died_relock()?;
     test_pi_owner_death_handoff()?;
     test_priority_inheritance()?;
+    test_accounting_reaches_futexstat()?;
 
     serial_println!("[futex] Futex self-test PASSED");
+    Ok(())
+}
+
+/// Check that the tests above actually reached `fs::futexstat`.
+///
+/// This is the test whose absence let the accounting gap exist for the whole
+/// life of the module.  Every other test here proves the futex *works*, and
+/// `futexstat`'s own self-test proves its bookkeeping works; neither could
+/// notice that the two were never connected, so `/proc/futexstat` reported an
+/// empty hotspot table and zero waits on a system doing real futex work, and
+/// nothing failed.
+///
+/// It must run last, after `test_blocking_wait_wake` has performed a genuine
+/// block-and-wake — this deliberately measures the side effects of the earlier
+/// tests rather than making its own, because a call it made itself could be
+/// wired up while the real paths were not.
+fn test_accounting_reaches_futexstat() -> KernelResult<()> {
+    let (addrs, _procs, waits, wakes, _timeouts, ops) = crate::fs::futexstat::stats();
+
+    if ops == 0 {
+        serial_println!(
+            "[futex]   FAIL: fs::futexstat recorded nothing; the accounting helpers are unwired"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if waits == 0 {
+        serial_println!("[futex]   FAIL: blocking waits happened but futexstat counted 0");
+        return Err(KernelError::InternalError);
+    }
+    if wakes == 0 {
+        serial_println!("[futex]   FAIL: wakes happened but futexstat counted 0");
+        return Err(KernelError::InternalError);
+    }
+    if addrs == 0 {
+        serial_println!("[futex]   FAIL: futexstat has no per-address rows to build hotspots from");
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[futex]   Accounting reaches futexstat: OK ({} addr(s), {} wait(s), {} wake(s))",
+        addrs,
+        waits,
+        wakes
+    );
     Ok(())
 }
 

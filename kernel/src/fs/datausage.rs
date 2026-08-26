@@ -679,12 +679,14 @@ fn self_test_inner() {
     }
     serial_println!("[datausage] 11/11 reset OK");
 
-    // Leave no residue for later callers / the live /proc/datausage view:
-    // reset_usage() clears per-app totals but the "Monthly Cap" limit added in
-    // test 6 persists, and these are test fixtures, not real recorded usage.
-    // Reset to None so the procfs view and `datausage` shell command report an
-    // empty, never-measured state.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     *STATE.lock() = None;
+    init_defaults();
 
     serial_println!("[datausage] All self-tests passed.");
 }

@@ -435,6 +435,7 @@ name = "archivemanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -2835,6 +2836,7 @@ name = "devicemanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -6454,6 +6456,7 @@ name = "launcher"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -6737,9 +6740,15 @@ dependencies = [
 name = "lockscreen"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "guitk",
+ "oswindow",
+ "posix",
  "pwkdf",
+ "scratchdir",
  "sha2",
+ "tzrules",
+ "userdb",
 ]
 
 [[package]]
@@ -8230,6 +8239,7 @@ name = "netmanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -8478,6 +8488,8 @@ name = "notifications"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "tzrules",
 ]
 
 [[package]]
@@ -12581,6 +12593,8 @@ name = "systray"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "tzrules",
 ]
 
 [[package]]

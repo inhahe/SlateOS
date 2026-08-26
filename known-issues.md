@@ -81109,8 +81109,50 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **469 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **463 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (twenty-eighth batch): `cmd_kstack` (6) cleared
+> — 469 → 463 across 215 → 214 functions. Not pinned by a rung: no self-test
+> asserts on `kstack` output, which is itself the reason the guesses survived
+> this long.
+>
+> **In short:** `kstack` records how much of each CPU's kernel stack is in use.
+> Four of its subcommands took a CPU number, and when they could not read the
+> word you typed they used **cpu 0**. `register` did the same and also invented
+> a **16384-byte** stack. So `kstack register l 8192` — a lowercase L for a 1 —
+> registered cpu 0 with a 16 KiB stack and said so; the later `kstack usage l
+> 900` then found that cpu and recorded against it.
+>
+> **The new row is about guesses that corroborate each other.** Every previous
+> row assumed the guessed value lands in a table that already exists, so the
+> wrong row is at least a row someone put there. Here `init_defaults` seeds an
+> **empty** CPU list, so `register`'s guessed cpu 0 *manufactures the very CPU*
+> that the next three guesses then resolve against successfully. Nothing ever
+> returns `NotFound`; there is no dangling reference to trip over. The table is
+> not inconsistent — it is **self-consistently wrong**, which removes the last
+> witness a reader had.
+>
+> Two aggravations worth recording, both of which recur elsewhere:
+>
+> * **16384 is `kconsole`'s `80x25` again** (batch 27's provenance row): it is
+>   simultaneously this OS's page size and the textbook kernel stack size, so it
+>   reads as documentation rather than as a guess. Worse than `80x25`, though,
+>   because `list` *divides* by it — `pct = high_water * 100 / stack_size` — so
+>   the guess silently rescales a **derived** column the operator reads as a
+>   measurement.
+> * **`record_usage(cpu, 0)` is an uncorrectable accumulator** (the `ipcns`
+>   thesis applied to a mean): it increments `samples` and adds 0 to
+>   `total_used_samples`, so a phantom sample drags the `avg` column down
+>   permanently. There is no operation that retracts a sample; the only repair
+>   is to discard the whole table.
+>
+> `overflow` and `guard` had **no usage line at all**, so their operand was
+> undocumented as well as guessed — the batch-26/27 generalisation holding
+> again, that a module whose only caller is an interactive shell command is
+> missing precisely what no test ever needed. Both now have one, and the arm
+> uses `end_help_arm` so an explicit `kstack help` exits 0 while an unknown
+> subcommand still exits 1.
+>
 > **Burn-down log.** 2026-08-26 (twenty-seventh batch): `cmd_kconsole` (6, plus
 > one uncounted) cleared — 475 → 469 across 216 → 215 functions. Pinned by
 > `kshell::self_test` rung 95.

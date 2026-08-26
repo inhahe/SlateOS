@@ -904,6 +904,41 @@ the on-screen volume overlay, the print manager and the login screen — is draw
 only by its own unit tests. Full detail is in `known-issues.md` →
 `TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
 
+**Measured 2026-08-25, and it is worse than "two copies".** A new scan
+(`scripts/scan-orphan-modules.py`) asks, for every module in my tree, whether
+*any* other file in the repository so much as names one of the things it
+defines. Twenty-one modules — **39,060 lines** — are named by nothing. Three
+findings in that list change what this question is asking:
+
+- **The shell duplicates itself, not just the app.**
+  `gui/desktop/src/a11y.rs` (2,292 lines: a screen magnifier, four
+  high-contrast schemes, sticky/filter/mouse keys, a colourblind filter) and
+  `gui/desktop/src/accessibility_settings.rs` are two models of the same
+  settings, six type names apart, in the same crate. `a11y.rs` is the copy
+  nobody calls. Same shape for notifications: `notif_pane.rs` and
+  `focus_assist.rs` share two types, both unreached, and
+  `gui/notifications/src/main.rs` says in its own comment that it shows the
+  same notifications — a **third** copy.
+- **Option A does not by itself de-duplicate.** File-type associations are
+  modelled in `gui/desktop/src/default_apps.rs` (2,314 lines) *and*
+  `apps/settings/src/associations.rs` (1,748) — and **neither is reachable**.
+  Deleting the shell's copy would leave an unreachable one behind.
+- **Only the app copy has ever been connected to storage.** `gui/desktop`
+  contains no file write of any kind; it reads `appearance.yaml` and stops.
+  `apps/settings` already saves two settings families through
+  `gui/settingsfile`. Meanwhile six shell modules (`a11y`, `power`,
+  `display_settings`, `input_method`, `tray_dnd`, `user_accounts`) hand-write
+  their settings into a string — four of them with a matching parser and a
+  passing round-trip test, two with no parser at all — and nothing calls any
+  of it. What they emit is **`key=value` and pipe-delimited text, not YAML**,
+  which `design.txt` requires for configuration.
+
+None of this decides the question, and it does not change my recommendation.
+It sharpens two things: whichever copy survives, **de-duplication has to
+happen inside the survivor too**; and if the deciding factor is "which copy is
+closer to working for a user", that is the app, on the evidence that it is the
+only one that has ever written a settings file.
+
 ### The options
 
 **A. The standalone app is the real one; delete the shell's settings panels.**

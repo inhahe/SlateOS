@@ -68003,6 +68003,84 @@ the day they discover what it assumed. Nothing breaks in the meantime, which is
 exactly why it has gone unnoticed for so long — a module nobody draws also
 never looks wrong.
 
+### Measured 2026-08-25 — `scripts/scan-orphan-modules.py`, and what it found
+
+The paragraphs above counted `pub fn render` by hand. There is now an
+instrument: for every library module in lane C's tree, it asks whether any
+other file in the *repository* names one of its top-level public items or its
+module path, outside tests and bare re-exports. A `pub` item must be named to
+be used, so a "no" is sound — which is what makes this answerable at module
+scale when the function-level question (`scan-unwired.py`) is not.
+
+**21 island modules, 39,060 lines, out of 200 library modules scanned.** The
+largest, and the reason the number is worth writing down:
+
+| Module | Lines | What is in it |
+|---|---|---|
+| `gui/toolkit/src/svg.rs` | 3,393 | an SVG path/transform/colour parser |
+| `gui/desktop/src/notif_pane.rs` | 3,374 | the notification pane and quick settings |
+| `gui/toolkit/src/menubar.rs` | 3,337 | the menu bar widget |
+| `gui/desktop/src/default_apps.rs` | 2,314 | default-application settings |
+| `gui/desktop/src/a11y.rs` | 2,292 | magnifier, high contrast, sticky/filter/mouse keys |
+| `gui/desktop/src/widgets.rs` | 2,276 | the desktop widget grid |
+| `gui/desktop/src/blur.rs` | 2,224 | the blur/acrylic renderer |
+| `apps/sysinfo/src/hwquery.rs` | 2,163 | the hardware-query provider chain |
+| `gui/desktop/src/window_peek.rs` | 2,154 | taskbar thumbnail previews |
+| `gui/desktop/src/run_dialog.rs` | 2,012 | the Run dialog |
+
+**Three of these are duplication, not merely absence** — and that is the part
+that bears on the decision in `open-questions.md` → C-Q6:
+
+- `gui/desktop/src/a11y.rs` and `gui/desktop/src/accessibility_settings.rs`
+  are two accessibility models **in the same crate**, sharing six type names
+  (`ColorFilter`, `MagnifierConfig`, `StickyKeys`, `FilterKeys`, `MouseKeys`,
+  `Magnifier`). `a11y.rs` is the unreached one.
+- `gui/desktop/src/default_apps.rs` (2,314) and
+  `apps/settings/src/associations.rs` (1,748) both model file-type
+  associations, and **neither is reachable**. Deleting one does not fix this.
+- `gui/toolkit/src/context_ext.rs` and `gui/desktop/src/context_ext.rs` are
+  two files of the same name in two crates sharing three names
+  (`ContextMenuExtension`, `ExtensionId`, `build_context_menu`); the toolkit
+  copy is the island.
+
+**And a sub-finding the module scan does not itself report:** six shell
+modules serialise settings that nothing ever stores.
+
+| Module | Writer | Reader | Emits |
+|---|---|---|---|
+| `a11y.rs` | `:1067 to_config_string` | `:1117 from_config_string` | `key=value` text |
+| `power.rs` | `:263 to_config_string` | `:313 from_config_string` | `key=value` text |
+| `user_accounts.rs` | `:744 to_config_text` | `:758 from_config_text` | pipe records, `USER\|…` |
+| `tray_dnd.rs` | `:410 to_config` | `:427 from_config` | a `TrayArrangementConfig` struct |
+| `display_settings.rs` | `:746 to_config_text` | **none** | `key=value` text |
+| `input_method.rs` | `:426 to_config_text` | **none** | `key=value` text |
+
+Every caller of all ten functions is inside a `#[cfg(test)]` module, and each
+has a passing round-trip test — except the last two, which have no reader to
+round-trip against and so serialise to a format nothing in the tree can parse.
+Three further problems:
+
+1. **`gui/desktop` performs no file I/O at all.** `fs::write`, `fs::read`,
+   `File::open` and `File::create` return nothing across the whole crate. It
+   reads `appearance.yaml` via `config::load` at `lib.rs:1148` and never
+   writes anything, so there is no path by which any of this text could reach
+   a disk.
+2. **The text formats are not YAML**, which `design.txt` requires for
+   configuration. `power.rs` emits `profile=performance\ndim_timeout=…`;
+   `user_accounts.rs` emits `USER|` followed by pipe-delimited fields.
+3. **`gui/settingsfile` already exists** and does this correctly — atomic
+   temp-file-and-rename, comment- and order-preserving splices into the user's
+   own file — and `apps/settings` already uses it for two families.
+
+Note `power.rs` is *not* in the island table: `lib.rs` draws its power menu, so
+the module is reached. `PowerManager`, `PowerConfig`, `ScreenSaver` and the
+config pair inside it still have no caller. A module absent from the table is
+not a clean bill of health for its contents.
+
+**Do not wire these up before C-Q6 is answered.** Adding `load()`/`save()` to
+six models that may be deleted is lesson 45 at a larger size — a bigger unused
+feature, with the same round-trip tests making it look covered.
+
 ## TD-B-FIVE-COPIES-OF-THE-FILE-TYPE-HALF-OF-A-MODE-WORD (lane B, 2026-08-22) — RESOLVED 2026-08-22
 
 **In short:** A file's *mode* is one integer holding two unrelated things: what

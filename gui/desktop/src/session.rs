@@ -69,6 +69,7 @@ use oswindow::{
 };
 
 use crate::animations::{AnimationManager, WindowAnimation};
+use crate::notif_pane;
 use crate::wallpaper::WallpaperManager;
 use crate::{DesktopShell, ShellAction, ShellRequest, WindowRequest};
 
@@ -412,6 +413,62 @@ impl<T: Transport> ShellSession<T> {
     /// `(id, path)` pair it remembers is unchanged, so there is no read, no
     /// decode and no upload. It does work exactly when the wallpaper actually
     /// changed, which is what the id was allocated to signal.
+    /// Record why the wallpaper could not be shown — and tell the user.
+    ///
+    /// The single writer of `wallpaper_error`. It exists because the field had
+    /// four assignments and no reader outside a getter nobody called: a
+    /// wallpaper that failed to decode left the user looking at a plain colour
+    /// with no way at all to find out why. Routing every assignment through
+    /// here means a failure the shell *noticed* is a failure the shell *says*,
+    /// and the two cannot drift apart by someone adding a fifth assignment that
+    /// forgets to post.
+    ///
+    /// Posting is conditional on the message being new, not on it being
+    /// `Some`. `paint_background` runs on every repaint, so an unconditional
+    /// post would put one notification per mouse click into the history for as
+    /// long as a corrupt file stayed selected.
+    ///
+    /// The notification is posted but the pane is **not** opened. A wallpaper
+    /// that did not load is a thing to explain, not an emergency to interrupt
+    /// with: the desktop is fully usable, and a panel that shoved itself over
+    /// the screen at login because of a missing file would be worse than the
+    /// missing file.
+    fn set_wallpaper_error(&mut self, why: Option<String>) {
+        if why == self.wallpaper_error {
+            return;
+        }
+        if let Some(message) = why.as_deref() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // The id is discarded: nothing here ever needs to refer back to
+            // this notification. It is a message, not a progress indicator to
+            // be updated later.
+            let _ = self.shell.notify(notif_pane::Notification {
+                id: 0,
+                app_name: "Desktop".to_owned(),
+                title: "Wallpaper could not be shown".to_owned(),
+                body: message.to_owned(),
+                timestamp: now,
+                // Not `High`: the desktop still works and still has a
+                // background. High priority is for something the user has to
+                // act on now, and reserving it for those is what stops it
+                // meaning nothing.
+                priority: notif_pane::NotifPriority::Normal,
+                read: false,
+                action: None,
+                // Left to `notify`, which is the only thing that knows whether
+                // focus assist is silencing "Desktop" right now. Setting it
+                // here would be this call answering a question it cannot see
+                // the state of.
+                silent: false,
+            });
+            self.dirty = true;
+        }
+        self.wallpaper_error = why;
+    }
+
     fn refresh_wallpaper_image(&mut self) -> Result<(), Error<T>> {
         let id = self.wallpaper.current_image_id();
         let want = self.wallpaper.current_image_path().map(str::to_owned);
@@ -421,7 +478,7 @@ impl<T: Transport> ShellSession<T> {
         // the link's image budget for nothing.
         let Some(path) = want.filter(|_| id != 0) else {
             self.release_wallpaper_image()?;
-            self.wallpaper_error = None;
+            self.set_wallpaper_error(None);
             return Ok(());
         };
 
@@ -454,7 +511,7 @@ impl<T: Transport> ShellSession<T> {
         let image = match decoded {
             Ok(image) => image,
             Err(why) => {
-                self.wallpaper_error = Some(why);
+                self.set_wallpaper_error(Some(why));
                 return Ok(());
             }
         };
@@ -467,12 +524,12 @@ impl<T: Transport> ShellSession<T> {
             // because "the compositor cannot lose my window" is an assumption
             // about the other end of a socket, and this crate does not get to
             // make those.
-            self.wallpaper_error = Some(format!("{path}: the background surface is gone"));
+            self.set_wallpaper_error(Some(format!("{path}: the background surface is gone")));
             return Ok(());
         };
         match handle.upload_image(id, width, height, stride, PixelFormat::Argb8888, bytes) {
             Ok(()) => {
-                self.wallpaper_error = None;
+                self.set_wallpaper_error(None);
                 Ok(())
             }
             // A refusal is the compositor saying "not this picture" — too big
@@ -482,7 +539,7 @@ impl<T: Transport> ShellSession<T> {
             // those propagate, because the `submit` two lines later would fail
             // the same way and swallowing them here would only delay it.
             Err(ConnectionError::Refused(why)) => {
-                self.wallpaper_error = Some(format!("{path}: {why}"));
+                self.set_wallpaper_error(Some(format!("{path}: {why}")));
                 Ok(())
             }
             Err(other) => Err(other),
@@ -542,6 +599,12 @@ impl<T: Transport> ShellSession<T> {
                 // case that arises.
                 self.shell.render_zone_overlay(),
                 self.shell.render_alt_tab(),
+                // Last of all, over Alt-Tab too, and for the opposite reason to
+                // the overview: the pane's scrim dims what is *behind* it, and
+                // the pane itself is a column that leaves most of the screen
+                // showing. Drawn earlier it would be the thing dimmed, by its
+                // own scrim, under a switcher it is supposed to be in front of.
+                self.shell.render_notifications(),
             ]
             .into_iter()
             .flatten()
@@ -563,6 +626,7 @@ impl<T: Transport> ShellSession<T> {
     fn popups_open(&self) -> bool {
         self.shell.start_menu_open
             || self.shell.calendar.visible
+            || self.shell.notifications.pane_state().is_visible()
             || self.shell.alt_tab_active
             || self.shell.snap.is_overlay_visible()
             || self.shell.overview.visible
@@ -725,6 +789,13 @@ impl<T: Transport> ShellSession<T> {
         // is watched is the observable fact "it is open now and was not
         // before", which no new caller can arrive behind.
         let overview_was_visible = self.shell.overview.visible;
+        // Same trick for the notification pane, with one extra condition: the
+        // pane's slide *ends* by changing this same flag (a slide-out finishes
+        // at `Hidden`), and that happens in `step_frame`. Sampling around a
+        // tick as well would see the end of the slide as a fresh gesture and
+        // start the slide over, for ever.
+        let notifications_were_open = self.shell.notifications.pane_state().is_visible();
+        let is_tick = matches!(event, Event::Tick { .. });
         match event {
             Event::Mouse(mouse) => self.pointer(&surface.to_screen(&mouse))?,
             Event::Key(key) => {
@@ -757,7 +828,32 @@ impl<T: Transport> ShellSession<T> {
         if !overview_was_visible && self.shell.overview.visible {
             self.begin_overview_fade();
         }
+        // Both directions, unlike the overview: the pane slides out as well as
+        // in, so what is watched is that the answer *changed*, not that it
+        // became true.
+        if !is_tick && notifications_were_open != self.shell.notifications.pane_state().is_visible()
+        {
+            self.begin_notifications_slide();
+        }
         Ok(())
+    }
+
+    /// Rewind the notification pane's jump into a slide, now that something has
+    /// opened or closed it.
+    ///
+    /// The counterpart of [`begin_overview_fade`](Self::begin_overview_fade)
+    /// and for the same reason: `show`/`hide`/`toggle` land the pane on its
+    /// destination, so a caller with no frame clock — a test, an embedder, the
+    /// login screen — gets a pane that is fully open or fully gone rather than
+    /// one stuck at zero progress off the right edge of the screen. This
+    /// session has a clock, so it puts the pane back where it started and lets
+    /// the clock carry it. See `design-decisions.md` §520 and §562.
+    fn begin_notifications_slide(&mut self) {
+        if self.animations.reduced_motion {
+            return;
+        }
+        self.shell.notifications.begin_slide();
+        self.arm_next_frame();
     }
 
     /// Start the overview's backdrop fade, now that something has opened it.
@@ -801,6 +897,17 @@ impl<T: Transport> ShellSession<T> {
         // the manager's — it lives on the overview so that the overview can be
         // drawn correctly by a caller that has no manager at all.
         self.shell.overview.tick_fade(dt);
+        // The pane keeps its own clock too, and in seconds rather than
+        // milliseconds: it is a `guitk` widget, whose animation convention is a
+        // float of seconds. Converted here rather than changed there, because
+        // the millisecond integer is this session's convention (it is what the
+        // wake-up reports) and the pane is drawn by callers that have neither.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a frame long enough to lose f32 precision is 97 days"
+        )]
+        let secs = dt as f32 / 1000.0;
+        self.shell.notifications.tick(secs);
         // The stepped rectangles are deliberately not used here. A window's
         // geometry belongs to the compositor, not to the shell — the shell
         // cannot move a window by drawing it somewhere else — so a window
@@ -829,7 +936,9 @@ impl<T: Transport> ShellSession<T> {
     /// animated thing the shell owns must be named here — one that is not is a
     /// thing that stops moving the moment nothing else is.
     fn anything_moving(&self) -> bool {
-        self.animations.has_active() || self.shell.overview.is_fading()
+        self.animations.has_active()
+            || self.shell.overview.is_fading()
+            || self.shell.notifications.is_sliding()
     }
 
     /// One pointer event, already in screen coordinates.

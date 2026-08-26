@@ -45554,6 +45554,286 @@ documented overflow past it.
 
 ---
 
+## 559. The file manager's picture cache is also its eviction policy: what falls out of the cache is what the display server is told to forget
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** the file manager makes small previews ("thumbnails") of the files
+in a folder and asks the display server to hold the pixels so it can draw them
+by number. The display server never throws any of them away on its own — it
+holds whatever it is given until it is explicitly told to stop — and there is a
+limit on how much one program may have it hold at once. So somebody has to
+decide *when* a preview stops being held. The decision: the answer is already
+sitting in the file manager, in the size-limited preview cache it keeps in its
+own memory, and the rule is simply "whatever falls out of that cache is what the
+display server is told to forget."
+
+**What was actually at stake.** Walk a photograph library — a hundred folders,
+tens of thousands of files — and without an eviction rule the file manager
+accumulates every preview it has ever produced on the display server's side.
+Eventually the per-connection image budget (`MAX_IMAGE_BYTES_PER_LINK`, 256 MiB,
+`gui/compositor/src/wire.rs:726`) refuses an upload. A refusal is
+`?`-propagated by `apply_images` (`gui/window/src/app.rs:490`), which ends the
+event loop — so the failure mode is not "previews stop appearing", it is "the
+file manager quits". This had to be solved before the window could ship, not
+after.
+
+**The decision.** `ThumbnailCache` — the bounded LRU already in `thumbs.rs`,
+already the thing the renderer reads to decide what to draw — grew a
+`evicted: Vec<u64>` field. Every route out of the map records the image id that
+left with it: LRU fall-off on insert, `invalidate` (a file changed on disk),
+and `clear`. `take_evicted_image_ids()` drains that list, and `take_images()`
+turns each into an `ImageChange::Drop`.
+
+*Alternative considered — a separate residency tracker beside the cache,* with
+its own size limit and its own policy (say, "hold the current folder plus the
+last one"). *Against:* two bounded structures over the same set of files, which
+must agree about what is held or else the renderer draws an id the server has
+forgotten (which renders nothing, silently, by design). The cache is already
+bounded, already ordered by use, and is already the authority on what can be
+drawn; a second structure adds a way for those two answers to differ and no new
+capability. *For:* it could hold more on the server than in local memory, which
+would let the cache be small (memory) while the residency set is large (drawing
+without re-decoding). That is a real property, and it is the reason this is a
+tradeoff rather than an obvious call — but the two limits would then need
+tuning against each other, and the win only shows up in a directory larger than
+the local cache and smaller than the budget.
+
+**The consequence, stated plainly.** The size of `ThumbnailCache` is now also
+the size of the file manager's footprint inside the display server. Changing one
+changes the other. That is written at `take_evicted_image_ids`.
+
+**Two details that are easy to get wrong.**
+
+- **Only actual removals are recorded.** `invalidate` takes a path and is called
+  routinely for files that were never cached. Recording a drop for an id the
+  server never held is not harmless: ids are derived from the file, so that same
+  id may have been *re-uploaded* by a later insert of the same file, and the
+  stale drop would forget the fresh pixels. `note_removed` records only when
+  `map.remove` returned `Some`.
+- **Drops go out before uploads, in one ordered list.** The budget arithmetic is
+  `after = held - freed + incoming`, so a batch that uploads first is charged
+  for both sets at once. Same reason as the wallpaper's slideshow (§557).
+
+**Where it lives.** `apps/explorer/src/thumbs.rs` (`ThumbnailCache::evicted`,
+`note_removed`, `clear`, `take_evicted_image_ids`, and the four tests under
+"What leaves the cache must leave the compositor"),
+`apps/explorer/src/main.rs` (`take_images`).
+
+---
+
+## 560. A preview's number is keyed on the same three facts as the cache entry it belongs to
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** each preview picture is given a number, and the display server
+stores the pixels under it. That number used to be computed from the file's path
+and its last-modified time. But the file manager's own cache files previews
+under path, modified-time **and length**. Those two disagree for a file that is
+written twice within the same second — the clock does not move, the length does
+— which produced two different cache entries claiming the same number. The
+second upload silently overwrites the first, and one of the two entries then
+draws the other's picture. The fix is to key the number on all three.
+
+**Why a second's resolution is not a corner case.** `mtime_secs` truncates to
+whole seconds because that is what the filesystem records. Any program that
+writes a file, then rewrites it — a download that resumes, an editor that saves
+twice, a build that regenerates an image — does this routinely. The old code was
+not wrong about a rare race; it was wrong about a common one that happened to be
+invisible because nothing had ever uploaded the pixels.
+
+**The decision.** `thumbnail_image_id(&Thumbnail)` is deleted and replaced by
+`pub fn image_id(path: &Path, mtime: u64, size: u64) -> u64`, which mixes the
+length's eight bytes into the existing `simple_hash` with an FNV round.
+`CacheKey::image_id()` calls it with the key's own three fields, so the id and
+the key cannot drift apart by construction.
+
+*Alternative considered — a counter,* handing out a fresh number per upload and
+storing it in the cache entry. *For:* collisions become impossible rather than
+improbable; it is what the wallpaper does (`alloc_image_id`). *Against:* the id
+would then be state that must be carried through every path that produces a
+`Thumbnail`, and a cache miss followed by a re-generation of the *same* file
+would get a new number and a new upload where the derived id gets a free
+replacement of the existing one. The wallpaper holds one picture and can afford
+a counter; the file manager holds hundreds.
+
+**A deliberate non-change.** `simple_hash(path, mtime)` is left exactly as it
+was, because it also names the on-disk thumbnail cache *files*. Changing it
+would invalidate every user's saved thumbnails for no benefit — a disk cache
+keyed on two facts is merely conservative (it re-generates when it need not),
+whereas an *id* keyed on two facts is incorrect (it conflates).
+
+**The signature change this forced.** `render_thumbnail` now takes the id as a
+parameter rather than deriving it, because a `Thumbnail` knows its pixels and
+its dimensions and knows nothing about the path, time or length it came from.
+Deriving an id inside it would have meant either passing those three in anyway
+or storing them on every thumbnail.
+
+**Where it lives.** `apps/explorer/src/thumbs.rs` (`image_id`,
+`CacheKey::image_id`, `render_thumbnail`), `apps/explorer/src/main.rs`
+(`pump_thumbnails`, `drawable_thumb`). The test is
+`two_versions_of_a_file_written_in_the_same_second_get_different_ids`.
+
+---
+
+## 561. "ARGB" names two opposite byte orders, so the conversion is named after the wire format and lives in exactly one place
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** a colour is four bytes — red, green, blue, and transparency — and
+there are two ways round to store them. This tree uses both, and calls both of
+them "ARGB". The drawing surface stores transparency first; the display server's
+wire format expects it last. Passing one where the other is wanted compiles
+cleanly, never crashes, and produces a picture with red and blue exchanged and
+transparency read out of the blue channel. The file manager's first draft did
+exactly that. The decision is about how to make that mistake hard, given both
+orders must continue to exist.
+
+**The two orders, and why neither can go.**
+
+| | Bytes, low to high | Who requires it |
+|---|---|---|
+| `Canvas::from_argb`/`to_argb` | `A, R, G, B` | the file manager's on-disk thumbnail cache, whose saved files are in this order already |
+| `BufferFormat::Argb8888` (`gui/remote/src/control.rs:186`) | `B, G, R, A` | every buffer handed to the display server; it is a little-endian `u32` of `0xAARRGGBB`, which is what the rasteriser's `blend_pixel` reads |
+
+The wire order is fixed by the format's own definition and by the hardware
+convention it follows. The other is fixed by files already written to users'
+disks. Neither is free to change.
+
+**The decision.** `Canvas` gained a second pair, `from_argb8888`/`to_argb8888`,
+and `Thumbnail::to_wire_bytes` routes through it — decode with one order, encode
+with the other. Three things about that:
+
+1. **Named after the wire enum, not after its byte order.** `to_bgra` would have
+   been more descriptive of the bytes and *worse*, because the two names would
+   then be `to_argb` and `to_bgra` and a caller would pick between them by
+   guessing which one the compositor wants. `to_argb8888` matches
+   `BufferFormat::Argb8888` character for character at the call site, so the
+   match is checkable by eye.
+2. **In `Canvas`, not hand-rolled at the call site.** The obvious
+   implementation is `chunks_exact_mut(4)` + `reverse()` in the thumbnailer. It
+   would work. It would also be a *third* statement of the byte order, free to
+   drift from the two definitions it sits between, and it would silently accept
+   a buffer with a trailing partial pixel where `Canvas::from_argb` returns
+   `None`. Routing through `Canvas` gets the length check for free.
+3. **Asserted, not just documented.** `the_compositors_argb_is_the_byte_reverse_of_the_other_argb`
+   states the relationship as an executable fact: `Color::rgba(1,2,3,4)` is
+   `[3,2,1,4]` in wire order, that is `to_argb()` reversed, and reading it as a
+   little-endian `u32` gives `0x0401_0203`. A change to either definition breaks
+   it loudly.
+
+*Alternative considered — one order everywhere, converting the disk cache on
+read.* *For:* one order is unambiguously simpler than two. *Against:* the
+conversion does not go away, it moves — and it moves to a path that runs on
+every cache hit rather than only on upload, which is the opposite of where you
+want it. It also does not remove the wire format's constraint, only hides it.
+
+**What this does *not* fix, and is logged as debt.** Both orders are still
+`Vec<u8>` with identical signatures, so nothing *prevents* the wrong one being
+passed — only the naming, the docs and the test discourage it. The real fix is a
+newtype the upload path requires and only `to_argb8888` can produce; it touches
+every upload site in `gui/**` and `apps/**` at once, which is why it is not in
+this change. See `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB`.
+
+**Where it lives.** `gui/toolkit/src/canvas.rs` (`from_argb8888`, `to_argb8888`,
+the cross-references on `from_argb`/`to_argb`, the module-doc warning, and two
+tests), `apps/explorer/src/thumbs.rs` (`Thumbnail::to_wire_bytes`),
+`apps/explorer/src/main.rs` (`take_images`, and
+`an_upload_carries_wire_order_bytes_and_not_the_stored_ones`).
+
+## 562. A panel that slides open must be fully open for a caller with no clock, and rewound into the slide by one that has
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** the desktop's notification panel slides in from the right edge of
+the screen. It was written so that "open the panel" meant "start it at zero
+width and let an animation widen it" — but nothing in the tree was running that
+animation, and a panel of zero width is a panel drawn entirely off the edge of
+the screen. Worse, the code that decides what a click landed on measured the
+same zero, so the panel was not only invisible, it was un-clickable at exactly
+the place it was invisible. The decision is where "open" should land when
+nobody is animating.
+
+**The defect, concretely.** `NotificationPane::show` set the state to
+`SlideIn(0.0)`. Both the drawing code (`notif_pane.rs`, `render`) and the
+hit-testing code (`handle_mouse_event`) place the panel's left edge at
+`screen_width - PANE_WIDTH * visibility`. At a visibility of `0.0` that is the
+right-hand edge of the screen: nothing is drawn, the dimming layer behind it is
+fully transparent, and a click anywhere is judged to have landed *outside* the
+panel — which the panel treats as "the user wants me closed". Every one of
+those is silent. There is no panic and no compile error; the panel simply never
+appears.
+
+**This is the second time.** §520 hit it in the Exposé overlay (the "show me
+every window" screen), where `if progress <= 0.0 { return }` meant the first
+working build drew a blank, un-dismissable, full-screen sheet. That one was
+resolved by *deleting* the fade, because the shell genuinely had no frame clock
+at the time. It has one now — `gui/window/src/lib.rs`'s `wake_after` synthesises
+a `Tick` event, and `session.rs` routes it — so this time the animation can
+actually run, and the question is only who starts it.
+
+**Decision.** The plain verbs land immediately; a separate verb rewinds.
+
+- `show`, `hide` and `toggle` put the panel *on* its destination —
+  `Visible` or `Hidden` — with no animation. This is what every caller gets by
+  default, so a caller with no frame clock (a test, an embedder driving the
+  shell by hand, the login screen, a user with reduced-motion turned on) gets a
+  panel that is all the way open or all the way gone. There is no state in
+  which "open" means "invisible".
+- `begin_slide()` is called *afterwards*, and only by a caller that owns a
+  clock. It looks at where the panel now is, puts it back at the far end, and
+  lets the clock carry it. `ShellSession::begin_notifications_slide` is that
+  caller, and it mirrors `begin_overview_fade` line for line, including the
+  reduced-motion guard that skips the rewind entirely.
+- `slide_from` remembers the visibility the panel was last *drawn* at, so a
+  slide reversed halfway — the user closes the panel while it is still opening —
+  resumes from where it is on screen instead of snapping to the far end and
+  playing the whole way back. That snap would be a visible jump in the single
+  case the animation exists to smooth.
+
+**Alternative considered: keep `show` starting the slide, and require every
+caller to have a clock.** Rejected for the reason §520 gives. The property that
+matters is not "the animation is convenient to start" but "a feature does not
+depend on an animation to be usable" — and a rule enforced by documentation is
+a rule that the next orphan module will break in the same silent way. Making
+the *default* correct means the failure mode of forgetting `begin_slide` is a
+panel that appears instantly, which is a cosmetic loss rather than a feature
+that does not exist.
+
+**Alternative considered: delete the slide, as §520 deleted the fade.**
+Rejected because the premise changed. §520 deleted an animation that nothing
+could run; the shell now has a frame clock with a live caller and a tick route,
+so the slide is a working animation rather than a decorative comment.
+
+**A consequence worth naming: the "it closed" event moved.** It used to be
+emitted when the slide-out *finished*. That makes it fire once for a session
+that animates and — since a non-animating session never reaches the end of a
+slide — never at all for one that does not. It is now emitted by the `hide`
+gesture itself, which is both when the user actually closed the panel and the
+one place that happens exactly once either way.
+
+**And a trap the session side has to avoid.** The session decides "a gesture
+opened or closed the panel" by comparing the open flag before and after each
+event. But the slide *ends* by changing that same flag — a slide-out finishes at
+`Hidden` — and that happens inside the frame-tick handler. Sampling around
+ticks as well would read the end of every slide as a fresh gesture and restart
+it, for ever. `dispatch` therefore skips the comparison for `Event::Tick`, and
+`a_frame_tick_does_not_restart_the_slide_it_just_finished` is the test that
+holds it there.
+
+**Where it lives.** `gui/desktop/src/notif_pane.rs` (`show`, `hide`, `toggle`,
+`begin_slide`, `is_sliding`, `slide_from`, `tick`, and the eleven tests naming
+these terms), `gui/desktop/src/session.rs`
+(`begin_notifications_slide`, the `is_tick` guard in `dispatch`,
+`anything_moving`, `step_frame`), `gui/desktop/src/lib.rs`
+(`toggle_notifications`).
+
+---
+
 ## 603. The shell's operand parsers are one generic `required_num<T>`, not one function per integer width
 
 **Date:** 2026-08-25
@@ -45897,6 +46177,229 @@ opposite of what a refusal is for.
 **Where it came from.** Rung 78 of `kshell::self_test`, which asserted
 `` `zz' is not an element id `` and was rejected by the wording gate because
 the kernel could only produce `` a element id ``.
+
+## 563. A panel opened from a button stops short of that button, so the second press closes it
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop grew a bell in the system tray — the little clock
+corner at the right end of the taskbar — that opens the notification panel.
+The panel slides in over the right-hand third of the screen. Written the
+obvious way it covered the whole height of the display, bell included, so the
+user's second press on the bell landed on the panel's own body and did
+nothing: the only ways back out were the Escape key, a chord almost nobody
+knows, or a click on the dimmed part of the screen. The decision is to make
+the panel stop at the top edge of the taskbar, leaving the bar — and the bell
+— visible and live while the panel is open, so that pressing the bell again
+closes it.
+
+**The rule, stated generally.** *A surface opened by a control must not cover
+that control.* Every popup this shell already had obeys it by accident: the
+start menu grows upward from the start button, the calendar hangs above the
+clock. The notification pane was the first one written as a full-height
+column, and full height on a desktop whose taskbar is at the bottom means
+"over the button that opened me".
+
+The failure it produces is quiet, which is what makes it worth a section. The
+pane still *works*; every one of its own controls responds. What is broken is
+only the way out, and only by the route the user just used to get in — so the
+symptom is "I pressed the bell twice and it stuck", and there is nothing on
+screen that says which press was ignored or why.
+
+**Decision.**
+
+- `DesktopShell::notification_pane_height()` returns `taskbar_rect().y`, and
+  it is the single source for the number: both `render_notifications` and the
+  mouse route in `handle_mouse` read it. Two numbers here would be a pane
+  hit-tested somewhere other than where it is painted — the pane derives its
+  own column and its scroll bound from whatever height it was last handed.
+- While the pane is open, `handle_mouse` forwards to it everything *except* a
+  press on the taskbar rect. The bar is neither covered nor dimmed, so an
+  event there is a real event on the bar and falls through to `hit_test`.
+- `handle_press` gains a dismissal arm beside the ones the start menu, the
+  power menu and the calendar already have: with the pane open, any hit that
+  is not `Hit::NotificationBell` closes the pane and is spent doing so. The
+  bell is excepted because it falls through to its own arm one match later,
+  which toggles — without the exception the press would close the pane here
+  and reopen it there.
+
+**Alternative considered: keep the pane full-height and special-case the bell
+in the mouse route.** The pane would stay a modal sheet over the whole
+display, and `handle_mouse` would test `bell_rect()` before forwarding. It is
+fewer moving parts. It was rejected because it makes the bell a button that is
+*drawn underneath an opaque panel* and still answers presses — the user cannot
+see the thing they are clicking, so the affordance is a secret, which is the
+defect being fixed rather than a fix for it.
+
+**Alternative considered: leave the bell out and keep Super+N as the only
+route.** This is what shipped before today, and the pane's own module doc had
+claimed a tray click since the day it was written. A panel whose only entrance
+is an undocumented chord is a panel nobody opens; the wallpaper failure that
+§562's wiring finally gave somewhere to appear would appear somewhere nobody
+looks.
+
+**A consequence worth naming: the taskbar is live while the pane is open.**
+Pressing the start button with the pane open closes the pane and does *not*
+open the menu — the same "dismissing is what the user aimed at" rule the other
+popups follow. That is a deliberate choice over letting the press do both:
+one click doing two things the user did not ask for in sequence is how a
+desktop surprises somebody.
+
+**The badge, and why it is right-aligned inside a fixed slot.** The bell's
+slot is a fixed 24 px square, not a measured width like the clock's, and the
+unread count is drawn right-aligned *inside* it — overlapping the glyph when
+it is two characters wide rather than widening the slot. The tray is laid out
+right-to-left from the display edge, so anything that changes width there
+shuffles every window button sideways; a count that did that would move the
+whole taskbar each time a notification arrived. The count also stops at `9+`
+for the same reason: three characters do not fit, and a slot that grew to fit
+them is the thing being avoided.
+
+**Where it lives.** `gui/desktop/src/lib.rs` — `TRAY_BELL_WIDTH`,
+`NOTIF_BELL_GLYPH`, `bell_rect`, `notification_pane_height`,
+`Hit::NotificationBell`, the tray arm of `hit_test`, the bell arm of
+`handle_press`, and the pane's dismissal arm beside the calendar's.
+
+## 564. Do Not Disturb hides the interruption, never the record — and the two switches that spell it are views of one mode
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop has a "Do Not Disturb" switch. Until now it moved
+when you pressed it and changed absolutely nothing — notifications kept
+arriving exactly as before. Turning it into a real control needed two answers.
+First: when something is silenced, is it *thrown away* or merely *not
+announced*? We keep it: it goes into the notification list as normal, it just
+does not light up the little count on the tray bell. Second: the panel offers
+two switches, "Do Not Disturb" and "Focus Mode", but underneath there is a
+single setting with four positions (off / only important things / only alarms /
+nothing at all). Two switches cannot spell four positions, so they are now
+*read-outs* of that one setting rather than two settings of their own, and
+turning either on turns the other off.
+
+### The state of things before
+
+`gui/desktop/src/focus_assist.rs` is 1,466 lines: four modes, per-app priority
+overrides, automatic rules keyed on time of day and on the machine being in a
+game or a presentation, a settings page and a tray pill. Nothing anywhere in
+the tree constructed a `FocusAssistManager`. It was the second-largest orphan
+island in the shell after `osd.rs` — see known-issues.md
+`TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
+
+`gui/desktop/src/notif_pane.rs` meanwhile had `QuickSetting::DoNotDisturb` and
+`QuickSetting::FocusMode` as two plain `bool`s in its own private state, a
+`QuickSettingToggled` event reporting each press, and — since nothing drained
+`NotificationPane::events` — nobody listening. The switches were decoration.
+
+### Decision 1: suppression governs attention, not the record
+
+A notification that arrives while focus assist is silencing its app is stored
+in the history exactly like any other, and marked
+`Notification::silent`. `NotificationPane::attention_count` — the number the
+tray bell's badge shows — skips the silent ones; `unread_count`, which is a
+plain statement about the history, does not.
+
+*Alternative considered: drop it.* Simpler by a field, and it makes "Total
+Silence" literally true. It is wrong because Do Not Disturb is a request not to
+be **interrupted**, not a request to be **lied to** about what happened while
+you were not looking, and a user who turns it off afterwards has no other way
+to ask for the missed hour back. Windows and macOS both keep the record for
+this reason. Dropping would also silently defeat the summary
+`FocusAssistManager::show_summary` promises, which can only say "you missed 4
+things" if the 4 things exist.
+
+*Alternative considered: store it but mark it `read: true`.* No new field, and
+`unread_count` — which the bell already used — would then be the badge number
+with no second counter. Rejected because `read` means *the user has seen this*,
+and under Total Silence they demonstrably have not. Setting it would make the
+pane open on a list with nothing highlighted, so the missed hour would be in
+the history and invisible in it, which is the drop with extra steps.
+
+The cost of the field is small and was measured rather than assumed: six sites
+in the whole tree construct a `notif_pane::Notification`.
+
+### Decision 2: the two switches are views of one mode
+
+`DesktopShell::sync_quick_settings` is the only place the mapping is written:
+
+| mode | Do Not Disturb | Focus Mode |
+|---|---|---|
+| `Off` | off | off |
+| `PriorityOnly` | off | **on** |
+| `AlarmsOnly` | off | **on** |
+| `TotalSilence` | **on** | off |
+
+A press is applied to the manager and then the manager is pushed back onto
+*both* switches, so the pair can never disagree with what is actually happening
+to arriving notifications. Turning either on replaces the mode outright, which
+makes them mutually exclusive; turning either off means "stop suppressing",
+including when the mode in force was the other switch's.
+
+*Alternative considered: let the two booleans stay independent and derive the
+mode from the pair.* That is the arrangement the pane already had, and it needs
+a rule for "both on" — which has to collapse to one mode, so the write-back
+then turns one of the switches off, and the user watches a switch they just
+pressed flip itself back. A control that undoes your press is worse than one
+that does nothing, because it looks like a bug rather than an absence.
+
+**The one thing the pair cannot spell** is `AlarmsOnly` versus `PriorityOnly`:
+both read "Focus Mode on". That is not a *lie* — focus assist is engaged and it
+is not total silence, so no switch shows a state the system is not in — it is
+merely coarse, and pressing it turns off whichever of the two was in force
+rather than swapping one for the other. The distinction lives on
+`focus_assist`'s own settings page, and in the meantime the tray glyph carries
+it: the mode's icon is a bell, a struck bell, an alarm clock or a no-entry
+sign, so the four modes are four different pictures in the tray.
+
+### The tray glyph is the mode's, and the tint is not
+
+`render_taskbar` draws `focus.effective_mode().icon()` in the bell slot, so one
+24-pixel square says both "here is your history" and "here is why it has been
+quiet" without the tray growing a second item — which would shuffle every
+window button sideways, per §563.
+
+The glyph is *not* tinted with `focus_assist`'s severity hues (blue / yellow /
+red for the three engaged modes). Those are chosen and contrast-checked against
+that module's own pill fill; on the taskbar the only pair this theme guarantees
+legible is accent-on-background, pinned by
+`the_taskbar_accent_contrasts_with_the_bar`. Reusing a colour across a
+background it was never measured on is exactly the bug `focus_assist`'s own
+module doc opens by describing. The changed glyph carries the mode; the accent
+keeps its one existing meaning of "something is waiting".
+
+### A consequence: the drain became mandatory, and moved to the outside
+
+Acting on `QuickSettingToggled` at all meant the shell finally had to call
+`NotificationPane::drain_events`, which nothing ever had — so the buffer grew
+one entry per click for the life of the session.
+
+The drain is deliberately placed *wrapping* `handle_mouse` and `handle_hotkey`
+rather than on the branch that forwards an event to the pane. Every path out of
+those functions can have touched the pane — the bell toggles it, a press
+elsewhere on the bar dismisses it, `dismiss_popups` closes it with everything
+else — and each reports a `Closed`. Draining only the forwarding branch bounds
+the buffer for clicks *inside* the pane and leaks one per click that closed it,
+which is the more common of the two; that is not a hypothetical, it is what the
+first draft did and what `the_panes_event_buffer_does_not_grow` caught.
+
+The wrapper is also what gives `Notification::action` its first reader in the
+tree: a click on a card that names a program returns `ShellAction::Launch`
+rather than being merely consumed.
+
+**Still unwired, and recorded rather than faked:** `evaluate_auto_rules` needs
+a wall clock and a "the foreground window went fullscreen" signal, neither of
+which reaches the shell yet, so `effective_mode()` is today exactly the manual
+mode. Wi-Fi, Bluetooth and Night Light are still decoration for the same kind
+of reason — the first two are other daemons' state and the third is the
+compositor's gamma ramp, over IPC the shell does not hold. Both are in
+known-issues.md.
+
+**Where it lives.** `gui/desktop/src/lib.rs` — `DesktopShell::focus`, `notify`,
+`sync_quick_settings`, `apply_focus_toggle`, `apply_pane_events`, and the
+wrappers around `handle_mouse` / `handle_hotkey`.
+`gui/desktop/src/notif_pane.rs` — `Notification::silent`, `attention_count`,
+`set_quick_setting`.
 
 ---
 

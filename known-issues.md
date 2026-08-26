@@ -68039,7 +68039,7 @@ The largest islands:
 | `gui/desktop/src/network_settings.rs` | 4,172 | the whole network settings page |
 | `gui/desktop/src/osd.rs` | 3,457 | volume/brightness/lock on-screen display |
 | `gui/toolkit/src/svg.rs` | 3,393 | an SVG path/transform/colour parser |
-| `gui/desktop/src/notif_pane.rs` | 3,374 | the notification pane and quick settings |
+| `gui/desktop/src/notif_pane.rs` | 3,374 | the notification pane and quick settings — **reached 2026-08-26, see the repayment log** |
 | `gui/toolkit/src/menubar.rs` | 3,337 | the menu bar widget |
 | `gui/desktop/src/touchpad.rs` | 2,841 | touchpad gestures and settings |
 | `gui/desktop/src/window_rules.rs` | 2,605 | per-application window placement rules |
@@ -68265,6 +68265,128 @@ it sits.
   feature rather than a wiring one. Until it exists, the refusal is at least
   visible before the user releases the button. See
   `TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE` below.
+
+- **2026-08-26 — `gui/desktop/src/notif_pane.rs` (3,374 lines) is reached, and
+  with it the desktop gets its first place to say something the user did not
+  ask about.** 53 remain repo-wide, from 54.
+
+  The pane lives on `DesktopShell` and is opened by Super+N, on the pattern
+  §493 set for the calendar: the pane's own `PaneState::is_visible` **is** the
+  open flag, and there is no second `notifications_open: bool` anywhere. It
+  joins `dismiss_popups`, the session's `popups_open`, `anything_moving` and
+  `step_frame`, and it is drawn last of the popup parts — its scrim dims what
+  is behind it, so drawn earlier it would be the thing dimmed, by its own
+  scrim, under a switcher it is meant to be in front of.
+
+  **This was not merely unwired; it was unwireable as written.** `show()` set
+  the state to `SlideIn(0.0)`, and both `render` and `handle_mouse_event`
+  place the pane's left edge at `screen_width - PANE_WIDTH * visibility`. At a
+  visibility of zero that is the right-hand edge of the screen: the pane draws
+  nothing, its dimming layer is fully transparent, and a click anywhere is
+  judged to have landed *outside* the pane — which the pane treats as "close
+  me". Wiring it as-written would have produced a Super+N that appeared to do
+  nothing at all. This is the identical defect §520 found in the Exposé
+  overlay, and it is now fixed the identical way (§562): the plain verbs land
+  on their destination, and a caller that owns a frame clock calls
+  `begin_slide()` to rewind the jump into an animation.
+
+  **What the wiring was for.** `ShellSession::wallpaper_error` had four writers
+  and exactly one reader — a `pub fn` nothing in the tree called — so a
+  wallpaper that failed to decode left the user looking at a plain colour with
+  no way whatever to find out why. `set_wallpaper_error` is now the single
+  writer and posts a notification when the message is new. The three conditions
+  are each load-bearing:
+  - *When the message is **new**, not when it is `Some`.* `paint_background`
+    runs on every repaint, so an unconditional post files one complaint per
+    mouse click for as long as a broken file stays selected.
+  - *New **message**, not "is there already an error".* Deduplicating on the
+    latter silences every failure after the first, so a user who fixes one path
+    and mistypes the next hears nothing about the second.
+  - *Posted without **opening** the pane.* A wallpaper that did not load is a
+    thing to explain, not an emergency to interrupt with; a panel that shoved
+    itself over the screen at login because of a missing file would be worse
+    than the missing file.
+
+  Two smaller gaps closed on the way: `PaneState::visibility`/`is_visible` were
+  private on a public enum (so no external caller could ask whether the pane
+  was open), and the pane had no reader for its own history at all —
+  `unread_count` was the whole of its readable state, which is the same reason
+  nothing could ask it to draw.
+
+  **Follow-up the same day — the pane now has the mouse route its own doc
+  promised.** `notif_pane`'s module comment has said since it was written that
+  the pane is toggled "on system tray click or Win+N", and only the chord
+  existed. A chord is a route nobody discovers, so the wallpaper message above
+  had somewhere to appear and no way to be found. The tray grew a bell in its
+  own fixed 24-px slot left of the clock (`bell_rect`,
+  `Hit::NotificationBell`), accent-coloured with an unread count when the
+  history is not empty.
+
+  Making the bell a *toggle* rather than a one-way door forced a second change,
+  recorded as §563: the pane used to be as tall as the display, so it covered
+  the bell that opened it and the second press landed on its own opaque column
+  and did nothing. `DesktopShell::notification_pane_height()` now returns the
+  taskbar's top edge and is the single source for the number given to both
+  `render` and `handle_mouse_event`. The bar stays visible and live while the
+  pane is open; a press on it that is not the bell closes the pane and is spent
+  doing so, exactly as the start menu, the power menu and the calendar already
+  behave.
+
+  **Repaid the same day — the events are drained and focus assist is no longer
+  an island.** `DesktopShell::apply_pane_events` drains
+  `NotificationPane::drain_events` from *wrappers* around `handle_mouse` and
+  `handle_hotkey`, not from the branch that forwards to the pane: every path
+  out of those functions can have closed the pane — the bell, a press
+  elsewhere on the bar, `dismiss_popups` — and each reports a `Closed`, so a
+  drain on the forwarding branch alone still leaked one entry per click that
+  closed it. `gui/desktop/src/focus_assist.rs` (1,466 lines, the second-largest
+  island after `osd.rs`) is now constructed as `DesktopShell::focus`:
+  `QuickSetting::DoNotDisturb` and `QuickSetting::FocusMode` are views of its
+  four-valued mode via `sync_quick_settings`, `notify` marks an arriving
+  notification `silent` when the mode suppresses its app (it still enters the
+  history — suppression governs attention, not the record) and counts it on
+  the manager, the bell's badge counts `attention_count` rather than
+  `unread_count`, and the tray glyph is `effective_mode().icon()`.
+  `Notification::action` gained its first reader in the tree: a click on a card
+  that names a program now returns `ShellAction::Launch`. See
+  `design-decisions.md` §564; 14 new tests.
+
+  **Still open from this thread — three toggles with nothing behind them.**
+  `QuickSetting::WiFi`, `QuickSetting::Bluetooth` and `QuickSetting::NightLight`
+  still move under the cursor and change nothing outside the pane. They are
+  matched explicitly in `apply_pane_events` with an empty arm, so adding a
+  variant is a compile error rather than a silent no-op, but there is nothing
+  in this process for them to talk to: the first two are the network and
+  bluetooth daemons' state and the third is the compositor's gamma ramp, all
+  reached over IPC the shell does not hold. The proper fix is a shell-side
+  client for each, which is blocked on those services existing; until then a
+  case could be made for hiding the three rather than showing dead controls,
+  which is a user-visible call and so belongs in `open-questions.md` if it is
+  ever pressing. Neither the volume nor the brightness slider in the same block
+  is wired either, for the same reason.
+
+  **Still open from this thread — focus assist's automatic half.**
+  `FocusAssistManager::evaluate_auto_rules` is never called, so
+  `effective_mode()` is today exactly `manual_mode`: the schedule rules
+  (`AutoRule::Schedule`), and the ones keyed on the machine being fullscreen,
+  presenting, gaming or on battery, do nothing. It needs a wall clock — the
+  shell reads one for the taskbar clock, so that half is available — and a
+  "the foreground window went fullscreen" signal from the compositor, which is
+  not. Wiring only the clock half would make a manager that switches modes on
+  schedule but never on a game, which is a worse state than neither, so both
+  wait together. Note also that `set_mode(Off)` clears `manual_override`, so
+  once auto rules *are* live, turning a switch off while an auto rule is
+  asserting a mode will re-assert it on the next evaluation — the manual "off"
+  needs to become a distinct suppress-the-rule state at that point, not the
+  absence of an override.
+
+  **Still an island next door:** `gui/desktop/src/osd.rs` (3,457 lines), the
+  volume/brightness/lock on-screen display, remains uncalled. It was the other
+  candidate for the wallpaper message and lost on the merits — an OSD
+  auto-dismisses, so a user away from the machine at login would miss the text
+  for ever, while a notification persists in a history they can come back to.
+  It still needs a caller of its own, for the transient messages an OSD is
+  actually right for.
 
 ## TD-C-A-DRAG-CAN-ASK-FOR-A-LINK-AND-FILEOPS-CANNOT-MAKE-ONE (lane C, 2026-08-25)
 
@@ -82939,16 +83061,18 @@ needs a third-party oracle: had the two been compared only to each other, all
 
 ---
 
-## `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING` (lane C, 2026-08-26) — **mostly fixed 2026-08-26: the decoder exists and the wallpaper and the image viewer use it; explorer thumbnails do not yet**
+## `TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING` (lane C, 2026-08-26) — **mostly fixed 2026-08-26: the decoder exists and the wallpaper, the image viewer and the file manager use it; the viewer's own filmstrip does not yet**
 
 **In short (update):** there is a PNG decoder now — `gui/imagecodec`, a
 dependency-free `no_std` crate that turns a `.png` on disk into the exact
 `0xAARRGGBB` pixels the compositor stores. The missing link in the table below
-is therefore no longer missing. Two of the callers are wired to it: a wallpaper
-the user picks appears, and the image viewer shows the photograph you opened
-instead of a grey checkerboard. What remains is `apps/explorer`'s thumbnails,
-and the image viewer's own filmstrip, both of which need a bounded scheduler for
-decoding many files at once. The entry stays open until they are.
+is therefore no longer missing. Three of the callers are wired to it: a
+wallpaper the user picks appears, the image viewer shows the photograph you
+opened instead of a grey checkerboard, and the file manager's icon view shows
+the picture in each file instead of a flat green rectangle. What remains is the
+image viewer's own filmstrip, which can now reuse the file manager's generator
+and eviction rule rather than inventing a second one. The entry stays open until
+it does.
 
 **What was built.**
 
@@ -82977,8 +83101,8 @@ agreed with ours exactly. The suite also truncates every real file at every
 length and flips a bit in every byte of every one, asserting only that nothing
 unwinds.
 
-**What is left.** Wire the remaining caller below to it — `apps/explorer`'s
-thumbnails, and the image viewer's filmstrip, which are the same problem.
+**What is left.** Wire the remaining caller below to it — the image viewer's
+filmstrip.
 
 **Wired so far — the wallpaper (2026-08-26).**
 `ShellSession::refresh_wallpaper_image` (`gui/desktop/src/session.rs`) runs at
@@ -83059,16 +83183,50 @@ application, so this half of the fix is reusable by all ~140 of them:
 (`render_thumbnail_strip`, ~line 1631) still draws a grey `FillRect` per entry
 under a comment reading "would use actual thumbnails". Decoding every file in a
 directory to fill it needs a bounded, off-the-draw-path scheduler and a
-per-thumbnail image id with an eviction rule — the same problem
-`apps/explorer` has, and it should be solved once for both rather than twice.
+per-thumbnail image id with an eviction rule — **all three of which now exist**,
+in `apps/explorer/src/thumbs.rs` (`ThumbnailGenerator`, `ThumbnailCache`,
+`take_evicted_image_ids`). The filmstrip should be wired by lifting that module
+somewhere both apps can depend on it, not by writing a second one; two
+thumbnailers is the glob-matcher mistake (design-decisions.md → 555) again.
 The **video** path in `apps/imageviewer/src/video.rs` is also still frameless:
 `imagecodec` decodes stills only, and no MP4/Matroska video decoder exists.
 
-**Still unwired.** `apps/explorer` (thumbnails). It does not depend on
-`oswindow` yet, which is what carries an upload to the compositor, so it needs
-that dependency before it can upload anything it decodes; `thumbs.rs` ~1313 says
-outright that "the caller is responsible for registering the pixel data with the
-compositor under this ID" and no caller does.
+**Wired so far — the file manager (2026-08-26).** `apps/explorer` decodes a
+`.png` into its thumbnail (`try_decoded_thumbnail`) *and* now has somewhere to
+put the result: the crate gained an `oswindow` dependency and an `App`
+implementation, so it is a real window rather than a print-only demo. The three
+pieces that had to exist:
+
+- **An eviction rule, which nothing else in the tree had needed.** The
+  compositor never evicts — it holds what a client gives it until the client
+  drops it — so a file manager walking a photograph library would accumulate
+  every preview it had ever made and eventually be refused by the per-link image
+  budget. `ThumbnailCache` now records the image id of every entry that leaves
+  it, by any route (LRU fall-off, `invalidate`, `clear`), and
+  `take_evicted_image_ids()` drains that list into `Drop` messages. The bounded
+  LRU cache the renderer already reads *is* the policy; a second policy beside it
+  would be a second thing to keep in agreement. See design-decisions.md §559.
+- **An image id keyed on the same three facts as the cache.** It was hashed from
+  (path, mtime) while the cache is keyed on (path, mtime, length), so a file
+  rewritten twice inside one second produced two cache entries sharing one id —
+  the second upload would silently replace the first and one of the two entries
+  would draw the other's picture. `thumbs::image_id(path, mtime, size)` now takes
+  all three. See design-decisions.md §560.
+- **A byte-order conversion, because "ARGB" names two opposite layouts here.**
+  The stored thumbnail is `A, R, G, B` low-to-high; the compositor's
+  `BufferFormat::Argb8888` is `B, G, R, A`. `Canvas` gained
+  `from_argb8888`/`to_argb8888` named after the *wire enum*, and
+  `Thumbnail::to_wire_bytes` routes through it. See
+  `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` below and design-decisions.md
+  §561.
+
+Drops are emitted before uploads in the same `take_images()` list, for the same
+budget reason the wallpaper has. `+19` tests, including one that decodes an
+upload's bytes back through `Canvas::from_argb8888` and asserts they are *not*
+the stored bytes — a test that passes trivially if you forget the conversion is
+a test that does nothing.
+
+**Still unwired.** Nothing outside the viewer's filmstrip.
 `gui/toolkit/src/grid.rs` takes the caller's id and is correct as it stands.
 
 **Original entry follows.**
@@ -83129,3 +83287,223 @@ decoder is an attack surface in the same way the wire decoder is:
 **How you would notice.** Set a wallpaper in Settings: the desktop stays the
 background colour. Open a folder of photographs in the file manager: every icon
 is the generic file glyph. Neither reports an error.
+
+---
+
+## `TD-C-A-THUMBNAIL-COSTS-A-FULL-SIZE-DECODE` (lane C, 2026-08-26)
+
+**In short:** to draw a 128×128 preview of a photograph, the file manager
+decodes the photograph at full size first and then shrinks it. A 24-megapixel
+picture is about 190 MB of memory for a fraction of a second, to produce 64 KB
+of preview. It works, and it is bounded — there is a cap, above which the entry
+simply keeps the plain coloured rectangle it always had — but the cap exists
+only because the decode is wasteful, and a picture *above* the cap gets no
+preview even though nothing about it is wrong.
+
+**Where it lives.** `apps/explorer/src/thumbs.rs` →
+`try_decoded_thumbnail`, which calls `imagecodec::decode` and then
+`box_filter_downscale`. The cap is `DEFAULT_MAX_SOURCE_PIXELS` (24 million —
+a 6000×4000 full-frame photograph), surfaced as `ThumbConfig::max_source_pixels`
+so a low-memory machine can lower it.
+
+**Why it costs what it does.** `imagecodec::decode` has no scaled or partial
+mode: it holds the compressed `IDAT` copy, the inflated scanline buffer
+(`w × h × bytes-per-pixel + h`) and the finished `Vec<u32>` at once, and returns
+the last of those at the file's own size. The thumbnailer then converts that
+into a `Canvas` and box-filters it down. The conversion is written to consume
+the decoder's buffer rather than borrow it (`into_iter().map(...).collect()`
+instead of `to_argb_bytes()`), and the compressed data is dropped before it, so
+the thumbnailer's own overhead is about as low as it can be *given a full-size
+decode*. The full-size decode is the cost.
+
+**Not urgent, and why.** Thumbnail generation is sequential — one file at a
+time — so the peak is one picture's worth, not a directory's. The cap keeps
+that peak bounded by a number the machine's owner can choose. Nothing crashes
+and nothing regresses at the boundary.
+
+**What the proper fix is.** A scaled decode in `imagecodec`: box-filter *during*
+scanline reconstruction, accumulating into a destination-sized buffer as rows
+come out of the inflater, so peak memory is the row buffer plus the thumbnail
+rather than the whole picture. PNG makes this easy in the non-interlaced case
+because rows arrive in order; Adam7 needs the full-size buffer anyway, since its
+passes are scattered, so that path would keep the current behaviour. With it,
+`max_source_pixels` can go away entirely and every picture gets a preview.
+
+**How you would notice.** Open a directory of 100-megapixel scans in the icon
+view: they show the plain green rectangle rather than a preview, while the
+6000×4000 photographs beside them show properly. Nothing reports why.
+
+---
+
+## `TD-C-EXPLORER-DOES-ARITHMETIC-ON-UNCHECKED-VALUES` (lane C, 2026-08-26)
+
+**In short:** the file manager has 33 places where it adds, multiplies or
+subtracts without checking for overflow, and the project's own lint
+(`clippy::arithmetic_side_effects`) warns about every one of them on every
+build. Most are on values the program itself controls and are fine in practice;
+some are on numbers that came out of a file's header, which is where this kind
+of thing becomes a way to make a program misbehave with a crafted file. Nobody
+has been through them to sort the two groups.
+
+**Where it lives.** `apps/explorer/src/` — `thumbs.rs` (16 sites), `fileops.rs`
+(11), `columns.rs` (6). `cargo clippy -p explorer --all-targets` lists them all.
+The ones inside `parse_jpeg_dimensions` (`thumbs.rs` ~389–427) are the ones that
+matter most: `pos += seg_len` and the `pos + 7 > data.len()` bounds checks walk
+a JPEG's marker chain using lengths the *file* supplies, so an overflow there
+turns a bounds check into a check that passes.
+
+**Why it has not been fixed.** It predates this lane's current work and is not
+caused by it; the decoder wiring added no new sites. Fixing it well means
+deciding per site whether the right answer is `checked_*` and an early return,
+`saturating_*`, or a comment explaining why the value cannot overflow — which is
+33 small judgements, not one sweep.
+
+**What the proper fix is.** Work the list, site by site. For the JPEG parser,
+prefer `byteread`'s bounded accessors (already a dependency, already used by the
+BMP path) over hand-rolled offset arithmetic; for the layout code in
+`columns.rs`, `saturating_*` is almost always right because a widget position
+that saturates draws wrong and a widget position that wraps draws somewhere
+absurd. Where a value genuinely cannot overflow, say so in a comment rather than
+allowing the lint file-wide — a blanket `#![allow]` is what turns 33 known sites
+into an unknown number.
+
+**How you would notice.** You would not, as a user, until a malformed JPEG in a
+directory made the file manager read the wrong bytes. As a developer, every
+`cargo clippy -p explorer` prints 33 warnings, which is enough noise to hide the
+34th when someone adds it.
+
+---
+
+## `TD-C-EXPLORER-HAS-NO-EDITING-KEYS` (lane C, 2026-08-26)
+
+**In short:** the file manager is now a real window you can click and type in,
+but only the keys that *look* at files work — arrows, Home/End, Enter,
+Backspace, Ctrl+A, F5. The keys everyone expects to *change* a file do nothing
+at all: Delete does not delete, F2 does not rename, Ctrl+C/Ctrl+V do not copy or
+paste. Pressing them is silent — no beep, no message, no greyed-out menu item —
+so the window looks broken rather than incomplete.
+
+**Where it lives.** `apps/explorer/src/main.rs` → `handle_key`, the `match` on
+`Key`. Everything the file manager needs underneath already exists and is
+tested: `fileops.rs` has copy, move, rename and recycle, and `ExplorerState`
+already tracks a selection.
+
+**Why it was left out rather than added.** The three editing keys each need a
+piece of *window* that does not exist yet, and wiring the key without the piece
+is worse than leaving the key dead:
+
+| Key | What is missing |
+|---|---|
+| `Delete` | A confirmation, and a visible undo. A Delete key that recycled the selection with no prompt and no way back is a key that destroys a user's files on a mis-keypress. |
+| `F2` | An in-place rename field. `fileops::rename` is ready; there is no text entry in the listing to drive it. |
+| `Ctrl+C` / `Ctrl+V` | A clipboard the file manager can put a *file reference* on, and a paste target. `gui/toolkit` has a clipboard for text. |
+
+**What the proper fix is.** Build the three missing widgets, then wire the keys
+to them — not the reverse. A modal confirmation and an inline edit field are
+both generally useful in `gui/toolkit`, so neither belongs in this app.
+Meanwhile, add a *visible* refusal: a status-line message on a dead editing key
+beats silence, because silence is indistinguishable from a bug.
+
+**How you would notice.** Select a file, press Delete. Nothing happens, and
+nothing says why.
+
+---
+
+## `TD-C-EXPLORER-DOES-NOT-SCROLL` (lane C, 2026-08-26)
+
+**In short:** the file manager draws as many entries as fit in the window and
+then stops. There is no scrollbar, no mouse wheel, no Page Up/Page Down — so in
+a directory with more files than fit on screen, the ones past the bottom edge
+**cannot be reached at all**. The arrow keys will move the selection onto them
+(the selection is an index into the full listing, not into the visible part), at
+which point the highlighted row is off-screen and the window appears to have
+lost the selection.
+
+**Where it lives.** `apps/explorer/src/main.rs` — the renderer walks
+`self.entries` and emits rows until it runs out of vertical space; nothing holds
+a scroll offset. `dropzone.rs` registers hit rectangles only for the rows that
+were actually drawn, which is correct and means clicking is consistent with what
+is visible — the gap is purely that nothing changes *which* rows those are.
+
+**Why it is separate from the input work.** Scrolling is a viewport, not a key
+binding: it needs a first-visible-row offset threaded through all three view
+layouts, a scroll-into-view rule so keyboard movement drags the viewport with
+it, wheel handling in `handle_mouse` (`MouseEventKind::Scroll` is delivered and
+falls into the `_ => false` arm), and a scrollbar. That is a layout change, and
+folding it into the commit that made the window clickable would have made both
+harder to review.
+
+**What the proper fix is — and it is mostly *use what is already there*.**
+`gui/toolkit` has this solved, because a dozen settings panels hit it first:
+
+| Piece | Where it already lives |
+|---|---|
+| Offset + selection kept in agreement, so the picked row is never off screen | `guitk::listview::ListViewport` — `select_prev`/`select_next`/`page_up`/`page_down`/`set_height`/`visible_range`, all clamped against a `len` passed per call |
+| Which rows fit, for a renderer that only has `&self` | `guitk::scroll_window::visible_count` / `Rows` — truncates rather than drawing a row across the bottom edge, and clamps a stale offset to the last page instead of going blank |
+| Wheel notches → row steps, accumulating fractions so a trackpad is not dead | `guitk::wheel::Accumulator::rows` |
+
+So the work is to hold a `ListViewport` on `ExplorerState`, drive the three
+layout paths from `visible_range`, and route `Scroll { dy }` through an
+`Accumulator`. **Explorer's own `move_selection` should go away in the process**
+— it is a hand-rolled `select_prev`/`select_next` with its own first-press rule,
+written before this entry noticed the toolkit had one, and two implementations
+of "move a selection down a list, clamped" is the glob-matcher mistake
+(design-decisions.md → 555) in miniature.
+
+**The one genuine mismatch.** `ListViewport::selected` is `Option<usize>` — one
+picked row — while explorer holds a multi-selection (`Ctrl+A` selects
+everything). The viewport half applies unchanged; what needs deciding is whether
+`ListViewport` grows an anchor/extend notion or whether explorer keeps its
+`Vec<usize>` and uses the viewport purely for scrolling, syncing the "cursor"
+row into it. The second is smaller and probably right, since a multi-select
+anchor is a file-manager concern rather than a settings-panel one. The icon and
+column views also need the offset expressed in their own units (rows of icons,
+not rows of files).
+
+**How you would notice.** Open a directory with a hundred files. You can see
+about twenty. Press Down thirty times: the selection highlight vanishes off the
+bottom and the listing never moves.
+
+---
+
+## `TD-C-TWO-BYTE-ORDERS-ARE-BOTH-CALLED-ARGB` (lane C, 2026-08-26)
+
+**In short:** "ARGB" names two *opposite* arrangements of the same four bytes in
+this tree, and both are spelled the same way in code. `Canvas::to_argb` writes
+alpha first (`A, R, G, B`); the compositor's wire format
+`BufferFormat::Argb8888` expects alpha last (`B, G, R, A`). Handing one to
+something expecting the other is not a compile error and does not panic — the
+picture simply appears with red and blue swapped and its transparency read out
+of the blue channel. The file manager was written with exactly that bug and it
+was caught by reading the two definitions side by side, not by any test.
+
+**Where it lives.** `gui/toolkit/src/canvas.rs` (`from_argb`/`to_argb` versus
+`from_argb8888`/`to_argb8888`) and `gui/remote/src/control.rs:186` (the wire
+enum's definition). Every caller that hands pixels to the compositor —
+`Thumbnail::to_wire_bytes`, the wallpaper upload, the image viewer — must use
+the `8888` pair; every caller reading or writing explorer's on-disk thumbnail
+cache must use the other.
+
+**What has been done about it.** The `8888` pair is named after the *wire enum*
+rather than after its byte order, so the two cannot be chosen between by reading
+the name and guessing; each of the four functions carries a table saying which
+is which and cross-references the other; the module doc opens with a "beware"
+paragraph; and a test (`the_compositors_argb_is_the_byte_reverse_of_the_other_argb`)
+asserts the reversal explicitly, so a change to either definition breaks loudly.
+See design-decisions.md §561.
+
+**Why that is not enough.** It is still two `Vec<u8>` types with identical
+signatures. Nothing stops a future caller from writing
+`canvas.to_argb()` into an `ImageChange::Upload`, which is precisely the mistake
+that was made once already.
+
+**What the proper fix is.** Make the byte order part of the *type*, not the
+function name: a `WireBytes(Vec<u8>)` newtype that only `to_argb8888` can
+produce and that `ImageChange::Upload`/`upload_image` require, so the wrong
+buffer cannot be passed at all. The same treatment would suit the disk-cache
+order. Cheap to do; it was not done in the same change because it touches every
+upload site in `gui/**` and `apps/**` at once.
+
+**How you would notice.** A thumbnail, wallpaper or photograph draws with red
+and blue exchanged — a blue sky above orange grass — and semi-transparent
+pixels come out wrong. Nothing reports an error.

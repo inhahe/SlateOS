@@ -26,9 +26,18 @@
 //! function moved between them silently produced colour-swapped output, and
 //! meant the byte order had to be re-derived at 115 sites rather than stated
 //! at the two that serialise. Here it is confined to [`Canvas::from_argb`],
-//! [`Canvas::to_argb`], [`Canvas::from_rgba`] and [`Canvas::to_rgba`], which
-//! is where a byte order is actually a fact about something. `Color` is four
-//! bytes and `Copy`, so this costs no memory.
+//! [`Canvas::to_argb`], [`Canvas::from_argb8888`], [`Canvas::to_argb8888`],
+//! [`Canvas::from_rgba`] and [`Canvas::to_rgba`], which is where a byte order
+//! is actually a fact about something. `Color` is four bytes and `Copy`, so
+//! this costs no memory.
+//!
+//! **Beware: "ARGB" names two opposite byte orders in this tree.**
+//! [`Canvas::to_argb`] writes `A, R, G, B`, which is explorer's on-disk
+//! thumbnail format; the compositor's `BufferFormat::Argb8888` means `B, G, R,
+//! A` — a little-endian `u32` — and is what [`Canvas::to_argb8888`] writes.
+//! Converting between the two is what this type is *for*: read with one, write
+//! with the other, and no code has to know that the answer happens to be a
+//! byte-reverse.
 //!
 //! **Every primitive clips; none panics.** A rectangle drawn partly off the
 //! edge draws the part that fits. Reading off-canvas returns `None`, writing
@@ -142,9 +151,35 @@ impl Canvas {
     }
 
     /// Wrap a buffer of `A, R, G, B` bytes, four per pixel, row-major.
+    ///
+    /// **Not the compositor's `Argb8888`** — see [`Self::from_argb8888`].
     #[must_use]
     pub fn from_argb(width: u32, height: u32, bytes: &[u8]) -> Option<Self> {
         Self::from_bytes(width, height, bytes, |[a, r, g, b]| Color::rgba(r, g, b, a))
+    }
+
+    /// Wrap a buffer in the layout `remote::control::BufferFormat::Argb8888`
+    /// names: bytes `B, G, R, A` low to high, i.e. a little-endian `u32` of
+    /// `0xAARRGGBB`.
+    ///
+    /// # The two ARGBs, and why both exist
+    ///
+    /// "ARGB" names two *opposite* byte orders in this tree, and both are
+    /// correct for what they describe:
+    ///
+    /// | | Bytes low→high | Used by |
+    /// |---|---|---|
+    /// | [`from_argb`](Self::from_argb) / [`to_argb`](Self::to_argb) | `A, R, G, B` | explorer's on-disk thumbnail cache |
+    /// | this / [`to_argb8888`](Self::to_argb8888) | `B, G, R, A` | every buffer handed to the compositor |
+    ///
+    /// The second is named after the wire enum rather than after its byte order
+    /// precisely so the two cannot be picked between by reading the name and
+    /// guessing. Getting it wrong is not a compile error and not a panic: red
+    /// comes out blue and opaque comes out transparent, which looks like a bug
+    /// in whatever *drew* the picture rather than in whoever serialised it.
+    #[must_use]
+    pub fn from_argb8888(width: u32, height: u32, bytes: &[u8]) -> Option<Self> {
+        Self::from_bytes(width, height, bytes, |[b, g, r, a]| Color::rgba(r, g, b, a))
     }
 
     /// Wrap a buffer of `R, G, B, A` bytes, four per pixel, row-major.
@@ -178,9 +213,27 @@ impl Canvas {
     }
 
     /// Serialise to `A, R, G, B` bytes, four per pixel, row-major.
+    ///
+    /// **Not the compositor's `Argb8888`** — see [`Self::to_argb8888`].
     #[must_use]
     pub fn to_argb(&self) -> Vec<u8> {
         self.to_bytes(|c| [c.a, c.r, c.g, c.b])
+    }
+
+    /// Serialise to the layout `remote::control::BufferFormat::Argb8888` names:
+    /// bytes `B, G, R, A` low to high, i.e. a little-endian `u32` of
+    /// `0xAARRGGBB`.
+    ///
+    /// **This is what an `UploadImage`/`register_image` buffer must contain.**
+    /// It is the byte-reverse of [`to_argb`](Self::to_argb), which is a
+    /// different, equally correct "ARGB" — [`from_argb8888`](Self::from_argb8888)
+    /// has the table.
+    ///
+    /// Alpha is straight, not premultiplied, matching what the compositor's
+    /// `blend_pixel` expects and what `imagecodec` produces.
+    #[must_use]
+    pub fn to_argb8888(&self) -> Vec<u8> {
+        self.to_bytes(|c| [c.b, c.g, c.r, c.a])
     }
 
     /// Serialise to `R, G, B, A` bytes, four per pixel, row-major.
@@ -595,11 +648,40 @@ mod tests {
         assert_eq!(c.to_rgba(), [1, 2, 3, 4]);
     }
 
+    /// The trap the `8888` suffix exists to defuse: the compositor's
+    /// `BufferFormat::Argb8888` is `B, G, R, A` in memory — a little-endian
+    /// `u32` of `0xAARRGGBB` — which is the *reverse* of what `to_argb` writes,
+    /// though both are called ARGB. Handing the compositor the wrong one is
+    /// neither a compile error nor a panic; red simply arrives as blue and
+    /// opaque as transparent.
+    #[test]
+    fn the_compositors_argb_is_the_byte_reverse_of_the_other_argb() {
+        let c = Canvas::filled(1, 1, Color::rgba(1, 2, 3, 4));
+        assert_eq!(c.to_argb8888(), [3, 2, 1, 4]);
+
+        let mut reversed = c.to_argb();
+        reversed.reverse();
+        assert_eq!(c.to_argb8888(), reversed);
+
+        // And it really is the little-endian u32 the wire documents.
+        let px = u32::from_le_bytes([3, 2, 1, 4]);
+        assert_eq!(px, 0x0401_0203); // 0xAARRGGBB with a=4, r=1, g=2, b=3
+    }
+
     #[test]
     fn bytes_round_trip_through_both_orders() {
         let c = Canvas::filled(2, 3, Color::rgba(9, 8, 7, 6));
         assert_eq!(Canvas::from_argb(2, 3, &c.to_argb()), Some(c.clone()));
-        assert_eq!(Canvas::from_rgba(2, 3, &c.to_rgba()), Some(c));
+        assert_eq!(Canvas::from_rgba(2, 3, &c.to_rgba()), Some(c.clone()));
+        assert_eq!(
+            Canvas::from_argb8888(2, 3, &c.to_argb8888()),
+            Some(c.clone())
+        );
+        // Reading with one order and writing with the other is the conversion
+        // explorer's upload path performs; it must not lose a channel.
+        let disk = c.to_argb();
+        let wire = Canvas::from_argb(2, 3, &disk).map(|k| k.to_argb8888());
+        assert_eq!(wire, Some(c.to_argb8888()));
     }
 
     #[test]

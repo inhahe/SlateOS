@@ -60,6 +60,14 @@
 //!
 //! JPEG is not here yet. It is the other format a wallpaper is likely to be in
 //! and is the next thing this crate should grow.
+//!
+//! # Picture files for *other* crates' tests
+//!
+//! [`testing`] emits real, small PNGs. It is public rather than `#[cfg(test)]`
+//! on purpose: every caller of this crate needs a `.png` to point its own tests
+//! at, and a `#[cfg(test)]` helper is invisible outside the crate that declares
+//! it — so "share theirs" is not an option even in principle, and three callers
+//! meant three hand-rolled encoders that could each be wrong differently.
 
 #![no_std]
 
@@ -70,6 +78,7 @@ use core::fmt;
 
 pub mod inflate;
 pub mod png;
+pub mod testing;
 
 /// A decoded picture: densely packed `0xAARRGGBB`, row-major, no padding.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -30,6 +30,7 @@ mod fileops;
 mod thumbs;
 
 use guitk::color::Color;
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::RenderTree;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
@@ -633,8 +634,8 @@ impl ExplorerState {
     pub fn pump_thumbnails(&mut self, batch: usize) -> usize {
         let generated = self.thumb_gen.process_batch(batch);
         for (req, thumb) in self.thumb_gen.take_completed() {
-            self.pending_uploads
-                .push((thumbs::thumbnail_image_id(&thumb), thumb.clone()));
+            let id = thumbs::image_id(&req.path, req.mtime, req.size);
+            self.pending_uploads.push((id, thumb.clone()));
             self.thumbs.insert(&req.path, req.mtime, req.size, thumb);
         }
         generated
@@ -675,19 +676,22 @@ impl ExplorerState {
         self.uploaded.len()
     }
 
-    /// The thumbnail to draw for `entry`, if one is both generated and
-    /// uploaded.
+    /// The thumbnail to draw for `entry` and the id to draw it under, if one is
+    /// both generated and uploaded.
     ///
     /// Both conditions, not either: a generated-but-not-uploaded thumbnail
     /// would draw as an empty white box, because the compositor discards an
     /// `Image` command naming an id it does not hold and says nothing about it.
-    fn drawable_thumb(&self, entry: &FileEntry) -> Option<&Thumbnail> {
-        let thumb = self
-            .thumbs
-            .peek(&entry.path, mtime_secs(entry.modified), entry.size)?;
-        self.uploaded
-            .contains(&thumbs::thumbnail_image_id(thumb))
-            .then_some(thumb)
+    ///
+    /// The id comes back with the thumbnail because it is derived from the
+    /// entry — path, mtime, length — and not from the pixels; the renderer has
+    /// the entry in hand here and would have to re-derive it downstream, which
+    /// is one more place for the two derivations to drift apart.
+    fn drawable_thumb(&self, entry: &FileEntry) -> Option<(u64, &Thumbnail)> {
+        let mtime = mtime_secs(entry.modified);
+        let thumb = self.thumbs.peek(&entry.path, mtime, entry.size)?;
+        let id = thumbs::image_id(&entry.path, mtime, entry.size);
+        self.uploaded.contains(&id).then_some((id, thumb))
     }
 
     /// The detail view's cells for one entry, in active-column order.
@@ -1670,7 +1674,7 @@ impl ExplorerState {
     /// disagree about when a picture is safe to emit.
     fn push_thumb(&self, tree: &mut RenderTree, entry: &FileEntry, x: f32, y: f32, size: f32) {
         let cmds = match self.drawable_thumb(entry) {
-            Some(thumb) => thumbs::render_thumbnail(thumb, x, y, size),
+            Some((id, thumb)) => thumbs::render_thumbnail(thumb, id, x, y, size),
             None => thumbs::render_placeholder(entry_category(entry), None, x, y, size),
         };
         for cmd in cmds {
@@ -1924,40 +1928,337 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
 // the same operation is how the weaker one ends up on the user-facing path.
 
 // ============================================================================
+// The window
+// ============================================================================
+
+/// How often to wake while there is thumbnail work left to do.
+///
+/// Generation is synchronous, so this is the rate at which batches of
+/// [`THUMB_BATCH_DEFAULT`] files are decoded, not a frame rate. Fast enough
+/// that a folder of photographs fills in while the user is still looking at
+/// it, slow enough that each batch has the frame to itself.
+const THUMB_TICK_MS: u64 = 60;
+
+impl oswindow::app::App for ExplorerState {
+    /// The folder's name first, then the application's.
+    ///
+    /// That order is what a task bar full of windows needs: the strip of
+    /// buttons is elided from the right, so leading with the application name
+    /// would give every open folder the same visible label.
+    fn title(&self) -> String {
+        match self.current_path.file_name() {
+            Some(name) => format!("{} — Files", Path::new(name).display()),
+            // The root of the tree has no file name of its own.
+            None => format!("{} — Files", self.current_path.display()),
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (self.window_width, self.window_height)
+    }
+
+    /// A clock only while thumbnails remain to be generated.
+    ///
+    /// Consulted after every event, so opening a folder of pictures arms it and
+    /// the last thumbnail disarms it. Both halves matter: without the first, a
+    /// folder entered by keyboard would never generate anything, because
+    /// nothing else in this application produces the events that would pump the
+    /// queue; without the second, a file manager left open on a folder of text
+    /// files would wake sixty times a second forever and hold the whole desktop
+    /// awake to discover each time that there was nothing to do.
+    ///
+    /// `completed_count` is in the condition as well as `pending_count`,
+    /// because a batch that finished generating has still not been filed into
+    /// the cache or queued for upload — that happens in
+    /// [`ExplorerState::pump_thumbnails`], which needs one more tick to run.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        let working = self.thumb_gen.pending_count() > 0 || self.thumb_gen.completed_count() > 0;
+        working.then(|| std::time::Duration::from_millis(THUMB_TICK_MS))
+    }
+
+    fn on_event(&mut self, event: &Event) -> oswindow::app::Response {
+        if matches!(event, Event::CloseRequested) {
+            return oswindow::app::Response::Exit;
+        }
+        if self.handle_event(event) {
+            oswindow::app::Response::Redraw
+        } else {
+            oswindow::app::Response::Idle
+        }
+    }
+
+    /// Give back what has left the cache, then hand over what has entered it.
+    ///
+    /// **Drops before uploads, and that order is load-bearing** (see
+    /// [`ImageChange`](oswindow::app::ImageChange)). Both lists are produced by
+    /// the same pump: a batch that generated N thumbnails into a full cache
+    /// evicted N others, and the link's image budget is checked against
+    /// `held - freed + incoming`. Uploading first would ask the compositor to
+    /// hold both sets at once and be refused at exactly the moment the cache is
+    /// working as designed.
+    ///
+    /// A thumbnail whose bytes cannot be put in wire order is skipped rather
+    /// than uploaded wrong. That can only happen for a `Thumbnail` assembled by
+    /// hand with mismatched fields — [`Thumbnail::to_wire_bytes`] gets the
+    /// length check for free — and the entry keeps drawing its placeholder,
+    /// which is what an entry with no usable picture should do.
+    fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
+        use oswindow::app::ImageChange;
+
+        let mut changes = Vec::new();
+        for id in self.thumbs.take_evicted_image_ids() {
+            // Only announce a drop for something believed to be held. An id the
+            // compositor never took costs nothing to drop, but the bookkeeping
+            // must still come off `uploaded` or the entry would keep claiming
+            // it was drawable.
+            if self.mark_dropped(id) {
+                changes.push(ImageChange::Drop(id));
+            }
+        }
+        for (id, thumb) in self.take_pending_uploads() {
+            let Some(bytes) = thumb.to_wire_bytes() else {
+                continue;
+            };
+            changes.push(ImageChange::Upload {
+                id,
+                width: thumb.width,
+                height: thumb.height,
+                // `Canvas` never pads, so a row is exactly its pixels.
+                stride: thumb.width.saturating_mul(4),
+                format: oswindow::PixelFormat::Argb8888,
+                bytes,
+            });
+            // Optimistic, and safe to be: the event loop propagates an upload
+            // failure out of `apply_images`, which ends the loop — so there is
+            // no frame in which this could be believed and be wrong.
+            self.mark_uploaded(id);
+        }
+        changes
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the compositor last reported wins over the one this state
+        // remembers. They agree whenever a `Resize` was delivered; the case
+        // where they do not is the very first frame, drawn before any event has
+        // arrived, which would otherwise be laid out at the size the explorer
+        // *asked* for rather than the size it got.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            self.window_width = width.clamp(1.0, 16384.0) as u32;
+            self.window_height = height.clamp(1.0, 16384.0) as u32;
+        }
+        ExplorerState::render(self)
+    }
+}
+
+impl ExplorerState {
+    /// Apply one event, reporting whether anything visible changed.
+    ///
+    /// Separate from [`App::on_event`](oswindow::app::App::on_event) so the
+    /// tests can drive it without a compositor, which is the only way any of
+    /// this is exercised on the development host.
+    ///
+    /// Hit-testing goes through [`DropZoneManager`], which holds the rectangles
+    /// the *last frame* actually drew. That is deliberate: the icon view's
+    /// column count depends on the pane width and the list view's row heights
+    /// depend on the view mode, so a click handler that recomputed the layout
+    /// would be a second copy of that arithmetic — and the first time the two
+    /// disagreed, the user would click one file and open another.
+    #[must_use]
+    pub fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Mouse(m) => self.handle_mouse(m),
+            Event::Key(k) => k.pressed && self.handle_key(k),
+            Event::Resize { width, height } => {
+                if self.window_width == *width && self.window_height == *height {
+                    return false;
+                }
+                self.window_width = *width;
+                self.window_height = *height;
+                true
+            }
+            // Each tick retires a batch. A tick that retires nothing has
+            // nothing new to draw, and saying so is what stops the loop
+            // repainting the whole window sixty times a second for no reason.
+            Event::Tick { .. } => self.pump_thumbnails_default() > 0,
+            Event::CloseRequested
+            | Event::Moved { .. }
+            | Event::FocusIn
+            | Event::FocusOut
+            | Event::ScaleChanged { .. } => false,
+        }
+    }
+
+    fn handle_mouse(&mut self, m: &MouseEvent) -> bool {
+        match m.kind {
+            MouseEventKind::Press(MouseButton::Left) => self.click_at(m.x, m.y),
+            MouseEventKind::DoubleClick(MouseButton::Left) => self.open_at(m.x, m.y),
+            // A file manager's back/forward thumb buttons are the one mouse
+            // gesture users expect to work without a toolbar.
+            MouseEventKind::Press(MouseButton::Back) => self.go_back_if_possible(),
+            MouseEventKind::Press(MouseButton::Forward) => self.go_forward_if_possible(),
+            _ => false,
+        }
+    }
+
+    /// A single left click: select the row under the pointer, follow the
+    /// sidebar place under it, or clear the selection.
+    fn click_at(&mut self, x: f32, y: f32) -> bool {
+        if let Some(index) = self.dropzone.find_file_row(x, y) {
+            self.select_single(index);
+            return true;
+        }
+        if let Some(path) = self.dropzone.find_sidebar_item(x, y) {
+            let path = path.to_path_buf();
+            self.navigate_to(&path);
+            return true;
+        }
+        if self.selected_indices.is_empty() {
+            return false;
+        }
+        self.deselect_all();
+        true
+    }
+
+    /// A double click opens whatever it landed on; a double click on empty
+    /// space does nothing, rather than opening the last thing selected.
+    fn open_at(&mut self, x: f32, y: f32) -> bool {
+        let Some(index) = self.dropzone.find_file_row(x, y) else {
+            return false;
+        };
+        self.open_entry(index);
+        true
+    }
+
+    fn go_back_if_possible(&mut self) -> bool {
+        if self.history_back.is_empty() {
+            return false;
+        }
+        self.go_back();
+        true
+    }
+
+    fn go_forward_if_possible(&mut self) -> bool {
+        if self.history_forward.is_empty() {
+            return false;
+        }
+        self.go_forward();
+        true
+    }
+
+    /// The keyboard map. Returns whether anything visible changed.
+    ///
+    /// Deliberately the navigation and selection keys only. The keys that
+    /// *edit* — Delete, F2, Ctrl+V — are not wired here because they need a
+    /// confirmation and a rename field that this window does not have yet, and
+    /// a Delete key that recycled a file with no prompt and no visible undo
+    /// would be worse than one that does nothing. See
+    /// `TD-C-EXPLORER-HAS-NO-EDITING-KEYS`.
+    fn handle_key(&mut self, k: &KeyEvent) -> bool {
+        let ctrl = k.modifiers.ctrl;
+        match k.key {
+            Key::A if ctrl => {
+                if self.entries.is_empty() {
+                    return false;
+                }
+                self.select_all();
+                true
+            }
+            Key::Backspace => self.go_up_if_possible(),
+            Key::Left if k.modifiers.alt => self.go_back_if_possible(),
+            Key::Right if k.modifiers.alt => self.go_forward_if_possible(),
+            Key::Up | Key::Left => self.move_selection(-1),
+            Key::Down | Key::Right => self.move_selection(1),
+            Key::Home => self.move_selection_to(0),
+            Key::End => self.move_selection_to(self.entries.len().saturating_sub(1)),
+            Key::Enter => match self.selected_indices.first() {
+                Some(&index) => {
+                    self.open_entry(index);
+                    true
+                }
+                None => false,
+            },
+            Key::Escape => {
+                if self.selected_indices.is_empty() {
+                    return false;
+                }
+                self.deselect_all();
+                true
+            }
+            Key::F5 => {
+                self.load_directory();
+                true
+            }
+            Key::H if ctrl => {
+                self.toggle_hidden();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn go_up_if_possible(&mut self) -> bool {
+        if self.current_path.parent().is_none() {
+            return false;
+        }
+        self.go_up();
+        true
+    }
+
+    /// Move the selection by `delta` rows, clamped to the listing.
+    ///
+    /// Clamped rather than wrapping: holding Down in a long folder should stop
+    /// at the last file, not return to the first, which is what every file
+    /// manager does and what stops a held key from cycling forever.
+    ///
+    /// Saturating in both directions on purpose — `selected_indices` holds
+    /// `usize`, so a naive `- 1` at row zero would wrap to the end of the
+    /// listing rather than staying put.
+    fn move_selection(&mut self, delta: isize) -> bool {
+        if self.entries.is_empty() {
+            return false;
+        }
+        let current = self.selected_indices.first().copied();
+        let next = match (current, delta.is_negative()) {
+            // Nothing selected: the first key press selects an end of the
+            // listing rather than moving from an imaginary position.
+            (None, true) => self.entries.len().saturating_sub(1),
+            (None, false) => 0,
+            (Some(i), true) => i.saturating_sub(delta.unsigned_abs()),
+            (Some(i), false) => i.saturating_add(delta.unsigned_abs()),
+        };
+        self.move_selection_to(next)
+    }
+
+    fn move_selection_to(&mut self, index: usize) -> bool {
+        if self.entries.is_empty() {
+            return false;
+        }
+        let index = index.min(self.entries.len().saturating_sub(1));
+        if self.selected_indices.as_slice() == [index] {
+            return false;
+        }
+        self.select_single(index);
+        true
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
-fn main() {
-    // Start in home directory or root
-    let start_path = std::env::var("HOME")
+fn main() -> std::process::ExitCode {
+    // The folder to open, then the home directory, then the root. A path given
+    // on the command line is what makes "open containing folder" possible from
+    // anywhere else in the desktop.
+    let start_path = std::env::args_os()
+        .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/"));
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/"));
 
     let mut explorer = ExplorerState::new(&start_path);
-
-    // Render initial view
-    let render = explorer.render();
-    println!(
-        "File Explorer initialized at: {}",
-        explorer.current_path.display()
-    );
-    println!("  {} entries loaded", explorer.entries.len());
-    println!("  {} render commands", render.len());
-    println!("  Status: {}", explorer.status_bar_text());
-
-    // Demonstrate navigation
-    if explorer.entries.iter().any(|e| e.is_dir) {
-        let first_dir_idx = explorer.entries.iter().position(|e| e.is_dir).unwrap_or(0);
-        explorer.open_entry(first_dir_idx);
-        println!("\nNavigated to: {}", explorer.current_path.display());
-        println!("  {} entries", explorer.entries.len());
-
-        // Go back
-        explorer.go_back();
-        println!("Back to: {}", explorer.current_path.display());
-    }
-
-    println!("\nFile Explorer ready.");
+    oswindow::app::launch("explorer", &mut explorer)
 }
 
 // ============================================================================
@@ -3246,5 +3547,441 @@ mod tests {
         let (x, y) = empty_space(&state);
         assert!(state.drop_at(x, y, DragModifiers::default()).is_none());
         assert!(state.drag_over(x, y, DragModifiers::default()).is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // The window: input, ticking, and getting pixels to the compositor
+    // ------------------------------------------------------------------
+
+    // The trait is named rather than imported anonymously because
+    // `ExplorerState` has a `render` of its own taking no size, so every call
+    // to the trait's has to say which one it means. Spelling it
+    // `App::render(&mut state, w, h)` is also what a frame actually goes
+    // through — it is the loop's call, not the internal one — so a test that
+    // used the inherent method would skip the size handshake it is checking.
+    use oswindow::app::{App, ImageChange};
+
+    fn click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn double_click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::DoubleClick(MouseButton::Left),
+        })
+    }
+
+    fn key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        })
+    }
+
+    fn ctrl_key(k: Key) -> Event {
+        Event::Key(KeyEvent {
+            key: k,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::ctrl(),
+            text: String::new(),
+        })
+    }
+
+    /// A click finds the row the *renderer* put under the pointer, not a row
+    /// recomputed from the layout. That is the whole reason the drop-zone
+    /// manager stores the index: the icon view's column count depends on the
+    /// pane width, so a second copy of the arithmetic would eventually open a
+    /// different file from the one clicked.
+    #[test]
+    fn a_click_selects_the_row_the_last_frame_drew_there() {
+        let scratch = dir_of("win_click", &["alpha.txt", "beta.txt", "gamma.txt"]);
+        let mut state = state_at(scratch.dir());
+
+        for mode in [ViewMode::Details, ViewMode::List, ViewMode::Icons] {
+            state.set_view_mode(mode);
+            state.deselect_all();
+            let _ = App::render(&mut state, 900.0, 600.0);
+
+            let (x, y) = row_center(&state, "beta.txt");
+            assert!(state.handle_event(&click(x, y)), "{mode:?}: click changed");
+            let picked = state.selected_indices.first().copied();
+            assert_eq!(
+                picked.map(|i| state.entries[i].name.clone()),
+                Some(String::from("beta.txt")),
+                "{mode:?}: clicked beta.txt and got {picked:?}"
+            );
+        }
+    }
+
+    /// A click before any frame has been drawn hits nothing, because nothing
+    /// has been registered yet. It must not select an arbitrary row, and above
+    /// all must not panic — the compositor is free to deliver a click before
+    /// the first frame goes out.
+    #[test]
+    fn a_click_before_the_first_frame_selects_nothing() {
+        let scratch = dir_of("win_click_early", &["a.txt"]);
+        let mut state = state_at(scratch.dir());
+        assert!(!state.handle_event(&click(400.0, 300.0)));
+        assert!(state.selected_indices.is_empty());
+    }
+
+    /// Double-clicking a folder enters it; double-clicking empty space does
+    /// nothing rather than opening whatever happened to be selected.
+    #[test]
+    fn a_double_click_opens_the_folder_under_the_pointer_and_only_that() {
+        let scratch = temp_dir("win_open");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).unwrap();
+
+        let mut state = state_at(&root);
+        let _ = App::render(&mut state, 900.0, 600.0);
+
+        let (ex, ey) = empty_space(&state);
+        assert!(!state.handle_event(&double_click(ex, ey)));
+        assert_eq!(state.current_path, root);
+
+        let (x, y) = row_center(&state, "sub");
+        assert!(state.handle_event(&double_click(x, y)));
+        assert_eq!(state.current_path, root.join("sub"));
+    }
+
+    /// Backspace goes up, Alt+Left goes back, Alt+Right goes forward — and
+    /// each reports "nothing changed" when there is nowhere to go, so a held
+    /// key at the top of the tree does not repaint the window forever.
+    #[test]
+    fn the_navigation_keys_move_and_say_so_only_when_they_moved() {
+        let scratch = temp_dir("win_navkeys");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("sub")).unwrap();
+
+        let mut state = state_at(&root);
+        assert!(!state.handle_event(&Event::Key(KeyEvent {
+            key: Key::Left,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::alt(),
+            text: String::new(),
+        })));
+
+        state.navigate_to(&root.join("sub"));
+        let back = Event::Key(KeyEvent {
+            key: Key::Left,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::alt(),
+            text: String::new(),
+        });
+        assert!(state.handle_event(&back));
+        assert_eq!(state.current_path, root);
+
+        let forward = Event::Key(KeyEvent {
+            key: Key::Right,
+            pressed: true,
+            modifiers: guitk::event::Modifiers::alt(),
+            text: String::new(),
+        });
+        assert!(state.handle_event(&forward));
+        assert_eq!(state.current_path, root.join("sub"));
+
+        assert!(state.handle_event(&key(Key::Backspace)));
+        assert_eq!(state.current_path, root);
+    }
+
+    /// Arrow keys walk the listing and stop at both ends. Clamping rather than
+    /// wrapping matters twice over: at row zero a `usize` decrement would wrap
+    /// to the *end* of the listing, and a held key that cycled would never
+    /// settle.
+    #[test]
+    fn the_arrow_keys_walk_the_listing_and_stop_at_both_ends() {
+        let scratch = dir_of("win_arrows", &["a.txt", "b.txt", "c.txt"]);
+        let mut state = state_at(scratch.dir());
+        let last = state.entries.len() - 1;
+
+        // Nothing selected: Down selects the first row rather than moving from
+        // an imaginary position.
+        assert!(state.handle_event(&key(Key::Down)));
+        assert_eq!(state.selected_indices, vec![0]);
+
+        assert!(state.handle_event(&key(Key::Down)));
+        assert_eq!(state.selected_indices, vec![1]);
+        assert!(state.handle_event(&key(Key::Up)));
+        assert_eq!(state.selected_indices, vec![0]);
+
+        // At the top, Up stays put — a `usize` decrement here would wrap to the
+        // *end* of the listing — and says nothing changed.
+        assert!(
+            !state.handle_event(&key(Key::Up)),
+            "a key that moved nothing must not ask for a repaint"
+        );
+        assert_eq!(state.selected_indices, vec![0], "clamped at the top");
+
+        assert!(state.handle_event(&key(Key::End)));
+        assert_eq!(state.selected_indices, vec![last]);
+        assert!(
+            !state.handle_event(&key(Key::Down)),
+            "clamped at the bottom"
+        );
+
+        assert!(state.handle_event(&key(Key::Home)));
+        assert_eq!(state.selected_indices, vec![0]);
+    }
+
+    /// Ctrl+A selects everything and Escape clears it, both reporting honestly
+    /// when there was nothing to do.
+    #[test]
+    fn select_all_and_escape_are_reported_only_when_they_change_something() {
+        let scratch = dir_of("win_selall", &["a.txt", "b.txt"]);
+        let mut state = state_at(scratch.dir());
+
+        assert!(!state.handle_event(&key(Key::Escape)), "nothing selected");
+        assert!(state.handle_event(&ctrl_key(Key::A)));
+        assert_eq!(state.selected_indices.len(), state.entries.len());
+        assert!(state.handle_event(&key(Key::Escape)));
+        assert!(state.selected_indices.is_empty());
+    }
+
+    /// Key *releases* do nothing. Acting on both edges would move the
+    /// selection two rows per press.
+    #[test]
+    fn a_key_release_is_not_a_second_key_press() {
+        let scratch = dir_of("win_release", &["a.txt", "b.txt", "c.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.select_single(0);
+
+        let release = Event::Key(KeyEvent {
+            key: Key::Down,
+            pressed: false,
+            modifiers: guitk::event::Modifiers::NONE,
+            text: String::new(),
+        });
+        assert!(!state.handle_event(&release));
+        assert_eq!(state.selected_indices, vec![0]);
+    }
+
+    /// The clock is armed by there being work and disarmed by there being
+    /// none. Without the first, a folder of pictures entered by keyboard never
+    /// generates anything; without the second, a file manager left open holds
+    /// the whole desktop awake for the rest of the session.
+    #[test]
+    fn the_clock_runs_only_while_there_are_thumbnails_left_to_make() {
+        let scratch = dir_of("win_tick", &["a.txt", "b.txt"]);
+        let mut state = state_at(scratch.dir());
+
+        assert_eq!(
+            state.tick_interval(),
+            None,
+            "the detail view queues no work, so there is nothing to wake for"
+        );
+
+        state.set_view_mode(ViewMode::Icons);
+        assert!(
+            state.tick_interval().is_some(),
+            "work queued: arm the clock"
+        );
+
+        // Ticks retire the queue, and the last of them disarms it.
+        let mut ticks = 0;
+        while state.tick_interval().is_some() {
+            let _ = state.handle_event(&Event::Tick { elapsed_ms: 60 });
+            ticks += 1;
+            assert!(ticks < 100, "the queue is not draining");
+        }
+        assert_eq!(state.thumb_gen.pending_count(), 0);
+        assert!(!state.take_pending_uploads().is_empty(), "work was done");
+    }
+
+    /// A tick that retires nothing must not ask for a repaint, or the window
+    /// redraws itself at the tick rate for as long as it is open.
+    #[test]
+    fn an_idle_tick_does_not_ask_for_a_repaint() {
+        let scratch = dir_of("win_idle_tick", &["a.txt"]);
+        let mut state = state_at(scratch.dir());
+        assert!(!state.handle_event(&Event::Tick { elapsed_ms: 60 }));
+    }
+
+    /// The first frame is drawn at the size the compositor gave, not the size
+    /// the explorer asked for — there is no `Resize` before it.
+    #[test]
+    fn the_first_frame_is_laid_out_at_the_size_the_compositor_gave() {
+        let scratch = dir_of("win_size", &["a.txt"]);
+        let mut state = state_at(scratch.dir());
+        let _ = App::render(&mut state, 1280.0, 720.0);
+        assert_eq!((state.window_width, state.window_height), (1280, 720));
+
+        // And a resize to the size already in force is not a repaint.
+        assert!(!state.handle_event(&Event::Resize {
+            width: 1280,
+            height: 720
+        }));
+        assert!(state.handle_event(&Event::Resize {
+            width: 800,
+            height: 600
+        }));
+        assert_eq!((state.window_width, state.window_height), (800, 600));
+    }
+
+    /// The upload's bytes are in the compositor's byte order, which is the
+    /// *reverse* of the one the thumbnail is stored in. Both are called ARGB;
+    /// getting it wrong is neither a compile error nor a panic, it is every
+    /// thumbnail arriving with red and blue exchanged and its alpha read out of
+    /// the blue channel.
+    #[test]
+    fn an_upload_carries_wire_order_bytes_and_not_the_stored_ones() {
+        let scratch = dir_of("win_wire", &["a.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::Icons);
+        while state.pump_thumbnails_default() > 0 {}
+
+        let stored = state
+            .thumbs
+            .peek(
+                &state.entries[0].path,
+                mtime_secs(state.entries[0].modified),
+                state.entries[0].size,
+            )
+            .expect("generated")
+            .clone();
+
+        let changes = state.take_images();
+        let ImageChange::Upload {
+            width,
+            height,
+            stride,
+            format,
+            ref bytes,
+            ..
+        } = changes[0]
+        else {
+            panic!("the first change should be the upload");
+        };
+        assert_eq!((width, height), (stored.width, stored.height));
+        assert_eq!(stride, stored.width * 4, "a canvas row is never padded");
+        assert_eq!(format, oswindow::PixelFormat::Argb8888);
+        assert_eq!(bytes.len(), stored.pixels.len());
+
+        // The pixel a decoder would read back out of these bytes is the pixel
+        // the thumbnail holds, channel for channel.
+        let from_wire = guitk::canvas::Canvas::from_argb8888(width, height, bytes).expect("wire");
+        let from_store =
+            guitk::canvas::Canvas::from_argb(stored.width, stored.height, &stored.pixels)
+                .expect("stored");
+        assert_eq!(from_wire, from_store);
+
+        // And they are genuinely different bytes: passing the stored buffer
+        // through unconverted is the bug this guards.
+        assert_ne!(
+            *bytes, stored.pixels,
+            "an opaque grey thumbnail must not serialise identically in both \
+             orders, or this test proves nothing"
+        );
+    }
+
+    /// Uploading marks the id held, so the very next frame draws the picture.
+    /// The optimism is safe because the event loop propagates a failed upload
+    /// out of `apply_images` and ends, so there is no frame in which this could
+    /// be believed and be wrong.
+    #[test]
+    fn taking_the_images_is_what_makes_the_next_frame_draw_them() {
+        let scratch = dir_of("win_take_images", &["a.txt", "b.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::Icons);
+        while state.pump_thumbnails_default() > 0 {}
+
+        assert!(image_ids(&App::render(&mut state, 900.0, 600.0)).is_empty());
+        assert_eq!(state.take_images().len(), 2);
+        assert_eq!(image_ids(&App::render(&mut state, 900.0, 600.0)).len(), 2);
+
+        // Draining: the same pictures are not offered twice.
+        assert!(state.take_images().is_empty());
+    }
+
+    /// **Drops come before uploads, and the order is load-bearing.** The link's
+    /// image budget is checked against `held - freed + incoming`, so a batch
+    /// that filled a full cache — evicting as many as it added — would be
+    /// refused if it asked the compositor to hold both sets at once.
+    #[test]
+    fn what_leaves_the_cache_is_given_back_before_what_enters_it_is_asked_for() {
+        let scratch = dir_of("win_evict", &["a.txt", "b.txt", "c.txt"]);
+        let mut state = state_at(scratch.dir());
+        // A cache with room for one entry turns every generation into an
+        // eviction, which is the case the ordering exists for.
+        state.thumbs = ThumbnailCache::new(1);
+        state.set_view_mode(ViewMode::Icons);
+
+        while state.pump_thumbnails_default() > 0 {}
+        let first = state.take_images();
+        assert!(
+            first
+                .iter()
+                .all(|c| matches!(c, ImageChange::Upload { .. })),
+            "nothing was held yet, so nothing can be given back"
+        );
+
+        // Re-generate the same folder into the now-full one-entry cache.
+        state.thumbs.clear();
+        let dropped = state.take_images();
+        assert!(
+            !dropped.is_empty() && dropped.iter().all(|c| matches!(c, ImageChange::Drop(_))),
+            "clearing the cache gives every picture back: {dropped:?}"
+        );
+
+        state.queue_thumbnails();
+        while state.pump_thumbnails_default() > 0 {}
+        let mixed = state.take_images();
+        let first_upload = mixed
+            .iter()
+            .position(|c| matches!(c, ImageChange::Upload { .. }));
+        let last_drop = mixed
+            .iter()
+            .rposition(|c| matches!(c, ImageChange::Drop(_)));
+        if let (Some(up), Some(drop)) = (first_upload, last_drop) {
+            assert!(drop < up, "every drop must precede every upload: {mixed:?}");
+        }
+    }
+
+    /// A drop is only announced for an id believed to be held. Announcing one
+    /// for an id the compositor never took is not free: the id is derived from
+    /// the file, so a later generation of the same file re-uses it, and a
+    /// stale drop would then take the *new* pixels down with it.
+    #[test]
+    fn an_eviction_of_something_never_uploaded_is_not_announced() {
+        let scratch = dir_of("win_evict_unheld", &["a.txt"]);
+        let mut state = state_at(scratch.dir());
+        state.set_view_mode(ViewMode::Icons);
+        while state.pump_thumbnails_default() > 0 {}
+
+        // Discard the pending uploads without taking them through `take_images`,
+        // so the cache holds a thumbnail the compositor never saw.
+        let _ = state.take_pending_uploads();
+        assert_eq!(state.uploaded_count(), 0);
+
+        state.thumbs.clear();
+        assert!(
+            state.take_images().is_empty(),
+            "nothing was held, so there is nothing to give back"
+        );
+    }
+
+    /// The title leads with the folder, because a task bar elides its buttons
+    /// from the right and every open window would otherwise read "Files".
+    #[test]
+    fn the_title_leads_with_the_folder_name() {
+        let scratch = temp_dir("win_title");
+        let root = scratch.dir().to_path_buf();
+        fs::create_dir(root.join("Pictures")).unwrap();
+
+        let mut state = state_at(&root);
+        state.navigate_to(&root.join("Pictures"));
+        assert!(
+            state.title().starts_with("Pictures"),
+            "got {:?}",
+            state.title()
+        );
     }
 }

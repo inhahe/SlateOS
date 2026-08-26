@@ -925,9 +925,14 @@ Three findings in that list change what this question is asking:
   `gui/desktop/src/accessibility_settings.rs` are two models of the same
   settings, six type names apart, in the same crate. `a11y.rs` is the copy
   nobody calls. Same shape for notifications: `notif_pane.rs` and
-  `focus_assist.rs` share two types, both unreached, and
-  `gui/notifications/src/main.rs` says in its own comment that it shows the
-  same notifications — a **third** copy.
+  `focus_assist.rs` share two types, and `gui/notifications/src/main.rs` says
+  in its own comment that it shows the same notifications — a **third** copy.
+  *(Update 2026-08-26: the first two are no longer unreached — the shell now
+  owns and drives both, and they were reconciled to each other in the process:
+  `design-decisions.md` §563–§564. That removes them from the island list but
+  **not** from this question: the third copy, `gui/notifications`, is still a
+  separate program modelling the same notifications on a third priority scale,
+  and nothing has decided which of the two is the one a user gets.)*
 - **Option A does not by itself de-duplicate.** File-type associations are
   modelled in `gui/desktop/src/default_apps.rs` (2,314 lines) *and*
   `apps/settings/src/associations.rs` (1,748) — and **neither is reachable**.

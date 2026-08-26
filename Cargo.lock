@@ -3673,6 +3673,8 @@ version = "0.1.0"
 dependencies = [
  "byteread",
  "guitk",
+ "imagecodec",
+ "oswindow",
  "scratchdir",
  "textfind",
 ]

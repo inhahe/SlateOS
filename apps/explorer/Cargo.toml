@@ -10,6 +10,19 @@ textfind = { path = "../../textfind" }
 # itself supplies. `byteread` is those reads stating their own bound.
 byteread = { path = "../../byteread" }
 
+# The picture decoder. Without it a `.png` in the icon view thumbnailed as a
+# flat green rectangle of the right aspect ratio and nothing more -- the code
+# said so: "we produce a placeholder ... since we lack a full decoder in this
+# crate". Only uncompressed BMP got a real thumbnail, which is the one format
+# nobody's photographs are in. See known-issues.md
+# TD-C-NOTHING-DECODES-A-PICTURE-SO-EVERY-IMAGE-ID-NAMES-NOTHING.
+imagecodec = { path = "../../gui/imagecodec" }
+
+# The window, the event loop, and the hook that gets thumbnail pixels to the
+# compositor. Without it `main` was a scripted print-only demo: the explorer
+# could lay out a frame but had nowhere to put it and no way to be clicked.
+oswindow = { path = "../../gui/window" }
+
 # Test fixtures only: a private temp directory per test, removed on drop.
 [dev-dependencies]
 scratchdir = { path = "../../userspace/scratchdir" }

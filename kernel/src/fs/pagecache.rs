@@ -554,7 +554,9 @@ pub fn self_test() {
             // A row exists only when it has something to say, and it must be
             // fully accounted for in the aggregate.
             assert!(k.hits > 0 || k.misses > 0 || k.evictions > 0 || k.cached_pages > 0);
-            assert!(hits >= 1 + k.hits);
+            // The aggregate carries the projected row *plus* the one hit this
+            // test recorded, so it must exceed the projected row on its own.
+            assert!(hits > k.hits);
             crate::serial_println!(
                 "  [9/9] projection: OK (kernel cache: {} hits, {} misses, {} resident)",
                 k.hits,

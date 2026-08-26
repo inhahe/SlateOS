@@ -81109,7 +81109,73 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **522 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **515 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twentieth batch): `cmd_shmem` (7) cleared —
+> 522 → 515 across 223 → 222 functions. Pinned by `kshell::self_test` rung 88.
+>
+> **The mildest severity in the burn-down, and the one that shows what the
+> counted ledger is actually counting.** Every other batch has been able to name
+> damage: a wrong object acted on, a number nobody measured filed as fact, a
+> guess that meant the negation of what was typed. `shmem` has none of that.
+> All seven sites guessed `0` and then, on the very next line, tested for `0`
+> and bailed — so **the guessed value never reached the subsystem**. No state
+> was written, nothing was corrupted, nothing was invented.
+>
+> What was destroyed is only the diagnosis, and all of it. `0` was doing two
+> jobs: it was the guess *and* it was the marker for "invalid". That collapses
+> three different mistakes onto one answer:
+>
+> | Typed | The mistake | What the shell said |
+> |---|---|---|
+> | `shmem create foo` | the size is **missing** | `Usage: shmem create <name> <size>` |
+> | `shmem create foo 1O24` | the size is **mistyped** (letter O) | `Usage: shmem create <name> <size>` |
+> | `shmem create foo 0` | the size is **readable and invalid** | `Usage: shmem create <name> <size>` |
+>
+> A synopsis is a specific claim: *you got the form wrong*. In rows two and
+> three the form was right. The operator is told to re-read a syntax line that
+> already matches what they typed, while the actual fault — one character, or a
+> value the subsystem will not accept — goes unmentioned. That is the sixth
+> severity row, **conflation**: not a wrong action, but one answer standing in
+> for three questions, and it is the answer to none of them.
+>
+> `shmem attach` is the same defect with a second edge. It takes two numbers,
+> and `shmem attach 1O 3` and `shmem attach 3 1O` printed the *identical* line —
+> so the message did not even narrow which of the two words was the problem.
+> They are now `` `1O' is not a region id `` and `` `1O' is not a process id ``.
+>
+> **The `delete 0` sentinel was dropped, not reworded.** Region ids are
+> allocated from 1 (`init_defaults` seeds `next_id: 1` in
+> `kernel/src/fs/shmem.rs`), so `delete 0` finds nothing
+> and `shmem::delete` answers `NotFound` — which is true, and is the same answer
+> `delete 999` gets. A shell-side rule singling out zero would invent a
+> distinction the id space does not have. Zero was only ever special *because it
+> was the guess*; once the guess is gone the special case has no reason to
+> exist. This is the general shape to look for in the remaining batches: a
+> sentinel test that looks like validation is often just the guess's shadow.
+>
+> **Why the checker could not have found this by shape.** `cmd_blkread`
+> (rung 86, eighteenth batch) had a structurally identical guess-then-test-the-
+> guess pair, and D1 did not flag it, because there the parse sat behind a
+> function boundary the statement-level regex cannot cross. The two batches
+> together are the argument for the ledger being keyed by *function* rather than
+> by pattern: the checker finds the sites it can see, and the count is what
+> keeps the ones it cannot from being forgotten.
+>
+> Rung 88 pins all three answers as distinct, both `attach` orders as distinct,
+> and carries a control — `shmem create zzrung88 1024` still succeeds — so the
+> three refusals cannot be passing by having simply broken `create`.
+>
+> **§604 note.** Two assertions in the first draft of rung 88 were
+> `assert_output_lacks(.., b"Usage: shmem create")` and the same for `delete`.
+> The wording gate rejected both as unfireable, and was right: after the fix
+> that text exists nowhere in `cmd_shmem`, so the needle matched no format
+> string and a misspelling of it would have passed forever. Both were replaced
+> rather than weakened — one by a comment (the guarantee is structural: the arm
+> cannot print a synopsis it no longer contains, which is stronger than a
+> runtime check), one by a positive `contains b"Error:"`, which is fixed text in
+> the arm's own `shell_println!` and asserts something the absence could not —
+> that the word reached `shmem::delete` and the *subsystem* answered.
 
 > **Burn-down log.** 2026-08-26 (nineteenth batch): `cmd_cputhr` (7) cleared —
 > 529 → 522 across 224 → 223 functions. Pinned by `kshell::self_test` rung 87.
@@ -83988,3 +84054,48 @@ The shell's grab list is checked against `DesktopAction::for_chord` in both
 directions by test, sweeping the entire key vocabulary, so a binding added
 without a grab — a shortcut silently dead in every window but one — fails the
 build rather than shipping.
+
+---
+
+## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **open**, tech debt
+
+**In short:** `diskquota` can limit two things: how many *bytes* a user may
+store, and how many *files*. The byte half works. The file half is a prop —
+`diskquota files alice user 100 200` accepts the numbers, stores them, prints a
+confirmation, and nothing anywhere ever looks at them again. A user given a
+200-file limit can create any number of files.
+
+**Where.** `kernel/src/fs/diskquota.rs`. The fields exist
+(`QuotaEntry::soft_limit_files`, `hard_limit_files`, lines ~83–84) and are
+written in exactly two places — the `u64::MAX` seed for a newly created entry
+(~195–196) and `set_file_limits` (~218–219). A tree-wide grep for
+`limit_files` returns no reader outside this file, and inside it there is none
+either: `QuotaEntry::status()` compares `bytes_used` against the byte limits
+only, and `check_quota` likewise tests `new_usage > entry.hard_limit_bytes`.
+
+The usage side is *also* live and equally unconsulted: `update_usage` maintains
+`entry.file_count` (~272–274), so the kernel dutifully tracks a running file
+count and dutifully stores a ceiling for it, and never once compares the two.
+
+**Why it is worth an entry rather than a shrug.** This is not a stub that
+announces itself. `set_file_limits` returns `KernelResult<()>` and reports
+`NotFound` when there is no such quota entry, so it fails in exactly the
+situation a real implementation would, which makes it look implemented. The
+shell prints `File limits for user 'alice': soft=100 hard=200` — a success line
+naming the numbers. Everything about the interface says the limit took effect.
+
+**The proper fix** is to enforce it, not to remove it: extend `status()` to
+return the worse of the byte and file verdicts, and give `check_quota` a
+file-count counterpart (or a `files: u64` parameter) so a write that would
+create a file is tested against `hard_limit_files` the way its bytes are tested
+against `hard_limit_bytes`. The grace-period machinery already keyed off the
+soft byte limit should apply to the soft file limit on the same terms.
+
+**Until then, do not let the D1 burn-down overstate the damage in this arm.**
+When `cmd_diskquota`'s guessed-value sites are fixed, the `files` subcommand's
+guessed `0` is a *latent* fault, not an active one: it records a limit that is
+wrong and that nothing currently enforces. It becomes an active lockout the
+moment the enforcement above is written. The `set` arm's guessed `0` is a live
+lockout today, because the byte path is real.
+
+**Not a regression.** True since `set_file_limits` was written.

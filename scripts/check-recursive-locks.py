@@ -111,7 +111,7 @@ def _char_literal_end(src: str, i: int) -> int | None:
     return None
 
 
-def strip_noise(src: str) -> str:
+def strip_noise(src: str, keep_literals: bool = False) -> str:
     """Blank out comments and string/char literals, preserving byte offsets.
 
     Offsets must be preserved because every later step reports and slices by
@@ -125,9 +125,31 @@ def strip_noise(src: str) -> str:
     exactly like a gate that found nothing wrong. That is not hypothetical: it
     hid a real lock-order inversion in `kshell.rs`, where this function saw 43
     of the file's 984 function bodies.
+
+    With `keep_literals=True`, literals are still *scanned* -- which is the part
+    that matters, since a `//` inside `"https://x"` opens no comment and a `"`
+    inside a comment opens no string -- but their characters are passed through
+    instead of blanked. Comments go either way.
+
+    That mode exists because the sibling gates that match *on* literal text
+    (`check-option-refusal.py`, `check-usage-status.py`, `check-query-status.py`
+    look for `"Usage: ..."`, `"-x"`, `shell_println!`) each grew their own
+    line-local comment stripper that understood only `//` to end of line. There
+    were five hand-rolled Rust lexers in `scripts/` and only this one handled
+    nested `/* */`, raw strings and char literals or had a self-test. One
+    parameter here is cheaper than five parsers, and far cheaper than five
+    parsers that disagree: the two `check-{usage,query}-status.py` mirrors had
+    already drifted apart on exactly this point without either being able to
+    report it.
     """
     out = list(src)
     i, n = 0, len(src)
+
+    def blank(k: int) -> None:
+        """Blank one literal character unless the caller asked to keep it."""
+        if not keep_literals and src[k] != "\n":
+            out[k] = " "
+
     while i < n:
         c = src[i]
         if c == "'":
@@ -136,8 +158,7 @@ def strip_noise(src: str) -> str:
                 i += 1  # a lifetime or a loop label, not a literal
                 continue
             while i < min(end, n):
-                if src[i] != "\n":
-                    out[i] = " "
+                blank(i)
                 i += 1
             continue
         if (
@@ -147,14 +168,13 @@ def strip_noise(src: str) -> str:
         ):
             hashes, quote = raw
             for k in range(i, quote + 1):
-                out[k] = " "
+                blank(k)
             i = quote + 1
             close = '"' + "#" * hashes
             end = src.find(close, i)
             stop = n if end == -1 else min(end + len(close), n)
             while i < stop:
-                if src[i] != "\n":
-                    out[i] = " "
+                blank(i)
                 i += 1
             continue
         if c == "/" and i + 1 < n and src[i + 1] == "/":
@@ -180,21 +200,20 @@ def strip_noise(src: str) -> str:
                     out[i] = " "
                 i += 1
         elif c == '"':
-            out[i] = " "
+            blank(i)
             i += 1
             while i < n:
                 if src[i] == "\\":
-                    out[i] = " "
-                    if i + 1 < n and src[i + 1] != "\n":
-                        out[i + 1] = " "
+                    blank(i)
+                    if i + 1 < n:
+                        blank(i + 1)
                     i += 2
                     continue
                 if src[i] == '"':
-                    out[i] = " "
+                    blank(i)
                     i += 1
                     break
-                if src[i] != "\n":
-                    out[i] = " "
+                blank(i)
                 i += 1
         else:
             i += 1
@@ -363,6 +382,60 @@ _PARSER_CASES: tuple[tuple[str, str, list[str]], ...] = (
 )
 
 
+# `keep_literals=True` cases, as (name, source, expected output). These assert
+# the *exact* result rather than a body list, because the whole point of the
+# mode is which characters survive -- a body list would not notice a literal
+# being blanked. Each is a shape that defeated one of the line-local strippers
+# this mode replaces.
+_KEEP_LITERAL_CASES: tuple[tuple[str, str, str], ...] = (
+    # The case that started it: a comment saying a thing is absent satisfied a
+    # grep for that thing.
+    (
+        "line comment goes, string stays",
+        'p("Usage: x"); // no set_exit(1) here\n',
+        'p("Usage: x");                       \n',
+    ),
+    # `//` inside a string opens no comment. A stripper that cuts at the first
+    # `//` would eat the rest of the line, including a real trailing `set_exit`.
+    (
+        "slashes inside a string are not a comment",
+        'p("https://x"); set_exit(1);\n',
+        'p("https://x"); set_exit(1);\n',
+    ),
+    # A quote inside a comment opens no string -- the failure that makes a
+    # naive stripper swallow to the next quote anywhere in the file.
+    (
+        "quote inside a comment",
+        'let a = 1; // it\'s "quoted\np("real");\n',
+        'let a = 1;                \np("real");\n',
+    ),
+    # Neither of the two ad-hoc copies understood block comments at all.
+    (
+        "block comment goes, spanning lines",
+        'a(); /* set_exit(1)\n more */ b("keep");\n',
+        'a();               \n         b("keep");\n',
+    ),
+    # Nested block comments are legal in Rust and end at the *matching* `*/`.
+    (
+        "nested block comment",
+        'a(); /* x /* y */ z */ b();\n',
+        'a();                   b();\n',
+    ),
+    # A raw string keeps its backslashes and may contain `//` and `/*`.
+    (
+        "raw string is not a comment",
+        'p(r"C:\\dir // *"); c();\n',
+        'p(r"C:\\dir // *"); c();\n',
+    ),
+    # A `'"'` must not open a string, or every brace to the next quote is lost.
+    (
+        "char literal holding a quote",
+        'if c == \'"\' { /* gone */ }\n',
+        'if c == \'"\' {            }\n',
+    ),
+)
+
+
 def self_test() -> int:
     """Check the source scanner against the literal forms that have broken it.
 
@@ -385,7 +458,25 @@ def self_test() -> int:
         if stripped.count("\n") != src.count("\n"):
             failures += 1
             print(f"FAIL {name}: line count not preserved")
-    total = len(_PARSER_CASES)
+        # The scanning is shared between the two modes, so every case above is
+        # also an offset test for `keep_literals=True`. Its body list is not
+        # checked: braces inside literals survive in that mode by design, so
+        # `find_bodies` is not meaningful on its output.
+        kept = strip_noise(src, keep_literals=True)
+        if len(kept) != len(src) or kept.count("\n") != src.count("\n"):
+            failures += 1
+            print(f"FAIL {name}: offsets not preserved with keep_literals")
+
+    for name, src, want in _KEEP_LITERAL_CASES:
+        got = strip_noise(src, keep_literals=True)
+        if got != want:
+            failures += 1
+            print(f"FAIL keep_literals/{name}:\n  expected {want!r}\n  got      {got!r}")
+        if len(got) != len(src):
+            failures += 1
+            print(f"FAIL keep_literals/{name}: offsets not preserved")
+
+    total = len(_PARSER_CASES) + len(_KEEP_LITERAL_CASES)
     if failures:
         print(f"\n[parser self-test] {failures} failure(s) across {total} case(s)", file=sys.stderr)
         return 1

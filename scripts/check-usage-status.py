@@ -72,9 +72,20 @@ why.
 Exit status: 0 clean, 1 unaccounted sites found.
 """
 
+import importlib.util
 import pathlib
 import re
 import sys
+
+# `strip_noise` is the directory's one self-tested Rust scanner. The filename's
+# hyphens make it un-`import`able normally, hence the spec dance.
+_SIBLING = pathlib.Path(__file__).resolve().parent / "check-recursive-locks.py"
+_spec = importlib.util.spec_from_file_location("check_recursive_locks", _SIBLING)
+if _spec is None or _spec.loader is None:  # pragma: no cover - packaging error
+    print(f"error: cannot load {_SIBLING}", file=sys.stderr)
+    raise SystemExit(2)
+_rl = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_rl)
 
 PATH = pathlib.Path(__file__).resolve().parent.parent / "kernel" / "src" / "kshell.rs"
 
@@ -219,40 +230,17 @@ USAGE = re.compile(
 FN = re.compile(r"(?:pub )?(?:async )?fn ([a-z_0-9]+)")
 
 
-def strip_strings(s):
-    """Drop string literals so braces inside them do not count as structure."""
-    return "".join(s.split('"')[::2])
-
-
-def strip_comments(s):
-    """Drop any trailing `//` comment, so prose is never read as code.
-
-    Without this, a *comment* mentioning `set_exit(` satisfied the search
-    below for a failure status. The site that exposed it said, in full,
-    `// No set_exit(1): --help succeeded at what it was asked.` -- a comment
-    explaining that there is deliberately no refusal here was read as proof
-    that there was one. Any note of the form "no X here" defeats a checker
-    that greps for X, and the shape of that note is exactly what a careful
-    author writes.
-
-    Strings are blanked first so the `//` in a URL literal is not taken for a
-    comment. `scripts/check-option-refusal.py` carries the same function for
-    the same reason; both were added the same day, after the first one turned
-    up a real unrefused option loop that a comment had been hiding.
-    """
-    in_str = False
-    esc = False
-    for i in range(len(s) - 1):
-        ch = s[i]
-        if esc:
-            esc = False
-        elif ch == "\\":
-            esc = True
-        elif ch == '"':
-            in_str = not in_str
-        elif not in_str and ch == "/" and s[i + 1] == "/":
-            return s[:i]
-    return s
+# Comments must never be read as code: a *comment* mentioning `set_exit(`
+# satisfied the search below for a failure status. The site that exposed it
+# said, in full, `// No set_exit(1): --help succeeded at what it was asked.` --
+# a note explaining that there is deliberately no refusal here was read as
+# proof that there was one. Any note of the form "no X here" defeats a checker
+# that greps for X, and that note is exactly what a careful author writes.
+#
+# This was a line-local `strip_comments` that understood only `//` to end of
+# line, one of five hand-rolled Rust scanners in this directory. It now uses
+# the one that is self-tested and handles nested `/* */`, raw strings and char
+# literals. See `check-recursive-locks.py::strip_noise`.
 
 
 def main(argv):
@@ -261,7 +249,16 @@ def main(argv):
     # report the sites that revision had. A checker nobody has watched fail is
     # a checker nobody knows works.
     path = pathlib.Path(argv[1]) if len(argv) > 1 else PATH
-    lines = path.read_text(encoding="utf-8", errors="surrogateescape").split("\n")
+    text = path.read_text(encoding="utf-8", errors="surrogateescape")
+
+    # Three views of one file, identically numbered because `strip_noise`
+    # blanks in place rather than deleting: `lines` verbatim for reporting,
+    # `code` (comments gone, literals kept) for matching -- everything this
+    # checker looks for lives in a literal -- and `struct` (both gone) as the
+    # only thing braces may be counted over.
+    lines = text.split("\n")
+    code = _rl.strip_noise(text, keep_literals=True).split("\n")
+    struct = _rl.strip_noise(text).split("\n")
 
     starts = [(i, m.group(1)) for i, ln in enumerate(lines) if (m := FN.match(ln))]
 
@@ -276,15 +273,15 @@ def main(argv):
 
     unaccounted = []
     seen_conflated = {}
-    for i, ln in enumerate(lines):
-        if not USAGE.search(strip_comments(ln)):
+    for i, ln in enumerate(code):
+        if not USAGE.search(ln):
             continue
 
         # Walk to wherever control leaves this block, looking for a failure status.
         depth = 0
         raised = False
-        for k in range(i, min(i + 300, len(lines))):
-            s = strip_comments(lines[k])
+        for k in range(i, min(i + 300, len(code))):
+            s = code[k]
             if "set_exit(" in s and "set_exit(0)" not in s:
                 raised = True
                 break
@@ -298,22 +295,25 @@ def main(argv):
             if "end_help_arm(" in s:
                 raised = True
                 break
-            if k > i and re.search(r"\breturn\b", strip_strings(s)):
+            if k > i and re.search(r"\breturn\b", struct[k]):
                 break
-            depth += strip_strings(s).count("{") - strip_strings(s).count("}")
+            depth += struct[k].count("{") - struct[k].count("}")
             if depth < 0:
                 break
         if raised:
             continue
 
         fn = fn_of(i)
-        text = ln.strip()
-        if any(fn == f and frag in text for (f, frag) in ALLOWED):
+        # Matched against the comment-free view, so an ALLOWED fragment quoted
+        # in a comment cannot grant the exemption; reported from the verbatim
+        # one, so the reader sees the line as it is written.
+        matchable = code[i].strip()
+        if any(fn == f and frag in matchable for (f, frag) in ALLOWED):
             continue
         if seen_conflated.get(fn, 0) < KNOWN_CONFLATED.get(fn, 0):
             seen_conflated[fn] = seen_conflated.get(fn, 0) + 1
             continue
-        unaccounted.append((i + 1, fn, text[:88]))
+        unaccounted.append((i + 1, fn, lines[i].strip()[:88]))
 
     # A debt entry that no longer matches anything is itself a defect: it means
     # the site was fixed (so the entry is stale and should go) or renamed away

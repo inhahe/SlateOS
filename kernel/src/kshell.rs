@@ -8102,7 +8102,9 @@ fn cmd_help() {
     shell_println!(
         "  strings [-n N] F  Extract printable strings from binary file (min length N, default 4)"
     );
-    shell_println!("  column [-t] [-s SEP] F  Format text into aligned columns (-t table mode)");
+    shell_println!(
+        "  column [-t] [-s CHARS] F  Format text into aligned columns (-t table mode; -s splits on any character of CHARS)"
+    );
     shell_println!("  date [+FMT] Show date/time (format: %Y %m %d %H %M %S %a %b %F %T %s)");
     shell_println!("  cal [M] [Y] Show monthly calendar (current month if no args)");
     shell_println!("  test EXPR / [ EXPR ]  Conditional expressions");
@@ -15184,9 +15186,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "a no-break space is not a field separator"
         );
 
-        // `-s` takes the first *character*, so a multi-byte one splits on the
-        // sequence the user typed. Taking the first byte instead would split on
-        // 0xE2, which appears inside other characters.
+        // `-s` members are whole *characters*, so a multi-byte one splits on
+        // the sequence the user typed. Taking the first byte instead would
+        // split on 0xE2, which appears inside other characters.
         let out = piped("column -t -s →", "zz_a→zz_b\n".as_bytes());
         assert_eq!(
             out.as_slice(),
@@ -15194,9 +15196,45 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             "a multi-byte -s separator splits on the whole character"
         );
 
+        // `-s` is a *set*: every character of the argument is a separator and a
+        // line splits at any of them. This used to keep only the first
+        // character, so the semicolon below was not a separator at all -- it
+        // rode along inside a field, and the table came out with two columns
+        // where the user had asked for three.
+        let out = piped("column -t -s ,;", b"zz_a,zz_b;zz_c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b  zz_c\n",
+            "-s takes a set of separators, not just its first character"
+        );
+
+        // ...and it is a set of characters, not of bytes, so a multi-byte
+        // member still matches as a unit when it shares the set with an ASCII
+        // one. The failure this guards is expanding the set byte-wise: E2, 86
+        // and 92 would then each be a separator, so one `→` would produce three
+        // breaks and two empty fields instead of one break.
+        let out = piped("column -t -s →,", "zz_a→zz_b,zz_c\n".as_bytes());
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a  zz_b  zz_c\n",
+            "a multi-byte member of a mixed set still matches as one character"
+        );
+
+        // A second `-s` replaces the set rather than extending it, as
+        // util-linux does -- the option's argument *is* the set. Stated here so
+        // it stays a decision: unioning would be just as implementable, and the
+        // two readings differ visibly on this input, where a union would also
+        // split the comma.
+        let out = piped("column -t -s , -s ;", b"zz_a,zz_b;zz_c\n");
+        assert_eq!(
+            out.as_slice(),
+            b"zz_a,zz_b  zz_c\n",
+            "a second -s replaces the first set instead of extending it"
+        );
+
         // An explicit separator keeps empty fields, where the default split
         // collapses runs -- unchanged from `str::split` and worth holding still,
-        // since `split_on_bytes` is new code doing an old job.
+        // since `split_on_any_of` is new code doing an old job.
         let out = piped("column -t -s ,", b"zz_a,,zz_b\n");
         assert_eq!(
             out.as_slice(),
@@ -16028,10 +16066,10 @@ fn cmd_strings(args: &str) {
 
 /// Format text into aligned columns.
 ///
-/// Usage: `column [-t] [-s SEP]` (reads from file or pipe)
+/// Usage: `column [-t] [-s CHARS]` (reads from file or pipe)
 ///
 /// `-t` — format into a table (columns split on runs of space or tab)
-/// `-s CHAR` — use CHAR as the delimiter (default: space or tab)
+/// `-s CHARS` — split on *any* character of CHARS (default: space or tab)
 ///
 /// Without `-t`, merges short lines into side-by-side columns filling
 /// the terminal width.
@@ -16042,23 +16080,23 @@ fn cmd_strings(args: &str) {
 /// not all ASCII — the thing the command exists to do.
 fn cmd_column(args: &str) {
     if args.is_empty() {
-        shell_println!("Usage: column [-t] [-s SEP] <file>");
+        shell_println!("Usage: column [-t] [-s CHARS] <file>");
         shell_println!("   or: ... | column -t");
         set_exit(1);
         return;
     }
 
-    let Some((table_mode, sep, file_path)) = column_parse_args(args) else {
+    let Some(parsed) = column_parse_args(args) else {
         return;
     };
 
-    if file_path.is_empty() {
+    if parsed.file_path.is_empty() {
         shell_println!("column: no input file");
         set_exit(1);
         return;
     }
 
-    let path = resolve_path(file_path);
+    let path = resolve_path(parsed.file_path);
     let data = match crate::fs::Vfs::read_file(&path) {
         Ok(d) => d,
         Err(e) => {
@@ -16067,26 +16105,54 @@ fn cmd_column(args: &str) {
             return;
         }
     };
-    column_format(&data, table_mode, sep.as_deref());
+    column_format(&data, parsed.table_mode, parsed.seps.as_deref());
+}
+
+/// A parsed `column` command line.
+///
+/// A struct rather than the tuple this used to be: once the separator became a
+/// set the return type was `Option<(bool, Option<Vec<Vec<u8>>>, &str)>`, which
+/// `clippy::type_complexity` rejects at deny level and which no reader could
+/// have told apart from a differently-ordered one anyway. Naming the fields
+/// also means the two call sites destructure by name, so adding a fourth flag
+/// later cannot silently reorder them.
+struct ColumnArgs<'a> {
+    /// `-t`: format into an aligned table rather than passing lines through.
+    table_mode: bool,
+    /// `-s`: the separator **set**, one entry per character, or `None` for the
+    /// default split on runs of space and tab.
+    seps: Option<Vec<Vec<u8>>>,
+    /// The single file operand, or `""` when reading from a pipe.
+    file_path: &'a str,
 }
 
 /// Parse `column`'s flags, shared by the file and pipe entry points.
 ///
-/// Returns `(table_mode, separator, file_path)`. The separator is the first
-/// *character* of the `-s` argument, carried as its bytes rather than as a
-/// `char` so that a multi-byte one (`column -s →`) splits on the sequence the
-/// user typed instead of on its first byte, which is a continuation byte that
-/// appears inside other characters too.
+/// The separator is a **set**: every character of the `-s` argument is one
+/// member, and a line is split at any occurrence of any of them —
+/// `column -s ',;'` splits on a comma or a semicolon. That is GNU/util-linux's
+/// reading of the flag, and this used to keep only the first character, so
+/// `column -s ',;'` split on commas and carried the semicolons along inside the
+/// fields.
 ///
-/// First character, not the whole argument: that is what this command has
-/// always documented (`-s CHAR`) and what it has always done. GNU takes the
-/// argument as a *set* of possible delimiters, so `column -s ', '` splits on
-/// either — see the `column -s` note in `known-issues.md`. Widening it is a
-/// behaviour change and belongs in its own commit, not smuggled into a
-/// correctness fix.
-fn column_parse_args(args: &str) -> Option<(bool, Option<Vec<u8>>, &str)> {
+/// Each member is carried as the *bytes of one character*, not as a byte, so a
+/// multi-byte separator (`column -s →`) splits on the whole sequence the user
+/// typed rather than on its lead byte — which is a byte that appears inside
+/// other characters too, and splitting there would cut a character in half and
+/// emit two undecodable halves. It is a set of characters, in other words, not
+/// a set of bytes.
+///
+/// A `-s` given more than once replaces the previous set rather than adding to
+/// it, matching util-linux, where the option's argument *is* the set.
+///
+/// An empty argument (`-s ''`) yields no separators and therefore falls back to
+/// the default blank splitting, which is the same thing the old first-character
+/// reading did with it. Unreachable today for a second reason — see the
+/// `split_whitespace` note in `known-issues.md` — but it is the behaviour if it
+/// ever becomes reachable.
+fn column_parse_args(args: &str) -> Option<ColumnArgs<'_>> {
     let mut table_mode = false;
-    let mut sep: Option<Vec<u8>> = None;
+    let mut sep: Option<Vec<Vec<u8>>> = None;
     let mut file_path = "";
     let mut flags_done = false;
 
@@ -16115,10 +16181,17 @@ fn column_parse_args(args: &str) -> Option<(bool, Option<Vec<u8>>, &str)> {
                 set_exit(1);
                 return None;
             };
-            sep = s.chars().next().map(|c| {
-                let mut buf = [0u8; 4];
-                c.encode_utf8(&mut buf).as_bytes().to_vec()
-            });
+            let set: Vec<Vec<u8>> = s
+                .chars()
+                .map(|c| {
+                    let mut buf = [0u8; 4];
+                    c.encode_utf8(&mut buf).as_bytes().to_vec()
+                })
+                .collect();
+            // An empty set means "no explicit separator", which is what the
+            // default blank split already is -- carrying `Some(vec![])` would
+            // reach `split_on_any_of` and make it decide the same thing again.
+            sep = if set.is_empty() { None } else { Some(set) };
         } else {
             shell_println!("column: unrecognized option `{}'", w);
             set_exit(1);
@@ -16126,26 +16199,30 @@ fn column_parse_args(args: &str) -> Option<(bool, Option<Vec<u8>>, &str)> {
         }
     }
 
-    Some((table_mode, sep, file_path))
+    Some(ColumnArgs {
+        table_mode,
+        seps: sep,
+        file_path,
+    })
 }
 
 /// column from piped input.
 fn cmd_column_input(args: &str, input: &[u8]) {
     if input.is_empty() && args.is_empty() {
-        shell_println!("Usage: ... | column [-t] [-s SEP]");
+        shell_println!("Usage: ... | column [-t] [-s CHARS]");
         set_exit(1);
         return;
     }
 
-    let Some((table_mode, sep, file_path)) = column_parse_args(args) else {
+    let Some(parsed) = column_parse_args(args) else {
         return;
     };
 
     // If a file was specified, read from it; otherwise use piped input.
-    if file_path.is_empty() {
-        column_format(input, table_mode, sep.as_deref());
+    if parsed.file_path.is_empty() {
+        column_format(input, parsed.table_mode, parsed.seps.as_deref());
     } else {
-        let path = resolve_path(file_path);
+        let path = resolve_path(parsed.file_path);
         let data = match crate::fs::Vfs::read_file(&path) {
             Ok(d) => d,
             Err(e) => {
@@ -16154,7 +16231,7 @@ fn cmd_column_input(args: &str, input: &[u8]) {
                 return;
             }
         };
-        column_format(&data, table_mode, sep.as_deref());
+        column_format(&data, parsed.table_mode, parsed.seps.as_deref());
     }
 }
 
@@ -16168,7 +16245,7 @@ fn cmd_column_input(args: &str, input: &[u8]) {
 /// Field widths come from [`display_width`], not from `len`, because the
 /// padding is measured in console cells. See that function for why the two
 /// disagree and by how much.
-fn column_format(text: &[u8], table_mode: bool, sep: Option<&[u8]>) {
+fn column_format(text: &[u8], table_mode: bool, sep: Option<&[Vec<u8>]>) {
     let lines = split_lines(text);
     if lines.is_empty() {
         return;
@@ -16190,7 +16267,7 @@ fn column_format(text: &[u8], table_mode: bool, sep: Option<&[u8]>) {
     let rows: Vec<Vec<&[u8]>> = lines
         .iter()
         .map(|line| match sep {
-            Some(s) => split_on_bytes(line, s),
+            Some(s) => split_on_any_of(line, s),
             None => split_ascii_blanks(line),
         })
         .collect();
@@ -16232,26 +16309,54 @@ fn column_format(text: &[u8], table_mode: bool, sep: Option<&[u8]>) {
     }
 }
 
-/// Split `line` on every occurrence of the byte sequence `sep`.
+/// Split `line` at every occurrence of *any* member of `seps`.
+///
+/// Each member is the bytes of one character, so this is a set of characters
+/// rather than a set of bytes; see [`column_parse_args`] for why the
+/// distinction matters. A member is matched as a unit, so a multi-byte
+/// separator never splits a character in half.
 ///
 /// Empty fields are kept — `a,,b` is three fields, the middle one empty — and
 /// a separator at either end produces an empty field there, which is what
 /// `str::split` did before and what an explicitly-given delimiter should do.
-fn split_on_bytes<'a>(line: &'a [u8], sep: &[u8]) -> Vec<&'a [u8]> {
-    if sep.is_empty() {
+/// The separator itself is *consumed*, not returned in any field.
+///
+/// Where two members could both match at one position the **longer** one wins.
+/// For a set built from characters that cannot happen, because no character's
+/// UTF-8 encoding is a prefix of another's — that is what self-synchronising
+/// means — so this rule is unobservable today. It is written down anyway
+/// because "first member in the order the user typed them" would make the
+/// output depend on argument order for no reason a user could predict, and
+/// longest-match is the rule that stays right if this ever takes multi-character
+/// separators.
+fn split_on_any_of<'a>(line: &'a [u8], seps: &[Vec<u8>]) -> Vec<&'a [u8]> {
+    // No separators is not "split on nothing" by accident -- it is the caller
+    // having nothing to split on, so the whole line is one field.
+    if seps.iter().all(Vec::is_empty) {
         return alloc::vec![line];
     }
     let mut out: Vec<&[u8]> = Vec::new();
     let mut start = 0usize;
     let mut i = 0usize;
-    while i.saturating_add(sep.len()) <= line.len() {
-        if line.get(i..i.saturating_add(sep.len())) == Some(sep) {
-            out.push(line.get(start..i).unwrap_or(&[]));
-            i = i.saturating_add(sep.len());
-            start = i;
-        } else {
-            i = i.saturating_add(1);
+    while i < line.len() {
+        let mut hit = 0usize;
+        for sep in seps {
+            if sep.is_empty() || sep.len() <= hit {
+                // An empty member would match everywhere and split between
+                // every byte; a shorter one cannot beat what we already have.
+                continue;
+            }
+            if line.get(i..i.saturating_add(sep.len())) == Some(sep.as_slice()) {
+                hit = sep.len();
+            }
         }
+        if hit == 0 {
+            i = i.saturating_add(1);
+            continue;
+        }
+        out.push(line.get(start..i).unwrap_or(&[]));
+        i = i.saturating_add(hit);
+        start = i;
     }
     out.push(line.get(start..).unwrap_or(&[]));
     out

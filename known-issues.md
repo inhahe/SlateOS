@@ -84723,7 +84723,7 @@ values are all in range; it is the *stored* pair that has to be inverted.
 
 ---
 
-## `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` (lane A, 2026-08-26) — **open**
+## `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` (lane A, 2026-08-26) — **fixed** the same day
 
 **In short:** `cgmem` tracks a cgroup's memory as one total (`usage`) plus a
 breakdown of that same memory into two buckets (`rss` for a program's own
@@ -84777,8 +84777,8 @@ was read with `unwrap_or("rss") == "cache"` and so turned any misspelling into
 `rss`. But the sequence above types `cache` correctly; the defect is in the
 subsystem, not in the parse, and clearing the parse does not clear it.
 
-**Proper fix.** Un-charge no more from the aggregate than actually left the
-bucket, so the two can never diverge:
+**Fixed.** Un-charge no more from the aggregate than actually left the bucket,
+so the two can never diverge:
 
 ```rust
 let actual = if is_cache {
@@ -84793,14 +84793,26 @@ let actual = if is_cache {
 c.usage_pages -= actual;   // == rss + cache still holds
 ```
 
-An alternative — refusing an un-charge larger than the bucket with
-`KernelError::InvalidArgument` — is worth considering *instead*, since silently
-un-charging less than asked is itself a kind of guess. The reason to prefer the
-clamp is that `record_uncharge` has exactly one honest job, keeping the two
-views of the same memory consistent, and a caller who over-un-charges has
-already lost track; refusing leaves the caller's own accounting wrong with no
-way to resynchronise. That is a genuine trade-off and is recorded here rather
-than decided in passing.
+`actual <= the bucket <= usage_pages` by the invariant, so the aggregate cannot
+underflow and the invariant holds afterwards.
+
+**The alternative that was rejected**, and it is a real trade-off rather than
+an obvious call: refuse an un-charge larger than the bucket with
+`KernelError::InvalidArgument`. That has a genuine argument behind it —
+silently un-charging less than asked is itself a quiet substitution of a number
+the caller did not supply, which is the very shape §600 exists to stamp out.
+The clamp wins because `record_uncharge` has exactly one honest job, keeping
+the two views of the same memory consistent, and a caller who over-un-charges
+has *already* lost track of what it charged; refusing leaves that caller's
+accounting wrong with no way to resynchronise, whereas clamping repairs the
+invariant on the spot. The §600 objection does not really apply either: the
+substituted number is not a guess about what the user meant, it is the
+arithmetic truth about how many pages were actually there.
+
+**Regression test.** `cgmem::self_test` test 9 covers both halves — un-charging
+a bucket that is empty (which used to deflate the aggregate and nothing else)
+and un-charging more than the right bucket holds — and asserts `usage_pages ==
+rss_pages + cache_pages` directly.
 
 **Not a regression.** True since `record_uncharge` was written.
 

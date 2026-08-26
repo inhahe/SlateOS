@@ -173,6 +173,31 @@ pub fn record_charge(cg_id: u32, pages: u64, is_cache: bool) -> KernelResult<()>
 }
 
 /// Uncharge pages from a cgroup.
+///
+/// Un-charges no more from `usage_pages` than actually left the named bucket.
+///
+/// The previous form subtracted `pages` from the aggregate and from the bucket
+/// with two *independent* `saturating_sub` calls, which silently broke the
+/// invariant [`record_charge`] maintains — `usage_pages == rss_pages +
+/// cache_pages`, since those two are the only fields either function writes.
+/// Un-charging 50 cache pages from a cgroup holding 100 rss and no cache
+/// deflated the aggregate to 50 and the buckets not at all, leaving a cgroup
+/// reporting 50 pages of usage of which 100 were resident.
+///
+/// That is not merely an inconsistent display. `usage_pages` is the number
+/// [`record_charge`] compares against `limit_pages`, so the divergence bought
+/// the cgroup headroom it did not have — an error in the permissive direction,
+/// which is the direction that does not announce itself.
+///
+/// Clamping to the bucket rather than *rejecting* an over-large un-charge is a
+/// real choice and the weaker one in one respect: under-un-charging is itself a
+/// quiet substitution of a number the caller did not ask for. It is preferred
+/// because this function has exactly one job — keeping the two views of the
+/// same memory consistent — and a caller who un-charges more than a bucket
+/// holds has already lost track; refusing would leave that caller's accounting
+/// wrong with no way to resynchronise, whereas clamping restores the invariant
+/// on the spot. See
+/// `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY`.
 pub fn record_uncharge(cg_id: u32, pages: u64, is_cache: bool) -> KernelResult<()> {
     with_state(|state| {
         let c = state
@@ -180,12 +205,18 @@ pub fn record_uncharge(cg_id: u32, pages: u64, is_cache: bool) -> KernelResult<(
             .iter_mut()
             .find(|c| c.cg_id == cg_id)
             .ok_or(KernelError::NotFound)?;
-        c.usage_pages = c.usage_pages.saturating_sub(pages);
-        if is_cache {
-            c.cache_pages = c.cache_pages.saturating_sub(pages);
+        let actual = if is_cache {
+            let n = pages.min(c.cache_pages);
+            c.cache_pages -= n;
+            n
         } else {
-            c.rss_pages = c.rss_pages.saturating_sub(pages);
-        }
+            let n = pages.min(c.rss_pages);
+            c.rss_pages -= n;
+            n
+        };
+        // `actual <= the bucket <= usage_pages` by the invariant above, so this
+        // cannot underflow and the invariant still holds afterwards.
+        c.usage_pages = c.usage_pages.saturating_sub(actual);
         c.uncharges += 1;
         state.total_uncharges += 1;
         Ok(())
@@ -244,14 +275,14 @@ pub fn self_test() {
     assert_eq!(per_cgroup().len(), 0);
     let (cg0, charges0, uncharges0, ooms0, _) = stats();
     assert_eq!((cg0, charges0, uncharges0, ooms0), (0, 0, 0, 0));
-    crate::serial_println!("  [1/8] empty defaults: OK");
+    crate::serial_println!("  [1/9] empty defaults: OK");
 
     // 2: Create — ids monotonic starting at 1; unknown-id charge errors.
     let id = create("test_cg", 10_000).expect("create");
     assert_eq!(id, 1);
     assert_eq!(per_cgroup().len(), 1);
     assert!(record_charge(99, 1, false).is_err());
-    crate::serial_println!("  [2/8] create: OK");
+    crate::serial_println!("  [2/9] create: OK");
 
     // 3: Charge RSS — usage and rss tracked, cache untouched.
     record_charge(id, 100, false).expect("charge_rss");
@@ -262,7 +293,7 @@ pub fn self_test() {
     assert_eq!(c.usage_pages, 100);
     assert_eq!(c.rss_pages, 100);
     assert_eq!(c.cache_pages, 0);
-    crate::serial_println!("  [3/8] charge rss: OK");
+    crate::serial_println!("  [3/9] charge rss: OK");
 
     // 4: Charge cache — separate bucket, usage is the sum.
     record_charge(id, 50, true).expect("charge_cache");
@@ -272,7 +303,7 @@ pub fn self_test() {
         .expect("cg");
     assert_eq!(c.cache_pages, 50);
     assert_eq!(c.usage_pages, 150);
-    crate::serial_println!("  [4/8] charge cache: OK");
+    crate::serial_println!("  [4/9] charge cache: OK");
 
     // 5: Uncharge RSS — usage and rss drop, cache unaffected.
     record_uncharge(id, 30, false).expect("uncharge");
@@ -283,7 +314,7 @@ pub fn self_test() {
     assert_eq!(c.rss_pages, 70);
     assert_eq!(c.cache_pages, 50);
     assert_eq!(c.usage_pages, 120);
-    crate::serial_println!("  [5/8] uncharge: OK");
+    crate::serial_println!("  [5/9] uncharge: OK");
 
     // 6: High-event detection when usage exceeds the page limit.
     let id2 = create("small_cg", 10).expect("create2");
@@ -302,26 +333,56 @@ pub fn self_test() {
             .oom_kills,
         1
     );
-    crate::serial_println!("  [6/8] high event + oom: OK");
+    crate::serial_println!("  [6/9] high event + oom: OK");
 
     // 7: Remove — gone, and double-remove errors.
     remove(id).expect("remove");
     remove(id2).expect("remove2");
     assert_eq!(per_cgroup().len(), 0);
     assert!(remove(id).is_err());
-    crate::serial_println!("  [7/8] remove: OK");
+    crate::serial_println!("  [7/9] remove: OK");
 
-    // 8: Final stats reflect only the real activity above (3 charges, 1
-    //    uncharge, 1 OOM; both cgroups removed).
+    // 8: Stats reflect only the real activity above (3 charges, 1 uncharge,
+    //    1 OOM; both cgroups removed).
     let (cgroups, charges, uncharges, ooms, ops) = stats();
     assert_eq!(cgroups, 0);
     assert_eq!(charges, 3);
     assert_eq!(uncharges, 1);
     assert_eq!(ooms, 1);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/9] stats: OK");
+
+    // 9: Un-charging more than a bucket holds keeps `usage == rss + cache`.
+    //
+    //    Both halves used to break it, because the aggregate and the bucket
+    //    floored at zero independently: the aggregate fell by the full `pages`
+    //    while the bucket fell by however much it had.
+    let id3 = create("clamp_cg", 10_000).expect("create3");
+    record_charge(id3, 100, false).expect("charge3");
+    // (a) Wrong bucket entirely: no cache pages exist, so nothing may leave
+    //     the aggregate either. This used to report 50 pages of usage in a
+    //     cgroup with 100 resident.
+    record_uncharge(id3, 50, true).expect("uncharge_empty_bucket");
+    let c = per_cgroup()
+        .into_iter()
+        .find(|c| c.cg_id == id3)
+        .expect("cg3");
+    assert_eq!(c.usage_pages, 100);
+    assert_eq!(c.rss_pages, 100);
+    assert_eq!(c.cache_pages, 0);
+    assert_eq!(c.usage_pages, c.rss_pages + c.cache_pages);
+    // (b) Right bucket, over-large: the clamp applies to both sides equally,
+    //     so the cgroup empties rather than going negative on one side only.
+    record_uncharge(id3, 150, false).expect("uncharge_over");
+    let c = per_cgroup()
+        .into_iter()
+        .find(|c| c.cg_id == id3)
+        .expect("cg3");
+    assert_eq!((c.usage_pages, c.rss_pages, c.cache_pages), (0, 0, 0));
+    remove(id3).expect("remove3");
+    crate::serial_println!("  [9/9] uncharge clamps to the bucket: OK");
 
     // Leave no residue in the live state.
     *STATE.lock() = None;
-    crate::serial_println!("cgmem::self_test() — all 8 tests passed");
+    crate::serial_println!("cgmem::self_test() — all 9 tests passed");
 }

@@ -87837,6 +87837,81 @@ path and deserves its own change and its own benchmark.
 
 **Not a regression.** True since the IOAPIC device vectors were installed.
 
+### Addendum, 2026-08-26 — a choke point, and a landmine in the display side
+
+Two findings from reading the consumers before implementing. Both change the
+plan above materially, so they are recorded here rather than discovered again
+halfway through the edit.
+
+**1. Step 1 should be one call, not five.** The list above — `isr_timer`,
+`handle_device_irq`, the two IPI ISRs, `isr_spurious` — is not where the count
+belongs. `idt.rs`'s `dispatch_vector` is a single function that *every* hardware
+vector already funnels through:
+
+```rust
+extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
+    match vector {
+        32 => crate::apic::handle_timer_irq(frame_ref, 0),
+        251 => crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0),
+        252 => crate::apic::handle_reschedule_irq(frame_ref, 0),
+        255 => crate::apic::handle_spurious_irq(frame_ref, 0),
+        v @ 33..=56 => { ... crate::ioapic::handle_device_irq(irq); }
+        _ => {}
+    }
+}
+```
+
+So `count_vector(vector as usize)` at the top of it covers 32, 33–56, 251, 252
+and 255 in one line — and, more to the point, covers whatever vector is added
+next *without anyone remembering to*. This is the same argument that decided the
+block-device capability gate in `devfs`: one call at the point every caller
+passes through beats a call each caller must not forget. Prefer it. The
+five-site version in step 1 is strictly worse and should not be implemented.
+
+Note the ordering constraint that comes with it: the count must be taken
+*before* the `match`, not inside each arm, or the `_ => {}` arm — an interrupt
+on an installed-but-unhandled vector, which is exactly the event worth
+counting — stays invisible.
+
+**2. Fixing the count breaks `kshell`'s exception health line.** At
+`kernel/src/kshell.rs:123411`:
+
+```rust
+let exc_total: u64 = crate::idt::vector_counts().iter().sum();
+```
+
+printed as `"Exceptions: total="`, with a companion
+`if non_pf_exceptions > 100 { "HIGH" }` indicator. That label is accurate
+**only because nothing currently counts hardware vectors.** The moment step 1
+lands, every timer tick — millions of them — folds into a figure labelled
+"Exceptions", and the HIGH indicator pins on within the first second of uptime
+and never clears.
+
+This is the asymmetry that makes the fix one careful commit rather than a
+one-liner: the same change flips `kstat.rs:159` and `kcounters.rs:279` from
+wrong to right, and flips this line from right to wrong. `exc_total` must be
+narrowed to `vector_counts().iter().take(32).sum()` **in the same commit**, not
+in a follow-up — a commit that is correct on its own terms and leaves a
+permanently-red health indicator behind it is worse than no commit.
+
+**Also in the same blast radius**, all in `kshell.rs`:
+
+| site | what is wrong | why it matters after the fix |
+|---|---|---|
+| `cmd_irqrate` (127706) | hardcodes `for i in 0..48` | 48–56, 251, 252, 255 never print |
+| `cmd_irqrate` | `33..=47 => "Device IRQ"` | IOAPIC maps 33–**56**, so 48–56 print "Unknown" |
+| `cmd_irqrate` | `rates.rates_x10[i]` / `EXCEPTION_NAMES[i]` with `[]` | widening `VECTOR_STATS_SIZE` makes the two arrays different lengths; index them with `.get()` |
+| `cmd_exceptions` (123556) | names every `i >= 32` as just `"IRQ"` | the whole point of counting them is telling them apart |
+| `kcounters.rs:288` | `irq_counts[32]` with `[]` | fine today, but `.get(32).copied().unwrap_or(0)` costs nothing and cannot panic |
+
+`cmd_irqrate` already skips zero-rate vectors, so widening the loop will not
+flood its output — it will show exactly the vectors that are actually live.
+
+**Sizing note.** Widening `VECTOR_STATS_SIZE` 48 → 256 makes `InterruptRates`
+(`rates_x10: [u64; VECTOR_STATS_SIZE]`) a ~2 KB by-value return. Acceptable:
+`vector_rates()` is called only from a hand-run diagnostic command, never from
+an interrupt path.
+
 ---
 
 ## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26)

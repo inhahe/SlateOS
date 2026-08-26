@@ -83637,3 +83637,101 @@ upload site in `gui/**` and `apps/**` at once.
 **How you would notice.** A thumbnail, wallpaper or photograph draws with red
 and blue exchanged — a blue sky above orange grass — and semi-transparent
 pixels come out wrong. Nothing reports an error.
+
+### A-FASTPY-FORKEXEC-PARENT-MISSES-THE-4000-YIELD-POLL-BUDGET. `self_test_fastpy_forkexec` failed once in 15 boots: the guest printed its success line, but the parent task had still not exited when the harness gave up polling — 2026-08-26 — **Status: OPEN (one occurrence, cause not established)**
+
+**In short:** the kernel runs a start-up self-test that launches a small Python
+program, has it start a second program, and waits for the first one to finish.
+On one boot the program did its whole job and said so, but the kernel gave up
+waiting a moment too soon and declared the test failed. The boot was otherwise
+completely clean. It has happened once and has not been reproduced, so it is
+recorded rather than diagnosed — and this entry exists mainly so the *next*
+occurrence is recognised as the second one rather than investigated from
+scratch.
+
+**Where.** `kernel/src/proc/spawn.rs`, `self_test_fastpy_forkexec` — the poll
+loop at ~9261 and the verdict at ~9277:
+
+```rust
+let mut became_zombie = false;
+for _ in 0..4000 {
+    if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) { became_zombie = true; break; }
+    crate::sched::yield_now();
+}
+let state = pcb::state(result.pid);
+…
+thread::on_thread_exit(result.task_id);   // ← this force-reaps the parent
+pcb::destroy(result.pid);
+if !became_zombie || state != Some(pcb::ProcessState::Zombie) { … FAIL … }
+```
+
+**The observation.** Boot `497f31a17` (debug, QEMU TCG, 430 s to `BOOT_OK`),
+`build/serial-test.txt` lines 3300–3382:
+
+```
+[spawn] Created process 192 ("fastpy-forkexec")
+[sched] Spawned task 155 …                    ← the parent
+[sched] Spawned task 156 … in process 193     ← the fork child
+[exec] Process 193 exec complete …            ← the child execs `cat`
+fastpy fork+exec+wait OK                      ← the PARENT's own success line
+[thread] Process 193 has no threads left — now zombie
+[sched] Task 156 exiting
+[thread] Process 192 has no threads left — now zombie
+[spawn]   FAIL: fastpy-forkexec (ring 3) — expected Zombie, got Some(Running)
+```
+
+**Read the last two lines in the right order or the diagnosis inverts.** It
+looks as though process 192 became a zombie and the harness then failed it
+anyway, i.e. a stale read. It is not that. `[thread] Process N has no threads
+left — now zombie` is printed by `thread::on_thread_exit`
+(`kernel/src/proc/thread.rs:767`), and the *harness itself* calls
+`on_thread_exit(result.task_id)` at spawn.rs:9273 — after capturing `state` at
+9270 and before printing the verdict at 9278. So that zombie line is the
+harness force-reaping the parent, not the parent exiting on its own. The read
+was not stale; task 155 really had not exited.
+
+**What is not the cause.** The commit under test changed only
+`parse_blkread_args` in `kshell.rs` and added self-test rung 86. The spawn
+self-tests run at serial line ~3300; `kshell::self_test 86` runs at line 40962.
+The changed code executes roughly 37,000 serial lines *after* the failure, so it
+cannot have contributed. The 14 boots immediately preceding this one were all
+`PASS`, and the boot in question was clean everywhere else — 0 `!! ` lines,
+`kshell::self_test PASSED`, `BOOT_OK detected`.
+
+**Two candidate causes, not distinguished.**
+
+1. *Budget too tight.* 4000 `yield_now()` calls is a fixed count, not a
+   deadline, so what it is worth in real time depends on how much else is
+   runnable. This boot took 430 s to `BOOT_OK` against a recent median of ~400 s
+   and was competing with a concurrent `cargo`/gate run on the host. A
+   fastpy parent has an interpreter to tear down after its last `print`, and
+   that teardown is not free.
+2. *Same family as `B-FORKEXEC-BOOT-HANG`.* That entry documents the exit path
+   of a just-reaped process wedging, with a suspected raw-spin
+   holder-preemption deadlock (Q24). The signature there is a **silent** stop
+   with no further output; here output continued and the boot completed, so it
+   is not the same event — but "the last thread of a fork/exec parent is slow
+   or stuck leaving" is the same neighbourhood, and this may be a survivable
+   instance of it.
+
+One detail argues against a plain slow-teardown story and is the most useful
+thing to check next: the parent's `fastpy fork+exec+wait OK` is printed
+*before* the child's zombie line, yet the parent only reaches that `print`
+after its `waitpid` returns, which in turn requires the child to already be a
+zombie. Either the two output paths (guest `write` syscall vs. kernel
+`serial_println!`) interleave, or `waitpid` returned before the child was
+reaped — and the latter would be a real bug worth having.
+
+**Deliberately not "fixed" by raising the budget.** Changing `4000` to a bigger
+number would make the symptom rarer without establishing which of the two
+causes is real, and if it is cause 2 the loop would be papering over a kernel
+bug with a longer wait. Note also that the harness reports a *poll timeout*
+with the words "faulted on the fork / execv / waitpid path", which is a
+misdiagnosis of exactly the kind §600 is about: nothing faulted.
+
+**Next step on recurrence.** Print the parent's `pcb::state` and the task's
+scheduler state at the moment the budget expires, and re-run with
+`--hard-lockup-watchdog` to capture the guest RIP if it is wedged rather than
+slow. If it turns out to be cause 1, the fix is a *deadline* (a tick-based
+timeout) rather than a yield count, and a verdict line that says "still
+Running after N ms" instead of blaming the fork/exec path.

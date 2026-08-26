@@ -45,7 +45,6 @@ cmd_backupsched 2
 cmd_bluetooth 1
 cmd_bootcfg 1
 cmd_bpfstat 4
-cmd_brightness 7
 cmd_buddyinfo 3
 cmd_cal 2
 cmd_cgmem 6

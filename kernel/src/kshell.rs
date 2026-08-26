@@ -18192,6 +18192,120 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("aiostat destroy 2");
     }
 
+    serial_println!(
+        "  kshell::self_test 85: when the optional operand comes first, a guess eats the word the \
+         next operand needed, and the command reports it missing"
+    );
+    // `bright set [id] <level>` was fixed for this in an earlier rung; the same
+    // shape was still live in `mode [id] <type>`, and it is worth a rung because
+    // the two defects *compound* into a diagnostic that is actively misleading.
+    //
+    // `bright mode auto` is the documented one-word form. `parts[1]` was read as
+    // the display id unconditionally, so `auto` was parsed as a number, failed,
+    // and silently became display 1 — consuming the word. The mode operand then
+    // looked absent, and the command answered
+    //
+    //     brightness: mode: `' is not a mode
+    //
+    // quoting the empty string back at a user who had supplied the mode. Neither
+    // half of that message is true: the mode was given, and the thing that could
+    // not be read was a word the command had already decided was a display.
+    //
+    // The `.ok()` calls under `mode`/`dim`/`undim` are the same disease at the
+    // other end: they threw away the `NotFound` that said nothing had been set
+    // and printed the success line anyway.
+    {
+        let _ = capture_command("bright init");
+
+        // The documented one-word form, which did not work at all.
+        let out = capture_command("bright mode auto");
+        assert_output_contains(
+            "`bright mode <type>` is the documented one-word form and must work",
+            &out,
+            b"Mode \xe2\x86\x92 ",
+        );
+        assert_eq!(last_exit(), 0, "`bright mode auto` succeeds");
+        assert_output_lacks(
+            "and the mode word must not be read as the display id",
+            &out,
+            b"is not a mode",
+        );
+
+        // Absence and unreadability are now different answers, and neither
+        // quotes an empty string.
+        let out = capture_command("bright mode");
+        assert_output_contains(
+            "no mode at all is reported as missing",
+            &out,
+            b"missing mode (manual, auto or battery)",
+        );
+        assert_eq!(last_exit(), 1, "`bright mode` errors");
+
+        let out = capture_command("bright mode 1 zz");
+        assert_output_contains("an unreadable mode is named", &out, b"`zz' is not a mode");
+        assert_eq!(last_exit(), 1, "an unreadable mode errors");
+
+        // The discarded Result. Display 9 does not exist, so nothing was set;
+        // the command used to say it had been.
+        let out = capture_command("bright mode 9 auto");
+        assert_eq!(
+            last_exit(),
+            1,
+            "setting the mode of a display that is not there errors"
+        );
+        assert_output_lacks(
+            "and a mode that was not set is not reported as set",
+            &out,
+            b"Mode \xe2\x86\x92 ",
+        );
+
+        // The step and id of `up`/`down` keep their documented defaults (§607),
+        // so pin the arithmetic to a known level first rather than to whatever
+        // an earlier rung left behind.
+        let _ = capture_command("bright set 1 40");
+        let out = capture_command("bright up");
+        assert_output_contains(
+            "omitting both bracketed operands still steps display 1 by ten",
+            &out,
+            b"Brightness \xe2\x86\x92 50%",
+        );
+
+        let out = capture_command("bright up 1O");
+        assert_output_contains(
+            "a display ID that cannot be read is named",
+            &out,
+            b"`1O' is not a display ID",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable display ID errors");
+        assert_output_lacks(
+            "and no display is stepped",
+            &out,
+            b"Brightness \xe2\x86\x92 ",
+        );
+
+        let out = capture_command("bright down 1 5x");
+        assert_output_contains(
+            "and so is a step that cannot be read",
+            &out,
+            b"`5x' is not a step percentage",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable step errors");
+
+        // `dim`/`undim` discarded their Result too.
+        let out = capture_command("bright dim 9");
+        assert_eq!(last_exit(), 1, "dimming a display that is not there errors");
+        assert_output_lacks("and nothing is reported dimmed", &out, b"dimmed.");
+
+        let out = capture_command("bright dim");
+        assert_output_contains(
+            "while the documented default still dims display 1",
+            &out,
+            b"Display 1 dimmed.",
+        );
+        assert_eq!(last_exit(), 0, "`bright dim` succeeds");
+        let _ = capture_command("bright undim");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -73885,14 +73999,18 @@ fn cmd_brightness(args: &str) {
             }
         }
         "up" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let step = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(10);
+            // Both operands are bracketed — `up [id] [step]` — so both defaults
+            // are documented and survive (§607). What does not survive is
+            // `bright up 1O`, which used to raise display **1** instead of
+            // display 10 and print `Brightness → 60%`: a number that is true of
+            // a screen the user was not looking at.
+            let Some(id) = optional_num::<u32>(&parts, 1, "bright", sub, "display ID", 1) else {
+                return;
+            };
+            let Some(step) = optional_num::<u32>(&parts, 2, "bright", sub, "step percentage", 10)
+            else {
+                return;
+            };
             match brightness::brightness_up(id, step) {
                 Ok(new) => shell_println!("Brightness → {}%", new),
                 Err(e) => {
@@ -73902,14 +74020,13 @@ fn cmd_brightness(args: &str) {
             }
         }
         "down" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let step = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(10);
+            let Some(id) = optional_num::<u32>(&parts, 1, "bright", sub, "display ID", 1) else {
+                return;
+            };
+            let Some(step) = optional_num::<u32>(&parts, 2, "bright", sub, "step percentage", 10)
+            else {
+                return;
+            };
             match brightness::brightness_down(id, step) {
                 Ok(new) => shell_println!("Brightness → {}%", new),
                 Err(e) => {
@@ -73919,11 +74036,26 @@ fn cmd_brightness(args: &str) {
             }
         }
         "mode" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            let mode_str = parts.get(2).copied().unwrap_or("");
+            // `mode [id] <type>` has the same shape as `set` above: the
+            // *optional* operand comes first, so only the operand count says
+            // which word is which. Reading `parts[1]` as the id unconditionally
+            // meant `bright mode auto` — the form anyone with one screen would
+            // type, and the form the synopsis documents — parsed `auto` as a
+            // display id, failed, silently became display 1, then found no mode
+            // word at all and answered ``brightness: mode: `' is not a mode``.
+            // A diagnostic quoting the empty string, about an operand the user
+            // did supply, is the arity bug and the guess compounding: the guess
+            // consumed the word and the arity guard then reported its absence.
+            let (id_idx, mode_idx) = if parts.len() >= 3 {
+                (Some(1), 2)
+            } else {
+                (None, 1)
+            };
+            let Some(mode_str) = parts.get(mode_idx).copied() else {
+                shell_println!("brightness: mode: missing mode (manual, auto or battery)");
+                set_exit(1);
+                return;
+            };
             let mode = match mode_str {
                 "manual" | "man" => brightness::BrightnessMode::Manual,
                 "auto" | "automatic" => brightness::BrightnessMode::Automatic,
@@ -73935,24 +74067,51 @@ fn cmd_brightness(args: &str) {
                     return;
                 }
             };
-            brightness::set_mode(id, mode).ok();
-            shell_println!("Mode → {}", mode.label());
+            let id = match id_idx {
+                None => 1,
+                Some(i) => {
+                    let Some(v) = optional_num::<u32>(&parts, i, "bright", sub, "display ID", 1)
+                    else {
+                        return;
+                    };
+                    v
+                }
+            };
+            // `.ok()` followed by an unconditional success line is the same
+            // defect as a guessed operand, one layer down: `bright mode 9 auto`
+            // set nothing, discarded the `NotFound` that said so, and printed
+            // `Mode → Automatic`. The report has to depend on the outcome.
+            match brightness::set_mode(id, mode) {
+                Ok(()) => shell_println!("Mode → {}", mode.label()),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
         }
         "dim" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            brightness::dim(id).ok();
-            shell_println!("Display {} dimmed.", id);
+            let Some(id) = optional_num::<u32>(&parts, 1, "bright", sub, "display ID", 1) else {
+                return;
+            };
+            match brightness::dim(id) {
+                Ok(()) => shell_println!("Display {} dimmed.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
         }
         "undim" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
-            brightness::undim(id).ok();
-            shell_println!("Display {} undimmed.", id);
+            let Some(id) = optional_num::<u32>(&parts, 1, "bright", sub, "display ID", 1) else {
+                return;
+            };
+            match brightness::undim(id) {
+                Ok(()) => shell_println!("Display {} undimmed.", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
+            }
         }
         "stats" => {
             let (count, adj, auto, ops) = brightness::stats();

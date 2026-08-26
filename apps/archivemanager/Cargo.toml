@@ -2,8 +2,13 @@
 name = "archivemanager"
 version = "0.1.0"
 edition = "2024"
+description = "SlateOS Archive Manager — browse, extract, create and verify archives"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window and its event loop. Without this, `fn main` was empty: the
+# toolbar, the tree, the column headers and every row existed only for the
+# tests to call, and nothing in the program could be clicked.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

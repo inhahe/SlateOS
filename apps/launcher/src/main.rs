@@ -12,12 +12,17 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::Response;
+use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Theme — Catppuccin Mocha palette
@@ -81,6 +86,97 @@ const INPUT_FONT_SIZE: f32 = 18.0;
 const NAME_FONT_SIZE: f32 = 14.0;
 /// Font size for descriptions and badges.
 const DESC_FONT_SIZE: f32 = 12.0;
+/// Height of the "could not launch that" banner, when there is one.
+const ERROR_HEIGHT: f32 = 28.0;
+
+// ============================================================================
+// Layout
+// ============================================================================
+
+/// Where the launcher's parts are, in screen coordinates.
+///
+/// Computed once from the viewport and the current result count, and used by
+/// **both** the renderer and the hit-test. That sharing is the entire point:
+/// the arithmetic that decides where row 3 is drawn and the arithmetic that
+/// decides which row a click landed in have to be the same arithmetic, or the
+/// pointer selects the row above the one under it — and that is a bug the user
+/// sees as "the launcher opened the wrong program".
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Layout {
+    /// Screen x of the dialog's left edge.
+    dialog_x: f32,
+    /// Screen y of the dialog's top edge.
+    dialog_y: f32,
+    /// Total dialog height, which grows with the result count and with the
+    /// presence of an error banner.
+    dialog_height: f32,
+    /// Width of the dialog's interior: the input box and every result row.
+    inner_width: f32,
+    /// Interior y of the error banner's top, if there is a banner.
+    error_top: Option<f32>,
+    /// Interior y of the first result row's top.
+    rows_top: f32,
+    /// How many rows are drawn.
+    row_count: usize,
+}
+
+impl Layout {
+    /// Measure the dialog as it currently stands.
+    fn of(state: &LauncherState) -> Self {
+        let row_count = state.results.len();
+        let error_top = state.error.is_some().then_some(INPUT_HEIGHT);
+        let rows_top = INPUT_HEIGHT
+            + if error_top.is_some() {
+                ERROR_HEIGHT
+            } else {
+                0.0
+            };
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "row_count is at most MAX_RESULTS"
+        )]
+        let results_height = row_count as f32 * ROW_HEIGHT;
+        Self {
+            dialog_x: (state.viewport_width - DIALOG_WIDTH) / 2.0,
+            dialog_y: state.viewport_height * 0.25,
+            dialog_height: rows_top + results_height + PADDING * 2.0,
+            inner_width: DIALOG_WIDTH - PADDING * 2.0,
+            error_top,
+            rows_top,
+            row_count,
+        }
+    }
+
+    /// A screen point in the dialog's interior coordinates — the frame the
+    /// renderer works in after its `PushTranslate`.
+    fn interior_of(self, x: f32, y: f32) -> (f32, f32) {
+        (x - (self.dialog_x + PADDING), y - (self.dialog_y + PADDING))
+    }
+
+    /// Whether a screen point is inside the dialog at all.
+    fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.dialog_x
+            && x < self.dialog_x + DIALOG_WIDTH
+            && y >= self.dialog_y
+            && y < self.dialog_y + self.dialog_height
+    }
+
+    /// The result row a screen point falls in, if any.
+    fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        let (ix, iy) = self.interior_of(x, y);
+        if ix < 0.0 || ix >= self.inner_width || iy < self.rows_top {
+            return None;
+        }
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "truncation is the intent -- the row a point falls in -- and \
+                      the value is non-negative because `iy < rows_top` returned above"
+        )]
+        let row = ((iy - self.rows_top) / ROW_HEIGHT) as usize;
+        (row < self.row_count).then_some(row)
+    }
+}
 
 // ============================================================================
 // App categories
@@ -292,6 +388,13 @@ pub struct LauncherState {
     viewport_width: f32,
     /// Assumed viewport height for vertical positioning.
     viewport_height: f32,
+    /// Why the last launch attempt did not start a program, if it did not.
+    ///
+    /// A launcher whose whole job is to start something has exactly one
+    /// interesting failure, and it must not be silent: "I clicked it and
+    /// nothing happened" is indistinguishable from a hung machine. Cleared by
+    /// [`Self::update_results`], i.e. as soon as the user types anything.
+    error: Option<String>,
 }
 
 impl LauncherState {
@@ -309,6 +412,7 @@ impl LauncherState {
             now_secs: 0,
             viewport_width,
             viewport_height,
+            error: None,
         };
         // Initially show all apps sorted by frecency
         state.update_results();
@@ -334,6 +438,135 @@ impl LauncherState {
         self.now_secs = secs;
     }
 
+    /// Read the wall clock into [`Self::now_secs`].
+    ///
+    /// The impure half of the frecency clock; [`Self::set_now`] is the pure
+    /// half a test can drive.
+    ///
+    /// # Why this had to exist
+    ///
+    /// `set_now` had no production caller, so `now_secs` was `0` for the life
+    /// of the process. Every launch was then recorded with
+    /// `timestamp_secs: 0`, and `frecency_bonus` computes `now - timestamp`,
+    /// which was `0` for all of them — inside the "launched in the last five
+    /// minutes" band. So every application the user had *ever* launched
+    /// counted as launched seconds ago, forever: the recency half of frecency
+    /// was inert, and the ranking degenerated into launch-count order. This is
+    /// the third clock in this tree found frozen because its setter was public,
+    /// documented, tested, and called by nothing. See known-issues.md.
+    ///
+    /// # No time zone here, deliberately
+    ///
+    /// `now_secs` is only ever used in *differences* against stored
+    /// timestamps, so it is an instant and not a time of day. Putting it
+    /// through `tzrules` as the clock-facing surfaces do would be harmless
+    /// arithmetically and misleading to read — it would suggest this number is
+    /// ever displayed. It is not.
+    pub fn refresh_now(&mut self) {
+        if let Ok(since_epoch) = SystemTime::now().duration_since(UNIX_EPOCH) {
+            self.set_now(since_epoch.as_secs());
+        }
+    }
+
+    /// Record that a launch attempt failed, and put the dialog back on screen
+    /// to say so.
+    ///
+    /// Not [`Self::show`]: that clears the query, which would throw away what
+    /// the user typed at exactly the moment they need to see it to understand
+    /// what failed.
+    pub fn report_launch_failure(&mut self, path: &str, reason: &str) {
+        self.visible = true;
+        self.error = Some(format!("Could not start {path}: {reason}"));
+    }
+
+    /// The last launch failure, if the dialog is showing one.
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Route a window event to the right handler.
+    ///
+    /// The launcher had no `handle_event` at all: `handle_key` existed and was
+    /// well covered, and nothing routed a key to it, so the whole dialog was
+    /// reachable only from its own tests.
+    pub fn handle_event(&mut self, event: &Event) -> LauncherAction {
+        match event {
+            Event::Key(key) => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Resize { width, height } => {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "a viewport is far below f32's exact-integer range"
+                )]
+                self.set_viewport(*width as f32, *height as f32);
+                LauncherAction::None
+            }
+            // Frecency decays against the wall clock and against nothing else.
+            Event::Tick { .. } => {
+                self.refresh_now();
+                LauncherAction::None
+            }
+            _ => LauncherAction::None,
+        }
+    }
+
+    /// Handle a mouse event against the same layout the renderer draws from.
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> LauncherAction {
+        if !self.visible {
+            return LauncherAction::None;
+        }
+        let layout = Layout::of(self);
+        match mouse.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                if let Some(row) = layout.row_at(mouse.x, mouse.y) {
+                    self.selected_index = row;
+                    return self.launch_selected();
+                }
+                if layout.contains(mouse.x, mouse.y) {
+                    // A click in the dialog's own chrome — the input box, the
+                    // padding — is not a click on anything, and must not
+                    // dismiss the dialog the user is aiming at.
+                    return LauncherAction::None;
+                }
+                // Clicking away from a transient dialog dismisses it. The
+                // launcher covers the whole screen precisely so that there is
+                // an "away" to click.
+                self.hide();
+                LauncherAction::Dismiss
+            }
+            // Hover moves the selection, so the row under the pointer is the
+            // row Enter would open. Only on an actual `Move`: the list is
+            // re-ranked under a *stationary* pointer on every keystroke, and
+            // selecting from a pointer that has not moved would let the mouse
+            // silently overrule the arrow keys.
+            MouseEventKind::Move => {
+                if let Some(row) = layout.row_at(mouse.x, mouse.y) {
+                    self.selected_index = row;
+                }
+                LauncherAction::None
+            }
+            _ => LauncherAction::None,
+        }
+    }
+
+    /// Everything the renderer reads that a single event can change.
+    ///
+    /// Used to decide `Redraw` versus `Idle`, because [`LauncherAction`] does
+    /// not answer that question: arrowing down the list, typing, and moving the
+    /// caret all return `LauncherAction::None` and all change what is drawn,
+    /// while a mouse move across empty space changes nothing.
+    fn display_revision(&self) -> DisplayRevision {
+        DisplayRevision {
+            visible: self.visible,
+            selected: self.selected_index,
+            results: self.results.len(),
+            query: self.query.clone(),
+            cursor: self.cursor,
+            error: self.error.clone(),
+        }
+    }
+
     /// Update viewport dimensions (call from Resize events).
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.viewport_width = width;
@@ -357,17 +590,13 @@ impl LauncherState {
             }
 
             Key::Up => {
-                if self.selected_index > 0 {
-                    self.selected_index -= 1;
-                }
+                self.selected_index = self.selected_index.saturating_sub(1);
                 return LauncherAction::None;
             }
 
             Key::Down => {
                 let max_idx = self.results.len().saturating_sub(1);
-                if self.selected_index < max_idx {
-                    self.selected_index += 1;
-                }
+                self.selected_index = self.selected_index.saturating_add(1).min(max_idx);
                 return LauncherAction::None;
             }
 
@@ -428,7 +657,7 @@ impl LauncherState {
                     let next = self.query[self.cursor..]
                         .char_indices()
                         .nth(1)
-                        .map(|(i, _)| self.cursor + i)
+                        .map(|(i, _)| self.cursor.saturating_add(i))
                         .unwrap_or(self.query.len());
                     self.cursor = next;
                 }
@@ -481,7 +710,7 @@ impl LauncherState {
         if event.types_text() {
             for ch in event.typed() {
                 self.query.insert(self.cursor, ch);
-                self.cursor += ch.len_utf8();
+                self.cursor = self.cursor.saturating_add(ch.len_utf8());
             }
             self.selected_index = 0;
             self.update_results();
@@ -521,6 +750,8 @@ impl LauncherState {
 
     /// Re-filter and re-sort results based on current query.
     fn update_results(&mut self) {
+        // The user has moved on from whatever failed to start.
+        self.error = None;
         self.results.clear();
 
         if self.query.is_empty() {
@@ -578,14 +809,16 @@ impl LauncherState {
 
         let mut cmds: Vec<RenderCommand> = Vec::new();
 
-        // Compute dialog dimensions
-        let result_count = self.results.len();
-        let results_height = result_count as f32 * ROW_HEIGHT;
-        let dialog_height = INPUT_HEIGHT + results_height + PADDING * 2.0;
-
-        // Center horizontally, position ~30% from top
-        let dialog_x = (self.viewport_width - DIALOG_WIDTH) / 2.0;
-        let dialog_y = self.viewport_height * 0.25;
+        // The same measurement the hit-test uses. Do not re-derive any of
+        // these here: a second copy of the arithmetic is how a click comes to
+        // land on the row above the one the user aimed at.
+        let layout = Layout::of(self);
+        let Layout {
+            dialog_x,
+            dialog_y,
+            dialog_height,
+            ..
+        } = layout;
 
         let radii = CornerRadii::all(DIALOG_RADIUS);
 
@@ -628,7 +861,7 @@ impl LauncherState {
         });
 
         // --- Search input area ---
-        let input_width = DIALOG_WIDTH - PADDING * 2.0;
+        let input_width = layout.inner_width;
         let input_radii = CornerRadii::all(8.0);
 
         // Input background
@@ -705,8 +938,33 @@ impl LauncherState {
             width: 2.0,
         });
 
+        // --- Launch failure banner ---
+        if let (Some(error_top), Some(message)) = (layout.error_top, self.error.as_ref()) {
+            cmds.push(RenderCommand::FillRect {
+                x: 0.0,
+                y: error_top,
+                width: input_width,
+                height: ERROR_HEIGHT - 4.0,
+                color: Color::rgba(theme::RED.r, theme::RED.g, theme::RED.b, 40),
+                corner_radii: CornerRadii::all(6.0),
+            });
+            cmds.push(RenderCommand::Text {
+                x: 10.0,
+                y: error_top + (ERROR_HEIGHT - 4.0) / 2.0 - DESC_FONT_SIZE / 2.0,
+                text: message.clone(),
+                color: theme::RED,
+                font_size: DESC_FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                // Elided rather than clipped: a path cut off mid-character
+                // reads as a *different* path, and this line exists to tell
+                // the user which program could not be started.
+                max_width: Some(input_width - 20.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
         // --- Results list ---
-        let results_y_start = INPUT_HEIGHT;
+        let results_y_start = layout.rows_top;
 
         for (i, scored) in self.results.iter().enumerate() {
             let entry = match self.apps.get(scored.db_index) {
@@ -818,7 +1076,7 @@ impl LauncherState {
 
             // Shortcut hint (Ctrl+N) for first 8 results
             if i < 8 {
-                let hint = format!("^{}", i + 1);
+                let hint = format!("^{}", i.saturating_add(1));
                 cmds.push(RenderCommand::Text {
                     x: input_width - badge_width - 40.0,
                     y: row_y + (ROW_HEIGHT - DESC_FONT_SIZE) / 2.0,
@@ -1066,16 +1324,124 @@ fn builtin_app_database() -> Vec<AppEntry> {
 // Entry point
 // ============================================================================
 
-fn main() {
-    // The launcher is typically spawned by the desktop shell when the user
-    // presses the launch shortcut (e.g., Super key or Ctrl+Space).
-    // For now, we initialize state and enter the event loop placeholder.
-    let mut launcher = LauncherState::new(1920.0, 1080.0);
+/// A snapshot of everything the renderer reads that one event can change.
+///
+/// See [`LauncherState::display_revision`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DisplayRevision {
+    visible: bool,
+    selected: usize,
+    results: usize,
+    query: String,
+    cursor: usize,
+    error: Option<String>,
+}
+
+/// The frecency clock's cadence. Never `None`: recency decays at 5 minutes, an
+/// hour and a day, and — more immediately — the timestamp written into the
+/// launch history has to be the instant of the *launch*, not the instant the
+/// dialog happened to open.
+const CLOCK_TICK: Duration = Duration::from_secs(1);
+
+/// The size the overlay asks for when the compositor has no opinion.
+///
+/// A screen, because the launcher is a floating dialog on a full-screen
+/// surface: "click away from it to dismiss it" only has an away to click if
+/// the launcher owns the pixels around itself. The real size arrives as the
+/// `width`/`height` handed to [`oswindow::app::App::render`].
+const DEFAULT_VIEWPORT: (u32, u32) = (1920, 1080);
+
+/// Start a program, or say why not.
+///
+/// The child is deliberately not waited on and its handle is dropped: the
+/// launcher exits as soon as a launch succeeds, so the child is reparented,
+/// and holding the dialog open until the program exits would make the launcher
+/// behave like a terminal.
+fn spawn_program(path: &str) -> Result<(), String> {
+    std::process::Command::new(path)
+        .spawn()
+        .map(|_child| ())
+        .map_err(|err| err.to_string())
+}
+
+impl oswindow::app::App for LauncherState {
+    fn title(&self) -> String {
+        String::from("Launcher")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        DEFAULT_VIEWPORT
+    }
+
+    /// Not resizable: it is a full-screen overlay, and a user who could drag
+    /// its corner could uncover the desktop it is supposed to sit in front of.
+    fn resizable(&self) -> bool {
+        false
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(CLOCK_TICK)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        let before = self.display_revision();
+        let action = self.handle_event(event);
+        // A resize moves every coordinate in the tree without touching any of
+        // the fields the revision samples, so it is named separately.
+        let moved = matches!(event, Event::Resize { .. }) || before != self.display_revision();
+
+        match action {
+            LauncherAction::Launch(path) => match spawn_program(&path) {
+                Ok(()) => Response::Exit,
+                // The dialog stays up carrying the reason. Exiting here would
+                // be the worst of both: the program did not start and the
+                // window that could say so is gone.
+                Err(reason) => {
+                    self.report_launch_failure(&path, &reason);
+                    Response::Redraw
+                }
+            },
+            LauncherAction::Dismiss => Response::Exit,
+            LauncherAction::None => {
+                if moved {
+                    Response::Redraw
+                } else {
+                    Response::Idle
+                }
+            }
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The granted size, not the requested one. The dialog is centred on
+        // the viewport and the hit-test reads the same two fields, so a
+        // launcher that kept believing in 1920×1080 on a smaller screen would
+        // draw its dialog off-centre *and* mislocate every row in it.
+        self.set_viewport(width, height);
+        let mut tree = RenderTree::new();
+        for cmd in LauncherState::render(self) {
+            tree.push(cmd);
+        }
+        tree
+    }
+}
+
+fn main() -> ExitCode {
+    let mut launcher = LauncherState::new(
+        f32::from(u16::try_from(DEFAULT_VIEWPORT.0).unwrap_or(u16::MAX)),
+        f32::from(u16::try_from(DEFAULT_VIEWPORT.1).unwrap_or(u16::MAX)),
+    );
+
+    // Before the first frame and before the first launch can be recorded, so
+    // the history is not written with timestamps from 1970. See `refresh_now`.
+    launcher.refresh_now();
+
+    // The launcher is spawned *because* the user asked for it, so it starts
+    // visible. `LauncherState::new` leaves it hidden because the shell may
+    // instead keep one alive across invocations.
     launcher.show();
 
-    // In a real environment, the event loop would be driven by the compositor.
-    // This placeholder demonstrates that the launcher initializes correctly.
-    let _commands = launcher.render();
+    oswindow::app::launch("launcher", &mut launcher)
 }
 
 // ============================================================================
@@ -1084,6 +1450,22 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test that indexes out of range or unwraps a `None` should fail loudly
+    // and point at the line that did it — that is the diagnosis. The defensive
+    // lints exist to keep panics out of code that runs on a user's data, which
+    // this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+    // Several tests assert a float equals the exact literal the code under test
+    // was handed. That is the assertion meant: a tolerance would let a value
+    // that has drifted pass as one that has not.
+    #![allow(clippy::float_cmp)]
+
     use super::*;
 
     /// The caret has to sit where the query text ends, and the query is drawn
@@ -1602,5 +1984,397 @@ mod tests {
         launcher.show();
         // With empty query, all apps shown but capped to MAX_RESULTS
         assert!(launcher.results.len() <= MAX_RESULTS);
+    }
+
+    // ========================================================================
+    // The pointer: one layout, shared by the renderer and the hit-test
+    // ========================================================================
+
+    /// A visible launcher on a screen of a deliberately unusual size, so that
+    /// nothing can pass by accidentally agreeing with 1920×1080.
+    fn shown(width: f32, height: f32) -> LauncherState {
+        let mut launcher = LauncherState::new(width, height);
+        launcher.show();
+        launcher
+    }
+
+    /// The centre of result row `i`, in screen coordinates, read out of the
+    /// **render output** rather than computed from `Layout`.
+    ///
+    /// This is what makes the hit-test tests mean anything: if they measured
+    /// rows with `Layout` and then hit-tested them with `Layout`, they would
+    /// agree no matter how wrong `Layout` was. Instead this walks the commands
+    /// the renderer actually emitted, takes the dialog's own
+    /// `PushTranslate` as the origin, and finds the 24×24 category icon that
+    /// every row draws — row backgrounds exist only on the selected row, so an
+    /// icon is the one landmark present on all of them.
+    fn drawn_row_centre(state: &LauncherState, i: usize) -> (f32, f32) {
+        let commands = state.render();
+        let (dx, dy) = commands
+            .iter()
+            .find_map(|cmd| match *cmd {
+                RenderCommand::PushTranslate { dx, dy } => Some((dx, dy)),
+                _ => None,
+            })
+            .expect("the dialog translates to its own interior");
+        let (x, y) = commands
+            .iter()
+            .filter_map(|cmd| match *cmd {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if width == 24.0 && height == 24.0 => Some((x, y)),
+                _ => None,
+            })
+            .nth(i)
+            .expect("that row is drawn");
+        (dx + x + 12.0, dy + y + 12.0)
+    }
+
+    fn click_at(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    fn move_to(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        })
+    }
+
+    /// The top and bottom screen y of row `i`'s drawn highlight.
+    ///
+    /// Only the *selected* row draws a full-width background, so this selects
+    /// the row, renders, and reads the one `FillRect` a row's height tall. It
+    /// gives exact edges rather than a centre — and edges are what a hit-test
+    /// can be wrong about while still looking right in the middle. An earlier
+    /// version of this file's tests only checked centres, and an eight-pixel
+    /// error in `row_at` passed them.
+    fn drawn_row_bounds(state: &mut LauncherState, i: usize) -> (f32, f32) {
+        let restore = state.selected_index;
+        state.selected_index = i;
+        let commands = state.render();
+        let dy = commands
+            .iter()
+            .find_map(|cmd| match *cmd {
+                RenderCommand::PushTranslate { dy, .. } => Some(dy),
+                _ => None,
+            })
+            .expect("the dialog translates to its own interior");
+        let y = commands
+            .iter()
+            .find_map(|cmd| match *cmd {
+                RenderCommand::FillRect { y, height, .. } if height == ROW_HEIGHT => Some(y),
+                _ => None,
+            })
+            .expect("the selected row draws a highlight");
+        state.selected_index = restore;
+        (dy + y, dy + y + ROW_HEIGHT)
+    }
+
+    #[test]
+    fn a_click_lands_on_the_row_it_is_drawn_over() {
+        // The reason `Layout` exists. Two copies of this arithmetic -- one in
+        // the renderer, one in the hit-test -- is how a launcher comes to open
+        // the program above the one you clicked.
+        //
+        // Asserted at the *edges*: a hit-test that is off by less than a row
+        // still answers correctly in the middle of one.
+        let mut launcher = shown(1280.0, 800.0);
+        assert!(launcher.results.len() >= 3, "need rows to aim at");
+        let x = drawn_row_centre(&launcher, 0).0;
+
+        for row in 0..3 {
+            let (top, bottom) = drawn_row_bounds(&mut launcher, row);
+            let layout = Layout::of(&launcher);
+            assert_eq!(
+                layout.row_at(x, top),
+                Some(row),
+                "the first pixel of row {row} hit-tests as something else"
+            );
+            assert_eq!(
+                layout.row_at(x, bottom - 0.5),
+                Some(row),
+                "the last pixel of row {row} hit-tests as something else"
+            );
+            // One pixel above the top belongs to whatever is above: the row
+            // before it, or -- for the first row -- the search box, which is
+            // not a row at all.
+            assert_eq!(
+                layout.row_at(x, top - 0.5),
+                row.checked_sub(1),
+                "the pixel above row {row} hit-tests as row {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_row_launches_that_row() {
+        let mut launcher = shown(1280.0, 800.0);
+        let second = launcher.results[1].db_index;
+        let expected = launcher.apps[second].executable_path.clone();
+
+        let (x, y) = drawn_row_centre(&launcher, 1);
+        assert_eq!(
+            launcher.handle_event(&click_at(x, y)),
+            LauncherAction::Launch(expected)
+        );
+        assert!(!launcher.visible, "launching left the dialog up");
+    }
+
+    #[test]
+    fn a_click_away_from_the_dialog_dismisses_it() {
+        let mut launcher = shown(1280.0, 800.0);
+        // Top-left corner: the dialog is centred and starts a quarter of the
+        // way down, so nothing of it is here.
+        assert_eq!(
+            launcher.handle_event(&click_at(2.0, 2.0)),
+            LauncherAction::Dismiss
+        );
+        assert!(!launcher.visible);
+    }
+
+    #[test]
+    fn a_click_on_the_search_box_does_not_dismiss_the_dialog() {
+        // Clicking the thing you are typing into must not close it. The naive
+        // "not on a row means outside" hit-test gets this wrong.
+        let mut launcher = shown(1280.0, 800.0);
+        let layout = Layout::of(&launcher);
+        let x = layout.dialog_x + DIALOG_WIDTH / 2.0;
+        let y = layout.dialog_y + PADDING + (INPUT_HEIGHT - PADDING) / 2.0;
+        assert_eq!(launcher.handle_event(&click_at(x, y)), LauncherAction::None);
+        assert!(launcher.visible, "clicking the input closed the launcher");
+    }
+
+    #[test]
+    fn hovering_a_row_selects_it() {
+        let mut launcher = shown(1280.0, 800.0);
+        assert_eq!(launcher.selected_index, 0);
+        let (x, y) = drawn_row_centre(&launcher, 2);
+        launcher.handle_event(&move_to(x, y));
+        assert_eq!(launcher.selected_index, 2);
+    }
+
+    #[test]
+    fn hovering_off_the_list_leaves_the_selection_alone() {
+        // Moving the pointer out of the dialog must not reset the selection to
+        // the top: the keyboard is still driving.
+        let mut launcher = shown(1280.0, 800.0);
+        let (x, y) = drawn_row_centre(&launcher, 2);
+        launcher.handle_event(&move_to(x, y));
+        launcher.handle_event(&move_to(2.0, 2.0));
+        assert_eq!(launcher.selected_index, 2);
+    }
+
+    // ========================================================================
+    // The frecency clock
+    // ========================================================================
+
+    #[test]
+    fn a_launch_is_recorded_at_the_time_it_happened() {
+        // `set_now` had no production caller, so every launch went into the
+        // history stamped `0` and `now - timestamp` was `0` forever -- inside
+        // the "launched in the last five minutes" band, permanently, for every
+        // application ever launched.
+        let mut launcher = shown(1280.0, 800.0);
+        launcher.refresh_now();
+        assert!(
+            launcher.now_secs > 1_700_000_000,
+            "the frecency clock read {} -- it is still at the epoch",
+            launcher.now_secs
+        );
+
+        let (x, y) = drawn_row_centre(&launcher, 0);
+        launcher.handle_event(&click_at(x, y));
+        assert_eq!(launcher.launch_history.len(), 1);
+        assert_eq!(
+            launcher.launch_history[0].timestamp_secs, launcher.now_secs,
+            "the record was stamped with something other than now"
+        );
+    }
+
+    #[test]
+    fn a_tick_advances_the_frecency_clock_through_the_event_loop() {
+        // `refresh_now` is only correct if something calls it.
+        let mut launcher = shown(1280.0, 800.0);
+        launcher.set_now(0);
+        launcher.handle_event(&Event::Tick { elapsed_ms: 16 });
+        assert!(launcher.now_secs > 1_700_000_000);
+    }
+
+    #[test]
+    fn an_old_launch_ranks_below_a_recent_one() {
+        // The behaviour the frozen clock destroyed: with `now_secs` stuck at 0
+        // these two scored identically, because both ages were 0.
+        let history = vec![
+            LaunchRecord {
+                executable_path: String::from("/bin/old"),
+                timestamp_secs: 0,
+            },
+            LaunchRecord {
+                executable_path: String::from("/bin/new"),
+                timestamp_secs: 1_787_751_000,
+            },
+        ];
+        let now = 1_787_751_907;
+        assert!(
+            frecency_bonus("/bin/new", &history, now, 0)
+                > frecency_bonus("/bin/old", &history, now, 0),
+            "a launch from 1970 ranks as recently as one from a minute ago"
+        );
+    }
+
+    // ========================================================================
+    // The window: `impl oswindow::app::App`
+    // ========================================================================
+
+    #[test]
+    fn render_believes_the_size_it_is_given_not_the_one_it_asked_for() {
+        let mut launcher = shown(1920.0, 1080.0);
+        let tree = oswindow::app::App::render(&mut launcher, 1024.0, 768.0);
+        assert_eq!(launcher.viewport_width, 1024.0);
+        assert_eq!(launcher.viewport_height, 768.0);
+        assert!(!tree.commands.is_empty(), "nothing was drawn");
+
+        // Centred on the screen it was actually given, not on the one it asked
+        // for -- and the hit-test moved with it, which is what `Layout` buys.
+        let layout = Layout::of(&launcher);
+        assert_eq!(layout.dialog_x, (1024.0 - DIALOG_WIDTH) / 2.0);
+        let (x, y) = drawn_row_centre(&launcher, 0);
+        assert_eq!(layout.row_at(x, y), Some(0));
+    }
+
+    #[test]
+    fn a_launcher_that_ranks_by_recency_never_stops_ticking() {
+        let launcher = shown(1280.0, 800.0);
+        assert_eq!(
+            oswindow::app::App::tick_interval(&launcher),
+            Some(CLOCK_TICK)
+        );
+    }
+
+    #[test]
+    fn an_event_the_launcher_ignores_does_not_ask_for_a_frame() {
+        let mut launcher = shown(1280.0, 800.0);
+        // A pointer crossing empty screen changes nothing that is drawn.
+        assert_eq!(
+            oswindow::app::App::on_event(&mut launcher, &move_to(2.0, 2.0)),
+            Response::Idle
+        );
+        // A resize moves every coordinate in the tree while changing none of
+        // the fields the revision samples -- which is why it is named
+        // separately in `on_event`.
+        assert_eq!(
+            oswindow::app::App::on_event(
+                &mut launcher,
+                &Event::Resize {
+                    width: 1024,
+                    height: 768,
+                }
+            ),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn arrowing_down_the_list_asks_for_a_frame() {
+        // `handle_key` returns `LauncherAction::None` for an arrow, and the
+        // highlight moves. Mapping "no action" to `Idle` would freeze the
+        // selection on screen while it moved underneath.
+        let mut launcher = shown(1280.0, 800.0);
+        let down = Event::Key(KeyEvent {
+            key: Key::Down,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(
+            oswindow::app::App::on_event(&mut launcher, &down),
+            Response::Redraw
+        );
+        assert_eq!(launcher.selected_index, 1);
+    }
+
+    #[test]
+    fn escape_closes_the_window() {
+        let mut launcher = shown(1280.0, 800.0);
+        let escape = Event::Key(KeyEvent {
+            key: Key::Escape,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        });
+        assert_eq!(
+            oswindow::app::App::on_event(&mut launcher, &escape),
+            Response::Exit
+        );
+    }
+
+    // ========================================================================
+    // The one failure a launcher can have
+    // ========================================================================
+
+    #[test]
+    fn a_program_that_will_not_start_says_so_instead_of_vanishing() {
+        // "I clicked it and nothing happened" is indistinguishable from a hung
+        // machine. The dialog has to stay up and carry the reason.
+        let mut launcher = shown(1280.0, 800.0);
+        let missing = String::from("/nonexistent/definitely-not-a-program");
+        let reason = spawn_program(&missing).expect_err("that path is not a program");
+        launcher.report_launch_failure(&missing, &reason);
+
+        assert!(launcher.visible, "the dialog vanished with the error on it");
+        let shown_error = launcher.error().expect("an error to show");
+        assert!(
+            shown_error.contains(&missing),
+            "the message does not name the program: {shown_error}"
+        );
+    }
+
+    #[test]
+    fn the_error_banner_makes_room_for_itself() {
+        // The banner sits between the input and the list, so every row below it
+        // moves down by its height -- in the renderer *and* in the hit-test,
+        // because they are the same measurement.
+        let mut launcher = shown(1280.0, 800.0);
+        let before = Layout::of(&launcher);
+        launcher.report_launch_failure("/bin/nope", "no such file");
+        let after = Layout::of(&launcher);
+
+        assert_eq!(after.rows_top - before.rows_top, ERROR_HEIGHT);
+        assert_eq!(after.dialog_height - before.dialog_height, ERROR_HEIGHT);
+
+        let (x, y) = drawn_row_centre(&launcher, 0);
+        assert_eq!(
+            after.row_at(x, y),
+            Some(0),
+            "the banner pushed the rows out from under the hit-test"
+        );
+    }
+
+    #[test]
+    fn typing_clears_a_stale_error() {
+        let mut launcher = shown(1280.0, 800.0);
+        launcher.report_launch_failure("/bin/nope", "no such file");
+        assert!(launcher.error().is_some());
+
+        launcher.handle_event(&Event::Key(KeyEvent {
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::from("a"),
+        }));
+        assert!(
+            launcher.error().is_none(),
+            "the error outlived the query it was about"
+        );
     }
 }

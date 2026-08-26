@@ -83735,7 +83735,7 @@ if !became_zombie || state != Some(pcb::ProcessState::Zombie) { … FAIL … }
 [sched] Spawned task 155 …                    ← the parent
 [sched] Spawned task 156 … in process 193     ← the fork child
 [exec] Process 193 exec complete …            ← the child execs `cat`
-fastpy fork+exec+wait OK                      ← the PARENT's own success line
+fastpy fork+exec+wait OK                      ← the CHILD: `cat` echoing the staged file
 [thread] Process 193 has no threads left — now zombie
 [sched] Task 156 exiting
 [thread] Process 192 has no threads left — now zombie
@@ -83776,13 +83776,34 @@ cannot have contributed. The 14 boots immediately preceding this one were all
    or stuck leaving" is the same neighbourhood, and this may be a survivable
    instance of it.
 
-One detail argues against a plain slow-teardown story and is the most useful
-thing to check next: the parent's `fastpy fork+exec+wait OK` is printed
-*before* the child's zombie line, yet the parent only reaches that `print`
-after its `waitpid` returns, which in turn requires the child to already be a
-zombie. Either the two output paths (guest `write` syscall vs. kernel
-`serial_println!`) interleave, or `waitpid` returned before the child was
-reaped — and the latter would be a real bug worth having.
+**Correction, made the same day, before this entry had been acted on — and it
+changes which cause is likely.** The first version of this entry read
+`fastpy fork+exec+wait OK` as the *parent's* success line and built a
+hypothesis on it: that the line appears before the child's zombie line, which
+would mean `waitpid` returned before the child was reaped. That is wrong twice
+over. The runner program (`services/fastpy-forkexec/build.py`, the embedded
+source at lines 78–96) **prints nothing at all** — it ends
+`sys.exit(os.WEXITSTATUS(status))`. And `FE_CONTENT` in spawn.rs:9208 is
+literally `b"fastpy fork+exec+wait OK\n"`: the harness stages that text in
+`/tmp/forkexec-input.txt`, and the line on serial is `cat` — *the child* —
+echoing the file it was handed. There is no ordering anomaly and no early
+`waitpid`.
+
+**The corrected reading is worse for cause 1, not better.** With the line
+attributed to the child, the log says the child had printed its output, exited,
+zombified *and* had its task torn down — and the parent still had not left
+`waitpid` when the budget expired. The parent had produced no output of its own
+and had no interpreter teardown left to blame, because it never got past the
+wait. So "the fastpy parent needed a few more yields to finish exiting" is not
+supported by anything in the log; what the log shows is a parent still blocked
+in `wait4` after the event it was waiting for had fully completed.
+
+That makes **a lost wakeup on the guest's `wait4` the leading hypothesis**, and
+it is worth being explicit that this is *not* excluded by the static audit under
+`B-FORKEXEC-BOOT-HANG`. That audit ruled out a lost wakeup on the ground that
+"the kernel harness … does not block — it *polls*", which is true and remains
+true. It says nothing about the **guest parent**, which genuinely does block in
+`waitpid`. The two are different waiters and only one of them was cleared.
 
 **Deliberately not "fixed" by raising the budget.** Changing `4000` to a bigger
 number would make the symptom rarer without establishing which of the two
@@ -83791,9 +83812,24 @@ bug with a longer wait. Note also that the harness reports a *poll timeout*
 with the words "faulted on the fork / execv / waitpid path", which is a
 misdiagnosis of exactly the kind §600 is about: nothing faulted.
 
-**Next step on recurrence.** Print the parent's `pcb::state` and the task's
-scheduler state at the moment the budget expires, and re-run with
-`--hard-lockup-watchdog` to capture the guest RIP if it is wedged rather than
-slow. If it turns out to be cause 1, the fix is a *deadline* (a tick-based
-timeout) rather than a yield count, and a verdict line that says "still
-Running after N ms" instead of blaming the fork/exec path.
+**Next step on recurrence.** Print the parent's `pcb::state` *and its scheduler
+state* at the moment the budget expires — the distinction that matters is
+`Ready` (merely starved: cause 1) versus `Blocked` (parked in `wait4` with the
+child already reaped: a lost wakeup). The harness currently records only
+`pcb::state`, which reports `Running` for both and so cannot tell them apart;
+that is the single cheapest instrumentation change and should be made whether
+or not this recurs. Then re-run with `--hard-lockup-watchdog` to capture the
+guest RIP.
+
+If it is cause 1, the fix is a *deadline* (a tick-based timeout) rather than a
+yield count, plus a verdict line that says "still Running after N ms" instead of
+blaming the fork/exec path. If it is the lost wakeup, the place to look is the
+wait/reap side: whether the child's zombification wakes a parent already parked
+in `wait4`, and whether the `pending_wake` flag in `sched/mod.rs` (which closes
+the register→park window for the core protocol) is actually on the path
+`wait4` uses.
+
+**Note on the evidence.** `build/serial-test.txt` is overwritten by the next
+boot, so the log quoted above no longer exists on disk. The excerpt in this
+entry is the whole of the surviving record — which is the argument for quoting
+generously here rather than referring to a file.

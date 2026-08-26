@@ -773,8 +773,14 @@ fn self_test_inner() {
     }
     serial_println!("[monitors] 11/11 remove monitor OK");
 
-    // Leave no residue for later callers / the live /proc/monitors view.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     *STATE.lock() = None;
+    init_defaults();
 
     serial_println!("[monitors] All self-tests passed.");
 }

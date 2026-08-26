@@ -391,11 +391,17 @@ pub fn self_test() {
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
-    // Leave NO residue: a diagnostic self-test must not populate the live
-    // /proc/dmastat table with its fixtures.  Reset to the uninitialised state
-    // so production reads report an empty table until the driver framework
-    // wires real accounting.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
+    //
+    // /proc/dmastat therefore reads empty rather than stale, until the
+    // driver framework wires real accounting into it.
     *STATE.lock() = None;
+    init_defaults();
 
     crate::serial_println!("dmastat::self_test() — all 8 tests passed");
 }

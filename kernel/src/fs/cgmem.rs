@@ -462,7 +462,13 @@ pub fn self_test() {
     remove(id4).expect("remove4");
     crate::serial_println!("  [10/10] swap accounting is writable: OK");
 
-    // Leave no residue in the live state.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     *STATE.lock() = None;
+    init_defaults();
     crate::serial_println!("cgmem::self_test() — all 10 tests passed");
 }

@@ -77,6 +77,12 @@ const MESSAGE_LINE_HEIGHT: f32 = 20.0;
 const DETAIL_LINE_HEIGHT: f32 = 16.0;
 /// Gap between the last line of the message and the first line of the detail.
 const DETAIL_GAP: f32 = 8.0;
+/// The tallest the message-and-detail column may be: what is left of
+/// [`DIALOG_MAX_HEIGHT`] once the title bar, the button row and the three
+/// paddings between them have taken theirs. Kept in step with
+/// `AlertDialog::compute_height`, which adds exactly those four back.
+const TEXT_BLOCK_MAX_HEIGHT: f32 =
+    DIALOG_MAX_HEIGHT - (TITLE_BAR_HEIGHT + CONTENT_PADDING * 3.0 + BUTTON_HEIGHT);
 const SHADOW_BLUR: f32 = 24.0;
 const SHADOW_OFFSET_Y: f32 = 8.0;
 const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 100);
@@ -335,6 +341,26 @@ impl ButtonSet {
     /// Whether the button set is empty.
     pub fn is_empty(&self) -> bool {
         self.buttons.is_empty()
+    }
+
+    /// The buttons, left to right, in the order they are drawn.
+    ///
+    /// The counterpart to [`len`](Self::len): a set whose size can be asked but
+    /// whose contents cannot is only enough to *count* buttons, and a caller
+    /// that wants to find the one meaning [`DialogResult::Ok`] would otherwise
+    /// have to hardcode a position — which is a position that stops being
+    /// checked the moment the row is reordered.
+    pub fn iter(&self) -> core::slice::Iter<'_, DialogButton> {
+        self.buttons.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ButtonSet {
+    type Item = &'a DialogButton;
+    type IntoIter = core::slice::Iter<'a, DialogButton>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.buttons.iter()
     }
 }
 
@@ -700,6 +726,19 @@ impl AlertDialog {
         self.detail.as_deref()
     }
 
+    /// Where button `index` was last drawn, as `(x, y, width, height)`.
+    ///
+    /// `None` before the first frame, and `None` for an index past the end.
+    /// This is the same rectangle [`handle_mouse`](Self::handle_mouse) hit-tests
+    /// against — deliberately so, because there is only one of it: a caller that
+    /// wants to aim at a button (a test, or a screen reader placing a focus
+    /// ring) must aim at what was actually drawn rather than at a second,
+    /// re-derived guess that agrees only until one of the two is edited.
+    #[must_use]
+    pub fn button_rect(&self, index: usize) -> Option<(f32, f32, f32, f32)> {
+        self.placement.as_ref()?.button_rects.get(index).copied()
+    }
+
     /// Update animation state.
     pub fn tick(&mut self, elapsed_ms: u64) {
         self.overlay.tick(elapsed_ms);
@@ -904,60 +943,19 @@ impl AlertDialog {
             text_x = icon_x + ICON_SIZE + ICON_PADDING;
         }
 
-        let buttons_y = layout.buttons_y;
-
-        // Message text, one command per wrapped line.
-        let text_max_width = self.message_max_width();
-        let lines = self.message_lines();
+        // Message, then the detail under whatever the message actually
+        // occupied — not under a fixed allowance for it. Both are capped to
+        // the room the box has by `line_budget`, so neither can be drawn over
+        // the button row and the drawing needs no overflow test of its own.
+        //
         // Centred against the icon while the text column is the shorter of the
         // two, then top-aligned once it is taller — so a one-line message
         // still sits level with its icon.
         let block_height = self.text_block_height();
         let first_line_y = content_y + (ICON_SIZE - block_height).max(0.0) / 2.0;
-        let mut line_y = first_line_y;
-        for line in &lines {
-            // The dialog height is clamped at `DIALOG_MAX_HEIGHT`, so a message
-            // can be longer than the box it is given. Lines that do not fit are
-            // dropped rather than drawn over the button row: text on top of the
-            // controls that dismiss the dialog is worse than text not shown.
-            if line_y + MESSAGE_LINE_HEIGHT > buttons_y {
-                break;
-            }
-            tree.push(RenderCommand::Text {
-                x: text_x,
-                y: line_y,
-                text: line.clone(),
-                color: COLOR_SUBTEXT1,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(text_max_width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            line_y += MESSAGE_LINE_HEIGHT;
-        }
-
-        // Detail, under whatever the message actually occupied — not under a
-        // fixed allowance for it. Same overflow rule as the message above.
-        let detail_lines = self.detail_lines();
-        if !detail_lines.is_empty() {
-            line_y = first_line_y + lines.len() as f32 * MESSAGE_LINE_HEIGHT + DETAIL_GAP;
-            for line in &detail_lines {
-                if line_y + DETAIL_LINE_HEIGHT > buttons_y {
-                    break;
-                }
-                tree.push(RenderCommand::Text {
-                    x: text_x,
-                    y: line_y,
-                    text: line.clone(),
-                    color: COLOR_YELLOW,
-                    font_size: FONT_SIZE_SMALL,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(text_max_width),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                line_y += DETAIL_LINE_HEIGHT;
-            }
-        }
+        let message_height = self.message_para(text_x, first_line_y).draw(tree);
+        self.detail_para(text_x, first_line_y + message_height + DETAIL_GAP)
+            .draw(tree);
 
         // Buttons (bottom-right aligned).
         self.render_buttons(tree, &layout);
@@ -1071,19 +1069,83 @@ impl AlertDialog {
         self.dialog_width() - text_offset - CONTENT_PADDING
     }
 
-    /// The message, broken into the lines it will be drawn as.
+    /// The message as it will be drawn: wrapped to the column, capped to the
+    /// room the box has, positioned at (`x`, `y`).
     ///
     /// `RenderCommand::Text` does not wrap — the compositor truncates at
     /// `max_width` — so a message longer than one line has to be broken up
-    /// here and drawn a line at a time. `compute_height` sizes the dialog from
-    /// this same list, so the box is always as tall as the text it holds.
-    fn message_lines(&self) -> Vec<String> {
-        crate::text::wrap(
-            &self.message,
-            self.message_max_width(),
-            FONT_SIZE,
-            FontWeightHint::Regular,
-        )
+    /// here and drawn a line at a time. One paragraph serves both the drawing
+    /// and `compute_height`, so the box is always as tall as the text it
+    /// holds and the text never taller than the box.
+    fn message_para(&self, x: f32, y: f32) -> crate::text::Paragraph<'_> {
+        crate::text::Paragraph::new(&self.message, COLOR_SUBTEXT1)
+            .at(x, y, self.message_max_width())
+            .font(FONT_SIZE, FontWeightHint::Regular)
+            .line_height(MESSAGE_LINE_HEIGHT)
+            .max_lines(self.line_budget().0)
+    }
+
+    /// The detail line as it will be drawn, or an empty paragraph if there is
+    /// none. Wrapped at the message's own column and in the detail's smaller
+    /// face, so the sizing and the drawing cannot disagree about how many
+    /// lines there are.
+    fn detail_para(&self, x: f32, y: f32) -> crate::text::Paragraph<'_> {
+        crate::text::Paragraph::new(self.detail.as_deref().unwrap_or(""), COLOR_YELLOW)
+            .at(x, y, self.message_max_width())
+            .font(FONT_SIZE_SMALL, FontWeightHint::Regular)
+            .line_height(DETAIL_LINE_HEIGHT)
+            .max_lines(self.line_budget().1)
+    }
+
+    /// How many lines of message, and of detail, the box has room for.
+    ///
+    /// A dialog cannot grow past [`DIALOG_MAX_HEIGHT`], so a long enough
+    /// message has to be cut somewhere. Cutting it at the *bottom of the box*
+    /// — which is what dropping the lines that no longer fit amounts to — cuts
+    /// the detail first, because the detail is drawn under the message. That
+    /// is the wrong end. On a destructive confirmation the detail is the
+    /// consequence ("All data on the drive will be permanently destroyed.
+    /// This action cannot be undone."), and the message is where the
+    /// unbounded text is: it names a file, or a drive, and those names come
+    /// from the disk rather than from us. A drive whose name runs to nine
+    /// lines would otherwise silently take the warning with it.
+    ///
+    /// So the detail is served first, out of at most half the column — half,
+    /// not all, so a long detail cannot crowd out the question either — and
+    /// the message takes what is left. Whichever is cut is marked with an
+    /// ellipsis by [`crate::text::Paragraph`]: a sentence cut short must not
+    /// read as a sentence that ended.
+    fn line_budget(&self) -> (usize, usize) {
+        let width = self.message_max_width();
+        let message = Self::natural_lines(&self.message, width, FONT_SIZE);
+        let detail =
+            Self::natural_lines(self.detail.as_deref().unwrap_or(""), width, FONT_SIZE_SMALL);
+
+        let gap = if detail == 0 { 0.0 } else { DETAIL_GAP };
+        let natural =
+            message as f32 * MESSAGE_LINE_HEIGHT + detail as f32 * DETAIL_LINE_HEIGHT + gap;
+        if natural <= TEXT_BLOCK_MAX_HEIGHT {
+            return (message, detail);
+        }
+
+        let room = (TEXT_BLOCK_MAX_HEIGHT - gap).max(0.0);
+        let detail_cap = ((room / 2.0) / DETAIL_LINE_HEIGHT).floor().max(0.0) as usize;
+        let detail_kept = detail.min(detail_cap);
+        let left = (room - detail_kept as f32 * DETAIL_LINE_HEIGHT).max(0.0);
+        // At least one line of message: a confirmation that shows only its
+        // consequence, with the question missing, is not a question.
+        let message_kept =
+            message.min(((left / MESSAGE_LINE_HEIGHT).floor().max(0.0) as usize).max(1));
+        (message_kept, detail_kept)
+    }
+
+    /// How many lines `text` wraps to at `width` with no cap applied.
+    /// Empty text takes no lines, so an absent detail takes no room.
+    fn natural_lines(text: &str, width: f32, size: f32) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+        crate::text::wrap(text, width, size, FontWeightHint::Regular).len()
     }
 
     /// Compute dialog layout (position and size, centered in parent).
@@ -1125,26 +1187,10 @@ impl AlertDialog {
         }
     }
 
-    /// The detail line, broken into the lines it will be drawn as, or empty if
-    /// there is none. Wrapped at the message's own column and in the detail's
-    /// smaller face, so [`compute_height`](Self::compute_height) and the draw
-    /// loop cannot disagree about how many lines there are.
-    fn detail_lines(&self) -> Vec<String> {
-        let Some(detail) = self.detail.as_deref() else {
-            return Vec::new();
-        };
-        crate::text::wrap(
-            detail,
-            self.message_max_width(),
-            FONT_SIZE_SMALL,
-            FontWeightHint::Regular,
-        )
-    }
-
     /// Height of the message and, under it, the detail — the whole text column.
     fn text_block_height(&self) -> f32 {
-        let message = self.message_lines().len() as f32 * MESSAGE_LINE_HEIGHT;
-        let detail = self.detail_lines().len() as f32 * DETAIL_LINE_HEIGHT;
+        let message = self.message_para(0.0, 0.0).height();
+        let detail = self.detail_para(0.0, 0.0).height();
         if detail > 0.0 {
             message + DETAIL_GAP + detail
         } else {
@@ -3195,6 +3241,92 @@ mod tests {
             detail_ys.iter().all(|y| *y > last_message),
             "detail {detail_ys:?} must sit below the message ending at {last_message}"
         );
+    }
+
+    /// Every line the dialog draws in the detail's colour and size.
+    fn drawn_detail(dialog: &mut AlertDialog) -> Vec<String> {
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        tree.commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if *color == COLOR_YELLOW && (*font_size - FONT_SIZE_SMALL).abs() < 0.01 => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_overlong_message_does_not_take_the_warning_with_it() {
+        // The message names things the program did not choose -- a file, a
+        // drive -- so its length is not ours to bound. The detail is the
+        // consequence, and it is drawn *under* the message, so a box that
+        // simply stops drawing when it runs out of room drops the warning
+        // first and keeps the name that caused the overflow.
+        let drive = "Some Vendor's Extremely Verbose Removable Storage Device ".repeat(20);
+        let mut dialog = AlertDialog::destructive("Confirm Write", &drive, "Write")
+            .with_detail("All data will be permanently destroyed. This cannot be undone.");
+        dialog.show();
+
+        let detail = drawn_detail(&mut dialog);
+        assert!(!detail.is_empty(), "the warning was not drawn at all");
+        assert!(
+            detail.join(" ").contains("cannot be undone"),
+            "the warning must survive an overlong message; it drew: {detail:?}"
+        );
+    }
+
+    #[test]
+    fn a_message_cut_for_room_says_so() {
+        // A body cut without a mark reads as a complete sentence -- here, as a
+        // drive name that is not the drive's name.
+        let drive = "Vendor Removable Storage ".repeat(40);
+        let mut dialog = AlertDialog::destructive("Confirm Write", &drive, "Write")
+            .with_detail("All data will be permanently destroyed.");
+        dialog.show();
+
+        let lines = alert_message_lines(&mut dialog);
+        let drawn: String = lines.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            drawn.contains('…'),
+            "a message cut to fit must be marked; it drew: {drawn}"
+        );
+    }
+
+    #[test]
+    fn text_never_reaches_the_button_row() {
+        // Whatever is cut, what is left has to stay above the controls that
+        // dismiss the dialog: prose over the Cancel button is worse than
+        // prose not shown.
+        let mut dialog =
+            AlertDialog::destructive("Confirm Write", &"Long Drive Name ".repeat(60), "Write")
+                .with_detail(&"All data will be permanently destroyed. ".repeat(10));
+        dialog.show();
+
+        let mut tree = RenderTree::new();
+        dialog.render(800.0, 600.0, &mut tree);
+        let buttons_y = dialog
+            .placement
+            .as_ref()
+            .expect("render records where it drew")
+            .buttons_y;
+        for cmd in &tree.commands {
+            if let RenderCommand::Text { y, text, color, .. } = cmd
+                && (*color == COLOR_SUBTEXT1 || *color == COLOR_YELLOW)
+            {
+                assert!(
+                    *y < buttons_y,
+                    "prose {text:?} at y={y} reaches the button row at {buttons_y}"
+                );
+            }
+        }
     }
 
     #[test]

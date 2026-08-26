@@ -41,6 +41,7 @@ use guitk::event::{
 };
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
+use guitk::modal::{AlertDialog, DialogResult};
 #[allow(unused_imports)]
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -129,27 +130,111 @@ const ISO_DATETIME_LEN: usize = 17;
 /// bytes are centiseconds and a timezone offset, which this view does not show.
 const ISO_DATETIME_DIGITS: usize = 14;
 
-// Destructive-confirmation dialog. Its two prose fields wrap, so the dialog
-// grows to hold them; these bound and floor that growth.
-/// Room between the dialog's title baseline and its message.
-const CONFIRM_TITLE_BLOCK: f32 = 28.0;
-/// Vertical room the message keeps even when it is one short line, so a
-/// typical confirmation looks exactly as it did before the fields wrapped.
-const CONFIRM_MESSAGE_MIN_HEIGHT: f32 = 24.0;
-/// Room below the warning for the Cancel/Write row and the padding under it.
-const CONFIRM_BUTTON_BLOCK: f32 = 62.0;
-/// The dialog never shrinks below the size it had when both fields were
-/// clipped to one line.
-const CONFIRM_MIN_HEIGHT: f32 = 200.0;
-/// A drive name is attacker-shaped input in the sense that matters here -- it
-/// comes from the device, not from us -- so neither field may grow the dialog
-/// without bound.
-const CONFIRM_MESSAGE_MAX_LINES: usize = 4;
-/// The warning is a fixed two-sentence form; four lines is generous for it at
-/// this width, and the cap keeps a pathological drive name from pushing the
-/// buttons off screen.
-const CONFIRM_DETAIL_MAX_LINES: usize = 4;
+// The destructive-confirmation dialog used to be sized here, by six constants
+// giving its title, message, warning and button row their shares of a box this
+// file drew itself. `guitk::modal::AlertDialog` owns all of that now --
+// including the rule those constants existed for: a drive name comes from the
+// device rather than from us, so the prose has to be bounded, and the bound
+// has to cut the *name* rather than the warning underneath it.
 const DEFAULT_BLOCK_SIZE: u64 = 4096;
+
+// ============================================================================
+// Write tab layout
+// ============================================================================
+
+/// Where the rows of the Write tab land.
+///
+/// The rows below the image and drive cards move depending on whether an image
+/// is loaded and whether a drive is selected, so the Write button's position
+/// is not a constant that a hit test could restate — and until this existed,
+/// no hit test tried: the button was drawn and nothing anywhere listened for a
+/// click on it, which left the program's one destructive action unreachable
+/// and its confirmation dialog dead code.
+///
+/// Computed once and read by both the renderer and the click handler, on the
+/// same principle as the toolkit dialog's `DialogLayout`: two copies of a
+/// layout agree only until one of them is edited.
+#[derive(Clone, Copy, Debug)]
+struct WriteTabLayout {
+    /// Left edge of every row.
+    px: f32,
+    image_label_y: f32,
+    image_body_y: f32,
+    drive_label_y: f32,
+    drive_body_y: f32,
+    options_label_y: f32,
+    verify_row_y: f32,
+    block_size_y: f32,
+    button_x: f32,
+    button_y: f32,
+    button_w: f32,
+    recent_y: f32,
+}
+
+impl WriteTabLayout {
+    /// Height of the image card, and of the placeholder that stands in for it.
+    const IMAGE_CARD_BLOCK: f32 = 100.0;
+    const IMAGE_EMPTY_BLOCK: f32 = 72.0;
+    /// Same, for the target-drive card.
+    const DRIVE_CARD_BLOCK: f32 = 72.0;
+    const DRIVE_EMPTY_BLOCK: f32 = 52.0;
+    /// A section heading and the gap under it.
+    const HEADING_BLOCK: f32 = 24.0;
+    /// The "Verify after write" checkbox row.
+    const VERIFY_ROW_BLOCK: f32 = 30.0;
+    /// The "Block size: N bytes" line.
+    const BLOCK_SIZE_BLOCK: f32 = 28.0;
+    /// Extra air above the Options heading.
+    const OPTIONS_GAP: f32 = 8.0;
+    /// Width of the Write button. Wide enough for its label at any weight.
+    const BUTTON_WIDTH: f32 = 160.0;
+
+    /// Lay the tab out in the panel at (`x`, `y`), for the given content.
+    fn new(x: f32, y: f32, image_loaded: bool, drive_selected: bool) -> Self {
+        let px = x + PANEL_PADDING;
+        let image_label_y = y + PANEL_PADDING;
+        let image_body_y = image_label_y + Self::HEADING_BLOCK;
+        let drive_label_y = image_body_y
+            + if image_loaded {
+                Self::IMAGE_CARD_BLOCK
+            } else {
+                Self::IMAGE_EMPTY_BLOCK
+            };
+        let drive_body_y = drive_label_y + Self::HEADING_BLOCK;
+        let options_label_y = drive_body_y
+            + if drive_selected {
+                Self::DRIVE_CARD_BLOCK
+            } else {
+                Self::DRIVE_EMPTY_BLOCK
+            }
+            + Self::OPTIONS_GAP;
+        let verify_row_y = options_label_y + Self::HEADING_BLOCK;
+        let block_size_y = verify_row_y + Self::VERIFY_ROW_BLOCK;
+        let button_y = block_size_y + Self::BLOCK_SIZE_BLOCK;
+        Self {
+            px,
+            image_label_y,
+            image_body_y,
+            drive_label_y,
+            drive_body_y,
+            options_label_y,
+            verify_row_y,
+            block_size_y,
+            button_x: px,
+            button_y,
+            button_w: Self::BUTTON_WIDTH,
+            recent_y: button_y + BUTTON_HEIGHT + 16.0,
+        }
+    }
+
+    /// Whether (`mx`, `my`) is on the Write button.
+    fn button_hit(&self, mx: f32, my: f32) -> bool {
+        mx >= self.button_x
+            && mx < self.button_x + self.button_w
+            && my >= self.button_y
+            && my < self.button_y + BUTTON_HEIGHT
+    }
+}
 
 // ============================================================================
 // Image format types
@@ -958,59 +1043,41 @@ impl OperationProgress {
 // Write confirmation dialog
 // ============================================================================
 
-/// Safety confirmation dialog state.
-#[derive(Clone, Debug)]
-pub struct ConfirmDialog {
-    pub visible: bool,
-    pub title: String,
-    pub message: String,
-    pub detail: String,
-    pub confirmed: bool,
-    pub cancelled: bool,
-    pub hover_confirm: bool,
-    pub hover_cancel: bool,
+/// The confirmation shown before a write, ready to be `show()`n.
+///
+/// This used to be a hand-rolled `ConfirmDialog` — a visible flag, two prose
+/// fields, two hover flags and two booleans for the answer — drawn by 140
+/// lines beside it and hit-tested by 30 more that restated the button geometry
+/// from different numbers than the drawing used. It is the toolkit's
+/// [`AlertDialog`] now, which is the same dialog the partition manager shows,
+/// so the two agree about what a destructive confirmation looks like and about
+/// which button Enter presses.
+///
+/// The dialog is returned rather than stored: `AlertDialog` starts hidden and
+/// ignores every event until `show()`, and building it at the point of use
+/// keeps the "make it, show it, act on its answer" sequence in one place.
+fn write_confirmation(image_name: &str, drive_name: &str, drive_size: u64) -> AlertDialog {
+    let mut dialog = AlertDialog::destructive(
+        "Confirm Write",
+        &format!("Write '{image_name}' to '{drive_name}'?"),
+        "Write",
+    )
+    .with_detail(&format!(
+        "All data on {} ({}) will be permanently destroyed. \
+         This action cannot be undone.",
+        drive_name,
+        format_bytes(drive_size)
+    ));
+    dialog.show();
+    dialog
 }
 
-impl Default for ConfirmDialog {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ConfirmDialog {
-    pub fn new() -> Self {
-        Self {
-            visible: false,
-            title: String::new(),
-            message: String::new(),
-            detail: String::new(),
-            confirmed: false,
-            cancelled: false,
-            hover_confirm: false,
-            hover_cancel: false,
-        }
-    }
-
-    /// Show a write-confirmation dialog for a destructive operation.
-    pub fn show_write_confirm(&mut self, image_name: &str, drive_name: &str, drive_size: u64) {
-        self.visible = true;
-        self.confirmed = false;
-        self.cancelled = false;
-        self.title = "Confirm Write".to_string();
-        self.message = format!("Write '{}' to '{}'?", image_name, drive_name);
-        self.detail = format!(
-            "WARNING: All data on {} ({}) will be permanently destroyed. \
-             This operation cannot be undone.",
-            drive_name,
-            format_bytes(drive_size)
-        );
-    }
-
-    pub fn dismiss(&mut self) {
-        self.visible = false;
-        self.confirmed = false;
-        self.cancelled = false;
-    }
+/// The name to show for an image file: its last path component.
+///
+/// Shared with the image card on the Write tab so the confirmation names the
+/// file the same way the card the user just read did.
+fn image_display_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 // ============================================================================
@@ -1162,7 +1229,12 @@ pub struct DiskImagerApp {
     pub create_options: CreateOptions,
 
     // Dialogs
-    pub confirm_dialog: ConfirmDialog,
+    /// The write confirmation, present only while it is on screen.
+    ///
+    /// `Option` rather than a `visible` flag: the old flag left the dialog's
+    /// stale title, message and answer sitting in the struct after it closed,
+    /// which is state that only ever exists to be read by mistake.
+    pub confirm_dialog: Option<AlertDialog>,
 
     /// The file-open dialog, present only while it is on screen.
     ///
@@ -1220,7 +1292,7 @@ impl DiskImagerApp {
             verification_result: VerificationResult::Pending,
             write_options: WriteOptions::default(),
             create_options: CreateOptions::default(),
-            confirm_dialog: ConfirmDialog::new(),
+            confirm_dialog: None,
             open_dialog: None,
             recent_images: VecDeque::new(),
             locked_drive_id: None,
@@ -1725,6 +1797,26 @@ impl DiskImagerApp {
     // ========================================================================
 
     pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        // A tick drives the confirmation's fade as well as the write's
+        // progress, and the dialog has to keep animating while it is up.
+        if let (Event::Tick { elapsed_ms }, Some(dialog)) = (event, self.confirm_dialog.as_mut()) {
+            dialog.tick(*elapsed_ms);
+        }
+
+        // An open confirmation takes every key and every click, because a
+        // toolkit dialog does its own hit-testing and its own focus handling
+        // and the two cannot be split apart here. Splitting them is what let
+        // the hand-rolled dialog this replaced test its buttons against a
+        // height of 200 px that the renderer, which sized the box from its own
+        // wrapped text, had generally not used.
+        //
+        // The file-open dialog is drawn over the confirmation, but the two are
+        // never up together: the confirmation swallows the Ctrl+O that opens
+        // the one, and `confirm_write` refuses while the other is up.
+        if self.confirm_dialog.is_some() && matches!(event, Event::Key(_) | Event::Mouse(_)) {
+            return self.handle_confirm_event(event);
+        }
+
         match event {
             Event::Resize { width, height } => {
                 self.window_width = *width as f32;
@@ -1755,27 +1847,6 @@ impl DiskImagerApp {
         // key before anything else can claim it.
         if let Some(result) = self.dispatch_to_open_dialog(key) {
             return result;
-        }
-
-        // Handle confirm dialog first
-        if self.confirm_dialog.visible {
-            match key.key {
-                Key::Enter => {
-                    self.confirm_dialog.confirmed = true;
-                    self.confirm_dialog.visible = false;
-                    // Execute the write
-                    if let Err(e) = self.start_write() {
-                        self.status_message = e;
-                        self.status_is_error = true;
-                    }
-                    return EventResult::Consumed;
-                }
-                Key::Escape => {
-                    self.confirm_dialog.dismiss();
-                    return EventResult::Consumed;
-                }
-                _ => return EventResult::Consumed,
-            }
         }
 
         // Tab switching
@@ -1852,11 +1923,6 @@ impl DiskImagerApp {
 
         match &mouse.kind {
             MouseEventKind::Press(MouseButton::Left) => {
-                // Confirm dialog buttons
-                if self.confirm_dialog.visible {
-                    return self.handle_dialog_click(mx, my);
-                }
-
                 // Tab bar clicks
                 if (TOOLBAR_HEIGHT..TOOLBAR_HEIGHT + ROW_HEIGHT + 8.0).contains(&my) {
                     return self.handle_tab_click(mx);
@@ -1870,6 +1936,12 @@ impl DiskImagerApp {
                 // File tree clicks (browse panel)
                 if self.active_tab == MainTab::Browse {
                     return self.handle_iso_click(mx, my);
+                }
+
+                // The Write tab's one control.
+                if self.active_tab == MainTab::Write && self.write_tab_layout().button_hit(mx, my) {
+                    self.confirm_write();
+                    return EventResult::Consumed;
                 }
 
                 EventResult::Consumed
@@ -1990,34 +2062,57 @@ impl DiskImagerApp {
         EventResult::Consumed
     }
 
-    fn handle_dialog_click(&mut self, mx: f32, my: f32) -> EventResult {
-        let dialog_w = 420.0_f32;
-        let dialog_h = 200.0_f32;
-        let dialog_x = (self.window_width - dialog_w) / 2.0;
-        let dialog_y = (self.window_height - dialog_h) / 2.0;
-
-        let btn_y = dialog_y + dialog_h - 50.0;
-        let btn_h = 32.0_f32;
-
-        // Cancel button
-        let cancel_x = dialog_x + dialog_w - 200.0;
-        if mx >= cancel_x && mx < cancel_x + 90.0 && my >= btn_y && my < btn_y + btn_h {
-            self.confirm_dialog.dismiss();
-            return EventResult::Consumed;
+    /// Ask before writing.
+    ///
+    /// Returns whether a confirmation went up. It does not when there is
+    /// nothing to write, which is the same condition that draws the Write
+    /// button disabled -- one test, so the button's look and its effect cannot
+    /// disagree -- and not while the file-open dialog is up, which is drawn
+    /// over the confirmation and would leave it visible but unreachable.
+    pub fn confirm_write(&mut self) -> bool {
+        if !self.can_write() || self.open_dialog.is_some() {
+            return false;
         }
+        let Some(image) = self.loaded_image.as_ref() else {
+            return false;
+        };
+        let Some(drive) = self.selected_drive() else {
+            return false;
+        };
+        self.confirm_dialog = Some(write_confirmation(
+            image_display_name(&image.path),
+            &drive.name,
+            drive.size_bytes,
+        ));
+        true
+    }
 
-        // Confirm button
-        let confirm_x = dialog_x + dialog_w - 100.0;
-        if mx >= confirm_x && mx < confirm_x + 90.0 && my >= btn_y && my < btn_y + btn_h {
-            self.confirm_dialog.confirmed = true;
-            self.confirm_dialog.visible = false;
-            if let Err(e) = self.start_write() {
-                self.status_message = e;
-                self.status_is_error = true;
-            }
-            return EventResult::Consumed;
+    /// Whether a write could start right now. Read by both the Write button's
+    /// colour and [`confirm_write`](Self::confirm_write).
+    pub fn can_write(&self) -> bool {
+        self.loaded_image.is_some()
+            && self.selected_drive_index.is_some()
+            && !self.operation.is_active()
+    }
+
+    /// Give an event to the open confirmation and act on its answer.
+    fn handle_confirm_event(&mut self, event: &Event) -> EventResult {
+        let Some(dialog) = self.confirm_dialog.as_mut() else {
+            return EventResult::Ignored;
+        };
+        let consumed = dialog.handle_event(event);
+        let Some(result) = dialog.result() else {
+            return consumed;
+        };
+        // `Cancel` is the button and `Dismissed` is Escape or a click on the
+        // scrim; both mean no. Only `Ok` -- which is what the destructive
+        // button reports, whatever verb it is wearing -- means yes.
+        let accepted = *result == DialogResult::Ok;
+        self.confirm_dialog = None;
+        if accepted && let Err(e) = self.start_write() {
+            self.status_message = e;
+            self.status_is_error = true;
         }
-
         EventResult::Consumed
     }
 
@@ -2025,7 +2120,13 @@ impl DiskImagerApp {
     // Rendering
     // ========================================================================
 
-    pub fn render(&self, rt: &mut RenderTree) {
+    /// Draw the whole window.
+    ///
+    /// Takes `&mut` because the toolkit's confirmation records where it landed
+    /// as a side effect of drawing, which is what makes "you can only click
+    /// what was drawn" true by construction rather than by two pieces of
+    /// arithmetic agreeing.
+    pub fn render(&mut self, rt: &mut RenderTree) {
         // Background
         rt.fill_rect(
             0.0,
@@ -2062,9 +2163,14 @@ impl DiskImagerApp {
             self.render_progress_overlay(rt);
         }
 
-        // Overlay: confirm dialog
-        if self.confirm_dialog.visible {
-            self.render_confirm_dialog(rt);
+        // Overlay: confirm dialog. This used to be 140 lines of scrim, shadow,
+        // box, border, title, wrapped message, wrapped warning and two
+        // hand-positioned buttons -- a copy of a dialog the toolkit already
+        // had, and a copy that hit-tested its buttons at a height the drawing
+        // did not use. All of it is `guitk::modal::AlertDialog` now.
+        let (w, h) = (self.window_width, self.window_height);
+        if let Some(dialog) = self.confirm_dialog.as_mut() {
+            dialog.render(w, h, rt);
         }
 
         // Overlay: file-open dialog, last so it is over the confirm dialog
@@ -2353,14 +2459,31 @@ impl DiskImagerApp {
         }
     }
 
+    /// The Write tab's layout for the current window and selection — the same
+    /// arrangement [`render_write_tab`](Self::render_write_tab) will draw,
+    /// because it is the one it draws from.
+    fn write_tab_layout(&self) -> WriteTabLayout {
+        WriteTabLayout::new(
+            SIDEBAR_WIDTH,
+            self.content_top(),
+            self.loaded_image.is_some(),
+            self.selected_drive().is_some(),
+        )
+    }
+
     fn render_write_tab(&self, rt: &mut RenderTree, x: f32, y: f32, width: f32, height: f32) {
-        let px = x + PANEL_PADDING;
-        let mut cy = y + PANEL_PADDING;
+        let lay = WriteTabLayout::new(
+            x,
+            y,
+            self.loaded_image.is_some(),
+            self.selected_drive().is_some(),
+        );
+        let px = lay.px;
 
         // Section: Image Selection
         rt.push(RenderCommand::Text {
             x: px,
-            y: cy,
+            y: lay.image_label_y,
             text: "Image File".to_string(),
             color: colors::TEXT,
             font_size: 14.0,
@@ -2368,16 +2491,14 @@ impl DiskImagerApp {
             max_width: Some(width - PANEL_PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cy += 24.0;
 
         if let Some(ref img) = self.loaded_image {
             // Image info card
-            self.render_image_card(rt, px, cy, width - PANEL_PADDING * 2.0, img);
-            cy += 100.0;
+            self.render_image_card(rt, px, lay.image_body_y, width - PANEL_PADDING * 2.0, img);
         } else {
             rt.fill_rounded_rect(
                 px,
-                cy,
+                lay.image_body_y,
                 width - PANEL_PADDING * 2.0,
                 60.0,
                 colors::SURFACE0,
@@ -2385,7 +2506,7 @@ impl DiskImagerApp {
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
-                y: cy + 20.0,
+                y: lay.image_body_y + 20.0,
                 // Names the key. The previous wording -- "Open an .iso, .img,
                 // or .bin file." -- was an instruction for an action the
                 // program did not offer.
@@ -2397,13 +2518,12 @@ impl DiskImagerApp {
                 max_width: Some(width - PANEL_PADDING * 4.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cy += 72.0;
         }
 
         // Section: Target Drive
         rt.push(RenderCommand::Text {
             x: px,
-            y: cy,
+            y: lay.drive_label_y,
             text: "Target Drive".to_string(),
             color: colors::TEXT,
             font_size: 14.0,
@@ -2411,15 +2531,13 @@ impl DiskImagerApp {
             max_width: Some(width - PANEL_PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cy += 24.0;
 
         if let Some(drive) = self.selected_drive() {
-            self.render_drive_card(rt, px, cy, width - PANEL_PADDING * 2.0, drive);
-            cy += 72.0;
+            self.render_drive_card(rt, px, lay.drive_body_y, width - PANEL_PADDING * 2.0, drive);
         } else {
             rt.fill_rounded_rect(
                 px,
-                cy,
+                lay.drive_body_y,
                 width - PANEL_PADDING * 2.0,
                 40.0,
                 colors::SURFACE0,
@@ -2427,7 +2545,7 @@ impl DiskImagerApp {
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
-                y: cy + 12.0,
+                y: lay.drive_body_y + 12.0,
                 text: "Select a target drive from the left panel".to_string(),
                 color: colors::SUBTEXT0,
                 font_size: UI_FONT_SIZE,
@@ -2435,14 +2553,12 @@ impl DiskImagerApp {
                 max_width: Some(width - PANEL_PADDING * 4.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cy += 52.0;
         }
 
         // Write options
-        cy += 8.0;
         rt.push(RenderCommand::Text {
             x: px,
-            y: cy,
+            y: lay.options_label_y,
             text: "Options".to_string(),
             color: colors::TEXT,
             font_size: 14.0,
@@ -2450,7 +2566,6 @@ impl DiskImagerApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cy += 24.0;
 
         // Verify after write checkbox
         let check_color = if self.write_options.verify_after_write {
@@ -2458,11 +2573,18 @@ impl DiskImagerApp {
         } else {
             colors::SURFACE1
         };
-        rt.fill_rounded_rect(px, cy, 18.0, 18.0, check_color, CornerRadii::all(3.0));
+        rt.fill_rounded_rect(
+            px,
+            lay.verify_row_y,
+            18.0,
+            18.0,
+            check_color,
+            CornerRadii::all(3.0),
+        );
         if self.write_options.verify_after_write {
             rt.push(RenderCommand::Text {
                 x: px + 3.0,
-                y: cy + 1.0,
+                y: lay.verify_row_y + 1.0,
                 text: "v".to_string(),
                 color: colors::CRUST,
                 font_size: 13.0,
@@ -2473,7 +2595,7 @@ impl DiskImagerApp {
         }
         rt.push(RenderCommand::Text {
             x: px + 26.0,
-            y: cy + 2.0,
+            y: lay.verify_row_y + 2.0,
             text: "Verify after write (byte-by-byte comparison)".to_string(),
             color: colors::TEXT,
             font_size: UI_FONT_SIZE,
@@ -2481,12 +2603,11 @@ impl DiskImagerApp {
             max_width: Some(width - PANEL_PADDING * 2.0 - 30.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cy += 30.0;
 
         // Block size
         rt.push(RenderCommand::Text {
             x: px,
-            y: cy,
+            y: lay.block_size_y,
             text: format!("Block size: {} bytes", self.write_options.block_size),
             color: colors::SUBTEXT0,
             font_size: SMALL_FONT_SIZE,
@@ -2494,30 +2615,26 @@ impl DiskImagerApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cy += 28.0;
 
-        // Write button
-        let can_write = self.loaded_image.is_some()
-            && self.selected_drive_index.is_some()
-            && !self.operation.is_active();
-
+        // Write button -- drawn at the rectangle `handle_mouse` tests against,
+        // because both read it from `lay`.
+        let can_write = self.can_write();
         let btn_color = if can_write {
             colors::BLUE
         } else {
             colors::SURFACE1
         };
-        let btn_w = 160.0_f32;
         rt.fill_rounded_rect(
-            px,
-            cy,
-            btn_w,
+            lay.button_x,
+            lay.button_y,
+            lay.button_w,
             BUTTON_HEIGHT,
             btn_color,
             CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::Text {
-            x: px + (btn_w - 80.0) / 2.0,
-            y: cy + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
+            x: lay.button_x + (lay.button_w - 80.0) / 2.0,
+            y: lay.button_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: "Write Image".to_string(),
             color: if can_write {
                 colors::CRUST
@@ -2532,7 +2649,7 @@ impl DiskImagerApp {
 
         // Recent images section
         let _ = height; // use height to avoid warning
-        cy += BUTTON_HEIGHT + 16.0;
+        let mut cy = lay.recent_y;
         if !self.recent_images.is_empty() {
             rt.push(RenderCommand::Text {
                 x: px,
@@ -3263,7 +3380,7 @@ impl DiskImagerApp {
         let mut ty = y + 8.0;
 
         // File name
-        let filename = img.path.rsplit(['/', '\\']).next().unwrap_or(&img.path);
+        let filename = image_display_name(&img.path);
         rt.push(RenderCommand::Text {
             x: tx,
             y: ty,
@@ -3660,146 +3777,6 @@ impl DiskImagerApp {
             color: colors::OVERLAY0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_confirm_dialog(&self, rt: &mut RenderTree) {
-        // Dim overlay
-        rt.fill_rect(
-            0.0,
-            0.0,
-            self.window_width,
-            self.window_height,
-            Color::rgba(0, 0, 0, 150),
-        );
-
-        let dialog_w = 420.0_f32;
-
-        // The message and the warning are prose, and `max_width` on a Text
-        // command clips to one line rather than wrapping -- so the detail
-        // ("... will be permanently destroyed. This operation cannot be
-        // undone.") was being cut mid-sentence, dropping the half that says
-        // the action is irreversible. Both wrap now, and the dialog is sized
-        // from the lines they actually produce. The dialog is centred, so its
-        // height has to be known before anything can be positioned.
-        let text_w = dialog_w - PANEL_PADDING * 2.0;
-        let message = |x: f32, y: f32| {
-            text::Paragraph::new(&self.confirm_dialog.message, colors::TEXT)
-                .at(x, y, text_w)
-                .font(UI_FONT_SIZE, FontWeightHint::Regular)
-                .max_lines(CONFIRM_MESSAGE_MAX_LINES)
-        };
-        let detail = |x: f32, y: f32| {
-            text::Paragraph::new(&self.confirm_dialog.detail, colors::YELLOW)
-                .at(x, y, text_w)
-                .font(SMALL_FONT_SIZE, FontWeightHint::Regular)
-                .max_lines(CONFIRM_DETAIL_MAX_LINES)
-        };
-        // Keep the original single-line allowance as a floor so a short
-        // message leaves the dialog looking exactly as it did.
-        let message_block = message(0.0, 0.0).height().max(CONFIRM_MESSAGE_MIN_HEIGHT);
-        let detail_h = detail(0.0, 0.0).height();
-        let dialog_h =
-            (PANEL_PADDING + CONFIRM_TITLE_BLOCK + message_block + detail_h + CONFIRM_BUTTON_BLOCK)
-                .max(CONFIRM_MIN_HEIGHT);
-        let dialog_x = (self.window_width - dialog_w) / 2.0;
-        let dialog_y = (self.window_height - dialog_h) / 2.0;
-
-        // Shadow
-        rt.push(RenderCommand::BoxShadow {
-            x: dialog_x,
-            y: dialog_y,
-            width: dialog_w,
-            height: dialog_h,
-            offset_x: 0.0,
-            offset_y: 4.0,
-            blur: 20.0,
-            spread: 0.0,
-            color: Color::rgba(0, 0, 0, 100),
-            corner_radii: CornerRadii::all(CORNER_RADIUS * 2.0),
-        });
-
-        // Dialog background
-        rt.fill_rounded_rect(
-            dialog_x,
-            dialog_y,
-            dialog_w,
-            dialog_h,
-            colors::MANTLE,
-            CornerRadii::all(CORNER_RADIUS * 2.0),
-        );
-        rt.push(RenderCommand::StrokeRect {
-            x: dialog_x,
-            y: dialog_y,
-            width: dialog_w,
-            height: dialog_h,
-            color: colors::RED,
-            line_width: 2.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS * 2.0),
-        });
-
-        // Title
-        rt.push(RenderCommand::Text {
-            x: dialog_x + PANEL_PADDING,
-            y: dialog_y + PANEL_PADDING,
-            text: self.confirm_dialog.title.clone(),
-            color: colors::RED,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(dialog_w - PANEL_PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Message, then the warning beneath whatever the message actually
-        // occupied -- not beneath a fixed one-line allowance for it.
-        let message_y = dialog_y + PANEL_PADDING + CONFIRM_TITLE_BLOCK;
-        message(dialog_x + PANEL_PADDING, message_y).draw(rt);
-        detail(dialog_x + PANEL_PADDING, message_y + message_block).draw(rt);
-
-        // Buttons
-        let btn_y = dialog_y + dialog_h - 50.0;
-        let btn_w = 90.0_f32;
-
-        // Cancel button
-        let cancel_x = dialog_x + dialog_w - 200.0;
-        rt.fill_rounded_rect(
-            cancel_x,
-            btn_y,
-            btn_w,
-            BUTTON_HEIGHT,
-            colors::SURFACE0,
-            CornerRadii::all(4.0),
-        );
-        rt.push(RenderCommand::Text {
-            x: cancel_x + (btn_w - 42.0) / 2.0,
-            y: btn_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
-            text: "Cancel".to_string(),
-            color: colors::TEXT,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Confirm (destructive) button
-        let confirm_x = dialog_x + dialog_w - 100.0;
-        rt.fill_rounded_rect(
-            confirm_x,
-            btn_y,
-            btn_w,
-            BUTTON_HEIGHT,
-            colors::RED,
-            CornerRadii::all(4.0),
-        );
-        rt.push(RenderCommand::Text {
-            x: confirm_x + (btn_w - 36.0) / 2.0,
-            y: btn_y + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
-            text: "Write".to_string(),
-            color: colors::CRUST,
-            font_size: UI_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
         });
@@ -5354,7 +5331,7 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
-        let app = DiskImagerApp::new();
+        let mut app = DiskImagerApp::new();
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());
@@ -5409,60 +5386,131 @@ mod tests {
         assert!(!rt.is_empty());
     }
 
+    /// An app on the Write tab with an image loaded and the USB drive picked,
+    /// which is the only state from which a write can be confirmed.
+    fn app_ready_to_write() -> DiskImagerApp {
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Write;
+        let mut info = ImageInfo::new("/images/slateos.iso");
+        info.file_size = 1024;
+        app.loaded_image = Some(info);
+        app.select_drive(1);
+        app
+    }
+
+    /// A left click at (`x`, `y`).
+    fn click(x: f32, y: f32) -> Event {
+        Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        })
+    }
+
+    /// Every line of text the app draws, from the back.
+    ///
+    /// From the back because the confirmation is drawn last, over everything
+    /// else, and the window behind it has prose of its own.
+    fn drawn_text(app: &mut DiskImagerApp) -> Vec<String> {
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        rt.commands
+            .iter()
+            .rev()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn test_render_with_confirm_dialog() {
-        let mut app = DiskImagerApp::new();
-        app.confirm_dialog
-            .show_write_confirm("test.img", "USB Drive", 32_000_000_000);
+        let mut app = app_ready_to_write();
+        assert!(app.confirm_write(), "nothing asked for confirmation");
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());
     }
 
-    /// Every `Text` command drawn by the confirm dialog, joined in order.
-    fn confirm_dialog_text(drive_name: &str) -> (Vec<(f32, String)>, f32, f32) {
-        let mut app = DiskImagerApp::new();
-        app.confirm_dialog
-            .show_write_confirm("test.img", drive_name, 32_000_000_000);
-        let mut rt = RenderTree::new();
-        // Just the dialog, not the whole app: rendering the app also draws the
-        // window chrome, and "Disk Imager" in the title bar is not prose that
-        // belongs to this dialog.
-        app.render_confirm_dialog(&mut rt);
-        let rows: Vec<(f32, String)> = rt
-            .commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Text { y, text, .. } => Some((*y, text.clone())),
-                _ => None,
-            })
-            .collect();
-        // The dialog is the red-stroked rect; there is exactly one.
-        let (dialog_y, dialog_h) = rt
-            .commands
-            .iter()
-            .find_map(|c| match c {
-                RenderCommand::StrokeRect {
-                    y, height, color, ..
-                } if *color == colors::RED => Some((*y, *height)),
-                _ => None,
-            })
-            .expect("the confirm dialog draws a red border");
-        (rows, dialog_y, dialog_h)
+    #[test]
+    fn the_write_button_opens_the_confirmation() {
+        // The button was drawn from the day the tab was written and no handler
+        // anywhere listened for a click on it, which left the program's one
+        // destructive action unreachable and its confirmation dialog dead.
+        let mut app = app_ready_to_write();
+        let lay = app.write_tab_layout();
+        app.handle_event(&click(lay.button_x + 4.0, lay.button_y + 4.0));
+        assert!(
+            app.confirm_dialog.is_some(),
+            "clicking Write Image did not ask for confirmation"
+        );
     }
 
     #[test]
-    fn the_destructive_warning_is_shown_in_full() {
-        // `max_width` clips rather than wraps, so this warning used to be cut
-        // mid-sentence -- and the half that got dropped was the half saying
-        // the write cannot be undone.
-        let (rows, _, _) = confirm_dialog_text("USB Drive");
-        let drawn: String = rows
-            .iter()
-            .map(|(_, t)| t.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        for phrase in ["permanently destroyed", "cannot be undone", "USB Drive"] {
+    fn the_write_button_is_drawn_where_the_click_is_tested() {
+        // Two copies of a rectangle agree only until one of them is edited.
+        let mut app = app_ready_to_write();
+        let lay = app.write_tab_layout();
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        let found = rt.commands.iter().any(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                (*x - lay.button_x).abs() < 0.01
+                    && (*y - lay.button_y).abs() < 0.01
+                    && (*width - lay.button_w).abs() < 0.01
+                    && (*height - BUTTON_HEIGHT).abs() < 0.01
+            }
+            _ => false,
+        });
+        assert!(
+            found,
+            "no button was drawn at the rect the hit test uses: \
+             ({}, {}) {}x{BUTTON_HEIGHT}",
+            lay.button_x, lay.button_y, lay.button_w
+        );
+    }
+
+    #[test]
+    fn there_is_nothing_to_confirm_without_an_image_and_a_drive() {
+        // The same test that draws the button disabled, so the two cannot
+        // disagree about whether the click does anything.
+        let mut app = DiskImagerApp::new();
+        app.active_tab = MainTab::Write;
+        assert!(!app.confirm_write(), "confirmed a write of nothing");
+
+        let mut with_image = DiskImagerApp::new();
+        with_image.active_tab = MainTab::Write;
+        with_image.loaded_image = Some(ImageInfo::new("/images/slateos.iso"));
+        assert!(
+            !with_image.confirm_write(),
+            "confirmed a write with no target drive"
+        );
+    }
+
+    #[test]
+    fn the_confirmation_names_the_image_the_drive_and_the_consequence() {
+        // The warning used to be one `Text` command with a `max_width`, and
+        // `max_width` clips rather than wraps -- so it was cut mid-sentence,
+        // and the half that got dropped was the half saying the write cannot
+        // be undone.
+        let mut app = app_ready_to_write();
+        assert!(app.confirm_write());
+        let drawn = drawn_text(&mut app).join(" ");
+        for phrase in [
+            "slateos.iso",
+            "USB Flash Drive",
+            "permanently destroyed",
+            "cannot be undone",
+            "Write",
+            "Cancel",
+        ] {
             assert!(
                 drawn.contains(phrase),
                 "the confirmation must show {phrase:?}; it drew: {drawn}"
@@ -5471,35 +5519,55 @@ mod tests {
     }
 
     #[test]
-    fn the_warning_never_runs_through_the_button_row() {
-        // A dialog that grows its prose but not itself puts text on top of the
-        // controls that dismiss it -- here, on top of the destructive button.
-        let (rows, dialog_y, dialog_h) = confirm_dialog_text(&"Very Long Drive Name ".repeat(8));
-        let button_top = dialog_y + dialog_h - 50.0;
-        let prose: Vec<&(f32, String)> = rows
-            .iter()
-            .filter(|(_, t)| t != "Cancel" && t != "Write")
-            .collect();
-        assert!(!prose.is_empty(), "the dialog drew no prose at all");
-        for (y, t) in prose {
-            assert!(
-                *y < button_top,
-                "prose line {t:?} at y={y} reaches the button row at {button_top}"
-            );
-            assert!(
-                *y >= dialog_y,
-                "prose line {t:?} at y={y} is above the dialog at {dialog_y}"
-            );
-        }
+    fn enter_on_the_write_confirmation_cancels_rather_than_writing() {
+        // Enter is what gets hit reflexively when a dialog appears unexpectedly.
+        // It must not thereby erase a drive.
+        let mut app = app_ready_to_write();
+        assert!(app.confirm_write());
+        app.handle_event(&plain(Key::Enter));
+        assert!(app.confirm_dialog.is_none(), "the confirmation stayed up");
+        assert!(
+            !app.operation.is_active(),
+            "Enter started the write it was meant to decline"
+        );
     }
 
     #[test]
-    fn a_short_confirmation_keeps_the_original_dialog_size() {
-        // Wrapping must not resize the dialog for the common case.
-        let (_, _, dialog_h) = confirm_dialog_text("USB");
+    fn escape_declines_the_write() {
+        let mut app = app_ready_to_write();
+        assert!(app.confirm_write());
+        app.handle_event(&plain(Key::Escape));
+        assert!(app.confirm_dialog.is_none(), "Escape left the dialog up");
+        assert!(!app.operation.is_active(), "Escape started the write");
+    }
+
+    #[test]
+    fn clicking_the_verb_starts_the_write() {
+        let mut app = app_ready_to_write();
+        assert!(app.confirm_write());
+        // Rendering is what tells the dialog where it is, and therefore what a
+        // click means -- so it has to happen before the click, exactly as it
+        // does on screen.
+        let mut rt = RenderTree::new();
+        app.render(&mut rt);
+        // The button is found by what it *means*, not by its position in the
+        // row: an ordering the test hardcodes is an ordering the test stops
+        // checking, and clicking the wrong one here would erase a drive.
+        let dialog = app.confirm_dialog.as_ref().expect("confirmation is up");
+        let verb = dialog
+            .buttons()
+            .iter()
+            .position(|b| *b.result() == DialogResult::Ok)
+            .expect("a destructive confirmation needs a button that means yes");
+        let (bx, by) = dialog
+            .button_rect(verb)
+            .map(|(x, y, w, h)| (x + w / 2.0, y + h / 2.0))
+            .expect("the confirmation drew its buttons");
+        app.handle_event(&click(bx, by));
+        assert!(app.confirm_dialog.is_none(), "the confirmation stayed up");
         assert!(
-            (dialog_h - 200.0).abs() < 0.01,
-            "a short confirmation should still be 200 px tall, got {dialog_h}"
+            app.operation.is_active(),
+            "confirming the write did not start it"
         );
     }
 
@@ -5526,27 +5594,6 @@ mod tests {
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());
-    }
-
-    // ----------------------------------------------------------------
-    // ConfirmDialog
-    // ----------------------------------------------------------------
-
-    #[test]
-    fn test_confirm_dialog_show() {
-        let mut d = ConfirmDialog::new();
-        d.show_write_confirm("img", "drive", 100);
-        assert!(d.visible);
-        assert!(!d.confirmed);
-        assert!(!d.title.is_empty());
-    }
-
-    #[test]
-    fn test_confirm_dialog_dismiss() {
-        let mut d = ConfirmDialog::new();
-        d.show_write_confirm("img", "drive", 100);
-        d.dismiss();
-        assert!(!d.visible);
     }
 
     // ----------------------------------------------------------------
@@ -6072,7 +6119,7 @@ mod tests {
         // clicked from `iso_list_offset`/`iso_list_height`. If those two ever
         // describe different rectangles, clicks land on the wrong row and
         // nothing says so. This compares them directly.
-        let app = app_with_long_iso();
+        let mut app = app_with_long_iso();
         let mut rt = RenderTree::new();
         app.render(&mut rt);
 
@@ -6093,7 +6140,7 @@ mod tests {
 
     #[test]
     fn the_drive_lists_clip_matches_what_the_hit_test_uses() {
-        let app = app_with_many_drives();
+        let mut app = app_with_many_drives();
         let mut rt = RenderTree::new();
         app.render(&mut rt);
 

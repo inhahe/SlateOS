@@ -5712,6 +5712,40 @@ pub struct Shell {
     /// A `[[ ]]`/`case` word is one of these contexts too, but it already has
     /// [`Shell::cond_word`] to say so and the predicate asks that separately.
     no_split_star: bool,
+    /// bash's `W_NOTILDE`, armed for exactly one word: the subscript
+    /// `expand_subscript_string` is about to expand.
+    ///
+    /// ```c
+    ///   td.flags = W_NOPROCSUB|W_NOTILDE|W_NOSPLIT2;
+    ///   td.word = savestring (string);
+    ///   tlist = call_expand_word_internal (&td, quoted, 0, …);
+    ///                                          /* subst.c:10800-10812 */
+    /// ```
+    ///
+    /// A flag on the **word**, not on the expansion, and the difference is
+    /// visible: a subscript's own leading `~` stands, but the same `~` written
+    /// inside an operand within it is expanded, the operand being a word of its
+    /// own that bash builds without the flag. Measured, bash 5.2.21, `HOME=/zz`
+    /// and `z` unset:
+    ///
+    /// ```text
+    ///   (( a[~] ))            \~: syntax error … (error token is "\~")
+    ///   (( a[${z:-~}] ))      /zz: syntax error … (error token is "/zz")
+    ///   [[ -v a[~] ]]         \~: syntax error … (error token is "\~")
+    ///   [[ -v a[${z:-~}] ]]   /zz: syntax error … (error token is "/zz")
+    /// ```
+    ///
+    /// so each of the three word-level walks — [`Shell::expand_word_annotated`],
+    /// [`Shell::expand_word_joined_annotated`] and the pattern one — *takes* it
+    /// rather than reading it: the outermost word consumes the arming and every
+    /// word nested inside that one sees it clear, which is what confines it to
+    /// one word without a stack. (A subscript goes through the *joining* walk,
+    /// so arming only the splitting one inverts the two cases rather than fixing
+    /// either.)
+    /// (The `\` in those tokens is the `abstab` quoting the subscript's result
+    /// is given afterwards — see [`backslash_quote_subscript`] — and is itself
+    /// the proof the `~` reached it unexpanded.)
+    no_tilde: bool,
     /// Set when a `[[ … =~ RHS ]]` match fails because the RHS could not be
     /// compiled as a regex. bash reports such a `[[` command as status 2 (not 1
     /// "no match") and prints nothing to stderr. `exec_cond` checks this flag
@@ -6675,6 +6709,7 @@ impl Shell {
             dquote: false,
             pat_quote: false,
             no_split_star: false,
+            no_tilde: false,
             cond_regex_error: false,
             arith_cmd: None,
             expand_cmd: None,
@@ -13398,6 +13433,7 @@ impl Shell {
             dquote: false,
             pat_quote: false,
             no_split_star: false,
+            no_tilde: false,
             cond_regex_error: false,
             arith_cmd: None,
             // A fork inherits the name in force, because bash's is an ordinary
@@ -28328,6 +28364,10 @@ impl Shell {
         // out of, so it is here that the text after an abandoned extent read
         // stops contributing.
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        // Taken, not read — the arming belongs to this word alone. See
+        // [`Shell::no_tilde`] and the matching line in
+        // [`Shell::expand_word_annotated`].
+        let no_tilde = std::mem::take(&mut self.no_tilde);
         let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
             // One `${!…}` resolution per part — see [`PointerPart`].
@@ -28339,7 +28379,7 @@ impl Shell {
                     // double quotes, which is the other half of the same guard —
                     // see [`Shell::push_literal_annotated`]. `"${z=~}"` reaches
                     // this walk and assigns the tilde as it stands.
-                    if idx == 0 && !self.dquote_bits() {
+                    if idx == 0 && !no_tilde && !self.dquote_bits() {
                         let home = self.tilde_expand(s.as_bytes());
                         push_chars(&mut cur, &home, false);
                     } else {
@@ -28852,6 +28892,11 @@ impl Shell {
         // `m: bad array subscript` for the *empty* key the abandoned read left,
         // then `AB`. See [`Shell::extent_consumed`].
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        // `W_NOTILDE` belongs to the word it was armed for and to no word inside
+        // that one, so it is *taken* here rather than read: the outermost call
+        // consumes the arming and every nested one sees it clear. See
+        // [`Shell::no_tilde`].
+        let no_tilde = std::mem::take(&mut self.no_tilde);
         let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
             // Asked at the *top* rather than at the tail, because the arms
@@ -28867,7 +28912,7 @@ impl Shell {
             self.begin_pointer_part();
             match part {
                 WordPart::Literal(s) => {
-                    self.push_literal_annotated(&mut cur, s, idx == 0);
+                    self.push_literal_annotated(&mut cur, s, idx == 0 && !no_tilde);
                     open = true;
                 }
                 WordPart::SingleQuoted { text: s, .. } => {
@@ -29508,9 +29553,17 @@ impl Shell {
         // its call (subst.c:10801-10812), so an unquoted `$*` in a subscript
         // joins rather than splitting.
         let saved_star = std::mem::replace(&mut self.no_split_star, true);
+        // …and builds the word it hands `call_expand_word_internal` with
+        // `W_NOTILDE`, so the subscript's own leading `~` is not a tilde
+        // expansion but a character — and one `abstab` then backslash-quotes,
+        // which is why bash's arithmetic reader complains about `\~` and not
+        // about `$HOME`. See [`Shell::no_tilde`], which the word's own
+        // expansion takes back off again so nothing nested inherits it.
+        let saved_tilde = std::mem::replace(&mut self.no_tilde, true);
         let val = self.expand_to_string(&Word {
             parts: parts.to_vec(),
         });
+        self.no_tilde = saved_tilde;
         self.no_split_star = saved_star;
         bfmt![b"[", &backslash_quote_subscript(&val), b"]"]
     }
@@ -29923,6 +29976,9 @@ impl Shell {
         // answers `AzzB`, the failed `$(` in the pattern having ended the
         // pattern's walk only.
         let saved_consumed = std::mem::replace(&mut self.extent_consumed, false);
+        // A pattern is a word of its own here as much as anywhere, so it takes
+        // the arming rather than reading it — see [`Shell::no_tilde`].
+        let no_tilde = std::mem::take(&mut self.no_tilde);
         let saved_ptr = self.enter_pointer_walk();
         for (idx, part) in word.parts.iter().enumerate() {
             if self.extent_consumed {
@@ -29931,7 +29987,9 @@ impl Shell {
             // One `${!…}` resolution per part — see [`PointerPart`].
             self.begin_pointer_part();
             match part {
-                WordPart::Literal(s) => self.push_literal_annotated(&mut buf, s, idx == 0),
+                WordPart::Literal(s) => {
+                    self.push_literal_annotated(&mut buf, s, idx == 0 && !no_tilde);
+                }
                 WordPart::SingleQuoted { text, .. } => push_chars(&mut buf, text.as_bytes(), true),
                 WordPart::DoubleQuoted { parts, .. } => {
                     let items = quoted_echars(&self.cond_dquote_items(parts));
@@ -104546,6 +104604,54 @@ st=1
             o8,
             "osh: '1': syntax error: operand expected (error token is \"'1'\")\nrc=1\n"
         );
+    }
+
+    /// bash's `W_NOTILDE` is a flag on the word `expand_subscript_string`
+    /// builds, so it stops the subscript's *own* leading tilde and stops
+    /// nothing inside it. Both halves are asserted here, because a suppression
+    /// implemented as a mode the expansion is left in would pass the first and
+    /// fail the second. See [`Shell::no_tilde`].
+    #[test]
+    fn a_subscripts_own_tilde_stands_but_an_operands_inside_it_expands() {
+        let err = |src: &str| {
+            let (o, _) = run(&format!("a=(0 1 2)\nHOME=/zz\nunset z\n{{ {src}; }} 2>&1"));
+            o
+        };
+        // Unexpanded, and then backslash-quoted against `abstab` — the `\` is
+        // the proof the `~` survived as a character.
+        assert_eq!(
+            err("(( a[~] ))"),
+            "osh: \\~: syntax error: operand expected (error token is \"\\~\")\n"
+        );
+        assert_eq!(
+            err("(( a[~/p] ))"),
+            "osh: \\~/p: syntax error: operand expected (error token is \"\\~/p\")\n"
+        );
+        // One word in, the flag is gone and the tilde is a home directory.
+        assert_eq!(
+            err("(( a[${z:-~}] ))"),
+            "osh: /zz: syntax error: operand expected (error token is \"/zz\")\n"
+        );
+        // `[[ -v ]]` is the other word bash expands under `Q_ARITH`, and it
+        // divides the same way.
+        assert_eq!(
+            err("[[ -v a[~] ]]"),
+            "osh: \\~: syntax error: operand expected (error token is \"\\~\")\n"
+        );
+        assert_eq!(
+            err("[[ -v a[${z:-~}] ]]"),
+            "osh: /zz: syntax error: operand expected (error token is \"/zz\")\n"
+        );
+        // A tilde that is not the word's first character was never a candidate,
+        // so the flag changes nothing about it either way.
+        assert_eq!(
+            err("q=X; (( a[$q~] ))"),
+            "osh: X\\~: syntax error: invalid arithmetic operator (error token is \"\\~\")\n"
+        );
+        // And the flag really is spent: an ordinary word expanded afterwards
+        // still has its tilde.
+        let (o, _) = run("a=(0 1 2)\nHOME=/zz\n{ (( a[~] )); } 2>/dev/null\necho ~");
+        assert_eq!(o, "/zz\n");
     }
 
     #[test]

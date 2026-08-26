@@ -17998,6 +17998,98 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("taskio unregister 4242");
     }
 
+    serial_println!(
+        "  kshell::self_test 83: zero means `unlimited', so a guessed zero is not a lost limit but \
+         the opposite of the one that was asked for"
+    );
+    // The fourth and worst way a guessed number goes wrong. In §607 the guess
+    // wrote to the wrong place; in rung 82 it invented a measurement. Here the
+    // guessed value is a legal, meaningful value that happens to be the
+    // *negation* of the request.
+    //
+    // `cgiostat` stores an I/O bandwidth cap, and `0` is its word for no cap —
+    // `list` renders it as the literal string `unlimited`. So
+    // `cgiostat create web 100O000` (letter O for a zero) asked for a 100 MB/s
+    // cap and created a cgroup with **no cap at all**, reporting it as created.
+    // Every other shape in this entry fails toward doing less than was asked;
+    // this one fails toward doing the exact opposite, and it does so in a
+    // subsystem whose entire purpose is to say no.
+    //
+    // The limits stay optional (§607): the synopsis brackets them, and omitting
+    // them to mean unlimited is a real request that must keep working. That is
+    // asserted here too, because a fix that quietly removed it would be a
+    // regression wearing the shape of a repair.
+    {
+        let _ = capture_command("cgiostat init");
+
+        let out = capture_command("cgiostat create zzweb 100000000 500");
+        assert_output_contains(
+            "a cgroup can be created with a cap",
+            &out,
+            b"(bw=100000000 iops=500)",
+        );
+        assert_eq!(last_exit(), 0, "`cgiostat create zzweb …` succeeds");
+
+        let out = capture_command("cgiostat list");
+        assert_output_contains("and the cap is what gets listed", &out, b" bw=100000000B/s");
+
+        // The inversion. Asserting the refusal is not enough on its own: the
+        // thing that mattered was that an uncapped cgroup came into existence,
+        // so the list is checked for its absence.
+        let out = capture_command("cgiostat create zzcap 100O000");
+        assert_output_contains(
+            "a bandwidth limit that cannot be read is named",
+            &out,
+            b"`100O000' is not a bandwidth limit in bytes/s",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable bandwidth limit errors");
+        assert_output_lacks("and nothing is reported created", &out, b"created");
+
+        let out = capture_command("cgiostat list");
+        assert_output_lacks(
+            "and no uncapped cgroup was brought into existence by the typo",
+            &out,
+            b"zzcap",
+        );
+
+        let out = capture_command("cgiostat create zzcap2 100000 5x");
+        assert_output_contains(
+            "and so is an IOPS limit",
+            &out,
+            b"`5x' is not an IOPS limit",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable IOPS limit errors");
+
+        // §607's control: omitting the limits still means unlimited. This is
+        // the request the `unwrap_or(0)` was pretending to serve, and it has to
+        // keep working, or the fix has removed a documented form.
+        let out = capture_command("cgiostat create zzfree");
+        assert_output_contains(
+            "omitting the limits still means unlimited",
+            &out,
+            b"(bw=0 iops=0)",
+        );
+        assert_eq!(last_exit(), 0, "`cgiostat create zzfree` succeeds");
+
+        let out = capture_command("cgiostat list");
+        assert_output_contains(
+            "and unlimited is what the listing says",
+            &out,
+            b"bw=unlimited",
+        );
+
+        // The cgroup id has no sentinel behind it either — `throttle 1O`
+        // recorded a throttle event against cgroup 0.
+        let out = capture_command("cgiostat throttle 1O");
+        assert_output_contains(
+            "a cgroup id that cannot be read is named",
+            &out,
+            b"`1O' is not a cgroup id",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable cgroup id errors");
+        assert_output_lacks("and no throttle event is recorded", &out, b"throttle event");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -97492,15 +97584,31 @@ fn cmd_cgiostat(args: &str) {
             shell_println!("cgiostat: initialized");
         }
         "create" => {
-            let name = parts.get(1).copied().unwrap_or("unnamed");
-            let bw = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let iops = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // `0` is this subsystem's word for *unlimited* — `list` renders it
+            // as the string `unlimited` — so `unwrap_or(0)` did not merely lose
+            // the number, it inverted the request. `cgiostat create web 100O000`
+            // (letter O) asked for a 100 MB/s cap and created a cgroup with no
+            // cap at all, then reported it as created. A throttle that silently
+            // becomes no throttle is the one failure a throttle must not have.
+            //
+            // The limits stay *optional* per §607 — the synopsis documents
+            // `[bw_limit] [iops_limit]`, and omitting them to mean unlimited is
+            // a real request — but an unreadable word is no longer routed into
+            // that meaning.
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("cgiostat: create: missing cgroup name");
+                set_exit(1);
+                return;
+            };
+            let Some(bw) =
+                optional_num::<u64>(&parts, 2, "cgiostat", sub, "bandwidth limit in bytes/s", 0)
+            else {
+                return;
+            };
+            let Some(iops) = optional_num::<u64>(&parts, 3, "cgiostat", sub, "IOPS limit", 0)
+            else {
+                return;
+            };
             match cgiostat::create_cgroup(name, bw, iops) {
                 Ok(id) => shell_println!(
                     "cgiostat: created '{}' → id {} (bw={} iops={})",
@@ -97516,10 +97624,9 @@ fn cmd_cgiostat(args: &str) {
             }
         }
         "remove" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "cgiostat", sub, "cgroup id") else {
+                return;
+            };
             match cgiostat::remove_cgroup(id) {
                 Ok(()) => shell_println!("cgiostat: removed cgroup {}", id),
                 Err(e) => {
@@ -97529,14 +97636,16 @@ fn cmd_cgiostat(args: &str) {
             }
         }
         "read" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            // Unlike `taskio`, this synopsis brackets the count — `read <cg_id>
+            // [bytes]` — so omitting it is a documented request and the default
+            // survives (§607). Only the unreadable word is refused.
+            let Some(id) = required_num::<u32>(&parts, 1, "cgiostat", sub, "cgroup id") else {
+                return;
+            };
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "cgiostat", sub, "byte count", 4096)
+            else {
+                return;
+            };
             match cgiostat::record_read(id, bytes) {
                 Ok(()) => shell_println!("cgiostat: read {} bytes cgroup {}", bytes, id),
                 Err(e) => {
@@ -97546,14 +97655,13 @@ fn cmd_cgiostat(args: &str) {
             }
         }
         "write" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let bytes = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(4096);
+            let Some(id) = required_num::<u32>(&parts, 1, "cgiostat", sub, "cgroup id") else {
+                return;
+            };
+            let Some(bytes) = optional_num::<u64>(&parts, 2, "cgiostat", sub, "byte count", 4096)
+            else {
+                return;
+            };
             match cgiostat::record_write(id, bytes) {
                 Ok(()) => shell_println!("cgiostat: write {} bytes cgroup {}", bytes, id),
                 Err(e) => {
@@ -97563,10 +97671,9 @@ fn cmd_cgiostat(args: &str) {
             }
         }
         "throttle" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "cgiostat", sub, "cgroup id") else {
+                return;
+            };
             match cgiostat::record_throttle(id) {
                 Ok(()) => shell_println!("cgiostat: throttle event cgroup {}", id),
                 Err(e) => {
@@ -97577,22 +97684,40 @@ fn cmd_cgiostat(args: &str) {
         }
         "list" => {
             for cg in cgiostat::per_cgroup() {
-                let bw = if cg.bw_limit_bps > 0 {
-                    alloc::format!("{}B/s", cg.bw_limit_bps)
+                // The two spellings of the limit are branches of the *format
+                // string*, not a `String` built above it. Written the other way
+                // — `let bw = format!("{}B/s", …)` interpolated through a
+                // trailing `bw={}` — the unit and the word `unlimited` exist
+                // nowhere a reader of this function can see them, and nothing
+                // outside a running kernel can establish that a zero limit is
+                // reported as `unlimited` rather than as `0`. That is precisely
+                // the inversion the `create` arm above was fixed for, so the
+                // line that displays it is the last place it should be
+                // undiscoverable.
+                if cg.bw_limit_bps > 0 {
+                    shell_println!(
+                        "  [{}] {:<16} R={}B ({}io) W={}B ({}io) throttle={} bw={}B/s",
+                        cg.cg_id,
+                        cg.name,
+                        cg.read_bytes,
+                        cg.read_ios,
+                        cg.write_bytes,
+                        cg.write_ios,
+                        cg.throttle_count,
+                        cg.bw_limit_bps
+                    );
                 } else {
-                    alloc::string::String::from("unlimited")
-                };
-                shell_println!(
-                    "  [{}] {:<16} R={}B ({}io) W={}B ({}io) throttle={} bw={}",
-                    cg.cg_id,
-                    cg.name,
-                    cg.read_bytes,
-                    cg.read_ios,
-                    cg.write_bytes,
-                    cg.write_ios,
-                    cg.throttle_count,
-                    bw
-                );
+                    shell_println!(
+                        "  [{}] {:<16} R={}B ({}io) W={}B ({}io) throttle={} bw=unlimited",
+                        cg.cg_id,
+                        cg.name,
+                        cg.read_bytes,
+                        cg.read_ios,
+                        cg.write_bytes,
+                        cg.write_ios,
+                        cg.throttle_count
+                    );
+                }
             }
         }
         "stats" => {

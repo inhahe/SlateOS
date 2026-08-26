@@ -243,7 +243,6 @@ cmd_upnp 4
 cmd_usagetime 1
 cmd_usbpolicy 1
 cmd_userfault 5
-cmd_vdesktop 18
 cmd_vmballoon 3
 cmd_vmfrag 2
 cmd_vmguest 2

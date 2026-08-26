@@ -80600,8 +80600,38 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **662 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **644 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (fifth batch): `cmd_vdesktop` (18) cleared —
+> 662 → 644 across 238 → 237 functions. Pinned by `kshell::self_test` rung 72.
+>
+> The guessed *id* here is the shape the earlier batches already covered. What
+> is new is three arms where the guess turned a **set into a query**, so a
+> mistyped operand produced a reply that was true, useful, and about something
+> else:
+>
+> * `vd visible abc` — `unwrap_or(vdesktop::current())` listed the *current*
+>   desktop's windows, under its own heading. Nothing in the reply suggested
+>   the operand had been discarded.
+> * `vd anim slid` — set nothing and printed `Animation: slide
+>   (none/slide/fade/overview)`, which is verbatim the answer to `vd anim`. The
+>   typo and the query were the same output.
+> * `vd wrap zzz` — the catch-all `_ =>` arm answered `Wrap: false`.
+>
+> All three keep their absent-operand behaviour, which is documented and
+> intended; only the present-but-unreadable case is now refused. That is the
+> distinction `optional_num` exists for, and `visible` is its first use outside
+> the numeric cases.
+>
+> Two further sites the *ledger cannot count*, found by reading rather than by
+> the gate — the second such pair in two batches, which is now a pattern worth
+> stating: **the ledger's figure is a lower bound.** `vd unpin abc` had no
+> guard at all, so it unpinned window 0 and announced `Unpinned window 0` with
+> status 0 while the window the user meant stayed pinned. And `vd wp <id>` for
+> a desktop that does not exist fell out of an `if let` chain with no `else`,
+> printing *nothing* and exiting 0 — which reads as "this desktop has no
+> wallpaper".
+>
 > **Burn-down log.** 2026-08-25 (fourth batch): `cmd_partmgr` (21) cleared —
 > the largest remaining entry — 683 → 662 across 239 → 238 functions. Pinned
 > by `kshell::self_test` rung 71.

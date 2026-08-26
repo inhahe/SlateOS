@@ -16683,6 +16683,127 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_eq!(last_exit(), 0, "pmgr adddisk: a readable size succeeds");
     }
 
+    serial_println!(
+        "  kshell::self_test 72: a virtual desktop refuses a word rather than answering a \
+         question nobody asked"
+    );
+    // `cmd_vdesktop` (18 ledger sites, plus three the ledger cannot count).
+    // Its interesting shape is not the guessed *id* -- the earlier batches
+    // covered that -- but the three arms where the guess turned a *set* into a
+    // *query*, so a mistyped operand produced a reply that was true, useful,
+    // and about something else entirely.
+    {
+        // `vd visible abc` guessed `current()`, so the shell listed the current
+        // desktop's windows under its own heading. Nothing about the reply
+        // suggested the operand had been discarded.
+        let out = capture_command("vd visible abc");
+        assert_output_contains(
+            "vd refuses a desktop id it cannot read",
+            &out,
+            b"`abc' is not a desktop id",
+        );
+        assert_eq!(last_exit(), 1, "vd visible: an unreadable id errors");
+        assert_output_lacks("and lists nothing", &out, b"visible windows");
+
+        // The control that matters most here: the current desktop is a
+        // *documented* default for an absent operand and must survive the fix.
+        let out = capture_command("vd visible");
+        assert_output_contains(
+            "bare `vd visible` still answers for the current desktop",
+            &out,
+            b"visible windows",
+        );
+        assert_eq!(last_exit(), 0, "bare `vd visible` succeeds");
+
+        // `vd anim slid` set nothing and reported the animation already in
+        // effect, in the exact wording used to answer `vd anim`.
+        let out = capture_command("vd anim slid");
+        assert_output_contains(
+            "vd names the animation it does not know",
+            &out,
+            b"`slid' is not an animation",
+        );
+        assert_eq!(last_exit(), 1, "vd anim: an unknown animation errors");
+
+        let out = capture_command("vd anim");
+        assert_output_contains(
+            "bare `vd anim` still reports the setting",
+            &out,
+            b"Animation:",
+        );
+        assert_eq!(last_exit(), 0, "bare `vd anim` succeeds");
+
+        let out = capture_command("vd anim slide");
+        assert_output_contains(
+            "a known animation is still applied",
+            &out,
+            b"Animation: slide",
+        );
+        assert_eq!(last_exit(), 0, "vd anim slide succeeds");
+
+        // Same conflation in `wrap`, whose catch-all answered the query.
+        let out = capture_command("vd wrap zzz");
+        assert_output_contains(
+            "vd refuses a wrap value that is neither on nor off",
+            &out,
+            b"`zzz' is not on or off",
+        );
+        assert_eq!(last_exit(), 1, "vd wrap: an unreadable value errors");
+
+        let out = capture_command("vd wrap");
+        assert_output_contains("bare `vd wrap` still reports the setting", &out, b"Wrap:");
+        assert_eq!(last_exit(), 0, "bare `vd wrap` succeeds");
+
+        // `unpin` had no guard at all: it unpinned window 0 and said so.
+        let out = capture_command("vd unpin abc");
+        assert_output_contains(
+            "vd refuses a window id it cannot read",
+            &out,
+            b"`abc' is not a window id",
+        );
+        assert_eq!(last_exit(), 1, "vd unpin: an unreadable window id errors");
+        assert_output_lacks("and unpins nothing", &out, b"Unpinned");
+
+        let out = capture_command("vd unpin 4294967295");
+        assert_output_lacks(
+            "a readable window id is not refused as unreadable",
+            &out,
+            b"is not a window id",
+        );
+
+        // The source desktop of a move -- the operand whose guess silently
+        // changed which desktop a window was taken from.
+        let out = capture_command("vd movewin 7 abc 2");
+        assert_output_contains(
+            "vd refuses a source desktop it cannot read",
+            &out,
+            b"`abc' is not a source desktop id",
+        );
+        assert_eq!(last_exit(), 1, "vd movewin: an unreadable source errors");
+        assert_output_lacks("and moves nothing", &out, b"Moved window");
+
+        // A position, where 0 is the front of the list and therefore a real
+        // destination rather than an obviously-wrong one.
+        let out = capture_command("vd reorder 1 abc");
+        assert_output_contains(
+            "vd refuses a position it cannot read",
+            &out,
+            b"`abc' is not a position",
+        );
+        assert_eq!(last_exit(), 1, "vd reorder: an unreadable position errors");
+        assert_output_lacks("and reorders nothing", &out, b"Reordered");
+
+        // The wallpaper query for a desktop that does not exist used to print
+        // nothing at all and exit 0, which reads as "no wallpaper set".
+        let out = capture_command("vd wp 4294967295");
+        assert_output_contains(
+            "vd says the desktop does not exist rather than printing nothing",
+            &out,
+            b"not found",
+        );
+        assert_eq!(last_exit(), 1, "vd wp: a missing desktop errors");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -34702,51 +34823,43 @@ fn cmd_vdesktop(args: &str) {
             }
         }
         "remove" | "rm" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: vd remove <id>");
-                set_exit(1);
-            } else {
-                match vdesktop::remove(id) {
-                    Ok(()) => shell_println!("Removed desktop #{}", id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(id) = required_num::<u32>(&parts, 1, "vd", sub, "desktop id") else {
+                return;
+            };
+            match vdesktop::remove(id) {
+                Ok(()) => shell_println!("Removed desktop #{}", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "rename" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "vd", "rename", "desktop id") else {
+                return;
+            };
             let name = if parts.len() > 2 {
                 parts[2..].join(" ")
             } else {
                 String::new()
             };
-            if id == 0 || name.is_empty() {
+            if name.is_empty() {
                 shell_println!("Usage: vd rename <id> <name>");
                 set_exit(1);
-            } else {
-                match vdesktop::rename(id, &name) {
-                    Ok(()) => shell_println!("Renamed #{} → {}", id, name),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+                return;
+            }
+            match vdesktop::rename(id, &name) {
+                Ok(()) => shell_println!("Renamed #{} → {}", id, name),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "get" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "vd", "get", "desktop id") else {
+                return;
+            };
             if let Some(d) = vdesktop::get(id) {
                 shell_println!(
                     "Desktop #{}: {} ({} windows){}{}",
@@ -34790,20 +34903,14 @@ fn cmd_vdesktop(args: &str) {
             }
         }
         "switch" | "sw" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: vd switch <id>");
-                set_exit(1);
-            } else {
-                match vdesktop::switch(id) {
-                    Ok(()) => shell_println!("Switched to #{}", id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(id) = required_num::<u32>(&parts, 1, "vd", sub, "desktop id") else {
+                return;
+            };
+            match vdesktop::switch(id) {
+                Ok(()) => shell_println!("Switched to #{}", id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
@@ -34825,95 +34932,84 @@ fn cmd_vdesktop(args: &str) {
             shell_println!("Current: #{}", vdesktop::current());
         }
         "addwin" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let wid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if did == 0 || wid == 0 {
-                shell_println!("Usage: vd addwin <desktop_id> <window_id>");
-                set_exit(1);
-            } else {
-                match vdesktop::add_window(did, wid) {
-                    Ok(()) => shell_println!("Added window {} to desktop #{}", wid, did),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(did) = required_num::<u32>(&parts, 1, "vd", "addwin", "desktop id") else {
+                return;
+            };
+            let Some(wid) = required_num::<u64>(&parts, 2, "vd", "addwin", "window id") else {
+                return;
+            };
+            match vdesktop::add_window(did, wid) {
+                Ok(()) => shell_println!("Added window {} to desktop #{}", wid, did),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "rmwin" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let wid = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if did == 0 || wid == 0 {
-                shell_println!("Usage: vd rmwin <desktop_id> <window_id>");
-                set_exit(1);
-            } else {
-                match vdesktop::remove_window(did, wid) {
-                    Ok(()) => shell_println!("Removed window {} from desktop #{}", wid, did),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(did) = required_num::<u32>(&parts, 1, "vd", "rmwin", "desktop id") else {
+                return;
+            };
+            let Some(wid) = required_num::<u64>(&parts, 2, "vd", "rmwin", "window id") else {
+                return;
+            };
+            match vdesktop::remove_window(did, wid) {
+                Ok(()) => shell_println!("Removed window {} from desktop #{}", wid, did),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "movewin" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let from = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let to = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            if wid == 0 || from == 0 || to == 0 {
-                shell_println!("Usage: vd movewin <window_id> <from_desktop> <to_desktop>");
-                set_exit(1);
-            } else {
-                match vdesktop::move_window(wid, from, to) {
-                    Ok(()) => shell_println!("Moved window {} from #{} to #{}", wid, from, to),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(wid) = required_num::<u64>(&parts, 1, "vd", "movewin", "window id") else {
+                return;
+            };
+            // `from` is the operand that made this the worst arm in the
+            // function: `vd movewin 7 abc 2` guessed desktop 0, so the window
+            // was taken off whichever desktop the lookup happened to match and
+            // the shell reported "Moved window 7 from #0 to #2".
+            let Some(from) = required_num::<u32>(&parts, 2, "vd", "movewin", "source desktop id")
+            else {
+                return;
+            };
+            let Some(to) = required_num::<u32>(&parts, 3, "vd", "movewin", "target desktop id")
+            else {
+                return;
+            };
+            match vdesktop::move_window(wid, from, to) {
+                Ok(()) => shell_println!("Moved window {} from #{} to #{}", wid, from, to),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "where" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if wid == 0 {
-                shell_println!("Usage: vd where <window_id>");
-                set_exit(1);
-            } else {
-                match vdesktop::desktop_of(wid) {
-                    Some(did) => shell_println!("Window {} on desktop #{}", wid, did),
-                    None => shell_println!("Window {} not found", wid),
-                }
+            let Some(wid) = required_num::<u64>(&parts, 1, "vd", "where", "window id") else {
+                return;
+            };
+            match vdesktop::desktop_of(wid) {
+                Some(did) => shell_println!("Window {} on desktop #{}", wid, did),
+                None => shell_println!("Window {} not found", wid),
             }
         }
         "visible" => {
-            let did = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(vdesktop::current());
+            // The current desktop is a documented default for an *absent*
+            // operand. `unwrap_or(current())` also swallowed an unreadable one,
+            // so `vd visible abc` listed the current desktop's windows under
+            // the heading "Desktop #2:" -- a correct-looking answer to a
+            // question nobody asked.
+            let Some(did) = optional_num::<u32>(
+                &parts,
+                1,
+                "vd",
+                "visible",
+                "desktop id",
+                vdesktop::current(),
+            ) else {
+                return;
+            };
             let wins = vdesktop::visible_windows(did);
             shell_println!("Desktop #{}: {} visible windows", did, wins.len());
             for w in &wins {
@@ -34929,28 +35025,24 @@ fn cmd_vdesktop(args: &str) {
             }
         }
         "pin" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            if wid == 0 {
-                shell_println!("Usage: vd pin <window_id>");
-                set_exit(1);
-            } else {
-                match vdesktop::pin(wid) {
-                    Ok(()) => shell_println!("Pinned window {}", wid),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(wid) = required_num::<u64>(&parts, 1, "vd", "pin", "window id") else {
+                return;
+            };
+            match vdesktop::pin(wid) {
+                Ok(()) => shell_println!("Pinned window {}", wid),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }
         "unpin" => {
-            let wid = parts
-                .get(1)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            // `unpin` had no guard at all, so `vd unpin abc` unpinned window 0
+            // and announced "Unpinned window 0" with status 0 -- the window the
+            // user meant stayed pinned, and nothing said so.
+            let Some(wid) = required_num::<u64>(&parts, 1, "vd", "unpin", "window id") else {
+                return;
+            };
             vdesktop::unpin(wid);
             shell_println!("Unpinned window {}", wid);
         }
@@ -34965,15 +35057,11 @@ fn cmd_vdesktop(args: &str) {
             }
         }
         "wallpaper" | "wp" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(id) = required_num::<u32>(&parts, 1, "vd", sub, "desktop id") else {
+                return;
+            };
             let path = parts.get(2).copied().unwrap_or("");
-            if id == 0 {
-                shell_println!("Usage: vd wp <id> [path|clear]");
-                set_exit(1);
-            } else if path == "clear" {
+            if path == "clear" {
                 match vdesktop::clear_wallpaper(id) {
                     Ok(()) => shell_println!("Cleared wallpaper for #{}", id),
                     Err(e) => {
@@ -34998,33 +35086,49 @@ fn cmd_vdesktop(args: &str) {
                         &d.wallpaper
                     }
                 );
+            } else {
+                // Without this the query for a desktop that does not exist
+                // printed nothing at all and exited 0, which reads as "this
+                // desktop has no wallpaper".
+                shell_println!("Desktop #{} not found", id);
+                set_exit(1);
             }
         }
-        "anim" | "animation" => {
-            if let Some(a) = parts
-                .get(1)
-                .and_then(|s| vdesktop::SwitchAnimation::from_str(s))
-            {
+        // `anim` and `wrap` are the query/set conflation: with no operand they
+        // report the current setting, and the same arm answered that query for
+        // a word the user plainly meant as a set. `vd anim slid` printed
+        // "Animation: none (none/slide/fade/overview)" and exited 0 -- so the
+        // typo and the query were indistinguishable, and the animation the user
+        // asked for was silently not applied.
+        "anim" | "animation" => match parts.get(1) {
+            None => shell_println!(
+                "Animation: {} (none/slide/fade/overview)",
+                vdesktop::animation().label()
+            ),
+            Some(word) => {
+                let Some(a) = vdesktop::SwitchAnimation::from_str(word) else {
+                    shell_println!("vd: anim: `{}' is not an animation", word);
+                    shell_println!("Animations: none, slide, fade, overview");
+                    set_exit(1);
+                    return;
+                };
                 vdesktop::set_animation(a);
                 shell_println!("Animation: {}", a.label());
-            } else {
-                shell_println!(
-                    "Animation: {} (none/slide/fade/overview)",
-                    vdesktop::animation().label()
-                );
             }
-        }
-        "wrap" => match parts.get(1).copied().unwrap_or("") {
-            "on" | "true" => {
+        },
+        "wrap" => match parts.get(1).copied() {
+            None => shell_println!("Wrap: {}", vdesktop::wrap_around()),
+            Some("on" | "true") => {
                 vdesktop::set_wrap(true);
                 shell_println!("Wrap: on");
             }
-            "off" | "false" => {
+            Some("off" | "false") => {
                 vdesktop::set_wrap(false);
                 shell_println!("Wrap: off");
             }
-            _ => {
-                shell_println!("Wrap: {}", vdesktop::wrap_around());
+            Some(word) => {
+                shell_println!("vd: wrap: `{}' is not on or off", word);
+                set_exit(1);
             }
         },
         "init" => match vdesktop::init_defaults() {
@@ -35035,24 +35139,20 @@ fn cmd_vdesktop(args: &str) {
             }
         },
         "reorder" => {
-            let id = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let pos = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            if id == 0 {
-                shell_println!("Usage: vd reorder <id> <position>");
-                set_exit(1);
-            } else {
-                match vdesktop::reorder(id, pos) {
-                    Ok(()) => shell_println!("Reordered #{} to position {}", id, pos),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
+            let Some(id) = required_num::<u32>(&parts, 1, "vd", "reorder", "desktop id") else {
+                return;
+            };
+            // Position 0 is the front of the list, so a mistyped position moved
+            // the desktop to the front and said "Reordered #3 to position 0" --
+            // a completed operation, just not the one asked for.
+            let Some(pos) = required_num::<usize>(&parts, 2, "vd", "reorder", "position") else {
+                return;
+            };
+            match vdesktop::reorder(id, pos) {
+                Ok(()) => shell_println!("Reordered #{} to position {}", id, pos),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
                 }
             }
         }

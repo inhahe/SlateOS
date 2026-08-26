@@ -114,6 +114,14 @@ members = [
     # untrusted input, each its own attack surface, and a bug fixed in one is
     # not fixed in the other.
     "deflate",
+    # ZIP (APPNOTE 6.3.x) with Zip64, promoted out of `kernel/src/fs/zip.rs`
+    # at lane C's request (`requests/c-a-zip-is-trapped-in-the-kernel-binary.md`)
+    # -- the third time this same pattern has come up.
+    # `apps/archivemanager` could list an archive's entries but could not open
+    # one, because the only ZIP reader in the tree sat behind the kernel's
+    # edge. The fix that does not end in a second parser of untrusted input is
+    # the one that moves the first parser somewhere both callers can name it.
+    "ziparchive",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

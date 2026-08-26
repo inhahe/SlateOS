@@ -1,0 +1,25 @@
+[package]
+name = "ziparchive"
+version = "0.1.0"
+edition = "2024"
+description = "ZIP archive reading and writing (APPNOTE 6.3.x), including Zip64, written once."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` + `alloc`, for the same reason as `deflate`: an archive reader cannot
+# be allocation-free, because neither the entry count nor any entry's size is
+# known until the central directory has been walked. `alloc` alone (no `std`) is
+# what lets the kernel link this, and the kernel is the caller that constrains
+# the dependency list.
+[dependencies]
+# The two codecs a ZIP entry can be stored in. Method 8 is DEFLATE; method 0 is
+# stored, and needs no codec at all.
+deflate = { path = "../deflate" }
+# Every entry carries a CRC-32 of its *uncompressed* bytes. This is the
+# reflected-IEEE CRC-32, the same one the gzip trailer uses -- not the CRC32C
+# the kernel uses for ext4.
+crc32 = { path = "../crc32" }
+
+[lints]
+workspace = true

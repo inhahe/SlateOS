@@ -6104,6 +6104,7 @@ dependencies = [
  "sha2",
  "spin",
  "tzrules",
+ "ziparchive",
 ]
 
 [[package]]
@@ -14756,6 +14757,14 @@ name = "zip"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "ziparchive"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "deflate",
 ]
 
 [[package]]

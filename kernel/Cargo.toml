@@ -47,6 +47,12 @@ crc32 = { path = "../crc32" }
 # (requests/c-a-two-inflates.md). no_std + alloc: a decompressor cannot be
 # allocation-free, since the output length is not declared in the format.
 deflate = { path = "../deflate" }
+# The shared ZIP reader/writer. `kernel/src/fs/zip.rs` used to be the
+# implementation and is now a shim over this crate, for the same reason
+# `compress.rs` is: `apps/archivemanager` could not depend on a module of a
+# binary crate, so it could list an archive's entries but not extract one
+# (requests/c-a-zip-is-trapped-in-the-kernel-binary.md). no_std + alloc.
+ziparchive = { path = "../ziparchive" }
 # The shared POSIX regular-expression engine, used by userspace's grep, sed,
 # awk and expr. The kernel shell carries its own awk and sed, and they were
 # matching `/regex/` with `str::contains` -- so `awk '/^err/'` matched lines

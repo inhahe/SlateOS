@@ -45831,3 +45831,349 @@ these terms), `gui/desktop/src/session.rs`
 (`begin_notifications_slide`, the `is_tick` guard in `dispatch`,
 `anything_moving`, `step_frame`), `gui/desktop/src/lib.rs`
 (`toggle_notifications`).
+
+---
+
+## 603. The shell's operand parsers are one generic `required_num<T>`, not one function per integer width
+
+**Date:** 2026-08-25
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel shell has ~700 places that read a number the user
+typed. §600 says each must *refuse* a word it cannot read rather than
+substitute a default, and the refusals are being converted in batches. The
+conversion runs through a small helper that does the reading and the
+refusing. The question was whether that helper should be written once per
+integer size -- `required_u32`, `required_u64`, `required_i32`, and so on --
+or once, generically, over "any type that can be parsed from a string." It is
+now one generic pair, `required_num<T>` / `optional_num<T>`. Nothing a user
+sees changes; the diagnostics are identical.
+
+**What was there before.** Six near-identical functions had accumulated over
+three burn-down batches: `required_u32`, `required_u64`, `required_i32`,
+`optional_u32`, `optional_u64`, and the id-specific `required_id`. Each was
+about fifteen lines and differed from its siblings only in the type after
+`parse::<>`. `required_i32` was added on its own in the second batch, for
+`monitors pos`, because a monitor coordinate to the left of the primary
+display is negative and `required_u32` would have refused exactly the inputs
+that are correct.
+
+**The argument for keeping them separate** is written in the file's own
+history: `required_u64`'s docstring said, in as many words, that a generic
+version was rejected because *"a `T: FromStr` bound would pull
+`core::str::FromStr` into a signature that every call site would then have to
+name."* That is a real cost if true -- 700 call sites each carrying a
+turbofish would be worse than six duplicated helpers.
+
+**It was not true, and that is what settled it.** Of the 55 call sites at the
+time of conversion, **51 compile with no annotation at all**: the value flows
+into a typed destination -- a struct field, a function parameter, a comparison
+against a typed constant -- and inference reads the type from there. Only four
+need `required_num::<u64>`, and they need it for a reason worth knowing
+rather than a reason worth hiding: `reslimit setmem` and `reslimit setio` are
+the only operands in the file whose value never reaches a typed destination.
+Both are multiplied out to bytes or bytes-per-second on the spot, and the
+*product* is what the subsystem sees, so nothing downstream pins the width.
+Those four sites carry a comment saying so, and saying why `u64` is the right
+answer and not a defensive widening: a limit in MiB times 1024*1024 overflows
+`u32` at 4 GiB, which is an ordinary memory limit to ask for.
+
+**The other half of the argument is the size of what remains.** A survey of
+the 706-site backlog's parse targets found **nine distinct types**: `u32`
+(279), inferred-from-context (221), `u64` (159), `usize` (60), `u8` (21),
+`u16` (16), `i32` (14), `i64` (9), `i8` (1). Continuing the per-width family
+therefore meant writing and maintaining ten more functions that differ in one
+token -- and, worse, meant that the next person converting a batch would have
+to *notice* that `u16` has no helper yet and write a seventh, or quietly
+reach for `required_u32` and truncate. A helper family with gaps in it is a
+helper family that invites the wrong helper.
+
+**What was given up.** Two things, both small and both real:
+
+* **The error message can no longer name the type.** A per-width helper could
+  in principle say "is not a 32-bit number". It never did -- every one of them
+  took a `noun` parameter and said `` `abc' is not a size in MiB ``, which is
+  the better message anyway, because the user typed a size in MiB and does
+  not know or care how many bits it lands in.
+* **Four call sites now carry a turbofish** that they did not before. Judged
+  worth it: the turbofish is *at* the site where the width genuinely is a
+  decision, which is where a reader should be made to think about it.
+
+**Where the deleted rationale went.** Each of the six docstrings carried a
+paragraph earned by a real defect, and none of it was thrown away.
+`optional_u64`'s note about `reslimit`'s inverted default — `0` means
+*unlimited*, so `.unwrap_or(0)` answered a mistyped cap by removing the cap
+-- is now the worked example in `optional_num`. `required_i32`'s note about
+negative monitor coordinates is now the "Choose `T` from what the operand
+means" section of `required_num`. Deleting a helper must not delete the bug
+report that justified it.
+
+**`required_id` was kept.** It is not a width variant: it fixes the operand
+index at 1, returns `u64` unconditionally, and emits an id-specific
+diagnostic. 42 of the 52 sites in the first burn-down batch were the
+character-for-character identical line it replaced. Folding it into
+`required_num` would have cost every one of those sites two extra arguments
+to say something the helper's name already says.
+
+**Where it came from.** `known-issues.md` →
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`,
+third burn-down batch (`cmd_colorpicker`, 23 sites). Commit `f6c59b370`.
+
+## 604. The self-test wording gate decides what a command can print by an over-approximating call-graph closure, and treats the rung's own text as a witness rather than a wording
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel shell's self-test checks commands by running them and
+asserting their output contains, or does not contain, some piece of text. That
+text goes stale: a command's wording is improved, the assertion still names the
+old wording, and the test either fails a *correct* kernel or quietly stops
+guarding anything. Because the shell self-test can only run inside a booted
+QEMU, either outcome costs an eleven-minute boot to discover. `scripts/check-selftest-wording.py`
+now checks the assertions against the source before the build. The decision
+recorded here is how it answers "can this command print this text?", because
+every plausible answer is wrong in one direction or the other, and the choice
+of which direction to be wrong in is the whole design.
+
+**The defect it exists for.** On `adddc7459` a table of nine commands asserted
+that each one's complaint about a missing operand contained `Usage:`. `vd
+remove` was then converted to `required_id` and began saying `vd: remove:
+missing desktop id` — strictly better wording — and the rung panicked the
+kernel *for the improvement*. The class is not "someone typed `Usage:`"; it is
+**an assertion whose expected text no longer belongs to the command under
+test**, and it has two directions:
+
+| Direction | What it costs |
+|---|---|
+| `assert_output_contains` names text the command cannot print | the rung fails a correct kernel — a boot lost per occurrence |
+| `assert_output_lacks` names text the command cannot print | the assertion can never fire, so the regression it was written to catch is unguarded, silently |
+
+Both were live in the tree when the gate was written: `wsnap snap abc left`
+asserted the absence of `Left half`, wording that stopped existing when the
+position started being named by `SnapPosition::label()` (which spells it
+`left`), and `bright set 50` asserted the absence of `Usage:` after that arm had
+been converted to `required_num` and stopped saying `Usage:` at all.
+
+**The problem.** To check the assertion the gate has to know what text a command
+can produce, and it is a regex scanner, not a compiler. Three sub-decisions:
+
+**1. How wide is "the command"?** Not the whole `cmd_*` function: `cmd_vdesktop`
+prints `Usage:` in plenty of arms, just not the one `remove` reaches, and a
+whole-function pool declares the stale marker producible and reports nothing.
+The pool is narrowed to the depth-1 `match` arm named by the command's *second*
+word, plus everything reachable from it. It deliberately does **not** narrow to
+nested matches, which would require knowing which operand the rung passed.
+
+**2. How does a call get followed?** By name, over every definition of that
+name in the file — free functions, associated functions and methods alike.
+Following methods is not optional: `cut`, `sed`, `fold` and `base64` put every
+diagnostic they own behind `err.report()`, and without it their pools held none
+of their own error wording and every refusal rung in four commands was reported
+as broken. But a name is all the scanner has, and `fn report` is a method on
+four different error enums, so it unions all four.
+
+*This over-approximates on purpose.* A pool larger than the truth lets a real
+defect through; a pool smaller than the truth accuses correct code. Only the
+second gets the gate switched off, so that is the direction not to err in. The
+same reasoning sets `MIN_FIXED_RUN` in `producible`: a fragment matches a
+format literal only if some *contiguous* run of the literal's fixed text, four
+bytes or more, survives in it — enough that `` `abc' is not a horizontal
+coordinate `` matches `` `{}' is not a {} `` on the eleven bytes of `' is not a `,
+and `Usage:` matches nothing in the `vd remove` arm, whose best run is a lone
+colon.
+
+**3. What about text the command never owned in the first place?** Most of
+these rungs assert on *data*, not wording: `cut -d: -f2` fed `zz_a:zz_b:zz_c`
+prints `zz_b`, and no pool of `cut`'s literals can ever vouch for it. Checking
+them anyway produced 121 findings that were all correct code.
+
+So the gate tracks a **witness**: everything the rung has put into the system in
+this block — every command line it ran, every byte it piped, every literal in a
+statement that asserts nothing (rungs plant witnesses through `Vfs::write_file`
+as readily as through a command). A fragment drawn from the witness is skipped,
+because text the rung supplied is not a wording the command owns. This is what
+these rungs' `zz_`/`selftest` prefix convention has always meant informally; the
+gate just makes it decidable.
+
+Three limits keep that from swallowing the rule it is meant to serve:
+
+- The witness is **rung-scoped**, dropped at brace depth 0 between rungs. Accumulated over all 74 rungs it would eventually contain a substring of nearly anything.
+- Assertion fragments and table markers are **excluded** — they are the thing under test. This is exactly what keeps `b"Usage:"` checkable.
+- Only **whitespace-free** plain literals are planted. A path or a file name is one token by construction; the third argument of `assert_eq!(last_exit(), 1, "find: an unreadable size is an error")` is prose *about* the command and would blind the gate to half its own vocabulary.
+
+**The alternative considered and rejected** for the witness was splitting the
+fragment on whitespace and skipping it if every token appears in the witness.
+It would have cleared two more findings, and it is far too weak: a marker like
+`no such desktop` would be skipped the moment `no`, `such` and `desktop` each
+turned up somewhere in the block.
+
+**What is left over is exempted, not analysed away.** Five assertions remain
+that the gate cannot derive: output a filter *rearranged* out of the rung's data
+(`cut -d: -f3,1` → `zz_a:zz_c`, `cut -c1-3,7` → `zz_d`, `sed s/zz_dup/zz_one/g`
+→ `zz_one zz_one`), `od`'s formatted offset column, and `pmgr`'s `Disk #{}: {}
+{}GB` whose literal frame between two operands is one space and two letters.
+They live in `ALLOWED` with a reason each, and an entry that stops matching is
+itself reported — an exemption that no longer fires is either debt that was paid
+or an exemption now covering something it was never written for.
+
+**The gate is graded before it grades.** `--self-test` runs the whole analysis
+over an embedded fixture — a miniature `kshell.rs` that *is* the `adddc7459` bug:
+a table of arity cases, a loop over it, and one `b"Usage:"` marker true of one
+row and false of the other. `boot-test.sh` runs it first, for the same reason
+`check-recursive-locks.py` and `check-selftest-skips.py` are run against their
+fixtures first: **every collapse mode of this analysis makes findings disappear,
+never appear**, and a gate that has stopped grading anything reports zero
+findings in exactly the same words as a clean tree. Building the fixture on the
+real bug rather than on synthetic cases means a gate that has lost the ability to
+catch the one thing it was written for cannot pass its own test.
+
+The fixture was then **mutation-tested** rather than trusted for passing. Six
+mutants — arm narrowing disabled, the witness never planted, `piped` unrecognised
+as a capture, the call graph not followed, the loop not bound to its table,
+`MIN_FIXED_RUN` removed — were each injected into a copy of the gate, and all six
+turned the fixture red. A fixture that passes proves nothing until a broken gate
+makes it fail; the passing run and the six failing ones together are the evidence.
+That is also why the analysis returns a `Report` rather than printing: the fixture
+asserts on the verdict, so rewording an error message cannot silently pass it.
+
+**What it does not do, learned on the first boot after it landed.** The gate
+answers *can this command print this text*, never *will this run print it*. The
+very first assertion written on its advice — `bright set 50` expecting
+`Brightness → 50%` — passed the gate and panicked the kernel, because
+`brightness::init_defaults()` is called only from the `show` arm and a fresh boot
+has no display 1 to set; the command printed `Error: NotFound`. The rung was
+missing a `bright show` opener, the way rung 74 opens with `tile init`. Worth
+recording because it is the *old* guard's epitaph too: `Error: NotFound` lacks
+`Usage:` exactly as happily as a working run does, so the assertion that gate
+replaced had been passing on the error path for as long as it existed. The
+lesson is that this gate narrows what a rung may *claim*; only a boot establishes
+that the claim holds — and note the direction, since it yields a rung that fails
+loudly on a correct kernel rather than one that passes while testing nothing.
+
+**Cost of being wrong.** If the over-approximation is too generous the gate
+misses a stale assertion and the tree is exactly where it was before the gate
+existed: one boot to find out. If it were too strict it would block builds over
+correct code, and the pressure would be to delete it. The asymmetry is the
+argument.
+
+**Where it came from.** The `adddc7459` regression, found the expensive way
+during the `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`
+burn-down. Same shape as §299: the gate fires on the category — "this text
+belongs to some other command" — not on the word `Usage`.
+
+## 605. An on/off setting reads its word through a three-way `Option<Toggle>`, so that "asking" and "mistyping" cannot collapse into each other
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** Dozens of shell settings are switches — `a11y captions on`,
+`a11y motion off`. Typing the word with the switch sets it; leaving the word
+off asks what it currently is. Until now a mistyped word (`a11y captions
+onn`) was treated as *no word at all*, so the shell answered a request to
+change the setting by printing the setting's present value and exiting
+successfully. It now says `` a11y: captions: `onn' is not on or off `` and
+exits 1. The reading is done once, in a helper called `toggle_arg`, rather
+than by a `matches!` in each of ~30 commands.
+
+**Why this shape is worse than the guessed number §600 is about.** §600's
+usual defect substitutes a made-up value for a word it could not read, which
+at least prints something visibly wrong — a brightness of 0 when you asked
+for 5o. This one prints something *right*. `Captions: false` is a true
+statement about the system, delivered in reply to a request to change it,
+with exit status 0. Nothing downstream — not the user, not a script checking
+`$?` — has any signal that the command declined to act. It was found by
+reading the arms, not by the ledger's regex, which is keyed on
+`unwrap_or`-shaped substitution and structurally cannot see a catch-all that
+prints a getter.
+
+**The decision that carries the weight: absence, and only absence, means
+query.** The helper returns `Option<Toggle>` where `Toggle` is `Query` or
+`Set(bool)`, giving three outcomes from one call:
+
+| Input | Return | Meaning |
+|---|---|---|
+| no word at index | `Some(Toggle::Query)` | the user is asking |
+| `on`/`true`/`yes`/`1`/`enable`/`enabled` | `Some(Toggle::Set(true))` | understood |
+| `off`/`false`/`no`/`0`/`disable`/`disabled` | `Some(Toggle::Set(false))` | understood |
+| anything else | `None`, after printing and setting status 1 | refused |
+
+The alternative — returning `Option<bool>` and letting the caller treat
+`None` as "query" — is what the code already did informally, and is exactly
+the bug. Two distinguishable situations must not share a return value; the
+extra variant exists to make the collapse unrepresentable rather than merely
+discouraged.
+
+**Why a helper rather than fixing the arms in place.** The `matches!(word,
+"on" | "true" | "yes" | "1")` idiom had been copied into roughly fifty
+places, and the copies had drifted: some accepted `enable`, some did not;
+some treated an unrecognised word as `false`, which is the dangerous
+direction — `datausage limit block <name> 1` and `kernelbuild auto <id> 1`
+both *disable* a protection when handed a word they cannot read. One helper
+means one vocabulary, and means the next setting added gets the refusal for
+free instead of getting it if its author remembers.
+
+**What was given up.** The helper fixes the *shape* of the diagnostic (`is
+not on or off`), so a command wanting to advertise a third state — a
+tri-state `auto`, say — cannot use it and must read the word itself. That is
+correct: such a command's vocabulary is not this one, and borrowing the
+helper would make it lie about what it accepts. Judged a feature, not a
+limitation.
+
+**Where it came from.** The `cmd_a11y` batch of the
+`A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ`
+burn-down; six toggles in that one command had the defect. Rung 78 of
+`kshell::self_test` holds it down, and pairs every refusal with a control
+proving the query form still answers.
+
+## 606. A refusal computes its indefinite article from the noun's first letter, and lets the caller override it
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** When the shell cannot read a word, it says `` `zz' is not a
+window id ``. The article was a literal `a` in the helper's format string,
+so any noun beginning with a vowel came out as `` is not a element id `` —
+visibly broken English in the one message whose whole job is to be believed.
+It is now computed. The tricky part is that English picks the article by
+*sound*, not spelling, so no letter rule can be right about "a UID"
+(yoo-eye-dee) or "an hour"; those callers write the article into the noun
+themselves and the helper stands aside.
+
+**Why not just rename the offending nouns.** That was the first fix
+attempted, and it worked for the case at hand — "x coordinate" became
+"horizontal coordinate", which is a better noun anyway. But a survey found
+four vowel-initial nouns already shipped ("UID", "alpha (0-255)", "element",
+"inode ratio"), and renaming is a fix that must be re-applied by every future
+author, silently, with no gate to catch a miss. The wording gate (§604) will
+reject a self-test assertion that predicts the *correct* article while the
+kernel prints the wrong one — which is how this was found — but only for
+nouns some rung happens to assert on. Renaming treats instances; computing
+treats the class.
+
+**The escape hatch is the whole design.** `article_for` returns `""` when the
+noun already starts with `"a "` or `"an "`. So a caller with a noun the
+letter rule gets wrong passes `"a UID"` instead of `"UID"` and gets the right
+sentence. This is deliberately not a lookup table of exceptions: a table
+lives far from the call site, has to be found before it can be consulted, and
+grows without bound. Putting the override in the argument puts it where the
+person choosing the noun is already looking.
+
+**What is knowingly wrong.** The rule is first-letter-is-a-vowel, which
+mispredicts every noun whose *pronunciation* disagrees with its spelling —
+consonant-sounding vowels ("a UID", "a one-shot") and vowel-sounding
+consonants ("an hour", "an FD" — eff-dee). Shipping a heuristic known to be
+wrong is only defensible because the failure is loud, local, and cheap: it
+produces one ungrammatical word in one error message, visible to whoever
+writes the noun, fixable in place by writing the article in. Compare the
+alternative of a pronunciation dictionary in a kernel, which is not a
+serious proposal.
+
+**Cost of being wrong.** Cosmetic in both directions, but not free: the whole
+argument for the §600 refusals is that a command that declines to act must be
+*convincing* about it. A message that reads like a typo invites the reader to
+assume the shell is broken rather than that their input was, which is the
+opposite of what a refusal is for.
+
+**Where it came from.** Rung 78 of `kshell::self_test`, which asserted
+`` `zz' is not an element id `` and was rejected by the wording gate because
+the kernel could only produce `` a element id ``.

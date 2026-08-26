@@ -18306,6 +18306,57 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let _ = capture_command("bright undim");
     }
 
+    serial_println!(
+        "  kshell::self_test 86: a parse that happens behind a helper is invisible to the gate, so \
+         the helper has to name the word itself"
+    );
+    // `blkread` is the one site in the shell where the conflation of "you left
+    // it out" with "I could not read it" happens *inside a helper*.
+    // `parse_blkread_args` returned `Option<u64>` and threw away which of three
+    // failures had occurred, so the caller could only print the synopsis —
+    // answering `blkread vda 1O` with the syntax of the line the user had just
+    // typed almost correctly, and never mentioning `1O`.
+    //
+    // Neither gate could see it: D1 in `check-option-refusal.py` matches a parse
+    // and a substituted value within one *statement*, and here the parse is on
+    // the far side of a function boundary. A sweep of the other 50
+    // synopsis-on-`None` sites in this file found all 50 to be genuine absences
+    // with no parse in them, which is what makes this one worth pinning rather
+    // than generalising.
+    {
+        let out = capture_command("blkread vda 1O");
+        assert_output_contains(
+            "the unreadable sector is named, not just the syntax",
+            &out,
+            b"`1O' is not a sector number",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable sector errors");
+
+        // The one-word form's word is a sector, so an unreadable one is named
+        // the same way rather than being mistaken for a device.
+        let out = capture_command("blkread zznotasector");
+        assert_output_contains(
+            "and so is the one-word form's",
+            &out,
+            b"`zznotasector' is not a sector number",
+        );
+        assert_eq!(last_exit(), 1, "an unreadable one-word sector errors");
+
+        // Absence is now a different answer from unreadability.
+        let out = capture_command("blkread");
+        assert_output_contains(
+            "no sector at all is reported as missing",
+            &out,
+            b"missing sector number",
+        );
+        assert_output_lacks(
+            "and is not described as a word that could not be read",
+            &out,
+            b"is not a sector number",
+        );
+        assert_eq!(last_exit(), 1, "a bare `blkread` errors");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -19295,9 +19346,10 @@ fn cmd_disk() {
 // Hex-dump formatting uses offsets bounded by SECTOR_SIZE (512).
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_blkread(args: &str) {
-    // Parse: "blkread <sector>" or "blkread <device> <sector>"
-    let (dev_name, sector) = parse_blkread_args(args);
-    let Some(sector) = sector else {
+    // Parse: "blkread <sector>" or "blkread <device> <sector>". The helper has
+    // already named whichever word it could not read, so the synopsis is
+    // printed only as a reminder of the form, never as the whole answer.
+    let Some((dev_name, sector)) = parse_blkread_args(args) else {
         shell_println!("Usage: blkread [device] <sector>");
         shell_println!("  e.g., blkread 0  or  blkread vda 0");
         set_exit(1);
@@ -19345,25 +19397,56 @@ fn cmd_blkread(args: &str) {
 }
 
 /// Parse blkread args: either "<sector>" or "<device> <sector>".
-/// Returns (device_name, Some(sector)) or (_, None) on parse error.
-fn parse_blkread_args(args: &str) -> (alloc::string::String, Option<u64>) {
+///
+/// Returns `None` having already said why, so the caller has nothing left to
+/// decide. The previous signature returned `(device, Option<u64>)` and folded
+/// three different failures into that one `None` — no argument at all, a
+/// two-word form whose sector would not parse, and a one-word form whose word
+/// was neither a sector nor anything else — leaving the caller able to print
+/// only the synopsis. `blkread vda 1O` answered
+///
+/// ```text
+/// Usage: blkread [device] <sector>
+///   e.g., blkread 0  or  blkread vda 0
+/// ```
+///
+/// which is the syntax of the line the user had just typed correctly, and never
+/// mentioned `1O`.
+///
+/// This site is worth a note because neither gate could see it. `check-option-
+/// refusal.py`'s D1 looks for a parse and a substituted value *in one
+/// statement*; here the parse is behind a function boundary and the substitution
+/// is the enclosing function's synopsis, so the shape is invisible to it. A
+/// sweep of the 50 other synopsis-on-`None` sites in this file found every one
+/// of them to be a genuine *absence*, with no parse involved — this helper is
+/// the only place in the shell where a helper conflates "you left it out" with
+/// "I could not read it".
+fn parse_blkread_args(args: &str) -> Option<(alloc::string::String, u64)> {
     let mut parts = args.split_whitespace();
-    let first = match parts.next() {
-        Some(s) => s,
-        None => return (alloc::string::String::from("vda"), None),
+    let Some(first) = parts.next() else {
+        shell_println!("blkread: missing sector number");
+        return None;
     };
 
     if let Some(second) = parts.next() {
-        // Two args: device name + sector
+        // Two words: device name, then sector. The device is whatever was
+        // typed -- `with_device` below reports an unknown one by name -- so
+        // only the sector can be unreadable here.
         match second.parse::<u64>() {
-            Ok(s) => (alloc::string::String::from(first), Some(s)),
-            Err(_) => (alloc::string::String::from("vda"), None),
+            Ok(s) => Some((alloc::string::String::from(first), s)),
+            Err(_) => {
+                shell_println!("blkread: `{}' is not a sector number", second);
+                None
+            }
         }
     } else {
-        // One arg: try as sector number (default device "vda")
+        // One word: the documented `[device]`-omitted form, so it is a sector.
         match first.parse::<u64>() {
-            Ok(s) => (alloc::string::String::from("vda"), Some(s)),
-            Err(_) => (alloc::string::String::from("vda"), None),
+            Ok(s) => Some((alloc::string::String::from("vda"), s)),
+            Err(_) => {
+                shell_println!("blkread: `{}' is not a sector number", first);
+                None
+            }
         }
     }
 }

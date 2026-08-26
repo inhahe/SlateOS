@@ -81311,6 +81311,7 @@ separately and cleared separately.
 |---|---|---|---|
 | 2026-08-26 | `pagecache` | 516 (unchanged, and that is the point) | category 3, fixed *without* moving this count. `mm/page_cache.rs` carries the comment "Counters (monitoring; mirror what fs::pagecache exposes for stats)" above its `STAT_HITS`/`STAT_MISSES`/`STAT_EVICTIONS` — the two halves of one intent, never joined, so `/proc/pagecache` reported a 0.00% hit rate while the cache served VFS reads and demand paging. Joined at *read* time (a projected `kernel` row) rather than by calling `record_hit` on the cache's fast path, which would put this module's spin lock and a per-device string compare inside an operation whose purpose is to beat the disk. The four `record_*` stay unreachable and now legitimately so, reserved for a per-device source that does not exist. **Lesson for the metric: it counts functions, but the defect is an unfed table.** Where the subsystem already keeps free counters, projection is the fix and the count will not move. Do not read a flat count as no progress. |
 | 2026-08-26 | `futexstat` | 516 | category 3, the sharpest instance found so far. `procfs.rs` publishes `futexstat::stats()` and `hotspots(10)` under `/proc`, and the `futexstat` shell command prints the same table — while all four of `record_wait` / `record_wake` / `record_timeout` / `record_contention` were unreachable. So `/proc`'s futex hotspot list was permanently empty and its wait/wake/timeout totals permanently zero, on a kernel whose futex implementation works. A reader takes that as *measured* zero contention. Fixed by wiring the four recorders into `kernel/src/ipc/futex.rs` at the real blocking and waking points. |
+| 2026-08-26 | `netdev` | 516 (unchanged, and that is the point) | category 3, the second projection. `/proc/netdev` listed no interfaces and reported `total_rx_bytes: 0` on a kernel that had just completed a DHCP exchange, because all six of `record_rx`/`record_tx`/`record_error`/`record_drop`/`register_iface`/`set_link_state` were unreachable -- while `net::interface` counted every frame in six relaxed atomics that `netstat -i` was already printing. The two halves of one intent, never joined, exactly as with `pagecache`. Joined at *read* time (a projected `kernel` row) rather than by calling `record_rx` per frame, which would put this module's spin lock and a string compare per interface on the path of every packet. The six `record_*`/`register_*` stay unreachable and now legitimately so, reserved for a per-NIC source that does not exist. **New finding while naming the row:** `net::interface`'s counters are not one NIC's -- `net::veth::poll` records into the same atomics, so the total includes frames that never reached the wire. The projected row is therefore named `kernel` and not `eth0`, and the conflation is logged separately as `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`. |
 
 The futexstat fix is worth reading before doing the next category-3 module,
 because it ran into the constraint that shapes all of them: **you usually cannot
@@ -85846,3 +85847,58 @@ console under the freed *name* gets a strictly greater id. It is deliberately
 placed after test 8 so the exact `count == 4` that test asserts stays meaningful.
 
 **Not a regression.** True since the module was written.
+
+---
+
+## `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR` (lane A, 2026-08-26)
+
+**Status:** OPEN
+
+**In short:** the kernel counts network traffic in one set of counters and
+labels them `eth0`. Traffic between two containers on a virtual cable — which
+never reaches the network card — is added to the same counters. So a machine
+that is busy only between its own containers reports a busy *NIC*, and there is
+no way from the output to tell how much of it, if any, actually went out on the
+wire.
+
+`kernel/src/net/interface.rs` keeps six relaxed atomics — `TX_BYTES`,
+`RX_BYTES`, `TX_PACKETS`, `RX_PACKETS`, `TX_ERRORS`, `RX_DROPS` — and exposes
+them through `stats()`. They are fed from two genuinely different places:
+
+| caller | what it is | what it should count as |
+|---|---|---|
+| `net::mod::poll` / `net::mod::send_frame*` (lines ~110, ~201–239) | frames in and out of the real NIC (virtio-net, e1000 or rtl8139) | the NIC's traffic |
+| `net::veth::poll` (lines 577, 584) | frames drained from a virtual-ethernet endpoint, delivered inside the kernel | a veth pair's traffic |
+
+`netstat -i` then prints `Interface: eth0` above the sum
+(`net/netstat.rs:240`), and `netstat -s` prints the same numbers as "packets
+received" / "packets sent" (lines 365–368). Neither says the total includes
+frames that never touched the wire.
+
+**Why it is not merely cosmetic.** These counters are what an operator uses to
+answer "is the network the bottleneck?" A conflated total answers that question
+wrongly in a specific direction — always *over*-reporting NIC load — and the
+error grows with exactly the workload (containers talking to each other) where
+the NIC is least involved. It also cannot be corrected after the fact, because
+the two contributions are summed at record time and nothing retains the split.
+
+**The proper fix** is per-source counters rather than a flag: give
+`net::interface` a small set of counter groups keyed by source (the NIC, and
+one per veth endpoint or at least a `veth` aggregate), have each recorder name
+its source, and have `stats()` return the NIC's group. `netstat -i` should then
+grow a row per source rather than one row labelled `eth0`. Do **not** fix it by
+removing the `record_rx` calls from `veth::poll` — the veth traffic is real and
+someone will want it; it is the *labelling* that is wrong, and deleting the
+calls would replace an over-count with a silent under-count of the machine's
+actual frame rate.
+
+**Where it bites, beyond netstat.** `fs::netdev` projects these counters into
+`/proc/netdev` as the row named `kernel` — deliberately *not* named `eth0`,
+precisely because of this conflation; see that module's docs. When this is
+fixed, `netdev::kernel_row` should project the NIC group and the name can
+become `eth0` honestly.
+
+**How it was found.** Reading `net::interface` while wiring the `/proc/netdev`
+projection, to decide what the projected row could truthfully be called.
+
+**Not a regression.** True since `veth::poll` was written.

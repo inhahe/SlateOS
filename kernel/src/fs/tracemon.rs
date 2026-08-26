@@ -470,9 +470,14 @@ fn self_test_inner() {
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
-    // Reset so the test leaves no fixtures (custom_probe, global-enabled,
-    // OneShot mode) behind in the live /proc/tracemon registry.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     *STATE.lock() = None;
+    init_defaults();
 
     crate::serial_println!("tracemon::self_test() — all 8 tests passed");
 }

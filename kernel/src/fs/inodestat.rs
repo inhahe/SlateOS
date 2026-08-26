@@ -424,11 +424,17 @@ pub fn self_test() {
         crate::serial_println!("  [9/9] non-UTF-8 mount point: OK");
     }
 
-    // Leave NO residue: a diagnostic self-test must not populate the live
-    // /proc/inodestat table with its fixtures.  Reset to the uninitialised state
-    // so production reads report an empty table until the VFS wires real
-    // accounting.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
+    //
+    // /proc/inodestat therefore reads empty rather than stale, until the
+    // VFS wires real accounting into it.
     *STATE.lock() = None;
+    init_defaults();
 
     crate::serial_println!("inodestat::self_test() — all 9 tests passed");
 }

@@ -712,13 +712,14 @@ pub fn self_test() {
     }
     serial_println!("[fileshare] 12/12 non-UTF-8 paths OK");
 
-    // Leave NO residue.  The tests above enable sharing and set the hostname
-    // to "fileserver"; leaving that behind would make `fileshare show` report
-    // sharing switched on and the machine renamed, neither of which the user
-    // asked for.  `init_defaults()` is only ever called explicitly (there is
-    // no lazy init -- `with_state` returns NotSupported when uninitialised),
-    // so resetting to `None` restores exactly the state a fresh boot has.
+    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Clearing alone would switch this module off for the rest of the boot
+    // -- `init_defaults` runs once, that once is here, and every later write
+    // would take the `NotSupported` arm and be dropped by a caller that must
+    // not let statistics fail a real operation.  known-issues.md:
+    // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     *STATE.lock() = None;
+    init_defaults();
 
     serial_println!("[fileshare] All self-tests passed.");
 }

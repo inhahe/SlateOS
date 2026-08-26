@@ -581,10 +581,7 @@ pub fn self_test() {
     // survive that, since it does not read `STATE` -- but recorded devices
     // would not, and silently losing half the table to having run a diagnostic
     // is not a tradeoff worth making.)
-    {
-        let mut guard = STATE.lock();
-        *guard = None;
-    }
+    *STATE.lock() = None;
     init_defaults();
 
     crate::serial_println!("pagecache::self_test() — all 9 tests passed");

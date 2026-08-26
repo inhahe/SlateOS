@@ -173,6 +173,28 @@ pub const fn key_for_scancode(scancode: u32) -> Key {
         0xE05C => Key::RightSuper,
         0xE037 => Key::PrintScreen,
 
+        // --- The multimedia block. ---
+        //
+        // Present on most keyboards made since about 2000, and reaching us
+        // unchanged: `kernel/src/keyboard.rs` folds *any* 0xE0-prefixed code
+        // into `0xE000 | code` without a table of its own, so these arrive
+        // whether or not anything downstream knows them. Before this they
+        // arrived as `Key::Unknown` and the shell's binding table looked for
+        // Windows virtual key codes (0xAF, 0xAE, 0xAD) that this system never
+        // emits, so pressing volume-up did nothing anywhere.
+        //
+        // Brightness is absent because it is not a key: a laptop's brightness
+        // pair is an Fn combination the firmware answers over ACPI or a vendor
+        // WMI interface, and no scancode is generated for this table to
+        // translate. See known-issues.md → `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+        0xE020 => Key::VolumeMute,
+        0xE02E => Key::VolumeDown,
+        0xE030 => Key::VolumeUp,
+        0xE022 => Key::MediaPlayPause,
+        0xE019 => Key::MediaNextTrack,
+        0xE010 => Key::MediaPrevTrack,
+        0xE024 => Key::MediaStop,
+
         // Pause is the one genuinely irregular key: the hardware sends a
         // six-byte sequence beginning 0xE1, which the driver collapses to this.
         0xE11D => Key::Pause,
@@ -474,6 +496,35 @@ impl ModifierState {
         (self.left_shift || self.right_shift) != self.caps_lock
     }
 
+    /// The scancodes of the modifier keys currently held that contribute to
+    /// `wanted` — the physical keys that formed a chord.
+    ///
+    /// [`modifiers`](Self::modifiers) collapses the two sides into four
+    /// booleans, which is the right answer for a client asking "was Ctrl
+    /// held?" and the wrong one here: what a caller wants is the *key* whose
+    /// release will end the gesture, and "Alt" is two keys. Both are returned
+    /// when both are down, because the user who is holding both has not
+    /// finished until they let go of both.
+    ///
+    /// Returned as a fixed array rather than a `Vec` because this runs on the
+    /// keystroke path; the caller flattens away the `None`s.
+    #[must_use]
+    pub const fn held_keys_for(self, wanted: Modifiers) -> [Option<u32>; 8] {
+        const fn pick(held: bool, wanted: bool, scancode: u32) -> Option<u32> {
+            if held && wanted { Some(scancode) } else { None }
+        }
+        [
+            pick(self.left_shift, wanted.shift, 0x2A),
+            pick(self.right_shift, wanted.shift, 0x36),
+            pick(self.left_ctrl, wanted.ctrl, 0x1D),
+            pick(self.right_ctrl, wanted.ctrl, 0xE01D),
+            pick(self.left_alt, wanted.alt, 0x38),
+            pick(self.right_alt, wanted.alt, 0xE038),
+            pick(self.left_super, wanted.super_key, 0xE05B),
+            pick(self.right_super, wanted.super_key, 0xE05C),
+        ]
+    }
+
     /// Release everything held.
     ///
     /// Called when the compositor loses the input device or the session is
@@ -596,6 +647,64 @@ mod tests {
                 "code {extended:#x} and {bare:#x} must stay distinct"
             );
             assert_eq!(key_for_scancode(bare), Key::Unknown(bare));
+        }
+    }
+
+    #[test]
+    fn the_media_keys_have_names_rather_than_raw_codes() {
+        for (code, expected) in [
+            (0xE020u32, Key::VolumeMute),
+            (0xE02E, Key::VolumeDown),
+            (0xE030, Key::VolumeUp),
+            (0xE022, Key::MediaPlayPause),
+            (0xE019, Key::MediaNextTrack),
+            (0xE010, Key::MediaPrevTrack),
+            (0xE024, Key::MediaStop),
+        ] {
+            assert_eq!(key_for_scancode(code), expected, "code {code:#x}");
+        }
+    }
+
+    /// The media block shares low bytes with the alphanumeric block, and the
+    /// prefix is the only thing separating them: `0x10` is `Q`, `0x19` is `P`,
+    /// `0x20` is `D`, `0x22` is `G`, `0x24` is `J`, `0x2E` is `C`, `0x30` is
+    /// `B`. Dropping the prefix anywhere on this path would make previous-track
+    /// type a Q.
+    #[test]
+    fn a_media_key_is_not_the_letter_that_shares_its_low_byte() {
+        for (extended, bare, letter) in [
+            (0xE010u32, 0x10u32, Key::Q),
+            (0xE019, 0x19, Key::P),
+            (0xE020, 0x20, Key::D),
+            (0xE022, 0x22, Key::G),
+            (0xE024, 0x24, Key::J),
+            (0xE02E, 0x2E, Key::C),
+            (0xE030, 0x30, Key::B),
+        ] {
+            assert_eq!(key_for_scancode(bare), letter, "bare {bare:#x}");
+            assert_ne!(
+                key_for_scancode(extended),
+                letter,
+                "code {extended:#x} must not be the letter {bare:#x} names"
+            );
+        }
+    }
+
+    /// A volume key held down should ramp, so it must not be excluded from
+    /// auto-repeat the way the modifiers and the latches are. Stated here
+    /// rather than in `present::evdev` because it is a property of the *name*:
+    /// `repeats` derives its answer from this table, so a media key added
+    /// without thinking about repeat would inherit whatever the table said.
+    #[test]
+    fn the_volume_keys_are_not_latches() {
+        for code in [0xE020u32, 0xE02E, 0xE030] {
+            assert!(
+                !matches!(
+                    key_for_scancode(code),
+                    Key::CapsLock | Key::NumLock | Key::ScrollLock
+                ),
+                "code {code:#x}"
+            );
         }
     }
 

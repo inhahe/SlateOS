@@ -1255,7 +1255,6 @@ Nothing is blocked and nothing degrades. The two dialects are documented in
 a recorded decision rather than an accident. The only ongoing cost is that a user
 who learns one pattern language may assume the other works the same way.
 
-
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

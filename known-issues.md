@@ -83833,3 +83833,158 @@ the register→park window for the core protocol) is actually on the path
 boot, so the log quoted above no longer exists on disk. The excerpt in this
 entry is the whole of the surviving record — which is the argument for quoting
 generously here rather than referring to a file.
+
+---
+
+## `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS` (lane C, 2026-08-26)
+
+**In short:** the desktop has actions named "brightness up" and "brightness
+down", but nothing in this system can ever trigger them, and nothing in this
+system can change a screen's brightness even if they were triggered. A laptop's
+brightness pair is not a key: pressing Fn+F5 does not send a scancode (the
+number a keyboard sends when a key goes down) at all. The firmware handles it
+itself and talks to the panel over ACPI (the firmware's power-management
+interface) or a vendor-specific WMI channel. So there is no key event for a
+keyboard table to translate, and the two actions sit in the hotkey table
+unbound.
+
+**Where it lives.**
+
+| File | What is there |
+|---|---|
+| `gui/desktop/src/hotkeys.rs` | `HotkeyAction::BrightnessUp` / `BrightnessDown` exist and are parseable from a config file, but `register_defaults` gives them no binding, and `parse_key_name` *rejects* `"brightnessup"` / `"brightnessdown"` |
+| `gui/toolkit/src/event.rs` | deliberately has no `Key::BrightnessUp` / `Key::BrightnessDown` variant |
+| `gui/compositor/src/keymap.rs` | `key_for_scancode` has arms for the seven media keys and deliberately none for brightness |
+
+**Why it was left this way rather than "fixed" by adding the variants.** A
+`Key` variant no producer can ever emit is exactly the bug this change was
+undoing. Before it, the shell bound the volume keys to `Key::Unknown(0xAF)` and
+its neighbours — Windows virtual key codes, which this system never emits — so
+the bindings matched nothing for the whole life of the module, and a binding
+that matches nothing looks exactly like a binding nobody has pressed. Adding
+`Key::BrightnessUp` would recreate that: a name that parses, a binding that
+registers, and silence when pressed. Rejecting the name in `parse_key_name`
+means a config file that asks for it fails loudly instead, which is the honest
+answer.
+
+**What the proper fix is** — two independent halves, in this order:
+
+1. **A backlight service.** Something has to be able to *set* brightness before
+   an event to change it means anything. On real hardware that is an ACPI
+   `_BCM` call or a vendor WMI method; the natural home is a userspace service
+   exposing a "set backlight to N%" request, with the compositor as its client
+   (it already owns the display). Until this exists, both halves of the feature
+   are decoration.
+2. **A source of brightness events.** Firmware that handles the keys itself
+   often *also* reports them as ACPI notify events on the video device rather
+   than as keystrokes, so the source is the ACPI subsystem, not the keyboard
+   driver — it must not be plumbed through `key_for_scancode`. Some external
+   USB keyboards do send HID consumer-page brightness usages, which would come
+   in through the HID path instead. Whichever arrives, it should reach the shell
+   as a *system event*, not as a `Key`.
+
+Once (1) exists, `HotkeyAction::BrightnessUp` becomes bindable to a chord of
+the user's choosing (Super+F5, say) and is immediately useful without (2).
+
+**What happens if nothing is done.** Nothing gets worse. The actions are inert,
+the config parser rejects the key names loudly, and no user-visible feature
+silently misbehaves. This is a missing feature with an honest failure mode, not
+a bug.
+
+---
+
+## `TD-C-A-SHORTCUT-ONLY-WORKS-WHEN-THE-DESKTOP-IS-FOCUSED` (lane C, 2026-08-26)
+
+**In short:** every keyboard shortcut the desktop defines — Super+N, Alt+Tab,
+Super+D, and now the volume keys — only fires while the taskbar itself has
+keyboard focus, which for a taskbar is almost never. The moment the user clicks
+into any application window, the entire shortcut table goes dead. Alt+Tab, the
+one shortcut whose entire purpose is to be pressed *while you are in another
+window*, cannot work at all. This is not a bug in the shortcut table; the
+shortcuts are registered correctly and would fire. It is that key events never
+reach the shell.
+
+**The mechanism.** `Compositor::handle_key` (`gui/compositor/src/lib.rs`, ~line
+6640) opens with:
+
+```rust
+let Some(window_id) = self.focused_window else { return; };
+```
+
+and then delivers the event to that window and no other. There is no
+global-hotkey path, no key-grab table, and no "system keys" list anywhere in the
+tree — a client can only ever see keys pressed while it is focused. The desktop
+shell is just another client.
+
+**What this costs, concretely.**
+
+| Shortcut | Works when the desktop is focused | Works when an app is focused |
+|---|---|---|
+| Alt+Tab (window switcher) | yes | no |
+| Super+D (show desktop) | yes | no |
+| Super+N (notification pane) | yes | no |
+| Volume up/down/mute | yes | no |
+| Anything a user binds in their config | yes | no |
+
+**What the proper fix is.** A key-grab table in the compositor, checked *before*
+the focus lookup above:
+
+- Two new requests on the existing client protocol, `GrabKey { key, modifiers }`
+  and `UngrabKey { .. }`, held in a compositor-owned map from chord to client.
+- `handle_key` consults that map first. A grabbed chord is delivered to the
+  grabbing client and **not** to the focused window; everything else falls
+  through to the code that exists today, unchanged.
+- First grabber wins, and a second client asking for the same chord gets an
+  error rather than silently shadowing the first — a grab that quietly does
+  nothing is the failure mode this whole entry is about.
+- Grabs die with the client's connection, so a crashed shell does not
+  permanently swallow Alt+Tab.
+
+This is the X11 / `RegisterHotKey` shape, and it is the reason those systems'
+shortcuts work from inside applications.
+
+**Who is allowed to grab, and why that needed no new decision.** A grab is
+plainly privileged — a program that claims Super+L can put up a fake lock screen
+and collect the password, and one that claims Alt+Tab breaks window switching for
+the whole session. That question was briefly filed for the operator and then
+withdrawn, because the compositor had already answered it:
+`ClientLink::require_shell` (`gui/compositor/src/wire.rs`) is the single seam
+every privileged request goes through, it refuses nobody today, and it says so at
+length — the honest gate needs a capability the kernel attests at connection
+accept, which kernel channel IPC does not yet carry to the compositor
+(`design-decisions.md` §495, tracked as
+`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`). Key grabs go behind that same
+seam rather than growing a policy of their own, so the day the capability arrives
+they are gated along with reading the window list, acting on other people's
+windows and reserving a panel edge.
+
+**What happens if nothing is done.** It does not get worse with time, but it
+gets more expensive to notice: every shortcut added from here on is written,
+tested at the unit level, and appears to work, while being unreachable in
+practice. Two have already been added in this state (the media keys, and the
+notification-pane toggle). Anything gated behind a keystroke — an on-screen
+volume overlay, for instance — cannot be finished until this is.
+
+**Resolved (2026-08-26).** Built as described above, in two commits: the
+mechanism, then the shell wiring that uses it. `Compositor::handle_key` now
+consults a chord-keyed grab table after resolving the keystroke into a chord and
+before the focused-window lookup, `GrabKey`/`UngrabKey` ride the client protocol
+behind `require_shell` (`CONTROL_VERSION` 1 to 2), grabs die with the window that
+took them — including via `Server::reclaim`, so a *crashed* shell gives Alt+Tab
+back — and `ShellSession::start` claims all seventeen of the desktop's chords
+against the panel window, with Escape grabbed and ungrabbed as popups open and
+close. Two details the plan above did not anticipate, both now in
+`design-decisions.md` 565:
+
+- A grabbed chord's **release** does not match the grab (Alt+Tab held while Tab
+  is let go sends a bare `Tab` up), so the target is remembered per *scancode*,
+  the only thing identical between a press and its release.
+- Alt+Tab commits on the **Alt release**, which nobody grabs. The modifier keys
+  that formed a grabbed chord now owe their release to the grabber as well —
+  *in addition to* the focused window, never instead of it, since that window saw
+  the press and must not be left with a stuck Alt.
+
+The shell's grab list is checked against `DesktopAction::for_chord` in both
+directions by test, sweeping the entire key vocabulary, so a binding added
+without a grab — a shortcut silently dead in every window but one — fails the
+build rather than shipping.

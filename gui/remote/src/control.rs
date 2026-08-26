@@ -56,6 +56,8 @@
 //! bits, oversized counts and non-UTF-8 strings are all [`DecodeError`]s
 //! naming what was wrong.
 
+use guitk::event::{Key, Modifiers};
+
 use crate::reserve::PanelEdge;
 use crate::zones::SnapSlot;
 use crate::{
@@ -71,7 +73,24 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 
 /// Control protocol version. Bump on any incompatible layout change; never
 /// reuse a number.
-pub const CONTROL_VERSION: u8 = 1;
+///
+/// **2** — the request vocabulary gained [`RequestBody::GrabKey`] and
+/// [`RequestBody::UngrabKey`] (tags `0x17`/`0x18`). No existing message moved a
+/// byte, but an unrecognised tag is [`DecodeError::BadTag`] and the decoder
+/// stops there, so a version-1 compositor handed a grab fails the frame rather
+/// than skipping one message in it. As with
+/// [`INPUT_VERSION`](crate::input::INPUT_VERSION) 2, "incompatible" is about
+/// what the other end can read, not only about where the bytes sit.
+///
+/// **3** — [`WindowSpec`] gained
+/// [`input_transparent`](WindowSpec::input_transparent), one byte written
+/// directly after `transparent`. Unlike 2, this one *does* move bytes: every
+/// field after it in a `CreateWindow` message shifts by one, so a version-2
+/// decoder reads the min-size presence flag out of the new byte and
+/// desynchronises for the rest of the message. There is no way to add it that
+/// an older peer could skip — the encoding carries no per-field lengths — which
+/// is what the version number is for.
+pub const CONTROL_VERSION: u8 = 3;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -479,6 +498,22 @@ pub struct WindowSpec {
     pub decorations: bool,
     /// Whether the window's background may be transparent.
     pub transparent: bool,
+    /// Whether pointer input passes straight through the window to whatever is
+    /// behind it.
+    ///
+    /// Distinct from [`transparent`](Self::transparent), which is about pixels:
+    /// a window can be see-through and still clickable (a frosted panel), and
+    /// opaque yet click-through (a debug overlay). This flag is about the
+    /// hit test alone — the compositor behaves as though the window were not
+    /// there when deciding where a click, a hover or a scroll lands.
+    ///
+    /// The window can therefore never be focused by clicking it, and gets no
+    /// pointer events at all. It can still be raised, moved and painted by its
+    /// owner, and still receives keyboard input if something else focuses it.
+    ///
+    /// This is what a heads-up overlay needs — a volume OSD covering the middle
+    /// of the screen must not eat the click aimed at the window underneath it.
+    pub input_transparent: bool,
     /// Smallest client area the window can usefully be shown at.
     pub min_size: Option<(u32, u32)>,
     /// Largest client area the window wants to be shown at.
@@ -494,7 +529,7 @@ pub struct WindowSpec {
 
 impl WindowSpec {
     /// A titled window of the given size, with the ordinary defaults:
-    /// resizable, decorated, opaque, placed by the compositor.
+    /// resizable, decorated, opaque, clickable, placed by the compositor.
     #[must_use]
     pub fn new(title: impl Into<String>, width: u32, height: u32) -> Self {
         Self {
@@ -505,6 +540,7 @@ impl WindowSpec {
             resizable: true,
             decorations: true,
             transparent: false,
+            input_transparent: false,
             min_size: None,
             max_size: None,
             layer: Layer::Normal,
@@ -812,6 +848,69 @@ pub enum RequestBody {
     /// Reporting "there was nothing to drop" would tell a client something it
     /// cannot act on and would make the ordinary tidy-up-everything loop noisy.
     DropImage { window: u64, image_id: u64 },
+    /// Claim one key combination for a window, so that it arrives there
+    /// whatever else has the keyboard.
+    ///
+    /// **This is the only way a desktop-wide shortcut can work.** Without it a
+    /// key event goes to the focused window and nowhere else, which means the
+    /// taskbar's Alt+Tab fires only while the taskbar itself is focused — never,
+    /// in practice, because Alt+Tab exists to be pressed from inside some other
+    /// window. The compositor consults its grab table *before* it looks up the
+    /// focused window, and a grabbed chord is delivered to the grabber **instead
+    /// of**, not as well as, the window the user is typing in.
+    ///
+    /// The window named is the sender's own and is resolved in the ordinary way:
+    /// it is where the [`crate::input::InputEvent`] will be addressed, and it is
+    /// also the grab's *lifetime*. Grabs die when the window is destroyed and
+    /// when the connection hangs up, which is what stops a crashed shell
+    /// swallowing Alt+Tab for the rest of the session with nothing left on
+    /// screen to release it. This is the same lifetime argument as
+    /// [`ReserveEdge`](Self::ReserveEdge).
+    ///
+    /// **First grabber wins.** A second client asking for a chord somebody else
+    /// holds is refused with an error rather than quietly shadowing or replacing
+    /// the first: a grab that silently does nothing is indistinguishable from a
+    /// shortcut nobody has pressed, which is precisely the bug this whole
+    /// mechanism exists to end. Re-grabbing a chord *you already hold* is not an
+    /// error — it is what a shell does when it re-reads its config.
+    ///
+    /// **Both the press and the release** of a grabbed key go to the grabber,
+    /// and the release follows the press even if the modifiers were let go
+    /// first: Alt+Tab held open is a chord whose release is `Tab` with Alt
+    /// already up, and a release delivered to somebody else is a key the grabber
+    /// never sees go up.
+    ///
+    /// A grabbed chord produces **no text**. The dead-key composer is not run
+    /// for it and no character is attached, because a shortcut is not typing.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`: a program that could
+    /// claim Super+L could show a convincing fake lock screen and collect the
+    /// password. See that function for why the gate does not yet answer.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error naming the conflict.
+    GrabKey {
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    },
+    /// Release a claim made by [`GrabKey`](Self::GrabKey).
+    ///
+    /// Releasing a chord this window does not hold is **not** an error, for the
+    /// same reason [`DropImage`](Self::DropImage) is not: a client tidying up
+    /// should not have to remember precisely what it took, and the ordinary
+    /// release-everything loop would otherwise be noisy. Releasing one that
+    /// *another* window holds is refused — otherwise any client could strip the
+    /// shell of Alt+Tab without ever holding it.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`, so that the refusal
+    /// above cannot be used as a way to probe which chords are taken.
+    ///
+    /// Answered with [`ResponseBody::Ok`].
+    UngrabKey {
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -839,6 +938,8 @@ enum RequestTag {
     ReloadInput = 0x14,
     UploadImage = 0x15,
     DropImage = 0x16,
+    GrabKey = 0x17,
+    UngrabKey = 0x18,
 }
 
 impl RequestTag {
@@ -866,6 +967,8 @@ impl RequestTag {
             0x14 => Self::ReloadInput,
             0x15 => Self::UploadImage,
             0x16 => Self::DropImage,
+            0x17 => Self::GrabKey,
+            0x18 => Self::UngrabKey,
             _ => return None,
         })
     }
@@ -1035,6 +1138,7 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(u8::from(spec.resizable));
             out.push(u8::from(spec.decorations));
             out.push(u8::from(spec.transparent));
+            out.push(u8::from(spec.input_transparent));
             write_optional_size(out, spec.min_size);
             write_optional_size(out, spec.max_size);
             out.push(spec.layer.as_byte());
@@ -1148,6 +1252,30 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::DropImage as u8);
             write_u64(out, *window);
             write_u64(out, *image_id);
+        }
+        // Both grab verbs carry the same three fields in the same order, and
+        // deliberately share the input protocol's key and modifier codecs rather
+        // than spelling a chord out here: one table for the whole crate is what
+        // stops a chord grabbed as `Home` being matched as `End`.
+        RequestBody::GrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            out.push(RequestTag::GrabKey as u8);
+            write_u64(out, *window);
+            crate::input::encode_key(out, *key);
+            out.push(crate::input::encode_modifiers(*modifiers));
+        }
+        RequestBody::UngrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            out.push(RequestTag::UngrabKey as u8);
+            write_u64(out, *window);
+            crate::input::encode_key(out, *key);
+            out.push(crate::input::encode_modifiers(*modifiers));
         }
     }
 }
@@ -1294,6 +1422,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
             let resizable = read_bool(r)?;
             let decorations = read_bool(r)?;
             let transparent = read_bool(r)?;
+            let input_transparent = read_bool(r)?;
             let min_size = read_optional_size(r)?;
             let max_size = read_optional_size(r)?;
             let layer_byte = r.read_u8()?;
@@ -1306,6 +1435,7 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 resizable,
                 decorations,
                 transparent,
+                input_transparent,
                 min_size,
                 max_size,
                 layer,
@@ -1441,6 +1571,31 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 image_id: r.read_u64()?,
             }
         }
+        // Read field by field into locals rather than inline in the struct
+        // literal, because the order the fields are *read* is the wire order and
+        // the order they are *written* in the literal is not; a struct literal
+        // that happened to list them differently would decode a chord out of
+        // alignment with what the encoder wrote.
+        RequestTag::GrabKey => {
+            let window = r.read_u64()?;
+            let key = crate::input::decode_key(r)?;
+            let modifiers = crate::input::decode_modifiers(r.read_u8()?)?;
+            RequestBody::GrabKey {
+                window,
+                key,
+                modifiers,
+            }
+        }
+        RequestTag::UngrabKey => {
+            let window = r.read_u64()?;
+            let key = crate::input::decode_key(r)?;
+            let modifiers = crate::input::decode_modifiers(r.read_u8()?)?;
+            RequestBody::UngrabKey {
+                window,
+                key,
+                modifiers,
+            }
+        }
     })
 }
 
@@ -1508,6 +1663,10 @@ mod tests {
             resizable: true,
             decorations: false,
             transparent: true,
+            // Opposite to `transparent`, so a codec that confused the two —
+            // wrote one twice, or read the pair back in the wrong order —
+            // fails the round trip instead of passing by coincidence.
+            input_transparent: false,
             min_size: Some((320, 240)),
             max_size: Some((3840, 2160)),
             layer: Layer::Overlay,
@@ -1684,6 +1843,99 @@ mod tests {
             decode_requests(&bytes),
             Err(DecodeError::ImageTooLarge(_))
         ));
+    }
+
+    /// A chord has to survive the wire exactly, in both directions, for every
+    /// key and every modifier combination. Encoding `Home` and decoding `End`
+    /// would give the shell a shortcut that fires on the wrong key — and unlike
+    /// most protocol bugs it would look like a *configuration* mistake, which is
+    /// the sort of thing that gets chased for a day in the wrong file.
+    #[test]
+    fn a_grabbed_chord_survives_the_round_trip() {
+        let mut reqs = Vec::new();
+        let mut seq = 0;
+        for key in [
+            Key::Tab,
+            Key::D,
+            Key::VolumeUp,
+            Key::MediaPlayPause,
+            Key::F1,
+            Key::Unknown(0xE0FF),
+        ] {
+            for bits in 0u8..16 {
+                let modifiers = Modifiers {
+                    shift: bits & 1 != 0,
+                    ctrl: bits & 2 != 0,
+                    alt: bits & 4 != 0,
+                    super_key: bits & 8 != 0,
+                };
+                seq += 1;
+                reqs.push(Request::new(
+                    seq,
+                    RequestBody::GrabKey {
+                        window: 3,
+                        key,
+                        modifiers,
+                    },
+                ));
+                seq += 1;
+                reqs.push(Request::new(
+                    seq,
+                    RequestBody::UngrabKey {
+                        window: 3,
+                        key,
+                        modifiers,
+                    },
+                ));
+            }
+        }
+        assert_eq!(round_trip_requests(&reqs), reqs);
+    }
+
+    /// The two verbs carry identical payloads, so a decoder that read one tag
+    /// for the other would round-trip a *grab* into an *ungrab* with every field
+    /// intact — the shortcut would register and then immediately release itself,
+    /// and the shape of the bug would be "the hotkey does nothing", which is
+    /// indistinguishable from having no mechanism at all. Asserted by tag byte
+    /// rather than by round trip, because a round trip cannot see it.
+    #[test]
+    fn grab_and_ungrab_are_not_the_same_tag() {
+        assert_ne!(RequestTag::GrabKey as u8, RequestTag::UngrabKey as u8);
+        let grab = encode_requests(&[Request::new(
+            1,
+            RequestBody::GrabKey {
+                window: 1,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+        )]);
+        let ungrab = encode_requests(&[Request::new(
+            1,
+            RequestBody::UngrabKey {
+                window: 1,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            },
+        )]);
+        assert_ne!(grab, ungrab, "the two verbs encode to the same bytes");
+    }
+
+    /// Growing the request vocabulary is a version change even though no
+    /// existing message moved a byte: an unknown tag stops the decoder, so a
+    /// version-1 compositor handed a grab fails the whole frame rather than
+    /// ignoring one message in it. Pinned as "not 1" rather than "at least 2" so
+    /// that a later unrelated bump does not fail this test.
+    #[test]
+    fn the_grab_verbs_moved_the_protocol_version() {
+        assert_ne!(
+            CONTROL_VERSION, 1,
+            "GrabKey/UngrabKey were added in control version 2"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x19),
+            None,
+            "0x19 is the next free tag"
+        );
     }
 
     #[test]
@@ -1980,6 +2232,39 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), ALL.len());
+    }
+
+    #[test]
+    fn see_through_and_click_through_are_two_different_things() {
+        // All four combinations are meaningful and must survive the wire
+        // independently: a frosted panel is transparent and clickable, a debug
+        // overlay is opaque and click-through. If the codec ever wrote one flag
+        // for both, two of these four would come back wrong.
+        for (transparent, input_transparent) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let mut s = spec();
+            s.transparent = transparent;
+            s.input_transparent = input_transparent;
+            let req = Request::new(1, RequestBody::CreateWindow(s));
+            let back = round_trip_requests(std::slice::from_ref(&req));
+            let RequestBody::CreateWindow(got) = &back[0].body else {
+                panic!("wrong variant back")
+            };
+            assert_eq!(got.transparent, transparent);
+            assert_eq!(got.input_transparent, input_transparent);
+            // The fields written after the new byte must still line up; a
+            // desynchronised reader shows up here first.
+            assert_eq!(got.min_size, Some((320, 240)));
+            assert_eq!(got.layer, Layer::Overlay);
+        }
+    }
+
+    #[test]
+    fn a_new_window_is_clickable_until_it_says_otherwise() {
+        // The default matters more than most: a window that silently ignored
+        // every click would look broken in a way that gives no clue why.
+        assert!(!WindowSpec::new("Untitled", 640, 480).input_transparent);
     }
 
     #[test]

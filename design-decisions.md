@@ -46403,6 +46403,277 @@ wrappers around `handle_mouse` / `handle_hotkey`.
 
 ---
 
+## 565. A shortcut belongs to the shell even while another window has the keyboard, and the key that *ends* the gesture is owed to both of them
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** Until now, every keyboard shortcut the desktop defines — Alt+Tab,
+Super, Super+D, Alt+F4 — stopped working the instant you clicked into an
+application, because the compositor (the program that owns the screen and the
+keyboard) sent each keystroke to whichever window had the focus, and that was no
+longer the desktop. Alt+Tab in particular could never work, since its whole
+purpose is to be pressed *while you are in another window*. The fix is a **key
+grab**: the shell asks the compositor to reserve a specific chord for it, and
+that chord is routed to the shell no matter who has the focus. This entry
+records the rules that made grabs behave, and the one that is genuinely
+two-sided: what to do with the **Alt release** that ends an Alt+Tab.
+
+### The mechanism, and the three easy rules
+
+A *grab* is a claim on a **chord** — a key plus a set of modifiers — not on a
+key. Grabbing Alt+Tab must not take Tab away from every text field on the
+desktop, so the table is keyed `(Key, Modifiers)`. The claim is checked after
+the keystroke has been resolved into a chord (so that the keyboard layout and
+the AltGr fold have already been applied — a grab is on Alt+Tab, not on
+"scancode 0x0F") but **before** the focused-window lookup, which is the entire
+point.
+
+Three consequences follow without argument:
+
+- **A grabbed chord's *release* is not the same chord.** Hold Alt+Tab and let go
+  of Tab while Alt is still down and the release event is a bare `Tab`, matching
+  no grab. So the compositor remembers, per **scancode**, which window received
+  the press (`grabbed_presses`) — scancode, because the physical key is the only
+  thing guaranteed identical between a press and its release; the `Key` can
+  change under a layout switch mid-keystroke.
+- **A grabbed chord carries no text and does not feed the dead-key composer.**
+  Alt+Tab is not an attempt to type anything, and letting it prime a composition
+  would corrupt the next real keystroke.
+- **A grab lives exactly as long as the window that took it.** `destroy_window`
+  releases the window's grabs, and because `Server::reclaim` destroys a departed
+  client's windows through that same function, a shell that *crashes* gives back
+  Alt+Tab by the same route as one that exits tidily. A grab that outlived its
+  owner would make the chord permanently dead with nothing left to fix it.
+
+### The decision: who gets the modifier release
+
+The fourth rule is the one with two defensible answers.
+
+A hold-to-preview switcher does not act when Tab goes down; it acts when **Alt
+comes up** — that is how it knows which window you landed on. But nobody grabs a
+bare modifier, so the Alt release matches no grab, goes to the focused
+application, and the switcher is never told the gesture ended. It would sit on
+screen having activated nothing until some unrelated keystroke arrived.
+
+So: when a grabbed chord that *has* modifiers fires, the compositor records the
+scancodes of the modifier keys currently held that contributed to it
+(`grabbed_modifiers`), and delivers their releases to the grabber. The question
+is whether that delivery **replaces** the focused window's copy or is **added**
+to it.
+
+| Option | Verdict |
+|---|---|
+| Redirect: the grabber gets the modifier release, the focused window does not | **Rejected.** The focused window already saw the Alt *press* — it was routed there normally, before any chord existed. Withholding the release leaves that window believing Alt is held down forever: its next `f` is Alt+F, its next click is an Alt-click. That is precisely the stuck-modifier bug `release_all_modifiers` exists to prevent, and a grab must not manufacture one. |
+| **Duplicate: both the grabber and the focused window get the release** | **Chosen.** Every recipient sees a well-formed press/release pair for the keys it saw pressed. The grabber sees a release for a key it never saw pressed, which is the lesser anomaly: a switcher is *looking* for that release, and a client that is not expecting one has no state to corrupt, because a release of a key it never saw pressed is already a no-op in any correct handler. |
+| Grab Alt itself while the switcher is open | **Rejected.** Either the grab is permanent, in which case Alt+F mnemonics stop working in every application on the desktop, or it is taken when the switcher opens — which needs a request/confirm round trip to the compositor *in the middle of a gesture*, and still leaves the focused application with the stuck Alt, because a grab taken after the press does not conjure a release for it. |
+
+The rule is deliberately **not** shell-specific: any hold-to-preview interaction
+needs it, and putting it in the compositor means each such client does not
+reinvent a worse version. Two grabbers can be waiting on the same physical key —
+a switcher on Alt+Tab and an accessibility tool on Alt+F7 — so the table maps one
+scancode to a *list* of windows.
+
+**The debt is collected before the grab is matched, not after.** A modifier key
+can *itself* be a grabbed chord — the shell holds the bare Super key, because
+that is the start menu, and Super is also the modifier in Super+D. Taking the
+owed release out of the table only on the fall-through path would therefore have
+stranded it for exactly the keys most likely to owe one, since the Super release
+matches a grab and returns early. It would then have been paid out to some
+*later* Super press instead, ending a gesture minutes after the one it belonged
+to. So the entry is removed first, and the window the grab has just delivered to
+is skipped when the copies go out, because one physical release must not reach
+one client twice.
+
+**Losing the keyboard cancels a gesture rather than finishing it.** On a VT
+switch, `release_all_modifiers` synthesises the releases the compositor stopped
+being able to see, and it clears `grabbed_modifiers` rather than draining it to
+the grabbers. Switching away from the desktop mid-Alt+Tab should not commit a
+window switch you never chose; the user let go of nothing.
+
+### Grabs go behind `require_shell`, and they are checked against the bindings
+
+The requests are `GrabKey`/`UngrabKey`, gated by `ClientLink::require_shell` —
+the compositor's single seam for privileged requests, which today returns
+`Ok(())` for everyone and documents why (an honest gate needs a kernel-attested
+capability that channel IPC does not yet carry; see 495 and
+`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE`). Grabs deliberately do **not**
+grow a second, parallel policy: when that seam becomes real, they become real
+with it. This is what withdrew open question C-Q10, which had asked the operator
+to choose a grab-permission model.
+
+Adding a vocabulary to a wire protocol is a version change, so `CONTROL_VERSION`
+went 1 to 2; an older compositor answers the unknown tag with
+`DecodeError::BadTag` rather than misreading it.
+
+Finally, the shell's grab list is **machine-checked against its binding table in
+both directions** (`gui/desktop/src/lib.rs`, `DesktopShell::global_chords`):
+every grabbed chord must be one `DesktopAction::for_chord` acts on, and — the
+direction that matters — every chord `for_chord` acts on must be grabbed. The
+second test sweeps the whole key vocabulary (`guiremote::input::ALL_KEYS` times
+all 16 modifier sets) rather than only the chords already listed, because the
+failure that actually happens is a *new binding* added to the table and never
+grabbed, which is a shortcut that is silently dead in every window but one.
+
+**Escape is the one exception, and is reconciled per event.** A permanent Escape
+grab would take the key from every dialog on the desktop; no grab at all means a
+menu opened with the mouse cannot be closed with the keyboard. So the shell holds
+Escape only while one of its own surfaces is open, deciding from
+`DesktopShell::any_popup_open()` — the same single expression `dismiss_popups`
+uses, so the two cannot drift — reconciled once per event-loop pump rather than
+at the six places that open and close menus, because a scheme that must be
+extended at each new one is a scheme that will be forgotten at the seventh. Per
+*pump* and not per *event*, because a menu also closes without one: the session
+dismisses them on shutdown, and a caller holding the session can dismiss them
+outright. Both would otherwise leave Escape claimed with nothing left for it to
+close — the same harm the conditional grab exists to avoid, inverted.
+
+**Where it lives.** `gui/compositor/src/lib.rs` — `Compositor::handle_key`,
+`grab_target`, `grab_key`, `ungrab_key`, `release_grabs_of`,
+`release_all_modifiers`, and the `grabbed` / `grabbed_presses` /
+`grabbed_modifiers` tables. `gui/compositor/src/keymap.rs` —
+`ModifierState::held_keys_for`. `gui/compositor/src/wire.rs`,
+`gui/remote/src/control.rs` — the two requests. `gui/remote/src/client.rs`,
+`gui/window/src/lib.rs` — `grab_key` / `ungrab_key`. `gui/desktop/src/lib.rs` —
+`GLOBAL_CHORDS`, `CONDITIONAL_CHORD`, `any_popup_open`.
+`gui/desktop/src/session.rs` — `ShellSession::start` takes the grabs,
+`reconcile_escape_grab` maintains the conditional one.
+
+---
+
+## 566. A window can be told to be invisible to the mouse, and that is a different fact from being see-through
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** The desktop wants to flash a volume indicator over the middle of
+the screen when you press the volume key — a small panel that appears for two
+seconds and fades. Everything the shell draws lives in a *window*, and until
+now every window took clicks: whatever was on top of a point got the click at
+that point. So the indicator would have swallowed clicks aimed at the document
+underneath it for those two seconds, and the user would have no idea why.
+Windows can now be created **click-through**: the compositor answers "what is
+under the mouse?" as though such a window were not there, so the click lands
+on what is behind. Painting, stacking and typing are unaffected.
+
+### The tension
+
+The overlay has to be *on top* — that is what makes it visible over a
+maximised window — and being on top is exactly what makes it take the click.
+The two properties come from the same fact (its place in the stack) and have to
+be separated by hand.
+
+There was already a flag called `transparent` on a window, and the obvious
+cheap move is to reuse it. That would be wrong, and the wrongness is not
+theoretical:
+
+| | takes clicks | shows what is behind |
+|---|---|---|
+| ordinary window | yes | no |
+| frosted shell panel | **yes** | **yes** |
+| heads-up overlay | **no** | usually |
+| debug graph over a game | **no** | **no** |
+
+The middle two rows are the point. `transparent` is a fact about *pixels* — it
+tells the compositor to skip the opaque client-area fill so what the client
+does not paint shows through. Click-through is a fact about the *hit test*. The
+shell's own taskbar is already `transparent: true` and must obviously keep
+taking clicks; folding the two together would have made the taskbar
+unclickable the moment it went translucent.
+
+### The options
+
+**Give the window a per-pixel input region** (X11's shape extension, Wayland's
+`wl_surface.set_input_region`). *What changes:* a client could say "clicks land
+on my buttons but pass through my drop shadow", per rectangle.
+**Rejected — for now.** It is strictly more expressive and it is what a mature
+compositor ends up with, but it is a region list per window consulted on every
+pointer motion, and nothing in the tree wants anything but all-or-nothing yet.
+The all-or-nothing flag is the degenerate case of the region version, so
+adopting regions later does not invalidate this: `input_transparent: true`
+becomes "empty input region", and the flag can be kept as the spelling of it.
+
+**Have the shell move the overlay out of the way instead.** *What changes:* the
+indicator would dodge the pointer rather than ignore it. **Rejected.** It
+solves nothing — a click is aimed at a point, and an overlay that jumps aside
+when the pointer approaches is worse than one that sits still, because now the
+thing you are reading runs away while you read it.
+
+**Let the overlay take the click and forward it on.** *What changes:* nothing
+visible, in the good case. **Rejected.** It requires a client to synthesise a
+pointer event for a window it does not own and cannot name, which is precisely
+the ambient authority (permission you get by *being* you, rather than by
+holding a token for the thing you are acting on) that the capability design
+rules out. It also cannot get the coordinates right without knowing the target
+window's geometry, which it also cannot ask for.
+
+**A flag on the window, honoured by the compositor's hit test.** *What
+changes:* a window created with `input_transparent: true` never appears in the
+answer to "what is under the mouse", so the search continues past it.
+**Chosen.**
+
+### What it does and does not affect
+
+Deliberately narrow. `input_transparent` is read in exactly two places —
+`Compositor::window_at` and `Compositor::window_at_with_decorations` — and
+nowhere else. So:
+
+- **Painting is untouched.** An overlay that took no clicks *and* was not drawn
+  would be a volume indicator nobody can see, which is the one thing it exists
+  to do. `a_click_through_window_is_still_drawn` pins this.
+- **Stacking is untouched.** It is still on top; that is the point.
+- **Keyboard is untouched.** A click-through window can never be focused *by
+  clicking*, because clicking is what it opts out of — but if something else
+  focuses it, it gets keys normally. Folding keyboard routing in as well would
+  have made the flag mean two things.
+- **Both hit tests skip it, not one.** They serve different questions — client
+  area versus frame — and a window that the pointer fell through for a click
+  but not for a title-bar drag would be draggable by an edge the user cannot
+  see.
+
+The skip is a `continue`, not a `return`: the loop goes on to the window
+*behind*. A hit test that stopped at the first click-through window and
+answered "nothing" would look identical from the overlay's side and be just as
+broken, so the test asserts the lower window is returned rather than merely
+that the upper one was not.
+
+### The cost, stated plainly
+
+A window that ignores every click looks broken, with no clue on screen as to
+why — there is nothing to see, because looking is exactly the sense that still
+works. That is why the default is `false` in both `WindowSpec::new` and the
+`chrome()` helper the shell builds its surfaces with, why the one surface that
+sets it says so at its own call site rather than inside the helper, and why
+`a_new_window_is_clickable_until_it_says_otherwise` exists to keep the default
+from drifting.
+
+Nothing gates *who* may ask for it. A hostile client can create a full-screen
+click-through window, but that is the harmless direction: it can only decline
+input, never steal it. The dangerous direction — a full-screen window that
+takes every click — was already available to anyone and is a separate problem
+(`TD-C-ANY-CLIENT-CAN-READ-EVERY-WINDOW-TITLE` and §495 cover the shape of the
+answer).
+
+### Protocol cost
+
+`CONTROL_VERSION` 2 → 3. Unlike the 1 → 2 bump, this one genuinely moves
+bytes: the new flag is written straight after `transparent` in `CreateWindow`,
+so every field after it shifts by one and a version-2 decoder reads the
+min-size presence flag out of the new byte and desynchronises for the rest of
+the message. There is no way to add a field that an older peer could skip —
+the encoding carries no per-field lengths — which is what the version number
+is for. `see_through_and_click_through_are_two_different_things` round-trips
+all four combinations of the two flags and checks the fields *after* the new
+byte still line up, so a desynchronised reader fails there first.
+
+**Where it lives.** `gui/remote/src/control.rs` — `WindowSpec`, the codec, the
+version bump. `gui/compositor/src/lib.rs` — `Window::input_transparent`,
+`window_at`, `window_at_with_decorations`. `gui/window/src/lib.rs` —
+`WindowBuilder::input_transparent`, `WindowAttributes`,
+`Window::is_input_transparent`.
+
+---
+
 ## 607. An operand whose guess destroys data is still made *optional*, not required — the fix is refusing the unreadable word, never withdrawing the documented default
 
 **Date:** 2026-08-26

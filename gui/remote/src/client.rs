@@ -43,6 +43,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
+use guitk::event::{Key, Modifiers};
 use guitk::render::RenderTree;
 
 use crate::DecodeError;
@@ -490,6 +491,65 @@ impl<T: Transport> Connection<T> {
         workspace: u32,
     ) -> Result<(), ClientError<T::Error>> {
         self.confirm(RequestBody::SetWindowWorkspace { window, workspace })
+    }
+
+    /// Claim a keyboard chord for `window`, wherever the keyboard focus is.
+    ///
+    /// A shell's, on the same terms as [`shell_control`](Self::shell_control)
+    /// and for a sharper reason: a shortcut that only fires while the desktop
+    /// itself holds the keyboard is not a shortcut. Alt+Tab exists to be pressed
+    /// *from inside another window*, and without a grab the compositor routes it
+    /// to that window and the switcher never hears it.
+    ///
+    /// The claim is on the chord, not the key: grabbing `Tab` with Alt held
+    /// leaves a bare `Tab` reaching the text field the user is typing in. Both
+    /// the press and the matching release are delivered, so a switcher can hold
+    /// its strip up until the modifier is let go.
+    ///
+    /// `window` must be one of this client's own. It is what the events are
+    /// addressed to and it is the grab's lifetime: closing it releases every
+    /// chord it held, which is also what happens when the client dies.
+    ///
+    /// # Errors
+    ///
+    /// [`ClientError::Transport`] if the exchange fails, and
+    /// [`ClientError::Refused`] if the compositor declined — which for a grab
+    /// means either the window is not this client's or another window already
+    /// holds the chord. First grabber wins, and it wins until it lets go.
+    pub fn grab_key(
+        &mut self,
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::GrabKey {
+            window,
+            key,
+            modifiers,
+        })
+    }
+
+    /// Give a chord back, so that it reaches the focused window again.
+    ///
+    /// Releasing a chord this window never held is not an error — a shell
+    /// tearing down does not have to remember precisely what it took. Releasing
+    /// one *another* window holds is refused, since that is the same theft
+    /// [`grab_key`](Self::grab_key) refuses in the other direction.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_key`](Self::grab_key).
+    pub fn ungrab_key(
+        &mut self,
+        window: u64,
+        key: Key,
+        modifiers: Modifiers,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::UngrabKey {
+            window,
+            key,
+            modifiers,
+        })
     }
 
     /// Take the oldest queued input event, if any.

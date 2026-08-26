@@ -173,6 +173,12 @@ pub struct ShellSession<T: Transport> {
     /// `set_visible` is a round trip only when the answer changes, rather than
     /// on every repaint.
     popups_shown: bool,
+    /// Whether the shell currently holds the Escape key.
+    ///
+    /// Tracked for the same reason `popups_shown` is, and reconciled by
+    /// [`reconcile_escape_grab`](Self::reconcile_escape_grab) — see there for
+    /// why Escape alone is held conditionally.
+    escape_held: bool,
     /// The last window-list revision folded into `shell`.
     revision: u64,
     /// Whether the chrome needs repainting before the next block.
@@ -266,6 +272,26 @@ impl<T: Transport> ShellSession<T> {
 
         events.watch_desktop(true)?;
 
+        // The shortcuts, claimed on the panel — the one surface that is mapped
+        // for the whole session. The popup surface is unmapped whenever no menu
+        // is open, which is most of the time, and a grab held by a window the
+        // user cannot see is easier to reason about when that window is at least
+        // always there.
+        //
+        // Without this every shortcut below is dead the moment the user clicks
+        // into an application: the compositor routes a keystroke to whoever has
+        // the keyboard, and that is not the shell. Alt+Tab could not work at
+        // all — it exists to be pressed from inside another window.
+        //
+        // A refusal is fatal, on the same argument the surfaces above are: a
+        // desktop whose window switcher does not respond is not a degraded
+        // desktop. The one refusal that is *not* a bug — another shell already
+        // holds the chord — is a refusal to run two shells at once, which is
+        // correct.
+        for &(key, modifiers) in DesktopShell::global_chords() {
+            events.grab_key(panel.window, key, modifiers)?;
+        }
+
         let mut session = Self {
             events,
             shell,
@@ -277,6 +303,8 @@ impl<T: Transport> ShellSession<T> {
             // first `paint_chrome` unmaps it. Recording `true` here rather than
             // `false` is what makes that first unmap actually happen.
             popups_shown: true,
+            // Nothing is open on a fresh desktop, and nothing was grabbed above.
+            escape_held: false,
             revision: 0,
             dirty: false,
             running: false,
@@ -670,6 +698,15 @@ impl<T: Transport> ShellSession<T> {
             self.dirty = false;
             self.paint_chrome()?;
         }
+
+        // Last, and unconditionally. Not in `dispatch`, because a popup does not
+        // only close in answer to an event — `run` closes them on shutdown, a
+        // caller may close them outright, and the window-list fold above can
+        // take the last window a menu was about — and not behind `dirty`, since
+        // a shell that decided nothing needed repainting has still changed what
+        // Escape means. One boolean compare per pump buys never having to ask
+        // which of those paths was taken.
+        self.reconcile_escape_grab()?;
         Ok(worked)
     }
 
@@ -835,6 +872,45 @@ impl<T: Transport> ShellSession<T> {
         {
             self.begin_notifications_slide();
         }
+        Ok(())
+    }
+
+    /// Hold Escape exactly while the shell has something for it to close.
+    ///
+    /// The one shortcut that cannot be claimed once and kept. A permanent grab
+    /// would take Escape from every dialog, every text field and every menu in
+    /// every application on the desktop; no grab at all would mean a start menu
+    /// opened by a click could not be closed by a key, because the press would
+    /// go to whatever window is behind it.
+    ///
+    /// Reconciled from [`DesktopShell::any_popup_open`] once per
+    /// [`pump`](Self::pump), rather than at the handful of places that open and
+    /// close menus. There are at least six such surfaces and several ways into
+    /// each — a click, a chord, a tray icon, the pane's own Escape — and a
+    /// scheme that had to be extended at each new one is a scheme that will be
+    /// forgotten at the seventh. What is watched is the observable answer, which
+    /// no new caller can arrive behind.
+    ///
+    /// Per pump and not per *event*, because a menu also closes without one:
+    /// `run` dismisses them on the way out, and a caller holding the session can
+    /// call `dismiss_popups` directly. Both used to leave Escape claimed with
+    /// nothing left for it to close, which is the exact harm this is here to
+    /// avoid, only inverted.
+    ///
+    /// `escape_held` makes this a round trip only when the answer *changes*, so
+    /// an idle desktop with nothing open costs nothing per pump.
+    fn reconcile_escape_grab(&mut self) -> Result<(), Error<T>> {
+        let wanted = self.shell.any_popup_open();
+        if wanted == self.escape_held {
+            return Ok(());
+        }
+        let (key, modifiers) = DesktopShell::conditional_chord();
+        if wanted {
+            self.events.grab_key(self.panel.window, key, modifiers)?;
+        } else {
+            self.events.ungrab_key(self.panel.window, key, modifiers)?;
+        }
+        self.escape_held = wanted;
         Ok(())
     }
 
@@ -1014,6 +1090,10 @@ impl<T: Transport> ShellSession<T> {
 /// would be a title bar on the title bars, and a shell panel the user could
 /// drag to a different size is a shell panel that no longer matches the work
 /// area the windows were tiled into.
+///
+/// Clickable, too. The one surface that is not — the heads-up overlay — says so
+/// at its own call site with `Spec { input_transparent: true, ..chrome(..) }`,
+/// which is where a reader will be asking the question.
 fn chrome(title: &str, width: u32, height: u32, at: (i32, i32), layer: Layer) -> Spec {
     Spec {
         title: title.to_owned(),
@@ -1023,6 +1103,7 @@ fn chrome(title: &str, width: u32, height: u32, at: (i32, i32), layer: Layer) ->
         resizable: false,
         decorations: false,
         transparent: true,
+        input_transparent: false,
         min_size: None,
         max_size: None,
         layer,

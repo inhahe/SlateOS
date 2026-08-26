@@ -294,12 +294,49 @@ pub enum Key {
     Pause,
     CapsLock,
     NumLock,
+    // ---- Media keys ----
+    //
+    // The extra block on a multimedia keyboard. They are named here rather
+    // than left as `Unknown(0xE030)` for the reason every other variant
+    // exists: a client that wants "volume up" should not have to know that
+    // this system's raw codes are scan code set 1 with the extended prefix in
+    // the high byte, which is a fact about the PS/2 controller and not about
+    // the key. `gui/desktop/src/hotkeys.rs` had bound them by raw code and
+    // bound them to *Windows virtual key codes* — 0xAF, 0xAE, 0xAD — which
+    // this system never produces, so the bindings could not fire.
+    //
+    // There is deliberately no `BrightnessUp`/`BrightnessDown` here. A laptop's
+    // brightness keys do not send a scancode at all: they are Fn combinations
+    // the firmware answers over ACPI or a vendor WMI interface, so nothing in
+    // the keyboard path could ever produce such a variant, and a `Key` no
+    // producer can emit is a binding that silently never fires. See
+    // known-issues.md → `TD-C-BRIGHTNESS-KEYS-ARE-NOT-KEYS`.
+    /// Raise the system volume.
+    VolumeUp,
+    /// Lower the system volume.
+    VolumeDown,
+    /// Toggle system mute.
+    VolumeMute,
+    /// Toggle playback in whatever is playing.
+    MediaPlayPause,
+    /// Skip to the next track.
+    MediaNextTrack,
+    /// Go back to the previous track.
+    MediaPrevTrack,
+    /// Stop playback.
+    MediaStop,
     /// Unknown/unmapped key.
     Unknown(u32),
 }
 
 /// Modifier key state.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// `Hash` because a modifier set is half of a *chord*, and a chord is a map key:
+/// the compositor's key-grab table is keyed by `(Key, Modifiers)`. Derived
+/// rather than written by hand so that it cannot drift from `PartialEq` — two
+/// modifier sets that compare equal must hash equal, and a hand-rolled version
+/// that forgot a field would look right and silently lose grabs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Modifiers {
     pub shift: bool,
     pub ctrl: bool,
@@ -315,23 +352,44 @@ impl Modifiers {
         super_key: false,
     };
 
-    pub fn ctrl() -> Self {
+    /// Ctrl alone.
+    #[must_use]
+    pub const fn ctrl() -> Self {
         Self {
             ctrl: true,
             ..Self::NONE
         }
     }
 
-    pub fn shift() -> Self {
+    /// Shift alone.
+    #[must_use]
+    pub const fn shift() -> Self {
         Self {
             shift: true,
             ..Self::NONE
         }
     }
 
-    pub fn alt() -> Self {
+    /// Alt alone.
+    #[must_use]
+    pub const fn alt() -> Self {
         Self {
             alt: true,
+            ..Self::NONE
+        }
+    }
+
+    /// Super (the Windows/Command key) alone.
+    ///
+    /// The last of the four to get a constructor, which is backwards: Super is
+    /// the modifier a *desktop* shortcut uses — Super+D, Super+E, Super+L — and
+    /// the other three are what applications bind. It was missing only because
+    /// nothing had needed to name a system-wide chord until the compositor grew
+    /// a key-grab table.
+    #[must_use]
+    pub const fn super_key() -> Self {
+        Self {
+            super_key: true,
             ..Self::NONE
         }
     }

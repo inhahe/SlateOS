@@ -51,7 +51,14 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 
 /// Input protocol version. Bump on any incompatible layout change; never reuse
 /// a number.
-pub const INPUT_VERSION: u8 = 1;
+///
+/// **2** — the key table gained the multimedia block (`VolumeUp` and its six
+/// neighbours, wire codes `0x59`–`0x5F`). The frame layout did not change, but
+/// an unrecognised key byte is [`DecodeError::BadKey`] rather than a key
+/// dropped, so a version-1 peer handed a volume key would reject the whole
+/// frame. "Incompatible" is about what the other end can read, not only about
+/// where the bytes sit.
+pub const INPUT_VERSION: u8 = 2;
 
 /// Input-frame header: magic + version + flags + event count.
 const INPUT_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -197,7 +204,7 @@ macro_rules! key_table {
     ($($code:literal => $variant:ident,)*) => {
         /// The wire byte for a key, or `None` for [`Key::Unknown`], which
         /// carries its raw code separately.
-        const fn key_code(k: Key) -> Option<u8> {
+        pub(crate) const fn key_code(k: Key) -> Option<u8> {
             match k {
                 $(Key::$variant => Some($code),)*
                 Key::Unknown(_) => None,
@@ -205,12 +212,27 @@ macro_rules! key_table {
         }
 
         /// The key for a wire byte, or `None` if this decoder does not know it.
-        const fn key_from_code(b: u8) -> Option<Key> {
+        pub(crate) const fn key_from_code(b: u8) -> Option<Key> {
             match b {
                 $($code => Some(Key::$variant),)*
                 _ => None,
             }
         }
+
+        /// Every key this protocol can name, in wire-code order.
+        ///
+        /// [`Key::Unknown`] is absent: it is not a key but a hole for the ones
+        /// this table does not have, and it carries a raw code rather than a
+        /// name.
+        ///
+        /// Public, unlike the two codecs, because "what keys are there?" is a
+        /// question callers outside this crate legitimately ask and cannot
+        /// answer for themselves — an enum has no iterator. The shell uses it to
+        /// check that every chord its binding table answers is a chord it also
+        /// claims from the compositor, which is a sweep over the whole
+        /// vocabulary or it is nothing. Generated from the same list as the
+        /// codecs above, so it cannot fall behind one.
+        pub const ALL_KEYS: &[Key] = &[$(Key::$variant,)*];
     };
 }
 
@@ -243,6 +265,13 @@ key_table! {
     // Locks and the rest
     0x54 => PrintScreen, 0x55 => ScrollLock, 0x56 => Pause, 0x57 => CapsLock,
     0x58 => NumLock,
+    // The multimedia block. Added in `INPUT_VERSION` 2: an unknown code is a
+    // hard `BadKey` here rather than a key quietly dropped, so a v1 decoder
+    // handed one of these would fail the whole frame — which is exactly the
+    // incompatibility the version byte exists to catch, and why it moved.
+    0x59 => VolumeUp, 0x5A => VolumeDown, 0x5B => VolumeMute,
+    0x5C => MediaPlayPause, 0x5D => MediaNextTrack, 0x5E => MediaPrevTrack,
+    0x5F => MediaStop,
 }
 
 // ============================================================================
@@ -377,7 +406,16 @@ const fn button_from_code(b: u8) -> Option<MouseButton> {
     }
 }
 
-fn encode_key(out: &mut Vec<u8>, key: Key) {
+/// Write a key as one table byte, or as `KEY_UNKNOWN` followed by its raw code.
+///
+/// `pub(crate)`, along with its three neighbours, because the *control* protocol
+/// carries keys too: a client grabbing a chord
+/// ([`crate::control::RequestBody::GrabKey`]) has to name the key it wants.
+/// Sharing this codec rather than giving that protocol one of its own is the
+/// same argument the `key_table!` macro makes one level down — two tables are
+/// two chances to encode `Home` and decode `End`, and no round-trip test written
+/// against either table alone would catch it.
+pub(crate) fn encode_key(out: &mut Vec<u8>, key: Key) {
     match key {
         // The one variant `key_code` cannot name, because its wire form is
         // data rather than an identity.
@@ -402,7 +440,7 @@ fn encode_key(out: &mut Vec<u8>, key: Key) {
     }
 }
 
-const fn encode_modifiers(m: Modifiers) -> u8 {
+pub(crate) const fn encode_modifiers(m: Modifiers) -> u8 {
     let mut bits = 0u8;
     if m.shift {
         bits |= MOD_SHIFT;
@@ -555,7 +593,7 @@ fn decode_button(r: &mut Reader<'_>) -> Result<MouseButton, DecodeError> {
     button_from_code(b).ok_or(DecodeError::BadMouseButton(b))
 }
 
-fn decode_key(r: &mut Reader<'_>) -> Result<Key, DecodeError> {
+pub(crate) fn decode_key(r: &mut Reader<'_>) -> Result<Key, DecodeError> {
     let code = r.read_u8()?;
     if code == KEY_UNKNOWN {
         return Ok(Key::Unknown(r.read_u32()?));
@@ -563,7 +601,7 @@ fn decode_key(r: &mut Reader<'_>) -> Result<Key, DecodeError> {
     key_from_code(code).ok_or(DecodeError::BadKey(code))
 }
 
-const fn decode_modifiers(bits: u8) -> Result<Modifiers, DecodeError> {
+pub(crate) const fn decode_modifiers(bits: u8) -> Result<Modifiers, DecodeError> {
     if bits & !MOD_KNOWN != 0 {
         return Err(DecodeError::ReservedFlags(bits));
     }
@@ -621,7 +659,7 @@ mod tests {
                 events.push(InputEvent::key(1, key(k), u32::from(code)));
             }
         }
-        assert_eq!(events.len(), 88, "the key table should have 88 named keys");
+        assert_eq!(events.len(), 95, "the key table should have 95 named keys");
         let decoded = roundtrip(&events);
         assert_eq!(decoded, events);
     }
@@ -872,6 +910,41 @@ mod tests {
         assert_eq!(
             decode_input_frame(&bytes),
             Err(DecodeError::UnsupportedVersion(INPUT_VERSION + 1))
+        );
+    }
+
+    /// A vocabulary change is a version change.
+    ///
+    /// Adding the media block to the key table did not move a single byte of
+    /// the frame layout, which is the thing the version doc used to talk about
+    /// — so the tempting reading was "compatible, leave it at 1". It is not:
+    /// an unknown key byte is [`DecodeError::BadKey`] and kills the whole
+    /// frame, so a version-1 peer handed a volume key rejects everything sent
+    /// with it. This pins the pair — the version and the fact that made it move
+    /// — so that a later table growth is not waved through on the same
+    /// reasoning.
+    #[test]
+    fn a_peer_that_cannot_read_the_key_table_is_a_different_version() {
+        // Stated as "not 1" rather than "at least 2" so that a later, unrelated
+        // bump does not fail this test: what is being pinned is that the table
+        // growth moved the version off the one that predates the media block.
+        assert_ne!(
+            INPUT_VERSION, 1,
+            "the media block was added in version 2; version 1 cannot decode it"
+        );
+        for code in [0x59u8, 0x5A, 0x5B, 0x5C, 0x5D, 0x5E, 0x5F] {
+            assert!(
+                key_from_code(code).is_some(),
+                "code {code:#x} should name a media key"
+            );
+        }
+        // The shape of the incompatibility, stated rather than assumed: an
+        // unknown byte is fatal, which is why growing the table needed the
+        // version and not just a comment.
+        assert_eq!(
+            key_from_code(0x60),
+            None,
+            "0x60 is the next free code; if it is taken, extend this test"
         );
     }
 

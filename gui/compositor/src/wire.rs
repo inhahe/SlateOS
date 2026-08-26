@@ -483,6 +483,41 @@ fn to_compositor_request(
             link.require_shell()?;
             CompositorRequest::SwitchWorkspace { workspace }
         }
+        // Resolved *and* privileged, the same pair as `ReserveEdge` and for the
+        // same shape of reason. `resolve` because the window named is the
+        // sender's own -- it is where the keystroke will be delivered and it is
+        // the grab's lifetime. `require_shell` because the effect lands on
+        // everyone else: a chord one client holds is a chord no other client can
+        // ever see, and a program able to claim Super+L could show a convincing
+        // fake lock screen and collect the password. Ownership first, so a
+        // program that is not a shell learns nothing about which window ids
+        // exist that it did not already know.
+        RequestBody::GrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            let window_id = link.resolve(window)?;
+            link.require_shell()?;
+            CompositorRequest::GrabKey {
+                window_id,
+                key,
+                modifiers,
+            }
+        }
+        RequestBody::UngrabKey {
+            window,
+            key,
+            modifiers,
+        } => {
+            let window_id = link.resolve(window)?;
+            link.require_shell()?;
+            CompositorRequest::UngrabKey {
+                window_id,
+                key,
+                modifiers,
+            }
+        }
         RequestBody::SetWindowWorkspace { window, workspace } => {
             link.require_shell()?;
             CompositorRequest::SetWindowWorkspace {
@@ -907,7 +942,9 @@ mod tests {
     use guiremote::window_list::{WindowInfo, WindowList};
     use guiremote::{InputEvent, encode_requests, encode_submit};
     use guitk::color::Color;
-    use guitk::event::Event;
+    use guitk::event::{Event, Key, Modifiers};
+
+    use crate::EventNotification;
 
     use super::*;
 
@@ -1657,6 +1694,88 @@ mod tests {
             responses[0].body
         );
         assert_eq!(comp.current_workspace(), 3);
+    }
+
+    /// The grab path end to end, over the real codec, with the shell *not*
+    /// focused — which is the only interesting case and the one that was
+    /// impossible before. Asserting on `Compositor::grab_key` alone would leave
+    /// the wire translation untested, and it is the translation that carries the
+    /// two checks: resolve the window against the sender, then `require_shell`.
+    #[test]
+    fn a_shell_grabs_a_chord_over_the_wire_and_receives_it_from_another_window() {
+        let (mut comp, mut shell) = wired();
+        let panel = open_in(&mut comp, &mut shell, "Taskbar", Layer::Overlay);
+        let mut app = ClientLink::new(99);
+        open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::GrabKey {
+                window: panel,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Ok),
+            "the grab was refused: {:?}",
+            responses[0].body
+        );
+
+        comp.drain_notifications();
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x38, // left Alt
+            character: None,
+        });
+        comp.handle_input(crate::InputEvent::KeyDown {
+            scancode: 0x0F, // Tab
+            character: None,
+        });
+
+        let tab = comp
+            .drain_notifications()
+            .into_iter()
+            .find_map(|n| match n {
+                EventNotification::KeyEvent {
+                    window_id,
+                    key: Key::Tab,
+                    ..
+                } => Some(window_id.raw()),
+                _ => None,
+            })
+            .expect("Alt+Tab reached nobody");
+        assert_eq!(
+            tab, panel,
+            "Alt+Tab went to the focused editor: the shortcut is still unreachable"
+        );
+    }
+
+    /// The window in a grab is the *sender's*, resolved like any other window
+    /// request. Without that, a client could aim another program's shortcuts at
+    /// itself — or, more simply, register a grab whose deliveries would go to a
+    /// window it cannot read.
+    #[test]
+    fn a_grab_naming_somebody_elses_window_is_refused() {
+        let (mut comp, mut shell) = wired();
+        open_in(&mut comp, &mut shell, "Taskbar", Layer::Overlay);
+        let mut app = ClientLink::new(99);
+        let editor = open_in(&mut comp, &mut app, "Editor", Layer::Normal);
+
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::GrabKey {
+                window: editor,
+                key: Key::Tab,
+                modifiers: Modifiers::alt(),
+            }],
+        );
+        assert!(
+            matches!(responses[0].body, ResponseBody::Error { .. }),
+            "a grab was accepted for a window the sender does not own"
+        );
+        assert_eq!(comp.grab_count(), 0);
     }
 
     #[test]

@@ -2754,6 +2754,97 @@ impl DesktopAction {
     }
 }
 
+/// Every chord [`DesktopAction::for_chord`] answers, except Escape.
+///
+/// The table above says what a chord *means*; this says which chords the shell
+/// must be able to hear at all. They are different questions, because the
+/// compositor delivers a keystroke to whatever holds the keyboard, and that is
+/// almost never the shell: `handle_hotkey` is only ever reached for a key that
+/// landed on one of the shell's own three surfaces. Every shortcut here was
+/// therefore dead the moment the user clicked into an application, Alt+Tab —
+/// whose entire purpose is to be pressed from inside another window — most of
+/// all. [`ShellSession`](session::ShellSession) grabs this list at startup.
+///
+/// Kept as a list rather than derived from the match, which cannot be
+/// enumerated, and pinned by `every_grabbed_chord_is_a_chord_the_shell_acts_on`
+/// and its converse below: a binding added to one and not the other is either a
+/// chord nobody can press or a key taken from every application for nothing.
+///
+/// **Escape is deliberately absent.** It is claimed *conditionally* — with no
+/// popup open the press belongs to the focused window's own dialog — and a grab
+/// is not conditional. Holding it permanently would break Escape everywhere on
+/// the desktop, so the session grabs and releases it as menus open and close,
+/// from [`DesktopShell::any_popup_open`].
+///
+/// **The bare Super key appears twice**, once with the Super modifier set and
+/// once without. Whether the modifier bit is already on for the key that *is*
+/// the modifier is the keyboard driver's business, the binding table declines
+/// to care (`super_key: _`), and a grab table keyed by the exact chord has to
+/// name both or the start menu opens on only one kind of driver.
+const GLOBAL_CHORDS: &[(Key, Modifiers)] = &[
+    (Key::Tab, Modifiers::alt()),
+    (
+        Key::Tab,
+        Modifiers {
+            shift: true,
+            alt: true,
+            ..Modifiers::NONE
+        },
+    ),
+    (Key::F4, Modifiers::alt()),
+    (Key::LeftSuper, Modifiers::NONE),
+    (Key::LeftSuper, Modifiers::super_key()),
+    (Key::RightSuper, Modifiers::NONE),
+    (Key::RightSuper, Modifiers::super_key()),
+    (Key::D, Modifiers::super_key()),
+    (Key::Left, Modifiers::super_key()),
+    (Key::Right, Modifiers::super_key()),
+    (Key::Up, Modifiers::super_key()),
+    (Key::Down, Modifiers::super_key()),
+    (Key::Z, Modifiers::super_key()),
+    (Key::Tab, Modifiers::super_key()),
+    (Key::N, Modifiers::super_key()),
+    (
+        Key::Left,
+        Modifiers {
+            ctrl: true,
+            super_key: true,
+            ..Modifiers::NONE
+        },
+    ),
+    (
+        Key::Right,
+        Modifiers {
+            ctrl: true,
+            super_key: true,
+            ..Modifiers::NONE
+        },
+    ),
+];
+
+/// The chord the shell holds only while one of its own surfaces is open.
+///
+/// See [`GLOBAL_CHORDS`] for why it is not in that list.
+const CONDITIONAL_CHORD: (Key, Modifiers) = (Key::Escape, Modifiers::NONE);
+
+impl DesktopShell {
+    /// The chords the shell needs delivered wherever the keyboard is.
+    ///
+    /// See [`GLOBAL_CHORDS`]. Exposed as a function rather than the constant so
+    /// that the list stays the shell's own business — a caller's job is to grab
+    /// what it is given, not to reason about which shortcut is which.
+    #[must_use]
+    pub const fn global_chords() -> &'static [(Key, Modifiers)] {
+        GLOBAL_CHORDS
+    }
+
+    /// The chord to hold only while [`any_popup_open`](Self::any_popup_open).
+    #[must_use]
+    pub const fn conditional_chord() -> (Key, Modifiers) {
+        CONDITIONAL_CHORD
+    }
+}
+
 impl DesktopShell {
     // ======================================================================
     // Rendering
@@ -3595,18 +3686,32 @@ impl DesktopShell {
         self.sync_quick_settings();
     }
 
+    /// Whether any of the shell's own surfaces is open over the desktop.
+    ///
+    /// Named separately from [`dismiss_popups`](Self::dismiss_popups), which
+    /// used to compute it inline, because it answers a second question the
+    /// session asks: whether the shell should be holding a grab on Escape. The
+    /// two must agree — an Escape grab held while nothing is open would take the
+    /// key away from every dialog on the desktop, and one *not* held while a
+    /// menu is up means the menu cannot be closed from inside an application.
+    /// One expression, so they cannot drift apart.
+    #[must_use]
+    pub fn any_popup_open(&self) -> bool {
+        self.start_menu_open
+            || self.power_menu_open
+            || self.calendar.visible
+            || self.notifications.pane_state().is_visible()
+            || self.snap.is_overlay_visible()
+            || self.overview.visible
+    }
+
     /// Close whatever popup is open. Returns whether anything was.
     ///
     /// The return value is what keeps Escape from being swallowed: a press
     /// with nothing open must reach the focused window, whose own dialog may
     /// be what the user meant to dismiss.
     pub fn dismiss_popups(&mut self) -> bool {
-        let any = self.start_menu_open
-            || self.power_menu_open
-            || self.calendar.visible
-            || self.notifications.pane_state().is_visible()
-            || self.snap.is_overlay_visible()
-            || self.overview.visible;
+        let any = self.any_popup_open();
         self.start_menu_open = false;
         self.power_menu_open = false;
         self.calendar.set_visible(false);
@@ -4251,6 +4356,97 @@ mod window_manager_tests {
             .get(&id)
             .expect("window is still open")
             .z_order
+    }
+
+    // ==================================================================
+    // The grab list against the binding table
+    // ==================================================================
+
+    /// Every modifier combination there is, for sweeping the binding table.
+    fn all_modifier_sets() -> Vec<Modifiers> {
+        (0u8..16)
+            .map(|bits| Modifiers {
+                shift: bits & 1 != 0,
+                ctrl: bits & 2 != 0,
+                alt: bits & 4 != 0,
+                super_key: bits & 8 != 0,
+            })
+            .collect()
+    }
+
+    /// A claimed chord that means nothing is a key taken from every application
+    /// on the desktop in exchange for nothing at all. The compositor cannot
+    /// notice — a grab is a grab — so it has to be noticed here.
+    #[test]
+    fn every_grabbed_chord_is_a_chord_the_shell_acts_on() {
+        for &(key, modifiers) in DesktopShell::global_chords() {
+            assert!(
+                super::DesktopAction::for_chord(modifiers, key).is_some(),
+                "{key:?} with {modifiers:?} is claimed from the compositor and then dropped"
+            );
+        }
+    }
+
+    /// And the converse, which is the failure that actually happens: somebody
+    /// adds a binding to the table and the shortcut silently never fires,
+    /// because the keystroke goes to whatever window has the keyboard.
+    ///
+    /// Swept over the whole key vocabulary rather than the keys already in the
+    /// list — a binding on a key nobody has bound before is exactly the case a
+    /// narrower sweep would miss.
+    #[test]
+    fn every_chord_the_shell_acts_on_is_a_chord_it_can_hear() {
+        let claimed: std::collections::HashSet<_> = DesktopShell::global_chords()
+            .iter()
+            .copied()
+            .chain(std::iter::once(DesktopShell::conditional_chord()))
+            .collect();
+        for &key in guiremote::input::ALL_KEYS {
+            for modifiers in all_modifier_sets() {
+                if super::DesktopAction::for_chord(modifiers, key).is_some() {
+                    assert!(
+                        claimed.contains(&(key, modifiers)),
+                        "{key:?} with {modifiers:?} is bound but never grabbed, \
+                         so it does nothing unless the desktop itself is focused"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Escape is the one binding that must *not* be held permanently: with no
+    /// popup open the press belongs to the focused window's own dialog. Pinned
+    /// because moving it into the global list would compile, pass every other
+    /// test here, and break the Escape key on the entire desktop.
+    #[test]
+    fn escape_is_not_held_permanently() {
+        assert!(
+            !DesktopShell::global_chords().contains(&(Key::Escape, Modifiers::NONE)),
+            "a permanent Escape grab takes the key from every dialog on the desktop"
+        );
+        assert_eq!(
+            DesktopShell::conditional_chord(),
+            (Key::Escape, Modifiers::NONE)
+        );
+    }
+
+    /// The condition the session reconciles the Escape grab against. It has to
+    /// be true exactly when there is something for Escape to close, or the shell
+    /// either holds the key for nothing or cannot close its own menu.
+    #[test]
+    fn the_escape_condition_tracks_what_escape_would_close() {
+        let mut shell = shell();
+        assert!(
+            !shell.any_popup_open(),
+            "nothing is open on a fresh desktop"
+        );
+        shell.start_menu_open = true;
+        assert!(shell.any_popup_open());
+        assert!(shell.dismiss_popups(), "there was something to dismiss");
+        assert!(
+            !shell.any_popup_open(),
+            "the condition outlived the popups it names"
+        );
     }
 
     // ==================================================================

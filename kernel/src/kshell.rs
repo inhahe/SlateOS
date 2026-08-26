@@ -99245,11 +99245,30 @@ fn cmd_rqstat(args: &str) {
             rqstat::init_defaults();
             shell_println!("rqstat: initialized");
         }
+        // `rqstat` had no way to register a CPU, so every other subcommand
+        // returned NotFound for the whole life of the shell: `init` seeds an
+        // empty table and `register_cpu` existed in the module with nothing
+        // calling it. The batch-26/27 generalisation again — a module whose
+        // only caller is an interactive command is missing exactly the
+        // operation no test needed, and here the missing one was *creation*,
+        // which is why the guessed `unwrap_or(0)` below never had a CPU to
+        // hit and the damage stayed latent.
+        "register" => {
+            let Some(cpu) = required_num::<u32>(&parts, 1, "rqstat", sub, "CPU number") else {
+                return;
+            };
+            match rqstat::register_cpu(cpu) {
+                Ok(()) => shell_println!("rqstat: registered cpu {}", cpu),
+                Err(e) => {
+                    shell_println!("rqstat: error: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
         "enqueue" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(cpu) = required_num::<u32>(&parts, 1, "rqstat", sub, "CPU number") else {
+                return;
+            };
             match rqstat::enqueue(cpu) {
                 Ok(()) => shell_println!("rqstat: enqueued on cpu {}", cpu),
                 Err(e) => {
@@ -99259,10 +99278,9 @@ fn cmd_rqstat(args: &str) {
             }
         }
         "dequeue" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            let Some(cpu) = required_num::<u32>(&parts, 1, "rqstat", sub, "CPU number") else {
+                return;
+            };
             match rqstat::dequeue(cpu) {
                 Ok(()) => shell_println!("rqstat: dequeued from cpu {}", cpu),
                 Err(e) => {
@@ -99272,14 +99290,19 @@ fn cmd_rqstat(args: &str) {
             }
         }
         "balance" => {
-            let from = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let to = parts
-                .get(2)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(1);
+            // The only arm in the batch whose guess invented a *relationship*
+            // rather than a value: `0` and `1` are two different defaults, so a
+            // mistyped pair fabricated a migration between two specific CPUs
+            // that never exchanged a task — and it fabricated the same edge
+            // every time, which is what would make it look like a pattern.
+            let Some(from) = required_num::<u32>(&parts, 1, "rqstat", sub, "source CPU number")
+            else {
+                return;
+            };
+            let Some(to) = required_num::<u32>(&parts, 2, "rqstat", sub, "destination CPU number")
+            else {
+                return;
+            };
             match rqstat::record_balance(from, to) {
                 Ok(()) => shell_println!("rqstat: balance {} → {}", from, to),
                 Err(e) => {
@@ -99289,14 +99312,14 @@ fn cmd_rqstat(args: &str) {
             }
         }
         "wait" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
-            let ns = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1000);
+            // `ns` feeds `avg_wait = total_wait_ns / dequeues`, so the old 1000
+            // did not produce a wrong row — it moved a column that is a mean.
+            let Some(cpu) = required_num::<u32>(&parts, 1, "rqstat", sub, "CPU number") else {
+                return;
+            };
+            let Some(ns) = required_num::<u64>(&parts, 2, "rqstat", sub, "wait time in ns") else {
+                return;
+            };
             match rqstat::record_wait(cpu, ns) {
                 Ok(()) => shell_println!("rqstat: recorded {}ns wait on cpu {}", ns, cpu),
                 Err(e) => {
@@ -99338,12 +99361,15 @@ fn cmd_rqstat(args: &str) {
         }
         "test" => rqstat::self_test(),
         _ => {
-            shell_println!("Usage: rqstat <init|enqueue|dequeue|balance|wait|cpus|stats|test>");
+            shell_println!(
+                "Usage: rqstat <init|register|enqueue|dequeue|balance|wait|cpus|stats|test>"
+            );
+            shell_println!("  register <cpu>                 — start tracking a CPU");
             shell_println!("  enqueue <cpu>                  — add task to runqueue");
             shell_println!("  dequeue <cpu>                  — remove task from runqueue");
             shell_println!("  balance <from_cpu> <to_cpu>    — load balance event");
-            shell_println!("  wait <cpu> [ns]                — record wait time");
-            set_exit(1);
+            shell_println!("  wait <cpu> <ns>                — record wait time");
+            end_help_arm("rqstat", sub);
         }
     }
 }

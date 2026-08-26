@@ -32813,9 +32813,53 @@ never advanced (its `Event::Tick` fell into a `_ => {}` arm), and
 line. That is the yield to expect per app, and it is the reason the conversions
 are worth doing individually rather than by a mechanical sweep.
 
-**Count: 135 to go.** Three applications open a window — editor, Settings,
-metronome — and Settings still has its own copy of the strap, so converting it
-onto `oswindow::app` is the next item under this entry rather than a fourth app.
+**Update 2026-08-25 (later) — Settings converted; the harness grew the one thing
+an application can need that a loop cannot guess.**
+
+Settings was the third and last hand-written strap, and it is the reason step 3
+of the recipe now has a fifth bullet. It edits `appearance.yaml` and
+`input.yaml`, which the *compositor* reads — window corners, drop shadows,
+whether two clicks are one double click — so it must tell the compositor when it
+has rewritten one. Its own loop did that; `drive` had no way to express it, and
+converting Settings without adding one would have been a silent downgrade
+producing exactly the defect this entry is about: a setting that appears to work
+and does not, its own preview updating while every real window keeps its old
+corners until the next login.
+
+`App::take_reloads` is the hook, drained after every event and turned into the
+`ReloadAppearance`/`ReloadInput` requests `EventLoop` already had. Two flags,
+because they become two requests. **Per event and not once per batch**, which is
+the one placement decision here with a wrong answer: a batch ending in
+`CloseRequested` never reaches `Dispatch::Settled`, so news held for the boundary
+is lost exactly when a user makes their last change and closes the window.
+
+Add to step 3 of the recipe:
+
+  - If the app writes a file another process reads, implement `take_reloads` —
+    and make it *drain*, not peek, or the compositor re-reads the file on every
+    event for the rest of the session.
+
+Two further notes from this conversion, both worth having before the next app:
+
+- **An app whose handlers speak `guitk::EventResult` should map at the seam, not
+  convert the handlers.** Settings' internal handlers use `Consumed`/`Ignored`
+  for what it genuinely means — whether an event keeps propagating up a widget
+  tree — so the four-line mapping in `on_event` is right and pushing `Response`
+  down into the hierarchy would be wrong. The mapping is imprecise in the
+  harmless direction only (a click on an already-selected item repaints an
+  identical frame) and never in the harmful one.
+- **A claim in a commit message is a claim to falsify like any other.** This
+  conversion deleted Settings' `split_args` tests on the grounds that `launch`
+  now carried the rule. It did not — `launch` needs a socket, so nothing in it
+  had ever been executed by a test. Fixed by extracting `leftover_complaint`,
+  which is the only part of `launch` that can be tested without a compositor.
+
+**Count: 135 to go.** All three applications that open a window — editor,
+Settings, metronome — are now on `oswindow::app`, so there is no fourth copy of
+the strap to retire and the remaining work is the placeholder `main`s. The next
+one is a judgement call rather than a forced move: pick an app whose state type
+already exists and already has a `handle_event`, since that is most of the work,
+and expect roughly one live defect per app (three conversions, three defects).
 
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 

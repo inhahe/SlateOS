@@ -30,8 +30,10 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, con
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::{scroll_window, wheel};
+use oswindow::app::Response;
 
 use std::collections::HashMap;
+use std::process::ExitCode;
 
 // ============================================================================
 // Constants -- layout dimensions
@@ -3392,9 +3394,57 @@ fn is_node_visible(state: &DeviceManagerState, index: usize) -> bool {
 // Entry point
 // ============================================================================
 
-fn main() {
-    // Placeholder: in a real Slate OS environment, this would create a window,
-    // enter the event loop, and call render() / handle_event() each frame.
+impl oswindow::app::App for DeviceManagerState {
+    fn title(&self) -> String {
+        String::from("Device Manager")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // `as` rather than `try_into`: both are small positive literals a few
+        // dozen lines above, so the conversion cannot fail and a fallible one
+        // would only add a branch nothing can take.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (DEFAULT_WIDTH as u32, DEFAULT_HEIGHT as u32)
+    }
+
+    /// No clock. Nothing in this window ages.
+    ///
+    /// Left at the default deliberately rather than by omission — see
+    /// [`oswindow::app::App::tick_interval`], which is the method five programs
+    /// in this tree got wrong by saying nothing. Every visible change here is
+    /// the direct consequence of a key or a click: selection, hover, scroll,
+    /// the search filter, expanding a category. The device list itself is
+    /// re-read only when the user asks for a rescan. If a future version polls
+    /// for hotplug, or animates the scroll, this method grows a body — and
+    /// `handle_event` grows an `Event::Tick` arm, which
+    /// `scripts/check-tick-wiring.py` will insist on.
+    fn on_event(&mut self, event: &Event) -> Response {
+        // Events here all arrive at human speed — a key, a click, a wheel
+        // notch — so an occasional wasted frame costs less than working out
+        // whether it was wasted. An app with a tick would have to be pickier;
+        // see `diskcleanup`, which answers `Idle` on ticks that changed nothing.
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // Record what the compositor granted before drawing to it. The first
+        // frame goes out before any `Event::Resize` arrives, so a renderer
+        // trusting `self.width` alone would draw its first picture at the size
+        // it *asked* for rather than the one it was given — and put the sidebar
+        // divider and the status bar somewhere the hit-test does not look.
+        self.width = width;
+        self.height = height;
+        RenderTree {
+            commands: render(self),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    oswindow::app::launch("devicemanager", &mut DeviceManagerState::new())
 }
 
 // ============================================================================
@@ -5402,5 +5452,79 @@ mod tests {
             assert_eq!(state.tree_scroll, rows_per_notch());
             assert!(state.properties_scroll > 0.0);
         }
+    }
+
+    // -- the window ----------------------------------------------------------
+
+    use oswindow::app::App as _;
+
+    /// The first frame is drawn before any `Event::Resize` arrives, so `render`
+    /// must believe the size it is *handed* rather than the one it asked for.
+    ///
+    /// Trusting `self.width` instead is not a cosmetic bug: the sidebar
+    /// divider, the properties panel and the status bar are all placed from it,
+    /// and `handle_event` hit-tests clicks against the same fields. A window
+    /// the compositor made narrower would draw its status bar off the right
+    /// edge and put the toolbar buttons where the mouse is not.
+    #[test]
+    fn render_believes_the_size_it_is_given_not_the_one_it_asked_for() {
+        let mut state = DeviceManagerState::new();
+        let given_w = 640.0_f32;
+        let given_h = 480.0_f32;
+        // The test proves nothing unless the granted size differs from the
+        // requested one. Asserted in integers, where the comparison is exact:
+        // asking whether two floats differ is the one float comparison that is
+        // never what the writer meant.
+        assert_ne!(
+            state.initial_size(),
+            (640, 480),
+            "the granted size must differ from the requested one"
+        );
+
+        let tree = state.render(given_w, given_h);
+
+        assert!(
+            (state.width - given_w).abs() < f32::EPSILON,
+            "render kept width {} instead of the granted {given_w}",
+            state.width
+        );
+        assert!(
+            (state.height - given_h).abs() < f32::EPSILON,
+            "render kept height {} instead of the granted {given_h}",
+            state.height
+        );
+        assert!(!tree.commands.is_empty(), "the window drew nothing");
+    }
+
+    /// An event nothing reacted to must not cost a frame.
+    ///
+    /// `Response::Redraw` unconditionally is the easy mistake, and it costs a
+    /// full composite per mouse move — on a window this size, for the entire
+    /// time a user drags the pointer across it on the way to something else.
+    #[test]
+    fn an_ignored_event_does_not_ask_for_a_frame() {
+        let mut state = DeviceManagerState::new();
+        // A tick is the clearest case: this app asks for no clock, so it has no
+        // handler for one, and one arriving anyway must change nothing.
+        let ignored = state.on_event(&Event::Tick { elapsed_ms: 16 });
+        assert_eq!(ignored, Response::Idle);
+
+        // ...while something the app does act on does ask for one.
+        let consumed = state.on_event(&Event::Resize {
+            width: 900,
+            height: 600,
+        });
+        assert_eq!(consumed, Response::Redraw);
+    }
+
+    /// This app ages nothing, so it must not hold the desktop awake.
+    ///
+    /// The reverse of `known-issues.md` lesson 47: that one is about an app
+    /// that needed a clock and did not ask: this is about not asking for one
+    /// with nothing to advance. A window requesting 60 ticks a second while
+    /// sitting idle keeps the compositor compositing for as long as it is open.
+    #[test]
+    fn a_window_with_nothing_moving_asks_for_no_clock() {
+        assert!(DeviceManagerState::new().tick_interval().is_none());
     }
 }

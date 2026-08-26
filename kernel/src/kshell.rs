@@ -16143,6 +16143,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // which stopped meaning anything the moment this arm was converted to
         // `required_num` and began saying `missing percentage` instead -- so it
         // is spelled here as the presence of the sentence a working run prints.
+        //
+        // `bright show` first, the way rung 74 opens with `tile init`: the
+        // brightness module is lazily initialised and only the `""|show|list`
+        // arm calls `init_defaults()`, so on a fresh boot `bright set 50` has no
+        // display 1 to set and answers `Error: NotFound`. Asserting the success
+        // sentence without this line asserts it of a path that cannot reach it
+        // -- which is also why the old `lacks Usage:` spelling survived so long:
+        // `Error: NotFound` lacks `Usage:` just as happily as a working run
+        // does, so the guard passed while testing nothing.
+        let _ = capture_command("bright show");
         let out = capture_command("bright set 50");
         assert_output_contains(
             "`bright set <level>` is the documented one-word form and must work",

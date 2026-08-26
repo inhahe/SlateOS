@@ -45134,6 +45134,20 @@ makes it fail; the passing run and the six failing ones together are the evidenc
 That is also why the analysis returns a `Report` rather than printing: the fixture
 asserts on the verdict, so rewording an error message cannot silently pass it.
 
+**What it does not do, learned on the first boot after it landed.** The gate
+answers *can this command print this text*, never *will this run print it*. The
+very first assertion written on its advice — `bright set 50` expecting
+`Brightness → 50%` — passed the gate and panicked the kernel, because
+`brightness::init_defaults()` is called only from the `show` arm and a fresh boot
+has no display 1 to set; the command printed `Error: NotFound`. The rung was
+missing a `bright show` opener, the way rung 74 opens with `tile init`. Worth
+recording because it is the *old* guard's epitaph too: `Error: NotFound` lacks
+`Usage:` exactly as happily as a working run does, so the assertion that gate
+replaced had been passing on the error path for as long as it existed. The
+lesson is that this gate narrows what a rung may *claim*; only a boot establishes
+that the claim holds — and note the direction, since it yields a rung that fails
+loudly on a correct kernel rather than one that passes while testing nothing.
+
 **Cost of being wrong.** If the over-approximation is too generous the gate
 misses a stale assertion and the tree is exactly where it was before the gate
 existed: one boot to find out. If it were too strict it would block builds over

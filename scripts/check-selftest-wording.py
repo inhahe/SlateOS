@@ -90,6 +90,24 @@ operator, a `capture_command` whose argument is a variable outside a table) is
 counted and printed, not silently skipped -- a gate that quietly drops what it
 cannot parse is a gate whose coverage nobody knows.
 
+**The largest blind spot is reachability, and it is not fixable here.** This
+gate answers "can this command print this text", never "will *this run* print
+it".  A `contains` it passes can still fail the boot, because the command took a
+different branch than the rung assumed -- most often because a lazily-initialised
+subsystem was never initialised.  That is not hypothetical: the first assertion
+written on this gate's advice, ``bright set 50`` expecting ``Brightness -> 50%``,
+passed the gate and panicked the kernel, because `brightness::init_defaults()`
+is called only from the `show` arm and a fresh boot has no display 1 to set.
+The rung was missing a `bright show` opener, the way rung 74 opens with
+`tile init`.
+
+So the gate narrows what a rung *may* claim; it does not establish that the
+claim holds.  A rung still has to set up the state its command needs, and a boot
+is still the only thing that proves it did.  Note which way that limitation
+points: it yields a rung that fails loudly on a correct kernel, never one that
+passes while testing nothing -- the same direction as every other
+over-approximation here, and the tolerable one.
+
 Exit status: 0 clean, 1 unaccounted assertions found.
 """
 

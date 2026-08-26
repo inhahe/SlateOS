@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Modal and non-modal dialog widgets.
 //!
 //! Provides comprehensive dialog infrastructure including:
@@ -34,12 +33,15 @@ const COLOR_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
 const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
 const COLOR_RED: Color = Color::from_hex(0xF38BA8);
 const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_GREEN: Color = Color::from_hex(0xA6E3A1);
 const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
 const COLOR_OVERLAY1: Color = Color::from_hex(0x7F849C);
 const COLOR_LAVENDER: Color = Color::from_hex(0xB4BEFE);
 
-// Overlay scrim color (semi-transparent black)
+/// The scrim behind a dialog, at full fade-in. Its alpha is the *peak* the
+/// fade animates towards, not a fixed value — [`ModalOverlay::render`] scales
+/// it by the current opacity. Kept as one constant so the scrim's colour and
+/// the number the fade multiplies are the same thing; they were two, and the
+/// constant was the copy nobody read.
 const COLOR_SCRIM: Color = Color::rgba(0, 0, 0, 160);
 
 // --- Layout constants ---
@@ -538,8 +540,8 @@ impl ModalOverlay {
         if self.opacity <= 0.0 {
             return;
         }
-        let alpha = (160.0 * self.opacity) as u8;
-        let scrim_color = Color::rgba(0, 0, 0, alpha);
+        let alpha = (f32::from(COLOR_SCRIM.a) * self.opacity) as u8;
+        let scrim_color = Color::rgba(COLOR_SCRIM.r, COLOR_SCRIM.g, COLOR_SCRIM.b, alpha);
         tree.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
@@ -1182,7 +1184,6 @@ impl AlertDialog {
             y,
             width,
             height,
-            buttons_y,
             button_rects,
         }
     }
@@ -1269,7 +1270,15 @@ pub struct InputDialog {
     validation_error: Option<String>,
     /// Validation function stored as a flag; actual validation is done via `validate()`.
     has_validator: bool,
-    buttons: ButtonSet,
+    // No `buttons: ButtonSet` here, deliberately. There was one, initialised to
+    // `ok_cancel()` and never read: `render` draws the strings "OK" and
+    // "Cancel" outright, and `InputPlacement` names its two hit rectangles
+    // `ok` and `cancel`. A field claiming the row is configurable when it is
+    // not is worse than no field, because the obvious next edit — an
+    // `InputDialog::with_buttons` — would compile and change nothing on
+    // screen. If this dialog ever needs its own labels, the row has to become
+    // real first: `render` reading the set, and `placement` holding a `Vec` of
+    // rectangles the way [`DialogLayout`] does.
     focused_element: InputFocus,
     result: Option<DialogResult>,
     overlay: ModalOverlay,
@@ -1303,7 +1312,6 @@ impl InputDialog {
             password_mode: false,
             validation_error: None,
             has_validator: false,
-            buttons: ButtonSet::ok_cancel(),
             focused_element: InputFocus::TextField,
             result: None,
             overlay,
@@ -2895,11 +2903,13 @@ struct DialogLayout {
     y: f32,
     width: f32,
     height: f32,
-    /// Top edge of the button row. Kept here rather than recomputed at each
-    /// use, because the message-clipping test in `render` and the button rects
-    /// below have to agree about where the row starts or a long message is
-    /// drawn over the controls that dismiss the dialog.
-    buttons_y: f32,
+    /// Each button's rectangle, left to right, as `(x, y, width, height)`.
+    ///
+    /// There is no separate `buttons_y` beside this. There was one, and it was
+    /// needed while `render` clipped the message against the row by hand; now
+    /// that [`AlertDialog::line_budget`] decides the text's height before a
+    /// line is drawn, the only thing that ever wanted the row's top edge was a
+    /// test — and a test asking where the buttons are should ask the buttons.
     button_rects: Vec<(f32, f32, f32, f32)>,
 }
 
@@ -3312,11 +3322,13 @@ mod tests {
 
         let mut tree = RenderTree::new();
         dialog.render(800.0, 600.0, &mut tree);
+        // The top of the row as the *buttons* report it, not as a separate
+        // bookkeeping number: prose has to clear the controls that are on
+        // screen, and those are the only ones that matter.
         let buttons_y = dialog
-            .placement
-            .as_ref()
-            .expect("render records where it drew")
-            .buttons_y;
+            .button_rect(0)
+            .expect("render records where it drew the buttons")
+            .1;
         for cmd in &tree.commands {
             if let RenderCommand::Text { y, text, color, .. } = cmd
                 && (*color == COLOR_SUBTEXT1 || *color == COLOR_YELLOW)

@@ -740,6 +740,22 @@ fn no_options_error(args: &[Str]) -> Option<u8> {
 /// 2)". Mapping by `ErrorKind` (not the raw OS code) keeps the text stable and
 /// bash-compatible on both the Windows dev host and the SlateOS target. Kinds
 /// without a canonical POSIX spelling fall back to the platform message.
+/// `strerror(0)` — the text a C library gives for "no error at all".
+///
+/// It is a diagnostic here only because bash prints one: `exec` reports `errno`
+/// for its second line having already cleared the one it printed the first line
+/// from, so the line says nothing went wrong. Which is an artifact, but a
+/// visible one, and it is not the same text everywhere — glibc says `Success`
+/// where newlib says `No error` — so it has to be asked of the host rather than
+/// written down. `Display` appends ` (os error 0)`, which `strerror` does not.
+fn strerror_ok() -> String {
+    let mut s = std::io::Error::from_raw_os_error(0).to_string();
+    if let Some(i) = s.find(" (os error") {
+        s.truncate(i);
+    }
+    s
+}
+
 fn io_error_message(e: &std::io::Error) -> String {
     use std::io::ErrorKind;
     match e.kind() {
@@ -1401,7 +1417,7 @@ enum SpawnDiag {
 /// answer: a trailing `/` demands that the name in front of it resolve to a
 /// directory, so a missing name is ENOENT and a plain file is ENOTDIR. Those
 /// are the two errnos this reconstructs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 enum SpawnTarget {
     /// `file_isdir (command)` — a directory, whatever the host error said.
     Dir,
@@ -1409,9 +1425,35 @@ enum SpawnTarget {
     Missing,
     /// A trailing separator on something that is not a directory: ENOTDIR.
     NotDir,
+    /// A file the caller *may* execute, which the OS refused anyway — bash's
+    /// `executable_file (command) != 0`, the case its ladder keeps going for.
+    /// The payload is the interpreter its `#!` line names, when it has one:
+    /// where the kernel honours such a line, a refusal is usually about the
+    /// interpreter rather than about this file, and only the line says which.
+    /// See [`spawn_error_message`].
+    Executable(Option<Str>),
     /// Not asked, or nothing the host's own error needs correcting by.
     #[default]
     Other,
+}
+
+/// The interpreter a file's `#!` line names, read back off the file to explain
+/// a refusal — bash's `getinterp` on the `sample` it re-reads in `shell_execve`.
+///
+/// A trailing `\r` is rendered `^M`, as bash renders it: a CRLF script names an
+/// interpreter whose last byte is invisible, and the failure is unreadable
+/// without saying so. Measured, bash 5.2.21, with a directory named `adir\r`:
+/// `./cr.sh: ./adir^M: bad interpreter: Permission denied`.
+fn file_interpreter(path: &std::path::Path) -> Option<Str> {
+    let mut head = [0u8; 128];
+    let n = File::open(path).and_then(|mut f| f.read(&mut head)).ok()?;
+    let head = head.get(..n)?;
+    let (mut program, _) = shebang(head)?;
+    if program.last() == Some(&b'\r') {
+        program.pop();
+        program.extend_from_slice(b"^M");
+    }
+    Some(program)
 }
 
 /// Ask the filesystem what the program path a failed spawn named is.
@@ -1427,9 +1469,15 @@ fn spawn_target(cwd: BStr<'_>, word: BStr<'_>, resolved: Option<&std::path::Path
         None if word_is_path(word) => exec_path_name(cwd, word),
         None => return SpawnTarget::Other,
     };
-    if let Ok(m) = std::fs::metadata(bytes::bytes_to_path(&path)) {
+    let probe = bytes::bytes_to_path(&path);
+    if let Ok(m) = std::fs::metadata(&probe) {
         return if m.is_dir() {
             SpawnTarget::Dir
+        } else if path_is_executable(&probe) {
+            // Only now is the `#!` line worth reading, and only because the
+            // spawn already failed: on a host that honours one the shell never
+            // looks, and bash likewise re-reads the file only here.
+            SpawnTarget::Executable(file_interpreter(&probe))
         } else {
             SpawnTarget::Other
         };
@@ -1482,13 +1530,37 @@ fn spawn_target(cwd: BStr<'_>, word: BStr<'_>, resolved: Option<&std::path::Path
 ///     required file not found`, 127. The interpreter is not even named: from
 ///     the caller's side the script is what would not run.
 ///   * an interpreter that is there and will not run — `SCRIPT: INTERP: bad
-///     interpreter: REASON`, 126. An `exec` adds a second line to that one, and
-///     bash's reads `SCRIPT: No error`: it reports `errno` having already
-///     cleared it to print the line above. That is an artifact, and `strerror(0)`
-///     is not the same string everywhere — but this whole reading is only
-///     reached where the OS does *not* honour a `#!` line (see
-///     [`shell_script_indirection`]), which is one host, whose wording is
-///     therefore the only one there is to match.
+///     interpreter: REASON`, 126.
+///
+/// Which side read that line is the *host's* business and changes nothing here.
+/// Where the OS does not honour a `#!` line the shell stands in for it, spawns
+/// the interpreter itself and knows its name going in (`interp`); where the OS
+/// does honour it, the kernel's refusal is the only sign anything was wrong and
+/// the line is read back off the file afterwards to explain it
+/// (`SpawnTarget::Executable`). bash is always in the second position and this
+/// is its ladder, from `shell_execve`: a directory first, then a file the caller
+/// may not execute (whose errno stands as it came), then the errors that are not
+/// about the file at all (`E2BIG`, `ENOMEM`), then `ENOENT` — which cannot be
+/// about a file that is right there and executable, so it is the interpreter's —
+/// and only then the file's contents.
+///
+/// `exec` adds a second line to any 126 it did not exit on, and there are two
+/// wordings. The two verdicts bash reaches *by reading the file* — `bad
+/// interpreter` and `cannot execute binary file` — are followed by a bare
+/// `WORD: strerror(0)`, because bash prints an `errno` it has already cleared;
+/// every other refusal is followed by `exec: WORD: cannot execute: REASON`.
+/// Measured, bash 5.2.21 (glibc), where `strerror(0)` is `Success`:
+///
+/// ```text
+/// exec ./elf.bin    D/elf.bin: cannot execute binary file: Exec format error
+///                   D/elf.bin: Success
+/// exec ./isdir.sh   D/isdir.sh: ./adir: bad interpreter: Permission denied
+///                   D/isdir.sh: Success
+/// exec ./adir       D/adir: Is a directory
+///                   exec: D/adir: cannot execute: Is a directory
+/// exec ./nox.sh     D/nox.sh: Permission denied
+///                   exec: D/nox.sh: cannot execute: Permission denied
+/// ```
 ///
 /// The returned lines have no prologue; the caller prepends the one each asks
 /// for.
@@ -1501,7 +1573,29 @@ fn spawn_error_message(
 ) -> (Vec<SpawnDiag>, i32) {
     use std::io::ErrorKind;
     let is_path = word_is_path(word);
-    if let Some(interp) = interp {
+    // The two `#!` verdicts, whichever side read the line. `interp` is this
+    // shell having stood in for a host that would not read it; the other is the
+    // line read back off the file to explain a kernel's refusal — which is only
+    // worth consulting for a file the caller may execute and the OS refused for
+    // a reason that is about *running* it. `ENOEXEC` is not such a reason: it
+    // is the fall-through to the script/binary branch, taken further down. Nor
+    // are the two errors bash calls "not involving the path argument".
+    let file_says = match &target {
+        SpawnTarget::Executable(shebang)
+            if !is_exec_format_error(e)
+                && !matches!(
+                    e.kind(),
+                    ErrorKind::ArgumentListTooLong | ErrorKind::OutOfMemory
+                ) =>
+        {
+            Some(shebang.as_deref())
+        }
+        _ => None,
+    };
+    if let Some(shebang) = file_says.or(interp.map(Some)) {
+        // A file that is there and executable cannot itself be what ENOENT is
+        // about; the interpreter its `#!` line named is. bash does not name it
+        // — from the caller's side the script is what would not run.
         if e.kind() == ErrorKind::NotFound {
             return (
                 vec![SpawnDiag::Line(bfmt![
@@ -1511,19 +1605,19 @@ fn spawn_error_message(
                 127,
             );
         }
-        let mut lines = vec![SpawnDiag::Bare(bfmt![
-            word,
-            b": ",
-            interp,
-            b": bad interpreter: ",
-            &io_error_message(e)
-        ])];
-        if as_exec {
-            // bash's stale `errno`, spelled the way the one host that reaches
-            // here spells `strerror(0)`. See the doc comment.
-            lines.push(SpawnDiag::Line(bfmt![word, b": No error"]));
+        if let Some(interp) = shebang {
+            let mut lines = vec![SpawnDiag::Bare(bfmt![
+                word,
+                b": ",
+                interp,
+                b": bad interpreter: ",
+                &io_error_message(e)
+            ])];
+            if as_exec {
+                lines.push(SpawnDiag::Line(bfmt![word, b": ", &strerror_ok()]));
+            }
+            return (lines, 126);
         }
-        return (lines, 126);
     }
     // ENOENT, whether the host said so or the trailing separator did (see
     // [`SpawnTarget`]) — and the only errno bash exits 127 for.
@@ -1547,20 +1641,16 @@ fn spawn_error_message(
     // after the failed `execve` and osh before the spawn. bash words the line
     // against the file rather than against the errno the OS actually gave.
     //
-    // An `exec` adds its own second line, and does so with EACCES: bash
-    // overwrites `errno` before returning its "binary file" verdict, so that
-    // line reads "Permission denied" and says nothing about the format.
+    // An `exec` adds its own second line, and this is one of the two verdicts
+    // bash reaches by *reading the file*, so that line is the cleared-`errno`
+    // one rather than the `cannot execute` form. See the doc comment.
     if !is_dir && target != SpawnTarget::NotDir && is_exec_format_error(e) {
         let mut lines = vec![SpawnDiag::Line(bfmt![
             word,
             b": cannot execute binary file: Exec format error"
         ])];
         if as_exec {
-            lines.push(SpawnDiag::Line(bfmt![
-                b"exec: ",
-                word,
-                b": cannot execute: Permission denied"
-            ]));
+            lines.push(SpawnDiag::Line(bfmt![word, b": ", &strerror_ok()]));
         }
         return (lines, 126);
     }
@@ -94659,7 +94749,24 @@ st=1
         assert_eq!(t(b"./reg/"), SpawnTarget::NotDir);
         // Without one the host's own error is left to speak.
         assert_eq!(t(b"./nosuch"), SpawnTarget::Other);
-        assert_eq!(t(b"./reg"), SpawnTarget::Other);
+        // A file the caller may run is named as such, so that a refusal can be
+        // worded off the file rather than off the errno. `reg` was written
+        // without an execute bit, which only exists to be missing off Windows.
+        let plain = if cfg!(windows) {
+            SpawnTarget::Executable(None)
+        } else {
+            SpawnTarget::Other
+        };
+        assert_eq!(t(b"./reg"), plain);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(dir.path.join("reg"), std::fs::Permissions::from_mode(0o755))
+                .expect("chmod +x");
+            assert_eq!(t(b"./reg"), SpawnTarget::Executable(None));
+            std::fs::set_permissions(dir.path.join("reg"), std::fs::Permissions::from_mode(0o644))
+                .expect("chmod -x");
+        }
         // A word with no separator in it named no file to ask about.
         assert_eq!(t(b"sub"), SpawnTarget::Other);
         assert_eq!(t(b""), SpawnTarget::Other);
@@ -94715,8 +94822,8 @@ st=1
         assert_eq!(
             diag_text(&as_exec),
             [
-                "!/a/s.sh: /tmp: bad interpreter: Permission denied",
-                "/a/s.sh: No error"
+                "!/a/s.sh: /tmp: bad interpreter: Permission denied".to_string(),
+                format!("/a/s.sh: {}", strerror_ok()),
             ]
         );
         assert_eq!(as_exec.1, 126);
@@ -94733,6 +94840,87 @@ st=1
             ["/a/s.sh: cannot execute: required file not found"]
         );
         assert_eq!(miss_exec.1, 127);
+    }
+
+    /// The same two verdicts reached from the other side: where the OS *does*
+    /// honour a `#!` line the shell never spawns the interpreter, so the only
+    /// sign anything was wrong is the kernel's refusal of the script — and the
+    /// line is read back off the file to explain it. bash is always in this
+    /// position, and these are its answers, measured against 5.2.21 (glibc).
+    #[test]
+    fn a_kernel_refusing_a_script_is_read_off_the_file_not_the_errno() {
+        use std::io::{Error, ErrorKind};
+        let exec = |i: Option<&[u8]>| SpawnTarget::Executable(i.map(<[u8]>::to_vec));
+        let call = |t: SpawnTarget, e: ErrorKind, as_exec: bool| {
+            spawn_error_message(b"./s.sh", None, &Error::from(e), t, as_exec)
+        };
+        // ENOENT cannot be about a file that is right there and executable, so
+        // it is the interpreter's — and bash does not name it.
+        let miss = call(exec(Some(b"./nope")), ErrorKind::NotFound, false);
+        assert_eq!(
+            diag_text(&miss),
+            ["./s.sh: cannot execute: required file not found"]
+        );
+        assert_eq!(miss.1, 127);
+        // …including for an executable with no `#!` at all, which is the shape
+        // a dynamically linked binary missing its loader takes.
+        assert_eq!(
+            diag_text(&call(exec(None), ErrorKind::NotFound, false)),
+            ["./s.sh: cannot execute: required file not found"]
+        );
+        // Anything else names the interpreter, under the prologue-less printer.
+        let bad = call(exec(Some(b"./adir")), ErrorKind::PermissionDenied, false);
+        assert_eq!(
+            diag_text(&bad),
+            ["!./s.sh: ./adir: bad interpreter: Permission denied"]
+        );
+        assert_eq!(bad.1, 126);
+        // `exec` follows it with the `errno` bash has already cleared.
+        let as_exec = call(exec(Some(b"./adir")), ErrorKind::PermissionDenied, true);
+        assert_eq!(
+            diag_text(&as_exec),
+            [
+                "!./s.sh: ./adir: bad interpreter: Permission denied".to_string(),
+                format!("./s.sh: {}", strerror_ok()),
+            ]
+        );
+        // With no `#!` line to name, the errno stands as it came.
+        let plain = call(exec(None), ErrorKind::PermissionDenied, false);
+        assert_eq!(diag_text(&plain), ["./s.sh: Permission denied"]);
+        assert_eq!(plain.1, 126);
+        // And a file the caller may *not* execute is not on this ladder at all:
+        // bash stops one rung above it, at `executable_file (command) == 0`.
+        let nox = call(SpawnTarget::Other, ErrorKind::PermissionDenied, false);
+        assert_eq!(diag_text(&nox), ["./s.sh: Permission denied"]);
+        let nox_miss = call(SpawnTarget::Other, ErrorKind::NotFound, false);
+        assert_eq!(diag_text(&nox_miss), ["./s.sh: No such file or directory"]);
+        assert_eq!(nox_miss.1, 127);
+    }
+
+    /// A `#!` interpreter read back off a file, for a message about it.
+    #[test]
+    fn a_files_interpreter_is_read_with_a_carriage_return_made_visible() {
+        let dir = ScratchDir::new("file_interp");
+        let w = |name: &str, body: &[u8]| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).expect("write probe file");
+            p
+        };
+        assert_eq!(
+            file_interpreter(&w("a.sh", b"#!/bin/awk -f\nBODY\n")).as_deref(),
+            Some(b"/bin/awk".as_slice())
+        );
+        // A CRLF script names an interpreter whose last byte is invisible, so
+        // bash spells it out. Measured, bash 5.2.21, with a directory `adir\r`:
+        // `./cr.sh: ./adir^M: bad interpreter: Permission denied`.
+        assert_eq!(
+            file_interpreter(&w("cr.sh", b"#!./adir\r\nBODY\n")).as_deref(),
+            Some(b"./adir^M".as_slice())
+        );
+        // No line, or a line naming nothing, is not an interpreter.
+        assert_eq!(file_interpreter(&w("n.sh", b"echo hi\n")), None);
+        assert_eq!(file_interpreter(&w("e.sh", b"#!\necho hi\n")), None);
+        assert_eq!(file_interpreter(&dir.join("absent")), None);
     }
 
     #[test]
@@ -94786,7 +94974,7 @@ st=1
         // Reaching `spawn_error_message` with ENOEXEC means the file is binary:
         // text is handed to this shell before the spawn instead. bash words the
         // line against the file, not the errno the OS gave, and `exec` adds a
-        // second line about EACCES — see the doc comment for why.
+        // bare second line naming no error at all — see the doc comment for why.
         let e = std::io::Error::from_raw_os_error(if cfg!(windows) { 193 } else { 8 });
         let text = |m: &(Vec<SpawnDiag>, i32)| diag_text(m);
         let plain = spawn_error_message(b"./bin.elf", None, &e, SpawnTarget::Other, false);
@@ -94799,8 +94987,8 @@ st=1
         assert_eq!(
             text(&ex),
             [
-                "/a/bin.elf: cannot execute binary file: Exec format error",
-                "exec: /a/bin.elf: cannot execute: Permission denied",
+                "/a/bin.elf: cannot execute binary file: Exec format error".to_string(),
+                format!("/a/bin.elf: {}", strerror_ok()),
             ]
         );
         assert_eq!(ex.1, 126);

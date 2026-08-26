@@ -102,7 +102,6 @@ cmd_futexstat 1
 cmd_fwsettings 1
 cmd_fwupdate 2
 cmd_gamemode 2
-cmd_groupmgr 7
 cmd_hdrdisplay 2
 cmd_head_input 1
 cmd_hexdump 2

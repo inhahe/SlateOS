@@ -288,6 +288,43 @@ pub fn get(pid: u32, fd: u32) -> Option<FdEntry> {
     })
 }
 
+/// Tear down a process's whole FD table — what happens when the process exits.
+///
+/// Returns the number of descriptors that were still open, and counts every one
+/// of them in `total_closes`, because they *were* closed: a teardown that did
+/// not show up in the close tally would make the aggregate disagree with the
+/// per-process history for no reason the reader could discover.
+///
+/// This exists because the module had no teardown path of any kind. `open`
+/// pushes a new `ProcessFdTable` for any pid it has not seen, nothing ever
+/// removes one, and `MAX_PROCESSES` caps the vector at 256 — so after 256
+/// distinct pids had ever opened a single descriptor, every subsequent `open`
+/// returned `ResourceExhausted` forever, whether or not any of those processes
+/// still existed. Process exit is the most common event in an fd table's life
+/// and it was the one operation the module could not represent.
+///
+/// `NotFound` when the pid has no table, so an exit reported twice is an error
+/// rather than a silent success — the caller has lost track of the process
+/// either way, and saying so is more useful than pretending.
+pub fn close_all(pid: u32) -> KernelResult<usize> {
+    with_state(|state| {
+        let idx = state
+            .tables
+            .iter()
+            .position(|t| t.pid == pid)
+            .ok_or(KernelError::NotFound)?;
+        // `remove`, not `swap_remove`: `/proc/fdtable` and `fdtable list` print
+        // the tables in vector order, and a process exiting should not silently
+        // reorder the ones that did not.
+        let table = state.tables.remove(idx);
+        let n = table.entries.len();
+        state.total_closes = state
+            .total_closes
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        Ok(n)
+    })
+}
+
 /// Set FD limit for a process.
 pub fn set_max_fds(pid: u32, max: u32) -> KernelResult<()> {
     with_state(|state| {
@@ -342,7 +379,7 @@ pub fn self_test() {
     assert_eq!(list(1).len(), 0);
     let (t0, o0, c0, d0, _ops0) = stats();
     assert_eq!((t0, o0, c0, d0), (0, 0, 0, 0));
-    crate::serial_println!("  [1/8] empty defaults: OK");
+    crate::serial_println!("  [1/9] empty defaults: OK");
 
     // 2: Open — auto-creates the process table; first fd is 0.
     let rdonly = FdFlags {
@@ -356,7 +393,7 @@ pub fn self_test() {
     assert_eq!(fd, 0);
     assert_eq!(list(1).len(), 1);
     assert_eq!(list_tables().len(), 1);
-    crate::serial_println!("  [2/8] open: OK");
+    crate::serial_println!("  [2/9] open: OK");
 
     // 3: Close — a second fd is allocated, then the first is closed.
     let fd1 = open(1, "/tmp/two.txt", FdType::RegularFile, rdonly).expect("open_b");
@@ -364,7 +401,7 @@ pub fn self_test() {
     close(1, fd).expect("close");
     assert_eq!(list(1).len(), 1);
     assert!(close(1, 999).is_err());
-    crate::serial_println!("  [3/8] close: OK");
+    crate::serial_println!("  [3/9] close: OK");
 
     // 4: Dup — clears cloexec and copies the path.
     let sock_flags = FdFlags {
@@ -380,7 +417,7 @@ pub fn self_test() {
     let entry = get(100, new_fd).expect("get");
     assert!(!entry.flags.cloexec); // dup clears cloexec.
     assert_eq!(entry.path, "socket:[5678]");
-    crate::serial_println!("  [4/8] dup: OK");
+    crate::serial_println!("  [4/9] dup: OK");
 
     // 5: Auto-create another table.
     let rw = FdFlags {
@@ -393,19 +430,19 @@ pub fn self_test() {
     let fd2 = open(999, "/tmp/new_proc.txt", FdType::RegularFile, rw).expect("open2");
     assert_eq!(fd2, 0);
     assert_eq!(list_tables().len(), 3); // pid 1, 100, 999.
-    crate::serial_println!("  [5/8] auto-create: OK");
+    crate::serial_println!("  [5/9] auto-create: OK");
 
     // 6: Get — type and path round-trip.
     let entry = get(1, fd1).expect("get2");
     assert_eq!(entry.fd_type, FdType::RegularFile);
     assert_eq!(entry.path, "/tmp/two.txt");
-    crate::serial_println!("  [6/8] get: OK");
+    crate::serial_println!("  [6/9] get: OK");
 
     // 7: FD limit — pid 999 holds 1 fd; cap at 2 admits one more, then errors.
     set_max_fds(999, 2).expect("limit");
     open(999, "/tmp/a", FdType::RegularFile, rw).expect("open3");
     assert!(open(999, "/tmp/b", FdType::RegularFile, rw).is_err());
-    crate::serial_println!("  [7/8] fd limit: OK");
+    crate::serial_println!("  [7/9] fd limit: OK");
 
     // 8: Stats — exact totals (3 tables, 5 opens, 1 close, 1 dup).
     let (tables, opens, closes, dups, ops) = stats();
@@ -414,10 +451,30 @@ pub fn self_test() {
     assert_eq!(closes, 1);
     assert_eq!(dups, 1);
     assert!(ops > 0);
-    crate::serial_println!("  [8/8] stats: OK");
+    crate::serial_println!("  [8/9] stats: OK");
+
+    // 9: Process exit — the table goes away, its descriptors are counted as
+    // closed, and the pid can then be opened again from scratch. Deliberately
+    // after test 8 so the exact totals it asserts stay meaningful.
+    assert_eq!(list(999).len(), 2);
+    assert_eq!(close_all(999).expect("close_all"), 2);
+    assert_eq!(list_tables().len(), 2); // pid 1 and 100 remain.
+    assert_eq!(list(999).len(), 0);
+    let (_, _, closes_after, _, _) = stats();
+    assert_eq!(closes_after, closes + 2);
+    // Twice is an error, not a silent success.
+    assert!(close_all(999).is_err());
+    // And the slot is genuinely reusable: `open` re-creates the table, and the
+    // fd numbering starts over because `next_fd` went away with it.
+    assert_eq!(
+        open(999, "/tmp/again", FdType::RegularFile, rw).expect("reopen"),
+        0
+    );
+    assert_eq!(close_all(999).expect("close_all2"), 1);
+    crate::serial_println!("  [9/9] process exit: OK");
 
     // Reset so the boot self-test leaves no fixtures behind in /proc/fdtable.
     *STATE.lock() = None;
 
-    crate::serial_println!("fdtable::self_test() — all 8 tests passed");
+    crate::serial_println!("fdtable::self_test() — all 9 tests passed");
 }

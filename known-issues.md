@@ -81109,7 +81109,91 @@ file` all still work — so the rung cannot pass by having broken the options.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **481 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **475 of 800 remain**
+
+> **Burn-down log.** 2026-08-26 (twenty-sixth batch): `cmd_fdtable` (6, plus
+> one uncounted) cleared — 481 → 475 across 217 → 216 functions. Pinned by
+> `kshell::self_test` rung 94.
+>
+> **In short:** `fdtable` shows and edits the table of open files a process
+> holds. Every one of its operands was guessed as `0` when it could not be read.
+> The process-id guesses were then caught by a guard and turned into a
+> complaint about the command's *shape*; the file-descriptor guesses were not
+> caught at all, and `0` is the first descriptor a process ever opens — so
+> `fdtable close 42 1O` closed it and said "Closed fd=0 for PID 42".
+>
+> **This is the first command in the burn-down that had already noticed the
+> problem and protected the wrong operand.** Both pid sites read
+>
+> ```rust
+> let pid = pid_str.parse::<u32>().unwrap_or(0);
+> if pid == 0 { shell_println!("Usage: fdtable close <pid> <fd>"); set_exit(1); return; }
+> ```
+>
+> which is the **conflation** row (`cmd_shmem`, `cmd_blkread`): one sentinel
+> serves as both the guess and the invalidity marker, so the shell reports that
+> the *form* of the command was wrong when the form was right and only the word
+> was unreadable. The reader's obvious response is to re-type the same shape and
+> get the same complaint. Note that the guard was not useless — `open`
+> auto-creates a table for whatever pid it is handed, so without it a mistyped
+> pid would have built a real fd table for process 0 — it was simply spent on
+> the operand that was not doing the damage.
+>
+> **The new row is the descriptor, and it turns on how the id space is
+> allocated.** Batch 25 established that a guessed `0` in `cgmem` was *safe but
+> dishonest*, because `next_id` starts at 1 and so cgroup 0 is unreachable. The
+> fd table inverts exactly that property: `next_fd` starts at **0**, so the
+> guess names the first descriptor the process ever opened — the entry most
+> likely to exist and the oldest one in the table. Reachability is not a
+> property of the number `0`; it is a property of where the allocator starts.
+>
+> | Guessed number is a… | What happens | How you find out |
+> |---|---|---|
+> | **selector in an allocation-ordered id space that starts at 0** (`cmd_fdtable close`) | destroys the process's first and oldest descriptor, reports success | you don't — and no later call can re-issue the number |
+>
+> **And it is not undoable at the number.** `open` and `dup` both allocate from
+> the monotonic `next_fd`, which never goes backwards and never reuses a freed
+> value. Re-opening the same path after a mistaken close returns *some later
+> fd*. In a table where the number is the interface — 0 being stdin by universal
+> convention — that is a permanent renumbering, not a recoverable deletion. This
+> is a stronger form of irreversibility than the `ipcns` accumulator row: there
+> the *count* could not be repaired, here the *identity* cannot.
+>
+> **`dup` is the additive twin.** The same guessed `0` there does not remove an
+> entry, it manufactures a second alias for the wrong descriptor, consumes a
+> number from `next_fd`, and bumps `total_dups` — which has no decrement. So
+> closing the surplus alias afterwards still leaves `dups=1` where the truth was
+> `dups=0`, the same laundered-audit-trail problem batch 25 found in `cgmem
+> charge`. One mistyped word thus reaches both the destructive and the
+> accumulating failure modes depending only on which subcommand it lands in.
+>
+> **The uncounted one** is `open`'s path, `parts.get(2).copied().unwrap_or("")`,
+> whose emptiness was folded into the *same* usage line as the pid — so an
+> omitted path and an unreadable pid produced byte-identical output. It now says
+> `fdtable: open: missing path`.
+>
+> **Rung 94 owns its fixture, and the first draft did not.** The rung needs a
+> descriptor to exist so it can prove the refused `close` did not destroy it.
+> The first attempt borrowed the tables `fdtable::self_test` builds earlier in
+> the boot battery — and panicked on `FDs for PID 100 (0):`, because that
+> self-test *ends* with `*STATE.lock() = None`, precisely so its fixtures cannot
+> masquerade as live processes in `/proc/fdtable`. The assertion that caught it
+> was the one written to make exactly that assumption fail loudly rather than
+> silently test an empty table, so the gate worked as designed; the lesson is
+> that a rung must build what it acts on.
+>
+> Doing that properly required the module to gain a process-exit path, which it
+> did not have — see
+> `A-FDTABLE-HAS-NO-PROCESS-EXIT-PATH-AND-THE-TABLE-VECTOR-ONLY-GROWS`, a
+> genuine leak (256-slot cap, nothing ever freed a slot) that stayed invisible
+> until a caller finally needed the operation. The rung now opens one descriptor
+> for pid 424242, pins severity with a before/after equality on both `fdtable
+> show 424242` and `fdtable stats` — the first proves the descriptor is still
+> listed, the second that no dup was tallied — and releases the fixture with
+> `fdtable exit 424242`, asserting the released count is exactly 1, which would
+> read 0 or 2 if any of the seven refusals had actually run. Neither reader
+> takes the `with_state` path, so neither perturbs `ops` and the captures are
+> comparable.
 
 > **Burn-down log.** 2026-08-26 (twenty-fifth batch): `cmd_cgmem` (6, plus
 > three uncounted) cleared — 487 → 481 across 218 → 217 functions. Pinned by
@@ -81201,9 +81285,13 @@ file` all still work — so the rung cannot pass by having broken the options.
 > default exists in the code.
 >
 > **Found while reading for evidence:** two independent `cgmem` defects, both
-> logged separately and both still open —
+> logged separately and both **since fixed** —
 > `A-CGMEM-UNCHARGE-SATURATES-PER-BUCKET-AND-IN-AGGREGATE-INDEPENDENTLY` and
-> `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`.
+> `A-CGMEM-THE-LIMIT-IS-COMPARED-AND-THE-RESULT-IS-NEVER-SHOWN`. Fixing the
+> second is what armed this batch's ceiling guess: `high_events` is now printed,
+> so a wrong ceiling is finally falsifiable. The trap named above was not
+> hypothetical — it was resolved within the hour, and the refusal had to be in
+> place first.
 
 > **Burn-down log.** 2026-08-26 (twenty-fourth batch): `cmd_colortemp` (7,
 > plus two uncounted) cleared — 494 → 487 across 219 → 218 functions. Pinned
@@ -84981,3 +85069,65 @@ ignored is worse than a control that says it is not available yet.
 **Not a regression.** Until 2026-08-26 the rules engine had no caller at all, so
 *seventeen* of seventeen did nothing. This is the state after wiring five of
 them up.
+
+---
+
+## `A-FDTABLE-HAS-NO-PROCESS-EXIT-PATH-AND-THE-TABLE-VECTOR-ONLY-GROWS` (lane A, 2026-08-26) — **fixed 2026-08-26**
+
+**In short:** The module that tracks which files each process has open had no
+way to represent a process *exiting*. Tables were created on first use and never
+removed, and the list of them is capped at 256 — so once 256 different processes
+had ever opened a single file, every later open failed permanently, whether or
+not any of those processes still existed.
+
+**Where.** `kernel/src/fs/fdtable.rs`. `open` (~line 187) pushes a fresh
+`ProcessFdTable` for any pid it has not seen:
+
+```rust
+if state.tables.len() >= MAX_PROCESSES {
+    return Err(KernelError::ResourceExhausted);
+}
+state.tables.push(ProcessFdTable { pid, entries: Vec::new(), next_fd: 0, max_fds: DEFAULT_MAX_FDS });
+```
+
+`MAX_PROCESSES` is 256 (line 124). The module's public surface was
+`init_defaults`, `open`, `close`, `dup`, `list`, `get`, `set_max_fds`,
+`list_tables`, `stats`, `self_test` — every one of which either adds a table or
+reads one. **Nothing removed a table.** `close` removes a single *entry* and
+leaves the table in place, so a process that opened one file and closed it still
+occupied one of the 256 slots forever.
+
+**Why this is worse than an ordinary leak.** Process exit is not an edge case in
+an fd table — it is the single most frequent event in its life, and the one the
+data structure exists to survive. A module that can model open, close and dup
+but not exit is not leaking by oversight in a corner; it is missing the main
+lifecycle transition. The symptom, moreover, is delayed and unattributable: the
+256th distinct pid works fine, the 257th gets `ResourceExhausted`, and nothing
+in the error names *exhausted by long-dead processes* as the cause. A reader
+would look for a process holding too many descriptors, which is exactly what is
+not happening.
+
+**Found by.** Writing `kshell::self_test` rung 94 for the twenty-sixth
+option-refusal burn-down batch. The rung needed a descriptor to exist so it
+could prove that a refused `close` had not destroyed it, and needed to leave no
+fixture behind afterwards — and there was no operation that could do the second
+thing. The absence was visible only because something finally asked for it.
+
+**Fixed.** `close_all(pid) -> KernelResult<usize>` removes the process's whole
+table, returns how many descriptors were still open, and adds them to
+`total_closes` (they *were* closed; an aggregate that disagreed with the
+per-process history for no discoverable reason would be its own bug). It uses
+`Vec::remove` rather than `swap_remove` so that a process exiting does not
+silently reorder the `/proc/fdtable` listing of the ones that did not. A second
+exit for the same pid is `NotFound` rather than a silent success — the caller
+has lost track of the process either way, and saying so is more useful than
+pretending. Reachable from the shell as `fdtable exit <pid>`.
+
+`fdtable::self_test` grew from 8 to 9 tests; test 9 asserts the table
+disappears, the surviving tables are untouched, the close tally moves by exactly
+the number of descriptors released, a repeat exit errors, and the pid is
+genuinely reusable afterwards — `open` re-creates the table and fd numbering
+restarts at 0, because `next_fd` went away with it. It is deliberately placed
+*after* test 8 so the exact totals that test asserts stay meaningful.
+
+**Not a regression.** True since the module was written.

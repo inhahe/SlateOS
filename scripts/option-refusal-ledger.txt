@@ -81,7 +81,6 @@ cmd_eventlog 4
 cmd_eyeprotect 2
 cmd_faceunlock 1
 cmd_fault_inject 3
-cmd_fdtable 6
 cmd_filelock 1
 cmd_filerules 1
 cmd_fileshare 1

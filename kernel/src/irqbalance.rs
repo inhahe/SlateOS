@@ -489,7 +489,10 @@ pub fn self_test() {
     assert!(!IRQ_STATES[10].active.load(Ordering::Relaxed));
     notify_irq(10);
     assert!(IRQ_STATES[10].active.load(Ordering::Relaxed));
-    // Clean up.
+    // Clean up.  This is load-bearing for Test 9, not mere tidiness: Test 9
+    // asserts that every line marked active was counted by `idt`, and IRQ 10
+    // was marked active here by a direct call with no interrupt behind it.
+    // Leaving it set would fail Test 9 with a message blaming the ISR path.
     IRQ_STATES[10].active.store(false, Ordering::Relaxed);
     serial_println!("[irqbalance]   Notify: OK");
 
@@ -537,15 +540,22 @@ pub fn self_test() {
         vector_for_irq(0)
     );
 
-    // Test 9: evidence that the ISR path actually reaches this module.
+    // Test 9: evidence that the ISR path actually reaches this module -- and
+    // that the vector it reaches through is the one `vector_for_irq` names.
     //
-    // Reported rather than asserted, for now: which IOAPIC lines have fired by
-    // the time the self-test runs is a property of the emulated hardware and of
-    // boot ordering, not of this module, and an assertion that depends on a
-    // device having happened to interrupt is a flaky one.  The line is here so
-    // the boot log carries the evidence -- if `notify_irq`'s call in
-    // `ioapic::handle_device_irq` is ever removed, this prints `none` forever
-    // after, which is a visible and greppable change rather than a silent one.
+    // Which IOAPIC lines have fired by now is a property of the emulated
+    // hardware and of boot ordering, not of this module, so the *count* is
+    // reported rather than asserted: requiring that some device have
+    // interrupted would be flaky.  What IS asserted is the agreement between
+    // the two records of whatever did fire (see below), which is a property of
+    // this kernel and holds no matter what the hardware did.
+    //
+    // If `notify_irq`'s call in `ioapic::handle_device_irq` is ever removed,
+    // this prints `none` forever after -- visible and greppable rather than
+    // silent.  Note that this self-test is sequenced late enough in boot for
+    // that to be meaningful: it runs after `keyboard::init` unmasks IRQ 1,
+    // whereas `fs::irqstat::self_test` runs before any device IRQ is unmasked
+    // at all and so can only ever observe the timer.
     let mut active: [u8; MAX_IRQS] = [0; MAX_IRQS];
     let mut n_active = 0usize;
     for (i, state) in IRQ_STATES.iter().enumerate() {
@@ -559,8 +569,29 @@ pub fn self_test() {
     if n_active == 0 {
         serial_println!("[irqbalance]   Live IRQ lines: none have fired yet");
     } else {
+        // Two independent instruments record the same event, and until now
+        // neither checked the other.  This module sets `active` from
+        // `notify_irq`, called by `ioapic::handle_device_irq`; `idt` counts the
+        // raw vector in `dispatch_vector`, one frame earlier on the same path.
+        // An IRQ that reached here therefore MUST have been counted there, and
+        // in the slot `vector_for_irq` names -- which is the off-by-one this
+        // function's doc comment describes, re-checked against live traffic
+        // rather than against arithmetic.
+        //
+        // This is an assertion where the count alone could only ever be a
+        // report: it is conditional on what actually fired, so it neither
+        // depends on a device happening to interrupt nor on where in the boot
+        // this self-test is sequenced.  Nothing fired, nothing is claimed.
+        for &irq in active.get(..n_active).unwrap_or(&[]) {
+            let vector = vector_for_irq(usize::from(irq));
+            let counted = crate::idt::vector_count(vector);
+            assert!(
+                counted > 0,
+                "IRQ {irq} is marked active but vector {vector} was never counted by idt::dispatch_vector. Either the two instruments disagree, or vector_for_irq names the wrong slot, or an earlier test in this function called notify_irq directly and failed to clear the flag (see Test 4's cleanup)"
+            );
+        }
         serial_println!(
-            "[irqbalance]   Live IRQ lines: {} seen via the ISR path {:?}",
+            "[irqbalance]   Live IRQ lines: {} seen via the ISR path {:?} (all cross-checked against idt vector counts): OK",
             n_active,
             active.get(..n_active).unwrap_or(&[])
         );

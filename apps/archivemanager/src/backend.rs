@@ -224,76 +224,65 @@ pub fn parse_zip(path: &Path, bytes: Vec<u8>) -> Result<ArchiveModel, ArchiveErr
 ///
 /// `ziparchive` hands the pair over raw and undecoded, deliberately: it is
 /// `no_std` and will not own a calendar. This is the caller that wants a date,
-/// so the decoding lives here — and it reaches the *shared* calendar
-/// (`guitk::tzrules::days_from_civil`, the same one `format_date`,
-/// `guitk::datetime` and the taskbar clock render through) rather than
-/// transcribing a sixth private one into this file.
+/// so the *rendering* decision lives here and the *calendar* decision does not:
+/// [`guitk::tzrules::unix_from_dos_datetime`] answers "does this pair name a
+/// real instant", and everything this function adds is the translation of its
+/// `None` into the `0` that `ArchiveEntry::format_date` renders as `-`.
 ///
-/// Two facts about the format shape this function:
+/// Two facts about the format shape that translation:
 ///
 /// * **Zero is "not recorded", not an instant.** A zero pair is day 0 of month
 ///   0, which is not a date at all, so it maps to `0` — which
 ///   `ArchiveEntry::format_date` renders as `-`. Rendering it as 1980-01-01
 ///   would put a measurement where there is none. Archives SlateOS itself
 ///   writes carry zero (design-decisions.md §618), so this is the common case,
-///   not an edge one. The same reasoning rejects any pair whose month or day is
-///   out of range: a malformed date is an unknown date, not a guessed one.
+///   not an edge one. The same reasoning maps every *malformed* pair to `0`
+///   too: a malformed date is an unknown date, not a guessed one.
+///
+///   Conflating the two is safe here for a reason worth stating, because it is
+///   not safe in general: a DOS pair cannot name 1970 — the format's epoch is
+///   1980 — so a `0` out of this function is never a real timestamp that
+///   happens to be the Unix epoch. In a format that stored Unix seconds
+///   directly it would be, and this shape would be wrong.
 /// * **A DOS timestamp has no zone.** The format records wall-clock time as the
 ///   writer's machine saw it and stores nothing about where that machine was.
-///   There is no correct conversion to an absolute instant, so this reads it as
-///   UTC — which is also what `format_date` renders in
+///   There is no correct conversion to an absolute instant, so `tzrules` reads
+///   it as UTC — which is also what `format_date` renders in
 ///   (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), making the round trip show back
 ///   exactly the digits the archive stored.
 ///
-/// # The inverse is already written — do not write a second one
+/// # Why both directions are shared and neither is written here
 ///
-/// When this app grows a writing side, the encoder it needs is
-/// [`guitk::tzrules::dos_datetime_from_unix`], which lane A landed in `37c04848e`
-/// (`requests/a-c-the-dos-encoder-already-exists-dont-write-it.md`). It packs
-/// `(date << 16) | time` exactly as this function unpacks it, refuses anything
-/// outside `DOS_EPOCH_UNIX ..= DOS_END_UNIX` by returning the same `0` sentinel
-/// this function reads as "not recorded", and rounds odd seconds *down* so a
-/// stored time is never later than the real one. It takes **seconds**, not
-/// nanoseconds.
+/// The encoder is [`guitk::tzrules::dos_datetime_from_unix`] (lane A, `37c04848e`)
+/// and the decoder is [`guitk::tzrules::unix_from_dos_datetime`]. They pack and
+/// unpack the same `(date << 16) | time` layout, and both take and return
+/// **seconds**, not nanoseconds.
 ///
-/// The decoder stays here rather than being hoisted to join it, because it does
-/// more than decode: the month/day range check above is a decision about whether
-/// there is a date to render at all, and moving it into a calendar crate would
-/// either lose that check or drag a rendering decision somewhere it does not
-/// belong. Nothing outside `apps/**` decodes a pair today.
+/// This app used to decode the pair itself, on the argument that the range
+/// check was a rendering decision rather than a calendar one and so belonged
+/// next to the column it fed. That argument was wrong, and it was wrong in a
+/// way that shipped a bug: the local check tested `day` against a constant
+/// `1..=31`, which is the *widest* month rather than *this* month, so
+/// 2026-02-30 passed it and reached `days_from_civil` — the Hinnant algorithm,
+/// which normalises rather than refusing — and came back rendering as
+/// **2026-03-02**. A plausible date in roughly the right place, with nothing to
+/// suggest the archive had said something impossible. 2026-02-29 in a common
+/// year became March 1 the same way.
+///
+/// "Is 30 a day in February" is a question about the calendar, and only the
+/// calendar crate knows the leap rule, so only the calendar crate can answer
+/// it. What is genuinely a rendering decision — that an unanswerable pair
+/// becomes a `-` in a column rather than an `Option` a caller must handle — is
+/// the part that stayed, and it is these four lines.
+///
+/// Reported in `requests/a-c-the-dos-decoder-exists-now-and-yours-invents-a-date-in-february.md`;
+/// the refusing-versus-normalising constraint both directions implement is
+/// design-decisions.md §618, and where the pair lives is §621.
 #[must_use]
 pub fn dos_datetime_to_unix(pair: u32) -> u64 {
-    if pair == 0 {
-        return 0;
-    }
-    let time = (pair & 0xFFFF) as u16;
-    let date = (pair >> 16) as u16;
-
-    let year = i64::from(date >> 9).saturating_add(1980);
-    let month = u32::from((date >> 5) & 0x0F);
-    let day = u32::from(date & 0x1F);
-    // Out of range means the pair is not a date, and an invented one would be
-    // worse than the `-` an unknown time already renders as.
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return 0;
-    }
-
-    let hour = i64::from(time >> 11);
-    let minute = i64::from((time >> 5) & 0x3F);
-    // DOS stores seconds halved, so odd seconds are simply not representable —
-    // the lost bit is the format's, not ours.
-    let second = i64::from(time & 0x1F).saturating_mul(2);
-    if hour > 23 || minute > 59 || second > 59 {
-        return 0;
-    }
-
-    let days = guitk::tzrules::days_from_civil(year, month, day);
-    let secs = days
-        .saturating_mul(86_400)
-        .saturating_add(hour.saturating_mul(3600))
-        .saturating_add(minute.saturating_mul(60))
-        .saturating_add(second);
-    u64::try_from(secs).unwrap_or(0)
+    guitk::tzrules::unix_from_dos_datetime(pair)
+        .and_then(|secs| u64::try_from(secs).ok())
+        .unwrap_or(0)
 }
 
 /// What to show in the Method column for a ZIP compression method number.
@@ -702,6 +691,84 @@ mod tests {
                 dos_datetime_to_unix(bad),
                 0,
                 "a malformed pair {bad:#010x} must be unknown, not guessed"
+            );
+        }
+    }
+
+    /// Regression: the day check used to be a constant `1..=31`, which is the
+    /// widest month rather than *this* month, so February 30 passed it and was
+    /// then normalised by `days_from_civil` into a perfectly ordinary March 2.
+    /// The user saw a plausible date in roughly the right region with nothing
+    /// to suggest the archive had said something impossible — the one outcome
+    /// this function's contract rules out. Reported by lane A in
+    /// `requests/a-c-the-dos-decoder-exists-now-and-yours-invents-a-date-in-february.md`.
+    #[test]
+    fn a_day_that_month_does_not_have_is_unknown_and_not_the_next_month() {
+        for (bad, would_have_been) in [
+            (dos(2026, 2, 30, 12, 0, 0), "2026-03-02"),
+            // 2026 is not a leap year, so the 29th is as impossible as the 30th
+            // — and this is the case a rule that only knows "February is short"
+            // would still get wrong.
+            (dos(2026, 2, 29, 12, 0, 0), "2026-03-01"),
+            (dos(2026, 4, 31, 12, 0, 0), "2026-05-01"),
+            (dos(2026, 6, 31, 12, 0, 0), "2026-07-01"),
+            (dos(2026, 9, 31, 12, 0, 0), "2026-10-01"),
+            (dos(2026, 11, 31, 12, 0, 0), "2026-12-01"),
+        ] {
+            let secs = dos_datetime_to_unix(bad);
+            assert_eq!(
+                secs, 0,
+                "{bad:#010x} names no day, so it must be unknown rather than {would_have_been}"
+            );
+            assert_eq!(
+                ArchiveEntry::format_date(secs),
+                "-",
+                "an impossible day must reach the Date column as `-`"
+            );
+        }
+    }
+
+    /// The other half of the same rule: a leap day is a real day, and refusing
+    /// it would be the opposite bug — an archive that recorded a true time
+    /// showing `-`. This is why the check has to consult the calendar rather
+    /// than shorten February by a constant.
+    #[test]
+    fn the_twenty_ninth_of_february_in_a_leap_year_still_decodes() {
+        // 2024-02-29 12:00:00 UTC.
+        assert_eq!(
+            dos_datetime_to_unix(dos(2024, 2, 29, 12, 0, 0)),
+            1_709_208_000
+        );
+        // 2000 is the century that *is* a leap year, which a rule missing the
+        // 400-year clause would refuse.
+        assert_ne!(dos_datetime_to_unix(dos(2000, 2, 29, 0, 0, 0)), 0);
+        // 2100 is the century that is not, which the same missing clause would
+        // wrongly accept.
+        assert_eq!(dos_datetime_to_unix(dos(2100, 2, 29, 0, 0, 0)), 0);
+    }
+
+    /// The rendering decision — an unanswerable pair becomes `-` — is the part
+    /// that stayed in this app when the decoding moved to `tzrules`. That makes
+    /// the mapping from `None` to `0` load-bearing, so it is asserted directly
+    /// against the shared function rather than only through its consequences.
+    #[test]
+    fn the_shared_decoder_and_this_wrapper_agree_on_every_pair_they_are_given() {
+        for pair in [
+            0,
+            dos(1980, 1, 1, 0, 0, 0),
+            dos(2026, 8, 26, 14, 30, 52),
+            dos(2026, 2, 30, 12, 0, 0),
+            dos(2024, 2, 29, 12, 0, 0),
+            dos(2026, 13, 1, 12, 0, 0),
+            dos(2026, 8, 26, 24, 0, 0),
+        ] {
+            let expected = guitk::tzrules::unix_from_dos_datetime(pair)
+                .and_then(|s| u64::try_from(s).ok())
+                .unwrap_or(0);
+            assert_eq!(
+                dos_datetime_to_unix(pair),
+                expected,
+                "the wrapper must add nothing to {pair:#010x} but the sentinel"
             );
         }
     }

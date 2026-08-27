@@ -176,7 +176,10 @@ mod tests {
 
     #[test]
     fn test_dev_paths_nonempty() {
-        assert!(!WATCHDOG_DEV_PATH.is_empty());
+        assert!(
+            !WATCHDOG_DEV_PATH.is_empty(),
+            "WATCHDOG_DEV_PATH must name a device node"
+        );
         assert!(WATCHDOG_DEV_PATH.starts_with("/dev/"));
         assert!(WATCHDOG_DEV_PATH0.starts_with("/dev/watchdog"));
         assert!(WATCHDOG_SYSFS_ROOT.starts_with("/sys/"));

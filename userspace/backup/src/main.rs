@@ -196,10 +196,22 @@ impl Manifest {
         out.push_str(&format!("# source: {}\n", self.source));
         out.push_str(&format!("# id: {}\n", self.backup_id));
 
-        let file_count = self.entries.iter().filter(|e| matches!(e, ManifestEntry::File { .. })).count();
-        let total_bytes: u64 = self.entries.iter().filter_map(|e| {
-            if let ManifestEntry::File { size, .. } = e { Some(*size) } else { None }
-        }).sum();
+        let file_count = self
+            .entries
+            .iter()
+            .filter(|e| matches!(e, ManifestEntry::File { .. }))
+            .count();
+        let total_bytes: u64 = self
+            .entries
+            .iter()
+            .filter_map(|e| {
+                if let ManifestEntry::File { size, .. } = e {
+                    Some(*size)
+                } else {
+                    None
+                }
+            })
+            .sum();
 
         out.push_str(&format!("# files: {}\n", file_count));
         out.push_str(&format!("# bytes: {}\n", total_bytes));
@@ -207,7 +219,12 @@ impl Manifest {
 
         for entry in &self.entries {
             match entry {
-                ManifestEntry::File { hash, size, mtime, path } => {
+                ManifestEntry::File {
+                    hash,
+                    size,
+                    mtime,
+                    path,
+                } => {
                     out.push_str(&format!("F {hash} {size} {mtime} {path}\n"));
                 }
                 ManifestEntry::Directory { mtime, path } => {
@@ -316,7 +333,13 @@ impl Manifest {
     fn file_index(&self) -> BTreeMap<&str, (&str, u64, u64)> {
         let mut map = BTreeMap::new();
         for entry in &self.entries {
-            if let ManifestEntry::File { hash, size, mtime, path } = entry {
+            if let ManifestEntry::File {
+                hash,
+                size,
+                mtime,
+                path,
+            } = entry
+            {
                 map.insert(path.as_str(), (hash.as_str(), *size, *mtime));
             }
         }
@@ -405,7 +428,11 @@ fn cmd_backup_full(source: &Path, dest: &Path, exclude: &[String]) {
         process::exit(1);
     }
 
-    println!("Full backup: {} → {}", source.display(), backup_dir.display());
+    println!(
+        "Full backup: {} → {}",
+        source.display(),
+        backup_dir.display()
+    );
     println!("Scanning source...");
 
     let tree = match walk_source(source) {
@@ -425,7 +452,10 @@ fn cmd_backup_full(source: &Path, dest: &Path, exclude: &[String]) {
         let rel_str = rel_path.to_string_lossy().replace('\\', "/");
 
         // Apply exclusion filters
-        if exclude.iter().any(|ex| rel_str.starts_with(ex.as_str()) || rel_str.contains(ex.as_str())) {
+        if exclude
+            .iter()
+            .any(|ex| rel_str.starts_with(ex.as_str()) || rel_str.contains(ex.as_str()))
+        {
             continue;
         }
 
@@ -584,7 +614,10 @@ fn cmd_backup_incremental(source: &Path, dest: &Path, exclude: &[String]) {
     for (rel_path, meta) in &tree {
         let rel_str = rel_path.to_string_lossy().replace('\\', "/");
 
-        if exclude.iter().any(|ex| rel_str.starts_with(ex.as_str()) || rel_str.contains(ex.as_str())) {
+        if exclude
+            .iter()
+            .any(|ex| rel_str.starts_with(ex.as_str()) || rel_str.contains(ex.as_str()))
+        {
             continue;
         }
 
@@ -732,9 +765,10 @@ fn find_latest_backup(dest: &Path) -> Option<(String, Manifest)> {
                     let name = entry.file_name().to_string_lossy().to_string();
                     // Extract timestamp from backup-NNNNNN format
                     if let Some(ts_str) = name.strip_prefix("backup-")
-                        && let Ok(ts) = ts_str.parse::<u64>() {
-                            backups.push((name, ts));
-                        }
+                        && let Ok(ts) = ts_str.parse::<u64>()
+                    {
+                        backups.push((name, ts));
+                    }
                 }
             }
         }
@@ -745,9 +779,10 @@ fn find_latest_backup(dest: &Path) -> Option<(String, Manifest)> {
     for (name, _) in &backups {
         let manifest_path = dest.join(name).join(MANIFEST_NAME);
         if let Ok(text) = fs::read_to_string(&manifest_path)
-            && let Ok(manifest) = Manifest::parse(&text) {
-                return Some((name.clone(), manifest));
-            }
+            && let Ok(manifest) = Manifest::parse(&text)
+        {
+            return Some((name.clone(), manifest));
+        }
     }
 
     None
@@ -774,7 +809,11 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
 
     let data_dir = backup_path.join("data");
 
-    println!("Restoring from {} to {}", manifest.backup_id, dest.display());
+    println!(
+        "Restoring from {} to {}",
+        manifest.backup_id,
+        dest.display()
+    );
 
     let mut restored = 0u64;
     let mut bytes_restored = 0u64;
@@ -841,7 +880,12 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
                     errors += 1;
                 }
             }
-            ManifestEntry::Symlink { target: _, path } => {
+            // `target` looks unused on a non-unix host, because only the
+            // `#[cfg(unix)]` arm below reads it — but binding it as `target: _`
+            // to quiet that warning breaks every unix build, SlateOS included
+            // (`toolchain/x86_64-slateos.json` sets `"target-family": ["unix"]`).
+            // It is bound for real and discarded explicitly in the other arm.
+            ManifestEntry::Symlink { target, path } => {
                 if !files_filter.is_empty()
                     && !files_filter.iter().any(|f| path.starts_with(f.as_str()))
                 {
@@ -866,6 +910,7 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
                 }
                 #[cfg(not(unix))]
                 {
+                    let _ = target;
                     eprintln!("  warning: symlinks not supported on this platform: {path}");
                 }
             }
@@ -988,10 +1033,11 @@ fn cmd_list(dest: &Path) {
             if path.is_dir() {
                 let manifest_path = path.join(MANIFEST_NAME);
                 if let Ok(text) = fs::read_to_string(&manifest_path)
-                    && let Ok(manifest) = Manifest::parse(&text) {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        backups.push((name, manifest));
-                    }
+                    && let Ok(manifest) = Manifest::parse(&text)
+                {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    backups.push((name, manifest));
+                }
             }
         }
     }
@@ -1016,10 +1062,22 @@ fn cmd_list(dest: &Path) {
             "incremental"
         };
 
-        let file_count = manifest.entries.iter().filter(|e| matches!(e, ManifestEntry::File { .. })).count();
-        let total_bytes: u64 = manifest.entries.iter().filter_map(|e| {
-            if let ManifestEntry::File { size, .. } = e { Some(*size) } else { None }
-        }).sum();
+        let file_count = manifest
+            .entries
+            .iter()
+            .filter(|e| matches!(e, ManifestEntry::File { .. }))
+            .count();
+        let total_bytes: u64 = manifest
+            .entries
+            .iter()
+            .filter_map(|e| {
+                if let ManifestEntry::File { size, .. } = e {
+                    Some(*size)
+                } else {
+                    None
+                }
+            })
+            .sum();
 
         println!(
             "{:<24} {:<12} {:<20} {:<8} {:<12} {}",
@@ -1060,12 +1118,32 @@ fn cmd_show(backup_path: &Path) {
         "incremental"
     };
 
-    let file_count = manifest.entries.iter().filter(|e| matches!(e, ManifestEntry::File { .. })).count();
-    let dir_count = manifest.entries.iter().filter(|e| matches!(e, ManifestEntry::Directory { .. })).count();
-    let link_count = manifest.entries.iter().filter(|e| matches!(e, ManifestEntry::Symlink { .. })).count();
-    let total_bytes: u64 = manifest.entries.iter().filter_map(|e| {
-        if let ManifestEntry::File { size, .. } = e { Some(*size) } else { None }
-    }).sum();
+    let file_count = manifest
+        .entries
+        .iter()
+        .filter(|e| matches!(e, ManifestEntry::File { .. }))
+        .count();
+    let dir_count = manifest
+        .entries
+        .iter()
+        .filter(|e| matches!(e, ManifestEntry::Directory { .. }))
+        .count();
+    let link_count = manifest
+        .entries
+        .iter()
+        .filter(|e| matches!(e, ManifestEntry::Symlink { .. }))
+        .count();
+    let total_bytes: u64 = manifest
+        .entries
+        .iter()
+        .filter_map(|e| {
+            if let ManifestEntry::File { size, .. } = e {
+                Some(*size)
+            } else {
+                None
+            }
+        })
+        .sum();
 
     println!("Backup: {}", manifest.backup_id);
     println!("  Type:    {type_str}");
@@ -1098,10 +1176,7 @@ fn cmd_show(backup_path: &Path) {
 fn cmd_delete(backup_path: &Path) {
     let manifest_path = backup_path.join(MANIFEST_NAME);
     if !manifest_path.exists() {
-        eprintln!(
-            "backup: not a backup directory: {}",
-            backup_path.display()
-        );
+        eprintln!("backup: not a backup directory: {}", backup_path.display());
         process::exit(1);
     }
 
@@ -1173,11 +1248,12 @@ fn main() {
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--exclude"
-            && let Some(pattern) = args.get(i + 1) {
-                exclude.push(pattern.clone());
-                i += 2;
-                continue;
-            }
+            && let Some(pattern) = args.get(i + 1)
+        {
+            exclude.push(pattern.clone());
+            i += 2;
+            continue;
+        }
         filtered_args.push(args[i].clone());
         i += 1;
     }

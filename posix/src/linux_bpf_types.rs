@@ -210,6 +210,6 @@ mod tests {
     #[test]
     fn test_bpffs() {
         assert_eq!(BPFFS_TYPE, "bpf");
-        assert!(!BPFFS_MOUNT.is_empty());
+        assert!(!BPFFS_MOUNT.is_empty(), "BPFFS_MOUNT must name a path");
     }
 }

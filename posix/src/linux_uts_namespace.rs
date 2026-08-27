@@ -98,8 +98,14 @@ mod tests {
 
     #[test]
     fn test_defaults_not_empty() {
-        assert!(!UTS_DEFAULT_HOSTNAME.is_empty());
-        assert!(!UTS_DEFAULT_DOMAINNAME.is_empty());
+        assert!(
+            !UTS_DEFAULT_HOSTNAME.is_empty(),
+            "UTS_DEFAULT_HOSTNAME must have a value"
+        );
+        assert!(
+            !UTS_DEFAULT_DOMAINNAME.is_empty(),
+            "UTS_DEFAULT_DOMAINNAME must have a value"
+        );
     }
 
     #[test]

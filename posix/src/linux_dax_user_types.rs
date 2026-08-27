@@ -118,7 +118,7 @@ mod tests {
             DAX_ATTR_RESOURCE,
             DAX_ATTR_REGION_ID,
         ] {
-            assert!(!a.is_empty());
+            assert!(!a.is_empty(), "a DAX sysfs attribute name is empty");
         }
     }
 }

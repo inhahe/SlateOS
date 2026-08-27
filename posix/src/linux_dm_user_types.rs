@@ -126,7 +126,10 @@ mod tests {
         assert_eq!(DM_VERSION_MAJOR, 4);
         // EXTRA string is non-empty (would otherwise fail the strncmp
         // in libdevmapper).
-        assert!(!DM_VERSION_EXTRA.is_empty());
+        assert!(
+            !DM_VERSION_EXTRA.is_empty(),
+            "DM_VERSION_EXTRA must be non-empty or libdevmapper's strncmp fails"
+        );
     }
 
     #[test]

@@ -781,12 +781,18 @@ mod tests {
 
     #[test]
     fn split_empty_input() {
-        assert!(split(b"").is_empty());
+        assert!(
+            split(b"").is_empty(),
+            "splitting an empty string must yield no words"
+        );
     }
 
     #[test]
     fn split_only_whitespace() {
-        assert!(split(b"   \t  \n  ").is_empty());
+        assert!(
+            split(b"   \t  \n  ").is_empty(),
+            "splitting whitespace only must yield no words"
+        );
     }
 
     #[test]

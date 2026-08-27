@@ -84,7 +84,7 @@ mod tests {
             for &y in &m[i + 1..] {
                 assert_ne!(x, y);
             }
-            assert!(!x.is_empty());
+            assert!(!x.is_empty(), "a bonding mode name is empty");
         }
         // The three balance-* modes share a prefix.
         for &v in &[

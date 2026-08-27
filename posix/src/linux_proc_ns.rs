@@ -101,7 +101,7 @@ mod tests {
             PROC_NS_TIME,
         ];
         for name in &names {
-            assert!(!name.is_empty());
+            assert!(!name.is_empty(), "a /proc/<pid>/ns link name is empty");
         }
     }
 

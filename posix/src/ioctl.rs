@@ -351,15 +351,19 @@ fn termios_to_wire(t: &Termios) -> [u8; KERNEL_TERMIOS_BYTES] {
 
     // Walk the three regions the wire format defines — four little-endian
     // u32s, the `c_line` byte, then the control characters — instead of
-    // computing an offset for each write.  `chunks_exact_mut` and `zip` make
+    // computing an offset for each write.  `as_chunks_mut` and `zip` make
     // every write in-bounds by construction, so there is no index arithmetic
     // to get wrong (and none for `clippy::arithmetic_side_effects` to flag).
+    // The chunk width is a const generic rather than `chunks_exact_mut(4)`'s
+    // runtime argument, so each `slot` is a `&mut [u8; 4]` and the store is a
+    // whole-array assignment that cannot be a length mismatch.
     // `zip` is also what truncates `c_cc` to the kernel's 19 entries: the
     // destination slice is that long, so the user array's extra padding slots
     // are dropped without a length check.
     let (flag_bytes, rest) = buf.split_at_mut(FLAG_BYTES);
-    for (slot, word) in flag_bytes.chunks_exact_mut(4).zip(words) {
-        slot.copy_from_slice(&word.to_le_bytes());
+    let (flag_words, _) = flag_bytes.as_chunks_mut::<4>();
+    for (slot, word) in flag_words.iter_mut().zip(words) {
+        *slot = word.to_le_bytes();
     }
     if let Some((line, cc)) = rest.split_first_mut() {
         *line = t.c_line;
@@ -381,10 +385,9 @@ fn termios_from_wire(buf: &[u8; KERNEL_TERMIOS_BYTES]) -> Termios {
     // than indexing it keeps the flag order stated in one place and readable.
     let (flag_bytes, rest) = buf.split_at(FLAG_BYTES);
     let mut words = [0u32; 4];
-    for (word, src) in words.iter_mut().zip(flag_bytes.chunks_exact(4)) {
-        let mut b = [0u8; 4];
-        b.copy_from_slice(src);
-        *word = u32::from_le_bytes(b);
+    let (flag_words, _) = flag_bytes.as_chunks::<4>();
+    for (word, src) in words.iter_mut().zip(flag_words) {
+        *word = u32::from_le_bytes(*src);
     }
     let [c_iflag, c_oflag, c_cflag, c_lflag] = words;
 
@@ -433,11 +436,14 @@ const WINSIZE_BYTES: usize = 2 * 4;
 fn winsize_to_wire(ws: &Winsize) -> [u8; WINSIZE_BYTES] {
     let mut buf = [0u8; WINSIZE_BYTES];
     let fields = [ws.ws_row, ws.ws_col, ws.ws_xpixel, ws.ws_ypixel];
-    // `chunks_exact_mut(2).zip(fields)` makes every write in-bounds by
+    // `as_chunks_mut::<2>().zip(fields)` makes every write in-bounds by
     // construction -- no offset arithmetic to get wrong, and nothing for
-    // `clippy::indexing_slicing` or `arithmetic_side_effects` to flag.
-    for (slot, field) in buf.chunks_exact_mut(2).zip(fields) {
-        slot.copy_from_slice(&field.to_le_bytes());
+    // `clippy::indexing_slicing` or `arithmetic_side_effects` to flag. The
+    // width being a const generic makes each `slot` a `&mut [u8; 2]`, so the
+    // store is a whole-array assignment rather than a copy that could mismatch.
+    let (slots, _) = buf.as_chunks_mut::<2>();
+    for (slot, field) in slots.iter_mut().zip(fields) {
+        *slot = field.to_le_bytes();
     }
     buf
 }
@@ -448,10 +454,9 @@ fn winsize_to_wire(ws: &Winsize) -> [u8; WINSIZE_BYTES] {
 /// `TIOCSWINSZ` reports what was set.
 fn winsize_from_wire(buf: &[u8; WINSIZE_BYTES]) -> Winsize {
     let mut fields = [0u16; 4];
-    for (field, src) in fields.iter_mut().zip(buf.chunks_exact(2)) {
-        let mut b = [0u8; 2];
-        b.copy_from_slice(src);
-        *field = u16::from_le_bytes(b);
+    let (slots, _) = buf.as_chunks::<2>();
+    for (field, src) in fields.iter_mut().zip(slots) {
+        *field = u16::from_le_bytes(*src);
     }
     // Destructuring rather than indexing keeps the field order stated once,
     // in the same order as `winsize_to_wire` writes it.

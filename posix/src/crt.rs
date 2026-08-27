@@ -1536,7 +1536,10 @@ mod tests {
             run_init_array(core::ptr::null(), core::ptr::null());
             run_fini_array(core::ptr::null(), core::ptr::null());
         }
-        assert!(take_order().is_empty());
+        assert!(
+            take_order().is_empty(),
+            "a null init/fini array must run no constructors"
+        );
     }
 
     #[test]
@@ -1549,7 +1552,10 @@ mod tests {
             run_init_array(arr.as_ptr(), arr.as_ptr());
             run_fini_array(arr.as_ptr(), arr.as_ptr());
         }
-        assert!(take_order().is_empty());
+        assert!(
+            take_order().is_empty(),
+            "an empty (start == end) init/fini array must run nothing"
+        );
     }
 
     // -- getauxval --

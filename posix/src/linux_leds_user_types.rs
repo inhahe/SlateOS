@@ -115,7 +115,7 @@ mod tests {
         // sysfs attribute filenames never contain '/'.
         for n in names {
             assert!(!n.contains('/'));
-            assert!(!n.is_empty());
+            assert!(!n.is_empty(), "an LED sysfs attribute name is empty");
         }
     }
 

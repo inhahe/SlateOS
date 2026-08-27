@@ -82,7 +82,10 @@ mod tests {
                 assert_ne!(x, y);
             }
             assert!(!x.contains('/'));
-            assert!(!x.is_empty());
+            assert!(
+                !x.is_empty(),
+                "a block-device sysfs attribute name is empty"
+            );
         }
         // ext_range extends range with a prefix.
         assert!(SYSFS_DEV_EXT_RANGE.ends_with(SYSFS_DEV_RANGE));

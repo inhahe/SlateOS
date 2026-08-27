@@ -99,7 +99,10 @@ mod tests {
         ];
         for &v in &a {
             assert!(!v.contains('/'));
-            assert!(!v.is_empty());
+            assert!(
+                !v.is_empty(),
+                "a power-supply sysfs attribute name is empty"
+            );
         }
         for (i, &x) in a.iter().enumerate() {
             for &y in &a[i + 1..] {

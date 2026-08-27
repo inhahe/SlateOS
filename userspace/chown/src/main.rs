@@ -561,12 +561,14 @@ const fn follow_child() -> bool {
 
 use modechange::{Changes, adjust, compile, from_reference};
 
-/// The file-mode creation mask.
-///
-/// POSIX has no read-only spelling of it -- reading it means setting it -- so
-/// this is the libc call rather than anything in `std`.
 #[cfg(unix)]
 unsafe extern "C" {
+    /// Set the file-mode creation mask, returning the previous one.
+    ///
+    /// POSIX has no read-only spelling of it -- reading it means setting it --
+    /// so this is the libc call rather than anything in `std`. (The doc comment
+    /// belongs on the declaration and not on the `extern` block: a block takes
+    /// no docs, and rustc warns the comment away as unused if it is put there.)
     fn umask(mask: u32) -> u32;
 }
 

@@ -88547,3 +88547,97 @@ recorded as "re-run with `--timeout-scale 5`", which could never have worked: a
 deadlock does not finish at any multiple of the budget, it just fails more
 slowly. The probe is now removed and the reasoning left in its place, which
 makes the case measurable again.
+
+## `B-DEV-HOST-IS-WINDOWS-SO-CFG-UNIX-CODE-IS-NEVER-COMPILED` (lane B, 2026-08-26) — **open**, process gap
+
+**In short:** everyone develops on a Windows machine, and the routine checks
+(`cargo build`, `cargo clippy`, `cargo test`) are run for that machine. Any code
+inside `#[cfg(unix)]` is therefore *not compiled at all* by a normal check —
+rustc skips it wholesale, so it can contain outright syntax and name errors and
+still look green. SlateOS is a unix (`toolchain/x86_64-slateos.json` sets
+`"target-family": ["unix"]`), so that is exactly the code that ships. This is not
+a hypothetical: it hid a hard compile error in `backup` for nearly three months.
+
+**How it bit.** `0cf670e67` (2026-06-03, "apps: clippy hygiene sweep") answered
+an unused-variable warning on
+
+```rust
+ManifestEntry::Symlink { target, path } => {
+```
+
+by rewriting the binding as `target: _`. On Windows the warning was real: the
+only reader of `target` is the `#[cfg(unix)]` arm four lines down calling
+`symlink(target, &dst)`, and on Windows the `#[cfg(not(unix))]` arm is compiled
+instead. On any unix target the same edit is
+
+```
+error[E0425]: cannot find value `target` in this scope
+ --> userspace/backup/src/main.rs:862:45
+```
+
+so `backup` had not compiled for the machine it ships on since June. It was
+found only because a lane-b→main merge was verified with `cargo check --workspace
+--target x86_64-unknown-linux-gnu` rather than with the host default. Fixed in
+`c9aee2c2c`; the binding is restored and discarded explicitly in the non-unix arm,
+with a comment saying why it must not be re-elided.
+
+**Why this class is nastier than it looks.** The failure mode is silent *and*
+self-inflicted: a warning-cleanup pass on Windows is precisely the operation that
+introduces it, because the warnings it is chasing are the ones that only exist
+because the unix arm is invisible. Every future clippy sweep is a fresh chance to
+do it again, and nothing in the current workflow would catch it.
+
+**Proper fix.** Make a unix-target check part of the routine, not of the
+occasional merge verification: add `cargo check --workspace --target
+x86_64-unknown-linux-gnu` (fast — under three minutes warm) to whatever gate
+`cargo clippy` is already in, and run it before any `-D warnings` cleanup is
+committed. `x86_64-unknown-linux-gnu` rather than `x86_64-slateos` because the
+latter needs `-Zbuild-std` and is far slower; for `cfg(unix)` coverage the two
+are equivalent. Worth raising with the other lanes — `kernel/**` and `gui/**`
+have their own `#[cfg(unix)]` arms and the same blind spot.
+
+## `B-POSIX-SEVENTEEN-TESTS-ASSERT-THE-SLATEOS-KERNEL-AND-GET-THE-HOST-KERNEL` (lane B, 2026-08-26) — **open**
+
+**In short:** `cargo test -p posix` on a Linux host reports 20531 passed and 17
+failed. None of the seventeen is a bug in `posix`: they assert what the *SlateOS*
+kernel answers for four syscalls, and on a Linux host the real kernel answers
+instead, correctly and differently. The suite is nonetheless red, which is the
+actual harm — a permanently-failing test run teaches everyone to skim past the
+failure line, and the next real regression goes with it.
+
+**The seventeen**, all in `posix/src/file.rs` and `posix/src/dirent.rs`:
+
+```
+dirent::tests::test_getdents_valid_args_reach_enosys
+dirent::tests::test_workflow_legacy_program_calling_raw_getdents
+file::tests::test_copy_file_range_phase89_ebadf_then_valid_progression
+file::tests::test_copy_file_range_phase89_einval_then_valid_progression
+file::tests::test_copy_file_range_phase89_zero_len_with_valid_fds_ok
+file::tests::test_copy_file_range_zero_len
+file::tests::test_posix_fadvise_pipe_returns_espipe
+file::tests::test_sync_file_range_phase90_ebadf_then_valid_progression
+file::tests::test_sync_file_range_phase90_einval_then_valid_progression
+file::tests::test_sync_file_range_phase90_endbyte_overflow_einval
+file::tests::test_sync_file_range_phase90_high_bit_flag_einval
+file::tests::test_sync_file_range_phase90_known_flag_combo_passes_prologue
+file::tests::test_sync_file_range_phase90_max_offset_zero_nbytes_ok_prologue
+file::tests::test_sync_file_range_phase90_negative_nbytes_einval
+file::tests::test_sync_file_range_phase90_negative_offset_einval
+file::tests::test_sync_file_range_phase90_unknown_flag_einval
+file::tests::test_sync_file_range_valid_fd_no_crash
+```
+
+Sample: `test_sync_file_range_valid_fd_no_crash` asserts `0` and gets `-1`
+(`posix/src/file.rs:9106`). The names give the shape away — the `getdents` pair
+literally expects `ENOSYS`, which is what SlateOS returns and what Linux does not.
+
+**Not a regression, and not from the clippy work.** Measured on both sides of
+`d51dc736d`: 20531 passed / 17 failed identically, so the count predates it.
+
+**Proper fix.** These are target-behaviour assertions, so gate them on the
+target rather than deleting or `#[ignore]`-ing them: a `#[cfg(target_os =
+"slateos")]` (or a runtime probe that skips when the syscall is genuinely
+implemented) keeps the assertion meaningful where it is true and stops it lying
+where it is not. Deleting them would lose real cover on the SlateOS side;
+`#[ignore]` would lose it on both. Same shape as
+`BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above, and worth doing in one pass with it.

@@ -81677,8 +81677,57 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **438 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **432 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (thirty-third batch): `cmd_prochistory` (6)
+> cleared — 438 → 432 across 209 → 208 functions. Not pinned by a rung.
+>
+> **In short:** `prochistory` is the shell's record of which processes ran and
+> how they ended. Six of its operands were guessed when they could not be read,
+> and the guesses were **0, 0, 0, 0, 10, 10**.
+>
+> * **The exit code is the site that matters, and it is a new shape.** Every
+>   earlier row in this log is about a guess that names the *wrong thing* — the
+>   wrong cpu, the wrong pid, the wrong limit. `prochistory exit 412 l` (a
+>   lowercase L for a 1) recorded exit code **0**, and 0 is not merely a wrong
+>   code: it is the code that means *the process succeeded*. The row then prints
+>   next to whatever `reason` was given, so `Crashed` and `exit=0` can appear on
+>   the same line of the crash listing — a record that contradicts itself, in a
+>   table whose entire purpose is reading after the fact.
+> * **Batch 29's rule again, by a different mechanism.** `record_exit` normally
+>   answers `NotFound` for a pid it cannot find, so a guessed pid 0 on the
+>   `exit` arm was at least visible. But `record_start` **cannot fail** — it
+>   pushes unconditionally — so a guessed pid 0 there *manufactures the running
+>   entry* that makes the next guess succeed. Again the forging path and the
+>   checking path are one function apart in the same file.
+> * **A guessed pid strands a row rather than mislabelling it.** `record_exit`
+>   closes the newest entry matching `pid == p && end_ns.is_none()`. An entry
+>   filed under a pid nobody will type again can therefore *never* be closed: it
+>   shows as RUNNING in `running` and `recent` for the rest of the boot, and
+>   only `MAX_HISTORY` eviction removes it. The guess is not correctable by
+>   repeating the command correctly.
+> * **A word-vocabulary guess that moved a counter.** Not a `.parse()` site, so
+>   the gate never counted it, but it was the same defect: `parse_exit_reason`
+>   fell back to `ExitReason::Unknown` for any word outside its vocabulary.
+>   `Unknown` is a reason a caller can legitimately *mean*, so "did not know"
+>   and "typed something unreadable" became the same record. Worse,
+>   `record_exit` increments `total_crashed` only for `Crashed` and
+>   `OutOfMemory` — so a mistyped `crahsed` filed the entry as Unknown *and*
+>   left the crash count one short, after which `stats` and the `crashed`
+>   listing disagree with nothing to say which is right. It now returns
+>   `Option`, `unknown` is in the vocabulary explicitly, and the refusal names
+>   the whole vocabulary.
+> * **The two `[n]` limits are the quiet ones.** `recent 5O` printed ten rows,
+>   indistinguishable from a successful `recent 10`: nothing in a truncated
+>   listing tells you whether the number you typed is the number that truncated
+>   it. `crashed [n]` is the same and worse to get wrong, being the listing an
+>   operator reads to decide whether a crash happened at all.
+>
+> The help arm moves to `end_help_arm` (so `prochistory help` exits 0 while an
+> unknown subcommand exits 1) and gained a line naming the `reason` vocabulary.
+> The `cmd_prochistory` ledger line is deleted rather than zeroed, since a count
+> larger than the number of real sites is itself reported by the gate.
+>
 > **Burn-down log.** 2026-08-26: `cmd_irqstat` (1) cleared — 439 → 438 across
 > 210 → 209 functions. **Not a burn-down; a side effect, and worth recording as
 > one.** The `irqstat register <num> <name>` subcommand guessed `0` for an

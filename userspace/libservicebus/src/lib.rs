@@ -94,109 +94,169 @@ mod syscall_nr {
     // Timers (12–13)
     pub const SYS_TIMER_CREATE: u64 = 12;
     pub const SYS_TIMER_CANCEL: u64 = 13;
-
 }
 
 // ============================================================================
 // Low-level syscall wrappers
 // ============================================================================
+//
+// Each wrapper has two arms, selected by `target_vendor = "slateos"` — true
+// only when compiling for the real OS (see toolchain/x86_64-slateos.json).
+//
+// The gate is load-bearing. A `syscall` instruction on a development host does
+// not fail cleanly: it enters whatever kernel is actually running, carrying a
+// SlateOS call number in RAX that means something entirely different there.
+// The service-bus numbers in `nr` above are low (0-13), which is the worst
+// range to get wrong — on Linux those are `read`, `write`, `open`, `close`,
+// `stat`, `mmap`, `ioctl` and friends, all of which do real work to real file
+// descriptors. The host arm returns `ENOSYS` instead.
+//
+// See known-issues.md
+// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+
+/// The value every host arm returns: `-ENOSYS`, "function not implemented".
+///
+/// Chosen because it is what a kernel says when a syscall number is not one it
+/// knows, which is exactly the honest description of a development host.
+#[cfg(not(target_vendor = "slateos"))]
+const HOST_ENOSYS: i64 = -38;
 
 /// Raw syscall with variable argument count.
 /// On x86_64, syscall ABI: rax=nr, rdi=a0, rsi=a1, rdx=a2, r10=a3, r8=a4, r9=a5
 /// Returns: rax (result).
 #[inline(always)]
 unsafe fn syscall0(nr: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees nr is a valid syscall number.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees nr is a valid syscall number.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = nr;
+        HOST_ENOSYS
+    }
 }
 
 #[inline(always)]
 unsafe fn syscall1(nr: u64, a0: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees nr and a0 are valid for the syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") a0,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees nr and a0 are valid for the syscall.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") a0,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (nr, a0);
+        HOST_ENOSYS
+    }
 }
 
 #[inline(always)]
 unsafe fn syscall2(nr: u64, a0: u64, a1: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees all arguments are valid for the syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") a0,
-            in("rsi") a1,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees all arguments are valid for the syscall.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") a0,
+                in("rsi") a1,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (nr, a0, a1);
+        HOST_ENOSYS
+    }
 }
 
 #[inline(always)]
 unsafe fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees all arguments are valid for the syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") a0,
-            in("rsi") a1,
-            in("rdx") a2,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees all arguments are valid for the syscall.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") a0,
+                in("rsi") a1,
+                in("rdx") a2,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (nr, a0, a1, a2);
+        HOST_ENOSYS
+    }
 }
 
 #[inline(always)]
 unsafe fn syscall4(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: caller guarantees all arguments are valid for the syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") a0,
-            in("rsi") a1,
-            in("rdx") a2,
-            in("r10") a3,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
+        // SAFETY: caller guarantees all arguments are valid for the syscall.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") nr,
+                in("rdi") a0,
+                in("rsi") a1,
+                in("rdx") a2,
+                in("r10") a3,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack),
+            );
+        }
+        ret
     }
-    ret
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        let _ = (nr, a0, a1, a2, a3);
+        HOST_ENOSYS
+    }
 }
 
 // ============================================================================
@@ -389,7 +449,10 @@ impl Message {
 
     /// Check if this is a reply (success or error).
     pub fn is_reply(&self) -> bool {
-        matches!(self.msg_type, MessageType::MethodReturn | MessageType::Error)
+        matches!(
+            self.msg_type,
+            MessageType::MethodReturn | MessageType::Error
+        )
     }
 
     /// Check if this is an error reply.
@@ -433,8 +496,7 @@ impl Message {
         let member_len = u16::from_le_bytes([data[2], data[3]]) as usize;
         let payload_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
         let serial = u64::from_le_bytes([
-            data[8], data[9], data[10], data[11],
-            data[12], data[13], data[14], data[15],
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);
 
         let expected_len = WIRE_HEADER_SIZE + member_len + payload_len;
@@ -637,8 +699,7 @@ impl Connection {
         }
 
         let len = ret as usize;
-        Message::from_bytes(&self.recv_buf[..len])
-            .ok_or(BusError::InvalidArgument)
+        Message::from_bytes(&self.recv_buf[..len]).ok_or(BusError::InvalidArgument)
     }
 
     /// Try to receive a message (non-blocking).
@@ -665,8 +726,7 @@ impl Connection {
         }
 
         let len = ret as usize;
-        let msg = Message::from_bytes(&self.recv_buf[..len])
-            .ok_or(BusError::InvalidArgument)?;
+        let msg = Message::from_bytes(&self.recv_buf[..len]).ok_or(BusError::InvalidArgument)?;
         Ok(Some(msg))
     }
 
@@ -687,8 +747,7 @@ impl Connection {
         }
 
         let len = ret as usize;
-        Message::from_bytes(&self.recv_buf[..len])
-            .ok_or(BusError::InvalidArgument)
+        Message::from_bytes(&self.recv_buf[..len]).ok_or(BusError::InvalidArgument)
     }
 
     /// Send a method call and wait for the reply.
@@ -711,7 +770,12 @@ impl Connection {
     }
 
     /// Send a method call and wait for the reply with a timeout.
-    pub fn call_timeout(&mut self, method: &str, payload: &[u8], timeout_ns: u64) -> Result<Message> {
+    pub fn call_timeout(
+        &mut self,
+        method: &str,
+        payload: &[u8],
+        timeout_ns: u64,
+    ) -> Result<Message> {
         let msg = Message::method_call(method).with_payload(payload);
         let serial = self.send(&msg)?;
 
@@ -784,9 +848,7 @@ impl ServiceHost {
     ///
     /// Returns a `Connection` representing the server's end of the channel.
     pub fn accept(&self) -> Result<Connection> {
-        let ret = unsafe {
-            syscall1(syscall_nr::SYS_SERVICE_ACCEPT, self.listener)
-        };
+        let ret = unsafe { syscall1(syscall_nr::SYS_SERVICE_ACCEPT, self.listener) };
 
         if ret < 0 {
             return Err(BusError::from_errno(ret));
@@ -801,9 +863,7 @@ impl ServiceHost {
 
     /// Try to accept a connection (non-blocking).
     pub fn try_accept(&self) -> Result<Option<Connection>> {
-        let ret = unsafe {
-            syscall1(syscall_nr::SYS_SERVICE_TRY_ACCEPT, self.listener)
-        };
+        let ret = unsafe { syscall1(syscall_nr::SYS_SERVICE_TRY_ACCEPT, self.listener) };
 
         if ret < 0 {
             let err = BusError::from_errno(ret);
@@ -911,7 +971,14 @@ impl EventLoop {
 
         Ok(EventLoop {
             cp_handle: ret as u64,
-            event_buf: vec![Event { source_type: 0, source_handle: 0, user_data: 0 }; 64],
+            event_buf: vec![
+                Event {
+                    source_type: 0,
+                    source_handle: 0,
+                    user_data: 0
+                };
+                64
+            ],
         })
     }
 
@@ -937,7 +1004,12 @@ impl EventLoop {
     }
 
     /// Register any waitable source with the event loop.
-    pub fn register_source(&self, source_type: SourceType, handle: u64, user_data: u64) -> Result<()> {
+    pub fn register_source(
+        &self,
+        source_type: SourceType,
+        handle: u64,
+        user_data: u64,
+    ) -> Result<()> {
         let ret = unsafe {
             syscall4(
                 syscall_nr::SYS_CP_REGISTER,
@@ -1061,9 +1133,7 @@ pub struct Timer {
 impl Timer {
     /// Create a one-shot timer that fires after `duration_ns` nanoseconds.
     pub fn one_shot(duration_ns: u64) -> Result<Self> {
-        let ret = unsafe {
-            syscall2(syscall_nr::SYS_TIMER_CREATE, duration_ns, 0)
-        };
+        let ret = unsafe { syscall2(syscall_nr::SYS_TIMER_CREATE, duration_ns, 0) };
 
         if ret <= 0 {
             return Err(BusError::ResourceExhausted);
@@ -1223,8 +1293,7 @@ mod tests {
 
     #[test]
     fn test_message_roundtrip() {
-        let msg = Message::method_call("GetWindow")
-            .with_payload(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let msg = Message::method_call("GetWindow").with_payload(&[1, 2, 3, 4, 5, 6, 7, 8]);
         let mut serialized_msg = msg.clone();
         serialized_msg.serial = 42;
 
@@ -1240,8 +1309,17 @@ mod tests {
     #[test]
     fn test_message_types() {
         let call = Message::method_call("Foo");
-        let reply = Message::reply(&Message { serial: 7, ..Message::method_call("") });
-        let error = Message::error(&Message { serial: 9, ..Message::method_call("") }, "NotFound");
+        let reply = Message::reply(&Message {
+            serial: 7,
+            ..Message::method_call("")
+        });
+        let error = Message::error(
+            &Message {
+                serial: 9,
+                ..Message::method_call("")
+            },
+            "NotFound",
+        );
         let signal = Message::signal("Changed");
 
         assert_eq!(call.msg_type, MessageType::MethodCall);
@@ -1372,8 +1450,22 @@ mod tests {
 
     #[test]
     fn root_is_recognised_by_uid_not_by_name() {
-        assert!(Credentials { pid: 1, uid: 0, gid: 0 }.is_root());
-        assert!(!Credentials { pid: 1, uid: 1000, gid: 0 }.is_root());
+        assert!(
+            Credentials {
+                pid: 1,
+                uid: 0,
+                gid: 0
+            }
+            .is_root()
+        );
+        assert!(
+            !Credentials {
+                pid: 1,
+                uid: 1000,
+                gid: 0
+            }
+            .is_root()
+        );
     }
 
     #[test]

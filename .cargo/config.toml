@@ -19,6 +19,23 @@
 [build]
 target = "x86_64-unknown-none"
 
+# `target_vendor = "slateos"` is how userspace tells "compiling for the real OS"
+# apart from "compiling for the developer's machine" — see
+# `toolchain/x86_64-slateos.json` and design-decisions.md §619. rustc keeps a
+# fixed list of well-known vendor values and ours is not on it, so without this
+# flag every such `#[cfg]` draws an `unexpected_cfgs` warning. `cfg(all())` is
+# vacuously true, so this applies to every target we build, host triples
+# included.
+#
+# Unlike a `--cfg` flag, losing this one is harmless: a `RUSTFLAGS` environment
+# variable *replaces* config rustflags rather than adding to them, and if that
+# happens here the only consequence is that the warnings come back. The gate
+# itself is a built-in cfg carried by the target spec and cannot be switched off
+# by a stray env var — which is exactly why the gate is `target_vendor` and not
+# `--cfg slateos`.
+[target.'cfg(all())']
+rustflags = ['--check-cfg=cfg(target_vendor, values("slateos"))']
+
 # Bare-metal x86_64-unknown-none target — used by both the kernel and
 # the bare-metal services in `services/`. Cargo MERGES (appends)
 # rustflags into every crate sharing this triple, so anything kernel-

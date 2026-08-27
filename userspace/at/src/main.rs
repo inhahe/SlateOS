@@ -60,9 +60,11 @@ const DEFAULT_QUEUE: char = 'a';
 /// returns nanoseconds-since-epoch in rax.  The kernel has no combined
 /// clock_gettime(clock_id, *ts) form.  (Syscall 40 is SYS_PORT_READ; the old
 /// SYS_CLOCK_GETTIME=40 was wrong.)
+#[cfg(target_vendor = "slateos")]
 const SYS_CLOCK_REALTIME: u64 = 14;
 
 /// Nanoseconds per second, to convert the kernel's ns clock value to seconds.
+#[cfg(target_vendor = "slateos")]
 const NSEC_PER_SEC: i64 = 1_000_000_000;
 
 /// Seconds per day.
@@ -80,34 +82,45 @@ const SECS_PER_MINUTE: i64 = 60;
 
 /// Read the current wall-clock time.
 ///
-/// Returns epoch seconds on success.  Uses the native no-argument
-/// `SYS_CLOCK_REALTIME` syscall, which returns nanoseconds-since-epoch in
-/// `rax`.
+/// Returns epoch seconds on success.  On SlateOS this uses the native
+/// no-argument `SYS_CLOCK_REALTIME` syscall, which returns
+/// nanoseconds-since-epoch in `rax`, and falls back to `std` if the kernel
+/// reports an error.
+///
+/// The raw `syscall` is gated on `target_vendor = "slateos"` (see
+/// `toolchain/x86_64-slateos.json`), which is true only when compiling for the
+/// real OS.  A `syscall` instruction on a development host does not fail
+/// cleanly: it enters whatever kernel is actually running with our call number
+/// in `rax`, and SlateOS number 14 is `rt_sigprocmask` on Linux.  On a host we
+/// therefore skip it entirely and use `std`, which is the *correct* answer
+/// there anyway — this function only reads a clock, so there is nothing the
+/// syscall would have told us that `std` cannot.
 fn get_current_time() -> Result<i64, String> {
-    let ret: i64;
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
 
-    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
-    // userspace; it only reads the kernel clock into rax.  rcx/r11 are
-    // clobbered by the SYSCALL instruction.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_REALTIME,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, nomem),
-        );
+        // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
+        // userspace; it only reads the kernel clock into rax.  rcx/r11 are
+        // clobbered by the SYSCALL instruction.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_REALTIME,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+
+        if ret >= 0 {
+            // `ret` is nanoseconds since the epoch; return whole seconds.
+            return Ok(ret / NSEC_PER_SEC);
+        }
     }
 
-    if ret >= 0 {
-        // `ret` is nanoseconds since the epoch; return whole seconds.
-        return Ok(ret / NSEC_PER_SEC);
-    }
-
-    // Fallback: std SystemTime (currently non-functional on this OS since the
-    // target is linux/musl with no syscall-translation layer, but returns a
-    // clean error rather than panicking).
+    // Fallback (and the only path on a development host): std SystemTime.
     match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
         Ok(dur) => Ok(dur.as_secs() as i64),
         Err(e) => Err(format!("cannot get current time: {e}")),
@@ -252,11 +265,7 @@ fn datetime_to_epoch(dt: &DateTime) -> Result<i64, String> {
         return Err(format!("second out of range: {}", dt.second));
     }
 
-    let y = if dt.month <= 2 {
-        dt.year - 1
-    } else {
-        dt.year
-    };
+    let y = if dt.month <= 2 { dt.year - 1 } else { dt.year };
     let m = if dt.month <= 2 {
         dt.month as i64 + 9
     } else {
@@ -354,48 +363,53 @@ fn parse_timespec(spec: &str, now_epoch: i64) -> Result<i64, Error> {
             _ => None,
         };
         if let Some(hour) = named_hour
-            && tokens[1] == "tomorrow" {
-                let now_dt = epoch_to_datetime(now_epoch);
-                let mut dt = DateTime {
-                    year: now_dt.year,
-                    month: now_dt.month,
-                    day: now_dt.day,
-                    hour,
-                    minute: 0,
-                    second: 0,
-                };
-                advance_day(&mut dt);
-                return datetime_to_epoch(&dt).map_err(Error::TimeParse);
-            }
-    }
-
-    // "HH:MM YYYY-MM-DD"
-    if tokens.len() == 2
-        && let Some(epoch) = try_parse_hhmm_date(&tokens) {
-            return epoch;
-        }
-
-    // "HH:MM" alone (today or tomorrow)
-    if tokens.len() == 1
-        && let Some(epoch) = try_parse_hhmm(tokens[0], now_epoch) {
-            return epoch;
-        }
-
-    // "HH:MM tomorrow"
-    if tokens.len() == 2 && tokens[1] == "tomorrow"
-        && let Some((hour, minute)) = parse_hhmm_pair(tokens[0]) {
+            && tokens[1] == "tomorrow"
+        {
             let now_dt = epoch_to_datetime(now_epoch);
             let mut dt = DateTime {
                 year: now_dt.year,
                 month: now_dt.month,
                 day: now_dt.day,
                 hour,
-                minute,
+                minute: 0,
                 second: 0,
             };
             advance_day(&mut dt);
             return datetime_to_epoch(&dt).map_err(Error::TimeParse);
         }
+    }
+
+    // "HH:MM YYYY-MM-DD"
+    if tokens.len() == 2
+        && let Some(epoch) = try_parse_hhmm_date(&tokens)
+    {
+        return epoch;
+    }
+
+    // "HH:MM" alone (today or tomorrow)
+    if tokens.len() == 1
+        && let Some(epoch) = try_parse_hhmm(tokens[0], now_epoch)
+    {
+        return epoch;
+    }
+
+    // "HH:MM tomorrow"
+    if tokens.len() == 2
+        && tokens[1] == "tomorrow"
+        && let Some((hour, minute)) = parse_hhmm_pair(tokens[0])
+    {
+        let now_dt = epoch_to_datetime(now_epoch);
+        let mut dt = DateTime {
+            year: now_dt.year,
+            month: now_dt.month,
+            day: now_dt.day,
+            hour,
+            minute,
+            second: 0,
+        };
+        advance_day(&mut dt);
+        return datetime_to_epoch(&dt).map_err(Error::TimeParse);
+    }
 
     Err(Error::TimeParse(format!(
         "cannot parse time specification: '{spec}'"
@@ -508,9 +522,7 @@ fn parse_relative_offset(now_epoch: i64, tokens: &[&str]) -> Result<i64, Error> 
     })?;
 
     if n < 0 {
-        return Err(Error::TimeParse(
-            "relative offset must be positive".into(),
-        ));
+        return Err(Error::TimeParse("relative offset must be positive".into()));
     }
 
     let unit = tokens[1].trim_end_matches('s'); // "minutes" -> "minute"
@@ -577,13 +589,15 @@ fn advance_day(dt: &mut DateTime) {
 /// Determine the current username from environment.
 fn current_username() -> String {
     if let Ok(user) = env::var("USER")
-        && !user.is_empty() {
-            return user;
-        }
+        && !user.is_empty()
+    {
+        return user;
+    }
     if let Ok(user) = env::var("LOGNAME")
-        && !user.is_empty() {
-            return user;
-        }
+        && !user.is_empty()
+    {
+        return user;
+    }
     format!("uid{}", process::id())
 }
 
@@ -761,9 +775,8 @@ fn next_job_id() -> Result<u32, Error> {
 
 /// Ensure the spool directory exists.
 fn ensure_spool_dir() -> Result<(), Error> {
-    fs::create_dir_all(SPOOL_DIR).map_err(|e| {
-        Error::Io(format!("cannot create spool directory {SPOOL_DIR}: {e}"))
-    })
+    fs::create_dir_all(SPOOL_DIR)
+        .map_err(|e| Error::Io(format!("cannot create spool directory {SPOOL_DIR}: {e}")))
 }
 
 // ============================================================================
@@ -791,9 +804,8 @@ fn cmd_schedule(
     }
     let content = format!("{header}{commands}");
 
-    fs::write(&path, &content).map_err(|e| {
-        Error::Io(format!("cannot write job file {}: {e}", path.display()))
-    })?;
+    fs::write(&path, &content)
+        .map_err(|e| Error::Io(format!("cannot write job file {}: {e}", path.display())))?;
 
     let dt = epoch_to_datetime(target_epoch);
     eprintln!("job {id} at {}", format_datetime(&dt));
@@ -822,9 +834,8 @@ fn cmd_batch(
     }
     let content = format!("{header}{commands}");
 
-    fs::write(&path, &content).map_err(|e| {
-        Error::Io(format!("cannot write job file {}: {e}", path.display()))
-    })?;
+    fs::write(&path, &content)
+        .map_err(|e| Error::Io(format!("cannot write job file {}: {e}", path.display())))?;
 
     eprintln!("job {id} (batch) scheduled");
 
@@ -850,10 +861,7 @@ fn print_jobs_table(jobs: &[Job]) {
         println!("no pending jobs");
         return;
     }
-    println!(
-        "{:<8}{:<7}{:<25}User",
-        "Job ID", "Queue", "When"
-    );
+    println!("{:<8}{:<7}{:<25}User", "Job ID", "Queue", "When");
     for job in jobs {
         let dt = epoch_to_datetime(job.epoch);
         println!(
@@ -905,10 +913,7 @@ fn json_escape(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if c.is_control() => {
                 // Unicode escape for other control chars.
-                let _ = std::fmt::Write::write_fmt(
-                    &mut out,
-                    format_args!("\\u{:04x}", c as u32),
-                );
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\u{:04x}", c as u32));
             }
             c => out.push(c),
         }
@@ -964,9 +969,9 @@ fn cmd_verify(target_epoch: i64) {
 fn read_commands_stdin() -> Result<String, Error> {
     eprintln!("at> (type commands, press Ctrl+D when done)");
     let mut buf = String::new();
-    io::stdin().read_to_string(&mut buf).map_err(|e| {
-        Error::Io(format!("cannot read from stdin: {e}"))
-    })?;
+    io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| Error::Io(format!("cannot read from stdin: {e}")))?;
     if buf.is_empty() {
         return Err(Error::Usage("no commands provided".into()));
     }
@@ -975,9 +980,7 @@ fn read_commands_stdin() -> Result<String, Error> {
 
 /// Read commands from a file.
 fn read_commands_file(path: &str) -> Result<String, Error> {
-    fs::read_to_string(path).map_err(|e| {
-        Error::Io(format!("cannot read '{}': {e}", path))
-    })
+    fs::read_to_string(path).map_err(|e| Error::Io(format!("cannot read '{}': {e}", path)))
 }
 
 // ============================================================================
@@ -1069,9 +1072,9 @@ fn parse_args() -> Result<Args, Error> {
             if argc < 2 {
                 return Err(Error::Usage("atrm: missing job ID".into()));
             }
-            let id: u32 = argv[1].parse().map_err(|_| {
-                Error::Usage(format!("atrm: invalid job ID: '{}'", argv[1]))
-            })?;
+            let id: u32 = argv[1]
+                .parse()
+                .map_err(|_| Error::Usage(format!("atrm: invalid job ID: '{}'", argv[1])))?;
             return Ok(Args {
                 action: Action::Remove(id),
                 queue,
@@ -1124,9 +1127,9 @@ fn parse_args() -> Result<Args, Error> {
                 if i + 1 >= argc {
                     return Err(Error::Usage("-d requires a job ID".into()));
                 }
-                let id: u32 = argv[i + 1].parse().map_err(|_| {
-                    Error::Usage(format!("invalid job ID: '{}'", argv[i + 1]))
-                })?;
+                let id: u32 = argv[i + 1]
+                    .parse()
+                    .map_err(|_| Error::Usage(format!("invalid job ID: '{}'", argv[i + 1])))?;
                 action = Some(Action::Remove(id));
                 i += 2;
             }
@@ -1134,9 +1137,9 @@ fn parse_args() -> Result<Args, Error> {
                 if i + 1 >= argc {
                     return Err(Error::Usage("-c requires a job ID".into()));
                 }
-                let id: u32 = argv[i + 1].parse().map_err(|_| {
-                    Error::Usage(format!("invalid job ID: '{}'", argv[i + 1]))
-                })?;
+                let id: u32 = argv[i + 1]
+                    .parse()
+                    .map_err(|_| Error::Usage(format!("invalid job ID: '{}'", argv[i + 1])))?;
                 action = Some(Action::Cat(id));
                 i += 2;
             }
@@ -1361,9 +1364,9 @@ mod tests {
         let test_epochs: &[i64] = &[
             0,
             86400,
-            1_704_067_200,  // 2024-01-01
-            1_747_491_045,  // 2025-05-17 14:10:45 UTC
-            946_684_800,    // 2000-01-01
+            1_704_067_200, // 2024-01-01
+            1_747_491_045, // 2025-05-17 14:10:45 UTC
+            946_684_800,   // 2000-01-01
         ];
         for &epoch in test_epochs {
             let dt = epoch_to_datetime(epoch);
@@ -1399,22 +1402,34 @@ mod tests {
     fn datetime_to_epoch_validation() {
         // Bad month.
         let dt = DateTime {
-            year: 2025, month: 13, day: 1,
-            hour: 0, minute: 0, second: 0,
+            year: 2025,
+            month: 13,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
         };
         assert!(datetime_to_epoch(&dt).is_err());
 
         // Bad day.
         let dt = DateTime {
-            year: 2023, month: 2, day: 29,
-            hour: 0, minute: 0, second: 0,
+            year: 2023,
+            month: 2,
+            day: 29,
+            hour: 0,
+            minute: 0,
+            second: 0,
         };
         assert!(datetime_to_epoch(&dt).is_err());
 
         // Bad hour.
         let dt = DateTime {
-            year: 2025, month: 1, day: 1,
-            hour: 24, minute: 0, second: 0,
+            year: 2025,
+            month: 1,
+            day: 1,
+            hour: 24,
+            minute: 0,
+            second: 0,
         };
         assert!(datetime_to_epoch(&dt).is_err());
     }
@@ -1434,8 +1449,12 @@ mod tests {
     #[test]
     fn advance_day_normal() {
         let mut dt = DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 10, minute: 0, second: 0,
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 10,
+            minute: 0,
+            second: 0,
         };
         advance_day(&mut dt);
         assert_eq!((dt.year, dt.month, dt.day), (2025, 5, 18));
@@ -1444,8 +1463,12 @@ mod tests {
     #[test]
     fn advance_day_month_boundary() {
         let mut dt = DateTime {
-            year: 2025, month: 5, day: 31,
-            hour: 10, minute: 0, second: 0,
+            year: 2025,
+            month: 5,
+            day: 31,
+            hour: 10,
+            minute: 0,
+            second: 0,
         };
         advance_day(&mut dt);
         assert_eq!((dt.year, dt.month, dt.day), (2025, 6, 1));
@@ -1454,8 +1477,12 @@ mod tests {
     #[test]
     fn advance_day_year_boundary() {
         let mut dt = DateTime {
-            year: 2025, month: 12, day: 31,
-            hour: 10, minute: 0, second: 0,
+            year: 2025,
+            month: 12,
+            day: 31,
+            hour: 10,
+            minute: 0,
+            second: 0,
         };
         advance_day(&mut dt);
         assert_eq!((dt.year, dt.month, dt.day), (2026, 1, 1));
@@ -1464,8 +1491,12 @@ mod tests {
     #[test]
     fn advance_day_leap_february() {
         let mut dt = DateTime {
-            year: 2024, month: 2, day: 28,
-            hour: 10, minute: 0, second: 0,
+            year: 2024,
+            month: 2,
+            day: 28,
+            hour: 10,
+            minute: 0,
+            second: 0,
         };
         advance_day(&mut dt);
         assert_eq!((dt.year, dt.month, dt.day), (2024, 2, 29));
@@ -1507,9 +1538,14 @@ mod tests {
     fn timespec_hhmm_future_today() {
         // "now" is 2025-05-17 10:00:00; schedule for 14:30 should be same day.
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 10, minute: 0, second: 0,
-        }).unwrap();
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 10,
+            minute: 0,
+            second: 0,
+        })
+        .unwrap();
         let target = parse_timespec("14:30", now).unwrap();
         let dt = epoch_to_datetime(target);
         assert_eq!(dt.year, 2025);
@@ -1523,9 +1559,14 @@ mod tests {
     fn timespec_hhmm_past_rolls_to_tomorrow() {
         // "now" is 2025-05-17 16:00:00; schedule for 14:30 should roll to 18th.
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 16, minute: 0, second: 0,
-        }).unwrap();
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 16,
+            minute: 0,
+            second: 0,
+        })
+        .unwrap();
         let target = parse_timespec("14:30", now).unwrap();
         let dt = epoch_to_datetime(target);
         assert_eq!(dt.year, 2025);
@@ -1538,9 +1579,14 @@ mod tests {
     #[test]
     fn timespec_hhmm_date() {
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 10, minute: 0, second: 0,
-        }).unwrap();
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 10,
+            minute: 0,
+            second: 0,
+        })
+        .unwrap();
         let target = parse_timespec("09:00 2025-06-01", now).unwrap();
         let dt = epoch_to_datetime(target);
         assert_eq!(dt.year, 2025);
@@ -1553,9 +1599,14 @@ mod tests {
     #[test]
     fn timespec_noon() {
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 10, minute: 0, second: 0,
-        }).unwrap();
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 10,
+            minute: 0,
+            second: 0,
+        })
+        .unwrap();
         let target = parse_timespec("noon", now).unwrap();
         let dt = epoch_to_datetime(target);
         assert_eq!(dt.hour, 12);
@@ -1566,9 +1617,14 @@ mod tests {
     #[test]
     fn timespec_midnight_rolls() {
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 10, minute: 0, second: 0,
-        }).unwrap();
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 10,
+            minute: 0,
+            second: 0,
+        })
+        .unwrap();
         // Midnight at 00:00 has already passed today, should roll to 18th.
         let target = parse_timespec("midnight", now).unwrap();
         let dt = epoch_to_datetime(target);
@@ -1580,9 +1636,14 @@ mod tests {
     #[test]
     fn timespec_teatime() {
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 10, minute: 0, second: 0,
-        }).unwrap();
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 10,
+            minute: 0,
+            second: 0,
+        })
+        .unwrap();
         let target = parse_timespec("teatime", now).unwrap();
         let dt = epoch_to_datetime(target);
         assert_eq!(dt.hour, 16);
@@ -1635,9 +1696,14 @@ mod tests {
     fn timespec_next_month() {
         // 2025-05-17 14:30:45 -> 2025-06-17 14:30:45
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 14, minute: 30, second: 45,
-        }).unwrap();
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 14,
+            minute: 30,
+            second: 45,
+        })
+        .unwrap();
         let target = parse_timespec("next month", now).unwrap();
         let dt = epoch_to_datetime(target);
         assert_eq!(dt.year, 2025);
@@ -1651,9 +1717,14 @@ mod tests {
     fn timespec_next_month_clamping() {
         // 2025-01-31 -> next month should clamp to Feb 28.
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 1, day: 31,
-            hour: 12, minute: 0, second: 0,
-        }).unwrap();
+            year: 2025,
+            month: 1,
+            day: 31,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        })
+        .unwrap();
         let target = parse_timespec("next month", now).unwrap();
         let dt = epoch_to_datetime(target);
         assert_eq!(dt.month, 2);
@@ -1663,9 +1734,14 @@ mod tests {
     #[test]
     fn timespec_hhmm_tomorrow() {
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 10, minute: 0, second: 0,
-        }).unwrap();
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 10,
+            minute: 0,
+            second: 0,
+        })
+        .unwrap();
         let target = parse_timespec("14:30 tomorrow", now).unwrap();
         let dt = epoch_to_datetime(target);
         assert_eq!(dt.day, 18);
@@ -1676,9 +1752,14 @@ mod tests {
     #[test]
     fn timespec_noon_tomorrow() {
         let now = datetime_to_epoch(&DateTime {
-            year: 2025, month: 5, day: 17,
-            hour: 10, minute: 0, second: 0,
-        }).unwrap();
+            year: 2025,
+            month: 5,
+            day: 17,
+            hour: 10,
+            minute: 0,
+            second: 0,
+        })
+        .unwrap();
         let target = parse_timespec("noon tomorrow", now).unwrap();
         let dt = epoch_to_datetime(target);
         assert_eq!(dt.day, 18);
@@ -1720,11 +1801,11 @@ mod tests {
     #[test]
     fn parse_job_filename_invalid() {
         assert_eq!(parse_job_filename(""), None);
-        assert_eq!(parse_job_filename("b00001"), None);     // no leading 'a'
-        assert_eq!(parse_job_filename("aA00001"), None);    // uppercase queue
-        assert_eq!(parse_job_filename("aa0001"), None);     // too short
-        assert_eq!(parse_job_filename("aa000001"), None);   // too long
-        assert_eq!(parse_job_filename("aahello"), None);    // non-numeric
+        assert_eq!(parse_job_filename("b00001"), None); // no leading 'a'
+        assert_eq!(parse_job_filename("aA00001"), None); // uppercase queue
+        assert_eq!(parse_job_filename("aa0001"), None); // too short
+        assert_eq!(parse_job_filename("aa000001"), None); // too long
+        assert_eq!(parse_job_filename("aahello"), None); // non-numeric
     }
 
     // -- Job file header tests --

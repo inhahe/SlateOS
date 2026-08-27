@@ -61,7 +61,7 @@ const SYS_FS_FORMAT: u64 = 654;
 /// Register convention: rax = number; rdi/rsi/rdx/r10/r8/r9 = arg0..arg5.
 /// rcx and r11 are clobbered by the `syscall` instruction itself, so the 4th
 /// argument goes in r10 (not rcx), matching the kernel's `SyscallFrame`.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
     let ret: i64;
     // SAFETY: a register-only syscall with no memory effects beyond the
@@ -86,7 +86,7 @@ fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i6
 }
 
 /// Host-build fallback so the tool compiles and unit-tests on the dev machine.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 fn syscall6(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, _a6: u64) -> i64 {
     -38 // ENOSYS on non-target hosts.
 }

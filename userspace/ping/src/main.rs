@@ -61,7 +61,7 @@ const SYS_DNS_RESOLVE: u64 = 820;
 /// - `nr` is a valid syscall number.
 /// - Arguments are valid for the specific syscall (e.g., pointers must be
 ///   readable/writable as required, sizes must be accurate).
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid for the given syscall.
@@ -79,6 +79,22 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         );
     }
     ret
+}
+
+/// Host stub for `syscall3` — see the gated definition above.
+///
+/// On a development host there is no SlateOS kernel to talk to, and a raw
+/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
+/// actually running, with this crate's SlateOS call number in RAX. Those
+/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
+/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
+/// run` and `clippy` on the host honest instead of dangerous.
+///
+/// See known-issues.md
+/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS
 }
 
 // ============================================================================
@@ -107,11 +123,7 @@ fn icmp_ping_wait(timeout_ms: u64) -> Result<u64, i64> {
     // SAFETY: SYS_ICMP_PING_WAIT takes one scalar argument; no pointer
     // dereferences occur in userspace.
     let ret = unsafe { syscall3(SYS_ICMP_PING_WAIT, timeout_ms, 0, 0) };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(ret as u64)
-    }
+    if ret < 0 { Err(ret) } else { Ok(ret as u64) }
 }
 
 /// Resolve a hostname to an IPv4 address (network byte order u32).
@@ -226,7 +238,9 @@ impl PingStats {
             self.rtt_max_us = rtt_us;
         }
         self.rtt_sum_us = self.rtt_sum_us.saturating_add(rtt_us);
-        self.rtt_sum_sq_us = self.rtt_sum_sq_us.saturating_add(u128::from(rtt_us) * u128::from(rtt_us));
+        self.rtt_sum_sq_us = self
+            .rtt_sum_sq_us
+            .saturating_add(u128::from(rtt_us) * u128::from(rtt_us));
     }
 
     fn loss_percent(&self) -> f64 {
@@ -340,9 +354,7 @@ fn parse_args() -> Result<Options, String> {
                 let val = argv
                     .get(i)
                     .ok_or_else(|| "-c requires a count value".to_string())?;
-                let count: u64 = val
-                    .parse()
-                    .map_err(|_| format!("invalid count: '{val}'"))?;
+                let count: u64 = val.parse().map_err(|_| format!("invalid count: '{val}'"))?;
                 if count == 0 {
                     return Err("count must be greater than 0".to_string());
                 }
@@ -389,9 +401,7 @@ fn parse_args() -> Result<Options, String> {
                 let val = argv
                     .get(i)
                     .ok_or_else(|| "-t requires a TTL value".to_string())?;
-                let ttl: u32 = val
-                    .parse()
-                    .map_err(|_| format!("invalid TTL: '{val}'"))?;
+                let ttl: u32 = val.parse().map_err(|_| format!("invalid TTL: '{val}'"))?;
                 if ttl == 0 || ttl > 255 {
                     return Err("TTL must be between 1 and 255".to_string());
                 }
@@ -540,40 +550,23 @@ fn print_timeout(stdout: &mut io::StdoutLock<'_>, seq: u16) {
 
 /// Print a timeout line in JSON format.
 fn print_timeout_json(stdout: &mut io::StdoutLock<'_>, seq: u16) {
-    let _ = writeln!(
-        stdout,
-        "{{\"icmp_seq\":{seq},\"error\":\"timeout\"}}",
-    );
+    let _ = writeln!(stdout, "{{\"icmp_seq\":{seq},\"error\":\"timeout\"}}",);
 }
 
 /// Print the header line.
-fn print_header(
-    stdout: &mut io::StdoutLock<'_>,
-    host: &str,
-    ip_str: &str,
-    payload_size: u16,
-) {
-    let _ = writeln!(
-        stdout,
-        "PING {host} ({ip_str}) {payload_size} data bytes",
-    );
+fn print_header(stdout: &mut io::StdoutLock<'_>, host: &str, ip_str: &str, payload_size: u16) {
+    let _ = writeln!(stdout, "PING {host} ({ip_str}) {payload_size} data bytes",);
 }
 
 /// Print the summary statistics.
-fn print_summary(
-    stdout: &mut io::StdoutLock<'_>,
-    host: &str,
-    stats: &PingStats,
-    json: bool,
-) {
+fn print_summary(stdout: &mut io::StdoutLock<'_>, host: &str, stats: &PingStats, json: bool) {
     if json {
         let loss = stats.loss_percent();
         let elapsed = stats.elapsed_ms();
         let _ = write!(
             stdout,
             "{{\"host\":\"{host}\",\"transmitted\":{},\"received\":{},\"loss_percent\":{loss:.1},\"time_ms\":{elapsed}",
-            stats.transmitted,
-            stats.received,
+            stats.transmitted, stats.received,
         );
         if stats.received > 0 {
             let min_ms = stats.rtt_min_us as f64 / 1000.0;
@@ -596,8 +589,7 @@ fn print_summary(
     let _ = writeln!(
         stdout,
         "{} packets transmitted, {} received, {loss:.0}% packet loss, time {elapsed}ms",
-        stats.transmitted,
-        stats.received,
+        stats.transmitted, stats.received,
     );
 
     if stats.received > 0 {
@@ -624,8 +616,8 @@ fn run() -> Result<(), String> {
     let ip_str: String;
 
     if is_ipv4_address(&opts.host) {
-        ip_addr = parse_ipv4(&opts.host)
-            .ok_or_else(|| format!("invalid IP address: '{}'", opts.host))?;
+        ip_addr =
+            parse_ipv4(&opts.host).ok_or_else(|| format!("invalid IP address: '{}'", opts.host))?;
         ip_str = opts.host.clone();
     } else {
         // Hostname: resolve via DNS syscall.
@@ -667,9 +659,10 @@ fn run() -> Result<(), String> {
     while RUNNING.load(Ordering::SeqCst) {
         // Check count limit.
         if let Some(max) = opts.count
-            && stats.transmitted >= max {
-                break;
-            }
+            && stats.transmitted >= max
+        {
+            break;
+        }
 
         // Send ICMP echo request.
         stats.record_sent();
@@ -753,9 +746,10 @@ fn run() -> Result<(), String> {
         // Sleep between pings unless flood mode or we have reached the count.
         if opts.interval_ms > 0 {
             if let Some(max) = opts.count
-                && stats.transmitted >= max {
-                    break;
-                }
+                && stats.transmitted >= max
+            {
+                break;
+            }
             sleep_interruptible(opts.interval_ms);
         }
     }

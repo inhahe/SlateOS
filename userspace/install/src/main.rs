@@ -3,8 +3,6 @@
 //! GNU coreutils-compatible `install` command for copying files
 //! with specified permissions, ownership, and directory creation.
 
-#![allow(unexpected_cfgs)]
-
 use quoting::quoteaf_os;
 use std::env;
 use std::fs;
@@ -456,10 +454,30 @@ fn resolve_group(name: &str) -> Result<u32, String> {
 }
 
 // ── Syscall wrappers ───────────────────────────────────────────────
+//
+// The gate below is `target_vendor`, not `target_os`. Until 2026-08-27 these
+// two functions were gated on `#[cfg(target_os = "slateos")]`, which is
+// **false everywhere** — including on SlateOS itself, whose target spec
+// reports `target_os = "linux"` so that build-std can compile a real `std`
+// (see toolchain/x86_64-slateos.json). The consequence was not a host-safety
+// problem but its mirror image: `sys_chmod` is the *only* way this program
+// sets a mode, so on the real OS `install -m 755 …` took the `not(...)` arm,
+// returned `Ok(())`, printed nothing, and left the file at its original
+// permissions. `#![allow(unexpected_cfgs)]` at the top of this file was
+// suppressing the one warning that said so.
+//
+// The host arms still answer `Ok(())`. That is a deliberate no-op rather than
+// an error: on a development host there is no SlateOS kernel to ask, and
+// failing here would make every host test of the copy logic fail for a reason
+// unrelated to what it is testing. Nothing on a dev host depends on the mode
+// actually changing.
+//
+// See known-issues.md
+// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
 
 #[allow(dead_code)]
 fn sys_chmod(path: &str, mode: u32) -> io::Result<()> {
-    #[cfg(target_os = "slateos")]
+    #[cfg(target_vendor = "slateos")]
     {
         let path_bytes = path.as_bytes();
         let ret: i64;
@@ -481,7 +499,7 @@ fn sys_chmod(path: &str, mode: u32) -> io::Result<()> {
             Ok(())
         }
     }
-    #[cfg(not(target_os = "slateos"))]
+    #[cfg(not(target_vendor = "slateos"))]
     {
         let _ = (path, mode);
         Ok(())
@@ -490,7 +508,7 @@ fn sys_chmod(path: &str, mode: u32) -> io::Result<()> {
 
 #[allow(dead_code)]
 fn sys_chown(path: &str, uid: u32, gid: u32) -> io::Result<()> {
-    #[cfg(target_os = "slateos")]
+    #[cfg(target_vendor = "slateos")]
     {
         let path_bytes = path.as_bytes();
         let ret: i64;
@@ -513,7 +531,7 @@ fn sys_chown(path: &str, uid: u32, gid: u32) -> io::Result<()> {
             Ok(())
         }
     }
-    #[cfg(not(target_os = "slateos"))]
+    #[cfg(not(target_vendor = "slateos"))]
     {
         let _ = (path, uid, gid);
         Ok(())
@@ -706,7 +724,7 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
         // On Slate OS we'd copy atime/mtime from source via syscall.
         // For now, this is a placeholder that will work when the
         // utimensat syscall is available.
-        #[cfg(target_os = "slateos")]
+        #[cfg(target_vendor = "slateos")]
         {
             // TODO: implement utimensat call to copy timestamps
         }

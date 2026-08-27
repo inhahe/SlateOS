@@ -57,7 +57,7 @@ const MAX_ARP_RECORDS: usize = 1024;
 /// - `nr` is a valid Slate OS syscall number.
 /// - All arguments are valid for that specific syscall (valid pointers,
 ///   correct sizes, etc.).
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid for the given syscall.
@@ -77,8 +77,8 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
-// Stub for non-x86_64 hosts (e.g., running tests on the build machine).
-#[cfg(not(target_arch = "x86_64"))]
+// Stub for development hosts (where `cargo test` runs).
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -38 // ENOSYS
 }
@@ -133,7 +133,9 @@ fn parse_ipv4(s: &str) -> Option<u32> {
     for ch in s.chars() {
         match ch {
             '0'..='9' => {
-                cur = cur.checked_mul(10)?.checked_add(u16::from(ch as u8 - b'0'))?;
+                cur = cur
+                    .checked_mul(10)?
+                    .checked_add(u16::from(ch as u8 - b'0'))?;
                 if cur > 255 {
                     return None;
                 }

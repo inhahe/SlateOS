@@ -79,7 +79,7 @@ const SYS_TCP_CLOSE: u64 = 803;
 ///
 /// The caller must ensure `nr` is a valid syscall number and `a1` is valid
 /// for that syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid. The `syscall` instruction
@@ -103,7 +103,7 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
 ///
 /// The caller must ensure `nr` is a valid syscall number and all arguments
 /// are valid for that syscall.
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller guarantees arguments are valid.
@@ -123,11 +123,11 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 }
 
 // Non-x86_64 stub so the crate compiles for host-side `cargo test`.
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
     -1
 }
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(target_vendor = "slateos"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -1
 }

@@ -89560,6 +89560,32 @@ latter needs `-Zbuild-std` and is far slower; for `cfg(unix)` coverage the two
 are equivalent. Worth raising with the other lanes — `kernel/**` and `gui/**`
 have their own `#[cfg(unix)]` arms and the same blind spot.
 
+**Update 2026-08-26 — adopted by all three lanes, but the coverage is lopsided.**
+Lane C put the check in its per-task gate; lane A put it in `scripts/pre-boot.py`
+(`ee2503c88`), deliberately *not* in `scripts/boot-test.sh`, because that script
+takes the cross-worktree QEMU lock and a `--workspace` compile there would let any
+lane's red tree block any other lane's boot test. Lane A's gate also triages
+failures by owning lane: only lane A's own files fail it, other lanes' print a
+`WARN` naming the paths, and errors inside `~/.cargo/registry` are attributed to
+nobody. Measured cost: 5m20s cold, 21s warm. Details:
+`requests/a-b-the-cfg-unix-check-is-in-lane-as-gate-with-two-changes.md`.
+
+The lopsided part, which lane A measured and asked to be recorded here:
+**lane A owns no `cfg(unix)` code at all** — zero occurrences in `kernel/**` and
+`bench/**`, against 515 in the tree, all of them in lane B's `userspace/**` or
+lane C's `apps/**`/`gui/**`/`randrange/**`. The kernel is bare-metal `no_std`, so
+there is nothing there for `cfg(unix)` to guard. My "worth raising with the other
+lanes — `kernel/**` … have their own `#[cfg(unix)]` arms" above was therefore
+wrong on the facts for lane A.
+
+The consequence is worth being honest about rather than quietly enjoying: in lane
+A this check is today a pure service to the other two trees, so lane A is the lane
+most likely to eventually stop paying 21s per task for it. **Do not count on all
+three lanes catching lane B's regressions symmetrically.** If lane A drops it, the
+detection lane B actually relies on is its own — which argues for lane B running
+the linux-target check in its own routine rather than treating the tree-wide gate
+as the safety net. (As of `045f603e1` lane B does run it per task, by hand.)
+
 ## `B-POSIX-SEVENTEEN-TESTS-ASSERT-THE-SLATEOS-KERNEL-AND-GET-THE-HOST-KERNEL` (lane B, 2026-08-26) — **CLOSED 2026-08-26, and the diagnosis below was wrong**
 
 **Resolution.** Fixed, but not as this entry proposed — the diagnosis under
@@ -89713,7 +89739,40 @@ capturing both RAX and RDX, identical to the code it replaced.
 
 ---
 
-## `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST` (lane B, 2026-08-26) — **open**
+## `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST` (lane B, 2026-08-26)
+
+**Status:** ✅ FIXED 2026-08-26 (`045f603e1`). Every site in `userspace/**` is now
+behind `#[cfg(target_vendor = "slateos")]` with an honest host arm. Verified with
+zero warnings on all three targets — the SlateOS target, `x86_64-pc-windows-gnu`,
+and `x86_64-unknown-linux-gnu`. The audit that produced the numbers below now
+reports 114 sites, 84 vendor-gated, 9 `target_os = "none"`-gated, and **0 ungated
+in `userspace/**`, `posix/**` or `init/**`**; the 21 that remain are all in
+`services/**`, which is outside the workspace and only ever builds for
+`x86_64-unknown-none`, so no host compiler ever sees them. Rationale for the
+choice of predicate: design-decisions.md §619.
+
+**Correction to the "proper fix" proposed below: `target_os = "slateos"` does not
+work and never did.** It is false on *every* target including the real OS, because
+`toolchain/x86_64-slateos.json` must declare `os = "linux"` — `build-std` compiles
+a real `std`, which picks its platform layer by `target_os`, so naming ourselves
+breaks the `std` build. Anything already sitting behind that predicate has
+therefore never been compiled at all. Flipping those gates to a predicate that is
+actually true found two such regions, and **both were broken**:
+
+| Where | What was wrong |
+|---|---|
+| `userspace/tput` terminal size | Did not compile: `get_terminal_size_ctl` defined, `get_terminal_size_ioctl` called. It also hand-rolled syscall **16**, which is our `SYS_CLOCK_ADJTIME` — so `tput cols` would have stepped the system clock, passing a pointer to a stack array as a signed nanosecond delta. |
+| `sync` (in `userspace/getopt`) | Issued raw syscall **162**: Linux's `sync` number, *unassigned* in our table (ours is `SYS_FS_SYNC = 641`). Correct on a Linux dev host, ENOSYS on the real OS. `sync -f` was also parsed and then discarded. |
+
+Both now route through the posix libc symbols (`ioctl`, `sync`, `syncfs`) under
+`cfg(unix)`, which is the right gate when `posix` exports the symbol and the host
+means the same thing by it — the host then does the real work instead of stubbing.
+`stty` and `htop` already did this.
+
+This is the entry's most useful lesson, and it generalises: **a gate that is false
+everywhere is worse than no gate**, because it silently exempts the code from the
+compiler as well as from the host. Grep for `target_os = "slateos"` before trusting
+any guard that mentions it.
 
 **In short:** The bug fixed directly above was one instance of a pattern, and
 an audit of lane B's tree found 101 more places where a raw `SYSCALL`
@@ -89757,12 +89816,27 @@ that returns a documented sentinel (or a small simulator where tests need the
 call to succeed). The mechanical part is uniform; the judgement per crate is
 only "does anything need this to *work* on host, or merely to fail cleanly?"
 
-**Worth telling lanes A and C.** The `target_arch`-instead-of-`target_os`
-confusion is not a lane-B idiom — it is the obvious-looking wrong answer, and
-`kernel/**`, `gui/**` and `net*/**` have their own raw-syscall and
-`#[cfg]`-gated arms. This is the third time in two days that a `#[cfg]`
-predicate has been wrong in a way that only shows up on one host (see
-`B-BACKUP-CFG-UNIX` and `BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above).
+**Confined to lane B — checked, not assumed.** The first draft of this entry
+said the other lanes were probably affected too and should be told. They are
+not, so no request was filed. Measured against `origin/main`:
+
+| tree | raw `syscall` sites | verdict |
+|---|---|---|
+| `kernel/**`, `bench/**` (lane A) | 0 | the kernel *receives* syscalls; it issues none |
+| `gui/**`, `apps/**`, `net*/**`, `pkg/**` (lane C) | 2 | both fine — see below |
+
+Lane C's two are in `gui/compositor/src/present/{drm,evdev}/sys.rs`, and they
+are deliberately *Linux* syscalls for DRM and evdev, gated
+`#[cfg(target_os = "linux")]` and documented as using "the x86-64 Linux
+syscall ABI". That is a raw syscall that is correct precisely because it runs
+on the host it names. It is the opposite of this bug, not an instance of it.
+
+**Still worth noting as a pattern, though.** This is the third `#[cfg]`
+predicate in two days that was wrong in a way visible on only one host — see
+`B-BACKUP-CFG-UNIX` and `BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above. The
+recurring shape is a gate that names the *nearly* right axis:
+`target_arch` for `target_os`, `cfg(unix)` for "has procfs", `cfg(unix)` on a
+dev host that is Windows.
 
 ---
 
@@ -90101,3 +90175,139 @@ instead would have been the smaller change and is wrong: the click would fall
 through to whatever is behind, which is not what a disabled button does.
 `a_running_benchmark_refuses_a_second_start_without_disappearing` pins both
 halves.
+
+---
+
+## `B-A-GATE-THAT-IS-FALSE-EVERYWHERE-HIDES-CODE-FROM-THE-COMPILER` (lane B, 2026-08-26)
+
+**Status:** ✅ FIXED 2026-08-26 (`045f603e1`) for the two instances found. Logged
+as its own entry because the *shape* will recur and the search for it is cheap.
+
+**In short:** A `#[cfg(...)]` guard whose condition is never true on any target
+does not merely fail to guard — it deletes the code from every build, so the
+compiler never type-checks it, `cargo clippy` never lints it, and no test can
+reach it. It looks like working, carefully-guarded code in review. It is
+unverified text.
+
+**How it arose here.** `#[cfg(target_os = "slateos")]` reads as "only on our OS"
+and is in fact false on our OS too, because our target spec must declare
+`os = "linux"` (see design-decisions.md §619). Two regions had sat behind it:
+one did not compile at all (a function whose name did not match its callers), and
+one issued a syscall number that is unassigned in our table. Neither defect was
+detectable by any tool until the gate was corrected.
+
+**How to find it.** The gates worth suspecting are the ones naming a value the
+target spec does not actually carry. A direct check:
+
+```bash
+# every distinct cfg predicate in the tree, with counts
+grep -rhoE '#!?\[cfg\w*\([^]]*\)\]' --include=*.rs . | sort | uniq -c | sort -rn
+```
+
+then, for any predicate that claims to select our OS, confirm it against
+`toolchain/x86_64-slateos.json` rather than against its own wording. A predicate
+with **zero** sites compiled in *any* of the three targets is the signature.
+
+**Residual state: zero.** `grep -rn 'target_os = "slateos"' --include=*.rs .` now
+matches nothing anywhere in the tree — not in `userspace/**`, and not in lane A's
+`kernel/**`/`bench/**` or lane C's zones either. So this is not "fixed where we
+looked"; the predicate is gone. Any future reappearance is a regression, and the
+grep above is the whole test.
+
+**Proper fix, generally.** Prefer a gate the target spec provably carries
+(`target_vendor = "slateos"`), and where `posix` exports the C symbol prefer
+`cfg(unix)` and the symbol — because that arm is *live on a dev host*, which
+means the compiler and the test suite both see it every day.
+
+---
+
+## `B-USERSPACE-USES-TARGET-OS-LINUX-TO-MEAN-SLATEOS-OR-A-LINUX-HOST` (lane B, 2026-08-26) — **open**, low severity
+
+**In short:** 41 places in `userspace/**` select a libc-using implementation with
+`#[cfg(target_os = "linux")]`. That predicate is true on SlateOS — but only
+because our target spec says `os = "linux"` for an unrelated reason. The code is
+correct today; the concern is that it rests on a coincidence, and the day the
+spec changes, 41 programs quietly switch to their do-nothing arms.
+
+**This is much smaller than the raw-syscall bug, and the first draft of this
+entry overstated it.** These sites are `extern "C"` declarations of ordinary libc
+functions — `kill`, `nice`, `getpriority`, `setpriority`, `fcntl`, `isatty` — not
+raw `syscall` instructions. Calling libc `kill()` on a Linux host does exactly
+what the code means; there is no ABI mismatch and nothing undefined happens. The
+predicate is honest about what it selects: "a platform with these C symbols".
+
+**The one real defect.** It says `linux` where it means "has a libc". The *only*
+thing making it true on SlateOS is `toolchain/x86_64-slateos.json` declaring
+`os = "linux"`, and that declaration exists to let `build-std` compile a real
+`std` — it is not a statement about libc at all. If that field ever changes, all
+41 fall through to their `not(...)` arms, which is precisely the silent-stub
+shape of the bug above. The predicate and the reason it holds are unrelated, and
+that is the whole problem.
+
+**Two things this is NOT, both of which the first draft got wrong:**
+
+- **It is not a Windows-blind-spot instance.** `cfg(unix)` is *also* false on
+  Windows, so converting would not make the Windows host compile these arms. The
+  detection story is `B-DEV-HOST-IS-WINDOWS-SO-CFG-UNIX-CODE-IS-NEVER-COMPILED`
+  and the linux-target check, which already covers them.
+- **`cfg(unix)` is not a blanket answer.** For `coreutils/src/stdfd.rs` (4 of the
+  41) it would be actively wrong: that gate gets a constructor into
+  `.init_array`, which is an **ELF** mechanism. macOS is `unix` and uses
+  `__mod_init_func` instead, so `cfg(unix)` would place the constructor in a
+  section that platform does not read. `target_os = "linux"` is arguably the
+  *more* correct predicate there, and if anything it wants
+  `cfg(target_family = "unix", not(target_vendor = "apple"))` or an explicit
+  ELF-ish gate.
+
+**Proper fix — per site, not mechanical.** Sort the 41 into: (a) plain libc
+symbol use, where `cfg(unix)` is both accurate and decoupled from the spec's `os`
+field; (b) genuinely ELF- or Linux-specific mechanisms like `stdfd.rs`, where the
+current gate stays and gains a comment saying *why* it is not `cfg(unix)`. Kept
+out of `045f603e1` so a 54-file semantic commit did not also carry unrelated
+predicate edits — and, as it turns out, so that the sorting could be done
+properly rather than by `sed`.
+
+**Where it bites:** `userspace/**`, 41 real attributes (an earlier count of 44
+included three mentions in comments). Find them with:
+
+```bash
+grep -rn 'target_os = "linux"' --include=*.rs userspace/ | grep -E '#!?\[cfg'
+```
+
+Distribution: `oils/src/interp.rs` 11, `coreutils/src/bin/nohup.rs` 8,
+`renice.rs` 6, `stdfd.rs` 4, `nice.rs` 4, `df.rs` 4, `kill.rs` 3,
+`hostname.rs` 1.
+
+---
+
+## `B-THE-TREE-IS-RUSTFMT-DIRTY-UNDER-THE-BUMPED-NIGHTLY` (lane B, 2026-08-26) — **open**, tech debt
+
+**In short:** After the nightly toolchain bump, a large fraction of the tree no
+longer matches what `rustfmt` would produce. This is not anyone's uncommitted
+mistake — the formatter's own defaults changed. The practical cost is that any
+commit which touches a stale file and runs `cargo fmt` drags in reformatting of
+lines it did not mean to change, which buries the real diff.
+
+**Measured, not estimated:** 26 of 40 randomly sampled files under `userspace/**`
+are rustfmt-dirty at HEAD — about 65%. The deltas are overwhelmingly trailing
+commas and line re-wrapping; a whitespace-normalised comparison of the 20 files
+reformatted in `fd78fa67b` found no non-whitespace change other than trailing
+commas, so the reformat is semantics-free.
+
+**Why it has not simply been fixed.** A tree-wide `cargo fmt` is the obvious
+answer and is the wrong move while three lanes are live: it would rewrite files in
+all three ownership zones at once and conflict with every in-flight branch. It is
+a coordination problem, not a technical one.
+
+**Workaround in use.** When a task must touch stale files, split it in two: one
+commit that is *only* the reformat of the files being touched, then the semantic
+change on top. `fd78fa67b` followed by `045f603e1` is the worked example.
+
+**Proper fix.** One tree-wide `cargo fmt` run, agreed between the three lanes,
+landed on `main` at a moment when all three have merged up and none has
+substantial uncommitted work — then all three merge it down before resuming. Worth
+raising with the operator to pick the moment; until then the split-commit
+workaround is adequate and cheap.
+
+**Where it bites:** the whole tree; most visibly `userspace/**`. Check with
+`rustfmt +nightly-x86_64-pc-windows-gnu --edition 2024 --check <files>`.

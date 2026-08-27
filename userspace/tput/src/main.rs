@@ -5,8 +5,6 @@
 //! - `reset`: Reset terminal to sane state
 //! - `clear`: Clear the terminal screen
 
-#![allow(unexpected_cfgs)]
-
 use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Write};
@@ -207,8 +205,8 @@ fn get_terminal_cols() -> i32 {
         return n;
     }
 
-    // Try ioctl on Slate OS
-    #[cfg(target_os = "slateos")]
+    // Ask the terminal itself.
+    #[cfg(unix)]
     {
         if let Some(size) = get_terminal_size_ioctl() {
             return size.0;
@@ -226,7 +224,7 @@ fn get_terminal_lines() -> i32 {
         return n;
     }
 
-    #[cfg(target_os = "slateos")]
+    #[cfg(unix)]
     {
         if let Some(size) = get_terminal_size_ioctl() {
             return size.1;
@@ -236,28 +234,44 @@ fn get_terminal_lines() -> i32 {
     24 // Default
 }
 
-#[cfg(target_os = "slateos")]
-#[allow(dead_code)]
-fn get_terminal_size_ctl() -> Option<(i32, i32)> {
-    // Slate OS ioctl to get terminal size
-    // Returns (cols, lines) or None
-    let mut cols: u16 = 0;
-    let mut lines: u16 = 0;
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") 16u64, // SYS_IOCTL
-            in("rdi") 1u64,  // stdout fd
-            in("rsi") 0x5413u64, // TIOCGWINSZ
-            in("rdx") &mut [lines, cols, 0u16, 0u16] as *mut _ as u64,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-        );
-    }
-    if ret == 0 && cols > 0 && lines > 0 {
-        Some((cols as i32, lines as i32))
+/// Window size as `TIOCGWINSZ` fills it in — layout must match the kernel's.
+#[cfg(unix)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Winsize {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+}
+
+// Terminal size goes through the posix libc `ioctl()` symbol, never a
+// hand-rolled `syscall`: the native Slate OS ABI has no SYS_IOCTL, and syscall
+// number 16 is SYS_CLOCK_ADJTIME — so a raw `ioctl` would step the system clock
+// with the Winsize pointer reinterpreted as a signed nanosecond delta.  See the
+// same note in `userspace/stty/src/main.rs`, and `htop`, which route the same
+// way.  `cfg(unix)` rather than `cfg(target_vendor = "slateos")` because
+// TIOCGWINSZ means the same thing on a Linux development host, so the query is
+// correct there too.
+#[cfg(unix)]
+unsafe extern "C" {
+    /// posix libc `ioctl` symbol — dispatches terminal control requests.
+    fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32;
+}
+
+/// Query the terminal's size via `TIOCGWINSZ` on stdout.
+///
+/// Returns `(cols, lines)`, or `None` when stdout is not a terminal.
+#[cfg(unix)]
+fn get_terminal_size_ioctl() -> Option<(i32, i32)> {
+    const TIOCGWINSZ: u64 = 0x5413;
+    const STDOUT_FILENO: i32 = 1;
+    let mut ws = Winsize::default();
+    // SAFETY: TIOCGWINSZ writes a Winsize; the pointer is valid for the call
+    // and the struct is `#[repr(C)]` with the layout the kernel expects.
+    let rc = unsafe { ioctl(STDOUT_FILENO, TIOCGWINSZ, (&raw mut ws).cast::<u8>()) };
+    if rc == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+        Some((i32::from(ws.ws_col), i32::from(ws.ws_row)))
     } else {
         None
     }

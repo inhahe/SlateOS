@@ -40,7 +40,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(target_vendor = "slateos")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let ret: i64;
     unsafe {
@@ -56,6 +56,22 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
         );
     }
     ret
+}
+
+/// Host stub for `syscall3` — see the gated definition above.
+///
+/// On a development host there is no SlateOS kernel to talk to, and a raw
+/// `syscall` instruction does not fail cleanly: it enters whatever kernel is
+/// actually running, with this crate's SlateOS call number in RAX. Those
+/// numbers mean unrelated things elsewhere, so the call is not a no-op — it
+/// is someone else's syscall. Returning `ENOSYS` keeps `cargo test`, `cargo
+/// run` and `clippy` on the host honest instead of dangerous.
+///
+/// See known-issues.md
+/// `B-FORTY-SIX-USERSPACE-CRATES-CAN-ISSUE-A-RAW-SYSCALL-ON-THE-DEV-HOST`.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS
 }
 
 fn clock_monotonic_ns() -> u64 {
@@ -473,19 +489,23 @@ impl Filter {
 
         // Port filter.
         if let Some(port) = self.port
-            && sport != port && dport != port {
-                return false;
-            }
+            && sport != port
+            && dport != port
+        {
+            return false;
+        }
 
         if let Some(port) = self.src_port
-            && sport != port {
-                return false;
-            }
+            && sport != port
+        {
+            return false;
+        }
 
         if let Some(port) = self.dst_port
-            && dport != port {
-                return false;
-            }
+            && dport != port
+        {
+            return false;
+        }
 
         true
     }
@@ -885,9 +905,10 @@ fn capture_live(
 
     loop {
         if let Some(max) = count
-            && captured >= max {
-                break;
-            }
+            && captured >= max
+        {
+            break;
+        }
 
         // Read a packet (format: 4-byte LE length prefix + raw frame).
         let n = match file.read(&mut buf) {
@@ -923,14 +944,12 @@ fn capture_live(
                     let ip_hdr_len = (ip.ihl as usize) * 4;
                     let transport = &pkt_data[14 + ip_hdr_len..];
                     match ip.protocol {
-                        PROTO_TCP
-                            if transport.len() >= 4 => {
-                                (read_u16_be(transport, 0), read_u16_be(transport, 2))
-                            }
-                        PROTO_UDP
-                            if transport.len() >= 4 => {
-                                (read_u16_be(transport, 0), read_u16_be(transport, 2))
-                            }
+                        PROTO_TCP if transport.len() >= 4 => {
+                            (read_u16_be(transport, 0), read_u16_be(transport, 2))
+                        }
+                        PROTO_UDP if transport.len() >= 4 => {
+                            (read_u16_be(transport, 0), read_u16_be(transport, 2))
+                        }
                         _ => (0, 0),
                     }
                 } else {
@@ -945,9 +964,10 @@ fn capture_live(
         };
 
         if let Some(ref eth_hdr) = eth
-            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport) {
-                continue;
-            }
+            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport)
+        {
+            continue;
+        }
 
         display_packet(pkt_data, opts, ts_ns, prev_ts);
 
@@ -986,9 +1006,10 @@ fn capture_from_proc_net(
 
     for line in content.lines() {
         if let Some(max) = count
-            && displayed >= max {
-                break;
-            }
+            && displayed >= max
+        {
+            break;
+        }
 
         // Parse text-based packet info.
         // Expected format: "PROTO SRC_IP:PORT > DST_IP:PORT FLAGS LEN TS"
@@ -1040,9 +1061,10 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
 
     while let Some((ts_sec, ts_usec, pkt_data)) = reader.next_packet() {
         if let Some(max) = count
-            && displayed >= max {
-                break;
-            }
+            && displayed >= max
+        {
+            break;
+        }
 
         let ts_ns = (ts_sec as u64) * 1_000_000_000 + (ts_usec as u64) * 1000;
 
@@ -1076,9 +1098,10 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
         };
 
         if let Some(ref eth_hdr) = eth
-            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport) {
-                continue;
-            }
+            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport)
+        {
+            continue;
+        }
 
         display_packet(pkt_data, opts, ts_ns, prev_ts_ns);
         prev_ts_ns = ts_ns;
@@ -1175,9 +1198,10 @@ fn parse_filter(args: &[String]) -> Filter {
                         filter.host = Some(ip);
                     }
                 } else if let Ok(port) = arg.parse::<u16>()
-                    && filter.port.is_none() {
-                        filter.port = Some(port);
-                    }
+                    && filter.port.is_none()
+                {
+                    filter.port = Some(port);
+                }
             }
         }
         idx += 1;

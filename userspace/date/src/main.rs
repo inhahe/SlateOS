@@ -45,7 +45,20 @@ use std::process;
 // arguments and returns wall-clock nanoseconds-since-epoch in rax;
 // SYS_CLOCK_SETTIME takes the target time in nanoseconds-since-epoch as its
 // only argument.
+//
+// The two raw `syscall` sites below are gated on `target_vendor = "slateos"`
+// (see `toolchain/x86_64-slateos.json`), which is true only when compiling for
+// the real OS.  The gate is load-bearing, and nowhere more so than here: a
+// `syscall` instruction on a development host does not fail cleanly, it enters
+// whatever kernel is actually running with our number in `rax`, and on Linux
+// number 14 is `rt_sigprocmask` while number 15 is **`rt_sigreturn`** — a call
+// that reloads the entire register set and signal mask from what it believes is
+// a signal frame on the stack.  Invoking it from ordinary code is not a failed
+// syscall, it is undefined behaviour in the host process.  `date --set` on a
+// Linux dev host would have done exactly that.
+#[cfg(target_vendor = "slateos")]
 const SYS_CLOCK_REALTIME: u64 = 14;
+#[cfg(target_vendor = "slateos")]
 const SYS_CLOCK_SETTIME: u64 = 15;
 const CLOCK_REALTIME: u64 = 0;
 /// Nanoseconds per second, used to split/combine the kernel's ns clock value.
@@ -61,33 +74,51 @@ const NSEC_PER_SEC: i64 = 1_000_000_000;
 /// `CLOCK_REALTIME` is supported; the kernel exposes the wall clock through
 /// the no-argument `SYS_CLOCK_REALTIME` syscall, which returns
 /// nanoseconds-since-epoch in `rax`.
+///
+/// On a development host there is no such kernel, so this reads `std`'s clock
+/// instead.  That is the right answer rather than a stub: this function only
+/// *reads* a clock, and the host's own clock is a truthful one.
 fn clock_gettime(clock_id: u64) -> Result<(i64, i64), String> {
     if clock_id != CLOCK_REALTIME {
         return Err(format!("unsupported clock id {clock_id}"));
     }
 
-    let ret: i64;
+    #[cfg(target_vendor = "slateos")]
+    {
+        let ret: i64;
 
-    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and only reads the kernel
-    // clock, writing nothing to userspace.  rcx/r11 are clobbered by the
-    // SYSCALL instruction per the x86_64 ABI; we mark them as such.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_REALTIME,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, nomem),
-        );
+        // SAFETY: SYS_CLOCK_REALTIME takes no arguments and only reads the
+        // kernel clock, writing nothing to userspace.  rcx/r11 are clobbered by
+        // the SYSCALL instruction per the x86_64 ABI; we mark them as such.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_REALTIME,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+
+        if ret < 0 {
+            return Err(format!("clock_gettime failed with error {ret}"));
+        }
+
+        // `ret` is nanoseconds since the Unix epoch (positive until year 2262).
+        Ok((ret / NSEC_PER_SEC, ret % NSEC_PER_SEC))
     }
 
-    if ret < 0 {
-        return Err(format!("clock_gettime failed with error {ret}"));
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
+            Ok(dur) => Ok((
+                i64::try_from(dur.as_secs()).unwrap_or(i64::MAX),
+                i64::from(dur.subsec_nanos()),
+            )),
+            Err(e) => Err(format!("clock_gettime failed: {e}")),
+        }
     }
-
-    // `ret` is nanoseconds since the Unix epoch (positive until year 2262).
-    Ok((ret / NSEC_PER_SEC, ret % NSEC_PER_SEC))
 }
 
 /// Set the specified clock to the given time.
@@ -95,6 +126,12 @@ fn clock_gettime(clock_id: u64) -> Result<(i64, i64), String> {
 /// Requires `CAP_SYS_TIME`.  Only `CLOCK_REALTIME` is settable; the kernel's
 /// `SYS_CLOCK_SETTIME` takes the absolute target time in
 /// nanoseconds-since-epoch as its single argument.
+///
+/// On a development host this is an error, not a stub success: the caller is
+/// `date --set`, whose entire purpose is the side effect, so silently reporting
+/// success would be a lie.  Nor do we set the *host's* clock — this program is
+/// built for SlateOS, and a `cargo run` of it has no business moving the
+/// developer's machine clock.
 fn clock_settime(clock_id: u64, sec: i64, nsec: i64) -> Result<(), String> {
     if clock_id != CLOCK_REALTIME {
         return Err(format!("unsupported clock id {clock_id}"));
@@ -103,33 +140,41 @@ fn clock_settime(clock_id: u64, sec: i64, nsec: i64) -> Result<(), String> {
         return Err(format!("invalid time {sec}.{nsec:09}"));
     }
 
-    // Combine into nanoseconds-since-epoch.  `sec` is non-negative and within
-    // range for any realistic date, so the multiply/add cannot overflow i64
-    // (i64::MAX ns is year 2262); saturate defensively regardless.
-    let target_ns = sec.saturating_mul(NSEC_PER_SEC).saturating_add(nsec) as u64;
-    let ret: i64;
+    #[cfg(target_vendor = "slateos")]
+    {
+        // Combine into nanoseconds-since-epoch.  `sec` is non-negative and
+        // within range for any realistic date, so the multiply/add cannot
+        // overflow i64 (i64::MAX ns is year 2262); saturate defensively anyway.
+        let target_ns = sec.saturating_mul(NSEC_PER_SEC).saturating_add(nsec) as u64;
+        let ret: i64;
 
-    // SAFETY: SYS_CLOCK_SETTIME takes a single scalar argument (target ns) and
-    // touches no userspace memory.  rcx/r11 are clobbered by SYSCALL.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") SYS_CLOCK_SETTIME,
-            in("rdi") target_ns,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack, nomem),
-        );
+        // SAFETY: SYS_CLOCK_SETTIME takes a single scalar argument (target ns)
+        // and touches no userspace memory.  rcx/r11 are clobbered by SYSCALL.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_SETTIME,
+                in("rdi") target_ns,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+
+        if ret < 0 {
+            return Err(format!(
+                "clock_settime failed with error {ret} (need CAP_SYS_TIME?)"
+            ));
+        }
+
+        Ok(())
     }
 
-    if ret < 0 {
-        return Err(format!(
-            "clock_settime failed with error {ret} (need CAP_SYS_TIME?)"
-        ));
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        Err("clock_settime: not supported on this host (no SlateOS kernel)".to_string())
     }
-
-    Ok(())
 }
 
 // ============================================================================

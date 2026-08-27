@@ -45,6 +45,7 @@ use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -966,26 +967,27 @@ fn label(
 
 /// Draw `text` centred on (`cx`, `cy`).
 ///
-/// The width is estimated from the character count rather than measured,
-/// because this function produces render commands and the compositor is what
-/// shapes them — there is no font here to ask. 0.55 em is close for the digits
-/// and short words this program centres, and a score a few pixels off centre is
-/// not worth a round trip to a font.
+/// Both offsets are measured rather than guessed. `guitk::text` asks the same
+/// font the compositor will shape with, so the answer is the one that will
+/// actually be drawn; and centring is exactly where a guess shows, because half
+/// the error in a width lands in the offset and so grows with the label — a
+/// two-character score and a "Game over" would drift by different amounts.
+/// Vertically the anchor is the line box rather than the em size, since `y` on
+/// a `Text` command is the top of the line and a line is taller than its size.
 fn centred(
     f: &mut Frame,
     cx: f32,
     cy: f32,
-    text: &str,
+    label_text: &str,
     size: f32,
     color: Color,
     weight: FontWeightHint,
 ) {
-    let w = text.chars().count() as f32 * size * 0.55;
     label(
         f,
-        cx - w / 2.0,
-        cy - size / 2.0,
-        text,
+        text::center_x(label_text, cx, size, weight),
+        cy - text::line_height(size, weight) / 2.0,
+        label_text,
         size,
         color,
         weight,

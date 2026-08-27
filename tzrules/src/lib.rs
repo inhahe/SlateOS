@@ -917,6 +917,85 @@ pub fn dos_datetime_from_unix(secs: i64) -> u32 {
     (date << 16) | time
 }
 
+/// Decode a packed MS-DOS date/time pair back into whole seconds since the
+/// Unix epoch. The inverse of [`dos_datetime_from_unix`].
+///
+/// Returns `None` when the pair does not name a real instant. That covers both
+/// `0` — the agreed "no modification time recorded" encoding — and any pair
+/// whose fields are individually in range but jointly impossible.
+///
+/// # Why the return is an `Option` and not a clamped `i64`
+///
+/// The DOS fields are wider than the values they may hold. Month gets 4 bits
+/// (0‥=15) but only 1‥=12 are dates; day gets 5 (0‥=31) but no month has 0
+/// days and only seven have 31; hours get 5 bits (0‥=31) against 24 valid, and
+/// minutes 6 (0‥=63) against 60. So a malformed or hostile archive can name
+/// "month 15", "February 30" or "25:61:58", and every one of those is a bit
+/// pattern the format physically permits.
+///
+/// A decoder that normalises them — the usual shortcut of feeding the raw
+/// numbers to a days-since-epoch formula — turns nonsense into a *plausible*
+/// date silently: `days_from_civil` is happy to accept month 15 and roll it
+/// into the following year, so `2020-15-01` decodes as `2021-03-01` and is
+/// then indistinguishable from an archive that really said so. Refusing keeps
+/// a corrupt field visible as a corrupt field, which is the same reason the
+/// encoder refuses out-of-range instants rather than clamping them
+/// (design-decisions.md §618).
+///
+/// # Seconds
+///
+/// The stored second is halved, so decoding multiplies by two and the result
+/// is always even. A pair that was encoded from an odd second decodes one
+/// second earlier — the resolution loss is in the format, and it errs in the
+/// direction the encoder documents: never later than the real instant.
+///
+/// # Timezone
+///
+/// DOS pairs carry local time with no zone recorded, and this does no zone
+/// conversion — it returns the instant that the fields name read as UTC. The
+/// caveat is the same one on the encoder and is a property of the format.
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
+// The arithmetic below cannot overflow: every field is masked to at most 7
+// bits before use, `year` is 1980‥=2107, and `days_from_civil` of a date in
+// that range is ~3_650‥=50_400, so the seconds total is far inside `i64`. The
+// allow is on the function because attributes on expressions are not stable.
+pub fn unix_from_dos_datetime(packed: u32) -> Option<i64> {
+    // `0` is the sentinel, not a date. Checking it first means the field
+    // decoding below never has to special-case an all-zero pair, and it is
+    // also caught by the month/day validation that follows — belt and braces,
+    // because this is the case callers actually hit.
+    if packed == 0 {
+        return None;
+    }
+
+    let date = packed >> 16;
+    let time = packed & 0xFFFF;
+
+    let year = i64::from(date >> 9) + 1980;
+    let month = (date >> 5) & 0x0F;
+    let day = date & 0x1F;
+
+    let hour = time >> 11;
+    let minute = (time >> 5) & 0x3F;
+    // Stored halved; 5 bits hold 0‥=31, so this is 0‥=62 and an encoder that
+    // wrote 30 or 31 would name second 60 or 62, which do not exist.
+    let second = (time & 0x1F) * 2;
+
+    // Reject every field the format can hold but the calendar cannot name.
+    // `days_in_month` is what makes 2020-02-30 fail while 2020-02-29 passes,
+    // which a fixed 1..=31 check would not.
+    if month == 0 || month > 12 || day == 0 || day > days_in_month(month, year) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day);
+    Some(days * 86_400 + i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1400,5 +1479,119 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 46_000, "expected ~46_750 days, walked {checked}");
+    }
+
+    // -- unix_from_dos_datetime ------------------------------------------
+
+    #[test]
+    fn decodes_a_known_pair_without_consulting_the_encoder() {
+        // 2020-09-13 12:26:40 UTC == 1_600_000_000, packed by hand from the
+        // documented layout so this does not merely assert that two functions
+        // agree with each other:
+        //   date = ((2020-1980) << 9) | (9 << 5) | 13 = 20_781
+        //   time = (12 << 11) | (26 << 5) | (40 / 2)  = 25_428
+        let packed = (20_781_u32 << 16) | 25_428;
+        assert_eq!(unix_from_dos_datetime(packed), Some(1_600_000_000));
+    }
+
+    #[test]
+    fn the_unrecorded_sentinel_decodes_to_nothing_rather_than_to_1980() {
+        // The whole point of the `0` encoding: it must not come back as the
+        // DOS epoch, or a blank Date column silently becomes "1980-01-01".
+        assert_eq!(unix_from_dos_datetime(0), None);
+        assert_ne!(
+            unix_from_dos_datetime(dos_datetime_from_unix(DOS_EPOCH_UNIX)),
+            None,
+            "the real DOS epoch must still decode -- only 0 is the sentinel"
+        );
+    }
+
+    #[test]
+    fn fields_the_format_can_hold_but_the_calendar_cannot_name_are_refused() {
+        // Each of these is a bit pattern a malformed or hostile archive can
+        // legally contain. A decoder that normalises instead of refusing turns
+        // every one of them into a plausible, wrong date.
+        let cases: [(u32, u32, &str); 7] = [
+            ((2020 - 1980) << 9 | (15 << 5) | 1, 0, "month 15"),
+            ((2020 - 1980) << 9 | (0 << 5) | 1, 0, "month 0"),
+            ((2020 - 1980) << 9 | (9 << 5) | 0, 0, "day 0"),
+            ((2020 - 1980) << 9 | (2 << 5) | 30, 0, "February 30"),
+            (
+                (2021 - 1980) << 9 | (2 << 5) | 29,
+                0,
+                "Feb 29 of a common year",
+            ),
+            ((2020 - 1980) << 9 | (9 << 5) | 13, 25 << 11, "hour 25"),
+            ((2020 - 1980) << 9 | (9 << 5) | 13, 61 << 5, "minute 61"),
+        ];
+        for (date, time, what) in cases {
+            assert_eq!(
+                unix_from_dos_datetime((date << 16) | time),
+                None,
+                "{what} must be refused, not normalised into a real date"
+            );
+        }
+
+        // The near-miss that proves the check is a calendar and not a constant:
+        // the same day-29 pattern in a leap year is a date and must decode.
+        let leap = ((2020 - 1980) << 9 | (2 << 5) | 29) << 16;
+        assert!(
+            unix_from_dos_datetime(leap).is_some(),
+            "2020-02-29 exists and must decode"
+        );
+    }
+
+    #[test]
+    fn decoding_is_the_exact_inverse_of_encoding_over_the_whole_range() {
+        // Walks every representable day, at a time of day whose seconds are
+        // even so the halving is lossless and the round-trip must be exact.
+        // A swapped shift, an off-by-one epoch, or a mask one bit too narrow
+        // survives spot checks and dies here.
+        let mut secs = DOS_EPOCH_UNIX + 12 * 3_600 + 26 * 60 + 40;
+        let mut checked = 0_u32;
+        while secs <= DOS_END_UNIX {
+            let pair = dos_datetime_from_unix(secs);
+            assert_eq!(
+                unix_from_dos_datetime(pair),
+                Some(secs),
+                "round trip lost {secs}"
+            );
+            secs += 86_400;
+            checked += 1;
+        }
+        assert!(checked > 46_000, "expected ~46_750 days, walked {checked}");
+    }
+
+    #[test]
+    fn an_odd_second_round_trips_one_second_early_never_late() {
+        // The format stores seconds halved, so odd seconds cannot survive.
+        // The direction of the loss is the contract: a decoded time may be
+        // earlier than the original, never later, or a file can be ordered
+        // ahead of an event that actually preceded it.
+        for offset in 0..120_i64 {
+            let secs = 1_600_000_000 + offset;
+            let back = unix_from_dos_datetime(dos_datetime_from_unix(secs))
+                .expect("in-range instant must decode");
+            assert!(
+                back <= secs && secs - back <= 1,
+                "{secs} round-tripped to {back}; must lose at most 1s, downward"
+            );
+            assert_eq!(back % 2, 0, "decoded seconds are always even");
+        }
+    }
+
+    #[test]
+    fn both_range_edges_survive_a_round_trip() {
+        // DOS_END_UNIX is 23:59:59, one second past the last *distinct* pair
+        // (23:59:58) because seconds are halved. It must round-trip to :58
+        // rather than being refused as out of range.
+        assert_eq!(
+            unix_from_dos_datetime(dos_datetime_from_unix(DOS_END_UNIX)),
+            Some(DOS_END_UNIX - 1),
+        );
+        assert_eq!(
+            unix_from_dos_datetime(dos_datetime_from_unix(DOS_EPOCH_UNIX)),
+            Some(DOS_EPOCH_UNIX),
+        );
     }
 }

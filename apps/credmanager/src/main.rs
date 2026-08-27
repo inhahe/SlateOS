@@ -27,17 +27,34 @@
 //! theoretical. See [`Vault::create`].
 //!
 //! The vault *contents* are not yet encrypted at rest — this crate has no
-//! persistence layer at all, and `main` is empty. When one is written, the key
-//! comes from `pwkdf::derive_key` under the same params, and the verifier
-//! stored beside it must be written with its salt and round count or the vault
-//! is unopenable.
+//! persistence layer at all, so every launch opens an empty vault. When one is
+//! written, the key comes from `pwkdf::derive_key` under the same params, and
+//! the verifier stored beside it must be written with its salt and round count
+//! or the vault is unopenable. Tracked as
+//! `known-issues.md` → `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK`.
 
+// Nineteen items are built and exercised by tests but reachable from no
+// control yet: the CSV export, the backup serialiser, the clipboard copy, and
+// the constructors for the entry kinds the "Add" button does not open a form
+// for. Those are finished, tested code waiting on a button, not corpses, so
+// they are kept rather than deleted -- but a blanket allow also swallows
+// genuine orphans, which is how `rows_top` and `build_render_tree` sat unused
+// through the conversion to a recorded-hit-box renderer without a peep. Both
+// are `#[cfg(test)]` now, and anything else that falls out of use should be
+// too, so that what is left under this allow is only the not-yet-wired.
+// Narrowing it per-item is
+// `known-issues.md` → `C-CREDMANAGER-ALLOWS-DEAD-CODE-CRATE-WIDE`.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::process::ExitCode;
 
 use guitk::color::Color;
-use guitk::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+#[cfg(test)]
+use guitk::probe;
+use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[cfg(test)]
 use guitk::rng::SeededRng;
@@ -45,6 +62,7 @@ use guitk::rng::{RandomSource, SecretSource, SystemRandom};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
+use oswindow::app::{self, App, Response};
 use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 
 // =============================================================================
@@ -96,6 +114,141 @@ const DEFAULT_AUTO_LOCK_MINUTES: u32 = 15;
 const CLIPBOARD_CLEAR_SECONDS: u32 = 30;
 const PASSWORD_OLD_DAYS: u64 = 90;
 const WEAK_PASSWORD_LEN: usize = 8;
+
+// =============================================================================
+// Targets and layout
+// =============================================================================
+
+/// Everything in the window a pointer can be over.
+///
+/// The renderer records one of these beside each control's rectangle as it
+/// draws it, and the click handler asks the recorded frame rather than
+/// rebuilding the geometry from the same constants. The four
+/// `handle_*_click` functions this replaces did rebuild it — the toolbar one
+/// carried a hand-computed `base_x + 284.0 ..= base_x + 364.0` for a button
+/// the renderer placed by adding five widths and five gaps, and the sidebar
+/// one re-summed a stack of `+ 12.0 + 30.0 + 24.0` offsets. They happened to
+/// agree; nothing made them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// Toolbar: add a new entry.
+    Add,
+    /// Toolbar: the search box.
+    Search,
+    /// Toolbar: cycle the sort order.
+    Sort,
+    /// Toolbar: open the password generator.
+    Generator,
+    /// Toolbar: lock the vault.
+    LockVault,
+    /// Toolbar: open settings.
+    Settings,
+    /// Sidebar row `n`, indexing [`AppState::sidebar_items`].
+    ///
+    /// An index rather than the [`SidebarSelection`] itself because a target
+    /// must be `Copy` and a tag filter carries a `String`. The index is not a
+    /// second derivation of the order: the renderer *iterates* that list, so
+    /// row `n` is drawn from `items[n]` and resolved back through `items[n]`.
+    Sidebar(usize),
+    /// Entry-list row `n`, indexing `filtered_ids`.
+    EntryRow(usize),
+    /// Lock screen: the master-password field.
+    MasterInput,
+    /// Lock screen: the Unlock button.
+    Unlock,
+}
+
+type Frame = guitk::frame::Frame<Target>;
+
+/// A window size that can be laid out against: never negative, never NaN.
+fn sane(v: f32) -> f32 {
+    if v.is_finite() { v.max(0.0) } else { 0.0 }
+}
+
+/// Take `want` px off the top of the space between `y` and `limit`, shrinking
+/// rather than clamping if there is less than that left.
+///
+/// Clamping is the wrong instinct here: [`Frame`] does not clip to the window,
+/// so a rectangle clamped to a minimum height in a window too short for it
+/// would still record a hit box — a button that cannot be seen but can be
+/// pressed.
+fn take_top(y: &mut f32, limit: f32, width: f32, want: f32) -> Rect {
+    let h = want.min((limit - *y).max(0.0));
+    let r = Rect::new(0.0, *y, width, h);
+    *y += h;
+    r
+}
+
+/// `r` cut down to `bounds`, or empty if it falls outside entirely.
+fn trim(r: Rect, bounds: Rect) -> Rect {
+    r.intersect(bounds).unwrap_or(Rect::EMPTY)
+}
+
+/// Where every pane goes, derived from the live window size.
+///
+/// Built fresh on every frame and never stored. The size a window *is* and the
+/// size it was told to be last are two different things for exactly one frame
+/// — the first one, which arrives before any `Event::Resize` — and that is the
+/// frame in which a remembered layout is wrong.
+struct Layout {
+    /// The whole window.
+    window: Rect,
+    /// The toolbar strip across the top.
+    toolbar: Rect,
+    /// The category sidebar down the left.
+    sidebar: Rect,
+    /// The entry-list column, header strip included.
+    list: Rect,
+    /// The scrolling part of the entry list — the header strip excluded,
+    /// because it does not scroll.
+    list_rows: Rect,
+    /// The detail panel filling the rest.
+    detail: Rect,
+}
+
+impl Layout {
+    fn new(width: f32, height: f32) -> Self {
+        let width = sane(width);
+        let height = sane(height);
+        let window = Rect::new(0.0, 0.0, width, height);
+
+        let mut top = 0.0;
+        let toolbar = take_top(&mut top, height, width, TOOLBAR_HEIGHT);
+        let body = (height - top).max(0.0);
+
+        let sidebar = trim(Rect::new(0.0, top, SIDEBAR_WIDTH, body), window);
+        let list = trim(
+            Rect::new(SIDEBAR_WIDTH, top, ENTRY_LIST_WIDTH, body),
+            window,
+        );
+
+        let rows_top = top + LIST_HEADER_HEIGHT;
+        let list_rows = trim(
+            Rect::new(
+                SIDEBAR_WIDTH,
+                rows_top,
+                ENTRY_LIST_WIDTH,
+                (height - rows_top).max(0.0),
+            ),
+            window,
+        );
+
+        let detail_x = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH;
+        let detail = trim(
+            Rect::new(detail_x, top, (width - detail_x).max(0.0), body),
+            window,
+        );
+
+        Self {
+            window,
+            toolbar,
+            sidebar,
+            list,
+            list_rows,
+            detail,
+        }
+    }
+}
 
 // =============================================================================
 // Unique ID generation
@@ -2391,6 +2544,70 @@ enum SidebarSelection {
     Audit,
 }
 
+/// The headed block of the sidebar a selection belongs to.
+///
+/// The renderer starts a new block — separator, gap, heading — whenever this
+/// changes between one row and the next, which is why the sidebar can be drawn
+/// by walking a single flat list of selections. Before that it was four
+/// hand-written blocks, and the click handler knew about three of them: the
+/// folders and tags it drew were dead to the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarGroup {
+    Categories,
+    Types,
+    Folders,
+    Tags,
+}
+
+impl SidebarGroup {
+    fn heading(self) -> &'static str {
+        match self {
+            Self::Categories => "CATEGORIES",
+            Self::Types => "TYPES",
+            Self::Folders => "FOLDERS",
+            Self::Tags => "TAGS",
+        }
+    }
+}
+
+impl SidebarSelection {
+    fn group(&self) -> SidebarGroup {
+        match self {
+            Self::AllItems | Self::Favorites | Self::Audit => SidebarGroup::Categories,
+            Self::TypeFilter(_) => SidebarGroup::Types,
+            Self::Folder(_) => SidebarGroup::Folders,
+            Self::Tag(_) => SidebarGroup::Tags,
+        }
+    }
+
+    /// The colour the row's label takes while it is the selected one.
+    fn accent(&self) -> Color {
+        match self {
+            Self::AllItems | Self::Folder(_) => BLUE,
+            Self::Favorites => YELLOW,
+            Self::Audit => RED,
+            Self::TypeFilter(etype) => etype.badge_color(),
+            Self::Tag(_) => LAVENDER,
+        }
+    }
+
+    /// The row's label. Folders need the vault to name themselves.
+    fn label(&self, vault: &Vault) -> String {
+        match self {
+            Self::AllItems => "All Items".to_string(),
+            Self::Favorites => "* Favorites".to_string(),
+            Self::Audit => "! Audit".to_string(),
+            Self::TypeFilter(etype) => format!("{} {}", etype.icon_char(), etype.label()),
+            Self::Folder(id) => vault
+                .folders
+                .iter()
+                .find(|f| f.id == *id)
+                .map_or_else(String::new, |f| f.name.clone()),
+            Self::Tag(tag) => tag.clone(),
+        }
+    }
+}
+
 // =============================================================================
 // View mode
 // =============================================================================
@@ -2490,14 +2707,6 @@ struct AppState {
     /// could be scrolled into blank space indefinitely.
     width: f32,
     height: f32,
-    /// Height of the detail panel's content as the renderer last laid it out.
-    ///
-    /// The panel's length depends on which fields the selected entry has, so
-    /// unlike the entry list it cannot be derived without doing the layout.
-    /// Measuring it during the render is what keeps the bound and the drawing
-    /// in agreement; a second derivation here would drift the first time a
-    /// field is added to one and not the other.
-    detail_content_height: f32,
     /// Settings: auto-lock minutes.
     settings_auto_lock: u32,
 }
@@ -2535,7 +2744,6 @@ impl AppState {
             detail_scroll: 0.0,
             width: DEFAULT_WINDOW_WIDTH,
             height: DEFAULT_WINDOW_HEIGHT,
-            detail_content_height: 0.0,
             settings_auto_lock: DEFAULT_AUTO_LOCK_MINUTES,
         };
         state.refresh_filter();
@@ -2549,6 +2757,22 @@ impl AppState {
         Self::new(Vault::for_test("My Vault", TEST_MASTER_PASSWORD))
     }
 
+    /// Where the panes go at the size the window is currently believed to be.
+    fn layout(&self) -> Layout {
+        Layout::new(self.width, self.height)
+    }
+
+    /// Adopt a new window size, and pull both scroll offsets back inside it.
+    ///
+    /// The size arrives two ways — `Event::Resize`, and the `width`/`height`
+    /// the compositor passes to [`App::render`] — and the second of those is
+    /// how the *first* frame is sized, before any resize event exists.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.width = sane(width);
+        self.height = sane(height);
+        self.clamp_scroll();
+    }
+
     /// Height of the area below the toolbar, which both panes are drawn into.
     fn pane_height(&self) -> f32 {
         (self.height - TOOLBAR_HEIGHT).max(0.0)
@@ -2558,7 +2782,11 @@ impl AppState {
     ///
     /// `TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT` was written once in the renderer
     /// and once in `handle_list_click`, which is the arrangement that let the
-    /// two disagree about which pixels are rows in the first place.
+    /// two disagree about which pixels are rows in the first place. Neither
+    /// writes it any more -- [`Layout`] derives it once and the click path
+    /// reads the boxes the renderer recorded -- so this survives only as the
+    /// independent second opinion the layout tests check that against.
+    #[cfg(test)]
     const fn rows_top() -> f32 {
         TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT
     }
@@ -2569,34 +2797,34 @@ impl AppState {
     /// to be inside the renderer's clip, which meant a scrolled row was
     /// painted over the "N entries" caption rather than stopping under it.
     fn rows_height(&self) -> f32 {
-        (self.height - Self::rows_top()).max(0.0)
+        self.layout().list_rows.h
     }
 
-    /// The index into `filtered_ids` under `my`, or `None` if the pointer is
-    /// not over a row.
+    /// Every sidebar row, in the order they are drawn.
     ///
-    /// The bound the click path never had. Without it, a click in the 32px
-    /// header strip produced a *negative* offset, and a negative `f32` cast to
-    /// `usize` saturates to zero in Rust rather than wrapping -- so clicking
-    /// the caption selected, decrypted and displayed the first entry in the
-    /// vault. Scrolled, it selected some other entry instead, because the
-    /// scroll offset was added before the cast could saturate.
-    fn row_at(&self, my: f32) -> Option<usize> {
-        let offset = my - Self::rows_top();
-        if !offset.is_finite() || offset < 0.0 || offset >= self.rows_height() {
-            return None;
-        }
-        let from_top = offset + self.list_scroll;
-        if !from_top.is_finite() || from_top < 0.0 {
-            return None;
-        }
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let idx = (from_top / ROW_HEIGHT) as usize;
-        if idx < self.filtered_ids.len() {
-            Some(idx)
-        } else {
-            None
-        }
+    /// One list, walked by the renderer and indexed by
+    /// [`Target::Sidebar`]. The folders and tags at the end of it used to be
+    /// drawn by a block of the renderer that the click handler had no
+    /// counterpart for, so they looked selectable and were not.
+    fn sidebar_items(&self) -> Vec<SidebarSelection> {
+        let mut items = vec![
+            SidebarSelection::AllItems,
+            SidebarSelection::Favorites,
+            SidebarSelection::Audit,
+        ];
+        items.extend(
+            EntryType::all()
+                .iter()
+                .map(|t| SidebarSelection::TypeFilter(*t)),
+        );
+        items.extend(
+            self.vault
+                .folders
+                .iter()
+                .map(|folder| SidebarSelection::Folder(folder.id)),
+        );
+        items.extend(self.vault.all_tags().into_iter().map(SidebarSelection::Tag));
+        items
     }
 
     /// How far the entry list may be scrolled before its last row sits on the
@@ -2610,13 +2838,30 @@ impl AppState {
         (content - self.rows_height()).max(0.0)
     }
 
-    /// How far the detail panel may be scrolled, from the height the renderer
-    /// last measured for it.
+    /// The height the detail panel's content lays out to, measured by laying
+    /// it out.
     ///
-    /// Zero until something has been rendered, and zero for the generator,
-    /// settings and audit views, none of which scroll.
+    /// Zero for the generator, settings and audit panels, which are
+    /// fixed-height and do not scroll.
+    ///
+    /// Measured on demand rather than cached from the last render, because the
+    /// cache had to be *written back* during drawing — which is why
+    /// `build_render_tree` took `&mut AppState`, and why the bound was zero (so
+    /// the wheel dead) until the first frame had gone out. Laying the panel out
+    /// twice costs a scratch `Vec` on a wheel event; a bound that lags the
+    /// state it describes costs a scroll that silently stops early.
+    fn detail_content_height(&self) -> f32 {
+        if self.detail_view != DetailView::EntryDetail {
+            return 0.0;
+        }
+        let mut scratch = Frame::new(self.width, self.height);
+        render_entry_detail(&mut scratch, self, self.width, self.height)
+    }
+
+    /// How far the detail panel may be scrolled before its last field sits on
+    /// the bottom edge of the pane.
     fn max_detail_scroll(&self) -> f32 {
-        (self.detail_content_height - self.pane_height()).max(0.0)
+        (self.detail_content_height() - self.pane_height()).max(0.0)
     }
 
     /// Pull both offsets back inside their bounds.
@@ -2668,8 +2913,8 @@ impl AppState {
 // =============================================================================
 
 /// Render a filled rounded rectangle.
-fn draw_rect(rt: &mut RenderTree, x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32) {
-    rt.push(RenderCommand::FillRect {
+fn draw_rect(frame: &mut Frame, x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32) {
+    frame.push(RenderCommand::FillRect {
         x,
         y,
         width: w,
@@ -2684,7 +2929,7 @@ fn draw_rect(rt: &mut RenderTree, x: f32, y: f32, w: f32, h: f32, color: Color, 
 // struct would only add noise at every call site.
 #[allow(clippy::too_many_arguments)]
 fn draw_stroke_rect(
-    rt: &mut RenderTree,
+    frame: &mut Frame,
     x: f32,
     y: f32,
     w: f32,
@@ -2693,7 +2938,7 @@ fn draw_stroke_rect(
     line_width: f32,
     radius: f32,
 ) {
-    rt.push(RenderCommand::StrokeRect {
+    frame.push(RenderCommand::StrokeRect {
         x,
         y,
         width: w,
@@ -2715,7 +2960,7 @@ fn draw_stroke_rect(
 // 8 args mirror the underlying Text render command; same shape on purpose.
 #[allow(clippy::too_many_arguments)]
 fn draw_text(
-    rt: &mut RenderTree,
+    frame: &mut Frame,
     x: f32,
     y: f32,
     text: &str,
@@ -2724,7 +2969,7 @@ fn draw_text(
     weight: FontWeightHint,
     max_width: Option<f32>,
 ) {
-    rt.push(RenderCommand::Text {
+    frame.push(RenderCommand::Text {
         x,
         y,
         text: text.to_string(),
@@ -2741,8 +2986,8 @@ fn draw_text(
 }
 
 /// Render a horizontal separator line.
-fn draw_separator(rt: &mut RenderTree, x: f32, y: f32, width: f32) {
-    rt.push(RenderCommand::Line {
+fn draw_separator(frame: &mut Frame, x: f32, y: f32, width: f32) {
+    frame.push(RenderCommand::Line {
         x1: x,
         y1: y,
         x2: x + width,
@@ -2768,12 +3013,12 @@ fn badge_width(label: &str) -> f32 {
 
 /// Render a small colored badge with text. Returns the width it drew, so a
 /// caller can lay out whatever follows without guessing at it.
-fn draw_badge(rt: &mut RenderTree, x: f32, y: f32, label: &str, bg: Color, fg: Color) -> f32 {
+fn draw_badge(frame: &mut Frame, x: f32, y: f32, label: &str, bg: Color, fg: Color) -> f32 {
     let badge_w = badge_width(label);
     let badge_h = 20.0;
-    draw_rect(rt, x, y, badge_w, badge_h, bg, 4.0);
+    draw_rect(frame, x, y, badge_w, badge_h, bg, 4.0);
     draw_text(
-        rt,
+        frame,
         x + 6.0,
         y + 3.0,
         label,
@@ -2790,7 +3035,7 @@ fn draw_badge(rt: &mut RenderTree, x: f32, y: f32, label: &str, bg: Color, fg: C
 // would not improve clarity at the call sites.
 #[allow(clippy::too_many_arguments)]
 fn draw_button(
-    rt: &mut RenderTree,
+    frame: &mut Frame,
     x: f32,
     y: f32,
     w: f32,
@@ -2810,7 +3055,7 @@ fn draw_button(
     } else {
         bg
     };
-    draw_rect(rt, x, y, w, h, actual_bg, CORNER_RADIUS);
+    draw_rect(frame, x, y, w, h, actual_bg, CORNER_RADIUS);
     // Centring is where a guessed width shows up worst: half the error goes
     // into the offset, and it grows with the label, so the longest label on a
     // toolbar is the one that visibly sits off-centre.
@@ -2822,7 +3067,7 @@ fn draw_button(
     );
     let text_y = y + (h - DEFAULT_FONT_SIZE) / 2.0;
     draw_text(
-        rt,
+        frame,
         text_x,
         text_y,
         label,
@@ -2840,7 +3085,7 @@ fn button_width(label: &str, pad: f32) -> f32 {
 
 /// Render a progress/strength bar.
 fn draw_strength_bar(
-    rt: &mut RenderTree,
+    frame: &mut Frame,
     x: f32,
     y: f32,
     width: f32,
@@ -2848,10 +3093,10 @@ fn draw_strength_bar(
     fraction: f32,
     color: Color,
 ) {
-    draw_rect(rt, x, y, width, height, SURFACE0, 3.0);
+    draw_rect(frame, x, y, width, height, SURFACE0, 3.0);
     let fill_width = (width * fraction.clamp(0.0, 1.0)).max(0.0);
     if fill_width > 0.0 {
-        draw_rect(rt, x, y, fill_width, height, color, 3.0);
+        draw_rect(frame, x, y, fill_width, height, color, 3.0);
     }
 }
 
@@ -2859,20 +3104,57 @@ fn draw_strength_bar(
 // Render: toolbar
 // =============================================================================
 
-fn render_toolbar(rt: &mut RenderTree, state: &AppState, width: f32) {
-    // Toolbar background
-    draw_rect(rt, 0.0, 0.0, width, TOOLBAR_HEIGHT, MANTLE, 0.0);
+/// Space between two adjacent toolbar controls.
+const TOOLBAR_GAP: f32 = 12.0;
+/// Height of the toolbar's buttons and search box.
+const TOOLBAR_BUTTON_HEIGHT: f32 = 32.0;
+/// Distance from the top of the toolbar to the top of its controls; the same
+/// again below them is what makes the strip [`TOOLBAR_HEIGHT`] tall.
+const TOOLBAR_BUTTON_INSET: f32 = 8.0;
 
-    let btn_y = 8.0;
-    let btn_h = 32.0;
-    let mut x = SIDEBAR_WIDTH + 12.0;
+/// Take the next `w`-wide control off the toolbar's left-to-right run.
+///
+/// The cursor advances by the control's own width plus one gap, so a control
+/// that changes width moves everything after it — which is what the hit test
+/// used to have to be told about separately, in the form of a
+/// `base_x + 284.0 ..= base_x + 364.0` written out by hand.
+fn take_toolbar(x: &mut f32, w: f32) -> Rect {
+    let r = Rect::new(*x, TOOLBAR_BUTTON_INSET, w, TOOLBAR_BUTTON_HEIGHT);
+    *x += w + TOOLBAR_GAP;
+    r
+}
+
+fn render_toolbar(frame: &mut Frame, state: &AppState, layout: &Layout) {
+    let width = layout.window.w;
+
+    // Toolbar background
+    draw_rect(frame, 0.0, 0.0, width, TOOLBAR_HEIGHT, MANTLE, 0.0);
+
+    // Clipped to the strip the layout gave it, so that in a window shorter
+    // than its own chrome the buttons are trimmed out of existence rather than
+    // left hanging below the bottom edge, invisible but still clickable.
+    frame.clip(layout.toolbar);
+
+    let mut x = SIDEBAR_WIDTH + TOOLBAR_GAP;
 
     // Add button
-    draw_button(rt, x, btn_y, 60.0, btn_h, "+ Add", BLUE, BASE, false);
-    x += 72.0;
+    let add = take_toolbar(&mut x, 60.0);
+    draw_button(
+        frame, add.x, add.y, add.w, add.h, "+ Add", BLUE, BASE, false,
+    );
+    frame.hit(Target::Add, add);
 
     // Search box
-    draw_rect(rt, x, btn_y, 200.0, btn_h, SURFACE0, CORNER_RADIUS);
+    let search = take_toolbar(&mut x, 200.0);
+    draw_rect(
+        frame,
+        search.x,
+        search.y,
+        search.w,
+        search.h,
+        SURFACE0,
+        CORNER_RADIUS,
+    );
     let search_text = if state.search_query.is_empty() {
         "Search..."
     } else {
@@ -2884,46 +3166,49 @@ fn render_toolbar(rt: &mut RenderTree, state: &AppState, width: f32) {
         TEXT_COLOR
     };
     draw_text(
-        rt,
-        x + 10.0,
-        btn_y + 8.0,
+        frame,
+        search.x + 10.0,
+        search.y + 8.0,
         search_text,
         search_color,
         DEFAULT_FONT_SIZE,
         FontWeightHint::Regular,
-        Some(180.0),
+        Some(search.w - 20.0),
     );
-    x += 212.0;
+    frame.hit(Target::Search, search);
 
     // Sort button
+    let sort = take_toolbar(&mut x, 80.0);
     draw_button(
-        rt,
-        x,
-        btn_y,
-        80.0,
-        btn_h,
+        frame,
+        sort.x,
+        sort.y,
+        sort.w,
+        sort.h,
         state.sort_order.label(),
         SURFACE1,
         TEXT_COLOR,
         false,
     );
-    x += 92.0;
+    frame.hit(Target::Sort, sort);
 
     // Generate password button
+    let generator = take_toolbar(&mut x, 100.0);
     draw_button(
-        rt,
-        x,
-        btn_y,
-        100.0,
-        btn_h,
+        frame,
+        generator.x,
+        generator.y,
+        generator.w,
+        generator.h,
         "Generator",
         SURFACE1,
         LAVENDER,
         false,
     );
-    x += 112.0;
+    frame.hit(Target::Generator, generator);
 
     // Lock button
+    let lock = take_toolbar(&mut x, 70.0);
     let lock_text = if state.vault.is_unlocked() {
         "Lock"
     } else {
@@ -2935,37 +3220,50 @@ fn render_toolbar(rt: &mut RenderTree, state: &AppState, width: f32) {
         RED
     };
     draw_button(
-        rt, x, btn_y, 70.0, btn_h, lock_text, SURFACE1, lock_color, false,
+        frame, lock.x, lock.y, lock.w, lock.h, lock_text, SURFACE1, lock_color, false,
     );
-    x += 82.0;
+    frame.hit(Target::LockVault, lock);
 
     // Settings button
+    let settings = take_toolbar(&mut x, 80.0);
     draw_button(
-        rt, x, btn_y, 80.0, btn_h, "Settings", SURFACE1, SUBTEXT0, false,
+        frame, settings.x, settings.y, settings.w, settings.h, "Settings", SURFACE1, SUBTEXT0,
+        false,
     );
+    frame.hit(Target::Settings, settings);
+
+    frame.unclip();
 
     // Bottom border
-    draw_separator(rt, 0.0, TOOLBAR_HEIGHT - 1.0, width);
+    draw_separator(frame, 0.0, TOOLBAR_HEIGHT - 1.0, width);
 }
 
 // =============================================================================
 // Render: sidebar
 // =============================================================================
 
-fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
-    let y_start = TOOLBAR_HEIGHT;
-    let h = height - y_start;
+/// The drawn height of one sidebar row.
+const SIDEBAR_ROW_HEIGHT: f32 = 32.0;
+/// Row pitch: the row's own height plus the 2 px of air under it.
+const SIDEBAR_ROW_STEP: f32 = SIDEBAR_ROW_HEIGHT + 2.0;
+
+fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
+    let pane = layout.sidebar;
 
     // Sidebar background
-    draw_rect(rt, 0.0, y_start, SIDEBAR_WIDTH, h, MANTLE, 0.0);
+    draw_rect(frame, pane.x, pane.y, pane.w, pane.h, MANTLE, 0.0);
 
-    let mut y = y_start + 12.0;
-    let item_h = 32.0;
+    // Clipped to the pane, so that rows past the bottom edge -- a vault with
+    // enough tags will produce them -- record no hit box at all. Bounding the
+    // click by hand instead is how the two get to disagree.
+    frame.clip(pane);
+
+    let mut y = pane.y + 12.0;
     let text_x = 16.0;
 
     // Vault name header
     draw_text(
-        rt,
+        frame,
         text_x,
         y,
         &state.vault.name,
@@ -2978,7 +3276,7 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
 
     let entry_count_text = format!("{} items", state.vault.entry_count());
     draw_text(
-        rt,
+        frame,
         text_x,
         y,
         &entry_count_text,
@@ -2989,192 +3287,64 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
     );
     y += 24.0;
 
-    draw_separator(rt, 8.0, y, SIDEBAR_WIDTH - 16.0);
-    y += 12.0;
-
-    // Categories section
-    draw_text(
-        rt,
-        text_x,
-        y,
-        "CATEGORIES",
-        OVERLAY0,
-        SMALL_FONT_SIZE,
-        FontWeightHint::Bold,
-        None,
-    );
-    y += 20.0;
-
-    // All Items
-    let all_selected = state.sidebar_selection == SidebarSelection::AllItems;
-    if all_selected {
-        draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
-    }
-    draw_text(
-        rt,
-        text_x + 4.0,
-        y + 8.0,
-        "All Items",
-        if all_selected { BLUE } else { TEXT_COLOR },
-        DEFAULT_FONT_SIZE,
-        FontWeightHint::Regular,
-        None,
-    );
-    y += item_h + 2.0;
-
-    // Favorites
-    let fav_selected = state.sidebar_selection == SidebarSelection::Favorites;
-    if fav_selected {
-        draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
-    }
-    draw_text(
-        rt,
-        text_x + 4.0,
-        y + 8.0,
-        "* Favorites",
-        if fav_selected { YELLOW } else { TEXT_COLOR },
-        DEFAULT_FONT_SIZE,
-        FontWeightHint::Regular,
-        None,
-    );
-    y += item_h + 2.0;
-
-    // Audit
-    let audit_selected = state.sidebar_selection == SidebarSelection::Audit;
-    if audit_selected {
-        draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
-    }
-    draw_text(
-        rt,
-        text_x + 4.0,
-        y + 8.0,
-        "! Audit",
-        if audit_selected { RED } else { TEXT_COLOR },
-        DEFAULT_FONT_SIZE,
-        FontWeightHint::Regular,
-        None,
-    );
-    y += item_h + 8.0;
-
-    draw_separator(rt, 8.0, y, SIDEBAR_WIDTH - 16.0);
-    y += 12.0;
-
-    // Types section
-    draw_text(
-        rt,
-        text_x,
-        y,
-        "TYPES",
-        OVERLAY0,
-        SMALL_FONT_SIZE,
-        FontWeightHint::Bold,
-        None,
-    );
-    y += 20.0;
-
-    for etype in EntryType::all() {
-        let type_selected = state.sidebar_selection == SidebarSelection::TypeFilter(*etype);
-        if type_selected {
-            draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
+    // One walk over `sidebar_items`, opening a new block -- separator, gap,
+    // heading -- wherever the group changes. The four hand-written blocks this
+    // replaces are why `handle_sidebar_click` knew about three of them: the
+    // folders and tags it drew looked selectable and were dead to the pointer,
+    // because nothing tied the block that drew them to the block that would
+    // have had to accept the click.
+    let items = state.sidebar_items();
+    let mut group = None;
+    for (index, item) in items.iter().enumerate() {
+        let item_group = item.group();
+        if group != Some(item_group) {
+            if group.is_some() {
+                y += 6.0;
+            }
+            draw_separator(frame, 8.0, y, SIDEBAR_WIDTH - 16.0);
+            y += 12.0;
+            draw_text(
+                frame,
+                text_x,
+                y,
+                item_group.heading(),
+                OVERLAY0,
+                SMALL_FONT_SIZE,
+                FontWeightHint::Bold,
+                None,
+            );
+            y += 20.0;
+            group = Some(item_group);
         }
-        let label = format!("{} {}", etype.icon_char(), etype.label());
-        let color = if type_selected {
-            etype.badge_color()
-        } else {
-            TEXT_COLOR
-        };
+
+        let row = Rect::new(4.0, y, SIDEBAR_WIDTH - 8.0, SIDEBAR_ROW_HEIGHT);
+        let selected = state.sidebar_selection == *item;
+        if selected {
+            draw_rect(frame, row.x, row.y, row.w, row.h, SURFACE0, 4.0);
+        }
         draw_text(
-            rt,
+            frame,
             text_x + 4.0,
             y + 8.0,
-            &label,
-            color,
+            &item.label(&state.vault),
+            if selected { item.accent() } else { TEXT_COLOR },
             DEFAULT_FONT_SIZE,
             FontWeightHint::Regular,
             None,
         );
-        y += item_h + 2.0;
+        frame.hit(Target::Sidebar(index), row);
+        y += SIDEBAR_ROW_STEP;
     }
 
-    y += 6.0;
-    draw_separator(rt, 8.0, y, SIDEBAR_WIDTH - 16.0);
-    y += 12.0;
+    frame.unclip();
 
-    // Folders section
-    draw_text(
-        rt,
-        text_x,
-        y,
-        "FOLDERS",
-        OVERLAY0,
-        SMALL_FONT_SIZE,
-        FontWeightHint::Bold,
-        None,
-    );
-    y += 20.0;
-
-    for folder in &state.vault.folders {
-        let folder_sel = state.sidebar_selection == SidebarSelection::Folder(folder.id);
-        if folder_sel {
-            draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
-        }
-        let color = if folder_sel { BLUE } else { TEXT_COLOR };
-        draw_text(
-            rt,
-            text_x + 4.0,
-            y + 8.0,
-            &folder.name,
-            color,
-            DEFAULT_FONT_SIZE,
-            FontWeightHint::Regular,
-            None,
-        );
-        y += item_h + 2.0;
-    }
-
-    y += 6.0;
-    draw_separator(rt, 8.0, y, SIDEBAR_WIDTH - 16.0);
-    y += 12.0;
-
-    // Tags section
-    draw_text(
-        rt,
-        text_x,
-        y,
-        "TAGS",
-        OVERLAY0,
-        SMALL_FONT_SIZE,
-        FontWeightHint::Bold,
-        None,
-    );
-    y += 20.0;
-
-    let all_tags = state.vault.all_tags();
-    for tag in &all_tags {
-        let tag_sel = state.sidebar_selection == SidebarSelection::Tag(tag.clone());
-        if tag_sel {
-            draw_rect(rt, 4.0, y, SIDEBAR_WIDTH - 8.0, item_h, SURFACE0, 4.0);
-        }
-        let color = if tag_sel { LAVENDER } else { TEXT_COLOR };
-        draw_text(
-            rt,
-            text_x + 4.0,
-            y + 8.0,
-            tag,
-            color,
-            DEFAULT_FONT_SIZE,
-            FontWeightHint::Regular,
-            None,
-        );
-        y += item_h + 2.0;
-    }
-
-    // Right border
-    rt.push(RenderCommand::Line {
+    // Right border, outside the clip: it sits on the pane's right edge, which
+    // the clip is half-open at.
+    frame.push(RenderCommand::Line {
         x1: SIDEBAR_WIDTH,
-        y1: y_start,
+        y1: pane.y,
         x2: SIDEBAR_WIDTH,
-        y2: height,
+        y2: pane.bottom(),
         color: SURFACE1,
         width: 1.0,
     });
@@ -3184,20 +3354,19 @@ fn render_sidebar(rt: &mut RenderTree, state: &AppState, height: f32) {
 // Render: entry list
 // =============================================================================
 
-fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
-    let x_start = SIDEBAR_WIDTH;
-    let y_start = TOOLBAR_HEIGHT;
-    let h = height - y_start;
+fn render_entry_list(frame: &mut Frame, state: &AppState, layout: &Layout) {
+    let pane = layout.list;
+    let x_start = pane.x;
 
     // List background
-    draw_rect(rt, x_start, y_start, ENTRY_LIST_WIDTH, h, BASE, 0.0);
+    draw_rect(frame, pane.x, pane.y, pane.w, pane.h, BASE, 0.0);
 
     // List header
     let count_text = format!("{} entries", state.filtered_ids.len());
     draw_text(
-        rt,
+        frame,
         x_start + 12.0,
-        y_start + 10.0,
+        pane.y + 10.0,
         &count_text,
         SUBTEXT0,
         SMALL_FONT_SIZE,
@@ -3205,40 +3374,40 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
         None,
     );
 
-    // Clip to the row area, not to the whole pane. Read from the same two
-    // helpers the hit test uses, so the clip below *is* the region a click is
-    // accepted in rather than a second opinion about it. The old clip started
-    // at the toolbar, which included the non-scrolling header strip -- so a
-    // scrolled row was painted straight over the "N entries" caption instead
-    // of disappearing under it.
-    let rows_y = AppState::rows_top();
-    let rows_h = state.rows_height();
-    let mut y = rows_y;
+    // Clip to the row area, not to the whole pane: the "N entries" caption
+    // does not scroll, so a row wound up under it must disappear rather than
+    // paint over it. Pushed through `Frame::clip` and not as a raw command,
+    // which is what makes the boxes recorded below get trimmed to it -- a row
+    // scrolled out of the pane records nothing and so cannot be clicked, with
+    // no bounds check in the click path to go stale.
+    let rows = layout.list_rows;
+    frame.clip(rows);
 
-    rt.push(RenderCommand::PushClip {
-        x: x_start,
-        y: rows_y,
-        width: ENTRY_LIST_WIDTH,
-        height: rows_h,
-    });
-
-    let effective_y = y - state.list_scroll;
+    let effective_y = rows.y - state.list_scroll;
 
     for (i, &entry_id) in state.filtered_ids.iter().enumerate() {
         let row_y = effective_y + i as f32 * ROW_HEIGHT;
 
         // Skip rows outside visible area
-        if row_y + ROW_HEIGHT < rows_y || row_y > rows_y + rows_h {
+        if row_y + ROW_HEIGHT < rows.y || row_y > rows.bottom() {
             continue;
         }
 
         if let Some(entry) = state.vault.get_entry(entry_id) {
             let is_selected = state.selected_entry_id == Some(entry_id);
 
+            // The whole row is the target, including the 2 px of air the
+            // selection highlight leaves under it: the pointer is over row `i`
+            // everywhere between one row's top and the next one's.
+            frame.hit(
+                Target::EntryRow(i),
+                Rect::new(x_start, row_y, ENTRY_LIST_WIDTH, ROW_HEIGHT),
+            );
+
             // Row background
             if is_selected {
                 draw_rect(
-                    rt,
+                    frame,
                     x_start + 4.0,
                     row_y,
                     ENTRY_LIST_WIDTH - 8.0,
@@ -3253,7 +3422,7 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
             // Type icon badge
             let badge_color = entry.entry_type().badge_color();
             draw_rect(
-                rt,
+                frame,
                 text_x,
                 row_y + 8.0,
                 ICON_SIZE,
@@ -3262,7 +3431,7 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
                 4.0,
             );
             draw_text(
-                rt,
+                frame,
                 text_x + 4.0,
                 row_y + 10.0,
                 entry.entry_type().icon_char(),
@@ -3275,7 +3444,7 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
             // Entry name
             let name_color = if is_selected { BLUE } else { TEXT_COLOR };
             draw_text(
-                rt,
+                frame,
                 text_x + 28.0,
                 row_y + 8.0,
                 entry.display_name(),
@@ -3289,7 +3458,7 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
             let sub = entry.subtitle();
             if !sub.is_empty() {
                 draw_text(
-                    rt,
+                    frame,
                     text_x + 28.0,
                     row_y + 28.0,
                     sub,
@@ -3303,7 +3472,7 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
             // Star indicator
             if entry.starred {
                 draw_text(
-                    rt,
+                    frame,
                     x_start + ENTRY_LIST_WIDTH - 30.0,
                     row_y + 8.0,
                     "*",
@@ -3317,7 +3486,7 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
             // Compromised indicator
             if entry.compromised {
                 draw_text(
-                    rt,
+                    frame,
                     x_start + ENTRY_LIST_WIDTH - 48.0,
                     row_y + 8.0,
                     "!",
@@ -3330,7 +3499,7 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
 
             // Bottom separator
             draw_separator(
-                rt,
+                frame,
                 x_start + 12.0,
                 row_y + ROW_HEIGHT - 2.0,
                 ENTRY_LIST_WIDTH - 24.0,
@@ -3338,20 +3507,16 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
         }
     }
 
-    // keep y used so it doesn't get an unused warning
-    let _ = y;
-    y = effective_y + state.filtered_ids.len() as f32 * ROW_HEIGHT;
-    let _ = y;
+    frame.unclip();
 
-    rt.push(RenderCommand::PopClip);
-
-    // Right border
+    // Right border, outside the clip: it sits on the pane's right edge, which
+    // the clip is half-open at.
     let list_right = x_start + ENTRY_LIST_WIDTH;
-    rt.push(RenderCommand::Line {
+    frame.push(RenderCommand::Line {
         x1: list_right,
-        y1: y_start,
+        y1: pane.y,
         x2: list_right,
-        y2: height,
+        y2: pane.bottom(),
         color: SURFACE1,
         width: 1.0,
     });
@@ -3367,14 +3532,22 @@ fn render_entry_list(rt: &mut RenderTree, state: &AppState, height: f32) {
 /// its length depends on which fields the entry carries, so the bound cannot
 /// be computed without walking the same layout. Returning the walked height
 /// means the bound and the drawing are one derivation rather than two.
-fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height: f32) -> f32 {
+fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: f32) -> f32 {
     let x_start = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH;
     let y_start = TOOLBAR_HEIGHT;
     let panel_width = width - x_start;
     let panel_height = height - y_start;
 
     // Background
-    draw_rect(rt, x_start, y_start, panel_width, panel_height, BASE, 0.0);
+    draw_rect(
+        frame,
+        x_start,
+        y_start,
+        panel_width,
+        panel_height,
+        BASE,
+        0.0,
+    );
 
     let entry = match state
         .selected_entry_id
@@ -3391,7 +3564,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                 FontWeightHint::Light,
             );
             draw_text(
-                rt,
+                frame,
                 empty_x,
                 y_start + panel_height / 2.0,
                 empty,
@@ -3405,7 +3578,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         }
     };
 
-    rt.push(RenderCommand::PushClip {
+    frame.push(RenderCommand::PushClip {
         x: x_start,
         y: y_start,
         width: panel_width,
@@ -3418,7 +3591,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
     // Entry type badge + name
     let badge_color = entry.entry_type().badge_color();
     let type_badge_w = draw_badge(
-        rt,
+        frame,
         x_start + pad,
         y,
         entry.entry_type().label(),
@@ -3428,7 +3601,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
     if entry.starred {
         draw_text(
-            rt,
+            frame,
             x_start + pad + type_badge_w + 12.0,
             y + 2.0,
             "* Starred",
@@ -3441,7 +3614,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
     y += 30.0;
 
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         entry.display_name(),
@@ -3454,7 +3627,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
     if entry.compromised {
         draw_rect(
-            rt,
+            frame,
             x_start + pad,
             y,
             panel_width - pad * 2.0,
@@ -3463,7 +3636,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             4.0,
         );
         draw_text(
-            rt,
+            frame,
             x_start + pad + 8.0,
             y + 6.0,
             "! This password may be compromised",
@@ -3475,7 +3648,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         y += 36.0;
     }
 
-    draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
     y += 16.0;
 
     // Render field rows based on entry type
@@ -3488,7 +3661,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         EntryData::Login(login) => {
             // Site
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3502,7 +3675,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
             // Username
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3521,7 +3694,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                 "*".repeat(login.password.len().min(20))
             };
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3536,7 +3709,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             let (strength, entropy) = evaluate_password_strength(&login.password);
             y += 8.0;
             draw_strength_bar(
-                rt,
+                frame,
                 field_value_x,
                 y,
                 160.0,
@@ -3546,7 +3719,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             );
             let strength_text = format!("{} ({:.0} bits)", strength.label(), entropy);
             draw_text(
-                rt,
+                frame,
                 field_value_x + 170.0,
                 y - 2.0,
                 &strength_text,
@@ -3560,7 +3733,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             // Show/hide toggle
             let toggle_text = if state.show_password { "Hide" } else { "Show" };
             draw_button(
-                rt,
+                frame,
                 field_value_x,
                 y,
                 60.0,
@@ -3575,7 +3748,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             // URL
             if !login.url.is_empty() {
                 y = render_detail_field(
-                    rt,
+                    frame,
                     y,
                     field_label_x,
                     field_value_x,
@@ -3591,7 +3764,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             // TOTP
             if let Some(ref totp) = login.totp_secret {
                 y = render_detail_field(
-                    rt,
+                    frame,
                     y,
                     field_label_x,
                     field_value_x,
@@ -3604,7 +3777,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                 y += row_spacing;
             } else {
                 draw_text(
-                    rt,
+                    frame,
                     field_label_x,
                     y,
                     "TOTP",
@@ -3614,7 +3787,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                     None,
                 );
                 draw_text(
-                    rt,
+                    frame,
                     field_value_x,
                     y,
                     "Not configured",
@@ -3628,10 +3801,10 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
             // Notes
             if !login.notes.is_empty() {
-                draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
+                draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
                 y += 12.0;
                 draw_text(
-                    rt,
+                    frame,
                     field_label_x,
                     y,
                     "Notes",
@@ -3642,7 +3815,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                 );
                 y += 20.0;
                 draw_text(
-                    rt,
+                    frame,
                     field_label_x,
                     y,
                     &login.notes,
@@ -3656,7 +3829,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         }
         EntryData::SecureNote(note) => {
             draw_text(
-                rt,
+                frame,
                 field_label_x,
                 y,
                 "Title",
@@ -3666,7 +3839,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                 None,
             );
             draw_text(
-                rt,
+                frame,
                 field_value_x,
                 y,
                 &note.title,
@@ -3677,11 +3850,11 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             );
             y += row_spacing;
 
-            draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
+            draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
             y += 12.0;
 
             draw_text(
-                rt,
+                frame,
                 field_label_x,
                 y,
                 &note.content,
@@ -3694,7 +3867,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         }
         EntryData::CreditCard(card) => {
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3707,7 +3880,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             y += row_spacing;
 
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3720,7 +3893,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             y += row_spacing;
 
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3733,7 +3906,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             y += row_spacing;
 
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3746,10 +3919,10 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             y += row_spacing;
 
             if !card.notes.is_empty() {
-                draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
+                draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
                 y += 12.0;
                 draw_text(
-                    rt,
+                    frame,
                     field_label_x,
                     y,
                     "Notes",
@@ -3760,7 +3933,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                 );
                 y += 20.0;
                 draw_text(
-                    rt,
+                    frame,
                     field_label_x,
                     y,
                     &card.notes,
@@ -3774,7 +3947,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         }
         EntryData::Identity(ident) => {
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3787,7 +3960,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             y += row_spacing;
 
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3801,7 +3974,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
             if !ident.phone.is_empty() {
                 y = render_detail_field(
-                    rt,
+                    frame,
                     y,
                     field_label_x,
                     field_value_x,
@@ -3816,7 +3989,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
             if !ident.address.is_empty() {
                 y = render_detail_field(
-                    rt,
+                    frame,
                     y,
                     field_label_x,
                     field_value_x,
@@ -3831,7 +4004,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         }
         EntryData::SshKey(key) => {
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3844,7 +4017,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             y += row_spacing;
 
             y = render_detail_field(
-                rt,
+                frame,
                 y,
                 field_label_x,
                 field_value_x,
@@ -3857,7 +4030,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             y += row_spacing;
 
             draw_text(
-                rt,
+                frame,
                 field_label_x,
                 y,
                 "Public Key",
@@ -3869,7 +4042,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
             y += 20.0;
 
             draw_rect(
-                rt,
+                frame,
                 field_label_x,
                 y,
                 panel_width - pad * 2.0,
@@ -3878,7 +4051,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                 4.0,
             );
             draw_text(
-                rt,
+                frame,
                 field_label_x + 8.0,
                 y + 8.0,
                 &key.public_key,
@@ -3894,10 +4067,10 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
     // Tags section
     if !entry.tags.is_empty() {
         y += 8.0;
-        draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
+        draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
         y += 12.0;
         draw_text(
-            rt,
+            frame,
             field_label_x,
             y,
             "Tags",
@@ -3915,7 +4088,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
                 tag_x = field_label_x;
                 y += 26.0;
             }
-            draw_badge(rt, tag_x, y, tag, SURFACE1, LAVENDER);
+            draw_badge(frame, tag_x, y, tag, SURFACE1, LAVENDER);
             tag_x += tag_w + 6.0;
         }
         y += 28.0;
@@ -3923,7 +4096,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 
     // Metadata
     y += 8.0;
-    draw_separator(rt, field_label_x, y, panel_width - pad * 2.0);
+    draw_separator(frame, field_label_x, y, panel_width - pad * 2.0);
     y += 12.0;
 
     let created_text = format!(
@@ -3931,7 +4104,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         state.now.saturating_sub(entry.created_at)
     );
     draw_text(
-        rt,
+        frame,
         field_label_x,
         y,
         &created_text,
@@ -3947,7 +4120,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         state.now.saturating_sub(entry.modified_at)
     );
     draw_text(
-        rt,
+        frame,
         field_label_x,
         y,
         &modified_text,
@@ -3967,7 +4140,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         };
         let age_text = format!("Password age: {} days", age_days);
         draw_text(
-            rt,
+            frame,
             field_label_x,
             y,
             &age_text,
@@ -3978,7 +4151,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
         );
     }
 
-    rt.push(RenderCommand::PopClip);
+    frame.push(RenderCommand::PopClip);
 
     // `y` is the baseline of the last thing drawn, in screen coordinates with
     // the scroll already subtracted; adding it back gives the unscrolled
@@ -3992,7 +4165,7 @@ fn render_entry_detail(rt: &mut RenderTree, state: &AppState, width: f32, height
 // flag + render tree. All needed at the call site; no useful grouping.
 #[allow(clippy::too_many_arguments)]
 fn render_detail_field(
-    rt: &mut RenderTree,
+    frame: &mut Frame,
     y: f32,
     label_x: f32,
     value_x: f32,
@@ -4003,7 +4176,7 @@ fn render_detail_field(
     is_password: bool,
 ) -> f32 {
     draw_text(
-        rt,
+        frame,
         label_x,
         y,
         label,
@@ -4015,7 +4188,7 @@ fn render_detail_field(
 
     let value_color = if is_password { PEACH } else { TEXT_COLOR };
     draw_text(
-        rt,
+        frame,
         value_x,
         y,
         value,
@@ -4027,7 +4200,7 @@ fn render_detail_field(
 
     // Copy button
     draw_button(
-        rt,
+        frame,
         copy_x,
         y - 4.0,
         44.0,
@@ -4045,19 +4218,27 @@ fn render_detail_field(
 // Render: password generator panel
 // =============================================================================
 
-fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, height: f32) {
+fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
     let x_start = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH;
     let y_start = TOOLBAR_HEIGHT;
     let panel_width = width - x_start;
     let panel_height = height - y_start;
 
-    draw_rect(rt, x_start, y_start, panel_width, panel_height, BASE, 0.0);
+    draw_rect(
+        frame,
+        x_start,
+        y_start,
+        panel_width,
+        panel_height,
+        BASE,
+        0.0,
+    );
 
     let pad = 24.0;
     let mut y = y_start + pad;
 
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "Password Generator",
@@ -4070,7 +4251,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
 
     // Generated password display
     draw_rect(
-        rt,
+        frame,
         x_start + pad,
         y,
         panel_width - pad * 2.0,
@@ -4088,7 +4269,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         (None, false) => (state.generated_password.as_str(), GREEN),
     };
     draw_text(
-        rt,
+        frame,
         x_start + pad + 12.0,
         y + 14.0,
         display_pw,
@@ -4103,7 +4284,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
     if !state.generated_password.is_empty() {
         let (strength, entropy) = evaluate_password_strength(&state.generated_password);
         draw_strength_bar(
-            rt,
+            frame,
             x_start + pad,
             y,
             panel_width - pad * 2.0,
@@ -4114,7 +4295,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         y += 16.0;
         let label = format!("{} - {:.0} bits entropy", strength.label(), entropy);
         draw_text(
-            rt,
+            frame,
             x_start + pad,
             y,
             &label,
@@ -4128,7 +4309,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
 
     // Buttons row
     draw_button(
-        rt,
+        frame,
         x_start + pad,
         y,
         100.0,
@@ -4139,7 +4320,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         false,
     );
     draw_button(
-        rt,
+        frame,
         x_start + pad + 112.0,
         y,
         80.0,
@@ -4151,12 +4332,12 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
     );
     y += 48.0;
 
-    draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
     y += 16.0;
 
     // Mode selection
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "Mode",
@@ -4178,14 +4359,14 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         let bg = if is_active { BLUE } else { SURFACE1 };
         let fg = if is_active { BASE } else { TEXT_COLOR };
         let btn_w = button_width(label, 10.0);
-        draw_button(rt, mode_x, y, btn_w, 28.0, label, bg, fg, false);
+        draw_button(frame, mode_x, y, btn_w, 28.0, label, bg, fg, false);
         mode_x += btn_w + 8.0;
     }
     y += 40.0;
 
     // Length setting
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "Length",
@@ -4196,7 +4377,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
     );
     let len_text = format!("{}", state.password_generator.length);
     draw_text(
-        rt,
+        frame,
         x_start + pad + 100.0,
         y,
         &len_text,
@@ -4211,17 +4392,17 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
     let slider_x = x_start + pad;
     let slider_w = panel_width - pad * 2.0;
     let slider_y = y + 12.0;
-    draw_rect(rt, slider_x, slider_y, slider_w, 4.0, SURFACE1, 2.0);
+    draw_rect(frame, slider_x, slider_y, slider_w, 4.0, SURFACE1, 2.0);
 
     let frac = (state.password_generator.length as f32 - 8.0) / 120.0;
     let knob_x = slider_x + slider_w * frac.clamp(0.0, 1.0);
-    draw_rect(rt, knob_x - 6.0, slider_y - 4.0, 12.0, 12.0, BLUE, 6.0);
+    draw_rect(frame, knob_x - 6.0, slider_y - 4.0, 12.0, 12.0, BLUE, 6.0);
     y += 32.0;
 
     // Character set toggles (for random mode)
     if state.password_generator.mode == GeneratorMode::Random {
         draw_text(
-            rt,
+            frame,
             x_start + pad,
             y,
             "Character Sets",
@@ -4243,7 +4424,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
             let check_color = if *enabled { GREEN } else { SURFACE2 };
             let check_char = if *enabled { "[x]" } else { "[ ]" };
             draw_text(
-                rt,
+                frame,
                 x_start + pad,
                 y,
                 check_char,
@@ -4253,7 +4434,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
                 None,
             );
             draw_text(
-                rt,
+                frame,
                 x_start + pad + 32.0,
                 y,
                 label,
@@ -4269,7 +4450,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
     // Passphrase options
     if state.password_generator.mode == GeneratorMode::Passphrase {
         draw_text(
-            rt,
+            frame,
             x_start + pad,
             y,
             "Word Count",
@@ -4280,7 +4461,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         );
         let wc_text = format!("{}", state.password_generator.passphrase.word_count);
         draw_text(
-            rt,
+            frame,
             x_start + pad + 120.0,
             y,
             &wc_text,
@@ -4292,7 +4473,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         y += 26.0;
 
         draw_text(
-            rt,
+            frame,
             x_start + pad,
             y,
             "Separator",
@@ -4302,7 +4483,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
             None,
         );
         draw_text(
-            rt,
+            frame,
             x_start + pad + 120.0,
             y,
             &state.password_generator.passphrase.separator,
@@ -4316,13 +4497,13 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
 
     // Entropy info
     y += 8.0;
-    draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
     y += 12.0;
 
     let entropy = state.password_generator.entropy_bits();
     let entropy_text = format!("Estimated entropy: {:.1} bits", entropy);
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         &entropy_text,
@@ -4346,7 +4527,7 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
         }
     };
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         &pool_text,
@@ -4363,19 +4544,27 @@ fn render_generator_panel(rt: &mut RenderTree, state: &AppState, width: f32, hei
 // Render: settings panel
 // =============================================================================
 
-fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, height: f32) {
+fn render_settings_panel(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
     let x_start = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH;
     let y_start = TOOLBAR_HEIGHT;
     let panel_width = width - x_start;
     let panel_height = height - y_start;
 
-    draw_rect(rt, x_start, y_start, panel_width, panel_height, BASE, 0.0);
+    draw_rect(
+        frame,
+        x_start,
+        y_start,
+        panel_width,
+        panel_height,
+        BASE,
+        0.0,
+    );
 
     let pad = 24.0;
     let mut y = y_start + pad;
 
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "Settings",
@@ -4388,7 +4577,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
 
     // Security section
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "SECURITY",
@@ -4400,7 +4589,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     y += 24.0;
 
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "Auto-lock timeout",
@@ -4411,7 +4600,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     );
     let timeout_text = format!("{} minutes", state.settings_auto_lock);
     draw_text(
-        rt,
+        frame,
         x_start + pad + 200.0,
         y,
         &timeout_text,
@@ -4425,14 +4614,14 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     // Timeout slider
     let slider_x = x_start + pad;
     let slider_w = panel_width - pad * 2.0;
-    draw_rect(rt, slider_x, y, slider_w, 4.0, SURFACE1, 2.0);
+    draw_rect(frame, slider_x, y, slider_w, 4.0, SURFACE1, 2.0);
     let frac = (state.settings_auto_lock as f32 - 1.0) / 59.0;
     let knob_x = slider_x + slider_w * frac.clamp(0.0, 1.0);
-    draw_rect(rt, knob_x - 6.0, y - 4.0, 12.0, 12.0, BLUE, 6.0);
+    draw_rect(frame, knob_x - 6.0, y - 4.0, 12.0, 12.0, BLUE, 6.0);
     y += 24.0;
 
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "Clipboard auto-clear",
@@ -4443,7 +4632,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     );
     let clear_text = format!("{} seconds", state.clipboard.auto_clear_seconds);
     draw_text(
-        rt,
+        frame,
         x_start + pad + 200.0,
         y,
         &clear_text,
@@ -4454,12 +4643,12 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     );
     y += 36.0;
 
-    draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
     y += 16.0;
 
     // Vault info section
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "VAULT INFO",
@@ -4483,7 +4672,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     ];
     for (label, value) in &info_items {
         draw_text(
-            rt,
+            frame,
             x_start + pad,
             y,
             label,
@@ -4493,7 +4682,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
             None,
         );
         draw_text(
-            rt,
+            frame,
             x_start + pad + 160.0,
             y,
             value,
@@ -4507,7 +4696,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
 
     let count_text = format!("{}", state.vault.entries.len());
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "Total entries",
@@ -4517,7 +4706,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
         None,
     );
     draw_text(
-        rt,
+        frame,
         x_start + pad + 160.0,
         y,
         &count_text,
@@ -4530,7 +4719,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
 
     let folder_count_text = format!("{}", state.vault.folders.len());
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "Folders",
@@ -4540,7 +4729,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
         None,
     );
     draw_text(
-        rt,
+        frame,
         x_start + pad + 160.0,
         y,
         &folder_count_text,
@@ -4551,12 +4740,12 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     );
     y += 36.0;
 
-    draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
     y += 16.0;
 
     // Export section
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "DATA",
@@ -4568,7 +4757,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
     y += 24.0;
 
     draw_button(
-        rt,
+        frame,
         x_start + pad,
         y,
         120.0,
@@ -4579,7 +4768,7 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
         false,
     );
     draw_button(
-        rt,
+        frame,
         x_start + pad + 132.0,
         y,
         120.0,
@@ -4597,19 +4786,27 @@ fn render_settings_panel(rt: &mut RenderTree, state: &AppState, width: f32, heig
 // Render: audit report panel
 // =============================================================================
 
-fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height: f32) {
+fn render_audit_panel(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
     let x_start = SIDEBAR_WIDTH + ENTRY_LIST_WIDTH;
     let y_start = TOOLBAR_HEIGHT;
     let panel_width = width - x_start;
     let panel_height = height - y_start;
 
-    draw_rect(rt, x_start, y_start, panel_width, panel_height, BASE, 0.0);
+    draw_rect(
+        frame,
+        x_start,
+        y_start,
+        panel_width,
+        panel_height,
+        BASE,
+        0.0,
+    );
 
     let pad = 24.0;
     let mut y = y_start + pad;
 
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         "Password Audit",
@@ -4622,7 +4819,7 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
 
     if state.audit_issues.is_empty() {
         draw_text(
-            rt,
+            frame,
             x_start + pad,
             y,
             "No issues found. All passwords look good!",
@@ -4636,7 +4833,7 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
 
     let summary = format!("{} issues found", state.audit_issues.len());
     draw_text(
-        rt,
+        frame,
         x_start + pad,
         y,
         &summary,
@@ -4647,10 +4844,10 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
     );
     y += 28.0;
 
-    draw_separator(rt, x_start + pad, y, panel_width - pad * 2.0);
+    draw_separator(frame, x_start + pad, y, panel_width - pad * 2.0);
     y += 12.0;
 
-    rt.push(RenderCommand::PushClip {
+    frame.push(RenderCommand::PushClip {
         x: x_start,
         y,
         width: panel_width,
@@ -4665,7 +4862,7 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
         let issue_color = issue.issue.severity_color();
 
         draw_rect(
-            rt,
+            frame,
             x_start + pad,
             y,
             panel_width - pad * 2.0,
@@ -4676,7 +4873,7 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
 
         // Issue severity badge
         let severity_w = draw_badge(
-            rt,
+            frame,
             x_start + pad + 8.0,
             y + 8.0,
             issue.issue.label(),
@@ -4686,7 +4883,7 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
 
         // Entry name, laid out from the width the badge actually drew.
         draw_text(
-            rt,
+            frame,
             x_start + pad + 8.0 + severity_w + 16.0,
             y + 10.0,
             &issue.entry_name,
@@ -4699,16 +4896,16 @@ fn render_audit_panel(rt: &mut RenderTree, state: &AppState, width: f32, height:
         y += 42.0;
     }
 
-    rt.push(RenderCommand::PopClip);
+    frame.push(RenderCommand::PopClip);
 }
 
 // =============================================================================
 // Render: lock screen
 // =============================================================================
 
-fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height: f32) {
+fn render_lock_screen(frame: &mut Frame, state: &AppState, width: f32, height: f32) {
     // Full-screen overlay
-    draw_rect(rt, 0.0, 0.0, width, height, MANTLE, 0.0);
+    draw_rect(frame, 0.0, 0.0, width, height, MANTLE, 0.0);
 
     let center_x = width / 2.0;
     let center_y = height / 2.0;
@@ -4719,7 +4916,7 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
     let py = center_y - panel_h / 2.0;
 
     // Lock panel with shadow
-    rt.push(RenderCommand::BoxShadow {
+    frame.push(RenderCommand::BoxShadow {
         x: px,
         y: py,
         width: panel_w,
@@ -4731,11 +4928,11 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
         color: Color::rgba(0, 0, 0, 100),
         corner_radii: CornerRadii::all(12.0),
     });
-    draw_rect(rt, px, py, panel_w, panel_h, SURFACE0, 12.0);
+    draw_rect(frame, px, py, panel_w, panel_h, SURFACE0, 12.0);
 
     // Lock icon
     draw_text(
-        rt,
+        frame,
         text::center_x("[=]", center_x, 24.0, FontWeightHint::Bold),
         py + 30.0,
         "[=]",
@@ -4754,7 +4951,7 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
         FontWeightHint::Bold,
     );
     draw_text(
-        rt,
+        frame,
         name_x,
         py + 70.0,
         &state.vault.name,
@@ -4773,7 +4970,7 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
         FontWeightHint::Regular,
     );
     draw_text(
-        rt,
+        frame,
         instruction_x,
         py + 100.0,
         instruction,
@@ -4790,9 +4987,17 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
     let input_h = 40.0;
 
     let border_color = if state.unlock_failed { RED } else { SURFACE2 };
-    draw_rect(rt, input_x, input_y, input_w, input_h, BASE, CORNER_RADIUS);
+    draw_rect(
+        frame,
+        input_x,
+        input_y,
+        input_w,
+        input_h,
+        BASE,
+        CORNER_RADIUS,
+    );
     draw_stroke_rect(
-        rt,
+        frame,
         input_x,
         input_y,
         input_w,
@@ -4815,7 +5020,7 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
         TEXT_COLOR
     };
     draw_text(
-        rt,
+        frame,
         input_x + 12.0,
         input_y + 12.0,
         display,
@@ -4824,13 +5029,17 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
         FontWeightHint::Regular,
         Some(input_w - 24.0),
     );
+    frame.hit(
+        Target::MasterInput,
+        Rect::new(input_x, input_y, input_w, input_h),
+    );
 
     // Error message
     if state.unlock_failed {
         let error = "Incorrect password";
         let error_x = text::center_x(error, center_x, SMALL_FONT_SIZE, FontWeightHint::Regular);
         draw_text(
-            rt,
+            frame,
             error_x,
             input_y + input_h + 8.0,
             error,
@@ -4842,122 +5051,110 @@ fn render_lock_screen(rt: &mut RenderTree, state: &AppState, width: f32, height:
     }
 
     // Unlock button
-    let btn_y = py + 200.0;
+    let unlock = Rect::new(center_x - 50.0, py + 200.0, 100.0, 36.0);
     draw_button(
-        rt,
-        center_x - 50.0,
-        btn_y,
-        100.0,
-        36.0,
-        "Unlock",
-        BLUE,
-        BASE,
-        false,
+        frame, unlock.x, unlock.y, unlock.w, unlock.h, "Unlock", BLUE, BASE, false,
     );
+    // Until this was recorded the button was decoration: the only way past the
+    // lock screen was the Enter key, and `handle_mouse` returned immediately
+    // while the vault was locked.
+    frame.hit(Target::Unlock, unlock);
 }
 
 // =============================================================================
 // Build complete render tree
 // =============================================================================
 
-/// Draw the whole window, and record what the detail panel measured.
-///
-/// Takes the state by `&mut` so the measurement has somewhere to go: the
-/// detail panel's height is only known once it has been laid out, and the
-/// wheel handler needs it to know where the panel ends. The window size comes
-/// from the state rather than from parameters, so that there is one answer to
-/// how big the window is instead of two that can disagree -- the parameters
-/// were the reason nothing but the renderer knew the size.
-fn build_render_tree(state: &mut AppState) -> RenderTree {
-    let mut rt = RenderTree::new();
-    let (width, height) = (state.width, state.height);
+impl AppState {
+    /// Draw the whole window at `width` x `height`, recording where every
+    /// control ended up.
+    ///
+    /// Takes the size as parameters and *believes* them, rather than reading
+    /// `self.width`/`self.height`: the compositor hands the size to
+    /// [`App::render`], and the first frame of a window's life is drawn before
+    /// any `Event::Resize` has arrived to tell the state about it. A renderer
+    /// that consults its own memory instead lays that frame out at the default
+    /// size and puts every control somewhere the pointer is not.
+    fn frame(&self, width: f32, height: f32) -> Frame {
+        let layout = Layout::new(width, height);
+        let mut frame = Frame::new(layout.window.w, layout.window.h);
+        let (w, h) = (layout.window.w, layout.window.h);
 
-    if !state.vault.is_unlocked() {
-        render_lock_screen(&mut rt, state, width, height);
-        return rt;
+        if !self.vault.is_unlocked() {
+            render_lock_screen(&mut frame, self, w, h);
+            debug_assert!(frame.is_balanced(), "a clip was pushed and not popped");
+            return frame;
+        }
+
+        // Background
+        draw_rect(&mut frame, 0.0, 0.0, w, h, BASE, 0.0);
+
+        render_toolbar(&mut frame, self, &layout);
+        render_sidebar(&mut frame, self, &layout);
+        render_entry_list(&mut frame, self, &layout);
+
+        // Detail panel (depends on view). Only the entry detail scrolls; the
+        // other three are fixed-height panels, which is why
+        // `detail_content_height` reports zero for them.
+        match self.detail_view {
+            DetailView::EntryDetail => {
+                let _measured = render_entry_detail(&mut frame, self, w, h);
+            }
+            DetailView::PasswordGenerator => render_generator_panel(&mut frame, self, w, h),
+            DetailView::Settings => render_settings_panel(&mut frame, self, w, h),
+            DetailView::AuditReport => render_audit_panel(&mut frame, self, w, h),
+        }
+
+        debug_assert!(frame.is_balanced(), "a clip was pushed and not popped");
+        frame
     }
 
-    // Background
-    draw_rect(&mut rt, 0.0, 0.0, width, height, BASE, 0.0);
+    /// The topmost control at `(x, y)`, or `None` for bare background.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.width, self.height).hit_test(x, y)
+    }
+}
 
-    // Toolbar
-    render_toolbar(&mut rt, state, width);
-
-    // Sidebar
-    render_sidebar(&mut rt, state, height);
-
-    // Entry list
-    render_entry_list(&mut rt, state, height);
-
-    // Detail panel (depends on view). Only the entry detail scrolls; the other
-    // three are fixed-height panels, so they measure as zero content and their
-    // bound comes out zero.
-    let detail_content = match state.detail_view {
-        DetailView::EntryDetail => render_entry_detail(&mut rt, state, width, height),
-        DetailView::PasswordGenerator => {
-            render_generator_panel(&mut rt, state, width, height);
-            0.0
-        }
-        DetailView::Settings => {
-            render_settings_panel(&mut rt, state, width, height);
-            0.0
-        }
-        DetailView::AuditReport => {
-            render_audit_panel(&mut rt, state, width, height);
-            0.0
-        }
-    };
-    state.detail_content_height = detail_content;
-    // A shorter entry than the last one can leave the offset past the end.
-    state.clamp_scroll();
-
-    rt
+/// The window as a render tree, at the size the state currently believes.
+///
+/// [`App::render`] does not go through here -- it is handed the live size and
+/// passes it straight to [`AppState::frame`], because believing the caller is
+/// the whole point. This is the tests' shorthand for "draw it at whatever size
+/// you were last told", which is what they set up by hand anyway.
+#[cfg(test)]
+fn build_render_tree(state: &AppState) -> RenderTree {
+    state.frame(state.width, state.height).into_tree()
 }
 
 // =============================================================================
 // Event handling
 // =============================================================================
 
-fn handle_event(state: &mut AppState, event: &Event) {
+fn handle_event(state: &mut AppState, event: &Event) -> EventResult {
     match event {
         Event::Tick { elapsed_ms } => {
             state.tick(*elapsed_ms);
+            EventResult::Consumed
         }
-        Event::Key(key_event) if key_event.pressed => {
-            handle_key(state, key_event);
-        }
-        Event::Mouse(mouse_event) => {
-            handle_mouse(state, mouse_event);
-        }
+        Event::Key(key_event) if key_event.pressed => handle_key(state, key_event),
+        Event::Mouse(mouse_event) => handle_mouse(state, mouse_event),
         Event::Resize { width, height } => {
             // Until this arm existed the size lived only in the renderer's
             // parameters, so the scroll bounds had nothing to be computed
             // from. Growing the window can leave a pane scrolled past its own
-            // end, hence the re-clamp.
-            state.width = *width as f32;
-            state.height = *height as f32;
-            state.clamp_scroll();
+            // end, which is what `resize` re-clamps.
+            state.resize(*width as f32, *height as f32);
+            EventResult::Consumed
         }
-        _ => {}
+        _ => EventResult::Ignored,
     }
 }
 
-fn handle_key(state: &mut AppState, key: &KeyEvent) {
-    use guitk::event::Key;
-
+fn handle_key(state: &mut AppState, key: &KeyEvent) -> EventResult {
     // Lock screen input
     if !state.vault.is_unlocked() {
         match key.key {
-            Key::Enter => {
-                let password = state.master_input.clone();
-                if state.vault.unlock(&password, state.now) {
-                    state.unlock_failed = false;
-                    state.master_input.clear();
-                    state.refresh_filter();
-                } else {
-                    state.unlock_failed = true;
-                }
-            }
+            Key::Enter => attempt_unlock(state),
             Key::Backspace => {
                 state.master_input.pop();
                 state.unlock_failed = false;
@@ -4967,59 +5164,81 @@ fn handle_key(state: &mut AppState, key: &KeyEvent) {
                 state.unlock_failed = false;
             }
             _ => {
-                if key.types_text() {
-                    state.master_input.extend(key.typed());
-                    state.unlock_failed = false;
+                if !key.types_text() {
+                    return EventResult::Ignored;
                 }
+                state.master_input.extend(key.typed());
+                state.unlock_failed = false;
             }
         }
-        return;
+        return EventResult::Consumed;
     }
 
     // Main app key handling
-    match key.key {
+    let result = match key.key {
         Key::L if key.modifiers.ctrl => {
             state.vault.lock();
+            EventResult::Consumed
         }
         Key::F if key.modifiers.ctrl => {
             // Focus search (toggle)
             state.search_query.clear();
             state.refresh_filter();
+            state.clamp_scroll();
+            EventResult::Consumed
         }
         Key::G if key.modifiers.ctrl => {
             state.detail_view = DetailView::PasswordGenerator;
             regenerate_password(state);
+            EventResult::Consumed
         }
         Key::Escape => {
             state.search_query.clear();
             state.detail_view = DetailView::EntryDetail;
             state.refresh_filter();
+            state.clamp_scroll();
+            EventResult::Consumed
         }
         Key::Up => {
             navigate_entry_list(state, -1);
+            EventResult::Consumed
         }
         Key::Down => {
             navigate_entry_list(state, 1);
+            EventResult::Consumed
         }
         Key::Enter => {
             if state.detail_view == DetailView::PasswordGenerator {
                 regenerate_password(state);
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
             }
+        }
+        Key::Backspace if !state.search_query.is_empty() => {
+            state.search_query.pop();
+            state.refresh_filter();
+            state.clamp_scroll();
+            EventResult::Consumed
         }
         _ => {
             // Text input for search
-            if key.types_text() {
-                state.search_query.extend(key.typed());
-                state.refresh_filter();
+            if !key.types_text() {
+                return EventResult::Ignored;
             }
-            if key.key == Key::Backspace && !state.search_query.is_empty() {
-                state.search_query.pop();
-                state.refresh_filter();
-            }
+            state.search_query.extend(key.typed());
+            state.refresh_filter();
+            state.clamp_scroll();
+            EventResult::Consumed
         }
-    }
+    };
 
-    state.vault.touch(state.now);
+    // Only a keystroke the app acted on postpones the auto-lock. A modifier
+    // held down on its own is not use of the vault.
+    if result == EventResult::Consumed {
+        state.vault.touch(state.now);
+    }
+    result
 }
 
 fn navigate_entry_list(state: &mut AppState, direction: i32) {
@@ -5048,158 +5267,220 @@ fn navigate_entry_list(state: &mut AppState, direction: i32) {
     state.show_password = false;
 }
 
-fn handle_mouse(state: &mut AppState, mouse: &MouseEvent) {
-    if !state.vault.is_unlocked() {
-        return;
-    }
-
-    if let MouseEventKind::Press(MouseButton::Left) = mouse.kind {
-        let mx = mouse.x;
-        let my = mouse.y;
-
-        // Check toolbar clicks
-        if my < TOOLBAR_HEIGHT {
-            handle_toolbar_click(state, mx);
-            return;
-        }
-
-        // Check sidebar clicks
-        if mx < SIDEBAR_WIDTH {
-            handle_sidebar_click(state, my);
-            return;
-        }
-
-        // Check entry list clicks
-        if mx < SIDEBAR_WIDTH + ENTRY_LIST_WIDTH {
-            handle_list_click(state, my);
-            return;
-        }
-
-        // Detail panel clicks
-        handle_detail_click(state, mx, my);
-    }
-
-    if let MouseEventKind::Scroll { dy, .. } = mouse.kind {
-        // `wheel::pixels` and not an `Accumulator`: both offsets are already
-        // continuous, so a trackpad's fifth of a notch can be shown as a fifth
-        // of a row straight away rather than banked until it rounds. The
-        // `20.0` per notch it replaces was one of a dozen private guesses in
-        // this tree at what a notch is worth -- these rows are 52 px, so it
-        // was not half of one.
-        //
-        // Both are now clamped at the far end as well as at zero. They were
-        // clamped with `.max(0.0)` alone, which let either pane be wound off
-        // the end of its content into blank space and kept going.
-        if mouse.x >= SIDEBAR_WIDTH && mouse.x < SIDEBAR_WIDTH + ENTRY_LIST_WIDTH {
-            state.list_scroll = (state.list_scroll + wheel::pixels(dy, ROW_HEIGHT))
-                .clamp(0.0, state.max_list_scroll());
-        } else if mouse.x >= SIDEBAR_WIDTH + ENTRY_LIST_WIDTH {
-            state.detail_scroll = (state.detail_scroll + wheel::pixels(dy, DETAIL_LINE_HEIGHT))
-                .clamp(0.0, state.max_detail_scroll());
-        }
-    }
-
-    state.vault.touch(state.now);
-}
-
-fn handle_toolbar_click(state: &mut AppState, mx: f32) {
-    let base_x = SIDEBAR_WIDTH + 12.0;
-
-    // Sort button region
-    if mx >= base_x + 284.0 && mx < base_x + 364.0 {
-        state.sort_order = state.sort_order.next();
-        state.refresh_filter();
-        return;
-    }
-
-    // Generator button region
-    if mx >= base_x + 376.0 && mx < base_x + 476.0 {
-        state.detail_view = DetailView::PasswordGenerator;
-        if state.generated_password.is_empty() {
-            regenerate_password(state);
-        }
-        return;
-    }
-
-    // Lock button region
-    if mx >= base_x + 488.0 && mx < base_x + 558.0 {
-        state.vault.lock();
-        return;
-    }
-
-    // Settings button region
-    if mx >= base_x + 570.0 && mx < base_x + 650.0 {
-        state.detail_view = DetailView::Settings;
-    }
-}
-
-fn handle_sidebar_click(state: &mut AppState, my: f32) {
-    let y_start = TOOLBAR_HEIGHT;
-    let item_h = 32.0;
-    let mut y = y_start + 12.0 + 30.0 + 24.0 + 12.0 + 20.0;
-
-    // All Items
-    if my >= y && my < y + item_h {
-        state.sidebar_selection = SidebarSelection::AllItems;
-        state.refresh_filter();
-        return;
-    }
-    y += item_h + 2.0;
-
-    // Favorites
-    if my >= y && my < y + item_h {
-        state.sidebar_selection = SidebarSelection::Favorites;
-        state.refresh_filter();
-        return;
-    }
-    y += item_h + 2.0;
-
-    // Audit
-    if my >= y && my < y + item_h {
-        state.sidebar_selection = SidebarSelection::Audit;
-        state.detail_view = DetailView::AuditReport;
-        state.run_audit();
-        state.refresh_filter();
-        return;
-    }
-    y += item_h + 8.0 + 12.0 + 20.0;
-
-    // Types
-    for etype in EntryType::all() {
-        if my >= y && my < y + item_h {
-            state.sidebar_selection = SidebarSelection::TypeFilter(*etype);
-            state.refresh_filter();
-            return;
-        }
-        y += item_h + 2.0;
-    }
-}
-
-fn handle_list_click(state: &mut AppState, my: f32) {
-    let Some(row_idx) = state.row_at(my) else {
-        return;
+fn handle_mouse(state: &mut AppState, mouse: &MouseEvent) -> EventResult {
+    let result = match mouse.kind {
+        MouseEventKind::Press(MouseButton::Left) => handle_click(state, mouse.x, mouse.y),
+        MouseEventKind::Scroll { dy, .. } => handle_scroll(state, mouse.x, mouse.y, dy),
+        _ => EventResult::Ignored,
     };
 
-    if let Some(&entry_id) = state.filtered_ids.get(row_idx) {
-        state.selected_entry_id = Some(entry_id);
-        state.detail_view = DetailView::EntryDetail;
-        state.show_password = false;
-        // A new entry's fields start at the top, not wherever the last one had
-        // been scrolled to.
-        state.detail_scroll = 0.0;
+    // Only a click the app actually did something with counts as activity for
+    // the auto-lock timer. A pointer resting on the window is not use of it.
+    if result == EventResult::Consumed {
+        state.vault.touch(state.now);
+    }
+    result
+}
+
+/// Act on a left click, from what the renderer recorded at that point.
+///
+/// The four `handle_*_click` functions this replaces each re-derived the
+/// geometry of the pane they covered -- the toolbar one by hand-adding the
+/// widths of five buttons, the sidebar one by re-summing a stack of vertical
+/// offsets -- and one of them, the detail panel's, was an empty stub. That the
+/// numbers agreed with the renderer's was a coincidence maintained by hand.
+fn handle_click(state: &mut AppState, x: f32, y: f32) -> EventResult {
+    let Some(target) = state.target_at(x, y) else {
+        return EventResult::Ignored;
+    };
+
+    // While the vault is locked the only two live targets are the lock
+    // screen's own, and nothing else is drawn -- so this is a statement about
+    // what the renderer emits, not a second guard that could disagree with it.
+    match target {
+        Target::Unlock => {
+            attempt_unlock(state);
+            EventResult::Consumed
+        }
+        // The field is where typing already goes; clicking it is a no-op that
+        // still has to be claimed, or the click falls through to the scrim.
+        Target::MasterInput => EventResult::Consumed,
+        Target::Add | Target::Search => EventResult::Ignored,
+        Target::Sort => {
+            state.sort_order = state.sort_order.next();
+            state.refresh_filter();
+            state.clamp_scroll();
+            EventResult::Consumed
+        }
+        Target::Generator => {
+            state.detail_view = DetailView::PasswordGenerator;
+            if state.generated_password.is_empty() {
+                regenerate_password(state);
+            }
+            EventResult::Consumed
+        }
+        Target::LockVault => {
+            state.vault.lock();
+            EventResult::Consumed
+        }
+        Target::Settings => {
+            state.detail_view = DetailView::Settings;
+            EventResult::Consumed
+        }
+        Target::Sidebar(index) => {
+            let Some(selection) = state.sidebar_items().get(index).cloned() else {
+                return EventResult::Ignored;
+            };
+            state.sidebar_selection = selection;
+            if state.sidebar_selection == SidebarSelection::Audit {
+                state.detail_view = DetailView::AuditReport;
+                state.run_audit();
+            }
+            state.refresh_filter();
+            // A narrower filter can leave the list scrolled past its own end.
+            state.clamp_scroll();
+            EventResult::Consumed
+        }
+        Target::EntryRow(index) => {
+            let Some(&entry_id) = state.filtered_ids.get(index) else {
+                return EventResult::Ignored;
+            };
+            state.selected_entry_id = Some(entry_id);
+            state.detail_view = DetailView::EntryDetail;
+            state.show_password = false;
+            // A new entry's fields start at the top, not wherever the last one
+            // had been scrolled to.
+            state.detail_scroll = 0.0;
+            EventResult::Consumed
+        }
     }
 }
 
-fn handle_detail_click(state: &mut AppState, _mx: f32, _my: f32) {
-    // Toggle show password when clicking in the detail area password field region
-    let _ = state;
+/// Scroll whichever pane the pointer is over.
+///
+/// `wheel::pixels` and not an `Accumulator`: both offsets are already
+/// continuous, so a trackpad's fifth of a notch can be shown as a fifth of a
+/// row straight away rather than banked until it rounds. The `20.0` per notch
+/// it replaces was one of a dozen private guesses in this tree at what a notch
+/// is worth -- these rows are 52 px, so it was not half of one.
+///
+/// Both are clamped at the far end as well as at zero. They were clamped with
+/// `.max(0.0)` alone, which let either pane be wound off the end of its
+/// content into blank space and kept going.
+fn handle_scroll(state: &mut AppState, x: f32, y: f32, dy: f32) -> EventResult {
+    if !state.vault.is_unlocked() {
+        return EventResult::Ignored;
+    }
+    let layout = state.layout();
+    if layout.list_rows.contains(x, y) {
+        state.list_scroll =
+            (state.list_scroll + wheel::pixels(dy, ROW_HEIGHT)).clamp(0.0, state.max_list_scroll());
+        EventResult::Consumed
+    } else if layout.detail.contains(x, y) {
+        state.detail_scroll = (state.detail_scroll + wheel::pixels(dy, DETAIL_LINE_HEIGHT))
+            .clamp(0.0, state.max_detail_scroll());
+        EventResult::Consumed
+    } else {
+        EventResult::Ignored
+    }
+}
+
+/// Check `master_input` against the vault's verifier.
+fn attempt_unlock(state: &mut AppState) {
+    let password = state.master_input.clone();
+    if state.vault.unlock(&password, state.now) {
+        state.unlock_failed = false;
+        state.master_input.clear();
+        state.refresh_filter();
+    } else {
+        state.unlock_failed = true;
+    }
 }
 
 // =============================================================================
 // Entry point
 // =============================================================================
 
-fn main() {}
+impl App for AppState {
+    fn title(&self) -> String {
+        "Credential Manager".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (DEFAULT_WINDOW_WIDTH as u32, DEFAULT_WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        // Ctrl+Q closes the window. Ctrl+L is *not* a close -- it locks the
+        // vault, which is the point of having it.
+        if let Event::Key(key) = event
+            && key.pressed
+            && key.key == Key::Q
+            && key.modifiers.ctrl
+        {
+            return Response::Exit;
+        }
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for AppState {
+    type Target = Target;
+    type Outcome = EventResult;
+
+    const SIZE: (f32, f32) = (DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+/// Open the window on a fresh, locked vault.
+///
+/// The vault is created empty with an empty master password because this crate
+/// still has no persistence layer: there is nothing on disk to read a
+/// [`pwkdf::PasswordVerifier`] and its salt back from, and inventing a password
+/// here would be worse than admitting there is none. So the window opens on
+/// the lock screen of a vault that pressing Enter opens. That is not a
+/// shipping arrangement; it is tracked in `known-issues.md` as
+/// `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK`, and wiring the window is what turns
+/// the gap from theoretical into visible.
+fn main() -> ExitCode {
+    let Ok(vault) = Vault::create("My Vault", "") else {
+        // A key derivation that will not run is not something a credential
+        // manager should paper over by opening an unprotected window.
+        return ExitCode::FAILURE;
+    };
+    app::launch("credmanager", &mut AppState::new(vault))
+}
 
 // =============================================================================
 // Tests
@@ -6008,9 +6289,9 @@ mod tests {
         state.password_generator = PasswordGenerator::without_entropy();
         regenerate_password(&mut state);
 
-        let mut rt = RenderTree::new();
-        render_generator_panel(&mut rt, &state, 1200.0, 800.0);
-        let shown = rt.commands.iter().any(
+        let mut frame = Frame::new(1200.0, 800.0);
+        render_generator_panel(&mut frame, &state, 1200.0, 800.0);
+        let shown = frame.commands().iter().any(
             |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == NO_ENTROPY_MESSAGE),
         );
         assert!(shown, "the refusal never reached the screen");
@@ -6543,6 +6824,21 @@ mod tests {
         );
     }
 
+    /// Press the left button where the window would, at the size it believes.
+    fn press_at(state: &mut AppState, x: f32, y: f32) -> EventResult {
+        handle_event(
+            state,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        )
+    }
+
+    /// A point one pixel into whichever entry row is drawn first.
+    const FIRST_ROW_Y: f32 = TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT + 1.0;
+
     #[test]
     fn one_wheel_notch_crosses_three_rows_of_the_entry_list() {
         // Not the flat `20.0` px this handler used to add, which on a 52 px
@@ -6623,7 +6919,7 @@ mod tests {
                 height: 200,
             },
         );
-        let _ = build_render_tree(&mut state);
+        let _ = build_render_tree(&state);
         let max = state.max_detail_scroll();
         assert!(max > 0.0, "the panel must overflow a 200 px window");
         for _ in 0..200 {
@@ -6647,7 +6943,7 @@ mod tests {
         ] {
             let mut state = unlocked_with_entries(60);
             state.detail_view = view;
-            let _ = build_render_tree(&mut state);
+            let _ = build_render_tree(&state);
             wheel_at(&mut state, DETAIL_X, -5.0);
             assert_eq!(state.detail_scroll, 0.0, "{view:?} should not scroll");
         }
@@ -6688,23 +6984,24 @@ mod tests {
                 height: 200,
             },
         );
-        let _ = build_render_tree(&mut state);
         wheel_at(&mut state, DETAIL_X, -1.0);
         assert!(state.detail_scroll > 0.0);
-        handle_list_click(&mut state, TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT + 1.0);
+        press_at(&mut state, LIST_X, FIRST_ROW_Y);
         assert_eq!(state.detail_scroll, 0.0);
     }
 
     #[test]
     fn the_hit_test_and_the_renderer_agree_on_where_row_zero_starts() {
         // Both used a bare `32.0`; naming it is what stops them drifting.
+        // They no longer *can* drift -- the click resolves through the boxes
+        // the renderer recorded -- but the agreement is still worth asserting.
         let mut state = unlocked_with_entries(60);
         let first = state.filtered_ids.first().copied();
-        handle_list_click(&mut state, TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT + 1.0);
+        press_at(&mut state, LIST_X, FIRST_ROW_Y);
         assert_eq!(state.selected_entry_id, first);
         // One row further down, after scrolling by exactly one row, is row 1.
         state.list_scroll = ROW_HEIGHT;
-        handle_list_click(&mut state, TOOLBAR_HEIGHT + LIST_HEADER_HEIGHT + 1.0);
+        press_at(&mut state, LIST_X, FIRST_ROW_Y);
         assert_eq!(state.selected_entry_id, state.filtered_ids.get(1).copied());
     }
 
@@ -6717,7 +7014,7 @@ mod tests {
     /// re-derives the renderer's arithmetic and then checks the hit test
     /// against *that*, so the two can drift together and the test still
     /// passes. This asks the renderer what it drew.
-    fn rows_clip(state: &mut AppState) -> (f32, f32) {
+    fn rows_clip(state: &AppState) -> (f32, f32) {
         build_render_tree(state)
             .commands
             .iter()
@@ -6756,7 +7053,7 @@ mod tests {
     #[allow(clippy::float_cmp)]
     fn the_lists_clip_is_the_region_the_hit_test_accepts() {
         let mut state = unlocked_with_entries(60);
-        let (clip_y, clip_h) = rows_clip(&mut state);
+        let (clip_y, clip_h) = rows_clip(&state);
         assert_eq!(clip_y, AppState::rows_top());
         assert_eq!(clip_h, state.rows_height());
 
@@ -6811,7 +7108,7 @@ mod tests {
     #[test]
     fn every_row_edge_selects_the_row_the_renderer_drew_there() {
         let mut state = unlocked_with_entries(60);
-        let (clip_y, clip_h) = rows_clip(&mut state);
+        let (clip_y, clip_h) = rows_clip(&state);
         let mut slot = 0usize;
         loop {
             let top = clip_y + slot as f32 * ROW_HEIGHT;
@@ -6837,7 +7134,7 @@ mod tests {
         // Inside the row area but past the end of the list -- a different
         // rejection from the caption one.
         let mut state = unlocked_with_entries(2);
-        let (clip_y, clip_h) = rows_clip(&mut state);
+        let (clip_y, clip_h) = rows_clip(&state);
         let below_last = clip_y + 2.0 * ROW_HEIGHT + 1.0;
         assert!(below_last < clip_y + clip_h, "the pane must fit >2 rows");
         click_list(&mut state, below_last);
@@ -6871,7 +7168,7 @@ mod tests {
         let mut state = AppState::for_test();
         state.width = 1024.0;
         state.height = 768.0;
-        let rt = build_render_tree(&mut state);
+        let rt = build_render_tree(&state);
         assert!(!rt.commands.is_empty());
         // Lock screen should have FillRect for background
         let has_fill = rt
@@ -6891,7 +7188,7 @@ mod tests {
         );
         state.refresh_filter();
         state.selected_entry_id = state.filtered_ids.first().copied();
-        let rt = build_render_tree(&mut state);
+        let rt = build_render_tree(&state);
         assert!(rt.commands.len() > 30);
     }
 
@@ -6901,7 +7198,7 @@ mod tests {
         state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.detail_view = DetailView::PasswordGenerator;
         state.generated_password = "test-password-123".to_string();
-        let rt = build_render_tree(&mut state);
+        let rt = build_render_tree(&state);
         assert!(rt.commands.len() > 20);
     }
 
@@ -6910,7 +7207,7 @@ mod tests {
         let mut state = AppState::for_test();
         state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.detail_view = DetailView::Settings;
-        let rt = build_render_tree(&mut state);
+        let rt = build_render_tree(&state);
         assert!(rt.commands.len() > 20);
     }
 
@@ -6919,7 +7216,7 @@ mod tests {
         let mut state = AppState::for_test();
         state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.detail_view = DetailView::AuditReport;
-        let rt = build_render_tree(&mut state);
+        let rt = build_render_tree(&state);
         assert!(!rt.commands.is_empty());
     }
 
@@ -6932,7 +7229,7 @@ mod tests {
             .add_entry(EntryData::Login(LoginData::new("s", "u", "123")), state.now);
         state.run_audit();
         state.detail_view = DetailView::AuditReport;
-        let rt = build_render_tree(&mut state);
+        let rt = build_render_tree(&state);
         assert!(rt.commands.len() > 20);
     }
 
@@ -6953,7 +7250,7 @@ mod tests {
             let id = state.vault.add_entry(data, state.now);
             state.selected_entry_id = Some(id);
             state.detail_view = DetailView::EntryDetail;
-            let rt = build_render_tree(&mut state);
+            let rt = build_render_tree(&state);
             assert!(rt.commands.len() > 20, "Render failed for entry type");
         }
     }
@@ -6963,7 +7260,7 @@ mod tests {
         let mut state = AppState::for_test();
         state.vault.unlock(TEST_MASTER_PASSWORD, state.now);
         state.selected_entry_id = None;
-        let rt = build_render_tree(&mut state);
+        let rt = build_render_tree(&state);
         assert!(!rt.commands.is_empty());
     }
 
@@ -7061,9 +7358,9 @@ mod tests {
     /// tag early and left a gap on the right.
     #[test]
     fn a_badge_is_measured_the_same_way_wherever_it_is_measured() {
-        let mut rt = RenderTree::new();
+        let mut frame = Frame::new(1280.0, 800.0);
         for label in ["Login", "Identity", "Compromised"] {
-            let drawn = draw_badge(&mut rt, 0.0, 0.0, label, BLUE, BASE);
+            let drawn = draw_badge(&mut frame, 0.0, 0.0, label, BLUE, BASE);
             assert!(
                 (drawn - badge_width(label)).abs() < f32::EPSILON,
                 "{label:?}: drawn {drawn} but laid out {}",
@@ -7109,5 +7406,323 @@ mod tests {
             );
             assert!(left >= 0.0, "{label:?} overflows its button");
         }
+    }
+
+    // == The window is what the renderer recorded ==============================
+
+    /// A vault with one folder and one tag, so the sidebar draws every group.
+    fn unlocked_with_a_folder_and_a_tag() -> AppState {
+        let mut state = unlocked_with_entries(3);
+        let folder = state.vault.add_folder("Work");
+        let first = state.filtered_ids[0];
+        state.vault.set_folder(first, Some(folder));
+        state.vault.add_tag(first, "banking");
+        state.refresh_filter();
+        state
+    }
+
+    /// Folders and tags were drawn as selectable sidebar rows and wired to
+    /// nothing: `handle_sidebar_click` re-derived the row bands by re-summing
+    /// the renderer's arithmetic, and simply had no arm for the two groups the
+    /// renderer drew last. Clicking one did nothing at all, silently.
+    ///
+    /// It cannot regress in that shape now -- the click resolves through the
+    /// boxes the renderer recorded, so a drawn row is a clickable row by
+    /// construction -- but this is the assertion that says so.
+    #[test]
+    fn a_folder_row_in_the_sidebar_selects_that_folder() {
+        let mut state = unlocked_with_a_folder_and_a_tag();
+        let folder = state.vault.folders[0].id;
+        let index = state
+            .sidebar_items()
+            .iter()
+            .position(|item| *item == SidebarSelection::Folder(folder))
+            .expect("the folder is drawn in the sidebar");
+
+        probe::click(&mut state, Target::Sidebar(index));
+        assert_eq!(state.sidebar_selection, SidebarSelection::Folder(folder));
+        assert_eq!(
+            state.filtered_ids.len(),
+            1,
+            "selecting a folder must narrow the list to it"
+        );
+    }
+
+    #[test]
+    fn a_tag_row_in_the_sidebar_selects_that_tag() {
+        let mut state = unlocked_with_a_folder_and_a_tag();
+        let index = state
+            .sidebar_items()
+            .iter()
+            .position(|item| *item == SidebarSelection::Tag("banking".to_string()))
+            .expect("the tag is drawn in the sidebar");
+
+        probe::click(&mut state, Target::Sidebar(index));
+        assert_eq!(
+            state.sidebar_selection,
+            SidebarSelection::Tag("banking".to_string())
+        );
+        assert_eq!(state.filtered_ids.len(), 1);
+    }
+
+    /// Every sidebar row the renderer draws is reachable, and reaching it
+    /// selects *that* row rather than its neighbour.
+    ///
+    /// The old arrangement could satisfy the first half and fail the second:
+    /// two independent walks down the same list of headings and gaps agree
+    /// until one of them gains a group, and then every row below it is off by
+    /// the height of a heading.
+    #[test]
+    fn every_sidebar_row_selects_the_item_the_renderer_drew_there() {
+        let mut state = unlocked_with_a_folder_and_a_tag();
+        let items = state.sidebar_items();
+        assert!(
+            items.len() > EntryType::all().len() + 3,
+            "the fixture must reach the folder and tag groups"
+        );
+        for (index, item) in items.iter().enumerate() {
+            probe::click(&mut state, Target::Sidebar(index));
+            assert_eq!(
+                state.sidebar_selection, *item,
+                "row {index} is drawn for {item:?} but selected something else"
+            );
+        }
+    }
+
+    /// The lock screen's Unlock button was decoration: `handle_mouse` returned
+    /// `Ignored` outright while the vault was locked, so the only way in was
+    /// the Enter key. A button that is painted, labelled and inert is worse
+    /// than no button -- it tells the user the pointer is the way in.
+    #[test]
+    fn the_unlock_button_unlocks_the_vault() {
+        let mut state = AppState::for_test();
+        assert!(!state.vault.is_unlocked(), "a fresh vault starts locked");
+        state.master_input = TEST_MASTER_PASSWORD.to_string();
+
+        probe::click(&mut state, Target::Unlock);
+        assert!(
+            state.vault.is_unlocked(),
+            "the button must do what Enter does"
+        );
+        assert!(
+            state.master_input.is_empty(),
+            "the typed master password must not outlive the unlock"
+        );
+    }
+
+    #[test]
+    fn the_unlock_button_reports_a_wrong_master_password() {
+        let mut state = AppState::for_test();
+        state.master_input = "not the master password".to_string();
+
+        probe::click(&mut state, Target::Unlock);
+        assert!(!state.vault.is_unlocked());
+        assert!(state.unlock_failed, "the refusal must be visible");
+    }
+
+    /// While the vault is locked, the lock screen is the whole window: none of
+    /// the controls behind it are drawn, so none of them can be reached.
+    #[test]
+    fn a_locked_vault_draws_no_control_but_its_own() {
+        let state = AppState::for_test();
+        let names = probe::control_names(&state);
+        assert!(names.contains(&"Unlock".to_string()));
+        assert!(names.contains(&"MasterInput".to_string()));
+        for hidden in ["LockVault", "Settings", "Sidebar", "EntryRow"] {
+            assert!(
+                !names.contains(&hidden.to_string()),
+                "{hidden} is behind the lock screen but was drawn: {names:?}"
+            );
+        }
+    }
+
+    /// The renderer must believe the size it is handed rather than the one it
+    /// remembers, because the first frame a real window submits goes out
+    /// before any resize event exists.
+    #[test]
+    fn the_window_draws_what_it_is_given_rather_than_what_it_remembers() {
+        let state = unlocked_with_entries(3);
+        assert_eq!(state.width, DEFAULT_WINDOW_WIDTH);
+
+        let narrow = (700.0, 500.0);
+        let frame = state.draw(narrow);
+        assert_eq!(
+            (frame.width, frame.height),
+            narrow,
+            "the frame was sized from the remembered width, not the given one"
+        );
+
+        // A toolbar button is laid out left to right from a fixed origin, so
+        // it must not move with the width; the detail pane is measured from
+        // the right edge, so it must.
+        let wide_button = probe::rect_of_sized(&state, Target::Add, AppState::SIZE)
+            .expect("the toolbar is drawn when unlocked");
+        let narrow_button =
+            probe::rect_of_sized(&state, Target::Add, narrow).expect("Add is left of the fold");
+        assert_eq!(wide_button, narrow_button);
+        assert!(
+            Layout::new(narrow.0, narrow.1).detail.w
+                < Layout::new(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+                    .detail
+                    .w,
+            "the detail pane must be measured from the width it was given"
+        );
+    }
+
+    /// The toolbar is a fixed 882px of buttons laid out left to right from the
+    /// sidebar's edge, and it neither wraps nor scrolls. Narrow the window and
+    /// the right-hand buttons -- Lock Vault among them -- go off the edge with
+    /// nothing to say so.
+    ///
+    /// What this asserts is the half that is *safe*: a button clipped away
+    /// records no hit box, so there is no invisible target sitting off-screen
+    /// or under the pane beside it. The half that is not safe is that the
+    /// button is simply gone, which is
+    /// `known-issues.md` -> `C-CREDMANAGER-TOOLBAR-FALLS-OFF-A-NARROW-WINDOW`.
+    /// When the toolbar learns to overflow, this test should start failing.
+    #[test]
+    fn a_toolbar_button_past_the_right_edge_records_no_hit_box() {
+        let state = unlocked_with_entries(3);
+        let full = probe::rect_of_sized(&state, Target::Settings, AppState::SIZE)
+            .expect("Settings is drawn at the default size");
+        assert!(
+            full.right() > 700.0,
+            "the fixture must be narrower than the toolbar needs"
+        );
+
+        assert!(
+            probe::rect_of_sized(&state, Target::Settings, (700.0, 500.0)).is_none(),
+            "a button drawn past the edge must not be clickable there"
+        );
+        // Everything left of the fold is untouched.
+        assert!(probe::rect_of_sized(&state, Target::Add, (700.0, 500.0)).is_some());
+        assert!(probe::rect_of_sized(&state, Target::Sort, (700.0, 500.0)).is_some());
+    }
+
+    /// A window too small for its own layout must not record a hit box outside
+    /// itself. `Frame::new` does not clip, so a pane that clamped rather than
+    /// shrank would leave a clickable region hanging off the edge -- and a
+    /// click there would select a row the user cannot see.
+    #[test]
+    fn a_window_smaller_than_its_layout_records_nothing_outside_itself() {
+        let state = unlocked_with_entries(20);
+        for size in [(200.0, 120.0), (60.0, 40.0), (1.0, 1.0), (0.0, 0.0)] {
+            let frame = state.draw(size);
+            for (target, rect) in frame.hits() {
+                assert!(
+                    rect.x >= 0.0
+                        && rect.y >= 0.0
+                        && rect.right() <= size.0 + 0.01
+                        && rect.bottom() <= size.1 + 0.01,
+                    "{target:?} recorded {rect:?}, outside a {size:?} window"
+                );
+            }
+        }
+    }
+
+    /// A size the compositor should never send, but which costs one
+    /// `is_finite` to survive and an unbounded loop to not.
+    #[test]
+    fn a_nonfinite_window_size_draws_an_empty_window() {
+        let state = unlocked_with_entries(20);
+        for size in [(f32::NAN, 800.0), (1280.0, f32::INFINITY), (-50.0, -50.0)] {
+            let frame = state.draw(size);
+            assert!(frame.width >= 0.0 && frame.width.is_finite());
+            assert!(frame.height >= 0.0 && frame.height.is_finite());
+        }
+    }
+
+    /// Every clickable thing the unlocked window draws is on screen. Adding a
+    /// `Target` variant and forgetting to draw a box for it fails here rather
+    /// than shipping as a control that does nothing.
+    #[test]
+    fn every_control_the_unlocked_window_draws_is_recorded() {
+        let state = unlocked_with_a_folder_and_a_tag();
+        let names = probe::control_names(&state);
+        for expected in [
+            "Add",
+            "Search",
+            "Sort",
+            "Generator",
+            "LockVault",
+            "Settings",
+            "Sidebar",
+            "EntryRow",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "{expected} is not on screen: {names:?}"
+            );
+        }
+    }
+
+    /// Clicking the toolbar's Lock returns the window to the lock screen, and
+    /// the lock screen is drawn from the same frame the next click resolves
+    /// through -- so the way back in is reachable immediately.
+    #[test]
+    fn the_lock_button_returns_the_window_to_the_lock_screen() {
+        let mut state = unlocked_with_entries(5);
+        probe::click(&mut state, Target::LockVault);
+        assert!(!state.vault.is_unlocked());
+        assert!(
+            probe::is_visible(&state, Target::Unlock),
+            "locking must draw the way back in"
+        );
+    }
+
+    /// Opening the generator fills it, so the panel never appears blank.
+    ///
+    /// Seeded on purpose: `PasswordGenerator::new` draws from
+    /// `CredRandom::from_system`, which on a host test has no kernel entropy to
+    /// draw from and therefore *refuses* -- correctly, since handing out a
+    /// password that only looks random is the failure this crate is built to
+    /// avoid. Asserting on a real password here would be asserting that the
+    /// refusal is broken.
+    #[test]
+    fn the_generator_button_opens_the_generator_with_a_password_in_it() {
+        let mut state = unlocked_with_entries(5);
+        state.password_generator = seeded(7);
+        assert!(state.generated_password.is_empty());
+
+        probe::click(&mut state, Target::Generator);
+        assert_eq!(state.detail_view, DetailView::PasswordGenerator);
+        assert!(
+            !state.generated_password.is_empty(),
+            "an empty generator panel is a panel that looks broken"
+        );
+        assert_eq!(state.generator_error, None);
+    }
+
+    /// And when the source cannot be trusted, the panel says so rather than
+    /// showing an empty field -- which is what a user reads as "still loading".
+    #[test]
+    fn the_generator_button_opens_a_refusal_when_there_is_no_entropy() {
+        let mut state = unlocked_with_entries(5);
+        state.password_generator = PasswordGenerator::without_entropy();
+
+        probe::click(&mut state, Target::Generator);
+        assert_eq!(state.detail_view, DetailView::PasswordGenerator);
+        assert!(state.generated_password.is_empty());
+        assert_eq!(
+            state.generator_error.as_deref(),
+            Some(NO_ENTROPY_MESSAGE),
+            "a blank field with no reason is indistinguishable from a bug"
+        );
+    }
+
+    /// Clicking bare background must not select, scroll or navigate anything.
+    #[test]
+    fn clicking_the_background_changes_nothing() {
+        let mut state = unlocked_with_entries(5);
+        probe::click(&mut state, Target::Sidebar(0));
+        let before = (
+            state.selected_entry_id,
+            state.detail_view,
+            state.sidebar_selection.clone(),
+        );
+        probe::click_background(&mut state);
+        assert_eq!(state.selected_entry_id, before.0);
+        assert_eq!(state.detail_view, before.1);
+        assert_eq!(state.sidebar_selection, before.2);
     }
 }

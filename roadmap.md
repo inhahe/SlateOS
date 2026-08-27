@@ -6421,7 +6421,7 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Disk cleanup utility (apps/diskcleanup: 9 cleanup categories, scanner, executor with dry-run, scheduled cleanup, history, progress UI)
 - [x] Emoji picker (apps/emojipicker: category tabs, search, 6-column grid, skin tone selector, 82 emoji, recent tracking)
 - [x] Font manager (apps/fontmanager: category sidebar, font list, preview panel, install/uninstall, rendering settings, 19 default fonts)
-- [x] Task scheduler (apps/taskscheduler: cron expression parsing, retry policies, execution history, task CRUD, config persistence, 99 tests)
+- [x] Task scheduler (apps/taskscheduler: **windowed** — `app::launch`, `Frame` hit boxes, `Layout` from the live size, a once-a-second tick that runs whatever became due; cron expression parsing, retry policies, execution history, task CRUD, config persistence, 128 tests. No way to start a process yet — held open by a `RunFn` seam that leaves a due task overdue rather than rescheduling one it could not run, see `known-issues.md` → `C-TASKSCHEDULER-HAS-NO-EXECUTOR`)
 - [x] Network speed test (apps/speedtest: speedometer arc gauge, latency/download/upload phases, throughput graph, history, server selection, 59 tests)
 - [x] Startup apps manager (apps/startupmanager: enable/disable, impact assessment, import/export, sortable table, 82 tests)
 - [x] Disk usage analyzer (apps/diskanalyzer: WinDirStat-style treemap, extension breakdown, squarified layout, drill-down, 77 tests)

@@ -13,8 +13,6 @@
 # A genuine false positive belongs in the IGNORE table in the script,
 # which records *why*, not here, which records only *that*.
 
-userspace/coreutils/examples/extfloat-probe.rs:argv-as-string
-userspace/coreutils/src/bin/cal.rs:argv-as-string
 userspace/coreutils/src/bin/dd.rs:argv-as-string
 userspace/coreutils/src/bin/df.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string

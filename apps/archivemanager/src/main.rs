@@ -3316,6 +3316,12 @@ fn sample_archive_bytes() -> Vec<u8> {
             // A directory has no bytes to deflate, and storing it keeps the
             // demo's Method column honest about which members are which.
             store_only: is_dir,
+            // The sample archive is synthesised, not read off disk, so there
+            // is no real modification time to record. 0 renders as `-` in the
+            // Date column, which is what an absent time should look like --
+            // stamping a plausible-looking date here would make the column
+            // look like it worked.
+            dos_datetime: 0,
         })
         .collect();
     ziparchive::create(&write)

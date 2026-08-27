@@ -88787,7 +88787,40 @@ registrant.
 
 ---
 
-## `A-DEVFS-READ-FILE-AND-READ-AT-SERVE-DIFFERENT-NODES` (lane A, 2026-08-26)
+## `A-DEVFS-READ-FILE-AND-READ-AT-SERVE-DIFFERENT-NODES` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**Fixed** in `f43685b4a`, by the first of the two options below — but not by
+extending the second table to match the first. `read_file` no longer *has* a
+table: it looks the node up in `DEV_NODES` and hands the read to `read_at`.
+That is the substance of the fix. Two hand-written dispatch tables over one
+node set will drift again no matter how carefully they are reconciled today;
+one table cannot drift from itself.
+
+Three things worth carrying forward:
+
+* **The guard is `parent().is_empty()`, not `CharDevice`.** Two refusals had
+  to survive the delegation, and only the root-only test preserves both: block
+  devices stay whole-file-refused (so a recursive walk cannot become a 500 GB
+  read), and the syscall-layer nodes under `input/`, `dri/` and `snd/` are
+  intercepted at `open`, so devfs must keep answering "not that way". A plain
+  `CharDevice` test would have quietly served both.
+* **The mount root had to be special-cased back in.** `find_node("")` is
+  `None`, so the delegating version reported `NotFound` for a directory that
+  plainly exists — a regression I wrote and caught before the boot test. It
+  now returns `IsADirectory` via an explicit early return, matching every
+  other path in the file.
+* **One observable length changed.** A whole-file read of `/dev/random` or
+  `/dev/urandom` yields 4096 bytes rather than 256. Any bound on an endless
+  stream is arbitrary; no caller in the tree reads either node whole, and none
+  could depend on a particular count of random bytes being the last ones.
+
+The self-test now drives **both** paths across all eleven root nodes rather
+than `read_at` alone, plus the two refusals as explicit checks. Asserting only
+the surviving path is what let the split live undetected in the first place.
+
+---
+
+**Original report.**
 
 **In short:** There are two ways to read a file in this kernel — ask for the
 whole thing (`read_file`), or ask for a byte range (`read_at`). For `/dev`,

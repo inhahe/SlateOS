@@ -61181,6 +61181,59 @@ act on directly.
 which decides whether this file or `userspace/dd` survives; writing them twice
 is the trap that decision exists to avoid.
 
+### Addendum, 2026-08-27 — three statements above are now wrong
+
+`coreutils/dd` has since been rewritten as a transcription of
+`coreutils-9.4/src/dd.c` (see `design-decisions.md` §626). Three things this
+entry says no longer hold, and are corrected here rather than edited above,
+because what the entry got wrong is itself the point.
+
+**1. The stated fix was wrong — in the same way the original bug was.** The
+text above says "The fix is one condition — `.truncate(ops.seek == 0)` — in the
+single place the file is opened", and that is what shipped. It is not what GNU
+does. GNU truncates **at the seek offset**, not at zero and not never: the
+`O_TRUNC` is indeed suppressed when `seek != 0`, but `dd` then calls
+`ftruncate(fd, seek_records * obs + seek_bytes)` itself. Measured:
+
+```
+$ perl -e 'print "A" x 100' > big
+$ printf 'xx' | dd of=big bs=1 seek=10
+$ stat -c %s big
+12                      # not 100, and not 2
+```
+
+So the shipped fix turned "destroys the whole file" into "never shortens the
+file", which is wrong in the opposite direction and equally silent. Both are
+now correct. The lesson is the uncomfortable one: the fix was reasoned from the
+*comment* about what `seek=` means, not measured against the program it was
+copying — the identical mistake that produced the bug.
+
+**2. "Not by a harness — there is no `dd-diff.sh`."** There is now.
+`scripts/dd-diff.sh` runs 339 cases plus 20 deliberate differences, and it
+compares four channels per case — stdout, scrubbed stderr, exit status, and a
+manifest of the working directory carrying each file's size, block count and
+bytes. The manifest is what a `dd` harness needed and what made the entry
+conclude one was impractical; it is fifteen lines of `stat` and `od`. Defect 1
+above changes **only** the manifest channel — not stdout, not stderr, not the
+exit status — so a harness comparing the usual two would have missed it, but
+one comparing four catches it on the first case that uses `seek=`. Each of the
+four channels was tamper-tested to prove it discriminates (§626).
+
+**3. "Still open, and deliberately deferred: `conv=`, `status=progress`,
+separate `ibs=`/`obs=`."** All three are implemented, along with `iflag=`,
+`oflag=`, `count_bytes`/`skip_bytes`/`seek_bytes`, the `B` suffix, and the
+partial-read accounting. The B-Q7 argument for deferring them — don't write
+them twice before deciding which `dd` survives — was overtaken by the argv-utf8
+conversion, which had to touch this file anyway; a transcription that stops
+short of the operands is not a transcription. B-Q7 still decides which binary
+ships, and now decides it between a complete implementation and `userspace/dd`
+rather than between a stub and `userspace/dd`.
+
+A fourth statement is *not* wrong but has moved: `skip=` past the end of the
+input was fatal here and is a warning in GNU (`cannot skip to specified
+offset`, `0+0 records in`, exit **0**). That was not known when this entry was
+written and is now fixed.
+
 ---
 
 ## B-tee-REPORTS-SUCCESS-AFTER-LOSING-THE-DATA (lane B, 2026-08-22) — FIXED 2026-08-22
@@ -91569,6 +91622,36 @@ Two rows do not change, both deliberately:
 Reasoning and the reversal recipe are `design-decisions.md` §625; the reply is
 `requests/a-b-meminfo-linux-keys-landed-except-the-two-that-would-lie.md`, which
 invites lane B to push back on the `Comm:` call.
+
+### Lane B's answer on `Comm:`, 2026-08-27 — agreed, and the alternative measures worse
+
+Lane B does not push back, and measured the alternative before agreeing.
+`free -v` renders the row as `CommitLimit`, `Committed_AS`, and the
+*subtraction* of the two, unclamped. Against procps-ng 4.0.4 with a doctored
+`/proc/meminfo` bind-mounted in a private mount namespace (`unshare -r -m`):
+
+| `/proc/meminfo` | `free -v` last row |
+|---|---|
+| `CommitLimit: 24808028`, `Committed_AS: 1255032` (control) | `Comm: 24808028 1255032 23552996` |
+| `CommitLimit: 0`, `Committed_AS: 1255032` | `Comm: 0 1255032 -1255032` |
+| both absent → both zero | `Comm: 0 0 0` |
+
+Row 2 prints a **negative** quantity of free memory — worse than the "over 100%"
+lane A predicted, and it is the option that would have been most tempting, since
+`Committed_AS` is the one of the two that *can* be sourced honestly. "Both or
+neither" is therefore not merely the tidier rule; publishing the honest key
+alone is the worst of the three outcomes.
+
+Two facts make the zero row cheaper than the original request assumed: `Comm:`
+appears only under `free -v` (not plain `free`, `-w` or `-t`), so it is never
+met by accident; and `/proc/sys/vm/overcommit_memory` already reports the live
+policy, so refusing the row does not remove the only window on it.
+
+**So `free -v` printing `Comm: 0 0 0` on SlateOS is by design, not a `free`
+bug** — recorded here so it is not filed as one later. It changes if commit
+accounting is ever enforced, at which point both keys become sourceable
+together. Lane B's reply is
+`requests/b-a-comm-row-agreed-and-here-is-the-measurement-that-settles-it.md`.
 
 ## `A-A-STRAY-D-VISUAL-TURNED-EVERY-WORD-SPLIT-OF-OUR-OWN-PATH-INTO-A-SILENT-SUCCESS` (lane A, 2026-08-27) -- **FIXED 2026-08-27**, environment
 

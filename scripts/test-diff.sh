@@ -518,7 +518,10 @@ t -o x
 t 1 -eq
 t -eq 1
 t x =
-t = x
+# Quoted only so shellcheck does not read `t = x` as a malformed assignment
+# (SC2283); `t` is a function and `=` is its first argument. Same convention as
+# the quoted `'!'` and `'('` above.
+t '=' x
 t '(' x = x -a
 t '!' '('
 t x y z

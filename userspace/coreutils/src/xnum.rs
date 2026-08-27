@@ -286,11 +286,45 @@ pub fn xstrtoumax(text: &[u8], valid_suffixes: Option<&[u8]>) -> (u64, Status) {
 /// A base of zero reads C's prefix: see [`strtoumax_base`].
 #[must_use]
 pub fn xstrtoumax_base(text: &[u8], base: u32, valid_suffixes: Option<&[u8]>) -> (u64, Status) {
+    let (value, status, _end) = xstrtoumax_end(text, base, valid_suffixes);
+    (value, status)
+}
+
+/// [`xstrtoumax_base`], also reporting **where the scan stopped** — gnulib's
+/// `char **ptr` out-parameter, which this port originally dropped.
+///
+/// Every other caller in the tree ignores it, which is why it was left out. `dd`
+/// cannot: its `parse_integer` is built on top of that pointer and does two
+/// things with it that are not expressible any other way.
+///
+/// - **A trailing `B` means "bytes, not blocks".** `B` is deliberately *not* in
+///   `dd`'s suffix list, so `count=1B` comes back as [`Status::InvalidSuffix`]
+///   with the end left sitting on the `B`; `dd` then steps over it and clears
+///   the error, but only when the `B` is neither the first character nor
+///   preceded by another `B` (so `1kB` — where `B` was already eaten as the
+///   base-switching second suffix — stays valid, and `1kBB` stays invalid).
+///   Both of those tests read the bytes *around* the end position.
+/// - **`x` is a product.** `bs=2x512` is 1024. The end position is where the
+///   `x` was found, and everything after it is parsed by the same function
+///   again, recursively, so `2x3x4` is 24.
+///
+/// The returned offset follows C exactly, including in the cases where C leaves
+/// it at the *start* of the string rather than where the scan gave up: a value
+/// that did not convert at all reports `0`. Callers must therefore consult
+/// `status` before reading the offset — which is what upstream's short-circuit
+/// `(e & ~LONGINT_OVERFLOW) == LONGINT_INVALID_SUFFIX_CHAR && *suffix == 'B'`
+/// is doing.
+#[must_use]
+pub fn xstrtoumax_end(
+    text: &[u8],
+    base: u32,
+    valid_suffixes: Option<&[u8]>,
+) -> (u64, Status, usize) {
     // gnulib refuses a leading `-` itself rather than letting C's strtoumax
     // wrap it around into a huge positive. This is why `fold -w -3` says
     // "invalid number of columns" and not "out of range".
     if matches!(text.get(skip_space(text)), Some(b'-')) {
-        return (0, Status::Invalid);
+        return (0, Status::Invalid, 0);
     }
 
     let scan = strtoumax_base(text, base);
@@ -305,7 +339,7 @@ pub fn xstrtoumax_base(text: &[u8], base: u32, valid_suffixes: Option<&[u8]>) ->
         let bare_suffix = valid_suffixes
             .is_some_and(|sfx| text.first().is_some_and(|c| *c != 0 && sfx.contains(c)));
         if !bare_suffix {
-            return (0, Status::Invalid);
+            return (0, Status::Invalid, 0);
         }
         value = 1;
     }
@@ -313,14 +347,15 @@ pub fn xstrtoumax_base(text: &[u8], base: u32, valid_suffixes: Option<&[u8]>) ->
     let Some(suffixes) = valid_suffixes else {
         // A null suffix list means "allow any suffix", and upstream returns
         // before even looking at the trailing bytes.
-        return (value, Status::of(overflow, false));
+        return (value, Status::of(overflow, false), at);
     };
 
     let Some(&c) = text.get(at).filter(|c| **c != 0) else {
-        return (value, Status::of(overflow, false));
+        return (value, Status::of(overflow, false), at);
     };
     if !suffixes.contains(&c) {
-        return (value, Status::of(overflow, true));
+        // The end is left *on* the offending byte, not past it. `dd` reads it.
+        return (value, Status::of(overflow, true), at);
     }
 
     let mut base = 1024u64;
@@ -358,12 +393,12 @@ pub fn xstrtoumax_base(text: &[u8], base: u32, valid_suffixes: Option<&[u8]>) ->
         b'Q' => scale_by_power(value, base, 10, &mut overflow),
         // Reachable only when the caller's list holds a character the scaling
         // switch does not name — the `0` flag itself, most plausibly.
-        _ => return (value, Status::of(overflow, true)),
+        _ => return (value, Status::of(overflow, true), at),
     };
 
     at = at.saturating_add(consumed);
     let trailing = text.get(at).is_some_and(|c| *c != 0);
-    (value, Status::of(overflow, trailing))
+    (value, Status::of(overflow, trailing), at)
 }
 
 /// gnulib's `xdectoumax`: [`xstrtoumax`] plus a range check, returning the

@@ -141,7 +141,11 @@ impl<'a> TzFile<'a> {
         let desig = take(body, &mut off, charcnt)?;
         // Leap seconds are deliberately not modelled (see the module docs), but
         // their size still has to be right or everything after them shifts.
-        let _leap = take(body, &mut off, leapcnt.checked_mul(time_size.checked_add(4)?)?)?;
+        let _leap = take(
+            body,
+            &mut off,
+            leapcnt.checked_mul(time_size.checked_add(4)?)?,
+        )?;
         let _isstd = take(body, &mut off, usize::try_from(head.isstdcnt).ok()?)?;
         let _isut = take(body, &mut off, usize::try_from(head.isutcnt).ok()?)?;
 
@@ -253,9 +257,14 @@ impl<'a> TzFile<'a> {
     #[must_use]
     pub fn standard(&self) -> TzInfo {
         if let Some(tail) = self.tail {
-            return TzInfo { gmtoff: tail.std_gmtoff, is_dst: false, name: tail.std_name };
+            return TzInfo {
+                gmtoff: tail.std_gmtoff,
+                is_dst: false,
+                name: tail.std_name,
+            };
         }
-        self.most_recent(false).unwrap_or_else(|| self.info_of_type(usize::from(self.default_type)))
+        self.most_recent(false)
+            .unwrap_or_else(|| self.info_of_type(usize::from(self.default_type)))
     }
 
     /// The zone's daylight-saving state, for `tzname[1]`, or `None` for a zone
@@ -264,7 +273,11 @@ impl<'a> TzFile<'a> {
     pub fn daylight(&self) -> Option<TzInfo> {
         if let Some(tail) = self.tail {
             let dst = tail.dst?;
-            return Some(TzInfo { gmtoff: dst.gmtoff, is_dst: true, name: dst.name });
+            return Some(TzInfo {
+                gmtoff: dst.gmtoff,
+                is_dst: true,
+                name: dst.name,
+            });
         }
         self.most_recent(true)
     }
@@ -333,7 +346,9 @@ impl<'a> TzFile<'a> {
         // than the window's own span.
         if let Some(mut i) = self.find(hi) {
             while n < MAX_CANDIDATES {
-                let Some(tr) = self.transition_time(i) else { break };
+                let Some(tr) = self.transition_time(i) else {
+                    break;
+                };
                 if tr <= lo {
                     break;
                 }
@@ -382,7 +397,14 @@ impl<'a> TzFile<'a> {
         fallback.unwrap_or_else(|| {
             // Unreachable in practice: `n >= 1` always, since three offsets are
             // pushed unconditionally.  Answering UTC beats a panic in a libc.
-            (local, TzInfo { gmtoff: 0, is_dst: false, name: TzName::UTC })
+            (
+                local,
+                TzInfo {
+                    gmtoff: 0,
+                    is_dst: false,
+                    name: TzName::UTC,
+                },
+            )
         })
     }
 
@@ -440,7 +462,11 @@ impl<'a> TzFile<'a> {
     /// cannot panic even if a future change breaks that reasoning.
     fn info_of_type(&self, ty: usize) -> TzInfo {
         let Some((gmtoff, isdst, idx)) = self.type_record(ty) else {
-            return TzInfo { gmtoff: 0, is_dst: false, name: TzName::UTC };
+            return TzInfo {
+                gmtoff: 0,
+                is_dst: false,
+                name: TzName::UTC,
+            };
         };
         TzInfo {
             gmtoff,
@@ -547,10 +573,16 @@ impl Header {
     fn block_len(&self, time_size: usize) -> Option<usize> {
         let timecnt = usize::try_from(self.timecnt).ok()?;
         let mut len = timecnt.checked_mul(time_size.checked_add(1)?)?;
-        len = len.checked_add(usize::try_from(self.typecnt).ok()?.checked_mul(TTINFO_LEN)?)?;
+        len = len.checked_add(
+            usize::try_from(self.typecnt)
+                .ok()?
+                .checked_mul(TTINFO_LEN)?,
+        )?;
         len = len.checked_add(usize::try_from(self.charcnt).ok()?)?;
         len = len.checked_add(
-            usize::try_from(self.leapcnt).ok()?.checked_mul(time_size.checked_add(4)?)?,
+            usize::try_from(self.leapcnt)
+                .ok()?
+                .checked_mul(time_size.checked_add(4)?)?,
         )?;
         len = len.checked_add(usize::try_from(self.isstdcnt).ok()?)?;
         len.checked_add(usize::try_from(self.isutcnt).ok()?)
@@ -576,7 +608,10 @@ mod tests {
 
     impl Buf {
         fn new() -> Self {
-            Self { bytes: [0; 1024], len: 0 }
+            Self {
+                bytes: [0; 1024],
+                len: 0,
+            }
         }
         fn put(&mut self, s: &[u8]) -> &mut Self {
             self.bytes[self.len..self.len + s.len()].copy_from_slice(s);
@@ -650,7 +685,10 @@ mod tests {
         assert!(tz.has_dst());
         assert_eq!(tz.standard().gmtoff, -5 * 3600);
         assert_eq!(tz.standard().name, name(b"EST"));
-        assert_eq!(tz.daylight().expect("EST5EDT has a DST half").name, name(b"EDT"));
+        assert_eq!(
+            tz.daylight().expect("EST5EDT has a DST half").name,
+            name(b"EDT")
+        );
     }
 
     #[test]
@@ -850,7 +888,10 @@ mod tests {
         // mandatory; every count still adds up at that point.
         for cut in 0..full.len() {
             let short = &full[..cut];
-            assert!(TzFile::parse(short).is_none(), "prefix of {cut} bytes accepted");
+            assert!(
+                TzFile::parse(short).is_none(),
+                "prefix of {cut} bytes accepted"
+            );
         }
         assert!(TzFile::parse(full).is_some());
     }

@@ -752,6 +752,106 @@ pub fn year_of_day(days: i64) -> i64 {
     civil_from_days(days).0
 }
 
+/// The smallest instant an MS-DOS date/time pair can represent:
+/// 1980-01-01 00:00:00, as seconds since the Unix epoch.
+pub const DOS_EPOCH_UNIX: i64 = 315_532_800;
+
+/// The largest Unix second that still lands inside the MS-DOS range:
+/// 2107-12-31 23:59:59.  The year field is 7 bits counting from 1980, so 2107
+/// is the last year it can name.
+///
+/// This is an **inclusive** bound and is one second later than the last
+/// *distinct* pair, which is 2107-12-31 23:59:58: seconds are stored halved, so
+/// :59 rounds down into the :58 bucket rather than falling outside the format.
+/// Treating :59 as out of range would discard a second that the format does in
+/// fact accept.
+pub const DOS_END_UNIX: i64 = 4_354_819_199;
+
+/// Pack a Unix timestamp into the MS-DOS date/time pair used by ZIP and FAT,
+/// as `(date << 16) | time`.
+///
+/// Returns **`0`** for any instant the format cannot represent — before
+/// 1980-01-01 or after 2107-12-31. Zero is the agreed encoding for "no
+/// modification time recorded": it is day 0 of month 0, which is not a
+/// representable date, so a reader cannot mistake it for one.
+///
+/// # Why it refuses instead of clamping
+///
+/// Clamping an out-of-range time to the DOS minimum would stamp
+/// `1980-01-01` on it — a real, plausible date that no reader can distinguish
+/// from a file genuinely last written that day. That is the exact fabrication
+/// `A-ZIPARCHIVE-CREATE-STAMPED-EVERY-MEMBER-1980-01-01` was filed for and
+/// design-decisions.md §618 decided against. An unknown time must not be
+/// rendered as a known one, so the failure is visible (`-` in a Date column)
+/// rather than invisible.
+///
+/// A Unix timestamp of `0` is 1970, which is before the DOS epoch, so the
+/// common "time not available" sentinel maps to "not recorded" on its own.
+///
+/// # Seconds are stored halved
+///
+/// The DOS time field gives seconds 5 bits, holding 0‥=29, which is the second
+/// divided by two. This rounds **down**, so a recorded time is never later than
+/// the real one — a file's mtime that reads as earlier than it was is a
+/// resolution limit, whereas one that reads later can put a file "ahead of" an
+/// event that actually preceded it.
+///
+/// # Timezone
+///
+/// DOS timestamps are *local* time with no zone recorded — the format has
+/// nowhere to put one. This function does no zone conversion, so it produces
+/// local time only if handed local time. Kernel callers have no user timezone
+/// available and therefore write UTC into a slot readers will interpret as
+/// local; that is a limitation of the format rather than of this function, and
+/// every OS writing ZIPs has it.
+///
+/// # Why this lives here
+///
+/// `ziparchive` is the obvious-looking home and is the wrong one: it is
+/// `no_std` and linked into the kernel, and encoding a DOS pair needs a
+/// calendar, which would drag one into kernel space or force a second to exist.
+/// `kernel/src/fs/zip.rs` is worse — a module of a *binary* crate cannot be
+/// depended on, which is what stranded the ZIP parser in the kernel binary and
+/// forced its promotion to a root crate. This crate is already `no_std`,
+/// dependency-free, and already a dependency of both the kernel and `guitk`.
+/// See design-decisions.md §621.
+///
+/// The inverse is deliberately absent: the only decoder today is
+/// `apps/archivemanager`'s, which also range-checks the pair as part of
+/// deciding whether to show it at all. Add one here when a second caller wants
+/// it, rather than shipping API nothing calls.
+#[must_use]
+#[allow(clippy::arithmetic_side_effects)]
+// Every cast below is exact and the ranges are enforced by the arithmetic, not
+// by convention: `year - 1980` is 0‥=127 because of the bounds check, `month`
+// is 1‥=12 and `day` 1‥=31 from `civil_from_days`, and `rem` is 0‥=86_399
+// because `rem_euclid` cannot be negative. The allow is on the function because
+// attributes on a tail expression are not stable Rust.
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+pub fn dos_datetime_from_unix(secs: i64) -> u32 {
+    // Checked before any arithmetic, so the shifts below cannot overflow their
+    // fields: outside this window `year - 1980` does not fit in 7 bits.
+    if secs < DOS_EPOCH_UNIX || secs > DOS_END_UNIX {
+        return 0;
+    }
+
+    // `div_euclid`/`rem_euclid` rather than `/` and `%` so that the remainder
+    // is never negative. It cannot be, given the bounds check above, but the
+    // truncating forms would be wrong if this function were ever given a wider
+    // range and the bug would be a silently shifted time rather than a panic.
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+
+    let (year, month, day) = civil_from_days(days);
+
+    let date = (((year - 1980) as u32) << 9) | (month << 5) | day;
+    let time = (((rem / 3600) as u32) << 11)
+        | ((((rem % 3600) / 60) as u32) << 5)
+        | (((rem % 60) / 2) as u32);
+
+    (date << 16) | time
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,5 +1128,147 @@ mod tests {
         assert!(Tz::parse(b"EST5EDT,J366,M11.1.0").is_none(), "Julian day 366");
         assert!(Tz::parse(b"EST5EDT,M3.2.0").is_none(), "one rule is not two");
         assert!(Tz::parse(b"EST25").is_none(), "an offset past 24 hours");
+    }
+
+    // -- dos_datetime_from_unix ------------------------------------------
+
+    /// Unpack a DOS pair the way a reader does, so the tests below can state
+    /// their expectations as dates rather than as hex.
+    ///
+    /// Deliberately a *test-local* transcription rather than a public inverse:
+    /// a round-trip through two functions in the same file that were written
+    /// together can agree while both being wrong, so the tests that matter
+    /// check against hand-computed constants, and this only exists to make
+    /// failure messages readable.
+    fn unpack(pair: u32) -> (i64, u32, u32, u32, u32, u32) {
+        let (date, time) = (pair >> 16, pair & 0xFFFF);
+        (
+            1980 + i64::from(date >> 9),
+            (date >> 5) & 0x0F,
+            date & 0x1F,
+            time >> 11,
+            (time >> 5) & 0x3F,
+            (time & 0x1F) * 2,
+        )
+    }
+
+    #[test]
+    fn packs_a_known_instant_into_the_documented_layout() {
+        // 2026-08-26 14:30:00 UTC.
+        let pair = dos_datetime_from_unix(1_787_754_600);
+        assert_eq!(unpack(pair), (2026, 8, 26, 14, 30, 0));
+        // Stated as bits too: the layout is the contract, and `unpack` above
+        // would agree with a consistently-wrong packing.
+        assert_eq!(
+            pair >> 16,
+            ((2026 - 1980) << 9) | (8 << 5) | 26,
+            "date half"
+        );
+        assert_eq!(pair & 0xFFFF, (14 << 11) | (30 << 5), "time half");
+    }
+
+    #[test]
+    fn the_dos_epoch_is_representable_and_the_instant_before_it_is_not() {
+        // The boundary is the whole point of the range check, so both sides of
+        // it are named rather than assumed.
+        assert_eq!(
+            unpack(dos_datetime_from_unix(DOS_EPOCH_UNIX)),
+            (1980, 1, 1, 0, 0, 0),
+            "the DOS epoch itself is a representable date"
+        );
+        assert_eq!(
+            dos_datetime_from_unix(DOS_EPOCH_UNIX - 1),
+            0,
+            "one second earlier cannot be represented, so it is 'not recorded'"
+        );
+    }
+
+    #[test]
+    fn out_of_range_is_refused_rather_than_clamped() {
+        // This is the property `A-ZIPARCHIVE-CREATE-STAMPED-EVERY-MEMBER-1980-01-01`
+        // is about: a clamping implementation returns the DOS minimum here,
+        // which reads as a real date of 1980-01-01 and is indistinguishable
+        // from a file genuinely written that day.
+        let dos_min = dos_datetime_from_unix(DOS_EPOCH_UNIX);
+        for (secs, what) in [
+            (0_i64, "the Unix epoch, and the 'time unavailable' sentinel"),
+            (-1, "one second before the Unix epoch"),
+            (i64::MIN, "the far past"),
+            (i64::MAX, "the far future"),
+            (DOS_END_UNIX + 1, "one second past the last DOS instant"),
+        ] {
+            let got = dos_datetime_from_unix(secs);
+            assert_eq!(got, 0, "{what} must be 'not recorded'");
+            assert_ne!(got, dos_min, "{what} must not be clamped to 1980-01-01");
+        }
+    }
+
+    #[test]
+    fn the_last_representable_instant_is_the_end_of_2107() {
+        assert_eq!(
+            unpack(dos_datetime_from_unix(DOS_END_UNIX)),
+            (2107, 12, 31, 23, 59, 58),
+            "the year field is 7 bits from 1980, so 2107 is the last year"
+        );
+        // 127 is the largest value the 7-bit year field holds; a bound that
+        // was off by one would either lose 2107 or overflow into the month.
+        assert_eq!(dos_datetime_from_unix(DOS_END_UNIX) >> 25, 127);
+    }
+
+    #[test]
+    fn odd_seconds_round_down_so_a_time_is_never_later_than_it_was() {
+        // 2026-08-26 14:30:00 UTC, then the following second.
+        let even = dos_datetime_from_unix(1_787_754_600);
+        let odd = dos_datetime_from_unix(1_787_754_601);
+        assert_eq!(unpack(even).5, 0);
+        assert_eq!(unpack(odd).5, 0, "the odd second rounds down, not up");
+        assert_eq!(even, odd, "both land in the same two-second bucket");
+
+        // And the next even second is a different bucket, so the rounding is
+        // losing one bit of resolution rather than losing the seconds field.
+        assert_eq!(unpack(dos_datetime_from_unix(1_787_754_602)).5, 2);
+    }
+
+    #[test]
+    fn a_leap_day_is_packed_as_itself() {
+        // 2024-02-29 12:00:00 UTC. A packing that derived the month from
+        // day-of-year over a 365-day year -- the bug that produced six wrong
+        // date columns before `civil_from_days` was shared -- reports 03-01
+        // here, which is in range and so cannot be caught by a bounds check.
+        assert_eq!(
+            unpack(dos_datetime_from_unix(1_709_208_000)),
+            (2024, 2, 29, 12, 0, 0)
+        );
+    }
+
+    #[test]
+    fn every_representable_day_packs_into_a_valid_in_range_field() {
+        // Walks all ~46_750 representable days at noon.  The cheap property --
+        // that no field ever overflows into its neighbour -- is exactly the one
+        // a hand-rolled packing gets wrong for a handful of dates scattered
+        // across a century, which spot checks miss.
+        let mut secs = DOS_EPOCH_UNIX + 43_200;
+        let mut checked = 0_u32;
+        while secs <= DOS_END_UNIX {
+            let pair = dos_datetime_from_unix(secs);
+            let (year, month, day, hour, minute, second) = unpack(pair);
+            assert_ne!(pair, 0, "in-range instant reported as unrecorded");
+            assert!((1980..=2107).contains(&year), "year {year} out of range");
+            assert!((1..=12).contains(&month), "month {month} out of range");
+            assert!(
+                day >= 1 && day <= days_in_month(month, year),
+                "{year}-{month:02}-{day:02} is not a day that exists"
+            );
+            assert_eq!((hour, minute, second), (12, 0, 0));
+            // And it agrees with the calendar the rest of the crate uses.
+            assert_eq!(
+                (year, month, day),
+                civil_from_days(secs.div_euclid(86_400)),
+                "packing disagrees with civil_from_days"
+            );
+            secs += 86_400;
+            checked += 1;
+        }
+        assert!(checked > 46_000, "expected ~46_750 days, walked {checked}");
     }
 }

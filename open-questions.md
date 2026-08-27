@@ -2060,3 +2060,89 @@ Safe and stable; nothing degrades. The cost is ongoing and quiet: every
 and any pipeline that splits on `:` reads the wrong field. It also gets
 *slightly* more expensive to change over time, since each new script written
 against the current defaults is one more thing to check.
+
+## SlateOS has no way to encrypt anything. Which cipher do we add, and who owns it? (lane C, 2026-08-26)
+
+**In short:** The whole operating system can *scramble* data so it can be
+checked (SHA-256, MD5, SHA-1, CRC32 — those are all one-way fingerprints), but
+it cannot **encrypt** anything: there is no code anywhere in the tree that turns
+readable data into unreadable data and back again with a key. So the password
+manager I just wired to a real window cannot save your passwords — not because
+nobody has written the save code, but because there is nothing to lock the file
+with. Adding a cipher is a few hours' work, but *which* one is a decision that
+sticks, because every file written under it has to stay readable forever.
+
+### Where it bites
+
+Anything that needs to store a secret on disk, which is at least:
+
+| Wants it | For | Status |
+|---|---|---|
+| `apps/credmanager` | the password vault | wired to a window, stores nothing — `known-issues.md` → `C-CREDMANAGER-HAS-NO-VAULT-ON-DISK` |
+| `gui/credentials` | saved Wi-Fi and site logins | same gap |
+| `apps/archivemanager` | encrypted zip members | can't read them either — `C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT` |
+| whole-disk encryption | the roadmap's storage section | not started |
+
+`pwkdf` already turns a master password into a 256-bit key correctly, with salt
+and a tunable cost. That half is done and tested. The missing half is what to
+*do* with the key.
+
+### The terms, since two of them do the work
+
+- **AEAD** — "authenticated encryption": a cipher that both hides the data and
+  detects tampering. The alternative (encrypt-only) lets an attacker flip bits
+  in your vault and have it decrypt to different, valid-looking garbage. Nobody
+  should ship encrypt-only in 2026; treat AEAD as settled and read the options
+  below as "which AEAD".
+- **AES-NI** — a CPU instruction that makes AES fast. Without it, a careful
+  software AES is ~5-10× slower *and* much harder to write without leaking the
+  key through timing. Every x86-64 chip since ~2010 has it, but we would be
+  choosing to depend on it.
+
+### Options
+
+**A — ChaCha20-Poly1305, written here.**
+*What changes:* one new `no_std` crate at the workspace root, ~400 lines, no CPU
+feature required. Fast and constant-time in plain Rust on any machine.
+This is what WireGuard and TLS 1.3 use on hardware without AES-NI.
+
+**B — AES-256-GCM, written here.**
+*What changes:* the same shape, but the software fallback is the part that is
+easy to get subtly wrong (timing leaks through table lookups), and doing it
+*properly* means writing the AES-NI path too — so it is really two
+implementations, and the interesting one is x86-only.
+
+**C — port a vetted C implementation instead of writing Rust.**
+*What changes:* no new hand-written crypto, but a C dependency in the build for
+every app that stores a secret, and `design.txt` already says C is for porting
+existing code — which this would be. Slower to land, harder to audit in-tree.
+
+**D — decide later; ship the apps without persistence.**
+*What changes:* nothing. credmanager keeps opening an empty vault every launch,
+`gui/credentials` keeps forgetting Wi-Fi passwords, and the gap spreads to
+whatever gets built next.
+
+### The part that is not mine to decide
+
+Even given a choice, **which lane owns it** is open. The hash crates (`sha2`,
+`sha1`, `md5`) live at the workspace root and are shared by all three lanes, so
+a cipher belongs there too — but that is outside every lane's write glob. If
+you pick A or B, say whether lane C should write it at the root, or whether I
+should file a request to lane A and pick up something else.
+
+### My recommendation
+
+**A, written by whichever lane you say.** ChaCha20-Poly1305 has no CPU
+dependency, so there is one implementation rather than a fast path and a
+dangerous fallback; it is the easiest of the three to write correctly and the
+easiest to test against published vectors. The reason I am asking rather than
+doing it is not the cipher — it is that hand-written crypto in an OS is exactly
+the kind of thing you may want to overrule on principle, and the file format it
+implies is permanent.
+
+### If this is never answered
+
+Nothing breaks and nothing gets worse on its own — but a growing number of
+finished, tested applications stay unable to do the one thing they exist for.
+credmanager is the third app now waiting on this. It is not blocking my current
+work; I am carrying on down the roadmap.

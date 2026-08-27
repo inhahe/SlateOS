@@ -22,11 +22,32 @@
 //!      v
 //! DefragUI         -- full GUI with multiple views and controls
 //! ```
+//!
+//! # Where the controls come from
+//!
+//! Every clickable thing is a [`Target`], and the *only* place a target's
+//! rectangle is written down is the renderer, which records it with
+//! [`Frame::hit`] at the moment it draws it. [`DefragUI::target_at`] then
+//! answers "what is under this point?" by drawing a frame and asking it.
+//!
+//! That is not merely tidy. This app had eighteen tested state-changing
+//! methods -- `select_drive`, `set_view_tab`, `start_defrag`, `set_file_sort`,
+//! `add_exclude` and the rest -- and *nothing called any of them*, because
+//! there was no input path at all. Writing a second, hand-summed copy of the
+//! renderer's arithmetic to fix that is how `credmanager` ended up drawing
+//! sidebar rows that clicked to nothing; see `known-issues.md` ->
+//! `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`.
 
 #![allow(dead_code)]
 
-#[allow(unused_imports)]
+use std::process::ExitCode;
+
 use guitk::color::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+#[cfg(test)]
+use guitk::probe;
+use guitk::probe::Probe;
 #[allow(unused_imports)]
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -36,6 +57,8 @@ use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 #[allow(unused_imports)]
 use guitk::text;
+use guitk::wheel;
+use oswindow::app::{self, App, Response};
 
 #[allow(unused_imports)]
 use std::collections::BTreeMap;
@@ -155,6 +178,165 @@ fn action_button_width(label: &str) -> f32 {
 /// sideways every time the selection moved.
 fn tab_width(label: &str) -> f32 {
     text::measure(label, FONT_SIZE, FontWeightHint::Bold) + 24.0
+}
+
+// ============================================================================
+// Targets and layout
+// ============================================================================
+
+/// Everything in the window that can be clicked.
+///
+/// One variant per control, recorded by the renderer as it draws. A variant
+/// that no renderer records is a control that cannot be reached, and a
+/// `Target` the renderer records but `handle_click` does not match is a
+/// control that does nothing -- both are visible in one place now, which is
+/// the point of naming them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// Toolbar: the Analyze / Defragment / Pause / Resume button.
+    ///
+    /// One target for four labels because it is one button: which of the four
+    /// it currently is depends on [`DefragUI::defrag_state`], and the click
+    /// handler asks that same question rather than remembering the answer.
+    Action,
+    /// Toolbar: an optimization-mode button.
+    Mode(OptimizationMode),
+    /// Sidebar: drive row `n`, indexing [`DefragUI::drives`].
+    Drive(usize),
+    /// The tab strip.
+    Tab(ViewTab),
+    /// File list: a sortable column header.
+    FileHeader(FileSortColumn),
+    /// Schedule view: the enable/disable toggle.
+    ScheduleToggle,
+    /// Schedule view: exclude-pattern row `n`, indexing [`DefragUI::excludes`].
+    ///
+    /// Clicking the row toggles the pattern; the `x` at its right removes it,
+    /// and is [`Target::ExcludeRemove`] so that "stop excluding this for now"
+    /// and "forget I ever wrote it" are not the same pixel.
+    ExcludeToggle(usize),
+    /// Schedule view: the `x` that deletes exclude-pattern row `n`.
+    ExcludeRemove(usize),
+    /// Schedule view: the button that opens the new-pattern field.
+    ExcludeAdd,
+    /// Schedule view: the new-pattern text field, while it is open.
+    ExcludeInput,
+    /// SSD warning: dismiss without defragmenting.
+    SsdCancel,
+    /// SSD warning: defragment the SSD anyway.
+    SsdProceed,
+    /// The dimmed backdrop behind the SSD warning.
+    ///
+    /// Recorded so the dialog swallows clicks meant for the window under it.
+    /// Without it a press at the toolbar's coordinates would start a defrag
+    /// through a dialog whose whole purpose is to ask whether to.
+    Scrim,
+}
+
+pub type Frame = guitk::frame::Frame<Target>;
+
+/// A window size that can be laid out against: never negative, never NaN.
+fn sane(v: f32) -> f32 {
+    if v.is_finite() { v.max(0.0) } else { 0.0 }
+}
+
+/// Take `want` px off the top of the space between `y` and `limit`, shrinking
+/// rather than clamping if there is less than that left.
+///
+/// Clamping is the wrong instinct: [`Frame`] does not clip to the window, so a
+/// rectangle clamped to a minimum height in a window too short for it would
+/// still record a hit box -- a button that cannot be seen but can be pressed.
+fn take_top(y: &mut f32, limit: f32, width: f32, want: f32) -> Rect {
+    let h = want.min((limit - *y).max(0.0));
+    let r = Rect::new(0.0, *y, width, h);
+    *y += h;
+    r
+}
+
+/// `r` cut down to `bounds`, or empty if it falls outside entirely.
+fn trim(r: Rect, bounds: Rect) -> Rect {
+    r.intersect(bounds).unwrap_or(Rect::EMPTY)
+}
+
+/// Where every pane goes, derived from the live window size.
+///
+/// Built fresh on every frame and never stored. The size a window *is* and the
+/// size it was last told to be are two different things for exactly one frame
+/// -- the first one, which arrives before any `Event::Resize` -- and that is
+/// the frame in which a remembered layout is wrong.
+struct Layout {
+    /// The whole window.
+    window: Rect,
+    /// The toolbar strip across the top.
+    toolbar: Rect,
+    /// The sidebar down the left, below the toolbar and above the status bar.
+    sidebar: Rect,
+    /// The tab strip, to the right of the sidebar.
+    tabs: Rect,
+    /// The view pane below the tabs: disk map, file list, statistics or
+    /// schedule, whichever [`DefragUI::view_tab`] selects.
+    content: Rect,
+    /// The status bar along the bottom.
+    status: Rect,
+}
+
+impl Layout {
+    fn new(width: f32, height: f32) -> Self {
+        let width = sane(width);
+        let height = sane(height);
+        let window = Rect::new(0.0, 0.0, width, height);
+
+        // The status bar is taken off the bottom first so that a window too
+        // short for everything loses content height rather than losing the
+        // bar off the bottom edge -- and `max(0.0)` rather than a clamp, so a
+        // window shorter than the toolbar simply has no content at all.
+        let status_h = STATUS_BAR_HEIGHT.min(height);
+        let body_limit = (height - status_h).max(0.0);
+
+        let mut top = 0.0;
+        let toolbar = take_top(&mut top, body_limit, width, TOOLBAR_HEIGHT);
+        let sidebar_top = top;
+
+        let tabs = trim(
+            Rect::new(
+                SIDEBAR_WIDTH,
+                top,
+                (width - SIDEBAR_WIDTH).max(0.0),
+                TAB_HEIGHT.min((body_limit - top).max(0.0)),
+            ),
+            window,
+        );
+        top += tabs.h;
+
+        let sidebar = trim(
+            Rect::new(
+                0.0,
+                sidebar_top,
+                SIDEBAR_WIDTH,
+                (body_limit - sidebar_top).max(0.0),
+            ),
+            window,
+        );
+        let content = trim(
+            Rect::new(
+                SIDEBAR_WIDTH,
+                top,
+                (width - SIDEBAR_WIDTH).max(0.0),
+                (body_limit - top).max(0.0),
+            ),
+            window,
+        );
+        let status = trim(Rect::new(0.0, body_limit, width, status_h), window);
+
+        Self {
+            window,
+            toolbar,
+            sidebar,
+            tabs,
+            content,
+            status,
+        }
+    }
 }
 
 // ============================================================================
@@ -1281,7 +1463,39 @@ pub struct DefragUI {
     pub show_exclude_editor: bool,
     /// Text input for new exclude pattern.
     pub exclude_input: String,
+    /// Window width in pixels, as of the last frame or resize.
+    ///
+    /// Only the *event* path reads these -- a click arrives with a point and
+    /// no size, so it must be told against which window that point was aimed.
+    /// The renderer never reads them: [`App::render`] is handed the live size
+    /// and passes it straight through, because believing the caller is the
+    /// whole point of not caching a layout.
+    pub width: f32,
+    /// Window height in pixels, as of the last frame or resize.
+    pub height: f32,
+    /// Carries the fraction of a row left over by each scroll event.
+    ///
+    /// The file list moves in whole rows, and a trackpad sends a fraction of a
+    /// notch per event. Rounding each one on its own would floor every event
+    /// to zero and the list would never move at all.
+    wheel: wheel::Accumulator,
+    /// How the Analyze button obtains a block map, or `None` if it cannot.
+    ///
+    /// SlateOS has no way to ask a filesystem for its block layout, so nothing
+    /// in the tree can supply this yet and the shipping app leaves it `None`.
+    /// That is deliberately visible rather than papered over: with no scanner
+    /// the toolbar draws Analyze greyed and records no hit box for it, so the
+    /// button is *absent* rather than present-and-dead. See `known-issues.md`
+    /// -> `C-DEFRAG-HAS-NO-WAY-TO-SCAN-A-DRIVE`.
+    pub scan: Option<ScanFn>,
 }
+
+/// Reads a drive's block layout and per-file fragmentation.
+///
+/// A plain `fn` pointer rather than a boxed closure so that [`DefragUI`] stays
+/// `Send`-agnostic and needs no allocator to hold one -- this is a socket for
+/// a future filesystem service, not a callback registry.
+pub type ScanFn = fn(&DriveInfo) -> Option<(BlockMap, Vec<FileFragInfo>)>;
 
 impl Default for DefragUI {
     fn default() -> Self {
@@ -1313,6 +1527,10 @@ impl DefragUI {
             show_ssd_warning: false,
             show_exclude_editor: false,
             exclude_input: String::new(),
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
+            wheel: wheel::Accumulator::default(),
+            scan: None,
         }
     }
 
@@ -1469,72 +1687,418 @@ impl DefragUI {
             .unwrap_or(DefragState::Idle)
     }
 
+    /// Whether the toolbar's action button can do anything if pressed.
+    ///
+    /// Consulted by the renderer to decide whether to record a hit box, and by
+    /// the click handler for what to do -- one predicate, so a button that
+    /// looks pressable and a button that *is* cannot come apart.
+    fn action_available(&self) -> bool {
+        match self.defrag_state() {
+            // Analysing is already under way; there is nothing to ask for.
+            DefragState::Analyzing => false,
+            // Pause and Resume act on the engine that exists.
+            DefragState::Running | DefragState::Paused => true,
+            DefragState::Idle | DefragState::Completed | DefragState::Error => {
+                if self.analysis.is_some() {
+                    // "Defragment": needs a drive, since `start_defrag` must
+                    // ask whether it is an SSD before touching it.
+                    self.current_drive().is_some()
+                } else {
+                    // "Analyze": needs a drive *and* something to read it with.
+                    self.scan.is_some() && self.current_drive().is_some()
+                }
+            }
+        }
+    }
+
+    /// Scan the selected drive and load the result, returning whether it ran.
+    ///
+    /// `false` means no scanner, no drive, or a scanner that could not read
+    /// the drive -- three ways of failing that the caller cannot usefully
+    /// tell apart, since all three leave the view exactly as it was.
+    pub fn analyze_selected_drive(&mut self) -> bool {
+        let Some(scan) = self.scan else { return false };
+        let Some(drive) = self.current_drive() else {
+            return false;
+        };
+        let Some((block_map, files)) = scan(drive) else {
+            return false;
+        };
+        self.load_analysis(analyze_drive(&block_map, &files));
+        // A fresh analysis sorts differently from the last one, so the row at
+        // the old offset is a different file. Back to the top, where the
+        // worst-fragmented files are and the reason to have scanned.
+        self.scroll_file_list_to_top();
+        true
+    }
+
+    // ========================================================================
+    // Input
+    // ========================================================================
+
+    /// Act on whatever control is at `(x, y)`.
+    ///
+    /// Every arm here names a [`Target`], and every `Target` the renderer
+    /// records appears in exactly one arm. A variant with no arm is a control
+    /// that does nothing when clicked, and the compiler's exhaustiveness check
+    /// is what stops one being added without an answer to "and then what?".
+    fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
+        let Some(target) = self.target_at(x, y) else {
+            return EventResult::Ignored;
+        };
+
+        match target {
+            Target::Action => match self.defrag_state() {
+                DefragState::Running => self.pause_defrag(),
+                DefragState::Paused => self.resume_defrag(),
+                DefragState::Analyzing => {}
+                DefragState::Idle | DefragState::Completed | DefragState::Error => {
+                    if self.analysis.is_some() {
+                        self.start_defrag();
+                    } else {
+                        self.analyze_selected_drive();
+                    }
+                }
+            },
+            Target::Mode(mode) => {
+                self.optimization_mode = mode;
+            }
+            Target::Drive(index) => self.select_drive(index),
+            Target::Tab(tab) => self.set_view_tab(tab),
+            Target::FileHeader(column) => {
+                self.set_file_sort(column);
+                // A re-sort makes the row at the current offset a different
+                // file. Scrolling back to the top is the only position that
+                // means the same thing before and after.
+                self.scroll_file_list_to_top();
+            }
+            Target::ScheduleToggle => {
+                self.schedule.enabled = !self.schedule.enabled;
+            }
+            Target::ExcludeToggle(index) => self.toggle_exclude(index),
+            Target::ExcludeRemove(index) => self.remove_exclude(index),
+            Target::ExcludeAdd => {
+                // Closing the editor discards what was typed. Leaving it to
+                // reappear on the next open would be a surprise: the field
+                // looks empty when closed, so its contents are not something
+                // the user can still see they own.
+                self.show_exclude_editor = !self.show_exclude_editor;
+                self.exclude_input.clear();
+            }
+            // Clicking the field is how a click lands on it rather than on the
+            // card behind it. There is no caret to move -- the field is
+            // append-only -- so it consumes the press and changes nothing.
+            Target::ExcludeInput => {}
+            Target::SsdCancel => self.show_ssd_warning = false,
+            Target::SsdProceed => self.force_start_defrag(),
+            // Absorbed, not acted on: see `Target::Scrim`.
+            Target::Scrim => {}
+        }
+
+        EventResult::Consumed
+    }
+
+    /// Scroll the file list, if that is what is under the pointer.
+    fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        // The file list is the only scrollable view, and only its own pane
+        // scrolls: a wheel over the sidebar or the toolbar is not this list's
+        // business, and consuming it would stop it ever becoming anything
+        // else's.
+        if self.view_tab != ViewTab::FileList {
+            return EventResult::Ignored;
+        }
+        if self.show_ssd_warning {
+            return EventResult::Ignored;
+        }
+        if !Layout::new(self.width, self.height).content.contains(x, y) {
+            return EventResult::Ignored;
+        }
+
+        let rows = self.wheel.rows(dy);
+        if rows == 0 {
+            // The notch was banked, not lost. Reporting `Consumed` says the
+            // list took the event, which it did -- reporting `Ignored` would
+            // let a parent scroll something else with the same flick.
+            return EventResult::Consumed;
+        }
+        self.scroll_file_list_by(rows);
+        EventResult::Consumed
+    }
+
+    /// Keys: typing into the exclude field, and the shortcuts around it.
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+
+        // The SSD dialog is modal, so it answers first and nothing else sees
+        // the key. Escape cancels and Enter proceeds, which is the pairing the
+        // buttons already have.
+        if self.show_ssd_warning {
+            return match key.key {
+                Key::Escape => {
+                    self.show_ssd_warning = false;
+                    EventResult::Consumed
+                }
+                Key::Enter => {
+                    self.force_start_defrag();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Consumed,
+            };
+        }
+
+        if self.show_exclude_editor {
+            match key.key {
+                Key::Escape => {
+                    self.show_exclude_editor = false;
+                    self.exclude_input.clear();
+                }
+                Key::Enter => {
+                    // `add_exclude` ignores an empty pattern, so Enter on an
+                    // empty field closes the editor rather than adding a
+                    // pattern that matches everything.
+                    self.add_exclude(&self.exclude_input.clone());
+                    self.show_exclude_editor = false;
+                    self.exclude_input.clear();
+                }
+                Key::Backspace => {
+                    self.exclude_input.pop();
+                }
+                _ => {
+                    // `typed` rather than the raw `text`: it drops control
+                    // characters, which would be invisible in the field and
+                    // meaningless in a glob, and it yields *every* character
+                    // the keystroke produced -- a dead key followed by a
+                    // non-composing one types two, and taking only the first
+                    // would silently eat what someone typed.
+                    self.exclude_input.extend(key.typed());
+                }
+            }
+            return EventResult::Consumed;
+        }
+
+        // Tab cycles the views, which is the one thing in this window worth a
+        // key of its own: the four tabs are the whole app.
+        if key.key == Key::Tab {
+            let tabs = ViewTab::all();
+            let here = tabs.iter().position(|t| *t == self.view_tab).unwrap_or(0);
+            let step = if key.modifiers.shift {
+                tabs.len().saturating_sub(1)
+            } else {
+                1
+            };
+            // `checked_rem` rather than `%` because `ViewTab::all()` being empty
+            // is a thing the type system does not forbid, and a modulo by zero
+            // panics. An empty tab list means "no view to move to", not a crash.
+            if let Some(next) = here
+                .saturating_add(step)
+                .checked_rem(tabs.len())
+                .and_then(|i| tabs.get(i))
+            {
+                self.set_view_tab(*next);
+            }
+            return EventResult::Consumed;
+        }
+
+        EventResult::Ignored
+    }
+}
+
+/// How many blocks a defrag advances per timer tick.
+///
+/// One step per tick would take a 100 000-block drive an hour of wall clock at
+/// 60 Hz, which is not a progress bar so much as a screensaver. A batch keeps
+/// the tick cheap and bounded while still finishing in a plausible time.
+const STEPS_PER_TICK: u64 = 64;
+
+/// Route one event into [`DefragUI`].
+///
+/// A free function rather than a method so the tests can drive the same path
+/// the window does, without going through `App`.
+fn handle_event(ui: &mut DefragUI, event: &Event) -> EventResult {
+    match event {
+        Event::Mouse(m) => match m.kind {
+            MouseEventKind::Press(MouseButton::Left) => ui.handle_click(m.x, m.y),
+            MouseEventKind::Scroll { dy, .. } => ui.handle_scroll(m.x, m.y, dy),
+            _ => EventResult::Ignored,
+        },
+        Event::Key(k) => ui.handle_key(k),
+        Event::Resize { width, height } => {
+            ui.resize(*width as f32, *height as f32);
+            EventResult::Consumed
+        }
+        Event::Tick { .. } => {
+            // Only a running defrag has anything to do on a tick. Reporting
+            // `Ignored` otherwise is what lets an idle window stop redrawing,
+            // rather than repainting an unchanged picture sixty times a second.
+            if ui.defrag_state() == DefragState::Running {
+                ui.defrag_step_batch(STEPS_PER_TICK);
+                EventResult::Consumed
+            } else {
+                EventResult::Ignored
+            }
+        }
+        _ => EventResult::Ignored,
+    }
+}
+
+impl App for DefragUI {
+    fn title(&self) -> String {
+        "Disk Defragmenter".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if let Event::Key(key) = event
+            && key.pressed
+            && key.key == Key::Q
+            && key.modifiers.ctrl
+        {
+            return Response::Exit;
+        }
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match handle_event(self, event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for DefragUI {
+    type Target = Target;
+    type Outcome = EventResult;
+
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(
+            self,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+        )
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        handle_event(self, &Event::Key(key.clone()))
+    }
+}
+
+impl DefragUI {
     // ========================================================================
     // Rendering
     // ========================================================================
 
     /// Render the complete UI to a `RenderTree`.
-    pub fn render(&self) -> RenderTree {
-        let mut tree = RenderTree::new();
+    /// The window at `width` x `height`, with every control's box recorded.
+    ///
+    /// The size is a parameter rather than a field read because this is the
+    /// one function that must never be wrong about it: [`App::render`] is
+    /// handed the live size, and `target_at` re-draws at the size the last
+    /// frame used, so the boxes a click is tested against are by construction
+    /// the boxes that were drawn.
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let layout = Layout::new(width, height);
+        let mut frame = Frame::new(layout.window.w, layout.window.h);
 
         // Background
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: layout.window.w,
+            height: layout.window.h,
             color: COLOR_BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
-        self.render_toolbar(&mut tree);
-        self.render_sidebar(&mut tree);
-        self.render_tabs(&mut tree);
+        self.render_toolbar(&mut frame, &layout);
+        self.render_sidebar(&mut frame, &layout);
+        self.render_tabs(&mut frame, &layout);
 
-        let content_x = SIDEBAR_WIDTH;
-        let content_y = TOOLBAR_HEIGHT + TAB_HEIGHT;
-        let content_w = WINDOW_WIDTH - SIDEBAR_WIDTH;
-        let content_h = WINDOW_HEIGHT - TOOLBAR_HEIGHT - TAB_HEIGHT - STATUS_BAR_HEIGHT;
-
+        // Each view is clipped to the content pane, so a list longer than the
+        // pane records no hit box for the rows past its bottom edge. `Frame`
+        // trims a hit to the innermost clip and drops it if nothing is left,
+        // which is what makes an off-screen row unclickable without anyone
+        // having to remember to bounds-check it.
+        let c = layout.content;
+        frame.clip(c);
         match self.view_tab {
-            ViewTab::DiskMap => {
-                self.render_disk_map(&mut tree, content_x, content_y, content_w, content_h);
-            }
-            ViewTab::FileList => {
-                self.render_file_list(&mut tree, content_x, content_y, content_w, content_h);
-            }
-            ViewTab::Statistics => {
-                self.render_statistics(&mut tree, content_x, content_y, content_w, content_h);
-            }
-            ViewTab::Schedule => {
-                self.render_schedule(&mut tree, content_x, content_y, content_w, content_h);
-            }
+            ViewTab::DiskMap => self.render_disk_map(&mut frame, c.x, c.y, c.w, c.h),
+            ViewTab::FileList => self.render_file_list(&mut frame, c.x, c.y, c.w, c.h),
+            ViewTab::Statistics => self.render_statistics(&mut frame, c.x, c.y, c.w, c.h),
+            ViewTab::Schedule => self.render_schedule(&mut frame, c.x, c.y, c.w, c.h),
         }
+        frame.unclip();
 
-        self.render_status_bar(&mut tree);
+        self.render_status_bar(&mut frame, &layout);
 
         if self.show_ssd_warning {
-            self.render_ssd_warning(&mut tree);
+            // Everything drawn above is still on screen but must stop being
+            // clickable: a modal that can be clicked past is not modal. The
+            // recorded boxes go, and the scrim takes the whole window.
+            frame.discard_hits();
+            self.render_ssd_warning(&mut frame, &layout);
         }
 
-        tree
+        frame
+    }
+
+    /// Which control is at `(x, y)`, at the size the last frame was drawn.
+    ///
+    /// Draws a frame and asks it, rather than re-deriving the arithmetic. The
+    /// cost is one throwaway frame per click, which is nothing next to being
+    /// unable to disagree with what the user saw.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.width, self.height).hit_test(x, y)
+    }
+
+    /// Remember a new window size, for the benefit of the event path.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.width = sane(width);
+        self.height = sane(height);
     }
 
     // -- toolbar ---------------------------------------------------------------
 
-    fn render_toolbar(&self, tree: &mut RenderTree) {
+    fn render_toolbar(&self, frame: &mut Frame, layout: &Layout) {
+        let bar = layout.toolbar;
+
         // Toolbar background
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: TOOLBAR_HEIGHT,
+            width: bar.w,
+            height: bar.h,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
+        // Everything below is clipped to the strip, so a button pushed off a
+        // narrow window's right edge is not merely invisible -- its hit box is
+        // trimmed to nothing and it stops being clickable too.
+        frame.clip(bar);
+
         // Title
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: PADDING,
             y: 14.0,
             text: "Disk Defragmenter".to_string(),
@@ -1546,7 +2110,7 @@ impl DefragUI {
         });
 
         // Action buttons on the right side
-        let mut btn_x = WINDOW_WIDTH - PADDING;
+        let mut btn_x = bar.w - PADDING;
 
         // Optimization mode selector
         for mode in OptimizationMode::all().iter().rev() {
@@ -1563,7 +2127,11 @@ impl DefragUI {
             } else {
                 COLOR_SUBTEXT0
             };
-            tree.push(RenderCommand::FillRect {
+            frame.hit(
+                Target::Mode(*mode),
+                Rect::new(btn_x, 9.0, btn_w, BUTTON_HEIGHT),
+            );
+            frame.push(RenderCommand::FillRect {
                 x: btn_x,
                 y: 9.0,
                 width: btn_w,
@@ -1571,7 +2139,7 @@ impl DefragUI {
                 color: bg_color,
                 corner_radii: CornerRadii::all(4.0),
             });
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: btn_x + 8.0,
                 y: 16.0,
                 text: label.to_string(),
@@ -1612,15 +2180,30 @@ impl DefragUI {
 
         let action_w = action_button_width(action_label);
         let action_x = SIDEBAR_WIDTH + PADDING;
-        tree.push(RenderCommand::FillRect {
+        // One predicate decides both whether the button is pressable and
+        // whether it looks it. A button drawn in its live colour that records
+        // no hit box is the dead control this whole rewrite exists to remove,
+        // so the greying and the hit box are not allowed to disagree.
+        let available = self.action_available();
+        if available {
+            frame.hit(
+                Target::Action,
+                Rect::new(action_x, 9.0, action_w, BUTTON_HEIGHT),
+            );
+        }
+        frame.push(RenderCommand::FillRect {
             x: action_x,
             y: 9.0,
             width: action_w,
             height: BUTTON_HEIGHT,
-            color: action_color,
+            color: if available {
+                action_color
+            } else {
+                COLOR_SURFACE0
+            },
             corner_radii: CornerRadii::all(4.0),
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: action_x + 10.0,
             y: 16.0,
             text: action_label.to_string(),
@@ -1630,26 +2213,32 @@ impl DefragUI {
             max_width: Some(action_w - 20.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        frame.unclip();
     }
 
     // -- sidebar ---------------------------------------------------------------
 
-    fn render_sidebar(&self, tree: &mut RenderTree) {
-        let sidebar_y = TOOLBAR_HEIGHT;
-        let sidebar_h = WINDOW_HEIGHT - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
+    fn render_sidebar(&self, frame: &mut Frame, layout: &Layout) {
+        let sidebar_y = layout.sidebar.y;
 
         // Sidebar background
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: sidebar_y,
-            width: SIDEBAR_WIDTH,
-            height: sidebar_h,
+            width: layout.sidebar.w,
+            height: layout.sidebar.h,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
+        // Drive rows below the sidebar's bottom edge record no hit box: more
+        // drives than fit is the ordinary case on a short window, and a row
+        // drawn under the status bar must not be clickable through it.
+        frame.clip(layout.sidebar);
+
         // "Drives" header
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: PADDING,
             y: sidebar_y + PADDING,
             text: "Drives".to_string(),
@@ -1671,8 +2260,17 @@ impl DefragUI {
             };
             let row_h = 64.0;
 
+            // The row's own rectangle is recorded, not a re-derivation of it:
+            // `Target::Drive(i)` and `drives[i]` are the same `i` the loop is
+            // already iterating, so a row can never resolve to a drive other
+            // than the one whose label was drawn on it.
+            frame.hit(
+                Target::Drive(i),
+                Rect::new(4.0, dy, SIDEBAR_WIDTH - 8.0, row_h),
+            );
+
             // Row background
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: 4.0,
                 y: dy,
                 width: SIDEBAR_WIDTH - 8.0,
@@ -1682,7 +2280,7 @@ impl DefragUI {
             });
 
             // Drive label
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: PADDING + 4.0,
                 y: dy + 6.0,
                 text: drive.label.clone(),
@@ -1698,7 +2296,7 @@ impl DefragUI {
             });
 
             // Drive info line (fs type + device type)
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: PADDING + 4.0,
                 y: dy + 22.0,
                 text: format!(
@@ -1719,7 +2317,7 @@ impl DefragUI {
             let bar_w = SIDEBAR_WIDTH - 2.0 * PADDING - 8.0;
             let bar_h = 8.0;
             // Background
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: PADDING + 4.0,
                 y: bar_y,
                 width: bar_w,
@@ -1737,7 +2335,7 @@ impl DefragUI {
                 COLOR_BLUE
             };
             if used_w > 0.5 {
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: PADDING + 4.0,
                     y: bar_y,
                     width: used_w,
@@ -1748,7 +2346,7 @@ impl DefragUI {
             }
 
             // Size text
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: PADDING + 4.0,
                 y: dy + 50.0,
                 text: format!(
@@ -1771,7 +2369,7 @@ impl DefragUI {
             && drive.is_ssd()
         {
             dy += 8.0;
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: 4.0,
                 y: dy,
                 width: SIDEBAR_WIDTH - 8.0,
@@ -1779,7 +2377,7 @@ impl DefragUI {
                 color: Color::rgba(COLOR_YELLOW.r, COLOR_YELLOW.g, COLOR_YELLOW.b, 40),
                 corner_radii: CornerRadii::all(4.0),
             });
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: PADDING + 4.0,
                 y: dy + 7.0,
                 text: "SSD - TRIM recommended".to_string(),
@@ -1790,34 +2388,39 @@ impl DefragUI {
                 overflow: TextOverflow::Ellipsis,
             });
         }
+
+        frame.unclip();
     }
 
     // -- tabs ------------------------------------------------------------------
 
-    fn render_tabs(&self, tree: &mut RenderTree) {
-        let tabs_y = TOOLBAR_HEIGHT;
-        let tabs_x = SIDEBAR_WIDTH;
-        let tabs_w = WINDOW_WIDTH - SIDEBAR_WIDTH;
+    fn render_tabs(&self, frame: &mut Frame, layout: &Layout) {
+        let strip = layout.tabs;
 
         // Tab bar background
-        tree.push(RenderCommand::FillRect {
-            x: tabs_x,
-            y: tabs_y,
-            width: tabs_w,
-            height: TAB_HEIGHT,
+        frame.push(RenderCommand::FillRect {
+            x: strip.x,
+            y: strip.y,
+            width: strip.w,
+            height: strip.h,
             color: COLOR_CRUST,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let mut tx = tabs_x + PADDING;
+        frame.clip(strip);
+
+        let tabs_y = strip.y;
+        let mut tx = strip.x + PADDING;
         for tab in ViewTab::all() {
             let label = tab.label();
             let is_active = self.view_tab == *tab;
             let tab_w = tab_width(label);
 
+            frame.hit(Target::Tab(*tab), Rect::new(tx, tabs_y, tab_w, TAB_HEIGHT));
+
             if is_active {
                 // Active tab highlight
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: tx,
                     y: tabs_y,
                     width: tab_w,
@@ -1826,7 +2429,7 @@ impl DefragUI {
                     corner_radii: CornerRadii::ZERO,
                 });
                 // Bottom accent
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: tx,
                     y: tabs_y + TAB_HEIGHT - 2.0,
                     width: tab_w,
@@ -1836,7 +2439,7 @@ impl DefragUI {
                 });
             }
 
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: tx + 12.0,
                 y: tabs_y + 10.0,
                 text: label.to_string(),
@@ -1857,16 +2460,18 @@ impl DefragUI {
 
             tx += tab_w + 2.0;
         }
+
+        frame.unclip();
     }
 
     // -- disk map view ---------------------------------------------------------
 
-    fn render_disk_map(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+    fn render_disk_map(&self, frame: &mut Frame, x: f32, y: f32, w: f32, h: f32) {
         // Progress bar (if defrag is active)
         let mut map_y = y + PADDING;
 
         if let Some(engine) = &self.engine {
-            self.render_progress_bar(tree, x + PADDING, map_y, w - 2.0 * PADDING, engine);
+            self.render_progress_bar(frame, x + PADDING, map_y, w - 2.0 * PADDING, engine);
             map_y += PROGRESS_BAR_HEIGHT + PADDING + 20.0;
         }
 
@@ -1882,7 +2487,7 @@ impl DefragUI {
             let map_h = h - (map_y - y) - LEGEND_HEIGHT - PADDING * 2.0;
 
             // Map background
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: x + PADDING,
                 y: map_y,
                 width: map_w,
@@ -1917,7 +2522,7 @@ impl DefragUI {
 
                 while idx < total && by + BLOCK_SIZE < map_y + map_h {
                     let state = bmap.blocks.get(idx).copied().unwrap_or(BlockState::Free);
-                    tree.push(RenderCommand::FillRect {
+                    frame.push(RenderCommand::FillRect {
                         x: bx,
                         y: by,
                         width: BLOCK_SIZE,
@@ -1949,7 +2554,7 @@ impl DefragUI {
             let mut lx = x + PADDING;
             for (state, label) in legend_items {
                 // Color swatch
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: lx,
                     y: legend_y + 8.0,
                     width: 12.0,
@@ -1958,7 +2563,7 @@ impl DefragUI {
                     corner_radii: CornerRadii::all(2.0),
                 });
                 // Label
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: lx + 16.0,
                     y: legend_y + 8.0,
                     text: label.to_string(),
@@ -1975,7 +2580,7 @@ impl DefragUI {
             }
         } else {
             // No analysis yet
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: text::center_x(
                     "Click Analyze to scan the drive",
                     x + w / 2.0,
@@ -1998,20 +2603,20 @@ impl DefragUI {
             let summary_x = x + w - 300.0;
             if self.engine.is_none() {
                 // Only show summary when not defragging (progress bar takes this space)
-                self.render_analysis_summary(tree, summary_x, summary_y, analysis);
+                self.render_analysis_summary(frame, summary_x, summary_y, analysis);
             }
         }
     }
 
     fn render_analysis_summary(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         x: f32,
         y: f32,
         analysis: &AnalysisResult,
     ) {
         // Summary panel
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y,
             width: 280.0,
@@ -2042,7 +2647,7 @@ impl DefragUI {
 
         for (i, (label, value)) in lines.iter().enumerate() {
             let ly = y + 10.0 + i as f32 * 20.0;
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + 10.0,
                 y: ly,
                 text: label.to_string(),
@@ -2052,7 +2657,7 @@ impl DefragUI {
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + 140.0,
                 y: ly,
                 text: value.clone(),
@@ -2067,7 +2672,7 @@ impl DefragUI {
 
     fn render_progress_bar(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         x: f32,
         y: f32,
         w: f32,
@@ -2076,7 +2681,7 @@ impl DefragUI {
         let progress = &engine.progress;
 
         // Progress bar background
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y,
             width: w,
@@ -2095,7 +2700,7 @@ impl DefragUI {
                 DefragState::Error => COLOR_RED,
                 _ => COLOR_BLUE,
             };
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x,
                 y,
                 width: fill_w,
@@ -2107,7 +2712,7 @@ impl DefragUI {
 
         // Percentage text
         let percent = format_percent(progress.percent());
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: text::center_x(&percent, x + w / 2.0, FONT_SIZE_SMALL, FontWeightHint::Bold),
             y: y + 3.0,
             text: percent,
@@ -2137,7 +2742,7 @@ impl DefragUI {
         };
 
         if !status.is_empty() {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x,
                 y: y + PROGRESS_BAR_HEIGHT + 4.0,
                 text: status,
@@ -2152,12 +2757,12 @@ impl DefragUI {
 
     // -- file list view --------------------------------------------------------
 
-    fn render_file_list(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+    fn render_file_list(&self, frame: &mut Frame, x: f32, y: f32, w: f32, h: f32) {
         let files = if let Some(analysis) = &self.analysis {
             &analysis.file_details
         } else {
             // No analysis: show placeholder
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: text::center_x(
                     "Analyze a drive to see file details",
                     x + w / 2.0,
@@ -2177,7 +2782,7 @@ impl DefragUI {
 
         // Header row
         let header_y = y;
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y: header_y,
             width: w,
@@ -2188,7 +2793,24 @@ impl DefragUI {
 
         let columns = file_list_columns(w);
         let table = Table::with_gap(&columns, x, PADDING);
-        table.header(&mut tree.commands, header_y + 6.0, COLOR_TEXT, FONT_SIZE);
+        frame.draw_with(|c| table.header(c, header_y + 6.0, COLOR_TEXT, FONT_SIZE));
+
+        // Each header is a sort control. Its box comes from the same `Table`
+        // that drew the label, via `column_x`, rather than from a second sum
+        // of `PADDING` and the column fractions -- the two would agree today
+        // and stop agreeing the first time a column width changed.
+        let sort_columns = [
+            (FILE_PATH, FileSortColumn::Path),
+            (FILE_SIZE, FileSortColumn::Size),
+            (FILE_FRAGMENTS, FileSortColumn::Fragments),
+            (FILE_SEVERITY, FileSortColumn::Severity),
+        ];
+        for (index, column) in sort_columns {
+            frame.hit(
+                Target::FileHeader(column),
+                Rect::new(table.left(index), header_y, table.width(index), ROW_HEIGHT),
+            );
+        }
 
         // File rows
         let row_area_y = header_y + ROW_HEIGHT;
@@ -2224,7 +2846,7 @@ impl DefragUI {
             // than by position on screen, so the stripes do not invert as the
             // list scrolls.
             if i % 2 == 0 {
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x,
                     y: ry,
                     width: w,
@@ -2248,25 +2870,29 @@ impl DefragUI {
             // — in practice a run of siblings under one deep directory. Cut at
             // the end they collapse to one repeated prefix with every filename
             // gone, which is precisely the column the user is reading.
-            table.cell(
-                &mut tree.commands,
-                FILE_PATH,
-                ry + 6.0,
-                &file.path,
-                path_color,
-                FONT_SIZE,
-                Fit::End,
-            );
+            frame.draw_with(|c| {
+                table.cell(
+                    c,
+                    FILE_PATH,
+                    ry + 6.0,
+                    &file.path,
+                    path_color,
+                    FONT_SIZE,
+                    Fit::End,
+                );
+            });
 
-            table.cell(
-                &mut tree.commands,
-                FILE_SIZE,
-                ry + 6.0,
-                &format_size(file.size_bytes),
-                COLOR_SUBTEXT0,
-                FONT_SIZE,
-                Fit::Start,
-            );
+            frame.draw_with(|c| {
+                table.cell(
+                    c,
+                    FILE_SIZE,
+                    ry + 6.0,
+                    &format_size(file.size_bytes),
+                    COLOR_SUBTEXT0,
+                    FONT_SIZE,
+                    Fit::Start,
+                );
+            });
 
             // Fragment count
             let frag_color = if file.fragment_count > 10 {
@@ -2276,15 +2902,17 @@ impl DefragUI {
             } else {
                 COLOR_SUBTEXT0
             };
-            table.cell(
-                &mut tree.commands,
-                FILE_FRAGMENTS,
-                ry + 6.0,
-                &format!("{}", file.fragment_count),
-                frag_color,
-                FONT_SIZE,
-                Fit::Start,
-            );
+            frame.draw_with(|c| {
+                table.cell(
+                    c,
+                    FILE_FRAGMENTS,
+                    ry + 6.0,
+                    &format!("{}", file.fragment_count),
+                    frag_color,
+                    FONT_SIZE,
+                    Fit::Start,
+                );
+            });
 
             // Severity
             let severity = file.severity();
@@ -2295,15 +2923,17 @@ impl DefragUI {
             } else {
                 COLOR_GREEN
             };
-            table.cell(
-                &mut tree.commands,
-                FILE_SEVERITY,
-                ry + 6.0,
-                &format!("{severity:.1}"),
-                sev_color,
-                FONT_SIZE,
-                Fit::Start,
-            );
+            frame.draw_with(|c| {
+                table.cell(
+                    c,
+                    FILE_SEVERITY,
+                    ry + 6.0,
+                    &format!("{severity:.1}"),
+                    sev_color,
+                    FONT_SIZE,
+                    Fit::Start,
+                );
+            });
         }
 
         // A list that is hiding rows says so. Without this the list looks
@@ -2311,7 +2941,7 @@ impl DefragUI {
         // exactly what a list with nothing more to show looks like.
         let hidden = sorted_files.len().saturating_sub(window.count);
         if hidden > 0 {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + PADDING,
                 y: row_area_y + window.count as f32 * ROW_HEIGHT + 2.0,
                 text: format!("{hidden} more"),
@@ -2341,7 +2971,7 @@ impl DefragUI {
 
     // -- statistics view -------------------------------------------------------
 
-    fn render_statistics(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+    fn render_statistics(&self, frame: &mut Frame, x: f32, y: f32, w: f32, h: f32) {
         let stats = if let Some(s) = &self.stats {
             s
         } else if let Some(engine) = &self.engine {
@@ -2351,7 +2981,7 @@ impl DefragUI {
             let card_y = y + PADDING;
             let card_w = w - 2.0 * PADDING;
 
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: card_x,
                 y: card_y,
                 width: card_w,
@@ -2360,7 +2990,7 @@ impl DefragUI {
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
 
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: card_x + PADDING,
                 y: card_y + PADDING,
                 text: "Live Statistics".to_string(),
@@ -2390,7 +3020,7 @@ impl DefragUI {
 
             for (i, (label, value)) in live_lines.iter().enumerate() {
                 let ly = card_y + 36.0 + i as f32 * 24.0;
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: card_x + PADDING,
                     y: ly,
                     text: label.to_string(),
@@ -2400,7 +3030,7 @@ impl DefragUI {
                     max_width: Some(200.0),
                     overflow: TextOverflow::Ellipsis,
                 });
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: card_x + 220.0,
                     y: ly,
                     text: value.clone(),
@@ -2414,7 +3044,7 @@ impl DefragUI {
             return;
         } else {
             // No stats at all
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: text::center_x(
                     "No statistics yet",
                     x + w / 2.0,
@@ -2438,7 +3068,7 @@ impl DefragUI {
         let card_w = w - 2.0 * PADDING;
 
         // Before/After comparison card
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: card_x,
             y: card_y,
             width: card_w,
@@ -2447,7 +3077,7 @@ impl DefragUI {
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: card_x + PADDING,
             y: card_y + PADDING,
             text: "Defragmentation Results".to_string(),
@@ -2464,7 +3094,7 @@ impl DefragUI {
 
         // Before
         let before_y = card_y + 44.0;
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: card_x + PADDING,
             y: before_y + 2.0,
             text: "Before:".to_string(),
@@ -2474,7 +3104,7 @@ impl DefragUI {
             max_width: Some(150.0),
             overflow: TextOverflow::Ellipsis,
         });
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: bar_x,
             y: before_y,
             width: bar_max_w,
@@ -2484,7 +3114,7 @@ impl DefragUI {
         });
         let before_w = bar_max_w * (stats.before_fragmentation / 100.0).min(1.0);
         if before_w > 0.5 {
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: bar_x,
                 y: before_y,
                 width: before_w,
@@ -2493,7 +3123,7 @@ impl DefragUI {
                 corner_radii: CornerRadii::all(3.0),
             });
         }
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: bar_x + bar_max_w + 8.0,
             y: before_y + 2.0,
             text: format_percent(stats.before_fragmentation),
@@ -2506,7 +3136,7 @@ impl DefragUI {
 
         // After
         let after_y = before_y + 30.0;
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: card_x + PADDING,
             y: after_y + 2.0,
             text: "After:".to_string(),
@@ -2516,7 +3146,7 @@ impl DefragUI {
             max_width: Some(150.0),
             overflow: TextOverflow::Ellipsis,
         });
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: bar_x,
             y: after_y,
             width: bar_max_w,
@@ -2526,7 +3156,7 @@ impl DefragUI {
         });
         let after_w = bar_max_w * (stats.after_fragmentation / 100.0).min(1.0);
         if after_w > 0.5 {
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: bar_x,
                 y: after_y,
                 width: after_w,
@@ -2535,7 +3165,7 @@ impl DefragUI {
                 corner_radii: CornerRadii::all(3.0),
             });
         }
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: bar_x + bar_max_w + 8.0,
             y: after_y + 2.0,
             text: format_percent(stats.after_fragmentation),
@@ -2563,7 +3193,7 @@ impl DefragUI {
 
         for (i, (label, value)) in detail_lines.iter().enumerate() {
             let ly = after_y + 36.0 + i as f32 * 24.0;
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: card_x + PADDING,
                 y: ly,
                 text: label.to_string(),
@@ -2573,7 +3203,7 @@ impl DefragUI {
                 max_width: Some(160.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: card_x + 180.0,
                 y: ly,
                 text: value.clone(),
@@ -2588,13 +3218,13 @@ impl DefragUI {
 
     // -- schedule view ---------------------------------------------------------
 
-    fn render_schedule(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, _h: f32) {
+    fn render_schedule(&self, frame: &mut Frame, x: f32, y: f32, w: f32, _h: f32) {
         let card_x = x + PADDING;
         let card_y = y + PADDING;
         let card_w = w - 2.0 * PADDING;
 
         // Schedule card
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: card_x,
             y: card_y,
             width: card_w,
@@ -2603,7 +3233,7 @@ impl DefragUI {
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: card_x + PADDING,
             y: card_y + PADDING,
             text: "Defrag Schedule".to_string(),
@@ -2621,7 +3251,15 @@ impl DefragUI {
         } else {
             COLOR_SURFACE1
         };
-        tree.push(RenderCommand::FillRect {
+        // The label is inside the target as well as the switch. A 44x22 switch
+        // is a small thing to hit, and "Enabled" next to it reads as part of
+        // the same control -- clicking a word that describes a toggle and
+        // having nothing happen is the kind of dead spot nobody reports.
+        frame.hit(
+            Target::ScheduleToggle,
+            Rect::new(card_x + PADDING, toggle_y, 130.0, 22.0),
+        );
+        frame.push(RenderCommand::FillRect {
             x: card_x + PADDING,
             y: toggle_y,
             width: 44.0,
@@ -2635,7 +3273,7 @@ impl DefragUI {
         } else {
             card_x + PADDING + 2.0
         };
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: knob_x,
             y: toggle_y + 2.0,
             width: 18.0,
@@ -2643,7 +3281,7 @@ impl DefragUI {
             color: COLOR_TEXT,
             corner_radii: CornerRadii::all(9.0),
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: card_x + PADDING + 52.0,
             y: toggle_y + 3.0,
             text: if self.schedule.enabled {
@@ -2674,7 +3312,7 @@ impl DefragUI {
 
         for (i, (label, value)) in sched_lines.iter().enumerate() {
             let ly = detail_y + i as f32 * 24.0;
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: card_x + PADDING,
                 y: ly,
                 text: label.to_string(),
@@ -2684,7 +3322,7 @@ impl DefragUI {
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: card_x + 120.0,
                 y: ly,
                 text: value.clone(),
@@ -2696,18 +3334,20 @@ impl DefragUI {
             });
         }
 
-        // Exclude patterns card
+        // Exclude patterns card. The editor row is inside the card when it is
+        // open, so the card grows rather than the field hanging off its edge.
+        let editor_h = if self.show_exclude_editor { 28.0 } else { 0.0 };
         let excl_y = card_y + 240.0;
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: card_x,
             y: excl_y,
             width: card_w,
-            height: 40.0 + self.excludes.len() as f32 * 24.0,
+            height: 40.0 + self.excludes.len() as f32 * 24.0 + editor_h,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: card_x + PADDING,
             y: excl_y + PADDING,
             text: "Exclude Patterns".to_string(),
@@ -2718,6 +3358,47 @@ impl DefragUI {
             overflow: TextOverflow::Clip,
         });
 
+        // "+ Add" opens the field below. Right-aligned in the card's header
+        // row, so it does not move as patterns are added and removed.
+        let add_w = text::measure("+ Add", FONT_SIZE, FontWeightHint::Bold) + 16.0;
+        let add_x = card_x + card_w - PADDING - add_w;
+        frame.hit(
+            Target::ExcludeAdd,
+            Rect::new(add_x, excl_y + 6.0, add_w, 22.0),
+        );
+        frame.push(RenderCommand::FillRect {
+            x: add_x,
+            y: excl_y + 6.0,
+            width: add_w,
+            height: 22.0,
+            color: if self.show_exclude_editor {
+                COLOR_BLUE
+            } else {
+                COLOR_SURFACE1
+            },
+            corner_radii: CornerRadii::all(4.0),
+        });
+        frame.push(RenderCommand::Text {
+            x: add_x + 8.0,
+            y: excl_y + 10.0,
+            text: "+ Add".to_string(),
+            color: if self.show_exclude_editor {
+                COLOR_CRUST
+            } else {
+                COLOR_TEXT
+            },
+            font_size: FONT_SIZE,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(add_w - 16.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+
+        // The `x` column is a fixed width off the card's right edge, and the
+        // pattern text stops short of it -- otherwise a long pattern would
+        // ellipsise straight through the button that deletes it.
+        let remove_w = 20.0;
+        let remove_x = card_x + card_w - PADDING - remove_w;
+
         for (i, excl) in self.excludes.iter().enumerate() {
             let ey = excl_y + 34.0 + i as f32 * 24.0;
             let text_color = if excl.enabled {
@@ -2725,8 +3406,17 @@ impl DefragUI {
             } else {
                 COLOR_OVERLAY0
             };
+
+            // The whole row toggles; the `x` deletes. Recorded in that order,
+            // and `Frame::hit_test` answers with the last box to contain the
+            // point, so the `x` wins where the two overlap.
+            frame.hit(
+                Target::ExcludeToggle(i),
+                Rect::new(card_x + PADDING, ey, remove_x - card_x - PADDING, 20.0),
+            );
+
             // Enabled indicator
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: card_x + PADDING,
                 y: ey + 2.0,
                 width: 14.0,
@@ -2739,14 +3429,67 @@ impl DefragUI {
                 corner_radii: CornerRadii::all(2.0),
             });
             // Pattern text
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: card_x + PADDING + 22.0,
                 y: ey + 2.0,
                 text: excl.pattern.clone(),
                 color: text_color,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(card_w - PADDING * 2.0 - 40.0),
+                max_width: Some((remove_x - (card_x + PADDING + 22.0) - 8.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+
+            frame.hit(
+                Target::ExcludeRemove(i),
+                Rect::new(remove_x, ey, remove_w, 20.0),
+            );
+            frame.push(RenderCommand::Text {
+                x: remove_x + 6.0,
+                y: ey + 2.0,
+                text: "x".to_string(),
+                color: COLOR_RED,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(remove_w),
+                overflow: TextOverflow::Clip,
+            });
+        }
+
+        if self.show_exclude_editor {
+            let ey = excl_y + 34.0 + self.excludes.len() as f32 * 24.0;
+            let field_w = (card_w - 2.0 * PADDING).max(0.0);
+            frame.hit(
+                Target::ExcludeInput,
+                Rect::new(card_x + PADDING, ey, field_w, 22.0),
+            );
+            frame.push(RenderCommand::FillRect {
+                x: card_x + PADDING,
+                y: ey,
+                width: field_w,
+                height: 22.0,
+                color: COLOR_CRUST,
+                corner_radii: CornerRadii::all(4.0),
+            });
+            // A caret, so an empty field does not look like a dead box: this
+            // is the only place in the window that takes typed text, and with
+            // nothing in it there is otherwise no sign it is listening.
+            frame.push(RenderCommand::Text {
+                x: card_x + PADDING + 6.0,
+                y: ey + 4.0,
+                text: if self.exclude_input.is_empty() {
+                    "|".to_string()
+                } else {
+                    format!("{}|", self.exclude_input)
+                },
+                color: if self.exclude_input.is_empty() {
+                    COLOR_OVERLAY0
+                } else {
+                    COLOR_TEXT
+                },
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((field_w - 12.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
@@ -2754,24 +3497,30 @@ impl DefragUI {
 
     // -- SSD warning dialog ----------------------------------------------------
 
-    fn render_ssd_warning(&self, tree: &mut RenderTree) {
-        // Overlay
-        tree.push(RenderCommand::FillRect {
+    fn render_ssd_warning(&self, frame: &mut Frame, layout: &Layout) {
+        let win = layout.window;
+
+        // Overlay. Recorded as a target so a press that misses the dialog is
+        // absorbed here rather than reaching the window it is covering.
+        frame.hit(Target::Scrim, win);
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
+            width: win.w,
+            height: win.h,
             color: Color::rgba(0, 0, 0, 160),
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Dialog box
-        let dw = 420.0;
-        let dh = 180.0;
-        let dx = (WINDOW_WIDTH - dw) / 2.0;
-        let dy = (WINDOW_HEIGHT - dh) / 2.0;
+        // Dialog box, shrunk to fit a window smaller than it rather than
+        // centred at a negative coordinate and drawn half off the top-left.
+        let dw = 420.0_f32.min(win.w);
+        let dh = 180.0_f32.min(win.h);
+        let dx = ((win.w - dw) / 2.0).max(0.0);
+        let dy = ((win.h - dh) / 2.0).max(0.0);
+        frame.clip(Rect::new(dx, dy, dw, dh));
 
-        tree.push(RenderCommand::BoxShadow {
+        frame.push(RenderCommand::BoxShadow {
             x: dx,
             y: dy,
             width: dw,
@@ -2783,7 +3532,7 @@ impl DefragUI {
             color: Color::rgba(0, 0, 0, 100),
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: dx,
             y: dy,
             width: dw,
@@ -2793,7 +3542,7 @@ impl DefragUI {
         });
 
         // Warning title
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: dx + PADDING,
             y: dy + PADDING,
             text: "SSD Detected".to_string(),
@@ -2805,7 +3554,7 @@ impl DefragUI {
         });
 
         // Warning text
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: dx + PADDING,
             y: dy + 40.0,
             text: "Defragmentation is not recommended for SSDs.".to_string(),
@@ -2815,7 +3564,7 @@ impl DefragUI {
             max_width: Some(dw - 2.0 * PADDING),
             overflow: TextOverflow::Ellipsis,
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: dx + PADDING,
             y: dy + 58.0,
             text: "It can reduce SSD lifespan without performance benefit.".to_string(),
@@ -2825,7 +3574,7 @@ impl DefragUI {
             max_width: Some(dw - 2.0 * PADDING),
             overflow: TextOverflow::Ellipsis,
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: dx + PADDING,
             y: dy + 76.0,
             text: "Consider using TRIM instead.".to_string(),
@@ -2839,9 +3588,19 @@ impl DefragUI {
         // Buttons
         let cancel_x = dx + dw - 2.0 * BUTTON_WIDTH - PADDING * 2.0 - 4.0;
         let proceed_x = dx + dw - BUTTON_WIDTH - PADDING;
+        let button_y = dy + dh - BUTTON_HEIGHT - PADDING;
+
+        frame.hit(
+            Target::SsdCancel,
+            Rect::new(cancel_x, button_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+        );
+        frame.hit(
+            Target::SsdProceed,
+            Rect::new(proceed_x, button_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+        );
 
         // Cancel button
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: cancel_x,
             y: dy + dh - BUTTON_HEIGHT - PADDING,
             width: BUTTON_WIDTH,
@@ -2849,7 +3608,7 @@ impl DefragUI {
             color: COLOR_SURFACE1,
             corner_radii: CornerRadii::all(4.0),
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: cancel_x + 28.0,
             y: dy + dh - BUTTON_HEIGHT - PADDING + 8.0,
             text: "Cancel".to_string(),
@@ -2861,7 +3620,7 @@ impl DefragUI {
         });
 
         // Proceed anyway button
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: proceed_x,
             y: dy + dh - BUTTON_HEIGHT - PADDING,
             width: BUTTON_WIDTH,
@@ -2869,7 +3628,7 @@ impl DefragUI {
             color: COLOR_RED,
             corner_radii: CornerRadii::all(4.0),
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: proceed_x + 18.0,
             y: dy + dh - BUTTON_HEIGHT - PADDING + 8.0,
             text: "Proceed".to_string(),
@@ -2879,20 +3638,24 @@ impl DefragUI {
             max_width: Some(BUTTON_WIDTH - 10.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        frame.unclip();
     }
 
     // -- status bar ------------------------------------------------------------
 
-    fn render_status_bar(&self, tree: &mut RenderTree) {
-        let y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
-        tree.push(RenderCommand::FillRect {
+    fn render_status_bar(&self, frame: &mut Frame, layout: &Layout) {
+        let bar = layout.status;
+        let y = bar.y;
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: WINDOW_WIDTH,
-            height: STATUS_BAR_HEIGHT,
+            width: bar.w,
+            height: bar.h,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
+        frame.clip(bar);
 
         // Left side: drive info
         let left_text = if let Some(drive) = self.current_drive() {
@@ -2906,14 +3669,14 @@ impl DefragUI {
             "No drive selected".to_string()
         };
 
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: PADDING,
             y: y + 7.0,
             text: left_text,
             color: COLOR_SUBTEXT0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(WINDOW_WIDTH / 2.0),
+            max_width: Some(bar.w / 2.0),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -2936,8 +3699,8 @@ impl DefragUI {
             DefragState::Error => "Error occurred".to_string(),
         };
 
-        tree.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 250.0,
+        frame.push(RenderCommand::Text {
+            x: (bar.w - 250.0).max(PADDING),
             y: y + 7.0,
             text: right_text,
             color: COLOR_SUBTEXT0,
@@ -2946,6 +3709,8 @@ impl DefragUI {
             max_width: Some(240.0),
             overflow: TextOverflow::Ellipsis,
         });
+
+        frame.unclip();
     }
 }
 
@@ -2953,7 +3718,15 @@ impl DefragUI {
 // Entry point
 // ============================================================================
 
-fn main() {}
+fn main() -> ExitCode {
+    // No drives and no scanner: SlateOS has no way yet to enumerate volumes or
+    // read a block layout, so the window opens on an empty drive list and says
+    // "No drive selected" in the status bar. That is the honest picture, and
+    // the toolbar greys the action button to match rather than offering an
+    // Analyze that cannot analyse. See `known-issues.md` ->
+    // `C-DEFRAG-HAS-NO-WAY-TO-SCAN-A-DRIVE`.
+    app::launch("defrag", &mut DefragUI::new())
+}
 
 // ============================================================================
 // Tests
@@ -2961,6 +3734,18 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
 
     // -- text measurement ------------------------------------------------------
@@ -3089,11 +3874,22 @@ mod tests {
         app
     }
 
+    /// The whole window as a render tree, at the size the state was last told.
+    ///
+    /// [`App::render`] does not go through here -- it is handed the live size
+    /// and passes it straight to [`DefragUI::frame`], because believing the
+    /// caller is the whole point. This is the tests' shorthand for "draw it at
+    /// whatever size you last set", which is what they set up by hand anyway.
+    fn tree_of(ui: &DefragUI) -> RenderTree {
+        ui.frame(ui.width, ui.height).into_tree()
+    }
+
     /// Every text the file list draws, as `(x, text, font_size, weight)`.
     fn file_list_texts(app: &DefragUI) -> Vec<(f32, String, f32, FontWeightHint)> {
-        let mut tree = RenderTree::new();
-        app.render_file_list(&mut tree, 0.0, 0.0, LIST_W, 400.0);
-        tree.commands
+        let mut frame = Frame::new(LIST_W, 400.0);
+        app.render_file_list(&mut frame, 0.0, 0.0, LIST_W, 400.0);
+        frame
+            .commands()
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::Text {
@@ -3333,6 +4129,657 @@ mod tests {
     }
 
     // -- test helpers ----------------------------------------------------------
+
+    // =========================================================================
+    // The window is what the renderer recorded
+    // =========================================================================
+
+    /// A scanner that always answers, so the Analyze button has a job.
+    ///
+    /// The real one does not exist -- SlateOS cannot read a block layout yet
+    /// -- so `DefragUI::scan` is `None` in the shipping app and every test
+    /// that presses Analyze has to install one. That asymmetry is the point:
+    /// it is impossible to test the Analyze path without being reminded that
+    /// production has no scanner.
+    // The `Option` is not redundant even though this arm always answers: the
+    // signature has to be `ScanFn`, and a real scanner fails when the volume
+    // cannot be read.
+    #[allow(clippy::unnecessary_wraps)]
+    fn always_scans(_drive: &DriveInfo) -> Option<(BlockMap, Vec<FileFragInfo>)> {
+        Some((sample_block_map(), sample_files()))
+    }
+
+    /// A drive list, a scanner, and nothing analysed yet.
+    fn scannable_ui() -> DefragUI {
+        let mut ui = DefragUI::new();
+        ui.set_drives(sample_drives());
+        ui.scan = Some(always_scans);
+        ui
+    }
+
+    /// Press the left button where the window would, at the size it believes.
+    fn press_at(ui: &mut DefragUI, x: f32, y: f32) -> EventResult {
+        handle_event(
+            ui,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        )
+    }
+
+    #[test]
+    fn every_control_the_window_draws_is_reachable() {
+        // The whole point of the rewrite: a box the renderer records is a box
+        // `target_at` finds. If these ever disagree the app has a control that
+        // is drawn and cannot be pressed, which is what it shipped with.
+        let mut ui = populated_ui();
+        ui.show_exclude_editor = true;
+        for tab in ViewTab::all() {
+            ui.set_view_tab(*tab);
+            let frame = ui.frame(ui.width, ui.height);
+            assert!(
+                frame.is_balanced(),
+                "{tab:?}: a clip or translate was pushed and not popped",
+            );
+            for (target, rect) in frame.hits() {
+                let (cx, cy) = rect.centre();
+                assert!(
+                    ui.target_at(cx, cy).is_some(),
+                    "{tab:?}: {target:?} was drawn at {rect:?} and hit-tests to nothing",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_sidebar_row_selects_the_drive_the_renderer_drew_there() {
+        // The failure this rules out is an off-by-one between the row the
+        // label was drawn on and the index the click resolves to -- silent,
+        // and the kind of thing only a per-row check catches.
+        for index in 0..sample_drives().len() {
+            let mut ui = scannable_ui();
+            let rect = probe::rect_of(&ui, Target::Drive(index))
+                .unwrap_or_else(|| panic!("no row drawn for drive {index}"));
+            let (cx, cy) = rect.centre();
+            assert_eq!(press_at(&mut ui, cx, cy), EventResult::Consumed);
+            assert_eq!(ui.selected_drive, index);
+            assert_eq!(
+                ui.current_drive().map(|d| d.label.as_str()),
+                sample_drives().get(index).map(|d| d.label.as_str()),
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_selects_the_view_it_is_labelled_with() {
+        for tab in ViewTab::all() {
+            let mut ui = populated_ui();
+            assert_eq!(
+                probe::click(&mut ui, Target::Tab(*tab)),
+                EventResult::Consumed
+            );
+            assert_eq!(ui.view_tab, *tab);
+        }
+    }
+
+    #[test]
+    fn a_mode_button_selects_the_mode_it_is_labelled_with() {
+        for mode in OptimizationMode::all() {
+            let mut ui = populated_ui();
+            assert_eq!(
+                probe::click(&mut ui, Target::Mode(*mode)),
+                EventResult::Consumed,
+            );
+            assert_eq!(ui.optimization_mode, *mode);
+        }
+    }
+
+    #[test]
+    fn the_action_button_analyses_then_defragments() {
+        let mut ui = scannable_ui();
+        assert!(ui.analysis.is_none(), "nothing analysed yet");
+
+        // First press: "Analyze".
+        probe::click(&mut ui, Target::Action);
+        assert!(
+            ui.analysis.is_some(),
+            "the Analyze press produced no analysis"
+        );
+        assert!(ui.engine.is_none(), "analysing must not start a defrag");
+
+        // Second press: the button now reads "Defragment". The first sample
+        // drive is a spinning disk, so no SSD warning stands in the way.
+        probe::click(&mut ui, Target::Action);
+        assert!(ui.engine.is_some(), "the Defragment press started nothing");
+        assert_eq!(ui.defrag_state(), DefragState::Running);
+
+        // Third press: "Pause". Fourth: "Resume".
+        probe::click(&mut ui, Target::Action);
+        assert_eq!(ui.defrag_state(), DefragState::Paused);
+        probe::click(&mut ui, Target::Action);
+        assert_eq!(ui.defrag_state(), DefragState::Running);
+    }
+
+    #[test]
+    fn with_no_scanner_the_analyze_button_is_absent_rather_than_dead() {
+        // A button drawn in its live colour that does nothing when pressed is
+        // exactly the defect this app shipped with. With no way to read a
+        // drive there is nothing to press, so there is no hit box either.
+        let mut ui = DefragUI::new();
+        ui.set_drives(sample_drives());
+        assert!(ui.scan.is_none(), "the shipping app has no scanner");
+        assert!(
+            !probe::is_visible(&ui, Target::Action),
+            "Analyze records a hit box with nothing to analyse with",
+        );
+
+        // And the same window with a scanner does draw it, so the absence is
+        // the missing backend rather than a renderer that forgot the button.
+        ui.scan = Some(always_scans);
+        assert!(probe::is_visible(&ui, Target::Action));
+    }
+
+    #[test]
+    fn with_no_drive_there_is_no_action_button() {
+        let mut ui = DefragUI::new();
+        ui.scan = Some(always_scans);
+        assert!(ui.drives.is_empty());
+        assert!(
+            !probe::is_visible(&ui, Target::Action),
+            "a drive-less window offers a button that acts on a drive",
+        );
+    }
+
+    #[test]
+    fn a_file_list_header_sorts_by_its_own_column() {
+        let columns = [
+            (
+                Target::FileHeader(FileSortColumn::Path),
+                FileSortColumn::Path,
+            ),
+            (
+                Target::FileHeader(FileSortColumn::Size),
+                FileSortColumn::Size,
+            ),
+            (
+                Target::FileHeader(FileSortColumn::Fragments),
+                FileSortColumn::Fragments,
+            ),
+            (
+                Target::FileHeader(FileSortColumn::Severity),
+                FileSortColumn::Severity,
+            ),
+        ];
+        for (target, column) in columns {
+            let mut ui = populated_ui();
+            ui.set_view_tab(ViewTab::FileList);
+            assert_eq!(probe::click(&mut ui, target), EventResult::Consumed);
+            assert_eq!(ui.file_sort_column, column);
+        }
+    }
+
+    #[test]
+    fn clicking_the_same_header_twice_reverses_the_order() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::FileList);
+        probe::click(&mut ui, Target::FileHeader(FileSortColumn::Size));
+        let first = ui.file_sort_direction;
+        probe::click(&mut ui, Target::FileHeader(FileSortColumn::Size));
+        assert_ne!(ui.file_sort_direction, first);
+    }
+
+    #[test]
+    fn sorting_returns_the_list_to_the_top() {
+        // A re-sort makes the row at the old offset a different file, so a
+        // remembered offset would silently move the user somewhere else.
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::FileList);
+        ui.scroll_file_list_by(3);
+        assert_ne!(ui.file_scroll_offset, 0);
+        probe::click(&mut ui, Target::FileHeader(FileSortColumn::Path));
+        assert_eq!(ui.file_scroll_offset, 0);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_file_list_and_only_over_the_file_list() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::FileList);
+        let content = Layout::new(ui.width, ui.height).content;
+        let (cx, cy) = content.centre();
+
+        // A notch away from the user scrolls towards row 0, which is already
+        // where the list is -- so scroll the other way to see movement.
+        let scrolled = handle_event(
+            &mut ui,
+            &Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+            }),
+        );
+        assert_eq!(scrolled, EventResult::Consumed);
+        assert!(ui.file_scroll_offset > 0, "the wheel moved nothing");
+
+        // The sidebar is not this list's business.
+        let before = ui.file_scroll_offset;
+        let ignored = handle_event(
+            &mut ui,
+            &Event::Mouse(MouseEvent {
+                x: 10.0,
+                y: TOOLBAR_HEIGHT + 20.0,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+            }),
+        );
+        assert_eq!(ignored, EventResult::Ignored);
+        assert_eq!(ui.file_scroll_offset, before);
+    }
+
+    #[test]
+    fn the_wheel_does_nothing_on_a_view_that_does_not_scroll() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::DiskMap);
+        let (cx, cy) = Layout::new(ui.width, ui.height).content.centre();
+        let result = handle_event(
+            &mut ui,
+            &Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+            }),
+        );
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(ui.file_scroll_offset, 0);
+    }
+
+    #[test]
+    fn the_schedule_toggle_toggles_the_schedule() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::Schedule);
+        let before = ui.schedule.enabled;
+        assert_eq!(
+            probe::click(&mut ui, Target::ScheduleToggle),
+            EventResult::Consumed,
+        );
+        assert_eq!(ui.schedule.enabled, !before);
+        probe::click(&mut ui, Target::ScheduleToggle);
+        assert_eq!(ui.schedule.enabled, before);
+    }
+
+    #[test]
+    fn an_exclude_row_toggles_and_its_cross_deletes() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::Schedule);
+        let pattern = ui
+            .excludes
+            .first()
+            .map(|e| e.pattern.clone())
+            .expect("the default excludes are not empty");
+
+        probe::click(&mut ui, Target::ExcludeToggle(0));
+        assert_eq!(ui.excludes.first().map(|e| e.enabled), Some(false));
+        probe::click(&mut ui, Target::ExcludeToggle(0));
+        assert_eq!(ui.excludes.first().map(|e| e.enabled), Some(true));
+
+        let count = ui.excludes.len();
+        probe::click(&mut ui, Target::ExcludeRemove(0));
+        assert_eq!(ui.excludes.len(), count - 1);
+        assert_ne!(
+            ui.excludes.first().map(|e| e.pattern.as_str()),
+            Some(pattern.as_str()),
+            "the cross removed a different row from the one it was drawn on",
+        );
+    }
+
+    #[test]
+    fn the_cross_wins_where_it_overlaps_the_row_it_deletes() {
+        // Both boxes cover the right-hand end of the row. `hit_test` answers
+        // with the last box recorded, and the renderer records the cross
+        // second -- so a press on the cross must delete, not toggle.
+        let ui = {
+            let mut ui = populated_ui();
+            ui.set_view_tab(ViewTab::Schedule);
+            ui
+        };
+        let cross = probe::rect_of(&ui, Target::ExcludeRemove(0))
+            .expect("no cross drawn for the first exclude");
+        let (cx, cy) = cross.centre();
+        assert_eq!(ui.target_at(cx, cy), Some(Target::ExcludeRemove(0)));
+    }
+
+    #[test]
+    fn the_add_button_opens_a_field_that_takes_a_pattern() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::Schedule);
+        assert!(!ui.show_exclude_editor);
+        assert!(
+            !probe::is_visible(&ui, Target::ExcludeInput),
+            "the field is drawn before it was asked for",
+        );
+
+        probe::click(&mut ui, Target::ExcludeAdd);
+        assert!(ui.show_exclude_editor);
+        assert!(probe::is_visible(&ui, Target::ExcludeInput));
+
+        let count = ui.excludes.len();
+        probe::type_str(&mut ui, "*.iso");
+        assert_eq!(ui.exclude_input, "*.iso");
+        probe::key(&mut ui, &probe::press(Key::Enter));
+
+        assert_eq!(ui.excludes.len(), count + 1);
+        assert_eq!(
+            ui.excludes.last().map(|e| e.pattern.as_str()),
+            Some("*.iso"),
+        );
+        assert!(!ui.show_exclude_editor, "Enter left the editor open");
+        assert!(ui.exclude_input.is_empty(), "Enter left the field dirty");
+    }
+
+    #[test]
+    fn escape_abandons_the_pattern_being_typed() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::Schedule);
+        probe::click(&mut ui, Target::ExcludeAdd);
+        probe::type_str(&mut ui, "*.tmp");
+
+        let count = ui.excludes.len();
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert_eq!(ui.excludes.len(), count, "Escape added the pattern anyway");
+        assert!(!ui.show_exclude_editor);
+        assert!(ui.exclude_input.is_empty());
+    }
+
+    #[test]
+    fn enter_on_an_empty_field_adds_nothing() {
+        // An empty glob would match every file and exclude the whole drive,
+        // so the one thing Enter must not do here is take it literally.
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::Schedule);
+        probe::click(&mut ui, Target::ExcludeAdd);
+
+        let count = ui.excludes.len();
+        probe::key(&mut ui, &probe::press(Key::Enter));
+        assert_eq!(ui.excludes.len(), count);
+        assert!(!ui.show_exclude_editor);
+    }
+
+    #[test]
+    fn backspace_erases_the_last_character_typed() {
+        let mut ui = populated_ui();
+        ui.set_view_tab(ViewTab::Schedule);
+        probe::click(&mut ui, Target::ExcludeAdd);
+        probe::type_str(&mut ui, "abc");
+        probe::key(&mut ui, &probe::press(Key::Backspace));
+        assert_eq!(ui.exclude_input, "ab");
+    }
+
+    #[test]
+    fn the_ssd_warning_stands_between_a_solid_state_drive_and_a_defrag() {
+        let mut ui = scannable_ui();
+        ui.select_drive(1);
+        assert_eq!(
+            ui.current_drive().map(DriveInfo::is_ssd),
+            Some(true),
+            "the second sample drive should be the SSD",
+        );
+        probe::click(&mut ui, Target::Action); // Analyze
+        probe::click(&mut ui, Target::Action); // Defragment
+
+        assert!(
+            ui.show_ssd_warning,
+            "no warning before defragmenting an SSD"
+        );
+        assert!(ui.engine.is_none(), "the defrag started anyway");
+
+        probe::click(&mut ui, Target::SsdCancel);
+        assert!(!ui.show_ssd_warning);
+        assert!(ui.engine.is_none(), "Cancel started the defrag");
+    }
+
+    #[test]
+    fn proceeding_past_the_ssd_warning_defragments_the_ssd() {
+        let mut ui = scannable_ui();
+        ui.select_drive(1);
+        probe::click(&mut ui, Target::Action);
+        probe::click(&mut ui, Target::Action);
+        assert!(ui.show_ssd_warning);
+
+        probe::click(&mut ui, Target::SsdProceed);
+        assert!(!ui.show_ssd_warning);
+        assert_eq!(ui.defrag_state(), DefragState::Running);
+    }
+
+    #[test]
+    fn the_ssd_warning_swallows_clicks_meant_for_the_window_behind_it() {
+        // A modal that can be clicked past is not modal. The tab strip is
+        // still drawn under the scrim; pressing where a tab is must not
+        // change the view.
+        let mut ui = scannable_ui();
+        ui.select_drive(1);
+        probe::click(&mut ui, Target::Action);
+        let tab_rect =
+            probe::rect_of(&ui, Target::Tab(ViewTab::Schedule)).expect("no Schedule tab drawn");
+        probe::click(&mut ui, Target::Action);
+        assert!(ui.show_ssd_warning);
+
+        let view_before = ui.view_tab;
+        let (cx, cy) = tab_rect.centre();
+        assert_eq!(
+            ui.target_at(cx, cy),
+            Some(Target::Scrim),
+            "the tab is still reachable through the dialog",
+        );
+        assert_eq!(press_at(&mut ui, cx, cy), EventResult::Consumed);
+        assert_eq!(ui.view_tab, view_before);
+    }
+
+    #[test]
+    fn escape_cancels_the_ssd_warning_and_enter_proceeds() {
+        let mut ui = scannable_ui();
+        ui.select_drive(1);
+        probe::click(&mut ui, Target::Action);
+        probe::click(&mut ui, Target::Action);
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert!(!ui.show_ssd_warning);
+        assert!(ui.engine.is_none());
+
+        probe::click(&mut ui, Target::Action);
+        assert!(ui.show_ssd_warning);
+        probe::key(&mut ui, &probe::press(Key::Enter));
+        assert!(!ui.show_ssd_warning);
+        assert_eq!(ui.defrag_state(), DefragState::Running);
+    }
+
+    #[test]
+    fn a_tick_advances_a_running_defrag_and_nothing_else() {
+        let mut ui = scannable_ui();
+        probe::click(&mut ui, Target::Action); // Analyze
+        // An idle window must not claim the tick, or it repaints an unchanged
+        // picture sixty times a second forever.
+        assert_eq!(
+            handle_event(&mut ui, &Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored,
+        );
+
+        probe::click(&mut ui, Target::Action); // Defragment
+        let moved_before = ui
+            .engine
+            .as_ref()
+            .map(|e| e.progress.blocks_moved)
+            .unwrap_or(0);
+        assert_eq!(
+            handle_event(&mut ui, &Event::Tick { elapsed_ms: 16 }),
+            EventResult::Consumed,
+        );
+        let moved_after = ui
+            .engine
+            .as_ref()
+            .map(|e| e.progress.blocks_moved)
+            .unwrap_or(0);
+        assert!(
+            moved_after > moved_before,
+            "a tick during a running defrag moved no blocks",
+        );
+    }
+
+    #[test]
+    fn a_paused_defrag_does_not_advance_on_a_tick() {
+        let mut ui = scannable_ui();
+        probe::click(&mut ui, Target::Action);
+        probe::click(&mut ui, Target::Action);
+        probe::click(&mut ui, Target::Action); // Pause
+        assert_eq!(ui.defrag_state(), DefragState::Paused);
+
+        let before = ui
+            .engine
+            .as_ref()
+            .map(|e| e.progress.blocks_moved)
+            .unwrap_or(0);
+        assert_eq!(
+            handle_event(&mut ui, &Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored,
+        );
+        let after = ui
+            .engine
+            .as_ref()
+            .map(|e| e.progress.blocks_moved)
+            .unwrap_or(0);
+        assert_eq!(before, after, "a paused defrag advanced on a tick");
+    }
+
+    #[test]
+    fn ticking_a_defrag_to_the_end_records_its_statistics() {
+        let mut ui = scannable_ui();
+        probe::click(&mut ui, Target::Action);
+        probe::click(&mut ui, Target::Action);
+
+        // Bounded: a run that does not finish is a bug in the engine, and a
+        // test that loops forever hides it behind a timeout.
+        for _ in 0..10_000 {
+            if ui.defrag_state() != DefragState::Running {
+                break;
+            }
+            handle_event(&mut ui, &Event::Tick { elapsed_ms: 16 });
+        }
+        assert_eq!(ui.defrag_state(), DefragState::Completed);
+        assert!(
+            ui.stats.is_some(),
+            "a finished defrag recorded no statistics"
+        );
+    }
+
+    #[test]
+    fn tab_cycles_the_views_in_both_directions() {
+        let mut ui = populated_ui();
+        let order = ViewTab::all();
+        for expected in order.iter().skip(1).chain(order.iter().take(1)) {
+            probe::key(&mut ui, &probe::press(Key::Tab));
+            assert_eq!(ui.view_tab, *expected);
+        }
+        // The forward loop wrapped back to the first tab, so stepping backwards
+        // from here walks the list in reverse: last, then second-to-last, ...,
+        // ending on the first again.
+        for expected in order.iter().rev() {
+            probe::key(&mut ui, &probe::shift(Key::Tab));
+            assert_eq!(ui.view_tab, *expected);
+        }
+    }
+
+    #[test]
+    fn the_window_draws_what_it_is_given_rather_than_what_it_remembers() {
+        // The first frame arrives before any `Event::Resize`, so a layout
+        // cached from the last size is wrong for exactly that frame -- which
+        // is the one where a click would land on the wrong thing.
+        let ui = populated_ui();
+        assert!(
+            probe::rect_of_sized(&ui, Target::Tab(ViewTab::Schedule), (700.0, 500.0)).is_some(),
+            "a tab near the left edge vanished from a narrower window",
+        );
+
+        let wide = probe::rect_of_sized(&ui, Target::Mode(OptimizationMode::Full), (1400.0, 760.0));
+        let narrow =
+            probe::rect_of_sized(&ui, Target::Mode(OptimizationMode::Full), (1060.0, 760.0));
+        match (wide, narrow) {
+            (Some(a), Some(b)) => assert_ne!(
+                a.x, b.x,
+                "a right-aligned button did not move when the window widened",
+            ),
+            other => panic!("the mode button vanished: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_window_smaller_than_its_layout_records_nothing_outside_itself() {
+        let ui = populated_ui();
+        for size in [(320.0, 240.0), (200.0, 100.0), (40.0, 40.0), (0.0, 0.0)] {
+            let frame = ui.draw(size);
+            assert!(frame.is_balanced(), "{size:?}: unbalanced clip stack");
+            for (target, rect) in frame.hits() {
+                assert!(
+                    rect.x >= 0.0
+                        && rect.y >= 0.0
+                        && rect.right() <= size.0 + 0.01
+                        && rect.bottom() <= size.1 + 0.01,
+                    "{size:?}: {target:?} recorded {rect:?}, outside the window",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_nonfinite_window_size_draws_an_empty_window() {
+        // Sizes cross a process boundary, and a NaN that reached the layout
+        // would make every comparison in it false -- so every rectangle would
+        // pass every bounds check.
+        let ui = populated_ui();
+        for size in [(f32::NAN, 760.0), (1060.0, f32::INFINITY), (-5.0, -5.0)] {
+            let frame = ui.draw(size);
+            assert!(
+                frame.hits().is_empty(),
+                "{size:?} recorded {} hit boxes",
+                frame.hits().len(),
+            );
+        }
+    }
+
+    #[test]
+    fn clicking_the_background_changes_nothing() {
+        let mut ui = populated_ui();
+        let before = (ui.view_tab, ui.selected_drive, ui.optimization_mode);
+        assert_eq!(probe::click_background(&mut ui), EventResult::Ignored);
+        assert_eq!(
+            (ui.view_tab, ui.selected_drive, ui.optimization_mode),
+            before,
+        );
+    }
+
+    #[test]
+    fn resizing_moves_the_boxes_the_next_click_is_tested_against() {
+        // Deliberately *not* `probe::rect_of`, which draws at the fixed
+        // `Probe::SIZE` and so cannot see a resize at all. The question here is
+        // what `target_at` will match a click against, and that is the frame at
+        // the size the window last reported.
+        let live = |ui: &DefragUI| {
+            ui.frame(ui.width, ui.height)
+                .rect_of(|t| *t == Target::Mode(OptimizationMode::Full))
+        };
+
+        let mut ui = populated_ui();
+        let before = live(&ui).expect("no mode button at the default size");
+        handle_event(
+            &mut ui,
+            &Event::Resize {
+                width: 1400,
+                height: 900,
+            },
+        );
+        let after = live(&ui).expect("the mode button vanished after a resize");
+        assert_ne!(
+            before.x, after.x,
+            "the click path is still testing against the old size",
+        );
+    }
 
     /// Create a sample block map with mixed states.
     fn sample_block_map() -> BlockMap {
@@ -4526,7 +5973,7 @@ mod tests {
     #[test]
     fn test_render_empty_ui() {
         let ui = DefragUI::new();
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         assert!(!tree.is_empty());
     }
 
@@ -4534,14 +5981,14 @@ mod tests {
     fn test_render_with_drives() {
         let mut ui = DefragUI::new();
         ui.set_drives(sample_drives());
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         assert!(tree.len() > 20);
     }
 
     #[test]
     fn test_render_disk_map_view() {
         let ui = populated_ui();
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         assert!(tree.len() > 30);
     }
 
@@ -4549,7 +5996,7 @@ mod tests {
     fn test_render_file_list_view() {
         let mut ui = populated_ui();
         ui.set_view_tab(ViewTab::FileList);
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         assert!(tree.len() > 20);
     }
 
@@ -4557,7 +6004,7 @@ mod tests {
     fn test_render_statistics_view_no_stats() {
         let mut ui = DefragUI::new();
         ui.set_view_tab(ViewTab::Statistics);
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         assert!(tree.len() > 5);
     }
 
@@ -4567,7 +6014,7 @@ mod tests {
         ui.start_defrag();
         ui.defrag_step_batch(100);
         ui.set_view_tab(ViewTab::Statistics);
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         assert!(tree.len() > 20);
     }
 
@@ -4575,7 +6022,7 @@ mod tests {
     fn test_render_schedule_view() {
         let mut ui = DefragUI::new();
         ui.set_view_tab(ViewTab::Schedule);
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         assert!(tree.len() > 10);
     }
 
@@ -4583,7 +6030,7 @@ mod tests {
     fn test_render_ssd_warning() {
         let mut ui = DefragUI::new();
         ui.show_ssd_warning = true;
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         // Should have the overlay + dialog elements
         assert!(tree.len() > 10);
     }
@@ -4593,7 +6040,7 @@ mod tests {
         let mut ui = populated_ui();
         ui.start_defrag();
         ui.defrag_step_batch(5);
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         assert!(tree.len() > 30);
     }
 
@@ -4603,7 +6050,7 @@ mod tests {
         ui.start_defrag();
         ui.defrag_step_batch(5);
         ui.set_view_tab(ViewTab::Statistics);
-        let tree = ui.render();
+        let tree = tree_of(&ui);
         assert!(tree.len() > 15);
     }
 

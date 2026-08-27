@@ -2795,6 +2795,60 @@ check_option_refusal() {
 
 check_option_refusal
 
+# A self-test may not compare two readings of a counter that never stops.
+#
+# Here for the same reason as the check above it: the rule was broken in four
+# places in one day, each locally reasonable, and the fourth panicked the
+# kernel on a green tree over a single timer interrupt --
+#
+#     [5/6] tick cross-check (39171 >= 39171): OK
+#     !!! KERNEL PANIC !!!
+#     panicked at kernel/src/fs/irqstat.rs:354:5:
+#     assertion `left == right` failed
+#       left: 39171
+#      right: 39170
+#
+# What makes it gate material rather than review material is that the rung
+# three lines above the panic reasons this exact race out correctly, at
+# length, and then the same function walks into it anyway. Knowing a counter
+# moves is not the same as noticing every place you assumed it did not.
+check_live_counter_reads() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== live-counter check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that no self-test compares two readings of one counter ==="
+    if "$py" "$PROJECT_ROOT/scripts/check-live-counter-reads.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A live counter -- the timer, an interrupt," >&2
+    echo "the clock, a CPU coming online -- moves between two reads of it, so an" >&2
+    echo "equality assertion across two readings holds only when nothing" >&2
+    echo "happened in between.  That is not a test; it is a race that usually" >&2
+    echo "wins." >&2
+    echo "" >&2
+    echo "The fix is structural, not a wider tolerance: take ONE snapshot and" >&2
+    echo "derive both sides from it, so the comparison cannot be handed two." >&2
+    echo "See kernel/src/fs/irqstat.rs (totals_from / lines_from).  Where the" >&2
+    echo "counter is monotone and you cannot snapshot it, bracket it instead --" >&2
+    echo "read before and after and assert membership in that range, which is" >&2
+    echo "exact rather than merely tolerant.  See kernel/src/fs/sysfs.rs." >&2
+    echo "" >&2
+    echo "If two readings are genuinely meant to be independent, add a line to" >&2
+    echo "scripts/live-counter-ledger.txt with the reason." >&2
+    exit 1
+}
+
+check_live_counter_reads
+
 # Keep self-test skips honest: looked up, and reported.
 #
 # A self-test may legitimately skip -- there is no second CPU to offline on a

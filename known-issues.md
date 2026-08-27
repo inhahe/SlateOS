@@ -90264,6 +90264,159 @@ through to whatever is behind, which is not what a disabled button does.
 `a_running_benchmark_refuses_a_second_start_without_disappearing` pins both
 halves.
 
+### C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY — credmanager struck off, and it was hiding two dead controls — 2026-08-26 — LANE C
+
+`apps/credmanager` is off the list on the same terms as benchmark: one `Layout`
+built from the live window size, and a hit box recorded for every control **as
+it is drawn**, through `guitk::frame::Frame`. Four hand-written hit tests are
+gone — `handle_toolbar_click`, `handle_sidebar_click`, `handle_list_click` and
+an empty `handle_detail_click` — replaced by a single `match self.target_at(x,
+y)`.
+
+**What the second derivation was actually hiding.** This app is the one that
+shows the failure is not theoretical drift, because two of its controls were
+not merely at risk of disagreeing — they had already lost the argument:
+
+- **Every folder and every tag in the sidebar was drawn as a selectable row and
+  wired to nothing.** `handle_sidebar_click` walked down the pane re-summing
+  `y_start + 12.0 + 30.0 + 24.0 + 12.0 + 20.0 + …` and had arms for the
+  Categories and Types groups only. The Folders and Tags groups were painted,
+  highlighted on selection, and had no counterpart block at all. Clicking one
+  did nothing, silently. Nothing failed, because nothing tested a control the
+  click handler had never heard of.
+- **The lock screen's Unlock button was decoration.** `handle_mouse` returned
+  before doing anything while the vault was locked, so the only way into the
+  vault was the Enter key. A painted, labelled, inert button is worse than no
+  button: it tells the user the pointer is the way in.
+
+Both are fixed by the conversion rather than *by* a fix — a drawn row is a
+clickable row by construction now — and both have a test that says so
+(`every_sidebar_row_selects_the_item_the_renderer_drew_there`,
+`the_unlock_button_unlocks_the_vault`).
+
+**The lesson worth carrying to the rest of the list.** A hand-written hit test
+does not just risk drifting from the renderer; it risks never having covered
+part of it. Drift is what you get when both sides are written and one changes.
+This was the other failure: one side was written and the other was *not
+finished*, and no amount of care in the arithmetic would have found it, because
+the arithmetic was right about the rows it knew about. What finds it is not
+having two sides.
+
+**A measuring pass costs nothing and removes a `&mut`.** `build_render_tree`
+took `&mut AppState` for one reason: to write the detail panel's measured
+content height back into a cached field. That made the scroll bound zero until
+the first frame had gone out — the wheel was dead in a freshly-opened panel —
+and it is incompatible with `Probe::draw`, which takes `&self` precisely so a
+test cannot be fooled by a renderer that mutates. The field is deleted;
+`detail_content_height()` draws into a scratch `Frame` and reads the height
+back. `the_detail_panel_cannot_be_scrolled_before_it_has_been_measured` now
+passes for the opposite reason it used to: there is no "before".
+
+### C-CREDMANAGER-TOOLBAR-FALLS-OFF-A-NARROW-WINDOW — 2026-08-26 — LANE C, OPEN
+
+**What happens.** credmanager's toolbar is a fixed row of six buttons laid out
+left to right from the sidebar's right edge: Add, the search box, Sort,
+Generator, Lock Vault, Settings. It needs 882 px and neither wraps nor scrolls.
+Resize the window narrower than that and the right-hand buttons go off the
+edge — **Lock Vault among them** — with nothing on screen to say they exist.
+At 700 px wide, only Add, the search box and Sort remain.
+
+**The half that is safe.** Since the conversion above, the toolbar is drawn
+inside `Frame::clip(layout.toolbar)`, so a button past the right edge records
+no hit box at all. There is no invisible click target hanging off-screen, and
+no stale bounds check to go wrong. `a_toolbar_button_past_the_right_edge_
+records_no_hit_box` pins that.
+
+**The half that is not.** The button is simply gone. For Settings that is an
+annoyance; for **Lock Vault** it is a security control the user cannot reach
+without resizing the window, which is not an obvious remedy when the thing you
+want is to lock your passwords and walk away. The keyboard has no accelerator
+for it either.
+
+**The proper fix**, in rough order of preference:
+
+1. Give the toolbar an overflow: measure the buttons, and when they do not fit,
+   collapse the ones that do not into a `»` menu at the right edge. This is
+   what every real toolbar does and it needs a popup, which the toolkit does
+   not have yet.
+2. Failing that, drop the search box's width first — it is the only elastic
+   thing in the row and it is 200 px of the 882.
+3. At minimum, bind Lock Vault to `Ctrl+L` so it is reachable at any size. This
+   is a few lines in `handle_key` and should probably happen regardless of
+   which of the above lands.
+
+**Until then**, `App::initial_size` is 1280×800 and the layout is comfortable
+there, so this only bites a user who deliberately narrows the window. When the
+toolbar learns to overflow, the test named above should start failing — which
+is the intent.
+
+### C-CREDMANAGER-ALLOWS-DEAD-CODE-CRATE-WIDE — 2026-08-26 — LANE C, OPEN, tech debt
+
+**What it is.** `apps/credmanager/src/main.rs` carries `#![allow(dead_code)]`
+at crate level. Nineteen items are genuinely unreached from the binary: the CSV
+export (`export_csv`, `escape_csv`), the backup serialiser
+(`serialize_backup`), the clipboard `copy`, `IdGen`, and the constructors for
+the entry kinds the Add button does not open a form for. They are finished and
+tested code waiting on a button, not corpses, so deleting them is wrong.
+
+**Why it matters.** A blanket allow does not distinguish "not wired yet" from
+"orphaned". It swallows both. The conversion above left `rows_top` and
+`build_render_tree` reachable from nothing but tests, and the lane gate's
+`-D dead_code` said nothing, because the allow was already covering nineteen
+other things. They were found by removing the allow by hand and reading the
+list — which is not a process, it is a coincidence.
+
+**What was done now.** Both orphans are `#[cfg(test)]`, which is the honest
+marker for "test-only" and keeps them under the lint's eye in the binary. The
+allow is back, with a comment naming exactly what it is expected to cover.
+
+**The proper fix.** Replace the crate-level allow with a per-item
+`#[allow(dead_code)]` and a one-line reason on each of the nineteen, so that
+anything *else* going dead is a gate failure on the day it happens rather than
+whenever someone next removes the allow out of curiosity. The reason to do it
+per-item rather than deleting the code is that each of those items is a feature
+with a roadmap entry: they want wiring, not a funeral.
+
+**Trigger:** do this when credmanager next gets a control wired (the Add form,
+or an Export menu item), since that pass will delete some of the nineteen
+annotations anyway.
+
+### C-CREDMANAGER-HAS-NO-VAULT-ON-DISK — 2026-08-26 — LANE C, OPEN
+
+**What happens.** credmanager now opens a real window, and that window opens an
+**empty vault, every launch**. There is no persistence layer at all: `main`
+calls `Vault::create("My Vault", "")` and hands it to `app::launch`. Anything
+the user stores is gone when the window closes.
+
+This is not a regression — the app had an empty `main` and stored nothing
+before either — but it changes character now that it is launchable, because a
+program that opens is a program someone may try to use.
+
+**Note the empty master password.** `Vault::create(name, "")` derives a
+verifier from an empty string, so the lock screen opens on Enter. That is the
+right default for a vault with nothing in it and the wrong one for a vault with
+something in it, which is the same statement as "there is no persistence yet".
+
+**The proper fix**, and the order it has to happen in:
+
+1. A vault file format: the `pwkdf` verifier written **with its salt and round
+   count** (a verifier without them is unopenable), then the entries encrypted
+   under `pwkdf::derive_key` with the same params.
+2. First-run: no vault file means prompt to *create* a master password, not to
+   enter one. The current lock screen has no create path.
+3. `main` reads the file, and the empty-password default disappears with it.
+
+Step 1 needs an encryption primitive **the whole tree does not have**. `pwkdf`
+derives keys; it does not encrypt. Nor does anything else: `sha2`, `sha1`, `md5`
+and `crc32` are one-way fingerprints, and there is no cipher crate in the
+workspace at all. So this is blocked on adding one, filed as
+`open-questions.md` → "SlateOS has no way to encrypt anything. Which cipher do
+we add, and who owns it?" — because "which cipher" and "which lane writes it"
+are not calls to make quietly in an app's `main`.
+
+**Until then**, the crate doc says so, and the app is a working demonstration
+of the UI rather than somewhere to keep a password.
+
 ---
 
 ## `B-A-GATE-THAT-IS-FALSE-EVERYWHERE-HIDES-CODE-FROM-THE-COMPILER` (lane B, 2026-08-26)
@@ -90480,3 +90633,226 @@ on the self-test fix.
 it exits on the budget rather than on the count, because right now a machine
 that lost a CPU to the timeout is indistinguishable at the serial log from one
 that never had it.
+
+---
+
+## `C-DEFRAG-HAS-NO-WAY-TO-SCAN-A-DRIVE` (lane C, 2026-08-26) — **open**, missing backend
+
+**In short:** The disk defragmenter now opens as a real window and every control
+in it works, but it has nothing to defragment. Nothing in SlateOS can yet list
+the volumes on a machine or read where a file's pieces physically sit on one, so
+the app opens on an empty drive list and stays there. It is a complete, tested
+front end waiting for a back end.
+
+**What is missing, precisely.** Two things, neither of which exists anywhere in
+the tree:
+
+1. **Volume enumeration.** `DefragUI::set_drives` takes a `Vec<DriveInfo>` and has
+   no caller outside tests. There is no service, syscall or library that can
+   answer "what drives are attached and how full are they?"
+2. **A block map.** `analyze_drive(&BlockMap, &[FileFragInfo])` — the function
+   that produces everything the app displays — needs to be told which of a
+   volume's blocks are free, which are used, and which file owns each one. That
+   is filesystem-internal data; there is no `fs/` tree in lane C and no interface
+   that exposes it.
+
+**How the gap is held open rather than papered over.** `DefragUI` carries a
+`scan: Option<ScanFn>` seam, where `ScanFn = fn(&DriveInfo) -> Option<(BlockMap,
+Vec<FileFragInfo>)>`. In the shipping binary `main` leaves it `None`. The
+predicate `DefragUI::action_available` gates **both** the Analyze button's hit box
+and its greying off the same condition, so with no scanner the button is *absent*
+rather than present-and-dead — a control that cannot work does not get drawn.
+Every test that exercises the Analyze path has to install a scanner itself
+(`always_scans` in the test module), which makes the missing backend impossible to
+forget while working on this file.
+
+**Two alternatives were rejected.** Inventing plausible fragmentation numbers so
+the app has something to draw would be a lie in the UI — a defragmenter that
+reports 34% fragmentation on a drive it never read is worse than one that reports
+nothing. Shipping the Analyze button wired to a function that always fails would
+be a control that looks live and does nothing, which is the exact failure this
+lane has been removing from app after app (see
+`C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`).
+
+**Proper fix.** When a filesystem service exists that can enumerate volumes and
+report block allocation, write the real `ScanFn` against it and set
+`ui.scan = Some(...)` in `main`, plus a drive-enumeration call feeding
+`set_drives`. Nothing in the UI needs to change: the seam was chosen so the
+window is already correct on the day the data arrives. Until then the app is
+honest about having no data.
+
+**Where it bites:** `apps/defrag/src/main.rs` — `ScanFn`, `DefragUI::scan`,
+`DefragUI::analyze_selected_drive`, `DefragUI::action_available`, and `main`.
+
+## `C-PDFVIEWER-HAS-NO-PDF-PARSER-AND-NO-PRINT-SPOOLER` (lane C, 2026-08-26) — **open**, missing backends
+
+**In short:** The PDF viewer now opens as a real window and everything in it
+works — tabs, zoom, rotation, continuous scrolling, the sidebar's thumbnail /
+bookmark / annotation panels, find-in-page, the print dialog — but it cannot
+open a PDF and it cannot print one. Nothing in SlateOS can yet turn a `.pdf`
+file into pages, and there is no print spooler for anything to be sent to. So
+the app opens on an empty tab, the recent-files list is inert, and the Print
+button is not drawn. It is a complete, tested front end waiting for two back
+ends.
+
+**What is missing, precisely.** Two things, neither of which exists anywhere in
+the tree:
+
+1. **A PDF parser.** Everything the app draws is derived from `PdfDocument` —
+   page sizes, the page count, the outline that fills the Bookmarks panel, the
+   `/Title` metadata that names the tab, the text that find-in-page searches.
+   `PdfDocument` is a plain data structure with no reader: there is no code that
+   can produce one from a file. A real one is a substantial port (xref tables,
+   object streams, Flate/LZW/DCT filters, font and CMap handling), not a
+   weekend's parsing.
+2. **A print spooler.** There is no print service, no queue, and no driver
+   interface. The dialog collects a page range, a copy count and duplex/colour
+   choices, and has nowhere to send them.
+
+**How the gaps are held open rather than papered over.** Each is a function
+pointer seam on `PdfViewerApp`, following the precedent set by defrag's
+`ScanFn` (see `C-DEFRAG-HAS-NO-WAY-TO-SCAN-A-DRIVE`):
+
+| Seam | Type | Gate |
+|---|---|---|
+| `open` | `OpenFn = fn(&Path) -> Option<PdfDocument>` | `can_open()` |
+| `print` | `PrintFn = fn(&PdfDocument, &[usize]) -> bool` | `can_print()` |
+
+Both are `None` in the shipping binary. Each gate governs the control's hit box
+and its appearance off the *same* condition, so a control that cannot work is
+never drawn as though it can: with no parser the recent-file rows are drawn as
+plain text and record no hit box, and with no spooler the Print button goes
+through `render_disabled_button`, which greys it and — the part that matters —
+records nothing for `hit_test` to find. There are no dead buttons.
+
+Every test that exercises either path installs its own backend (`a_document` /
+`refuses` for the parser, `accepts` for the spooler; installed through
+`set_opener` / `set_printer`), and each path is
+tested from **both** sides: the control is absent with no backend, and present
+and working with one. That makes the missing backends impossible to forget
+while working on this file.
+
+**Two alternatives were rejected**, for the same reasons as in defrag. Shipping
+a fabricated document so the viewer has something to draw would put a lie on
+screen. Shipping a Print button wired to a function that always fails would be a
+control that looks live and does nothing — the exact failure this lane has spent
+weeks removing from app after app.
+
+**Proper fix.** When a PDF library exists, write the real `OpenFn` against it
+and set `app.open = Some(...)` in `main`; likewise `app.print` when a spooler
+exists. Nothing in the UI needs to change — the seams were chosen so that the
+window is already correct on the day the data arrives.
+
+**Where it bites:** `apps/pdfviewer/src/main.rs` — `OpenFn`, `PrintFn`,
+`PdfViewerApp::open`, `PdfViewerApp::print`, `PdfViewerApp::can_open`,
+`PdfViewerApp::can_print`, `render_disabled_button`, and `main`.
+---
+
+## `B-WHICH-DOES-NOT-READ-ALIASES-FUNCTIONS-OR-~USER` (lane B, 2026-08-27) — **open**, missing feature
+
+**In short:** Our `which` now matches GNU which 2.21 for everything it does, but
+three of upstream's features are accepted-and-ignored rather than implemented.
+None of them can make `which` answer *wrongly* — each only makes it answer less
+than upstream would — but a script that relies on them will get a different
+answer than it does on Linux.
+
+**What is missing.**
+
+| Missing | Upstream behaviour | Ours |
+|---|---|---|
+| `--read-alias` / `-i` | Reads shell aliases on stdin (the shell function in `alias`(1)'s `which` wrapper pipes them in) and reports an alias before searching `PATH`. | Option parsed and ignored; only `PATH` is searched. |
+| `--read-functions` | Same, for shell function definitions. | Option parsed and ignored. |
+| `~user` in a `PATH` element | Expands to that user's home via `getpwnam`. | Left literal, so the element never matches. `~` and `~/…` *are* expanded from `$HOME` and work. |
+
+**Why they are not done.** The alias/function features are not really `which`
+features — they are a protocol between `which` and the shell that invoked it,
+and the useful half of that protocol (the `which` shell function that pipes
+`alias`/`declare -f` in) does not exist in our shell yet. Implementing the
+reader without the writer produces a feature nobody can reach. `~user` needs
+`getpwnam` and the `struct passwd` layout, which the coreutils crate does not
+bind today; `~` and `~/…` cover the case that actually appears in a `PATH`.
+
+**Proper fix.** For the aliases: land the shell-side wrapper first, then read
+stdin as bytes and match before the `PATH` scan. For `~user`: bind `getpwnam_r`
+(reentrant, so the returned buffer is ours) behind `#[cfg(unix)]` alongside the
+existing `euidaccess`/`geteuid` block in `which.rs`, and expand in
+`expand_tilde`, which already isolates the decision.
+
+**Where it lives:** `userspace/coreutils/src/bin/which.rs` — the ignored options
+are in `parse_args`, and `expand_tilde` is where `~user` would go. The module
+doc's "What is not implemented" section says the same thing at the code.
+
+---
+
+## `B-WHICH-DIVERGES-FROM-GNU-IN-FOUR-MEASURED-PLACES` (lane B, 2026-08-27) — **open**, deliberate divergence
+
+**In short:** Four places where our `which` deliberately does something other
+than what GNU which 2.21 was measured doing. Two are upstream bugs we declined
+to copy, one is a house rule about typed options, one is a message-shape choice.
+Recorded here so a future reader who diffs the two does not "fix" them back.
+
+| # | Upstream (measured) | Ours | Why |
+|---|---|---|---|
+| 1 | With `PATH` unset, the slash-split branch is skipped entirely, so `which /bin/sh` reports it missing even though it is right there. | An absolute or slashed command resolves without consulting `PATH` at all. | Upstream bug. The command names its own directory; `PATH` is irrelevant to it. |
+| 2 | `which /init` splits into directory `""` and searches nothing, reporting `no init in ()`. | A command directly under the root searches `/`. | Upstream bug — the empty string is the wrong reading of "the part before the last slash" when the slash is the first byte. |
+| 3 | An unrecognised option is reported and then *ignored*; the search proceeds. | Fatal: one diagnostic, `Try 'which --help' for more information.`, status 255. | Silently proceeding after ignoring an option the user typed is the same defect class this sweep exists to remove. The house `getopt` also ends its iteration at the first error. |
+| 4 | Diagnostics go to stderr unprefixed in some paths. | Every diagnostic is `which: …` through `stdfd::diag_bytes`, so a non-UTF-8 path survives it. | House rule; also what makes a `PATH` with arbitrary bytes reportable at all. |
+
+**Everything else was measured and matched**, including the surprising parts:
+the exit status is the *count* of commands not found, wrapped to a byte (300
+missing gives 44); `PATH=""` searches nothing while `PATH=":"` searches the
+working directory twice; `--skip-dot` drops every *relative* element, not only
+the dotted ones its own help text describes; `--skip-tilde` also drops absolute
+elements that sit under `$HOME`; a fifo with the execute bit matches, so the
+test is "not a directory, and `X_OK`", not `S_ISREG`; a leading `//` in a `PATH`
+element survives cleaning but `///` collapses to `/`; and `--tty-only` freezes
+only the four show/skip options written to its *right*.
+
+**Where it lives:** `userspace/coreutils/src/bin/which.rs`, "Where this
+deliberately diverges" in the module doc, and the tests named for each.
+
+---
+
+## `B-STRINGS-HAS-NO-OBJECT-FILE-READER` (lane B, 2026-08-27) — **open**, deliberate limitation
+
+**In short:** GNU `strings` is part of binutils, so it can open an executable,
+find the "data" section inside it, and scan only that. Ours cannot — it has no
+code for reading executable file formats — so it always scans the whole file
+from the first byte to the last. Three of upstream's options ask for something
+that needs that reader. Rather than accept them and quietly scan the whole file
+anyway, we refuse them with a message that says why.
+
+| Option | What upstream does with it | Ours |
+|---|---|---|
+| `-d` / `--data` | Scans only the initialised-data sections of an object file. | Refused: `strings: --data needs an object-file reader, which this build does not have` |
+| `-T` / `--target=BFDNAME` | Names the object-file format to assume (`elf64-x86-64`, `binary`, …). | Refused, same sentence with `--target`. |
+| `-U` / `--unicode=MODE` | Six modes for re-rendering UTF-8 runs (`show`, `invalid`, `hex`, `escape`, `highlight`). | Only `d` (the upstream default — treat UTF-8 as ordinary bytes) is accepted; the other five are refused. |
+| `@FILE` | Reads further command-line options out of `FILE`. | Refused. Nothing else in this coreutils has a private argument-file syntax. |
+
+**Why refuse rather than ignore.** Accepting `-d` and scanning the whole file
+would answer a different question than the one asked, silently, and with *more*
+output than the caller expected — the shape of error a reader is least likely
+to notice. A script that greps the output would simply get wrong answers. A
+refusal is loud, and the exit status (1) is the one upstream uses for a bad
+command line, so a caller that checks its status stops rather than proceeds.
+
+**Everything else is implemented and was measured against GNU strings 2.42**,
+including the parts no reasonable implementation would guess: a bare `-`
+operand means `--all` and is *not* a file to scan; `-n`'s argument goes through
+`strtoul` in base 0, so `-n 010` means eight and `-n 0xA` means ten; the two
+"too big" refusals are worded differently on either side of `0xffffffff`;
+`-t q` and `-e q` print the bare usage with no sentence of their own; `-n`
+counts *characters* while `-t` reports *bytes*, so a 16-bit run of five
+characters needs `-n 5` but its offsets advance by two; and a multi-byte
+character that fails the printable test restarts the scan one byte later, not
+one character later.
+
+**The proper fix**, should it ever be wanted: `-d`/`-T` need an ELF section
+reader. The natural home is a shared `coreutils::elf` module (`readelf`,
+`objdump`, and `nm` would all want it), not a private one inside `strings`.
+`-U`'s five other modes need a UTF-8 decoder plus the four rendering styles,
+which is self-contained and could be done without the reader.
+
+**Where it lives:** `userspace/coreutils/src/bin/strings.rs` — "Where this
+deliberately diverges" in the module doc, `unsupported()`, and the test
+`the_object_file_options_are_refused_rather_than_ignored`.

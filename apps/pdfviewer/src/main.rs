@@ -17,15 +17,39 @@
 //! - Dark mode rendering
 //!
 //! Uses the guitk library for UI rendering.
+//!
+//! # Where the controls come from
+//!
+//! Every clickable thing is a [`Target`], and the *only* place a target's
+//! rectangle is written down is the renderer, which records it with
+//! [`Frame::hit`] at the moment it draws it. [`PdfViewerApp::target_at`] then
+//! answers "what is under this point?" by drawing a frame and asking it.
+//!
+//! That matters here more than in most of these apps, because this toolbar's
+//! geometry is *accumulated*: `btn_x` walks left to right across fourteen
+//! buttons, three separators and two variable-width text readouts, one of which
+//! (the zoom label) is only drawn when a tab exists. A second, hand-summed copy
+//! of that walk would be wrong the first time anyone inserted a button — which
+//! is exactly how `credmanager` ended up drawing sidebar rows that clicked to
+//! nothing; see `known-issues.md` ->
+//! `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`.
 
-#[allow(unused_imports)]
+use std::process::ExitCode;
+
 use guitk::color::Color;
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+#[cfg(test)]
+use guitk::probe;
+use guitk::probe::Probe;
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textfind;
+use guitk::wheel;
+use oswindow::app::{self, App, Response};
 
 use std::path::{Path, PathBuf};
 
@@ -106,6 +130,178 @@ const DEFAULT_ZOOM: f32 = 1.0;
 /// Standard US Letter page dimensions in points (at 72 DPI).
 const DEFAULT_PAGE_WIDTH: f32 = 612.0;
 const DEFAULT_PAGE_HEIGHT: f32 = 792.0;
+
+/// The window this app asks for when it opens.
+const WINDOW_WIDTH: f32 = 1100.0;
+const WINDOW_HEIGHT: f32 = 780.0;
+
+/// How far one scrolled *row* moves the document, in points at 1x zoom.
+///
+/// A notch is `guitk::wheel::ROWS_PER_NOTCH` rows, so a notch moves three times
+/// this -- the same three-lines-per-notch the rest of the desktop uses, rather
+/// than a distance this app picked for itself.
+const SCROLL_ROW_HEIGHT: f32 = 20.0;
+
+// ============================================================================
+// What can be clicked
+// ============================================================================
+
+/// Every clickable thing in the window.
+///
+/// One variant per control, carrying whatever index the handler needs. The
+/// renderer records the rectangle; nothing else knows one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// First / previous / next / last page.
+    Nav(Nav),
+    ZoomOut,
+    ZoomIn,
+    /// Fit-width and fit-page, which set [`ZoomMode`] rather than a factor.
+    Fit(Fit),
+    RotateCcw,
+    RotateCw,
+    /// Single-page vs. continuous scroll.
+    ViewModeToggle,
+    SidebarToggle,
+    SearchToggle,
+    Print,
+    /// A document tab in the tab strip.
+    Tab(usize),
+    /// The `x` on a document tab. Recorded *after* the tab it sits on, so that
+    /// `hit_test` -- which answers with the last box containing the point --
+    /// closes the tab rather than merely selecting it.
+    TabClose(usize),
+    NewTab,
+    /// One of the three sidebar panel selectors.
+    Panel(SidebarPanel),
+    /// A page thumbnail in the sidebar, by page index.
+    Thumbnail(usize),
+    /// A bookmark row, by index into the *flattened* outline.
+    Bookmark(usize),
+    /// The expand/collapse arrow on a bookmark that has children. Recorded
+    /// after the row, so the arrow wins where the two overlap.
+    BookmarkArrow(usize),
+    /// A recent-file entry on the welcome screen.
+    RecentFile(usize),
+    /// The search field, previous-match and next-match buttons.
+    SearchField,
+    SearchPrev,
+    SearchNext,
+    /// The document viewport. Not a button -- it exists so a click or a wheel
+    /// notch over the pages can be told apart from one over the sidebar.
+    Document,
+}
+
+/// The four page-navigation buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nav {
+    First,
+    Prev,
+    Next,
+    Last,
+}
+
+/// The two fit buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fit {
+    Width,
+    Page,
+}
+
+/// The frame this app draws into: a render tree that also remembers where each
+/// [`Target`] was put.
+pub type Frame = guitk::frame::Frame<Target>;
+
+// ============================================================================
+// Layout
+// ============================================================================
+
+/// A finite, non-negative version of `v`.
+///
+/// A window size arrives from outside this program, and NaN or a negative width
+/// would otherwise propagate into every rectangle in the frame.
+fn sane(v: f32) -> f32 {
+    if v.is_finite() { v.max(0.0) } else { 0.0 }
+}
+
+/// Take a band of height `want` off the top of what is left below `y`, and
+/// advance `y` past it.
+///
+/// The band **shrinks** to what remains rather than being clamped away or
+/// clipped afterwards, and -- the part that matters -- it keeps its `y` even
+/// when it shrinks to nothing. An earlier version derived each band by
+/// intersecting it with the window and taking `Rect::EMPTY` when that failed,
+/// which is correct for the *size* and silently wrong for the *position*:
+/// `Rect::EMPTY` sits at the origin, so a zero-height tab strip reported
+/// `bottom() == 0` and the sidebar below it was laid out on top of the toolbar,
+/// where its controls were both invisible and clickable. A band with no height
+/// still has a place.
+fn take_top(y: &mut f32, limit: f32, width: f32, want: f32) -> Rect {
+    let h = want.min((limit - *y).max(0.0));
+    let band = Rect::new(0.0, *y, width, h);
+    *y += h;
+    band
+}
+
+/// Where the bands of the window are, for one frame at one size.
+///
+/// Recomputed on every frame from the size the caller supplies and never
+/// remembered -- see [`PdfViewerApp::frame`] for why.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    pub window: Rect,
+    pub toolbar: Rect,
+    pub tab_bar: Rect,
+    /// Empty when the sidebar is hidden, which is also what makes every
+    /// sidebar hit box vanish: `Frame::hit` drops a box trimmed to nothing.
+    pub sidebar: Rect,
+    pub content: Rect,
+    pub status: Rect,
+}
+
+impl Layout {
+    /// Derive the bands for a `width` x `height` window.
+    ///
+    /// `sidebar_visible` is app state rather than geometry, but the content
+    /// area's left edge depends on it, so it has to come in here rather than be
+    /// applied afterwards.
+    #[must_use]
+    pub fn new(width: f32, height: f32, sidebar_visible: bool) -> Self {
+        let width = sane(width);
+        let height = sane(height);
+        let window = Rect::new(0.0, 0.0, width, height);
+
+        // The status bar is taken off the bottom first, so a window too short
+        // for everything loses document area rather than losing the bar off the
+        // bottom edge.
+        let status_h = STATUS_BAR_HEIGHT.min(height);
+        let body_bottom = (height - status_h).max(0.0);
+
+        let mut y = 0.0;
+        let toolbar = take_top(&mut y, body_bottom, width, TOOLBAR_HEIGHT);
+        let tab_bar = take_top(&mut y, body_bottom, width, TAB_BAR_HEIGHT);
+        // Whatever is left between the strips and the status bar.
+        let body = take_top(&mut y, body_bottom, width, f32::INFINITY);
+
+        let sidebar_w = if sidebar_visible {
+            SIDEBAR_WIDTH.min(width)
+        } else {
+            0.0
+        };
+        let sidebar = Rect::new(0.0, body.y, sidebar_w, body.h);
+        let content = Rect::new(sidebar_w, body.y, (width - sidebar_w).max(0.0), body.h);
+        let status = Rect::new(0.0, body_bottom, width, status_h);
+
+        Self {
+            window,
+            toolbar,
+            tab_bar,
+            sidebar,
+            content,
+            status,
+        }
+    }
+}
 
 // ============================================================================
 // Document model
@@ -305,6 +501,36 @@ impl Bookmark {
         }
         result
     }
+
+    /// Find the `index`-th entry of this subtree's flattened order, mutably.
+    ///
+    /// `index` counts down as the walk consumes entries, and the walk stops at
+    /// the first hit -- so on return `index` is the *remaining* count if this
+    /// subtree was too short. Callers pass the same running counter to each
+    /// root in turn, which is how a flat row number reached through the
+    /// renderer's list finds the tree node it was drawn from.
+    ///
+    /// The order here must be the same order [`Bookmark::flatten`] produces,
+    /// collapsed children included -- a row the user cannot see is a row they
+    /// cannot have clicked, so descending into a collapsed subtree would shift
+    /// every index below it.
+    fn nth_mut(&mut self, index: &mut usize) -> Option<&mut Bookmark> {
+        if *index == 0 {
+            return Some(self);
+        }
+        *index = index.saturating_sub(1);
+        if !self.expanded {
+            return None;
+        }
+        // Not a `find_map`: the closure would need `&mut index` while the
+        // iterator holds `&mut self.children`, and the loop says it plainly.
+        for child in &mut self.children {
+            if let Some(found) = child.nth_mut(index) {
+                return Some(found);
+            }
+        }
+        None
+    }
 }
 
 /// PDF document metadata.
@@ -465,6 +691,32 @@ impl PdfDocument {
     /// Count total bookmark entries (including nested).
     pub fn total_bookmark_count(&self) -> usize {
         self.bookmarks.iter().map(|b| b.total_count()).sum()
+    }
+
+    /// Expand or collapse the `index`-th row of the flattened outline.
+    ///
+    /// Answers whether anything changed, so a caller can tell a click that hit
+    /// a childless row (where an arrow is not drawn and toggling is
+    /// meaningless) from one that did something.
+    pub fn toggle_bookmark(&mut self, index: usize) -> bool {
+        let mut remaining = index;
+        for bm in &mut self.bookmarks {
+            if let Some(found) = bm.nth_mut(&mut remaining) {
+                if found.children.is_empty() {
+                    return false;
+                }
+                found.expanded = !found.expanded;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The page the `index`-th row of the flattened outline points at.
+    pub fn bookmark_page(&self, index: usize) -> Option<usize> {
+        self.flatten_bookmarks()
+            .get(index)
+            .map(|(_, bm)| bm.page_index)
     }
 }
 
@@ -1067,12 +1319,38 @@ impl Default for IdGenerator {
     }
 }
 
+/// Turn a path into a document, if something in this build knows how.
+///
+/// Nothing does yet -- there is no PDF parser in the tree -- so the field
+/// holding one of these is `None` in a shipped build, and the controls that
+/// would need it are drawn disabled and record no hit box. See `known-issues.md`
+/// -> `C-PDFVIEWER-HAS-NO-PDF-BACKEND`.
+///
+/// The seam exists rather than the call being written inline and stubbed out
+/// because a stub is a lie the type system stops checking: the moment
+/// `open_recent` "succeeds" by conjuring a sample document, every test above it
+/// is testing the conjurer. A `None` opener makes the absence a value the
+/// renderer can *see*, which is what keeps the button honest.
+pub type OpenFn = fn(&Path) -> Option<PdfDocument>;
+
+/// Send the named pages of a document to a spooler, answering whether it took.
+///
+/// `None` for the same reason as [`OpenFn`]: there is no print service to talk
+/// to, and a Print button that silently does nothing is worse than one that is
+/// visibly greyed out.
+pub type PrintFn = fn(&PdfDocument, &[usize]) -> bool;
+
 /// The complete PDF viewer application state.
-#[derive(Debug)]
 pub struct PdfViewerApp {
     pub tabs: Vec<DocumentTab>,
     pub active_tab: usize,
     pub search: SearchState,
+    /// Whether keystrokes go to the search query rather than the document.
+    ///
+    /// Distinct from `search.active`, which is whether the bar is *shown*: a
+    /// click on the page leaves the bar up (so the match count stays readable)
+    /// but takes the caret away, exactly as a browser's find bar does.
+    pub search_focused: bool,
     pub recent_files: RecentFilesList,
     pub print_settings: PrintSettings,
     pub dark_mode: bool,
@@ -1080,6 +1358,40 @@ pub struct PdfViewerApp {
     pub window_height: f32,
     pub id_gen: IdGenerator,
     pub next_annotation_id: u64,
+    /// See [`OpenFn`]. `None` in a shipped build.
+    open: Option<OpenFn>,
+    /// See [`PrintFn`]. `None` in a shipped build.
+    print: Option<PrintFn>,
+    /// Fractional wheel notches not yet worth a scroll step.
+    ///
+    /// A touchpad delivers a stream of small fractions; dropping each one
+    /// because it rounds to zero rows makes a slow drag scroll nothing at all,
+    /// so the remainder is carried between events.
+    wheel: wheel::Accumulator,
+}
+
+impl std::fmt::Debug for PdfViewerApp {
+    // Hand-written because `fn` pointers are not `Debug`, and the two seams are
+    // not state anyone debugging this wants printed -- only whether they are
+    // wired at all, which is what the two booleans say.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdfViewerApp")
+            .field("tabs", &self.tabs)
+            .field("active_tab", &self.active_tab)
+            .field("search", &self.search)
+            .field("search_focused", &self.search_focused)
+            .field("recent_files", &self.recent_files)
+            .field("print_settings", &self.print_settings)
+            .field("dark_mode", &self.dark_mode)
+            .field("window_width", &self.window_width)
+            .field("window_height", &self.window_height)
+            .field("id_gen", &self.id_gen)
+            .field("next_annotation_id", &self.next_annotation_id)
+            .field("can_open", &self.open.is_some())
+            .field("can_print", &self.print.is_some())
+            .field("wheel", &self.wheel)
+            .finish()
+    }
 }
 
 impl PdfViewerApp {
@@ -1090,6 +1402,7 @@ impl PdfViewerApp {
             tabs: vec![initial_tab],
             active_tab: 0,
             search: SearchState::new(),
+            search_focused: false,
             recent_files: RecentFilesList::default(),
             print_settings: PrintSettings::default(),
             dark_mode: true,
@@ -1097,7 +1410,32 @@ impl PdfViewerApp {
             window_height: height,
             id_gen,
             next_annotation_id: 1,
+            open: None,
+            print: None,
+            wheel: wheel::Accumulator::default(),
         }
+    }
+
+    /// Install the thing that turns a path into a document. See [`OpenFn`].
+    pub fn set_opener(&mut self, open: OpenFn) {
+        self.open = Some(open);
+    }
+
+    /// Install the thing that spools pages. See [`PrintFn`].
+    pub fn set_printer(&mut self, print: PrintFn) {
+        self.print = Some(print);
+    }
+
+    /// Whether a document can be opened at all in this build.
+    #[must_use]
+    pub fn can_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Whether the active tab holds something a printer could take.
+    #[must_use]
+    pub fn can_print(&self) -> bool {
+        self.print.is_some() && self.active_tab().is_some_and(|t| t.document.is_some())
     }
 
     /// Get the active tab.
@@ -1240,72 +1578,93 @@ impl PdfViewerApp {
     }
 
     /// Compute the content area dimensions (accounting for toolbar, tabs, status, sidebar).
+    ///
+    /// Derived from [`Layout`] rather than re-summing the band heights, so
+    /// there is one description of where the document area is and callers of
+    /// this cannot drift away from what the renderer drew.
     pub fn content_area(&self) -> (f32, f32, f32, f32) {
-        let sidebar_w = self
-            .active_tab()
-            .filter(|t| t.sidebar_visible)
-            .map_or(0.0, |_| SIDEBAR_WIDTH);
-        let x = sidebar_w;
-        let y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
-        let w = (self.window_width - sidebar_w).max(0.0);
-        let h = (self.window_height - y - STATUS_BAR_HEIGHT).max(0.0);
-        (x, y, w, h)
+        let c = self.layout(self.window_width, self.window_height).content;
+        (c.x, c.y, c.w, c.h)
     }
 
-    /// Render the entire application to a RenderTree.
-    pub fn render(&self) -> RenderTree {
-        let mut tree = RenderTree::new();
+    /// The bands of the window at `width` x `height`, with the sidebar's
+    /// visibility taken from the active tab.
+    fn layout(&self, width: f32, height: f32) -> Layout {
+        Layout::new(
+            width,
+            height,
+            self.active_tab().is_some_and(|t| t.sidebar_visible),
+        )
+    }
 
-        // Background
-        tree.push(RenderCommand::FillRect {
+    /// Draw the whole window at `width` x `height`, recording as it goes where
+    /// every control ended up.
+    ///
+    /// The size is an argument and not a field on purpose. A layout cached from
+    /// the last resize is wrong for exactly one frame -- the first one after the
+    /// window changes size -- and that is the frame in which a click lands on
+    /// whatever used to be there.
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let layout = self.layout(width, height);
+        let mut frame = Frame::new(layout.window.w, layout.window.h);
+
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
+            width: layout.window.w,
+            height: layout.window.h,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
-        self.render_toolbar(&mut tree);
-        self.render_tab_bar(&mut tree);
+        self.render_toolbar(&mut frame, &layout);
+        self.render_tab_bar(&mut frame, &layout);
 
         if let Some(tab) = self.active_tab() {
             if tab.sidebar_visible {
-                self.render_sidebar(&mut tree, tab);
+                self.render_sidebar(&mut frame, &layout, tab);
             }
-            self.render_document_area(&mut tree, tab);
+            self.render_document_area(&mut frame, &layout, tab);
         }
 
-        self.render_status_bar(&mut tree);
+        self.render_status_bar(&mut frame, &layout);
 
         if self.search.active {
-            self.render_search_bar(&mut tree);
+            self.render_search_bar(&mut frame, &layout);
         }
 
-        tree
+        frame
     }
 
     /// Render the toolbar.
-    fn render_toolbar(&self, tree: &mut RenderTree) {
+    fn render_toolbar(&self, frame: &mut Frame, layout: &Layout) {
+        let bar = layout.toolbar;
+
         // Toolbar background
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.window_width,
-            height: TOOLBAR_HEIGHT,
+            width: bar.w,
+            height: bar.h,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Bottom border
-        tree.push(RenderCommand::Line {
+        frame.push(RenderCommand::Line {
             x1: 0.0,
-            y1: TOOLBAR_HEIGHT,
-            x2: self.window_width,
-            y2: TOOLBAR_HEIGHT,
+            y1: bar.bottom(),
+            x2: bar.w,
+            y2: bar.bottom(),
             color: SURFACE0,
             width: 1.0,
         });
+
+        // Clipped to the toolbar band, which is what makes the buttons in a
+        // window too short to have a toolbar not merely invisible but
+        // unclickable: `Frame::hit` trims each box to the innermost clip and
+        // drops what is left of nothing.
+        frame.clip(bar);
 
         let mut btn_x: f32 = 8.0;
         let btn_y: f32 = 6.0;
@@ -1313,14 +1672,22 @@ impl PdfViewerApp {
 
         // Navigation buttons
         let nav_buttons = [
-            ("<<", "First"),
-            ("<", "Prev"),
-            (">", "Next"),
-            (">>", "Last"),
+            ("<<", Nav::First),
+            ("<", Nav::Prev),
+            (">", Nav::Next),
+            (">>", Nav::Last),
         ];
-        for (label, _tooltip) in &nav_buttons {
+        for (label, which) in &nav_buttons {
             let btn_w: f32 = 36.0;
-            self.render_toolbar_button(tree, btn_x, btn_y, btn_w, btn_h, label);
+            self.render_toolbar_button(
+                frame,
+                btn_x,
+                btn_y,
+                btn_w,
+                btn_h,
+                label,
+                Target::Nav(*which),
+            );
             btn_x += btn_w + 4.0;
         }
 
@@ -1333,7 +1700,7 @@ impl PdfViewerApp {
                 tab.current_page.saturating_add(1),
                 tab.page_count()
             );
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: btn_x,
                 y: btn_y + 9.0,
                 text: page_text,
@@ -1347,7 +1714,7 @@ impl PdfViewerApp {
         }
 
         // Separator
-        tree.push(RenderCommand::Line {
+        frame.push(RenderCommand::Line {
             x1: btn_x,
             y1: btn_y + 2.0,
             x2: btn_x,
@@ -1358,16 +1725,16 @@ impl PdfViewerApp {
         btn_x += 12.0;
 
         // Zoom buttons
-        let zoom_buttons = [("-", "Zoom Out"), ("+", "Zoom In")];
-        for (label, _tooltip) in &zoom_buttons {
+        let zoom_buttons = [("-", Target::ZoomOut), ("+", Target::ZoomIn)];
+        for (label, target) in &zoom_buttons {
             let btn_w: f32 = 32.0;
-            self.render_toolbar_button(tree, btn_x, btn_y, btn_w, btn_h, label);
+            self.render_toolbar_button(frame, btn_x, btn_y, btn_w, btn_h, label, *target);
             btn_x += btn_w + 4.0;
         }
 
         // Zoom indicator
         if let Some(tab) = self.active_tab() {
-            let (_, _, vw, vh) = self.content_area();
+            let (vw, vh) = (layout.content.w, layout.content.h);
             let page_w = tab
                 .document
                 .as_ref()
@@ -1379,7 +1746,7 @@ impl PdfViewerApp {
                 .and_then(|d| d.pages.first())
                 .map_or(DEFAULT_PAGE_HEIGHT, |p| p.display_height());
             let zoom_label = tab.zoom.label(vw, vh, page_w, page_h);
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: btn_x,
                 y: btn_y + 9.0,
                 text: zoom_label,
@@ -1393,7 +1760,7 @@ impl PdfViewerApp {
         }
 
         // Separator
-        tree.push(RenderCommand::Line {
+        frame.push(RenderCommand::Line {
             x1: btn_x,
             y1: btn_y + 2.0,
             x2: btn_x,
@@ -1404,20 +1771,23 @@ impl PdfViewerApp {
         btn_x += 12.0;
 
         // Fit buttons
-        let fit_buttons = [("FW", "Fit Width"), ("FP", "Fit Page")];
-        for (label, _tooltip) in &fit_buttons {
+        let fit_buttons = [
+            ("FW", Target::Fit(Fit::Width)),
+            ("FP", Target::Fit(Fit::Page)),
+        ];
+        for (label, target) in &fit_buttons {
             let btn_w: f32 = 36.0;
-            self.render_toolbar_button(tree, btn_x, btn_y, btn_w, btn_h, label);
+            self.render_toolbar_button(frame, btn_x, btn_y, btn_w, btn_h, label, *target);
             btn_x += btn_w + 4.0;
         }
 
         btn_x += 8.0;
 
         // Rotation buttons
-        let rot_buttons = [("CCW", "Rotate CCW"), ("CW", "Rotate CW")];
-        for (label, _tooltip) in &rot_buttons {
+        let rot_buttons = [("CCW", Target::RotateCcw), ("CW", Target::RotateCw)];
+        for (label, target) in &rot_buttons {
             let btn_w: f32 = 40.0;
-            self.render_toolbar_button(tree, btn_x, btn_y, btn_w, btn_h, label);
+            self.render_toolbar_button(frame, btn_x, btn_y, btn_w, btn_h, label, *target);
             btn_x += btn_w + 4.0;
         }
 
@@ -1429,29 +1799,130 @@ impl PdfViewerApp {
             Some(ViewMode::ContinuousScroll) => "Scr",
             None => "1pg",
         };
-        self.render_toolbar_button(tree, btn_x, btn_y, 36.0, btn_h, vm_label);
+        self.render_toolbar_button(
+            frame,
+            btn_x,
+            btn_y,
+            36.0,
+            btn_h,
+            vm_label,
+            Target::ViewModeToggle,
+        );
         btn_x += 44.0;
 
         // Sidebar toggle
-        self.render_toolbar_button(tree, btn_x, btn_y, 36.0, btn_h, "SB");
+        self.render_toolbar_button(
+            frame,
+            btn_x,
+            btn_y,
+            36.0,
+            btn_h,
+            "SB",
+            Target::SidebarToggle,
+        );
 
-        // Right-side buttons (search, print)
-        let right_x = self.window_width - 90.0;
-        self.render_toolbar_button(tree, right_x, btn_y, 36.0, btn_h, "Srch");
-        self.render_toolbar_button(tree, right_x + 44.0, btn_y, 36.0, btn_h, "Prt");
+        // Right-side buttons (search, print). Positioned from the right edge, so
+        // in a window narrow enough for them to collide with the row above they
+        // are drawn last and therefore win the hit test -- which is the right
+        // answer, since they are the ones still fully visible.
+        let right_x = bar.w - 90.0;
+        self.render_toolbar_button(
+            frame,
+            right_x,
+            btn_y,
+            36.0,
+            btn_h,
+            "Srch",
+            Target::SearchToggle,
+        );
+        // Print is only a control when something can be printed. With no
+        // spooler wired (the shipped case, see `OpenFn`) or no document in the
+        // tab, it is drawn greyed and records no target -- so a click lands on
+        // whatever is behind it, which is nothing, rather than on a button that
+        // takes the press and swallows it.
+        if self.can_print() {
+            self.render_toolbar_button(
+                frame,
+                right_x + 44.0,
+                btn_y,
+                36.0,
+                btn_h,
+                "Prt",
+                Target::Print,
+            );
+        } else {
+            self.render_disabled_button(frame, right_x + 44.0, btn_y, 36.0, btn_h, "Prt");
+        }
+
+        frame.unclip();
     }
 
-    /// Render a toolbar button.
-    fn render_toolbar_button(
+    /// Render a toolbar button that cannot be pressed, recording no hit box.
+    ///
+    /// Deliberately not `render_toolbar_button` with a flag: the enabled path
+    /// *always* records a target and the disabled path *never* does, and a
+    /// boolean parameter is how that invariant becomes a runtime question
+    /// somebody eventually gets backwards.
+    fn render_disabled_button(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         x: f32,
         y: f32,
         w: f32,
         h: f32,
         label: &str,
     ) {
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: MANTLE,
+            corner_radii: CornerRadii::all(4.0),
+        });
+        frame.push(RenderCommand::StrokeRect {
+            x,
+            y,
+            width: w,
+            height: h,
+            color: SURFACE0,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(4.0),
+        });
+        frame.push(RenderCommand::Text {
+            x: x + 4.0,
+            y: y + (h - 12.0) / 2.0,
+            text: label.to_string(),
+            color: OVERLAY0,
+            font_size: 12.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(w - 8.0),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    /// Render a toolbar button, and record that `target` is what a click inside
+    /// it means.
+    ///
+    /// The hit box is the button's own rectangle, taken from the same
+    /// parameters the fill uses -- not recomputed. That is the entire reason
+    /// this takes a target at all rather than the caller recording the box:
+    /// there is no arithmetic here for the two to disagree about.
+    // self + frame + rect (x,y,w,h) + label + target. Grouping the rect into a
+    // struct would not read better at eighteen call sites.
+    #[allow(clippy::too_many_arguments)]
+    fn render_toolbar_button(
+        &self,
+        frame: &mut Frame,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        label: &str,
+        target: Target,
+    ) {
+        frame.hit(target, Rect::new(x, y, w, h));
+        frame.push(RenderCommand::FillRect {
             x,
             y,
             width: w,
@@ -1459,7 +1930,7 @@ impl PdfViewerApp {
             color: SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
-        tree.push(RenderCommand::StrokeRect {
+        frame.push(RenderCommand::StrokeRect {
             x,
             y,
             width: w,
@@ -1471,7 +1942,7 @@ impl PdfViewerApp {
         // Center text in button
         let text_x = x + 4.0;
         let text_y = y + (h - 12.0) / 2.0;
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: text_x,
             y: text_y,
             text: label.to_string(),
@@ -1484,27 +1955,32 @@ impl PdfViewerApp {
     }
 
     /// Render the tab bar.
-    fn render_tab_bar(&self, tree: &mut RenderTree) {
-        let y = TOOLBAR_HEIGHT;
+    fn render_tab_bar(&self, frame: &mut Frame, layout: &Layout) {
+        let strip = layout.tab_bar;
+        let y = strip.y;
 
         // Tab bar background
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: self.window_width,
-            height: TAB_BAR_HEIGHT,
+            width: strip.w,
+            height: strip.h,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
 
-        tree.push(RenderCommand::Line {
+        frame.push(RenderCommand::Line {
             x1: 0.0,
-            y1: y + TAB_BAR_HEIGHT,
-            x2: self.window_width,
-            y2: y + TAB_BAR_HEIGHT,
+            y1: strip.bottom(),
+            x2: strip.w,
+            y2: strip.bottom(),
             color: SURFACE0,
             width: 1.0,
         });
+
+        // Clipped to the strip, so tabs that have run off the right-hand edge
+        // are unclickable rather than clickable-but-invisible.
+        frame.clip(strip);
 
         let mut tab_x: f32 = 4.0;
         let tab_w: f32 = 180.0;
@@ -1515,8 +1991,10 @@ impl PdfViewerApp {
             let bg = if is_active { BASE } else { CRUST };
             let fg = if is_active { TEXT_COLOR } else { SUBTEXT0 };
 
+            frame.hit(Target::Tab(i), Rect::new(tab_x, y + 2.0, tab_w, tab_h));
+
             // Tab background
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: tab_x,
                 y: y + 2.0,
                 width: tab_w,
@@ -1532,7 +2010,7 @@ impl PdfViewerApp {
 
             if is_active {
                 // Active tab indicator line
-                tree.push(RenderCommand::Line {
+                frame.push(RenderCommand::Line {
                     x1: tab_x,
                     y1: y + 2.0,
                     x2: tab_x + tab_w,
@@ -1562,7 +2040,7 @@ impl PdfViewerApp {
                 TAB_TITLE_SIZE,
                 FontWeightHint::Regular,
             );
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: tab_x + TAB_TEXT_INSET,
                 y: y + 10.0,
                 text: display_title,
@@ -1573,10 +2051,21 @@ impl PdfViewerApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            // Close button (x) on each tab
+            // Close button (x) on each tab. Recorded *after* the tab, because
+            // `hit_test` answers with the last box containing the point: where
+            // the cross overlaps the tab it sits on, closing wins over
+            // selecting, which is what a user aiming at a cross means.
+            //
+            // The box is a finger-sized square around the glyph rather than the
+            // glyph's own ink -- an 11px `x` is about six pixels wide, which is
+            // not a target anyone can hit.
             let close_x = tab_x + tab_w - TAB_CLOSE_INSET;
             let close_y = y + 10.0;
-            tree.push(RenderCommand::Text {
+            frame.hit(
+                Target::TabClose(i),
+                Rect::new(close_x - 5.0, y + 6.0, 20.0, 20.0),
+            );
+            frame.push(RenderCommand::Text {
                 x: close_x,
                 y: close_y,
                 text: "x".to_string(),
@@ -1591,7 +2080,8 @@ impl PdfViewerApp {
         }
 
         // New tab button (+)
-        tree.push(RenderCommand::FillRect {
+        frame.hit(Target::NewTab, Rect::new(tab_x, y + 6.0, 28.0, 24.0));
+        frame.push(RenderCommand::FillRect {
             x: tab_x,
             y: y + 6.0,
             width: 28.0,
@@ -1599,7 +2089,7 @@ impl PdfViewerApp {
             color: SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: tab_x + 8.0,
             y: y + 10.0,
             text: "+".to_string(),
@@ -1609,28 +2099,40 @@ impl PdfViewerApp {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
+
+        frame.unclip();
     }
 
     /// Render the sidebar.
-    fn render_sidebar(&self, tree: &mut RenderTree, tab: &DocumentTab) {
-        let sidebar_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
-        let sidebar_h = self.window_height - sidebar_y - STATUS_BAR_HEIGHT;
+    ///
+    /// Everything here is measured from `layout.sidebar`, which is empty when
+    /// the sidebar is hidden or the window is too small to hold it. That is
+    /// what makes the panel tabs stop being clickable in those cases without a
+    /// second visibility test: the `frame.clip` below trims every hit box to
+    /// the band, and [`Frame::hit`] drops a box that trims to nothing.
+    fn render_sidebar(&self, frame: &mut Frame, layout: &Layout, tab: &DocumentTab) {
+        let band = layout.sidebar;
+        let sidebar_y = band.y;
+        let sidebar_h = band.h;
+        let sidebar_w = band.w;
+
+        frame.clip(band);
 
         // Sidebar background
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: sidebar_y,
-            width: SIDEBAR_WIDTH,
-            height: sidebar_h.max(0.0),
+            width: sidebar_w,
+            height: sidebar_h,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Right border
-        tree.push(RenderCommand::Line {
-            x1: SIDEBAR_WIDTH,
+        frame.push(RenderCommand::Line {
+            x1: sidebar_w,
             y1: sidebar_y,
-            x2: SIDEBAR_WIDTH,
+            x2: sidebar_w,
             y2: sidebar_y + sidebar_h,
             color: SURFACE0,
             width: 1.0,
@@ -1642,14 +2144,19 @@ impl PdfViewerApp {
             (SidebarPanel::Bookmarks, "Marks"),
             (SidebarPanel::Annotations, "Notes"),
         ];
-        let panel_tab_w = SIDEBAR_WIDTH / panels.len() as f32;
+        let panel_tab_w = sidebar_w / panels.len() as f32;
         for (i, (panel, label)) in panels.iter().enumerate() {
             let px = i as f32 * panel_tab_w;
             let is_active = tab.sidebar_panel == *panel;
             let bg = if is_active { BASE } else { MANTLE };
             let fg = if is_active { BLUE } else { SUBTEXT0 };
 
-            tree.push(RenderCommand::FillRect {
+            frame.hit(
+                Target::Panel(*panel),
+                Rect::new(px, sidebar_y, panel_tab_w, 28.0),
+            );
+
+            frame.push(RenderCommand::FillRect {
                 x: px,
                 y: sidebar_y,
                 width: panel_tab_w,
@@ -1658,7 +2165,7 @@ impl PdfViewerApp {
                 corner_radii: CornerRadii::ZERO,
             });
 
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: px + 8.0,
                 y: sidebar_y + 7.0,
                 text: label.to_string(),
@@ -1678,38 +2185,34 @@ impl PdfViewerApp {
         let content_y = sidebar_y + 32.0;
         let content_h = (sidebar_h - 32.0).max(0.0);
 
-        tree.push(RenderCommand::PushClip {
-            x: 0.0,
-            y: content_y,
-            width: SIDEBAR_WIDTH,
-            height: content_h,
-        });
+        frame.clip(Rect::new(0.0, content_y, sidebar_w, content_h));
 
         match tab.sidebar_panel {
             SidebarPanel::Thumbnails => {
-                self.render_thumbnail_strip(tree, tab, content_y, content_h);
+                self.render_thumbnail_strip(frame, tab, content_y, content_h);
             }
             SidebarPanel::Bookmarks => {
-                self.render_bookmarks_panel(tree, tab, content_y, content_h);
+                self.render_bookmarks_panel(frame, tab, content_y, content_h);
             }
             SidebarPanel::Annotations => {
-                self.render_annotations_panel(tree, tab, content_y, content_h);
+                self.render_annotations_panel(frame, tab, content_y, content_h);
             }
         }
 
-        tree.push(RenderCommand::PopClip);
+        frame.unclip();
+        frame.unclip();
     }
 
     /// Render the thumbnail strip in the sidebar.
     fn render_thumbnail_strip(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         tab: &DocumentTab,
         start_y: f32,
         _height: f32,
     ) {
         let Some(doc) = &tab.document else {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No document loaded".to_string(),
@@ -1729,9 +2232,18 @@ impl PdfViewerApp {
         for (i, _page) in doc.pages.iter().enumerate() {
             let is_current = i == tab.current_page;
 
+            // The whole cell -- page image *and* its number label -- is the
+            // target, because the label is what a user reads to decide which
+            // page they want, and a strip where the words below a thumbnail do
+            // nothing is a strip where half the aimed-at pixels are dead.
+            frame.hit(
+                Target::Thumbnail(i),
+                Rect::new(14.0, y - 2.0, thumb_w + 4.0, thumb_h + 22.0),
+            );
+
             // Thumbnail border highlight
             if is_current {
-                tree.push(RenderCommand::StrokeRect {
+                frame.push(RenderCommand::StrokeRect {
                     x: 14.0,
                     y: y - 2.0,
                     width: thumb_w + 4.0,
@@ -1743,7 +2255,7 @@ impl PdfViewerApp {
             }
 
             // Thumbnail page (white rectangle as placeholder)
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: 16.0,
                 y,
                 width: thumb_w,
@@ -1754,7 +2266,7 @@ impl PdfViewerApp {
 
             // Page number label below thumbnail
             let label = doc.page_label(i);
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: 16.0,
                 y: y + thumb_h + 2.0,
                 text: label,
@@ -1772,13 +2284,13 @@ impl PdfViewerApp {
     /// Render the bookmarks/outline panel.
     fn render_bookmarks_panel(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         tab: &DocumentTab,
         start_y: f32,
         _height: f32,
     ) {
         let Some(doc) = &tab.document else {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No document loaded".to_string(),
@@ -1792,7 +2304,7 @@ impl PdfViewerApp {
         };
 
         if doc.bookmarks.is_empty() {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No bookmarks".to_string(),
@@ -1809,14 +2321,33 @@ impl PdfViewerApp {
         let mut y = start_y + 8.0;
         let line_h: f32 = 24.0;
 
-        for (depth, bm) in &entries {
+        for (i, (depth, bm)) in entries.iter().enumerate() {
             let indent = 16.0 + (*depth as f32) * 16.0;
             let is_on_current_page = bm.page_index == tab.current_page;
+
+            // The row spans the full sidebar width, not just the title's ink,
+            // so the blank space to the right of a short title still jumps to
+            // the page -- which is what every outline pane in every reader
+            // does, and what a user aiming below a long title expects.
+            frame.hit(
+                Target::Bookmark(i),
+                Rect::new(0.0, y, SIDEBAR_WIDTH, line_h),
+            );
 
             // Expand/collapse indicator
             if !bm.children.is_empty() {
                 let arrow = if bm.expanded { "v" } else { ">" };
-                tree.push(RenderCommand::Text {
+
+                // Recorded *after* the row it sits inside, because `hit_test`
+                // answers with the last box containing the point: on the
+                // triangle, folding wins over navigating. A childless row
+                // records no arrow at all, so its whole width navigates.
+                frame.hit(
+                    Target::BookmarkArrow(i),
+                    Rect::new(indent - 16.0, y, 16.0, line_h),
+                );
+
+                frame.push(RenderCommand::Text {
                     x: indent - 12.0,
                     y: y + 4.0,
                     text: arrow.to_string(),
@@ -1829,7 +2360,7 @@ impl PdfViewerApp {
             }
 
             // Bookmark title
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: indent,
                 y: y + 4.0,
                 text: bm.title.clone(),
@@ -1851,13 +2382,13 @@ impl PdfViewerApp {
     /// Render the annotations panel.
     fn render_annotations_panel(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         tab: &DocumentTab,
         start_y: f32,
         _height: f32,
     ) {
         let Some(doc) = &tab.document else {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No document loaded".to_string(),
@@ -1877,7 +2408,7 @@ impl PdfViewerApp {
             .collect();
 
         if annotations.is_empty() {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No annotations".to_string(),
@@ -1908,7 +2439,7 @@ impl PdfViewerApp {
             };
 
             // Color dot
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: 16.0,
                 y: y + 4.0,
                 width: 8.0,
@@ -1918,7 +2449,7 @@ impl PdfViewerApp {
             });
 
             // Annotation type and page
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: 30.0,
                 y: y + 2.0,
                 text: format!("{} - Page {}", type_label, ann.page_index.saturating_add(1)),
@@ -1934,19 +2465,21 @@ impl PdfViewerApp {
     }
 
     /// Render the main document viewing area.
-    fn render_document_area(&self, tree: &mut RenderTree, tab: &DocumentTab) {
-        let (area_x, area_y, area_w, area_h) = self.content_area();
+    fn render_document_area(&self, frame: &mut Frame, layout: &Layout, tab: &DocumentTab) {
+        let area = layout.content;
+        let (area_x, area_y, area_w, area_h) = (area.x, area.y, area.w, area.h);
 
         // Clip to content area
-        tree.push(RenderCommand::PushClip {
-            x: area_x,
-            y: area_y,
-            width: area_w,
-            height: area_h,
-        });
+        frame.clip(area);
+
+        // The page itself is one target covering the whole viewport, recorded
+        // first so anything drawn into the area later (a recent-file link on
+        // the welcome screen) overrides it. It exists so a click on the page
+        // can take focus away from the search field -- not so it can navigate.
+        frame.hit(Target::Document, area);
 
         // Dark background
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: area_x,
             y: area_y,
             width: area_w,
@@ -1957,29 +2490,29 @@ impl PdfViewerApp {
 
         let Some(doc) = &tab.document else {
             // No document — show welcome message
-            self.render_welcome(tree, area_x, area_y, area_w, area_h);
-            tree.push(RenderCommand::PopClip);
+            self.render_welcome(frame, area_x, area_y, area_w, area_h);
+            frame.unclip();
             return;
         };
 
         match tab.view_mode {
             ViewMode::SinglePage => {
-                self.render_single_page(tree, doc, tab, area_x, area_y, area_w, area_h);
+                self.render_single_page(frame, doc, tab, area_x, area_y, area_w, area_h);
             }
             ViewMode::ContinuousScroll => {
-                self.render_continuous_scroll(tree, doc, tab, area_x, area_y, area_w, area_h);
+                self.render_continuous_scroll(frame, doc, tab, area_x, area_y, area_w, area_h);
             }
         }
 
-        tree.push(RenderCommand::PopClip);
+        frame.unclip();
     }
 
     /// Render welcome message when no document is loaded.
-    fn render_welcome(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
+    fn render_welcome(&self, frame: &mut Frame, x: f32, y: f32, w: f32, h: f32) {
         let cx = x + w / 2.0 - 100.0;
         let cy = y + h / 2.0 - 60.0;
 
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: cx,
             y: cy,
             text: "PDF Viewer".to_string(),
@@ -1990,7 +2523,7 @@ impl PdfViewerApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: cx,
             y: cy + 36.0,
             text: "Open a PDF to begin".to_string(),
@@ -2003,7 +2536,7 @@ impl PdfViewerApp {
 
         // Recent files
         if !self.recent_files.entries.is_empty() {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: cx,
                 y: cy + 72.0,
                 text: "Recent Files:".to_string(),
@@ -2021,11 +2554,23 @@ impl PdfViewerApp {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "unknown".to_string());
-                tree.push(RenderCommand::Text {
+
+                // A link only when this build can follow it. With no parser
+                // wired there is no target and no link colour -- the list is
+                // still shown, because "these are the files you had open" is
+                // true and useful, but it does not pretend to be clickable.
+                if self.can_open() {
+                    // Recorded after `Target::Document`, which covers the whole
+                    // viewport: `hit_test` takes the last match, so the link
+                    // wins over the page beneath it.
+                    frame.hit(Target::RecentFile(i), Rect::new(cx, ry - 2.0, 296.0, 20.0));
+                }
+
+                frame.push(RenderCommand::Text {
                     x: cx + 8.0,
                     y: ry,
                     text: format!("{}. {}", i.saturating_add(1), name),
-                    color: BLUE,
+                    color: if self.can_open() { BLUE } else { OVERLAY0 },
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(280.0),
@@ -2042,7 +2587,7 @@ impl PdfViewerApp {
     #[allow(clippy::too_many_arguments)]
     fn render_single_page(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         doc: &PdfDocument,
         tab: &DocumentTab,
         area_x: f32,
@@ -2065,7 +2610,7 @@ impl PdfViewerApp {
         let page_y = area_y + (area_h - rendered_h) / 2.0;
 
         self.render_page_box(
-            tree,
+            frame,
             page,
             tab.current_page,
             page_x,
@@ -2076,7 +2621,7 @@ impl PdfViewerApp {
         );
 
         // Render search highlights on this page
-        self.render_search_highlights(tree, tab.current_page, page_x, page_y, zoom);
+        self.render_search_highlights(frame, tab.current_page, page_x, page_y, zoom);
     }
 
     /// Render continuous scroll mode.
@@ -2084,7 +2629,7 @@ impl PdfViewerApp {
     #[allow(clippy::too_many_arguments)]
     fn render_continuous_scroll(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         doc: &PdfDocument,
         tab: &DocumentTab,
         area_x: f32,
@@ -2114,8 +2659,8 @@ impl PdfViewerApp {
             // Only render pages that are visible
             if y_offset + ph >= area_y && y_offset <= area_y + area_h {
                 let page_x = area_x + (area_w - pw) / 2.0;
-                self.render_page_box(tree, page, i, page_x, y_offset, pw, ph, zoom);
-                self.render_search_highlights(tree, i, page_x, y_offset, zoom);
+                self.render_page_box(frame, page, i, page_x, y_offset, pw, ph, zoom);
+                self.render_search_highlights(frame, i, page_x, y_offset, zoom);
             }
 
             y_offset += ph + PAGE_GAP;
@@ -2127,7 +2672,7 @@ impl PdfViewerApp {
     #[allow(clippy::too_many_arguments)]
     fn render_page_box(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         page: &PdfPage,
         _page_index: usize,
         x: f32,
@@ -2137,7 +2682,7 @@ impl PdfViewerApp {
         zoom: f32,
     ) {
         // Page shadow
-        tree.push(RenderCommand::BoxShadow {
+        frame.push(RenderCommand::BoxShadow {
             x,
             y,
             width: w,
@@ -2156,7 +2701,7 @@ impl PdfViewerApp {
         } else {
             Color::rgb(255, 255, 255)
         };
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y,
             width: w,
@@ -2166,7 +2711,7 @@ impl PdfViewerApp {
         });
 
         // Page border
-        tree.push(RenderCommand::StrokeRect {
+        frame.push(RenderCommand::StrokeRect {
             x,
             y,
             width: w,
@@ -2189,7 +2734,7 @@ impl PdfViewerApp {
             let font_sz = span.font_size * zoom;
             let max_w = span.rect.width * zoom;
 
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: sx,
                 y: sy,
                 text: span.text.clone(),
@@ -2203,14 +2748,14 @@ impl PdfViewerApp {
 
         // Render annotations
         for ann in &page.annotations {
-            self.render_annotation(tree, ann, x, y, zoom);
+            self.render_annotation(frame, ann, x, y, zoom);
         }
     }
 
     /// Render an annotation overlay on a page.
     fn render_annotation(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         ann: &Annotation,
         page_x: f32,
         page_y: f32,
@@ -2223,7 +2768,7 @@ impl PdfViewerApp {
 
         match &ann.annotation_type {
             AnnotationType::Highlight { color } => {
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: ax,
                     y: ay,
                     width: aw,
@@ -2234,7 +2779,7 @@ impl PdfViewerApp {
             }
             AnnotationType::Note { .. } => {
                 // Sticky note icon
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: ax,
                     y: ay,
                     width: 20.0 * zoom,
@@ -2242,7 +2787,7 @@ impl PdfViewerApp {
                     color: YELLOW,
                     corner_radii: CornerRadii::all(3.0),
                 });
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: ax + 3.0 * zoom,
                     y: ay + 3.0 * zoom,
                     text: "N".to_string(),
@@ -2261,7 +2806,7 @@ impl PdfViewerApp {
                 // Draw line segments between points
                 for pair in points.windows(2) {
                     if let [p1, p2] = pair {
-                        tree.push(RenderCommand::Line {
+                        frame.push(RenderCommand::Line {
                             x1: page_x + p1.0 * zoom,
                             y1: page_y + p1.1 * zoom,
                             x2: page_x + p2.0 * zoom,
@@ -2273,7 +2818,7 @@ impl PdfViewerApp {
                 }
             }
             AnnotationType::Underline { color } => {
-                tree.push(RenderCommand::Line {
+                frame.push(RenderCommand::Line {
                     x1: ax,
                     y1: ay + ah,
                     x2: ax + aw,
@@ -2283,7 +2828,7 @@ impl PdfViewerApp {
                 });
             }
             AnnotationType::Strikethrough { color } => {
-                tree.push(RenderCommand::Line {
+                frame.push(RenderCommand::Line {
                     x1: ax,
                     y1: ay + ah / 2.0,
                     x2: ax + aw,
@@ -2298,7 +2843,7 @@ impl PdfViewerApp {
     /// Render search result highlights on a page.
     fn render_search_highlights(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         page_index: usize,
         page_x: f32,
         page_y: f32,
@@ -2324,7 +2869,7 @@ impl PdfViewerApp {
             let hw = result.rect.width * zoom;
             let hh = result.rect.height * zoom;
 
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: hx,
                 y: hy,
                 width: hw,
@@ -2334,7 +2879,7 @@ impl PdfViewerApp {
             });
 
             if is_current {
-                tree.push(RenderCommand::StrokeRect {
+                frame.push(RenderCommand::StrokeRect {
                     x: hx,
                     y: hy,
                     width: hw,
@@ -2348,14 +2893,26 @@ impl PdfViewerApp {
     }
 
     /// Render the search bar overlay.
-    fn render_search_bar(&self, tree: &mut RenderTree) {
-        let bar_w: f32 = 360.0;
+    ///
+    /// This floats over the document rather than displacing it, and it is drawn
+    /// last, so its hit boxes are recorded after the ones underneath and win
+    /// the overlap -- but only where it actually covers them. A click beside
+    /// the bar still reaches the page, which is what an overlay (as opposed to
+    /// a modal) means.
+    fn render_search_bar(&self, frame: &mut Frame, layout: &Layout) {
+        let bar_w: f32 = 360.0_f32.min(layout.window.w);
         let bar_h: f32 = 44.0;
-        let bar_x = self.window_width - bar_w - 16.0;
-        let bar_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 8.0;
+        let bar_x = (layout.window.w - bar_w - 16.0).max(0.0);
+        let bar_y = layout.content.y + 8.0;
+
+        // A window too short to hold the bar below the tab strip gets no search
+        // bar at all rather than one drawn over the status bar: the clip trims
+        // its boxes to the content band, and `Frame::hit` drops what is left of
+        // nothing.
+        frame.clip(layout.content);
 
         // Shadow
-        tree.push(RenderCommand::BoxShadow {
+        frame.push(RenderCommand::BoxShadow {
             x: bar_x,
             y: bar_y,
             width: bar_w,
@@ -2369,7 +2926,7 @@ impl PdfViewerApp {
         });
 
         // Background
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: bar_x,
             y: bar_y,
             width: bar_w,
@@ -2378,18 +2935,29 @@ impl PdfViewerApp {
             corner_radii: CornerRadii::all(8.0),
         });
 
-        tree.push(RenderCommand::StrokeRect {
+        // The focus ring is the only thing that distinguishes "typing goes
+        // here" from "typing pages the document", and both states are reachable
+        // with the bar on screen, so it has to be visible rather than implied.
+        frame.push(RenderCommand::StrokeRect {
             x: bar_x,
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: SURFACE1,
-            line_width: 1.0,
+            color: if self.search_focused { BLUE } else { SURFACE1 },
+            line_width: if self.search_focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(8.0),
         });
 
+        // The field is everything left of the two nav buttons: the icon, the
+        // query text and the match count all put the caret in the query, which
+        // is the only thing a click in a search box can sensibly mean.
+        frame.hit(
+            Target::SearchField,
+            Rect::new(bar_x, bar_y, (bar_w - 68.0).max(0.0), bar_h),
+        );
+
         // Search icon placeholder
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: bar_x + 12.0,
             y: bar_y + 13.0,
             text: "S".to_string(),
@@ -2411,7 +2979,7 @@ impl PdfViewerApp {
         } else {
             TEXT_COLOR
         };
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: bar_x + 32.0,
             y: bar_y + 14.0,
             text: query_display,
@@ -2425,7 +2993,7 @@ impl PdfViewerApp {
         // Match count
         let count_label = self.search.match_count_label();
         if !count_label.is_empty() {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: bar_x + 220.0,
                 y: bar_y + 14.0,
                 text: count_label,
@@ -2439,28 +3007,49 @@ impl PdfViewerApp {
 
         // Nav buttons (prev/next match)
         let btn_y = bar_y + 8.0;
-        self.render_toolbar_button(tree, bar_x + bar_w - 64.0, btn_y, 26.0, 28.0, "<");
-        self.render_toolbar_button(tree, bar_x + bar_w - 34.0, btn_y, 26.0, 28.0, ">");
+        self.render_toolbar_button(
+            frame,
+            bar_x + bar_w - 64.0,
+            btn_y,
+            26.0,
+            28.0,
+            "<",
+            Target::SearchPrev,
+        );
+        self.render_toolbar_button(
+            frame,
+            bar_x + bar_w - 34.0,
+            btn_y,
+            26.0,
+            28.0,
+            ">",
+            Target::SearchNext,
+        );
+
+        frame.unclip();
     }
 
     /// Render the status bar.
-    fn render_status_bar(&self, tree: &mut RenderTree) {
-        let y = self.window_height - STATUS_BAR_HEIGHT;
+    fn render_status_bar(&self, frame: &mut Frame, layout: &Layout) {
+        let band = layout.status;
+        let y = band.y;
 
-        tree.push(RenderCommand::FillRect {
+        frame.clip(band);
+
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
+            width: band.w,
+            height: band.h,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Top border
-        tree.push(RenderCommand::Line {
+        frame.push(RenderCommand::Line {
             x1: 0.0,
             y1: y,
-            x2: self.window_width,
+            x2: band.w,
             y2: y,
             color: SURFACE0,
             width: 1.0,
@@ -2476,7 +3065,7 @@ impl PdfViewerApp {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "Untitled".to_string());
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: sx,
                     y: y + 7.0,
                     text: name,
@@ -2490,7 +3079,7 @@ impl PdfViewerApp {
             }
 
             // Page info
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: sx,
                 y: y + 7.0,
                 text: format!(
@@ -2511,7 +3100,7 @@ impl PdfViewerApp {
                 ViewMode::SinglePage => "Single Page",
                 ViewMode::ContinuousScroll => "Continuous",
             };
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: sx,
                 y: y + 7.0,
                 text: mode_str.to_string(),
@@ -2525,7 +3114,7 @@ impl PdfViewerApp {
 
             // Rotation
             if tab.rotation != Rotation::Deg0 {
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: sx,
                     y: y + 7.0,
                     text: format!("{}deg", tab.rotation.degrees()),
@@ -2538,7 +3127,7 @@ impl PdfViewerApp {
             }
 
             // Right side: zoom percentage
-            let (_, _, vw, vh) = self.content_area();
+            let (vw, vh) = (layout.content.w, layout.content.h);
             let pw = tab
                 .document
                 .as_ref()
@@ -2550,8 +3139,8 @@ impl PdfViewerApp {
                 .and_then(|d| d.pages.first())
                 .map_or(DEFAULT_PAGE_HEIGHT, |p| p.display_height());
             let zoom_pct = tab.zoom.effective_zoom(vw, vh, pw, ph) * 100.0;
-            tree.push(RenderCommand::Text {
-                x: self.window_width - 80.0,
+            frame.push(RenderCommand::Text {
+                x: band.w - 80.0,
                 y: y + 7.0,
                 text: format!("{}%", zoom_pct as u32),
                 color: SUBTEXT0,
@@ -2560,6 +3149,502 @@ impl PdfViewerApp {
                 max_width: Some(60.0),
                 overflow: TextOverflow::Ellipsis,
             });
+        }
+
+        frame.unclip();
+    }
+
+    // ========================================================================
+    // Input
+    // ========================================================================
+
+    /// Remember the size the window last reported.
+    ///
+    /// The size is *only* stored here; every rectangle is recomputed from it on
+    /// each frame. Nothing caches a [`Layout`], because a cached layout is a
+    /// second copy of the geometry that a resize can leave stale -- which is
+    /// how a click lands on where a button used to be.
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.window_width = sane(width);
+        self.window_height = sane(height);
+    }
+
+    /// What is under this point, according to the frame that was last drawn.
+    ///
+    /// Drawing a whole frame to answer a click looks wasteful and is not: it is
+    /// the only way the answer cannot disagree with what the user sees, because
+    /// it *is* what the user sees. The alternative -- a second pass that
+    /// re-derives the toolbar's accumulated `btn_x` walk -- is the bug this
+    /// design exists to make impossible.
+    #[must_use]
+    pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.window_width, self.window_height)
+            .hit_test(x, y)
+    }
+
+    /// Open the `index`-th recent file, answering whether a document arrived.
+    ///
+    /// `false` covers three different failures on purpose -- no opener wired,
+    /// no such entry, the opener declined -- because every one of them means
+    /// the same thing to the caller: the tab still holds what it held.
+    pub fn open_recent(&mut self, index: usize) -> bool {
+        let Some(open) = self.open else {
+            return false;
+        };
+        let Some(entry) = self.recent_files.entries.get(index) else {
+            return false;
+        };
+        // Cloned before the call because `open` may (and in a real build will)
+        // want to hand back a document that borrows nothing from us, and
+        // `load_document` needs `&mut self` while `entry` borrows `self`.
+        let path = entry.path.clone();
+        let Some(doc) = open(&path) else {
+            return false;
+        };
+        self.load_document(doc);
+        true
+    }
+
+    /// Spool the pages the print settings name, answering whether it took.
+    pub fn print_active(&mut self) -> bool {
+        let Some(print) = self.print else {
+            return false;
+        };
+        let Some(tab) = self.active_tab() else {
+            return false;
+        };
+        let Some(doc) = tab.document.as_ref() else {
+            return false;
+        };
+        let pages = self
+            .print_settings
+            .resolve_pages(doc.page_count(), tab.current_page);
+        if pages.is_empty() {
+            return false;
+        }
+        print(doc, &pages)
+    }
+
+    /// Re-run the search against the active document.
+    ///
+    /// Called on every edit to the query rather than on Enter, because the
+    /// match count in the bar is only truthful if it describes the text that is
+    /// currently in the box.
+    fn refresh_search(&mut self) {
+        let Some(doc) = self.active_tab().and_then(|t| t.document.clone()) else {
+            self.search.results.clear();
+            self.search.current_match = None;
+            return;
+        };
+        self.search.search(&doc);
+        self.follow_current_match();
+    }
+
+    /// Move the view to the page holding the current search hit.
+    ///
+    /// A highlight the user cannot see is not a search result, so stepping
+    /// through matches has to page the document as well as move the cursor.
+    fn follow_current_match(&mut self) {
+        let Some(i) = self.search.current_match else {
+            return;
+        };
+        let Some(page) = self.search.results.get(i).map(|r| r.page_index) else {
+            return;
+        };
+        self.go_to_page(page);
+    }
+
+    /// Navigate the active tab to a page, keeping continuous scroll in step.
+    ///
+    /// In continuous mode the page number is a *consequence* of the scroll
+    /// offset -- the renderer lays pages out from `scroll_offset_y` and never
+    /// reads `current_page` -- so setting the page without moving the offset
+    /// changes the status bar and nothing else. This moves both.
+    fn go_to_page(&mut self, page: usize) {
+        let content = self.layout(self.window_width, self.window_height).content;
+        let area = (content.w, content.h);
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        tab.go_to_page(page);
+        if tab.view_mode == ViewMode::ContinuousScroll {
+            Self::scroll_to_current_page(tab, area);
+        }
+    }
+
+    /// Put the top of `tab.current_page` at the top of the viewport.
+    fn scroll_to_current_page(tab: &mut DocumentTab, area: (f32, f32)) {
+        let Some(doc) = tab.document.as_ref() else {
+            return;
+        };
+        let zoom = Self::continuous_zoom(tab, doc, area);
+        let mut y = PAGE_MARGIN;
+        for page in doc.pages.iter().take(tab.current_page) {
+            y += page.display_height() * zoom + PAGE_GAP;
+        }
+        // Clamped to the same extent a wheel scroll is: the last page of a
+        // document cannot be dragged to the top of the window if that would
+        // leave blank space below it, so "go to the last page" and "scroll to
+        // the bottom" have to agree about where the bottom is.
+        tab.scroll_offset_y = y.clamp(0.0, Self::max_scroll(doc, zoom, area.1));
+    }
+
+    /// The zoom continuous mode lays pages out at.
+    ///
+    /// This has to agree with `render_continuous_scroll` exactly -- it is the
+    /// scale the scroll extent is measured in, so a disagreement of even a few
+    /// percent makes the bottom stop land short of, or past, the last page. It
+    /// is a separate function rather than a call into the renderer because the
+    /// renderer's copy lives in a `&self` method and this is reached from the
+    /// `&mut DocumentTab` paths; the two are written the same way on purpose.
+    fn continuous_zoom(tab: &DocumentTab, doc: &PdfDocument, area: (f32, f32)) -> f32 {
+        let ref_w = doc
+            .pages
+            .first()
+            .map_or(DEFAULT_PAGE_WIDTH, |p| p.display_width());
+        let ref_h = doc
+            .pages
+            .first()
+            .map_or(DEFAULT_PAGE_HEIGHT, |p| p.display_height());
+        tab.zoom.effective_zoom(area.0, area.1, ref_w, ref_h)
+    }
+
+    /// How far the document can scroll before its last page is fully shown.
+    ///
+    /// Zero when the whole document already fits, which is why this is a `max`
+    /// rather than a subtraction: a document shorter than the window must not
+    /// scroll *up* past its own top.
+    fn max_scroll(doc: &PdfDocument, zoom: f32, area_h: f32) -> f32 {
+        (total_document_height(doc, zoom) - area_h).max(0.0)
+    }
+
+    /// Handle a click on whatever `target_at` says is under the pointer.
+    ///
+    /// Answers whether anything changed, which is what lets the window skip a
+    /// repaint for a click that landed on scenery.
+    #[allow(clippy::too_many_lines)]
+    pub fn handle_target(&mut self, target: Target) -> bool {
+        // A click anywhere outside the search bar takes the caret out of it, so
+        // that (say) pressing Right after clicking a thumbnail pages the
+        // document instead of moving a caret the user has forgotten about.
+        let keeps_focus = matches!(
+            target,
+            Target::SearchField | Target::SearchPrev | Target::SearchNext
+        );
+        let focus_changed = self.search_focused && !keeps_focus;
+        if focus_changed {
+            self.search_focused = false;
+        }
+
+        let acted = match target {
+            Target::Nav(which) => {
+                let Some(tab) = self.active_tab_mut() else {
+                    return focus_changed;
+                };
+                match which {
+                    Nav::First => tab.first_page(),
+                    Nav::Prev => tab.prev_page(),
+                    Nav::Next => tab.next_page(),
+                    Nav::Last => tab.last_page(),
+                }
+                let page = tab.current_page;
+                self.go_to_page(page);
+                true
+            }
+            Target::ZoomOut => self.with_tab(DocumentTab::zoom_out),
+            Target::ZoomIn => self.with_tab(DocumentTab::zoom_in),
+            Target::Fit(Fit::Width) => self.set_zoom_mode(ZoomMode::FitWidth),
+            Target::Fit(Fit::Page) => self.set_zoom_mode(ZoomMode::FitPage),
+            Target::RotateCcw => self.with_tab(DocumentTab::rotate_ccw),
+            Target::RotateCw => self.with_tab(DocumentTab::rotate_cw),
+            Target::ViewModeToggle => self.with_tab(DocumentTab::toggle_view_mode),
+            Target::SidebarToggle => self.with_tab(DocumentTab::toggle_sidebar),
+            Target::SearchToggle => {
+                self.search.active = !self.search.active;
+                // Opening the bar focuses it -- a find bar you have to click
+                // after summoning is a find bar that wasted the summon. Closing
+                // it drops both the caret and the highlights, because leaving
+                // highlights on screen with no bar to explain them is worse
+                // than losing them.
+                self.search_focused = self.search.active;
+                if !self.search.active {
+                    self.search.clear();
+                }
+                true
+            }
+            Target::Print => self.print_active(),
+            Target::Tab(i) => {
+                self.switch_tab(i);
+                true
+            }
+            Target::TabClose(i) => {
+                self.close_tab(i);
+                true
+            }
+            Target::NewTab => {
+                self.new_tab();
+                true
+            }
+            Target::Panel(panel) => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.sidebar_panel = panel;
+                }
+                true
+            }
+            Target::Thumbnail(i) => {
+                self.go_to_page(i);
+                true
+            }
+            Target::Bookmark(i) => {
+                let page = self
+                    .active_tab()
+                    .and_then(|t| t.document.as_ref())
+                    .and_then(|d| d.bookmark_page(i));
+                if let Some(page) = page {
+                    self.go_to_page(page);
+                    true
+                } else {
+                    false
+                }
+            }
+            Target::BookmarkArrow(i) => self
+                .active_tab_mut()
+                .and_then(|t| t.document.as_mut())
+                .is_some_and(|d| d.toggle_bookmark(i)),
+            Target::RecentFile(i) => self.open_recent(i),
+            Target::SearchField => {
+                self.search_focused = true;
+                true
+            }
+            Target::SearchPrev => {
+                self.search.prev_match();
+                self.follow_current_match();
+                true
+            }
+            Target::SearchNext => {
+                self.search.next_match();
+                self.follow_current_match();
+                true
+            }
+            // The page takes the click only to drop the search caret, which the
+            // block above already did.
+            Target::Document => false,
+        };
+
+        acted || focus_changed
+    }
+
+    /// Apply a mutation to the active tab, answering whether there was one.
+    fn with_tab(&mut self, f: fn(&mut DocumentTab)) -> bool {
+        match self.active_tab_mut() {
+            Some(tab) => {
+                f(tab);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Switch the active tab to a fit mode.
+    fn set_zoom_mode(&mut self, mode: ZoomMode) -> bool {
+        match self.active_tab_mut() {
+            Some(tab) => {
+                tab.zoom = mode;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Scroll the document, in wheel notches.
+    ///
+    /// `notches` is the raw wheel delta, which is positive for a push *away*
+    /// from the user. That is the opposite of the direction the document moves,
+    /// and the sign flip belongs to `guitk::wheel` rather than to each app --
+    /// so everything below reads the wheel helpers' output as a distance along
+    /// the document, where positive means "towards the last page".
+    ///
+    /// The two view modes read a notch differently and both readings are right
+    /// for their mode: continuous scroll is a continuous surface, so a notch is
+    /// a distance; single-page mode shows one centred page that cannot pan, so
+    /// there is nothing for a distance to mean and a notch is a page.
+    pub fn scroll_by(&mut self, notches: f32) -> bool {
+        let content = self.layout(self.window_width, self.window_height).content;
+        let area = (content.w, content.h);
+        // Only single-page mode goes through the accumulator, and the split is
+        // deliberate. A page turn is quantised, so a touchpad's fractional
+        // notches have to be banked until they add up to one -- otherwise a
+        // slow drag rounds to zero every frame and turns no pages at all. A
+        // continuous scroll is not quantised: a fraction of a notch is a real
+        // distance, and putting it through a whole-row accumulator would throw
+        // away exactly the movement the user is making.
+        let Some(mode) = self.tabs.get(self.active_tab).map(|t| t.view_mode) else {
+            return false;
+        };
+        match mode {
+            ViewMode::SinglePage => {
+                // One page per notch rather than `ROWS_PER_NOTCH` pages: a
+                // flick reporting six notches at once should not skip eighteen
+                // pages past what the user saw go by.
+                let pages = self.wheel.rows_at(notches, 1.0);
+                if pages == 0 {
+                    return false;
+                }
+                let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+                    return false;
+                };
+                if pages > 0 {
+                    tab.next_page();
+                } else {
+                    tab.prev_page();
+                }
+                true
+            }
+            ViewMode::ContinuousScroll => {
+                let delta = wheel::pixels(notches, SCROLL_ROW_HEIGHT);
+                let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+                    return false;
+                };
+                let Some(doc) = tab.document.as_ref() else {
+                    return false;
+                };
+                let zoom = Self::continuous_zoom(tab, doc, area);
+                let limit = Self::max_scroll(doc, zoom, area.1);
+                let before = tab.scroll_offset_y;
+                tab.scroll_offset_y = (before + delta).clamp(0.0, limit);
+                // The page number is derived from where we ended up, so a
+                // scroll that hit the top or bottom stop still reports the
+                // right page rather than the one it was aiming at.
+                tab.current_page = page_at_offset(doc, tab.scroll_offset_y, zoom);
+                #[allow(clippy::float_cmp)]
+                let moved = tab.scroll_offset_y != before;
+                moved
+            }
+        }
+    }
+
+    /// Handle a keystroke, answering whether anything changed.
+    #[allow(clippy::too_many_lines)]
+    pub fn handle_key(&mut self, event: &KeyEvent) -> bool {
+        if !event.pressed {
+            return false;
+        }
+
+        // Escape closes the search bar from anywhere, focused or not, because
+        // the whole point of Escape on an overlay is that you do not have to
+        // find it first.
+        if event.key == Key::Escape && self.search.active {
+            self.search.clear();
+            self.search_focused = false;
+            return true;
+        }
+
+        if self.search_focused {
+            return self.handle_search_key(event);
+        }
+
+        match event.key {
+            Key::Right | Key::Down | Key::PageDown | Key::Space => {
+                self.step_page(true);
+                true
+            }
+            Key::Left | Key::Up | Key::PageUp => {
+                self.step_page(false);
+                true
+            }
+            Key::Home => {
+                self.go_to_page(0);
+                true
+            }
+            Key::End => {
+                let last = self
+                    .active_tab()
+                    .map_or(0, |t| t.page_count().saturating_sub(1));
+                self.go_to_page(last);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Page forward or back, keeping continuous scroll in step.
+    fn step_page(&mut self, forward: bool) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        if forward {
+            tab.next_page();
+        } else {
+            tab.prev_page();
+        }
+        let page = tab.current_page;
+        self.go_to_page(page);
+    }
+
+    /// Handle a keystroke while the search field holds the caret.
+    fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
+        match event.key {
+            Key::Enter => {
+                self.search.next_match();
+                self.follow_current_match();
+                true
+            }
+            Key::Backspace => {
+                // `pop` removes a `char`, not a byte, so a query ending in a
+                // multi-byte character loses the character rather than half of
+                // it -- which would panic the next time the string was sliced.
+                if self.search.query.pop().is_none() {
+                    return false;
+                }
+                self.refresh_search();
+                true
+            }
+            _ => {
+                // `typed()` rather than `single_char()`: a compose sequence or
+                // an IME commit hands over several characters in one event, and
+                // taking only the first silently drops the rest. It also drops
+                // control characters, which is what keeps Tab and Enter from
+                // being typed into the box.
+                let typed: String = event.typed().collect();
+                if typed.is_empty() {
+                    return false;
+                }
+                self.search.query.push_str(&typed);
+                self.refresh_search();
+                true
+            }
+        }
+    }
+
+    /// Route one window event.
+    pub fn handle_event(&mut self, event: &Event) -> bool {
+        match event {
+            Event::Resize { width, height } => {
+                // `as f32` on a window dimension: exact for every size a
+                // display can be, and `sane` in `resize` catches the rest.
+                #[allow(clippy::cast_precision_loss)]
+                self.resize(*width as f32, *height as f32);
+                true
+            }
+            Event::Mouse(MouseEvent { kind, x, y, .. }) => match kind {
+                MouseEventKind::Press(MouseButton::Left) => match self.target_at(*x, *y) {
+                    Some(target) => self.handle_target(target),
+                    None => {
+                        // A press on bare background is still a press away from
+                        // the search field.
+                        let had_focus = self.search_focused;
+                        self.search_focused = false;
+                        had_focus
+                    }
+                },
+                // `dy` only: there is no horizontal scroll offset to move, and
+                // silently treating a sideways flick as a vertical one is worse
+                // than ignoring it.
+                MouseEventKind::Scroll { dy, .. } => self.scroll_by(*dy),
+                _ => false,
+            },
+            Event::Key(key) => self.handle_key(key),
+            _ => false,
         }
     }
 }
@@ -2620,12 +3705,111 @@ pub fn page_at_offset(doc: &PdfDocument, offset: f32, zoom: f32) -> usize {
 }
 
 // ============================================================================
+// Window
+// ============================================================================
+
+impl App for PdfViewerApp {
+    fn title(&self) -> String {
+        match self.active_tab() {
+            Some(tab) if tab.document.is_some() => format!("{} - PDF Viewer", tab.title()),
+            _ => "PDF Viewer".to_string(),
+        }
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // `as u32` on two positive constants; the values are written above.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        // Ctrl+Q and the window's own close button are the two ways out, and
+        // they are checked before anything else so a modal state can never
+        // swallow the quit.
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        if let Event::Key(key) = event {
+            if key.pressed && key.modifiers.ctrl {
+                match key.key {
+                    Key::Q => return Response::Exit,
+                    // Ctrl+F is the find shortcut everywhere else, and going
+                    // through `handle_target` rather than setting the flags
+                    // here means the shortcut and the button cannot drift.
+                    Key::F => {
+                        if !self.search.active {
+                            self.handle_target(Target::SearchToggle);
+                        } else {
+                            self.search_focused = true;
+                        }
+                        return Response::Redraw;
+                    }
+                    Key::T => {
+                        self.handle_target(Target::NewTab);
+                        return Response::Redraw;
+                    }
+                    Key::W => {
+                        let i = self.active_tab;
+                        self.handle_target(Target::TabClose(i));
+                        return Response::Redraw;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if self.handle_event(event) {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the compositor is about to draw at is the size every
+        // rectangle -- and therefore every hit box -- is derived from, so it is
+        // recorded before the frame is built rather than waiting for a `Resize`
+        // event that may not arrive before the first paint.
+        self.resize(width, height);
+        self.frame(self.window_width, self.window_height)
+            .into_tree()
+    }
+}
+
+impl Probe for PdfViewerApp {
+    type Target = Target;
+    type Outcome = bool;
+
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> guitk::frame::Frame<Self::Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Press(button),
+            x,
+            y,
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_key(key)
+    }
+}
+
+// ============================================================================
 // Entry point
 // ============================================================================
 
-fn main() {
-    // Placeholder: the real entry point would initialize the windowing system,
-    // create a PdfViewerApp, and enter the event loop.
+fn main() -> ExitCode {
+    app::launch(
+        "pdfviewer",
+        &mut PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT),
+    )
 }
 
 // ============================================================================
@@ -3722,7 +4906,7 @@ mod tests {
     #[test]
     fn test_app_render_no_doc() {
         let app = PdfViewerApp::new(1280.0, 720.0);
-        let tree = app.render();
+        let tree = app.frame(1280.0, 720.0).into_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3731,7 +4915,7 @@ mod tests {
         let mut app = PdfViewerApp::new(1280.0, 720.0);
         let doc = PdfDocument::create_sample(PathBuf::from("/test.pdf"), 3);
         app.load_document(doc);
-        let tree = app.render();
+        let tree = app.frame(1280.0, 720.0).into_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3741,7 +4925,7 @@ mod tests {
         let doc = PdfDocument::create_sample(PathBuf::from("/test.pdf"), 5);
         app.load_document(doc);
         app.active_tab_mut().unwrap().toggle_view_mode();
-        let tree = app.render();
+        let tree = app.frame(1280.0, 720.0).into_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3757,7 +4941,7 @@ mod tests {
             app.search.results = results;
             app.search.current_match = Some(0);
         }
-        let tree = app.render();
+        let tree = app.frame(1280.0, 720.0).into_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3840,7 +5024,7 @@ mod tests {
             RED,
             2.0,
         );
-        let tree = app.render();
+        let tree = app.frame(1280.0, 720.0).into_tree();
         assert!(!tree.is_empty());
     }
 
@@ -3894,9 +5078,39 @@ mod tests {
             app.tabs.push(tab);
         }
         app.active_tab = 0;
-        let mut tree = RenderTree::new();
-        app.render_tab_bar(&mut tree);
+        // Through the whole frame rather than `render_tab_bar` alone, because
+        // the strip is positioned by `Layout` and calling the band renderer
+        // with a hand-made layout would test a geometry the app never draws.
+        // But the whole frame also holds the toolbar, whose button labels are
+        // drawn at TAB_TITLE_SIZE too -- so a caller that told tab titles apart
+        // by font size alone would measure fourteen toolbar buttons and believe
+        // it had measured the tabs. Cutting to the strip's own band keeps the
+        // real geometry and still hands back only the strip.
+        let band = app.layout(1280.0, 720.0).tab_bar;
+        let mut tree = app.frame(1280.0, 720.0).into_tree();
+        tree.commands
+            .retain(|cmd| command_y(cmd).is_some_and(|y| y >= band.y && y < band.bottom()));
         tree
+    }
+
+    /// Where a drawing command puts what it draws, or `None` for the structural
+    /// commands (clip and transform bookkeeping) that put nothing anywhere.
+    fn command_y(cmd: &RenderCommand) -> Option<f32> {
+        match *cmd {
+            RenderCommand::FillRect { y, .. }
+            | RenderCommand::StrokeRect { y, .. }
+            | RenderCommand::Text { y, .. }
+            | RenderCommand::RichText { y, .. }
+            | RenderCommand::Image { y, .. }
+            | RenderCommand::BoxShadow { y, .. }
+            | RenderCommand::PushClip { y, .. } => Some(y),
+            RenderCommand::Line { y1, .. } => Some(y1),
+            RenderCommand::PopClip
+            | RenderCommand::PushTranslate { .. }
+            | RenderCommand::PopTranslate
+            | RenderCommand::PushFont { .. }
+            | RenderCommand::PopFont => None,
+        }
     }
 
     #[test]
@@ -3948,6 +5162,1058 @@ mod tests {
             "expected one title per tab; the filter matched {checked}, so this \
              test would pass without measuring what it claims to"
         );
+    }
+
+    // -- Window wiring --------------------------------------------------------
+    //
+    // The tests below are about the seam between "the app has a method that
+    // changes something" and "a user can reach it". Every one of the eighteen
+    // state-changing methods above was already tested before this app opened a
+    // window, and every one of them was unreachable -- `main` was empty. What
+    // these test is the part that was missing: that a click at a place the
+    // renderer drew a control arrives at the method that control names.
+
+    /// A viewer with a five-page document, so bookmarks nest and the thumbnail
+    /// strip has more than one entry.
+    fn wired() -> PdfViewerApp {
+        let mut app = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.load_document(PdfDocument::create_sample(PathBuf::from("/report.pdf"), 5));
+        app
+    }
+
+    // The `Option` is not redundant even though this arm always answers: the
+    // signature has to be `OpenFn`, and a real parser declines a file it cannot
+    // read -- which `refuses` below is the test double for.
+    #[allow(clippy::unnecessary_wraps)]
+    fn a_document(_path: &Path) -> Option<PdfDocument> {
+        Some(PdfDocument::create_sample(PathBuf::from("/opened.pdf"), 2))
+    }
+
+    fn refuses(_path: &Path) -> Option<PdfDocument> {
+        None
+    }
+
+    fn accepts(_doc: &PdfDocument, _pages: &[usize]) -> bool {
+        true
+    }
+
+    #[test]
+    fn every_control_the_renderer_draws_can_be_clicked() {
+        let mut app = wired();
+        app.search.active = true;
+        let frame = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+
+        assert!(
+            !frame.hits().is_empty(),
+            "a fully populated viewer recorded no hit boxes at all"
+        );
+
+        for (target, rect) in frame.hits() {
+            let (cx, cy) = rect.centre();
+            assert_eq!(
+                frame.hit_test(cx, cy),
+                Some(*target),
+                "{target:?} was drawn at {rect:?} but the centre of its own box \
+                 does not click to it -- something recorded later covers it"
+            );
+        }
+    }
+
+    #[test]
+    fn no_control_is_drawn_outside_the_window() {
+        let mut app = wired();
+        app.search.active = true;
+        let frame = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let window = Rect::new(0.0, 0.0, WINDOW_WIDTH, WINDOW_HEIGHT);
+
+        for (target, rect) in frame.hits() {
+            assert!(
+                rect.x >= window.x
+                    && rect.y >= window.y
+                    && rect.right() <= window.right() + 0.5
+                    && rect.bottom() <= window.bottom() + 0.5,
+                "{target:?} is at {rect:?}, which leaves the {window:?} window"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_too_small_for_a_band_drops_its_controls_rather_than_stacking_them() {
+        let mut app = wired();
+        app.search.active = true;
+        // Tall enough for the toolbar and nothing else.
+        let frame = app.frame(400.0, TOOLBAR_HEIGHT);
+        let window = Rect::new(0.0, 0.0, 400.0, TOOLBAR_HEIGHT);
+
+        for (target, rect) in frame.hits() {
+            assert!(
+                rect.intersect(window).is_some(),
+                "{target:?} at {rect:?} survived into a window it does not touch"
+            );
+        }
+        assert!(
+            frame.rect_of(|t| matches!(t, Target::Panel(_))).is_none(),
+            "the sidebar has no room at all, but its panel tabs are still clickable"
+        );
+    }
+
+    #[test]
+    fn a_zero_sized_window_draws_nothing_clickable() {
+        let app = wired();
+        let frame = app.frame(0.0, 0.0);
+        assert!(
+            frame.hits().is_empty(),
+            "a window with no area still recorded {} hit boxes",
+            frame.hits().len()
+        );
+    }
+
+    #[test]
+    fn resizing_moves_the_boxes_the_next_click_is_tested_against() {
+        let mut app = wired();
+
+        // Deliberately not `probe::rect_of`, which draws at the fixed
+        // `Probe::SIZE` and therefore cannot observe a resize at all. What is
+        // under test is what `target_at` will match a click against, and that
+        // is the frame at the size the window last reported.
+        let live = |app: &PdfViewerApp| {
+            app.frame(app.window_width, app.window_height)
+                .rect_of(|t| *t == Target::SearchToggle)
+        };
+
+        let before = live(&app).expect("the search button is drawn at the opening size");
+        app.resize(WINDOW_WIDTH + 300.0, WINDOW_HEIGHT);
+        let after = live(&app).expect("the search button survives a widening");
+
+        assert!(
+            after.x > before.x,
+            "the toolbar's right-hand buttons are measured from the right edge, \
+             so widening the window must move them: {before:?} -> {after:?}"
+        );
+        assert_eq!(
+            app.target_at(after.centre().0, after.centre().1),
+            Some(Target::SearchToggle),
+            "the click test still uses the old geometry after a resize"
+        );
+    }
+
+    // -- Toolbar --------------------------------------------------------------
+
+    #[test]
+    fn the_nav_buttons_page_the_document() {
+        let mut app = wired();
+        assert_eq!(app.active_tab().unwrap().current_page, 0);
+
+        probe::click(&mut app, Target::Nav(Nav::Next));
+        assert_eq!(app.active_tab().unwrap().current_page, 1);
+
+        probe::click(&mut app, Target::Nav(Nav::Last));
+        assert_eq!(app.active_tab().unwrap().current_page, 4);
+
+        probe::click(&mut app, Target::Nav(Nav::Prev));
+        assert_eq!(app.active_tab().unwrap().current_page, 3);
+
+        probe::click(&mut app, Target::Nav(Nav::First));
+        assert_eq!(app.active_tab().unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn the_zoom_buttons_reach_the_tab() {
+        let mut app = wired();
+        app.active_tab_mut().unwrap().zoom = ZoomMode::Fixed(1.0);
+
+        probe::click(&mut app, Target::ZoomIn);
+        match app.active_tab().unwrap().zoom {
+            ZoomMode::Fixed(z) => assert!(z > 1.0, "zoom in left the factor at {z}"),
+            other => panic!("expected Fixed after zoom in, got {other:?}"),
+        }
+
+        probe::click(&mut app, Target::ZoomOut);
+        probe::click(&mut app, Target::ZoomOut);
+        match app.active_tab().unwrap().zoom {
+            ZoomMode::Fixed(z) => assert!(z < 1.0, "two zoom-outs left the factor at {z}"),
+            other => panic!("expected Fixed after zoom out, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_fit_buttons_reach_the_tab() {
+        let mut app = wired();
+
+        probe::click(&mut app, Target::Fit(Fit::Width));
+        assert_eq!(app.active_tab().unwrap().zoom, ZoomMode::FitWidth);
+
+        probe::click(&mut app, Target::Fit(Fit::Page));
+        assert_eq!(app.active_tab().unwrap().zoom, ZoomMode::FitPage);
+    }
+
+    #[test]
+    fn the_rotate_buttons_turn_the_page_both_ways() {
+        let mut app = wired();
+
+        probe::click(&mut app, Target::RotateCw);
+        assert_eq!(app.active_tab().unwrap().rotation, Rotation::Deg90);
+
+        probe::click(&mut app, Target::RotateCcw);
+        probe::click(&mut app, Target::RotateCcw);
+        assert_eq!(app.active_tab().unwrap().rotation, Rotation::Deg270);
+    }
+
+    #[test]
+    fn the_view_mode_button_switches_between_the_two_layouts() {
+        let mut app = wired();
+        assert_eq!(app.active_tab().unwrap().view_mode, ViewMode::SinglePage);
+
+        probe::click(&mut app, Target::ViewModeToggle);
+        assert_eq!(
+            app.active_tab().unwrap().view_mode,
+            ViewMode::ContinuousScroll
+        );
+
+        probe::click(&mut app, Target::ViewModeToggle);
+        assert_eq!(app.active_tab().unwrap().view_mode, ViewMode::SinglePage);
+    }
+
+    #[test]
+    fn hiding_the_sidebar_takes_its_controls_with_it() {
+        let mut app = wired();
+        assert!(
+            probe::rect_of(&app, Target::Panel(SidebarPanel::Bookmarks)).is_some(),
+            "the panel tabs should be clickable while the sidebar is shown"
+        );
+
+        probe::click(&mut app, Target::SidebarToggle);
+        assert!(!app.active_tab().unwrap().sidebar_visible);
+        assert!(
+            probe::rect_of(&app, Target::Panel(SidebarPanel::Bookmarks)).is_none(),
+            "the sidebar is hidden but its panel tabs still take clicks"
+        );
+        assert!(
+            probe::rect_of(&app, Target::Thumbnail(0)).is_none(),
+            "the sidebar is hidden but its thumbnails still take clicks"
+        );
+
+        // And the document takes the space back, which is the visible half of
+        // the same change.
+        let content = app.layout(WINDOW_WIDTH, WINDOW_HEIGHT).content;
+        assert_eq!(content.x, 0.0);
+        assert_eq!(content.w, WINDOW_WIDTH);
+    }
+
+    // -- Tabs -----------------------------------------------------------------
+
+    #[test]
+    fn the_new_tab_button_opens_a_tab_and_switches_to_it() {
+        let mut app = wired();
+        assert_eq!(app.tabs.len(), 1);
+
+        probe::click(&mut app, Target::NewTab);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active_tab, 1);
+        assert!(
+            app.active_tab().unwrap().document.is_none(),
+            "a new tab should be empty"
+        );
+    }
+
+    #[test]
+    fn clicking_a_tab_switches_to_it() {
+        let mut app = wired();
+        probe::click(&mut app, Target::NewTab);
+        assert_eq!(app.active_tab, 1);
+
+        probe::click(&mut app, Target::Tab(0));
+        assert_eq!(app.active_tab, 0);
+        assert!(app.active_tab().unwrap().document.is_some());
+    }
+
+    #[test]
+    fn the_close_cross_beats_the_tab_it_sits_on() {
+        let mut app = wired();
+        probe::click(&mut app, Target::NewTab);
+        assert_eq!(app.tabs.len(), 2);
+
+        // The point that matters is the cross's own centre: it lies inside the
+        // tab's rectangle, so whichever box was recorded last decides. Closing
+        // must win, or the cross is decoration.
+        let cross = probe::rect_of(&app, Target::TabClose(1)).expect("tab 1 has a close cross");
+        let tab = probe::rect_of(&app, Target::Tab(1)).expect("tab 1 is drawn");
+        assert!(
+            tab.intersect(cross).is_some(),
+            "this test is vacuous unless the cross sits on the tab: {tab:?} vs {cross:?}"
+        );
+
+        let (cx, cy) = cross.centre();
+        assert_eq!(app.target_at(cx, cy), Some(Target::TabClose(1)));
+
+        app.click_at(cx, cy, MouseButton::Left, <PdfViewerApp as Probe>::SIZE);
+        assert_eq!(app.tabs.len(), 1, "the cross did not close the tab");
+    }
+
+    #[test]
+    fn the_last_tab_cannot_be_closed_away() {
+        let mut app = wired();
+        assert_eq!(app.tabs.len(), 1);
+        probe::click(&mut app, Target::TabClose(0));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "closing the only tab left the window with nothing in it"
+        );
+    }
+
+    // -- Sidebar --------------------------------------------------------------
+
+    #[test]
+    fn the_panel_tabs_switch_which_panel_is_shown() {
+        let mut app = wired();
+        assert_eq!(
+            app.active_tab().unwrap().sidebar_panel,
+            SidebarPanel::Thumbnails
+        );
+
+        probe::click(&mut app, Target::Panel(SidebarPanel::Bookmarks));
+        assert_eq!(
+            app.active_tab().unwrap().sidebar_panel,
+            SidebarPanel::Bookmarks
+        );
+        assert!(
+            probe::rect_of(&app, Target::Bookmark(0)).is_some(),
+            "switching to the bookmarks panel should make bookmarks clickable"
+        );
+        assert!(
+            probe::rect_of(&app, Target::Thumbnail(0)).is_none(),
+            "the thumbnail strip is not shown, so it must not take clicks"
+        );
+
+        probe::click(&mut app, Target::Panel(SidebarPanel::Annotations));
+        assert_eq!(
+            app.active_tab().unwrap().sidebar_panel,
+            SidebarPanel::Annotations
+        );
+    }
+
+    #[test]
+    fn clicking_a_thumbnail_goes_to_that_page() {
+        let mut app = wired();
+        probe::click(&mut app, Target::Thumbnail(3));
+        assert_eq!(app.active_tab().unwrap().current_page, 3);
+    }
+
+    #[test]
+    fn a_thumbnail_scrolled_out_of_the_strip_is_not_clickable() {
+        let mut app = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        // Far more pages than the strip is tall, so the last ones are drawn
+        // below the sidebar's clip and must not be reachable.
+        app.load_document(PdfDocument::create_sample(PathBuf::from("/long.pdf"), 60));
+        assert!(
+            probe::rect_of(&app, Target::Thumbnail(0)).is_some(),
+            "the first thumbnail is on screen"
+        );
+        assert!(
+            probe::rect_of(&app, Target::Thumbnail(59)).is_none(),
+            "a thumbnail drawn past the bottom of the strip is still taking clicks"
+        );
+    }
+
+    #[test]
+    fn clicking_a_bookmark_goes_to_its_page() {
+        let mut app = wired();
+        app.active_tab_mut().unwrap().sidebar_panel = SidebarPanel::Bookmarks;
+
+        // Row 1 is "Chapter 2: Methods" on page 2 -- row 0's children are
+        // collapsed, so the flattened list is the two chapter headings.
+        let flat = app
+            .active_tab()
+            .unwrap()
+            .document
+            .as_ref()
+            .unwrap()
+            .flatten_bookmarks();
+        assert_eq!(flat.len(), 2, "the sample's chapters start collapsed");
+        assert_eq!(flat[1].1.page_index, 2);
+
+        probe::click(&mut app, Target::Bookmark(1));
+        assert_eq!(app.active_tab().unwrap().current_page, 2);
+    }
+
+    #[test]
+    fn the_bookmark_arrow_folds_the_row_rather_than_navigating() {
+        let mut app = wired();
+        app.active_tab_mut().unwrap().sidebar_panel = SidebarPanel::Bookmarks;
+        assert_eq!(app.active_tab().unwrap().current_page, 0);
+
+        probe::click(&mut app, Target::BookmarkArrow(0));
+
+        let doc = app.active_tab().unwrap().document.as_ref().unwrap();
+        assert_eq!(
+            doc.flatten_bookmarks().len(),
+            4,
+            "expanding chapter 1 should reveal its two children"
+        );
+        assert_eq!(
+            app.active_tab().unwrap().current_page,
+            0,
+            "the fold arrow moved the document as well as folding"
+        );
+
+        probe::click(&mut app, Target::BookmarkArrow(0));
+        assert_eq!(
+            app.active_tab()
+                .unwrap()
+                .document
+                .as_ref()
+                .unwrap()
+                .flatten_bookmarks()
+                .len(),
+            2,
+            "the arrow does not fold back"
+        );
+    }
+
+    #[test]
+    fn a_childless_bookmark_has_no_arrow_and_its_whole_row_navigates() {
+        let mut app = wired();
+        app.active_tab_mut().unwrap().sidebar_panel = SidebarPanel::Bookmarks;
+        probe::click(&mut app, Target::BookmarkArrow(0));
+
+        // Row 1 is now "1.1 Background", a leaf.
+        assert!(
+            probe::rect_of(&app, Target::BookmarkArrow(1)).is_none(),
+            "a leaf bookmark should not record a fold arrow"
+        );
+        let row = probe::rect_of(&app, Target::Bookmark(1)).expect("the leaf row is drawn");
+        assert_eq!(
+            app.target_at(row.x + 2.0, row.centre().1),
+            Some(Target::Bookmark(1)),
+            "the left edge of a leaf row, where an arrow would be, must navigate"
+        );
+    }
+
+    #[test]
+    fn folding_a_bookmark_renumbers_the_rows_below_it() {
+        let mut app = wired();
+        app.active_tab_mut().unwrap().sidebar_panel = SidebarPanel::Bookmarks;
+        probe::click(&mut app, Target::BookmarkArrow(0));
+
+        // Expanded: [Ch1, 1.1(p0), 1.2(p1), Ch2(p2)]. Row 3 is chapter 2.
+        probe::click(&mut app, Target::Bookmark(3));
+        assert_eq!(app.active_tab().unwrap().current_page, 2);
+
+        // Collapsed again, row 1 is chapter 2 -- the indices the renderer draws
+        // and the ones `toggle_bookmark`/`bookmark_page` walk must agree.
+        probe::click(&mut app, Target::BookmarkArrow(0));
+        probe::click(&mut app, Target::Nav(Nav::First));
+        probe::click(&mut app, Target::Bookmark(1));
+        assert_eq!(app.active_tab().unwrap().current_page, 2);
+    }
+
+    // -- The two absent backends ----------------------------------------------
+
+    #[test]
+    fn print_is_not_a_control_without_a_spooler() {
+        let app = wired();
+        assert!(!app.can_print());
+        assert!(
+            probe::rect_of(&app, Target::Print).is_none(),
+            "the Print button takes clicks with nothing behind it -- see \
+             known-issues.md -> C-PDFVIEWER-HAS-NO-PDF-BACKEND"
+        );
+    }
+
+    #[test]
+    fn print_is_not_a_control_with_a_spooler_but_no_document() {
+        let mut app = PdfViewerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        app.set_printer(accepts);
+        assert!(!app.can_print(), "an empty tab has nothing to print");
+        assert!(probe::rect_of(&app, Target::Print).is_none());
+    }
+
+    #[test]
+    fn wiring_a_spooler_makes_print_clickable_and_it_spools() {
+        let mut app = wired();
+        app.set_printer(accepts);
+        assert!(app.can_print());
+        assert!(
+            probe::rect_of(&app, Target::Print).is_some(),
+            "with a spooler wired, Print must become a control"
+        );
+        assert!(
+            probe::click(&mut app, Target::Print),
+            "the click did nothing"
+        );
+    }
+
+    #[test]
+    fn a_recent_file_is_not_a_link_without_a_parser() {
+        let app = wired();
+        assert!(!app.can_open());
+        // `load_document` put the sample in the recent list, and the welcome
+        // screen is what draws it -- so an empty tab is needed to see it.
+        let mut app = app;
+        probe::click(&mut app, Target::NewTab);
+        assert!(!app.recent_files.entries.is_empty());
+        assert!(
+            probe::rect_of(&app, Target::RecentFile(0)).is_none(),
+            "the recent-files list is offering links this build cannot follow"
+        );
+    }
+
+    #[test]
+    fn wiring_a_parser_makes_a_recent_file_open() {
+        let mut app = wired();
+        app.set_opener(a_document);
+        probe::click(&mut app, Target::NewTab);
+        assert!(app.active_tab().unwrap().document.is_none());
+
+        assert!(
+            probe::rect_of(&app, Target::RecentFile(0)).is_some(),
+            "with a parser wired, a recent file must become a link"
+        );
+        assert!(probe::click(&mut app, Target::RecentFile(0)));
+        assert_eq!(app.active_tab().unwrap().page_count(), 2);
+    }
+
+    #[test]
+    fn an_opener_that_declines_leaves_the_tab_alone() {
+        let mut app = wired();
+        app.set_opener(refuses);
+        probe::click(&mut app, Target::NewTab);
+        assert!(!probe::click(&mut app, Target::RecentFile(0)));
+        assert!(
+            app.active_tab().unwrap().document.is_none(),
+            "a refused open must not leave a half-loaded tab"
+        );
+    }
+
+    #[test]
+    fn opening_a_recent_file_that_is_not_there_is_not_a_panic() {
+        let mut app = wired();
+        app.set_opener(a_document);
+        assert!(!app.open_recent(99));
+    }
+
+    // -- Scrolling ------------------------------------------------------------
+    //
+    // A wheel delta is positive when the wheel is pushed *away* from the user,
+    // which walks the view back towards page 1. So throughout this section a
+    // **negative** `dy` is the gesture that scrolls *down* the document, and
+    // these tests are written that way on purpose: reading them as "negative
+    // means down" is the thing that would have caught the sign being applied
+    // twice.
+
+    #[test]
+    fn scrolling_in_continuous_mode_moves_the_offset() {
+        let mut app = wired();
+        probe::click(&mut app, Target::ViewModeToggle);
+        assert_eq!(app.active_tab().unwrap().scroll_offset_y, 0.0);
+
+        assert!(app.scroll_by(-3.0));
+        let after = app.active_tab().unwrap().scroll_offset_y;
+        assert!(after > 0.0, "three notches down moved nothing");
+
+        assert!(app.scroll_by(3.0));
+        assert_eq!(
+            app.active_tab().unwrap().scroll_offset_y,
+            0.0,
+            "three notches back up did not return to the top"
+        );
+    }
+
+    #[test]
+    fn a_continuous_scroll_stops_at_the_end_of_the_document() {
+        let mut app = wired();
+        probe::click(&mut app, Target::ViewModeToggle);
+
+        // Far more than the document is long.
+        for _ in 0..200 {
+            app.scroll_by(-10.0);
+        }
+        let tab = app.active_tab().unwrap();
+        let doc = tab.document.as_ref().unwrap();
+        let area = app.layout(WINDOW_WIDTH, WINDOW_HEIGHT).content;
+        let zoom = PdfViewerApp::continuous_zoom(tab, doc, (area.w, area.h));
+        let limit = PdfViewerApp::max_scroll(doc, zoom, area.h);
+
+        assert!(
+            (tab.scroll_offset_y - limit).abs() < 0.5,
+            "scrolled to {} but the document ends at {limit}",
+            tab.scroll_offset_y
+        );
+        assert!(
+            !app.scroll_by(-10.0),
+            "a scroll at the bottom stop should report that nothing moved"
+        );
+    }
+
+    #[test]
+    fn scrolling_never_takes_the_document_above_its_own_top() {
+        let mut app = wired();
+        probe::click(&mut app, Target::ViewModeToggle);
+        for _ in 0..20 {
+            app.scroll_by(10.0);
+        }
+        assert_eq!(app.active_tab().unwrap().scroll_offset_y, 0.0);
+    }
+
+    #[test]
+    fn the_page_number_follows_a_continuous_scroll() {
+        let mut app = wired();
+        probe::click(&mut app, Target::ViewModeToggle);
+        assert_eq!(app.active_tab().unwrap().current_page, 0);
+
+        for _ in 0..40 {
+            app.scroll_by(-3.0);
+        }
+        assert!(
+            app.active_tab().unwrap().current_page > 0,
+            "the status bar would still read page 1 after scrolling past it"
+        );
+    }
+
+    #[test]
+    fn scrolling_in_single_page_mode_pages_one_page_at_a_time() {
+        let mut app = wired();
+        assert_eq!(app.active_tab().unwrap().view_mode, ViewMode::SinglePage);
+
+        // Six notches in one gesture -- a flick, not six deliberate clicks.
+        assert!(app.scroll_by(-6.0));
+        assert_eq!(
+            app.active_tab().unwrap().current_page,
+            1,
+            "one gesture skipped past the pages the user watched go by"
+        );
+
+        assert!(app.scroll_by(6.0));
+        assert_eq!(app.active_tab().unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn a_slow_touchpad_drag_scrolls_rather_than_rounding_to_nothing() {
+        let mut app = wired();
+        probe::click(&mut app, Target::ViewModeToggle);
+
+        // A touchpad drag: ten reports, each a tenth of a notch. Quantised to
+        // whole rows one at a time, every one of these rounds to zero and the
+        // document never moves -- which is why continuous scrolling takes the
+        // distance directly instead of going through the row accumulator.
+        let mut moved = false;
+        for _ in 0..10 {
+            moved |= app.scroll_by(-0.1);
+        }
+        assert!(moved, "a slow touchpad drag scrolled nothing");
+        assert!(app.active_tab().unwrap().scroll_offset_y > 0.0);
+    }
+
+    #[test]
+    fn a_slow_touchpad_drag_still_eventually_turns_a_page() {
+        let mut app = wired();
+        assert_eq!(app.active_tab().unwrap().view_mode, ViewMode::SinglePage);
+
+        // The same drag in single-page mode, where a page turn *is* quantised.
+        // Each tenth of a notch is too small to turn a page on its own, so this
+        // only works if the leftovers are banked rather than discarded.
+        let mut moved = false;
+        for _ in 0..10 {
+            moved |= app.scroll_by(-0.1);
+        }
+        assert!(moved, "a slow touchpad drag turned no pages at all");
+        assert_eq!(app.active_tab().unwrap().current_page, 1);
+    }
+
+    #[test]
+    fn a_scroll_wheel_event_reaches_the_document() {
+        let mut app = wired();
+        probe::click(&mut app, Target::ViewModeToggle);
+        assert!(app.handle_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+            x: WINDOW_WIDTH / 2.0,
+            y: WINDOW_HEIGHT / 2.0,
+        })));
+        assert!(app.active_tab().unwrap().scroll_offset_y > 0.0);
+    }
+
+    #[test]
+    fn a_sideways_flick_does_not_scroll_the_document_downwards() {
+        let mut app = wired();
+        probe::click(&mut app, Target::ViewModeToggle);
+        assert!(!app.handle_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Scroll { dx: 5.0, dy: 0.0 },
+            x: WINDOW_WIDTH / 2.0,
+            y: WINDOW_HEIGHT / 2.0,
+        })));
+        assert_eq!(app.active_tab().unwrap().scroll_offset_y, 0.0);
+    }
+
+    // -- Search ---------------------------------------------------------------
+
+    #[test]
+    fn the_search_button_opens_the_bar_focused() {
+        let mut app = wired();
+        assert!(probe::rect_of(&app, Target::SearchField).is_none());
+
+        probe::click(&mut app, Target::SearchToggle);
+        assert!(app.search.active);
+        assert!(
+            app.search_focused,
+            "a find bar you have to click after summoning wasted the summon"
+        );
+        assert!(probe::rect_of(&app, Target::SearchField).is_some());
+    }
+
+    #[test]
+    fn typing_reaches_the_query_only_while_the_field_is_focused() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        probe::type_str(&mut app, "Lorem");
+        assert_eq!(app.search.query, "Lorem");
+        assert!(
+            !app.search.results.is_empty(),
+            "the query matches the sample text, so the count must not read zero"
+        );
+
+        // Clicking the page takes the caret away; further typing pages the
+        // document instead of editing the query.
+        probe::click(&mut app, Target::Document);
+        assert!(!app.search_focused);
+        probe::type_str(&mut app, "xyz");
+        assert_eq!(
+            app.search.query, "Lorem",
+            "typing leaked into an unfocused box"
+        );
+    }
+
+    #[test]
+    fn clicking_the_field_takes_the_caret_back() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        probe::click(&mut app, Target::Document);
+        assert!(!app.search_focused);
+
+        probe::click(&mut app, Target::SearchField);
+        assert!(app.search_focused);
+        probe::type_str(&mut app, "ip");
+        assert_eq!(app.search.query, "ip");
+    }
+
+    #[test]
+    fn the_match_buttons_do_not_steal_the_caret() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        probe::type_str(&mut app, "Lorem");
+        probe::click(&mut app, Target::SearchNext);
+        assert!(
+            app.search_focused,
+            "stepping to the next match must not close the caret out of the box"
+        );
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_character_not_a_byte() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        probe::type_str(&mut app, "Отчёт");
+        probe::key(&mut app, &probe::press(Key::Backspace));
+        assert_eq!(
+            app.search.query, "Отчё",
+            "backspace cut a multi-byte character in half"
+        );
+    }
+
+    #[test]
+    fn backspace_on_an_empty_query_is_not_a_panic() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        assert!(!probe::key(&mut app, &probe::press(Key::Backspace)));
+        assert!(app.search.query.is_empty());
+    }
+
+    #[test]
+    fn stepping_through_matches_pages_the_document_to_them() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        // "Page 4" appears only in the fourth page's own text span.
+        probe::type_str(&mut app, "Page 4");
+        assert!(
+            !app.search.results.is_empty(),
+            "the query found nothing to step to"
+        );
+        assert_eq!(
+            app.active_tab().unwrap().current_page,
+            3,
+            "a highlight the user cannot see is not a search result"
+        );
+    }
+
+    #[test]
+    fn enter_steps_to_the_next_match() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        probe::type_str(&mut app, "Lorem");
+        let first = app.search.current_match;
+        probe::key(&mut app, &probe::press(Key::Enter));
+        assert_ne!(
+            app.search.current_match, first,
+            "Enter in a find bar must advance the match"
+        );
+    }
+
+    #[test]
+    fn the_match_buttons_wrap_in_both_directions() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        probe::type_str(&mut app, "Lorem");
+        let count = app.search.results.len();
+        assert!(
+            count > 1,
+            "this test needs more than one match, got {count}"
+        );
+
+        assert_eq!(app.search.current_match, Some(0));
+        probe::click(&mut app, Target::SearchPrev);
+        assert_eq!(
+            app.search.current_match,
+            Some(count - 1),
+            "stepping back from the first match should wrap to the last"
+        );
+        probe::click(&mut app, Target::SearchNext);
+        assert_eq!(app.search.current_match, Some(0));
+    }
+
+    #[test]
+    fn escape_closes_the_search_bar_from_anywhere() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        probe::type_str(&mut app, "Lorem");
+        probe::click(&mut app, Target::Document); // unfocused, bar still up
+
+        assert!(probe::key(&mut app, &probe::press(Key::Escape)));
+        assert!(!app.search.active);
+        assert!(app.search.query.is_empty());
+        assert!(probe::rect_of(&app, Target::SearchField).is_none());
+    }
+
+    #[test]
+    fn closing_the_bar_with_the_button_clears_the_highlights_too() {
+        let mut app = wired();
+        probe::click(&mut app, Target::SearchToggle);
+        probe::type_str(&mut app, "Lorem");
+        assert!(!app.search.results.is_empty());
+
+        probe::click(&mut app, Target::SearchToggle);
+        assert!(!app.search.active);
+        assert!(
+            app.search.results.is_empty(),
+            "highlights outlived the bar that explained them"
+        );
+    }
+
+    #[test]
+    fn escape_with_no_search_bar_is_not_swallowed_as_a_change() {
+        let mut app = wired();
+        assert!(!probe::key(&mut app, &probe::press(Key::Escape)));
+    }
+
+    // -- Keyboard -------------------------------------------------------------
+
+    #[test]
+    fn the_arrow_keys_page_the_document() {
+        let mut app = wired();
+        probe::key(&mut app, &probe::press(Key::Right));
+        assert_eq!(app.active_tab().unwrap().current_page, 1);
+        probe::key(&mut app, &probe::press(Key::Down));
+        assert_eq!(app.active_tab().unwrap().current_page, 2);
+        probe::key(&mut app, &probe::press(Key::Left));
+        assert_eq!(app.active_tab().unwrap().current_page, 1);
+        probe::key(&mut app, &probe::press(Key::PageUp));
+        assert_eq!(app.active_tab().unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn home_and_end_reach_the_ends_of_the_document() {
+        let mut app = wired();
+        probe::key(&mut app, &probe::press(Key::End));
+        assert_eq!(app.active_tab().unwrap().current_page, 4);
+        probe::key(&mut app, &probe::press(Key::Home));
+        assert_eq!(app.active_tab().unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn a_key_release_is_not_a_second_keypress() {
+        let mut app = wired();
+        let mut release = probe::press(Key::Right);
+        release.pressed = false;
+        assert!(!app.handle_key(&release));
+        assert_eq!(app.active_tab().unwrap().current_page, 0);
+    }
+
+    #[test]
+    fn paging_in_continuous_mode_moves_the_scroll_offset_too() {
+        let mut app = wired();
+        probe::click(&mut app, Target::ViewModeToggle);
+        probe::key(&mut app, &probe::press(Key::End));
+
+        let tab = app.active_tab().unwrap();
+        assert_eq!(tab.current_page, 4);
+        assert!(
+            tab.scroll_offset_y > 0.0,
+            "the status bar reads the last page but the view never moved"
+        );
+    }
+
+    // -- The window strap -----------------------------------------------------
+
+    #[test]
+    fn the_close_button_exits() {
+        let mut app = wired();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn ctrl_q_exits() {
+        let mut app = wired();
+        assert_eq!(
+            app.on_event(&Event::Key(probe::ctrl(Key::Q))),
+            Response::Exit
+        );
+    }
+
+    #[test]
+    fn a_bare_q_types_rather_than_quitting() {
+        let mut app = wired();
+        assert_ne!(
+            app.on_event(&Event::Key(probe::typing("q"))),
+            Response::Exit,
+            "an unmodified q must not close the window"
+        );
+    }
+
+    #[test]
+    fn ctrl_f_opens_the_search_bar_focused() {
+        let mut app = wired();
+        assert_eq!(
+            app.on_event(&Event::Key(probe::ctrl(Key::F))),
+            Response::Redraw
+        );
+        assert!(app.search.active);
+        assert!(app.search_focused);
+
+        // Pressed again with the bar already up, it takes the caret back rather
+        // than closing what the user just asked for.
+        probe::click(&mut app, Target::Document);
+        app.on_event(&Event::Key(probe::ctrl(Key::F)));
+        assert!(app.search.active);
+        assert!(app.search_focused);
+    }
+
+    #[test]
+    fn ctrl_t_and_ctrl_w_open_and_close_a_tab() {
+        let mut app = wired();
+        app.on_event(&Event::Key(probe::ctrl(Key::T)));
+        assert_eq!(app.tabs.len(), 2);
+        app.on_event(&Event::Key(probe::ctrl(Key::W)));
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn a_click_on_scenery_asks_for_no_repaint() {
+        let mut app = wired();
+        // The very top-left corner is toolbar background, not a button.
+        assert_eq!(
+            app.on_event(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x: 1.0,
+                y: 1.0,
+            })),
+            Response::Idle
+        );
+    }
+
+    #[test]
+    fn render_uses_the_size_it_was_handed() {
+        let mut app = wired();
+        let tree = app.render(900.0, 600.0);
+        assert!(!tree.is_empty());
+        assert_eq!(app.window_width, 900.0);
+        assert_eq!(app.window_height, 600.0);
+        assert_eq!(
+            app.target_at(1.0, 1.0),
+            app.frame(900.0, 600.0).hit_test(1.0, 1.0),
+            "the click test and the paint disagree about the window size"
+        );
+    }
+
+    #[test]
+    fn a_resize_event_is_what_moves_the_controls() {
+        let mut app = wired();
+        let before = probe::rect_of(&app, Target::SearchToggle).unwrap();
+        app.handle_event(&Event::Resize {
+            width: 1500,
+            height: 780,
+        });
+        let after = app
+            .frame(app.window_width, app.window_height)
+            .rect_of(|t| *t == Target::SearchToggle)
+            .unwrap();
+        assert!(after.x > before.x);
+    }
+
+    #[test]
+    fn a_nonsense_window_size_does_not_reach_the_geometry() {
+        let mut app = wired();
+        app.resize(f32::NAN, -5.0);
+        assert_eq!(app.window_width, 0.0);
+        assert_eq!(app.window_height, 0.0);
+        // And drawing at it is still a well-formed, empty frame.
+        let frame = app.frame(app.window_width, app.window_height);
+        assert!(
+            frame.is_balanced(),
+            "a degenerate frame left a clip unclosed"
+        );
+        assert!(frame.hits().is_empty());
+    }
+
+    #[test]
+    fn the_title_names_the_open_document() {
+        let mut app = wired();
+        assert!(
+            app.title().contains("Sample Document"),
+            "the title bar should say what is open, got {:?}",
+            app.title()
+        );
+
+        probe::click(&mut app, Target::NewTab);
+        assert_eq!(
+            app.title(),
+            "PDF Viewer",
+            "an empty tab should not claim to be showing a document"
+        );
+    }
+
+    #[test]
+    fn every_frame_closes_the_clips_it_opens() {
+        let sizes = [
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+            (320.0, 240.0),
+            (0.0, 0.0),
+            (WINDOW_WIDTH, TOOLBAR_HEIGHT),
+            (2400.0, 1600.0),
+        ];
+        for panel in [
+            SidebarPanel::Thumbnails,
+            SidebarPanel::Bookmarks,
+            SidebarPanel::Annotations,
+        ] {
+            for (w, h) in sizes {
+                let mut app = wired();
+                app.search.active = true;
+                app.active_tab_mut().unwrap().sidebar_panel = panel;
+                assert!(
+                    app.frame(w, h).is_balanced(),
+                    "the frame at {w}x{h} with the {panel:?} panel left a clip open"
+                );
+            }
+        }
     }
 
     #[test]

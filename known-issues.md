@@ -89708,12 +89708,27 @@ that returns a documented sentinel (or a small simulator where tests need the
 call to succeed). The mechanical part is uniform; the judgement per crate is
 only "does anything need this to *work* on host, or merely to fail cleanly?"
 
-**Worth telling lanes A and C.** The `target_arch`-instead-of-`target_os`
-confusion is not a lane-B idiom — it is the obvious-looking wrong answer, and
-`kernel/**`, `gui/**` and `net*/**` have their own raw-syscall and
-`#[cfg]`-gated arms. This is the third time in two days that a `#[cfg]`
-predicate has been wrong in a way that only shows up on one host (see
-`B-BACKUP-CFG-UNIX` and `BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above).
+**Confined to lane B — checked, not assumed.** The first draft of this entry
+said the other lanes were probably affected too and should be told. They are
+not, so no request was filed. Measured against `origin/main`:
+
+| tree | raw `syscall` sites | verdict |
+|---|---|---|
+| `kernel/**`, `bench/**` (lane A) | 0 | the kernel *receives* syscalls; it issues none |
+| `gui/**`, `apps/**`, `net*/**`, `pkg/**` (lane C) | 2 | both fine — see below |
+
+Lane C's two are in `gui/compositor/src/present/{drm,evdev}/sys.rs`, and they
+are deliberately *Linux* syscalls for DRM and evdev, gated
+`#[cfg(target_os = "linux")]` and documented as using "the x86-64 Linux
+syscall ABI". That is a raw syscall that is correct precisely because it runs
+on the host it names. It is the opposite of this bug, not an instance of it.
+
+**Still worth noting as a pattern, though.** This is the third `#[cfg]`
+predicate in two days that was wrong in a way visible on only one host — see
+`B-BACKUP-CFG-UNIX` and `BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above. The
+recurring shape is a gate that names the *nearly* right axis:
+`target_arch` for `target_os`, `cfg(unix)` for "has procfs", `cfg(unix)` on a
+dev host that is Windows.
 
 ---
 

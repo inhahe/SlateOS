@@ -91757,3 +91757,42 @@ cheap and both were violated by an expert-looking one-liner.
    so one level of quoting is not enough.
 2. **`xargs` over our paths needs `-d '\n'` or `-0`.** Bare `xargs` splits on
    whitespace, and our paths all contain it.
+
+## `C-NO-CALENDAR-CLOCK-FOR-APPS` (lane C, 2026-08-27) -- **open**, missing kernel/service data
+
+**What it is.** An application running inside a window cannot find out what day
+it is. `oswindow::app::App` gives a program `tick_interval` and `Event::Tick`,
+which is a *metronome* -- it says "another interval has passed", not "it is now
+the 27th". There is no call anywhere in `gui/**` that returns a wall-clock time,
+a date, or a timezone, and nothing in `apps/**` reads one.
+
+**Where it bites.** Any feature whose behaviour is supposed to depend on the
+calendar rather than on elapsed time. Concretely, today:
+
+| Program | What it wanted | What it does instead |
+|---|---|---|
+| `apps/dictionary` | A **word of the day** -- one entry chosen by the date, changing at midnight. | A **featured word**: the same card, stepped by the reader with `Left`/`Right` or the two arrow buttons, and wrapping. |
+
+The dictionary's original code named the field `word_of_day_index`, initialised
+it to `0` with the comment "First word as word of the day", and never assigned
+it again -- so it was permanently the first entry. Renaming the feature was the
+honest fix: a "word of the day" that is not tied to a day is a label making a
+claim the program cannot keep, and the operator would have no way to tell the
+difference between "the date is stuck" and "the feature is fake".
+
+**Why it is not simply a missing function.** A calendar clock is not one API but
+a chain: a hardware time source, a persisted timezone and DST database, and a
+service that owns "what time is it" so that every program agrees. Bolting
+`std::time::SystemTime` into the toolkit would give apps a number without any of
+that, and would then have to be taken away again when the real service arrives
+-- with every caller already written against the wrong shape.
+
+**What the proper fix looks like.** A time service reachable over a channel, and
+a thin `guitk` accessor over it, so an app asks for a *civil* date (year, month,
+day, weekday, in the user's zone) rather than for a count of seconds. Apps that
+want a metronome keep using `Event::Tick`; apps that want the calendar ask the
+service. Until that exists, an app must not pretend to know the date.
+
+**Trigger to revisit.** When a time service exists and is reachable from
+userspace: rename `Screen::Featured` back to a word of the day, seed the index
+from the civil date, and keep the arrows as a way to browse.

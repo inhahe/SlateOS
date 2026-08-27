@@ -6539,7 +6539,32 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
 - [x] Battleship (apps/battleship: 10x10 naval combat with hunt/target AI, ship placement phase, hit/miss/sink detection, stats panel, 93 tests)
 - [x] Game of Life (apps/life: 80x60 toroidal grid, 10 preset patterns, play/pause/step, adjustable speed, mouse/keyboard editing, 80+ tests)
 - [x] Maze (apps/maze: recursive backtracker generation, BFS solver, 3 difficulty sizes, trail visualization, solution reveal, 80+ tests)
-- [x] Tic-Tac-Toe (apps/tictactoe: 3x3 grid with perfect minimax AI, score tracking, click/keyboard placement, 80+ tests)
+- [x] Tic-Tac-Toe (apps/tictactoe) **windowed** — `App` + `Probe`, layout derived
+  from the live window size, hit boxes recorded by the pass that draws them, and
+  the computer's reply on an `Event::Tick` clock. Wiring it up found five faults
+  the simulation `main` had kept out of sight:
+  1. **Every key fired twice** — the handler never read `pressed`, so an arrow
+     moved the cursor *two* squares per press (the middle row was unreachable
+     from either edge), and `Enter` on a finished game reset the board on the
+     press and then played a move on the release: "new game" started you one
+     move down, in a square you never chose.
+  2. **A click outside the grid placed a mark inside it** — `((x - grid_x) /
+     cell) as i32` truncates towards zero, so a click a fraction of a cell left
+     of the board gave column 0 and `(0..3).contains(&0)` accepted it. The same
+     held above the board, where the title and status line live: clicking the
+     word "Tic-Tac-Toe" played the top-left square.
+  3. **The layout was a constant** — 100px cells at a fixed y=100 and a score
+     line pinned at y=430, so a window shorter than 460px drew its score below
+     the bottom edge and one narrower than 300px hung the grid off both sides.
+  4. **The "AI thinking..." status was unreachable** — the search ran inside the
+     human's own event handler, so the turn flipped back before any frame was
+     drawn. The reply is now a state the window renders, held for `THINK_MS`.
+  5. **`render` took `&mut self` only to hit-test**, caching `win_width` for a
+     hand-written click test (plus a `win_height` nothing read).
+  60 tests replace the old 30, including an exhaustive check of the
+  unbeatability claim: every one of the ~4.7k reachable positions, both marks,
+  compared against a three-valued negamax solver written from the rules rather
+  than from the code under test. Window-wiring baseline 94 -> 93.
 - [x] Mandelbrot (apps/mandelbrot: **windowed** — fractal explorer with zoom/pan, 5 color schemes, preset locations, adjustable iterations/resolution, 63 tests). Wiring it found six faults, three of which made the program wrong rather than merely unwired. `main` computed one fractal, dropped it and exited, so nothing reached a screen. Every key fired twice: `pressed` was never read, so the key ran again on release — which meant `I` and `F1` toggled back off the instant they were let go and the help sheet could not be seen at all. The renderer indexed cells (`px / cols`) while the click handler mapped pixels (`x / width`), against a `cols` computed by a truncating divide: the image was stretched by up to a cell, the right and bottom edges were never painted, and a click landed on a different point than the one drawn under it. The per-frame arithmetic was unbounded — at 4K with `pixel_size` 1 and 2000 iterations a single frame asked for four billion iterations — and every frame recomputed from scratch, so merely recolouring cost a full recompute. And the mouse wheel did nothing despite the help text saying it zoomed. One `complex_in` mapping now serves both the renderer and the hit test, cells are sampled at their centres and sized with `ceil` so the edges are painted, a `TileKey`-keyed cache holds *iteration counts* (not colours, so `C` is free), an iteration budget enlarges the cell rather than silently ignoring the resolution setting and the readout says when it has done so, the scale is clamped to where `f64` stops resolving, and the wheel zooms about the pointer.
 - [x] Pong (apps/pong: **windowed** — classic two-paddle ball game with AI opponent, speed increases, first to 11 wins, 63 tests). Wiring it up found four faults, each of which needed the game to actually be playable to see: `main` built a `PongApp` and dropped it; the key handler never read `KeyEvent::pressed` — with a comment claiming the framework has no key releases, which it always has — so one Up press welded the paddle to the wall and *releasing* P paused again; `update()` moved the ball a fixed distance per tick, making its speed the compositor's frame rate (speeds are now per second, `advance` scales by `elapsed_ms` and sub-steps at 4 field units so a fast ball cannot jump a 12-unit paddle); and `FIELD_X`/`FIELD_Y` were absolute screen coordinates with a constant 700x500 field, so `render(width, height)` used its arguments for one line of help text. `Layout` now fits the field into the live window at a single aspect-preserving scale, the pointer steers the paddle, and the message box and footer buttons do what they say.
 - [x] Sliding Puzzle (apps/sliding: 8/15/24-puzzle with 3x3/4x4/5x5 sizes, mouse+keyboard, best scores, 70+ tests)

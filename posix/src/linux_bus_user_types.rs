@@ -86,7 +86,7 @@ mod tests {
             BUS_NAME_NVME,
             BUS_NAME_AUXILIARY,
         ] {
-            assert!(!n.is_empty());
+            assert!(!n.is_empty(), "a bus name is empty");
             // Sysfs names are lowercase ASCII (allowing digits like "i2c").
             for c in n.chars() {
                 assert!(c.is_ascii_lowercase() || c.is_ascii_digit());

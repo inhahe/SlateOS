@@ -119,9 +119,15 @@ mod tests {
 
     #[test]
     fn test_names_nonempty_ascii() {
-        assert!(!HSR_GENL_NAME.is_empty());
+        assert!(
+            !HSR_GENL_NAME.is_empty(),
+            "HSR_GENL_NAME must name the generic-netlink family"
+        );
         assert!(HSR_GENL_NAME.is_ascii());
-        assert!(!HSR_GENL_MCAST_GROUP_NAME.is_empty());
+        assert!(
+            !HSR_GENL_MCAST_GROUP_NAME.is_empty(),
+            "HSR_GENL_MCAST_GROUP_NAME must name the multicast group"
+        );
         assert!(HSR_GENL_MCAST_GROUP_NAME.is_ascii());
     }
 

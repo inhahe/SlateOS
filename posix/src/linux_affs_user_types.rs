@@ -151,7 +151,7 @@ mod tests {
             AFFS_OPT_PREFIX,
             AFFS_OPT_VOLUME,
         ] {
-            assert!(!o.is_empty());
+            assert!(!o.is_empty(), "an AFFS mount-option name is empty");
         }
         // mode/reserved/prefix/volume are "key=" options; protect/verbose
         // are bare keywords.

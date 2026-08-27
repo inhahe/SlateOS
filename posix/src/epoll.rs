@@ -2394,10 +2394,14 @@ fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, watched: &[u8]) 
         // SAFETY: the guard is still held, so no concurrent &mut to scratch
         // while we read the records back out.
         let scratch = unsafe { &*event_scratch_ptr() };
-        for rec in scratch
-            .chunks_exact(crate::syscall::FS_WATCH_EVENT_SIZE)
-            .take(count)
-        {
+        // The record width is a compile-time constant, so `as_chunks` states it
+        // as a const generic and hands back `&[u8; FS_WATCH_EVENT_SIZE]` rather
+        // than an unsized slice. The `.get(..)` calls below are unchanged --
+        // they still deref to a slice -- but the record length is now in the
+        // type instead of being a runtime argument that could drift from the
+        // offsets it is read with.
+        let (records, _) = scratch.as_chunks::<{ crate::syscall::FS_WATCH_EVENT_SIZE }>();
+        for rec in records.iter().take(count) {
             let Some(affected_raw) = rec.get(..KEV_NEWPATH_OFF) else {
                 continue;
             };

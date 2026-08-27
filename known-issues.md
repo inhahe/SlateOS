@@ -89162,6 +89162,363 @@ why §610 exists.
 
 ---
 
+## `TD-B-OSH-ANNOUNCES-EVERY-STAGE-OF-A-BACKGROUND-PIPELINE-BEFORE-STARTING-ANY` (lane B, 2026-08-26) — **open**, tech debt
+
+**In short:** with a debugger's DEBUG trap armed, bash tells the trap about a
+background pipeline's stages *one at a time, starting each before it mentions
+the next*, while osh mentions all of them first and only then starts any. Every
+status, every `${PIPESTATUS[@]}` and every verdict comes out the same; the only
+thing that differs is the order in which a stage's own output can interleave
+with the trap's, and even in bash that order is a race.
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::announce_async` (the loop over
+`ao.first.commands`) and its caller in the item loop, which hands the whole job
+to `Shell::exec_background` once the loop has finished.
+
+**Reproduce** (bash 5.2.21 / glibc 2.39, `osh` built from this tree):
+
+```sh
+shopt -s extdebug
+c(){ echo "F<$BASH_COMMAND>" >&2; [ "$BASH_COMMAND" != "$W" ] || return 2; }
+f(){ { exit 3; } | exit 4 | exit 5 & echo after; }
+W="exit 5"; trap c DEBUG; f
+```
+
+bash prints `F<exit 4>`, `F<exit 3>`, `F<exit 5>`; osh prints `F<exit 4>`,
+`F<exit 5>`, `F<exit 3>`. The `F<exit 3>` is the *group* stage's own child
+announcing its body — a group stage is not announced by the owning shell, so the
+only shell that can name `exit 3` is the child running it. bash has already
+forked that child before it announces `exit 5`, so the child's line can land in
+the middle; osh forks nothing until the loop is over, so it always lands after.
+
+**Why it is only an ordering difference:** the child is concurrent with the
+parent either way, so its position in the stream is a race in bash too — replace
+the group with `{ sleep 2; exit 3; }` and bash reorders to `F<exit 4>`,
+`F<sleep 2>`, `F<exit 5>`, `F<exit 3>`. Nothing a script can read depends on it:
+the answer, the array and which stages ran are identical, which is what
+`tests/corpus/debug-trap-verdict-takes-a-pipeline-stage.sh` checks. No corpus
+section asserts the interleaving, deliberately — a racy expectation would be a
+flaky test.
+
+**Proper fix:** interleave announcement and start, the way `Shell::exec_pipeline`
+would have to as well. That means `announce_async` cannot decide the whole
+`skips` vector up front and hand it to a clone; the job's stages would have to be
+forked by the announcing shell as it goes, which is a different division of
+labour between the parent and the `&` job's clone than osh currently has. Worth
+doing only if a real observable is found that depends on it.
+
+### BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY. `a_reopened_descriptor_starts_at_zero_and_does_not_move_the_shells_cursor` fails on the Windows dev host — 2026-08-26 — LANE B, REPORTED
+
+**In short:** `cargo test --workspace` has exactly one failing test, and it is a
+test rather than a bug. The shell (`osh`) can be told to read a file "through a
+descriptor number" — `read b </dev/fd/3`. On Linux that re-opens the file from
+the beginning; on Windows there is no way to name a file that way, so the shell
+falls back to sharing the existing descriptor, and the read continues from where
+the last one stopped. The fallback is deliberate and documented. The test is
+not: it asserts the Linux answer on every host, so it is red for anybody running
+the suite on this machine. Nothing a user can do is broken by it — but a
+permanently-red suite is, because it trains everyone to ignore the failure line.
+
+**Repro:**
+
+```
+cargo test -p oils --lib --target x86_64-pc-windows-gnu a_reopened_descriptor_starts_at_zero
+```
+
+```
+assertion `left == right` failed        (userspace/oils/src/interp.rs:106519)
+  left: "[one][two][]\n"
+ right: "[one][one][two]\n"
+```
+
+**Where:** `userspace/oils/src/interp.rs`. The test arrived with `4b65729b0`;
+the fallback it collides with is `file_reopen_path` / `host_reopen_path`
+(~65942/65930), whose `#[cfg(not(unix))]` arms return `None`, so
+`Shell::resolve_special_redirect` yields `SpecialRedirect::Duplicated` and the
+redirect becomes `<&3`. Under a dup, `b` reads `two` and leaves fd 3 at EOF, so
+`c` reads nothing — precisely the observed `[one][two][]`.
+
+**Whose:** lane B (`userspace/**`). Lane C does not edit it. Filed as
+`requests/c-b-the-reopen-test-is-red-on-the-windows-dev-host.md`, which suggests
+splitting the test so the dev host asserts the documented dup and the Unix build
+asserts the re-open — that covers the fallback rather than merely excusing it.
+
+**Proper fix:** lane B's call; either `#[cfg(unix)]` with a reason, or the split
+above.
+
+## `TD-OILS-ENABLE-F-AND-D-FOLLOW-THE-NO-DLOPEN-BUILD` (lane B, 2026-08-26) — **open**, `SCOPE: out of frozen scope (§305)`
+
+**In short:** `enable -f file name` asks the shell to load a new builtin out of a
+shared library file, and `enable -d name` asks it to unload one again. osh
+answers both with a flat refusal. The reference bash we diff against does not
+refuse — it genuinely tries, and fails for its own reason (the file isn't there,
+or isn't a library, or hasn't got the right symbol in it). So the two shells
+print different words and return different numbers for these two options. This
+is a difference in what the two programs were *built to be able to do*, not a
+mistake in osh, and nothing on SlateOS can hit it.
+
+**What each side does.** Measured against GNU bash 5.2.21 (x86_64-pc-linux-gnu):
+
+| command | bash (has `dlopen`) | osh |
+|---|---|---|
+| `enable -f /nosuch/lib.so foo` | `cannot open shared object /nosuch/lib.so: …No such file or directory`, rc=1 | `dynamic loading not available`, rc=2 |
+| `enable -f libc.so.6 foo` | `cannot find foo_struct in shared object …`, rc=1 | as above |
+| `enable -fn x` | `-f` takes the bundled `n` as its filename, rc=1 | as above |
+| `enable -d echo` | `echo: not dynamically loaded`, rc=1 | usage line alone, rc=2 |
+| `enable -d nosuchname` | `nosuchname: not a shell builtin`, rc=1 | usage line alone, rc=2 |
+| `enable -d` (no names) | falls through to the ordinary listing, rc=0 | usage line alone, rc=2 |
+
+osh's column is not invented: it is what bash itself prints when configured
+*without* `dlopen`, which is the build MSYS bash was and the build osh
+deliberately imitates (`Shell::builtin_enable` in `userspace/oils/src/interp.rs`
+says so in its comments, and `enable_refuses_the_dynamic_loading_options` pins
+it). The corpus prose used to state that column as though it were bash's
+behaviour everywhere; that was an artifact of the reference shell of the day
+being MSYS, and is now corrected.
+
+**Why this is not going to be fixed.** §305 froze osh's bash-fidelity scope, and
+this divergence fails every one of its three "fix it" tests: nothing we ship or
+run calls `enable -f`; it is not a crash, hang, data-loss, security or
+propagating-wrong-status bug; and it is not a regression. It lands squarely on
+the excluded list instead — diagnostic wording and an exit status for an option
+that cannot do anything here. More to the point, **§305's own reasoning depends
+on osh not needing a dynamic linker** (decision part 1), and SlateOS has none:
+there is no `dlopen` anywhere in the tree and the ELF loader has no `PT_INTERP`
+handling. A shared object osh could load does not exist on the target.
+
+**What was done instead.** The five corpus probes whose answers depend on
+`dlopen` (`-f FILE`, `-fn x`, `-d echo`, `-nd echo`, `-dn echo`) were removed
+from `userspace/oils/tests/corpus/a-enable-lists-and-refuses.sh` rather than the
+whole case being waived with `EXPECT-DIFF` — waiving the case would have dropped
+regression cover from the ~60 assertions in it that *do* match, including the one
+that matters most, that both shells name the same 61 builtins in the same order.
+The four probes that survive (`-f` with no argument, `-nf`, `-z`, `-sz`) are
+option-parser behaviour, which happens before either letter is acted on and is
+identical in both builds.
+
+**If SlateOS ever grows a dynamic linker**, this becomes answerable and should be
+revisited — but note that even then osh could not *run* a bash loadable builtin,
+because those are C functions taking bash's own `WORD_LIST`, and osh's word list
+is Rust. The most it could ever do is reproduce bash's failure messages more
+precisely.
+
+## `TD-OILS-A-CLOSED-FD-0-DEADLOCKS-BASH-IN-A-REDIRECT-WORD` (lane B, 2026-08-26) — **open**, bash quirk, no osh change intended
+
+**In short:** if you close a command's standard input and then, in the *same*
+redirect list, use a `$(…)` substitution that tries to read standard input, bash
+hangs forever. osh does not — it reports `Bad file descriptor` and carries on.
+osh's answer is the better one, and this entry exists to record why the corpus
+cannot test the case rather than to propose a change.
+
+**Reproducer** (GNU bash 5.2.21, x86_64-pc-linux-gnu; hangs until killed):
+
+```sh
+bash --norc -c '( true <&- 3> $(read -r a; echo "rc=$?" >&2; echo /dev/null) )' </dev/null
+```
+
+**Why it hangs.** `<&-` closes descriptor 0, so 0 becomes the lowest free
+number. bash then calls `pipe(2)` to collect the command substitution's stdout,
+and `pipe(2)` hands out the lowest free descriptors — so the *read* end of that
+pipe is handed fd 0. The substitution's child dups the write end onto fd 1 but
+never closes the stray read end, so inside the substitution fd 0 is the read end
+of its own stdout pipe. The `read` waits for data only that same process could
+send, and because the write end is open EOF never arrives either.
+
+Confirmed directly rather than inferred: substituting `ls -l /proc/self/fd/0`
+for the `read` prints `lr-x------ … 0 -> pipe:[24709]` under bash — read-only,
+so it is the read end. Under osh the same probe says `/proc/self/fd/0: No such
+file or directory`, because osh really did leave fd 0 closed.
+
+**Why osh is not going to be changed to match.** Matching would mean reproducing
+a deadlock. §305's stopping criterion excludes exactly this — an artifact of
+bash's C-level descriptor allocation, reachable only by deliberately closing
+stdin and then reading it, whose only "observable" is that one shell hangs. osh
+already gives the answer bash gives whenever it has a spare descriptor.
+
+**What it cost, and what was done.** The probe sat in
+`userspace/oils/tests/corpus/a-redirect-list-is-performed-left-to-right-and-each-step-is-already-in-effect.sh`
+and hung the *reference* side, so the harness reported the case as `T … bash did
+not finish within 20s, twice` and the case produced no verdict at all — taking
+the roughly fifty other assertions in the same file down with it, including the
+whole `<>`, shared-offset and `2>&1`-ordering sections. It was previously
+recorded as "re-run with `--timeout-scale 5`", which could never have worked: a
+deadlock does not finish at any multiple of the budget, it just fails more
+slowly. The probe is now removed and the reasoning left in its place, which
+makes the case measurable again.
+### TD-C-ARCHIVEMANAGER-HOLDS-THE-WHOLE-ARCHIVE-IN-MEMORY — 2026-08-26 — LANE C, OPEN
+
+**In short:** Opening a ZIP in the archive manager reads the entire file into
+memory and keeps it there for as long as the window is open. A 400 MB archive
+therefore costs 400 MB of RAM to *look* at, even to read one small file out of
+it, and archives over 512 MB are refused outright with a message saying so
+rather than being opened. Nothing gives a wrong answer; the program is simply
+much more expensive than it needs to be on big files, and puts a ceiling where
+there should not be one.
+
+**Where:** `apps/archivemanager/src/backend.rs` — `MAX_ARCHIVE_BYTES` and
+`open`, which does `fs::read(path)` and stores the result in
+`ArchiveSource::bytes`. Every read after that (`ziparchive::entry_data`,
+`extract_entry`) takes a `&[u8]` covering the whole archive.
+
+**Why it is like this:** `ziparchive` is a `no_std` crate with a slice API — it
+parses a `&[u8]` and hands back offsets into it. There is no seeking reader to
+give it, so the only way to call it is to have the whole file in memory. The
+512 MB cap is not arbitrary caution: without it, opening a DVD image with a
+`.zip` extension would try to allocate several gigabytes and be killed, which
+looks to the user like the program crashing on a file it should have refused.
+
+**Proper fix:** on the crate side, not this one. `ziparchive` wants a reader
+trait — something that can be asked for a byte range — so the central directory
+can be parsed from the tail of the file and each member inflated by streaming
+its own extent. The archive manager would then hold a file handle and a parsed
+directory, and `MAX_ARCHIVE_BYTES` would disappear along with the refusal
+message. That is a lane A change; it is not filed as a request yet because the
+current behaviour is correct for every archive a desktop user is likely to open,
+and the crate is a week old — asking for a second API before the first one has
+been used in anger is how APIs get designed twice.
+
+### TD-C-NOTHING-CAN-ACTUALLY-COPY-AND-PASTE-BETWEEN-PROGRAMS — 2026-08-26 — LANE C, OPEN
+
+**In short:** Copy and Paste do not cross between programs. Every window that
+has a Copy button — the colour picker, the text editor, the clipboard manager,
+the Run box — copies into a `String` field of its own, which no other program
+can see. Copying a hex colour and pasting it into the editor puts nothing in
+the editor. The clipboard *service* that is supposed to hold the one shared
+copy exists and is written, but nothing is connected to it at either end.
+
+**Where:**
+
+| Piece | State |
+|---|---|
+| `gui/clipboard/src/main.rs` | The service. Formats, history ring, sensitive-entry expiry and a full request/response enum are all written and tested. `fn main` runs a self-test and returns; three `TODO`s at lines 788-790 mark the missing register-with-service-manager, open-endpoint and event-loop steps. |
+| `gui/clipboard/Cargo.toml` | **Binary only — there is no `lib` target**, so no program can even link against `ClipboardRequest`/`ClipboardResponse` to build a message. |
+| `gui/toolkit` | No clipboard API of any kind. A widget that wants to copy has nowhere to call. |
+| `apps/colorpicker`, `apps/editor`, `apps/tmux`, `gui/desktop/src/run_dialog.rs` | Each keeps a private `clipboard: String`. Correct in isolation, invisible to everyone else. |
+| `apps/clipmanager` | A clipboard *manager* over its own in-process store: it shows and searches a history the rest of the system does not put anything into. |
+
+**Why it is like this:** the service was written before there was any IPC to
+carry it, and each app grew a local `String` in the meantime because a Copy
+button that does nothing at all is worse than one that at least feeds the
+program's own Paste. Nothing here is wrong so much as unconnected — the shape
+of the fix is not in doubt, only the plumbing.
+
+**Proper fix, in the order the pieces have to land:**
+
+1. **Give `gui/clipboard` a `lib` target** (`src/lib.rs` holding the types,
+   `src/main.rs` reduced to the service loop). Without this there is no shared
+   vocabulary and every caller would invent its own message encoding.
+2. **Finish the service loop** — register with the service manager, open a
+   channel endpoint, and dispatch `ClipboardRequest` off it. That is the
+   existing three `TODO`s, and it is a lane B/A dependency: it needs the
+   service-manager registration path and channel IPC to be callable from a
+   userspace binary.
+3. **Add `guitk::clipboard`** — a `get(format)` / `set(entry)` pair over that
+   channel, which is what every widget and app should call. This is the piece
+   lane C owns, and it is the one that deletes all four private `String`s.
+4. **Rewire the four apps and `clipmanager`** onto it. `clipmanager` in
+   particular should be reading the service's history rather than its own,
+   which is the whole point of the program.
+
+Nothing above should be started before step 2 is possible, and step 2 is not
+lane C's to make possible; this entry is here so that whoever gets there does
+not conclude the service is missing and write a second one.
+
+## `B-DEV-HOST-IS-WINDOWS-SO-CFG-UNIX-CODE-IS-NEVER-COMPILED` (lane B, 2026-08-26) — **open**, process gap
+
+**In short:** everyone develops on a Windows machine, and the routine checks
+(`cargo build`, `cargo clippy`, `cargo test`) are run for that machine. Any code
+inside `#[cfg(unix)]` is therefore *not compiled at all* by a normal check —
+rustc skips it wholesale, so it can contain outright syntax and name errors and
+still look green. SlateOS is a unix (`toolchain/x86_64-slateos.json` sets
+`"target-family": ["unix"]`), so that is exactly the code that ships. This is not
+a hypothetical: it hid a hard compile error in `backup` for nearly three months.
+
+**How it bit.** `0cf670e67` (2026-06-03, "apps: clippy hygiene sweep") answered
+an unused-variable warning on
+
+```rust
+ManifestEntry::Symlink { target, path } => {
+```
+
+by rewriting the binding as `target: _`. On Windows the warning was real: the
+only reader of `target` is the `#[cfg(unix)]` arm four lines down calling
+`symlink(target, &dst)`, and on Windows the `#[cfg(not(unix))]` arm is compiled
+instead. On any unix target the same edit is
+
+```
+error[E0425]: cannot find value `target` in this scope
+ --> userspace/backup/src/main.rs:862:45
+```
+
+so `backup` had not compiled for the machine it ships on since June. It was
+found only because a lane-b→main merge was verified with `cargo check --workspace
+--target x86_64-unknown-linux-gnu` rather than with the host default. Fixed in
+`c9aee2c2c`; the binding is restored and discarded explicitly in the non-unix arm,
+with a comment saying why it must not be re-elided.
+
+**Why this class is nastier than it looks.** The failure mode is silent *and*
+self-inflicted: a warning-cleanup pass on Windows is precisely the operation that
+introduces it, because the warnings it is chasing are the ones that only exist
+because the unix arm is invisible. Every future clippy sweep is a fresh chance to
+do it again, and nothing in the current workflow would catch it.
+
+**Proper fix.** Make a unix-target check part of the routine, not of the
+occasional merge verification: add `cargo check --workspace --target
+x86_64-unknown-linux-gnu` (fast — under three minutes warm) to whatever gate
+`cargo clippy` is already in, and run it before any `-D warnings` cleanup is
+committed. `x86_64-unknown-linux-gnu` rather than `x86_64-slateos` because the
+latter needs `-Zbuild-std` and is far slower; for `cfg(unix)` coverage the two
+are equivalent. Worth raising with the other lanes — `kernel/**` and `gui/**`
+have their own `#[cfg(unix)]` arms and the same blind spot.
+
+## `B-POSIX-SEVENTEEN-TESTS-ASSERT-THE-SLATEOS-KERNEL-AND-GET-THE-HOST-KERNEL` (lane B, 2026-08-26) — **open**
+
+**In short:** `cargo test -p posix` on a Linux host reports 20531 passed and 17
+failed. None of the seventeen is a bug in `posix`: they assert what the *SlateOS*
+kernel answers for four syscalls, and on a Linux host the real kernel answers
+instead, correctly and differently. The suite is nonetheless red, which is the
+actual harm — a permanently-failing test run teaches everyone to skim past the
+failure line, and the next real regression goes with it.
+
+**The seventeen**, all in `posix/src/file.rs` and `posix/src/dirent.rs`:
+
+```
+dirent::tests::test_getdents_valid_args_reach_enosys
+dirent::tests::test_workflow_legacy_program_calling_raw_getdents
+file::tests::test_copy_file_range_phase89_ebadf_then_valid_progression
+file::tests::test_copy_file_range_phase89_einval_then_valid_progression
+file::tests::test_copy_file_range_phase89_zero_len_with_valid_fds_ok
+file::tests::test_copy_file_range_zero_len
+file::tests::test_posix_fadvise_pipe_returns_espipe
+file::tests::test_sync_file_range_phase90_ebadf_then_valid_progression
+file::tests::test_sync_file_range_phase90_einval_then_valid_progression
+file::tests::test_sync_file_range_phase90_endbyte_overflow_einval
+file::tests::test_sync_file_range_phase90_high_bit_flag_einval
+file::tests::test_sync_file_range_phase90_known_flag_combo_passes_prologue
+file::tests::test_sync_file_range_phase90_max_offset_zero_nbytes_ok_prologue
+file::tests::test_sync_file_range_phase90_negative_nbytes_einval
+file::tests::test_sync_file_range_phase90_negative_offset_einval
+file::tests::test_sync_file_range_phase90_unknown_flag_einval
+file::tests::test_sync_file_range_valid_fd_no_crash
+```
+
+Sample: `test_sync_file_range_valid_fd_no_crash` asserts `0` and gets `-1`
+(`posix/src/file.rs:9106`). The names give the shape away — the `getdents` pair
+literally expects `ENOSYS`, which is what SlateOS returns and what Linux does not.
+
+**Not a regression, and not from the clippy work.** Measured on both sides of
+`d51dc736d`: 20531 passed / 17 failed identically, so the count predates it.
+
+**Proper fix.** These are target-behaviour assertions, so gate them on the
+target rather than deleting or `#[ignore]`-ing them: a `#[cfg(target_os =
+"slateos")]` (or a runtime probe that skips when the syscall is genuinely
+implemented) keeps the assertion meaningful where it is true and stops it lying
+where it is not. Deleting them would lose real cover on the SlateOS side;
+`#[ignore]` would lose it on both. Same shape as
+`BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above, and worth doing in one pass with it.
+
+---
+
 ## `A-PROC-NUMASTAT-REPORTS-ZERO-NODES-ON-A-MACHINE-THAT-HAS-SOME` (lane A, 2026-08-26)
 
 **Status:** OPEN

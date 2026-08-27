@@ -436,6 +436,7 @@ version = "0.1.0"
 dependencies = [
  "guitk",
  "oswindow",
+ "ziparchive",
 ]
 
 [[package]]
@@ -1952,6 +1953,7 @@ name = "clipmanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -2094,6 +2096,7 @@ name = "colorpicker"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -2942,6 +2945,8 @@ name = "diskanalyzer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "scratchdir",
 ]
 
 [[package]]

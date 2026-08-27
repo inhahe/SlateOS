@@ -126,7 +126,7 @@ mod tests {
             ACPI_EVENT_VIDEO,
         ];
         for s in e {
-            assert!(!s.is_empty());
+            assert!(!s.is_empty(), "an ACPI event class name is empty");
             assert!(!s.contains(' '));
             // The event protocol uses '/' as a subtype separator only
             // for button events.

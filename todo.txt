@@ -8375,6 +8375,20 @@ Remaining net improvements (diminishing returns):
   syscall).  Until then, the surface stays as a typed sketch — useful
   as documentation and tested via unit tests (80/80) — without the lint
   noise blocking nearby work.
+  RESOLVED (2026-08-26, lane C): clipmanager now opens a real window.
+  `main()` reaches `oswindow::app::launch`, the renderer is a
+  `guitk::frame::Frame<Target>` that records every clickable box as it
+  paints, and clicks/keys/wheel/ticks/resizes route through
+  `handle_event`.  `#![allow(dead_code)]` is gone from the crate root and
+  clippy is clean at `-D warnings -D dead_code`: every method the sketch
+  had now has a UI home (a tag-filter strip for `all_tags`/`filter_by_tag`,
+  the per-type breakdown in the stats bar for `stats_by_type`, a Mark
+  button feeding `delete_many`, Export/Import buttons carrying
+  `export_text`/`import_text` through the clipboard itself).  126 tests
+  pass, 35 of them driving the window through `guitk::probe`.  The
+  daemon-IPC half of the original "proper fix" is a separate matter and is
+  not blocked by anything here: the window is wired to the model, and the
+  model is what a daemon would feed.
 
 - (2026-05-30) socketpair() supports only AF_UNIX + SOCK_STREAM.
   posix/src/socket.rs socketpair() is backed by the kernel stream-socket

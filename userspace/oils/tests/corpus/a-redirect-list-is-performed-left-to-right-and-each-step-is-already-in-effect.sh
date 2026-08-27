@@ -56,7 +56,18 @@ printf 'L1\nL2\nL3\n' > in
 ( { read -r c; echo "c=[$c]"; } <in 3> $(read -r a; echo "a=[$a]" >&2; echo /dev/null) ) 2>&1
 # …and the reverse order reads the ambient fd 0, not the file.
 ( true 3> $(read -r a; echo "a=[$a]" >&2; echo /dev/null) <in ) 2>&1
-( true <&- 3> $(read -r a; echo "rc=$?" >&2; echo /dev/null) ) 2>&1
+# Closing fd 0 first — `true <&- 3> $(read -r a; …)`, so that the word's `read`
+# meets a *closed* stdin — was probed here until 2026-08-26, and cannot be
+# probed at all: it deadlocks bash outright, and it hung this whole case, taking
+# some fifty other assertions down with it. The deadlock is about allocation
+# and not about redirect order at all. With fd 0 closed, 0 is the lowest free
+# number, so the pipe bash opens for the command substitution's own stdout is
+# handed exactly that number; the `read` then drains the substitution's own
+# output pipe, whose write end the substitution itself is holding open, and
+# nothing ever arrives. osh leaves fd 0 closed and the `read` fails with
+# `Bad file descriptor`, which is what bash would say had it no spare
+# descriptor to reuse. See known-issues
+# TD-OILS-A-CLOSED-FD-0-DEADLOCKS-BASH-IN-A-REDIRECT-WORD.
 ( true <in 3>/dev/null; read -r z; echo "z=[$z]" ) 2>&1
 
 echo '=== including the here-document body, which is a word like any other'

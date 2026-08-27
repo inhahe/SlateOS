@@ -124,7 +124,13 @@ mod tests {
 
     #[test]
     fn test_paths_nonempty() {
-        assert!(!FW_PATH_DEFAULT.is_empty());
-        assert!(!FW_PATH_UPDATES.is_empty());
+        assert!(
+            !FW_PATH_DEFAULT.is_empty(),
+            "FW_PATH_DEFAULT must name a directory"
+        );
+        assert!(
+            !FW_PATH_UPDATES.is_empty(),
+            "FW_PATH_UPDATES must name a directory"
+        );
     }
 }

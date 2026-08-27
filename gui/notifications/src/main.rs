@@ -2689,6 +2689,41 @@ mod tests {
         daemon
     }
 
+    /// Noon UTC, as an instant: `1787745600 % 86400 == 43200`.
+    ///
+    /// The one time of day no plausible quiet-hours window contains, which is
+    /// what makes it the right instant to pin a clock to in a test that is not
+    /// about quiet hours.
+    const MIDDAY_UTC: i64 = 1_787_745_600;
+
+    /// Put one toast on screen, with the quiet-hours clock pinned to midday.
+    ///
+    /// The pin is not decoration. `on_event` refreshes that clock from the
+    /// *host* on every tick — deliberately, and
+    /// `a_tick_advances_the_quiet_hours_clock_through_the_event_loop` is the
+    /// test of it — so a test that delivers a tick before it sends has had its
+    /// clock replaced by whatever time it happens to be on the machine
+    /// running it. With `daemon_as_main_builds_it`'s 22:00–07:00 schedule
+    /// that is a test which passes by day and fails at night, and it did:
+    /// `a_tick_asks_for_a_frame_only_when_something_is_moving` failed on an
+    /// evening run with the daemon correctly suppressing the toast.
+    ///
+    /// The length assertion is here rather than at the call sites so that a
+    /// suppressed toast reports itself instead of surfacing as whatever
+    /// unrelated thing the caller went on to assert.
+    fn send_one_toast(daemon: &mut NotificationDaemon) {
+        daemon.set_time_from_utc(MIDDAY_UTC);
+        daemon.handle_request(NotificationRequest::Send(make_test_notification(
+            0,
+            NotificationPriority::Normal,
+        )));
+        assert_eq!(
+            daemon.toasts.len(),
+            1,
+            "quiet hours suppressed the toast this test needs on screen"
+        );
+    }
+
     /// Minutes from midnight, computed here rather than by the code under
     /// test, so the two can disagree.
     fn wall_clock_minutes() -> u16 {
@@ -2799,11 +2834,7 @@ mod tests {
             "an idle daemon stopped ticking"
         );
 
-        daemon.set_time_from_utc(1_787_745_600); // noon, so the toast appears
-        daemon.handle_request(NotificationRequest::Send(make_test_notification(
-            0,
-            NotificationPriority::Normal,
-        )));
+        send_one_toast(&mut daemon);
         assert_eq!(
             oswindow::app::App::tick_interval(&daemon),
             Some(ANIMATION_TICK),
@@ -2814,11 +2845,7 @@ mod tests {
     #[test]
     fn render_believes_the_size_it_is_given_not_the_one_it_asked_for() {
         let mut daemon = daemon_as_main_builds_it();
-        daemon.set_time_from_utc(1_787_745_600);
-        daemon.handle_request(NotificationRequest::Send(make_test_notification(
-            0,
-            NotificationPriority::Normal,
-        )));
+        send_one_toast(&mut daemon);
 
         // Past the slide-in: a toast that has just arrived is deliberately
         // still off the right edge, so measuring one mid-animation would
@@ -2877,7 +2904,7 @@ mod tests {
     #[test]
     fn a_tick_asks_for_a_frame_only_when_something_is_moving() {
         let mut daemon = daemon_as_main_builds_it();
-        daemon.set_time_from_utc(1_787_745_600);
+        daemon.set_time_from_utc(MIDDAY_UTC);
 
         let tick = Event::Tick { elapsed_ms: 16 };
         assert_eq!(
@@ -2886,10 +2913,9 @@ mod tests {
             "an idle daemon redrew an empty overlay"
         );
 
-        daemon.handle_request(NotificationRequest::Send(make_test_notification(
-            0,
-            NotificationPriority::Normal,
-        )));
+        // After that tick the clock is the host's, so the toast has to be sent
+        // through the helper that pins it back.
+        send_one_toast(&mut daemon);
         assert_eq!(
             oswindow::app::App::on_event(&mut daemon, &tick),
             Response::Redraw,
@@ -2903,12 +2929,7 @@ mod tests {
         // handled: after this tick there are no toasts left, but the frame
         // that erases the last one still has to be drawn.
         let mut daemon = daemon_as_main_builds_it();
-        daemon.set_time_from_utc(1_787_745_600);
-        daemon.handle_request(NotificationRequest::Send(make_test_notification(
-            0,
-            NotificationPriority::Normal,
-        )));
-        assert_eq!(daemon.toasts.len(), 1);
+        send_one_toast(&mut daemon);
 
         // Expiry takes two ticks: the first marks the toast dismissing, the
         // second finishes its exit animation and drops it.

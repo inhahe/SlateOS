@@ -107,7 +107,7 @@ mod tests {
             CGROUP_FREEZER_STATE_FREEZING,
             CGROUP_FREEZER_STATE_FROZEN,
         ] {
-            assert!(!s.is_empty());
+            assert!(!s.is_empty(), "a freezer state name is empty");
         }
     }
 }

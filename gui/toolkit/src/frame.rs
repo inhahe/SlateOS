@@ -275,6 +275,30 @@ impl<T> Frame<T> {
         self.tree.push(command);
     }
 
+    /// Draw with a helper that writes into a `Vec<RenderCommand>`.
+    ///
+    /// Several drawing helpers in this crate — [`Table`](crate::table::Table)
+    /// most of all — were written against a plain command list, because they
+    /// predate `Frame` and because they have no use for hit testing. Their
+    /// output still has to reach the frame through [`push`](Self::push), which
+    /// is what keeps the clip and translation stacks honest; handing out a
+    /// `&mut Vec` into the frame's own buffer would let a `PushClip` slip past
+    /// that bookkeeping and silently mis-place every later hit box.
+    ///
+    /// So this stages the helper's commands in a scratch list and replays them
+    /// through `push`. The closure's return value is passed back, so a helper
+    /// that reports where it drew stays usable:
+    ///
+    /// ```ignore
+    /// frame.draw_with(|cmds| table.header(cmds, y, colors::OVERLAY0, 12.0));
+    /// ```
+    pub fn draw_with<R>(&mut self, draw: impl FnOnce(&mut Vec<RenderCommand>) -> R) -> R {
+        let mut staged = Vec::new();
+        let result = draw(&mut staged);
+        self.extend(staged);
+        result
+    }
+
     /// Push a clip rectangle, in the coordinate space currently being drawn in.
     pub fn clip(&mut self, rect: Rect) {
         self.push(RenderCommand::PushClip {
@@ -728,6 +752,44 @@ mod tests {
             Rect::new(0.0, 100.0, 200.0, 20.0),
             "the clip and the translation both came in through `extend`"
         );
+    }
+
+    #[test]
+    fn draw_with_replays_a_helpers_clip_through_the_frames_stacks() {
+        // `draw_with` exists so a helper written against a plain
+        // `Vec<RenderCommand>` — `Table`, above all — can still reach the frame
+        // without handing out a `&mut Vec` into its buffer. Staging is only
+        // worth the copy if the staged commands go back in through `push`: a
+        // `PushClip` the helper emitted has to move the frame's clip stack, or
+        // a hit recorded afterwards is recorded unclipped.
+        let mut frame: Frame<T> = Frame::new(200.0, 200.0);
+        frame.translate(0.0, 100.0);
+        let reported = frame.draw_with(|cmds| {
+            cmds.push(RenderCommand::PushClip {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 20.0,
+            });
+            "header"
+        });
+        assert_eq!(reported, "header", "the closure's value is passed back");
+
+        frame.hit(T::A, Rect::new(0.0, 0.0, 200.0, 50.0));
+        assert_eq!(
+            frame.hits()[0].1,
+            Rect::new(0.0, 100.0, 200.0, 20.0),
+            "the staged clip trimmed the hit, and the translation moved it"
+        );
+        assert!(!frame.is_balanced(), "the staged clip is still open");
+
+        frame.draw_with(|cmds| cmds.push(RenderCommand::PopClip));
+        frame.untranslate();
+        assert!(frame.is_balanced(), "a staged pop closes it again");
+
+        // A hit outside the (now popped) clip is no longer trimmed.
+        frame.hit(T::B, Rect::new(0.0, 0.0, 200.0, 50.0));
+        assert_eq!(frame.hits()[1].1, Rect::new(0.0, 0.0, 200.0, 50.0));
     }
 
     #[test]

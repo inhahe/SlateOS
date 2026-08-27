@@ -424,7 +424,10 @@ mod tests {
         // The sixth field is filled, not left as the zeroes a caller could
         // have got from `memset` — it is a real value, so a program that
         // prints `u.domainname` prints something.
-        assert!(!field(&sample().domainname).is_empty());
+        assert!(
+            !field(&sample().domainname).is_empty(),
+            "uname must fill domainname, not leave it zeroed"
+        );
     }
 
     #[test]

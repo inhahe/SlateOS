@@ -338,6 +338,13 @@ struct Instance {
     pending_again: bool,
 }
 
+// `large_const_arrays` wants this to be a `static`, and it cannot be. This is a
+// *template*, not a datum: `process_global!` below needs it in a const
+// initializer, and resetting a slot with `*inst = INSTANCE_INIT` moves out of
+// it. Neither is legal against a static unless `Instance` is made `Copy` — and
+// making an ~8 KiB struct of two `PATH_MAX` buffers implicitly copyable to
+// satisfy a lint would trade a real footgun for a cosmetic win.
+#[allow(clippy::large_const_arrays)]
 const INSTANCE_INIT: Instance = Instance {
     in_use: false,
     options: 0,

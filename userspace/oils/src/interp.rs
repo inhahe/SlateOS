@@ -2258,6 +2258,26 @@ enum DebugVerdict {
     Exit(i32),
 }
 
+/// What [`Shell::announce_async`] decided about the `&` job it just announced
+/// to the DEBUG trap.
+enum AsyncStart {
+    /// Start the job. `Some(skips)` names the stages a verdict took away and is
+    /// what the clone running the job needs, both so that it does not announce
+    /// the same stages over again ([`Shell::debug_announced`]) and so that it
+    /// leaves those stages out ([`Shell::debug_stage_skips`]). `None` means the
+    /// list was not a form that gets announced here at all — an `&&`/`||` list,
+    /// or a `time`d pipeline — and is handed to the child whole.
+    Go(Option<Vec<bool>>),
+    /// A `return` verdict landed on a stage of a multi-stage pipeline. The
+    /// stages announced before it were already started, and the job they make
+    /// never goes to the background: run what is left of the pipeline here, in
+    /// the foreground, and leave the enclosing function with its answer.
+    ForegroundThenReturn(Vec<bool>),
+    /// Do not start the job; take this flow instead — `Flow::Next` when the
+    /// verdict took the whole job away.
+    Leave(Flow),
+}
+
 /// Where a command's standard output should go.
 enum Out {
     /// Inherit the shell's real stdout.
@@ -4871,13 +4891,20 @@ pub struct Shell {
     /// that runs a `&` job, whose stages [`Shell::announce_async`] announced in
     /// the parent (and, being the parent, refused there).
     ///
-    /// It is separate from the skips [`Shell::exec_pipeline`] decides itself
-    /// because only the latter can abandon the pipeline. Refusing the last
-    /// stage abandons it precisely because that stage is the one the announcing
-    /// shell would have run itself; a `&` job's last stage is not — the shell
-    /// that refused it forks the job and never runs any of it — so there the
-    /// refusal costs the stage and nothing more.
+    /// They mean exactly what a locally-decided skip means, and
+    /// [`Shell::exec_pipeline`] cannot tell the two apart: a refusal costs the
+    /// stage it announced and nothing else, and a pipeline left with no stage
+    /// at all publishes nothing.
     debug_stage_skips: Vec<bool>,
+    /// Set with [`Shell::debug_stage_skips`] when the verdict that produced them
+    /// was a `return` rather than a plain refusal, so that the pipeline leaves
+    /// the enclosing function once it has finished and published.
+    ///
+    /// It only ever travels *within* one shell — from [`Shell::announce_async`]
+    /// to the [`Shell::exec_pipeline`] that the same shell then runs in the
+    /// foreground — because a `return` verdict is what stops the `&` job being
+    /// started at all. It is never handed to the clone the way the skips are.
+    debug_stage_return: bool,
     /// readline's key tables, once `bind` has had to look at them.
     ///
     /// `None` is not "empty" but "still exactly what readline compiles in", so
@@ -6641,6 +6668,7 @@ impl Shell {
             debug_announced: false,
             debug_skipped: false,
             debug_stage_skips: Vec::new(),
+            debug_stage_return: false,
             bind_maps: None,
             last_bg_pid: None,
             pipefail: false,
@@ -9322,9 +9350,21 @@ impl Shell {
                 // The DEBUG trap hears about the job here, in the parent, before
                 // it is started — see [`Shell::announce_async`].
                 let announced = match self.announce_async(&item.list, out, stdin) {
-                    Ok(skips) => skips,
-                    Err(Flow::Next) => continue,
-                    Err(other) => return other,
+                    AsyncStart::Go(skips) => skips,
+                    // A `return` verdict costs the `&` along with the stages it
+                    // took away: what is left is run and waited for right here,
+                    // as an ordinary foreground pipeline, and its answer is what
+                    // the function returns with. The skips travel to it exactly
+                    // as they would to the clone, and `debug_stage_return` is
+                    // what tells `exec_pipeline` to leave once it has published.
+                    AsyncStart::ForegroundThenReturn(skips) => {
+                        self.debug_stage_skips = skips;
+                        self.debug_announced = true;
+                        self.debug_stage_return = true;
+                        return self.exec_and_or(&item.list, out, stdin);
+                    }
+                    AsyncStart::Leave(Flow::Next) => continue,
+                    AsyncStart::Leave(other) => return other,
                 };
                 // A single external command backgrounds as an OS process; every
                 // other form (builtin, function, compound, pipeline, …) runs on a
@@ -9570,13 +9610,18 @@ impl Shell {
         // Which stages the extdebug verdict took away. A refused stage is simply
         // never started: its endpoints are made and dropped, so its successor
         // reads an immediate EOF and its predecessor writes to a pipe nobody
-        // holds — exactly the hole bash leaves where the stage would have been.
+        // holds — exactly the gap bash leaves in the plumbing where the stage
+        // would have been. (`${PIPESTATUS[@]}` gets no such gap; see below.)
         //
         // Skips decided elsewhere arrive with the claim ([`Shell::
-        // debug_stage_skips`]) and are honoured but never abandon the pipeline.
+        // debug_stage_skips`]) and are honoured on the same terms.
         let mut skipped = std::mem::take(&mut self.debug_stage_skips);
         skipped.resize(pipe.commands.len(), false);
-        let mut abandoned = false;
+        // Set by a `return` verdict on one of the stages — below for a
+        // foreground pipeline, or in [`Shell::announce_async`] for a `&` job
+        // whose `&` the verdict took away with them. Either way the pipeline
+        // still finishes and publishes, and only then does the function return.
+        let mut returning = std::mem::take(&mut self.debug_stage_return);
         if pipe.commands.len() > 1
             && !stages_announced
             && !self.in_trap
@@ -9593,24 +9638,65 @@ impl Shell {
                     match self.announce_debug(crate::unparse::simple_src(sc), out, stdin) {
                         DebugVerdict::Run => {}
                         DebugVerdict::Skip(_) => skipped[i] = true,
+                        // A `return` verdict costs this stage exactly as a
+                        // refusal does — and costs every stage after it too,
+                        // which is what tells the two apart. bash announces a
+                        // stage and starts it before announcing the next, so a
+                        // verdict that leaves the function is reached before the
+                        // later stages are announced at all: with a handler that
+                        // returns 2 at `exit 4`, `exit 3 | exit 4 | exit 5`
+                        // announces only the first two and `exit 5` is never
+                        // named. What it does not do is undo the stages already
+                        // started: they finish, publish `${PIPESTATUS[@]}`
+                        // between them, and the function returns with the answer
+                        // that shortened pipeline gave — 3 here, not the
+                        // handler's 2. Only a verdict on the *first* stage,
+                        // which leaves nothing to publish, returns the 2.
                         DebugVerdict::Return => {
-                            self.last_status = 2;
-                            return Flow::Return;
+                            for s in skipped.iter_mut().skip(i) {
+                                *s = true;
+                            }
+                            returning = true;
+                            break;
                         }
                         DebugVerdict::Exit(code) => return Flow::Exit(code),
                     }
                 }
             }
-            // Refusing the **last** stage abandons the pipeline's result rather
-            // than just that stage: bash runs the last stage in the shell that
-            // owns the pipeline, so the refusal returns out of the pipeline
-            // before it ever publishes anything. The earlier stages have
-            // already been started and still run — bash does not even wait for
-            // them, which osh does — but the pipeline answers 0 and
-            // `${PIPESTATUS[@]}` keeps whatever it held before, exactly as for
-            // a refused lone command.
-            abandoned = skipped.last().copied().unwrap_or(false);
         }
+        // A refusal costs the stage it announced and nothing else — the last
+        // stage included. It is not the one the owning shell runs itself: bash
+        // forks every stage of a multi-command pipeline unless `lastpipe` is on
+        // with job control off, so there is no stage the shell is already
+        // "inside" and nothing for a refusal there to return out of. The
+        // pipeline is simply what remains, and answers with the last *remaining*
+        // stage: `exit 3 | exit 4` with the second refused is 3, with
+        // `${PIPESTATUS[@]}` reading `3` alone.
+        //
+        // What actually decides an element of `${PIPESTATUS[@]}` is whether bash
+        // made a *process* for the stage, which is why a refused stage shortens
+        // the array rather than leaving a hole in it. Two consequences follow,
+        // both measured against bash 5.2.21:
+        //
+        // * A pipeline that started nothing at all — every stage refused, which
+        //   for a one-element pipeline means that one command — has no job to
+        //   publish from. `$?` is 0 and `${PIPESTATUS[@]}` keeps exactly what
+        //   the previous command left it — the `abandoned` case below.
+        // * Under `lastpipe` the last stage is not forked even when it runs, so
+        //   its slot is there either way and reads 0 when it was refused:
+        //   `shopt -s lastpipe; set +m` makes `exit 3 | exit 4` with the second
+        //   stage refused answer 0 with `${PIPESTATUS[@]}` reading `3 0`, where
+        //   without `lastpipe` the same refusal answers 3 with `3` alone.
+        //
+        // A backgrounded pipeline is no different: its verdicts were reached in
+        // the parent before the fork ([`Shell::announce_async`]) and arrive here
+        // in `debug_stage_skips`, and the same two rules apply to them.
+        let abandoned = !skipped.is_empty() && skipped.iter().all(|&s| s);
+        // Whether the last stage runs in this very shell rather than a forked
+        // one, which is what puts its slot in the array regardless. Job control
+        // is always off in osh, so `lastpipe` alone decides it.
+        let lastpipe =
+            pipe.commands.len() > 1 && self.shopt.get("lastpipe").copied().unwrap_or(false);
         // Wall time and CPU are both measured as a *span*: bash's `time` reads
         // `times()` on either side of the command and reports the difference, so
         // the figures cover this pipeline rather than the whole shell.
@@ -9657,13 +9743,35 @@ impl Shell {
         if abandoned {
             self.last_status = 0;
         } else if !std::mem::take(&mut self.debug_skipped) && writes_array {
+            let last = pipe.commands.len().saturating_sub(1);
             let started: Vec<i32> = statuses
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| !skipped.get(*i).copied().unwrap_or(false))
+                .filter(|(i, _)| {
+                    // A refused stage was never started and so has no element —
+                    // unless `lastpipe` made the last stage this very shell,
+                    // which is not a process the pipeline can decline to make.
+                    // Its slot then reads the 0 the executor left in it.
+                    !skipped.get(*i).copied().unwrap_or(false) || (lastpipe && *i == last)
+                })
                 .map(|(_, s)| *s)
                 .collect();
             self.finish_pipeline(&started);
+        }
+        if returning {
+            if abandoned {
+                // Nothing ran, so there is no pipeline answer to return with:
+                // the handler's own 2 stands, and the enclosing command
+                // publishes it as its own `${PIPESTATUS[@]}` in the usual way.
+                self.last_status = 2;
+            } else {
+                // The array this pipeline just published is the one that has to
+                // survive: the command the function call is a stage of must not
+                // overwrite it with the function's return status. That is the
+                // same suppression a taken-away lone command asks for.
+                self.debug_skipped = true;
+            }
+            return Flow::Return;
         }
         // …unless the pipeline left by a `jump_to_top_level`. bash negates at the
         // bottom of `execute_command_internal` (execute_cmd.c:1123), which a
@@ -10323,11 +10431,13 @@ impl Shell {
             let stage_root_redirected = matches!(&cmds[last], Command::Redirected { .. });
             let last_announced = announced && Self::stage_simple(&cmds[last]).is_some();
             if skipped.get(last).copied().unwrap_or(false) {
-                // Taken away like any other stage. Whether its absence also
-                // costs the pipeline its answer depends on which shell refused
-                // it, which is the caller's business (see
-                // [`Shell::exec_pipeline`]); here it only means the upstream
-                // producer loses its reader, which `drop(stdin)` below does.
+                // Taken away like any other stage: here that only means the
+                // upstream producer loses its reader, which `drop(stdin)` below
+                // does. Whether the empty slot it leaves in `statuses` still
+                // reaches `${PIPESTATUS[@]}` is the caller's business — under
+                // `lastpipe` it does, because then this stage is the shell
+                // itself rather than a process the pipeline declined to make
+                // (see [`Shell::exec_pipeline`]).
             } else if lastpipe {
                 // Run in the current shell (not a subshell): mutations persist
                 // and control flow propagates. No EXIT trap firing here — this
@@ -13266,6 +13376,7 @@ impl Shell {
             debug_announced: false,
             debug_skipped: false,
             debug_stage_skips: Vec::new(),
+            debug_stage_return: false,
             bind_maps: self.bind_maps.clone(),
             last_bg_pid: self.last_bg_pid,
             pipefail: self.pipefail,
@@ -43647,6 +43758,15 @@ impl Shell {
                         // message with no usage line after it. A *missing*
                         // argument is caught before that, by the option parser,
                         // and does print one.
+                        //
+                        // A bash that *does* have `dlopen` — including the one
+                        // the corpus diffs against — answers quite differently,
+                        // by trying and failing: `cannot open shared object …`
+                        // at status 1. Following the other build is deliberate
+                        // and is not going to change, because SlateOS has no
+                        // dynamic linker for a loadable builtin to arrive
+                        // through. See known-issues
+                        // `TD-OILS-ENABLE-F-AND-D-FOLLOW-THE-NO-DLOPEN-BUILD`.
                         b'f' => {
                             if j + 1 == flags.len() && i + 1 == args.len() {
                                 self.perrln("enable: -f: option requires an argument");
@@ -43661,6 +43781,12 @@ impl Shell {
                         // with its usage line and nothing else — not with the
                         // `invalid option` an unlisted letter gets, since `-d`
                         // is still in the synopsis that line would print.
+                        //
+                        // With `dlopen` it is a real option instead, and reports
+                        // per name (`echo: not dynamically loaded`, or
+                        // `…: not a shell builtin`) at status 1, falling through
+                        // to the ordinary listing when given no names at all.
+                        // Same deliberate divergence as `-f` above.
                         b'd' => {
                             self.emit_stderr(usage_line.as_bytes());
                             return 2;
@@ -45346,20 +45472,10 @@ impl Shell {
     /// `&&`/`||` list, a compound command and a `time`d pipeline are not
     /// announced at all — those are handed to the child whole.
     ///
-    /// `Ok` means go ahead and start the job, and carries `Some(skips)` if the
-    /// announcement happened — which the job's own clone needs, both so that it
-    /// does not announce the same stages over again
-    /// ([`Shell::debug_announced`]) and so that it leaves out the ones refused
-    /// here ([`Shell::debug_stage_skips`]). `Err(flow)` means do not start it,
-    /// and take `flow` instead — `Flow::Next` when `extdebug` took the job away.
-    fn announce_async(
-        &mut self,
-        ao: &AndOr,
-        out: &mut Out,
-        stdin: &StdinSrc,
-    ) -> Result<Option<Vec<bool>>, Flow> {
+    /// See [`AsyncStart`] for what the answer means.
+    fn announce_async(&mut self, ao: &AndOr, out: &mut Out, stdin: &StdinSrc) -> AsyncStart {
         if !ao.rest.is_empty() || ao.first.timed {
-            return Ok(None);
+            return AsyncStart::Go(None);
         }
         let single_stage = ao.first.commands.len() == 1;
         let mut skips = vec![false; ao.first.commands.len()];
@@ -45369,27 +45485,47 @@ impl Shell {
             };
             match self.announce_debug(crate::unparse::simple_src(sc), out, stdin) {
                 DebugVerdict::Run => {}
-                // A refusal costs the stage it was announcing, which for a
-                // one-stage pipeline is the whole job. In a longer one it costs
-                // that stage and only that stage — including the last, which in
-                // a *foreground* pipeline would take the pipeline's answer with
-                // it. The difference is not about pipelines: there the last
-                // stage is the one the announcing shell runs itself, so refusing
-                // it returns out before anything is published, whereas here the
-                // announcing shell forks the job and runs none of it.
+                // A refusal costs the stage it was announcing and only that
+                // stage, the last one included — exactly as in a foreground
+                // pipeline, which forks every stage too. A one-stage pipeline
+                // is the same rule with nothing left over: no stage remains, so
+                // there is no job to start and nothing to publish, and `$?` is 0
+                // with `${PIPESTATUS[@]}` untouched. The longer case reaches
+                // that same end in [`Shell::exec_pipeline`], where a `skips`
+                // that is true throughout abandons the pipeline.
                 DebugVerdict::Skip(_) if single_stage => {
                     self.last_status = 0;
-                    return Err(Flow::Next);
+                    return AsyncStart::Leave(Flow::Next);
                 }
                 DebugVerdict::Skip(_) => skips[i] = true,
-                DebugVerdict::Return => {
+                // A `return` verdict costs this stage and every later one, as in
+                // a foreground pipeline — but it also costs the `&`. bash has
+                // already forked and started the stages it announced before this
+                // one by the time the verdict arrives, and the job those stages
+                // make is never handed over to the background: the shell waits
+                // for it right here and leaves the function with its answer.
+                // `{ sleep 2; exit 3; } | exit 4 | exit 5 &` with the handler
+                // returning at `exit 5` takes two seconds, publishes `4` from
+                // the two stages that ran, and never reaches the `$!` after it.
+                //
+                // With one stage there is nothing left over to wait for, so the
+                // handler's own 2 stands and `${PIPESTATUS[@]}` is untouched —
+                // the same end [`Shell::exec_pipeline`] reaches when every stage
+                // of a longer pipeline was taken away.
+                DebugVerdict::Return if single_stage => {
                     self.last_status = 2;
-                    return Err(Flow::Return);
+                    return AsyncStart::Leave(Flow::Return);
                 }
-                DebugVerdict::Exit(code) => return Err(Flow::Exit(code)),
+                DebugVerdict::Return => {
+                    for s in skips.iter_mut().skip(i) {
+                        *s = true;
+                    }
+                    return AsyncStart::ForegroundThenReturn(skips);
+                }
+                DebugVerdict::Exit(code) => return AsyncStart::Leave(Flow::Exit(code)),
             }
         }
-        Ok(Some(skips))
+        AsyncStart::Go(Some(skips))
     }
 
     /// Run the `EXIT` trap, if set, exactly once when the top-level shell exits.
@@ -78971,6 +79107,151 @@ if (( r >= 10 && w >= 10 && r != w )); then echo ok; fi"#)
         );
     }
 
+    /// Run `src` with a DEBUG trap already armed and report `$?` and
+    /// `${PIPESTATUS[@]}` the way the corpus case does, as `"<status> [<a b c>]"`.
+    ///
+    /// The two reads share one command on purpose: an assignment-only command is
+    /// still a command, so splitting them would let `st=$?` overwrite
+    /// `${PIPESTATUS[@]}` with its own `0` before the second read saw it.
+    fn debug_verdict(setup: &str, src: &str) -> String {
+        let script = format!(
+            "shopt -s extdebug\n\
+             c(){{ [ \"$BASH_COMMAND\" != \"$W\" ]; }}\n\
+             {setup}\n\
+             trap c DEBUG\n\
+             {src}\n\
+             st=$? ps=\"${{PIPESTATUS[*]}}\"\n\
+             trap - DEBUG\n\
+             echo \"$st [$ps]\"\n"
+        );
+        run(&script).0
+    }
+
+    #[test]
+    fn debug_verdict_refusing_a_stage_shortens_pipestatus() {
+        // A refusal costs the stage it announced and nothing else, so the
+        // pipeline answers with the last *remaining* stage and the refused stage
+        // has no element at all — the array is shorter, not holed. The last
+        // stage is no exception: bash forks every stage of a multi-command
+        // pipeline, so there is no stage the shell is already "inside".
+        // (bash 5.2.21.)
+        assert_eq!(
+            debug_verdict("W='exit 4'", "exit 3 | exit 4"),
+            "3 [3]\n",
+            "refusing the last stage leaves `exit 3` to answer"
+        );
+        assert_eq!(
+            debug_verdict("W='exit 3'", "exit 3 | exit 4"),
+            "4 [4]\n",
+            "refusing the first stage leaves `exit 4` to answer"
+        );
+        assert_eq!(
+            debug_verdict("W='exit 4'", "exit 3 | exit 4 | exit 5"),
+            "5 [3 5]\n",
+            "a middle refusal leaves a two-element array, not a three-element one"
+        );
+        // `!` negates whatever is left, including a 0 the survivors produced.
+        assert_eq!(debug_verdict("W='exit 4'", "! exit 3 | exit 4"), "0 [3]\n");
+    }
+
+    #[test]
+    fn debug_verdict_refusing_everything_publishes_nothing() {
+        // An element of `${PIPESTATUS[@]}` exists exactly when bash made a
+        // process for that stage, so a pipeline that made none has no job to
+        // publish from: `$?` is 0 and `${PIPESTATUS[@]}` keeps whatever the
+        // previous command left it — `1 1` from the `false | false` here.
+        assert_eq!(
+            debug_verdict(
+                "c(){ case $BASH_COMMAND in exit*) false;; *) true;; esac; }",
+                "false | false\nexit 3 | exit 4"
+            ),
+            "0 [1 1]\n"
+        );
+        // A one-element pipeline is the same rule with nothing left over.
+        assert_eq!(
+            debug_verdict("W='exit 3'", "false | false\nexit 3"),
+            "0 [1 1]\n"
+        );
+    }
+
+    #[test]
+    fn debug_verdict_lastpipe_keeps_the_last_slot() {
+        // Under `lastpipe` with job control off the last stage is run by the
+        // owning shell rather than a forked child, so its slot is in the array
+        // whether it ran or not — and reads 0 when it was refused. Without
+        // `lastpipe` the very same refusal gives `3 [3]` (above).
+        assert_eq!(
+            debug_verdict("shopt -s lastpipe; set +m; W='exit 4'", "exit 3 | exit 4"),
+            "0 [3 0]\n"
+        );
+        // `pipefail` then reads that array as it finds it: the 3 is a stage that
+        // really ran, so it wins over the retained 0.
+        assert_eq!(
+            debug_verdict(
+                "shopt -s lastpipe; set +m; set -o pipefail; W='exit 4'",
+                "exit 3 | exit 4"
+            ),
+            "3 [3 0]\n"
+        );
+    }
+
+    #[test]
+    fn debug_verdict_return_costs_the_rest_of_the_pipeline() {
+        // A `return` verdict costs the stage it announced *and* every stage
+        // after it, which are never announced at all — bash announces a stage
+        // and starts it before announcing the next, so the verdict leaves the
+        // function before the later stages are reached. What it does not do is
+        // undo the stages already started: they finish and publish, and the
+        // function returns with that shortened pipeline's answer, not the
+        // handler's own 2.
+        let ret = "c(){ [ \"$BASH_COMMAND\" != \"$W\" ] || return 2; }\n\
+                   g(){ exit 3 | exit 4 | exit 5; echo unreachable; }";
+        assert_eq!(
+            debug_verdict(&format!("{ret}\nW='exit 4'"), "g"),
+            "3 [3]\n",
+            "`exit 3` ran and published; `exit 5` was never announced"
+        );
+        assert_eq!(
+            debug_verdict(&format!("{ret}\nW='exit 5'"), "g"),
+            "4 [3 4]\n",
+            "the first two stages ran and published between them"
+        );
+        // Only a verdict on the *first* stage leaves nothing published, and then
+        // the handler's own 2 is what the function returns with.
+        assert_eq!(debug_verdict(&format!("{ret}\nW='exit 3'"), "g"), "2 [2]\n");
+    }
+
+    #[test]
+    fn debug_verdict_return_costs_the_ampersand_too() {
+        // A `&` job's stages are announced before the fork, so a `return`
+        // verdict lands while the shell still has the job in hand — and it keeps
+        // it. What is left of the pipeline runs and is *waited for* right there,
+        // publishes `${PIPESTATUS[@]}`, and the function leaves with that
+        // answer: the same three numbers the foreground pipeline gives, and
+        // nothing is backgrounded, so the `$!` after the job is never reached.
+        let ret = "c(){ [ \"$BASH_COMMAND\" != \"$W\" ] || return 2; }\n\
+                   h(){ exit 3 | exit 4 | exit 5 & j=$!; echo \"bg=${j:+yes}\"; }";
+        assert_eq!(debug_verdict(&format!("{ret}\nW='exit 4'"), "h"), "3 [3]\n");
+        assert_eq!(
+            debug_verdict(&format!("{ret}\nW='exit 5'"), "h"),
+            "4 [3 4]\n"
+        );
+        assert_eq!(debug_verdict(&format!("{ret}\nW='exit 3'"), "h"), "2 [2]\n");
+        // One stage has nothing left over once the verdict has taken it, so
+        // there is no job to wait for and nothing to publish from — but the
+        // *call* is a command in its own right, and publishing the 2 it returned
+        // as a one-element array is the ordinary thing for a command to do. The
+        // `1 1` the pipeline before it left is overwritten by the call, not by
+        // the pipeline that never ran.
+        assert_eq!(
+            debug_verdict(
+                &format!("{ret}\nk(){{ exit 3 & j=$!; echo \"bg=${{j:+yes}}\"; }}\nW='exit 3'"),
+                "false | false\nk"
+            ),
+            "2 [2]\n"
+        );
+    }
+
     #[test]
     fn functrace_reported_in_options() {
         // `[[ -o functrace ]]`, `$-`, and `set -o` all reflect the flag.
@@ -102933,7 +103214,12 @@ st=1
     #[test]
     fn enable_refuses_the_dynamic_loading_options() {
         // `-f` and `-d` load and unload a builtin from a shared object. osh has
-        // no way to, and answers as a bash built without `dlopen` does.
+        // no way to, and answers as a bash built without `dlopen` does — which
+        // is *not* what the glibc bash the corpus diffs against answers, and is
+        // meant not to be. See known-issues
+        // `TD-OILS-ENABLE-F-AND-D-FOLLOW-THE-NO-DLOPEN-BUILD`; the corpus case
+        // leaves the probes that would show the difference out for that reason,
+        // so these assertions are the only thing pinning this behaviour.
         // Regression: osh accepted both silently and took their arguments as
         // builtin names, so `enable -f /x foo` said `/x: not a shell builtin`.
         let (o, s) = run("enable -f /nosuch/so foo 2>&1");

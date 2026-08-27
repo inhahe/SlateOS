@@ -111,7 +111,7 @@ mod tests {
         }
         // No name is empty.
         for s in n {
-            assert!(!s.is_empty());
+            assert!(!s.is_empty(), "an ALSA mixer control name is empty");
         }
     }
 

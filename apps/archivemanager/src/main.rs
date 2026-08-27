@@ -15,8 +15,15 @@
 //! - Archive testing/verification
 //!
 //! Uses the guitk library for UI rendering.
+//!
+//! Reading is real for ZIP only, and lives in [`backend`]; the other formats
+//! listed above are modelled but not yet parsed, and say so rather than
+//! pretending.
+
+mod backend;
 
 use guitk::color::Color;
+use guitk::dialog::{DialogAction, FileDialog, list_directory};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::probe::Probe;
@@ -874,6 +881,52 @@ impl ArchiveTestResults {
     pub fn all_passed(&self) -> bool {
         self.failed == 0 && self.tested > 0
     }
+
+    /// One line for the status bar, naming a failure rather than only
+    /// counting it.
+    ///
+    /// "3 of 12 files failed" tells the user something is wrong and gives
+    /// them nowhere to start; the name of one bad file is the thing they can
+    /// actually act on, and the count says how much more there is. The named
+    /// one is the alphabetically first, so the same archive always reports
+    /// the same file — `results` is a `HashMap`, whose order is not stable
+    /// between runs, and a status line that changed on every press would look
+    /// like the archive was changing.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        if self.tested == 0 {
+            return String::from("Nothing to test — the archive holds no files");
+        }
+        let mut failures: Vec<(&String, &TestResult)> = self
+            .results
+            .iter()
+            .filter(|(_, r)| !matches!(r, TestResult::Ok | TestResult::Pending))
+            .collect();
+        if failures.is_empty() {
+            return format!(
+                "All {} file{} passed",
+                self.tested,
+                if self.tested == 1 { "" } else { "s" }
+            );
+        }
+        failures.sort_by_key(|(path, _)| *path);
+        let Some((path, result)) = failures.first() else {
+            return format!("{} of {} files failed", self.failed, self.tested);
+        };
+        let detail = match result {
+            TestResult::Corrupted(why) => format!(": {why}"),
+            _ => String::new(),
+        };
+        let rest = self.failed.saturating_sub(1);
+        if rest == 0 {
+            format!("{path} failed{detail}")
+        } else {
+            format!(
+                "{path} failed{detail} (and {rest} other file{} did too)",
+                if rest == 1 { "" } else { "s" }
+            )
+        }
+    }
 }
 
 // ============================================================================
@@ -905,6 +958,12 @@ pub struct ArchiveModel {
     pub is_split: bool,
     /// Comment embedded in the archive (ZIP/7z support this).
     pub comment: String,
+    /// The archive's bytes and the parser's own view of them, where this
+    /// model came from a real file. `None` for a model built by hand (the
+    /// tests do that, and so does an empty model), and that is the whole
+    /// difference between an archive that can be extracted and one that can
+    /// only be looked at: extraction needs the bytes, not the summary rows.
+    pub source: Option<backend::ArchiveSource>,
     /// Next unique entry id.
     next_id: u64,
 }
@@ -928,13 +987,23 @@ impl ArchiveModel {
             encrypted: false,
             is_split: false,
             comment: String::new(),
+            source: None,
             next_id: 1,
         }
     }
 
-    /// Add an entry to the archive model.
-    pub fn add_entry(&mut self, mut entry: ArchiveEntry) {
-        entry.id = self.next_id;
+    /// Add an entry to the archive model, returning the id it was given.
+    ///
+    /// The id is returned rather than merely assigned because a caller that
+    /// parsed the entry out of a real archive has to remember which parsed
+    /// member each row came from, and the row's *position* will not do:
+    /// clicking a column header re-sorts `entries`, so an index recorded at
+    /// parse time would later name a different file — and extracting one
+    /// member's bytes under another member's name is a corruption bug, not a
+    /// display one.
+    pub fn add_entry(&mut self, mut entry: ArchiveEntry) -> u64 {
+        let id = self.next_id;
+        entry.id = id;
         // Ids only have to be distinct, not dense, so saturating at the top
         // of the range would hand two entries the same id and make selection
         // ambiguous. Wrapping cannot collide in any archive that fits in
@@ -950,6 +1019,7 @@ impl ArchiveModel {
         }
 
         self.entries.push(entry);
+        id
     }
 
     /// Rebuild the directory tree from current entries.
@@ -1165,6 +1235,44 @@ pub enum ViewMode {
     DirectoryView,
 }
 
+/// What the file dialog currently on screen is being used to choose.
+///
+/// One dialog serves three questions, so the answer has to carry which
+/// question it is answering: `Selected("/tmp")` means "open this archive"
+/// for one purpose and "write the files here" for another, and a dialog
+/// that forgot which it was would silently do the wrong one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogPurpose {
+    /// An archive file to open.
+    OpenArchive,
+    /// A folder to extract every member into.
+    ExtractAll,
+    /// A folder to extract the selected members into.
+    ExtractSelected,
+}
+
+impl DialogPurpose {
+    /// The dialog's title, which is also the only thing on screen that says
+    /// what pressing Enter will do.
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::OpenArchive => "Open archive",
+            Self::ExtractAll => "Extract all — choose a folder",
+            Self::ExtractSelected => "Extract selected — choose a folder",
+        }
+    }
+}
+
+/// A file dialog on screen, together with the question it is asking.
+#[derive(Clone, Debug)]
+pub struct PendingChoice {
+    /// Why the dialog is up.
+    pub purpose: DialogPurpose,
+    /// The widget itself. It does no I/O — see [`AppState::open_dialog`].
+    pub dialog: FileDialog,
+}
+
 /// The full application state.
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -1207,6 +1315,14 @@ pub struct AppState {
     /// discards the remainder and the list never moves. The accumulator keeps
     /// it, so slow scrolling still advances a row eventually.
     pub wheel: wheel::Accumulator,
+    /// The file dialog on screen, if any, and what it is asking.
+    pub choosing: Option<PendingChoice>,
+    /// The directory the file dialog opens in next time.
+    ///
+    /// Remembered across dialogs because a user who just extracted into
+    /// `~/work` is more likely to extract into `~/work` again than into
+    /// wherever the program happened to start.
+    pub last_directory: String,
 }
 
 impl Default for AppState {
@@ -1230,8 +1346,22 @@ impl Default for AppState {
             nav_history: vec![String::new()],
             nav_position: 0,
             wheel: wheel::Accumulator::default(),
+            choosing: None,
+            last_directory: default_directory(),
         }
     }
+}
+
+/// Where a file dialog starts when nothing better is known.
+///
+/// `HOME` rather than the process's working directory: a program launched
+/// from a desktop icon inherits whatever directory the launcher happened to
+/// be in, which is not a place the user has ever seen.
+fn default_directory() -> String {
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| String::from("/"))
 }
 
 impl AppState {
@@ -2663,16 +2793,166 @@ impl AppState {
                     format!("Removed {count} entr{} from the list", plural(count));
                 Action::Redraw
             }
-            // Everything else needs a back end that can read and write the
-            // archive bytes, which does not exist yet. This reports the
-            // request instead of silently dropping it.
-            other => {
+            ToolbarAction::Open => {
+                self.open_dialog(DialogPurpose::OpenArchive);
+                Action::Redraw
+            }
+            ToolbarAction::Test => self.run_test(),
+            ToolbarAction::ExtractAll => {
+                self.open_dialog(DialogPurpose::ExtractAll);
+                Action::Redraw
+            }
+            ToolbarAction::ExtractSelected => {
+                self.open_dialog(DialogPurpose::ExtractSelected);
+                Action::Redraw
+            }
+            // Creating and adding need a *writer* that can rebuild an archive
+            // around an existing file, which this build does not have: it
+            // reads archives. Saying which half is missing is the difference
+            // between a button that is not finished and a program that has
+            // stopped responding.
+            other @ (ToolbarAction::New | ToolbarAction::Add) => {
                 self.status_message = format!(
-                    "{}: not yet implemented — no archive back end",
+                    "{}: this build reads archives, it cannot write them",
                     other.label()
                 );
                 Action::Redraw
             }
+        }
+    }
+
+    /// Check every file in the open archive against its stored checksum.
+    fn run_test(&mut self) -> Action {
+        let Some(archive) = &self.archive else {
+            return Action::None;
+        };
+        if archive.source.is_none() {
+            // A model built by hand has rows but no bytes, so there is
+            // nothing to check them against. Reporting "all files OK" here
+            // would be the worst possible answer: it is the one a user would
+            // act on, and it would be based on nothing.
+            self.status_message = String::from(
+                "Test needs the archive's bytes, and this archive was not read from a file",
+            );
+            return Action::Redraw;
+        }
+        let results = backend::verify(archive);
+        self.status_message = results.summary();
+        self.test_results = Some(results);
+        Action::Redraw
+    }
+
+    /// Put a file dialog on screen to answer `purpose`.
+    ///
+    /// The dialog does no I/O of its own — it is a toolkit widget holding
+    /// whatever listing it was handed — so every `NavigatedTo` it returns has
+    /// to be answered with a fresh listing here. A navigation that is not
+    /// answered leaves the dialog showing one directory's files under another
+    /// directory's name, which is worse than showing nothing.
+    pub fn open_dialog(&mut self, purpose: DialogPurpose) {
+        let start = self.last_directory.clone();
+        let mut dialog = match purpose {
+            DialogPurpose::OpenArchive => FileDialog::open()
+                .with_filter("Archives", &["*.zip"])
+                .with_initial_path(&start),
+            DialogPurpose::ExtractAll | DialogPurpose::ExtractSelected => {
+                FileDialog::select_folder().with_initial_path(&start)
+            }
+        };
+        dialog.set_entries(list_directory(&start));
+        self.choosing = Some(PendingChoice { purpose, dialog });
+        self.status_message = String::from(purpose.title());
+    }
+
+    /// Feed a key to the dialog on screen and act on what it returns.
+    ///
+    /// Returns `None` when no dialog is up so the caller falls through to its
+    /// own bindings, and `Some` otherwise — a modal that let Delete remove
+    /// rows from the list behind it would not be one.
+    fn dispatch_to_dialog(&mut self, key: &KeyEvent) -> Option<Action> {
+        let choice = self.choosing.as_mut()?;
+        let purpose = choice.purpose;
+        match choice.dialog.handle_event(key) {
+            DialogAction::Selected(path) => {
+                self.choosing = None;
+                self.finish_choice(purpose, &path);
+            }
+            DialogAction::NavigatedTo(path) => {
+                choice.dialog.set_entries(list_directory(&path));
+                self.last_directory = path;
+            }
+            DialogAction::Cancelled => {
+                self.choosing = None;
+                self.status_message = self.status_text();
+            }
+            DialogAction::None => {}
+        }
+        Some(Action::Redraw)
+    }
+
+    /// Act on the path the dialog came back with.
+    fn finish_choice(&mut self, purpose: DialogPurpose, path: &str) {
+        match purpose {
+            DialogPurpose::OpenArchive => self.open_path(Path::new(path)),
+            DialogPurpose::ExtractAll => self.extract(Path::new(path), false),
+            DialogPurpose::ExtractSelected => self.extract(Path::new(path), true),
+        }
+    }
+
+    /// Read `path` off disk and show it.
+    ///
+    /// A failure replaces the status line and leaves the previous archive
+    /// open: the user picked this file by name a moment ago, so "nothing
+    /// happened" would be indistinguishable from a hang, and closing what
+    /// they already had would punish them for a typo.
+    pub fn open_path(&mut self, path: &Path) {
+        match backend::open(path) {
+            Ok(model) => {
+                if let Some(dir) = path.parent().and_then(|p| p.to_str()) {
+                    self.last_directory = dir.to_string();
+                }
+                self.archive = Some(model);
+                self.current_dir = String::new();
+                self.nav_history = vec![String::new()];
+                self.nav_position = 0;
+                self.list_scroll_y = 0.0;
+                self.tree_scroll_y = 0.0;
+                self.hovered_entry = None;
+                // Results are about the archive that was open when they were
+                // produced. Carrying them across an open would report the old
+                // file's verdict under the new file's name.
+                self.test_results = None;
+                self.status_message = self.status_text();
+            }
+            Err(e) => self.status_message = format!("Cannot open {}: {e}", path.display()),
+        }
+    }
+
+    /// Write the archive's members into `dest`.
+    ///
+    /// `selected_only` picks between the two Extract buttons. Both go through
+    /// the same code because the difference really is only which members: a
+    /// second extraction path would be a second place for the Zip Slip
+    /// defence to be got wrong.
+    fn extract(&mut self, dest: &Path, selected_only: bool) {
+        let Some(archive) = &self.archive else {
+            return;
+        };
+        let Some(source) = archive.source.as_ref() else {
+            self.status_message = String::from(
+                "Extract needs the archive's bytes, and this archive was not read from a file",
+            );
+            return;
+        };
+        let members: Vec<&ArchiveEntry> = if selected_only {
+            archive.entries.iter().filter(|e| e.selected).collect()
+        } else {
+            archive.entries.iter().collect()
+        };
+        let report = backend::extract(source, &members, dest);
+        self.status_message = report.summary(dest);
+        if let Some(dir) = dest.to_str() {
+            self.last_directory = dir.to_string();
         }
     }
 
@@ -2778,6 +3058,12 @@ impl AppState {
             // A key *release* must not repeat the action of its press.
             return Action::None;
         }
+        // A dialog is modal, so it gets the key first and keeps it. Falling
+        // through would let Delete remove rows from the list the user cannot
+        // see, and Escape close the window instead of the dialog.
+        if let Some(action) = self.dispatch_to_dialog(key) {
+            return action;
+        }
         let (_, content_h) = self.content_band(size.1);
         // A page is what the viewport can show, so Page Down lands on the row
         // that was at the bottom — the reader keeps one row of context rather
@@ -2815,6 +3101,13 @@ impl AppState {
                 self.sidebar_visible = !self.sidebar_visible;
                 Action::Redraw
             }
+            Key::O if key.modifiers.ctrl => self.run_toolbar(ToolbarAction::Open),
+            Key::T if key.modifiers.ctrl => self.run_toolbar(ToolbarAction::Test),
+            Key::E if key.modifiers.ctrl => self.run_toolbar(if key.modifiers.shift {
+                ToolbarAction::ExtractSelected
+            } else {
+                ToolbarAction::ExtractAll
+            }),
             Key::Escape => {
                 // Escape backs out of the smallest thing first. Closing the
                 // window while a selection is up would throw away work the
@@ -2881,6 +3174,16 @@ impl AppState {
 
     /// Route a whole event.
     pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
+        // The file dialog is keyboard-driven and records no hit boxes, so a
+        // click over it would land on whatever is *behind* it — sorting a
+        // column, or selecting a row — with the dialog still on screen and
+        // nothing to say what happened. Swallow the pointer while it is up.
+        // The close button is not part of the window's own surface, so it
+        // still works: a modal that could not be dismissed by closing the
+        // window would be a program the user has to kill.
+        if self.choosing.is_some() && !matches!(event, Event::Key(_) | Event::CloseRequested) {
+            return Action::None;
+        }
         match event {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
@@ -2914,119 +3217,123 @@ fn plural(count: usize) -> &'static str {
 // Sample / demo data
 // ============================================================================
 
-/// Create a sample archive for demonstration/testing.
-pub fn create_sample_archive() -> ArchiveModel {
-    let path = PathBuf::from("/home/user/project.zip");
-    let mut archive = ArchiveModel::new(&path, ArchiveFormat::Zip);
+/// The bytes of a sample archive, built by the ZIP writer.
+///
+/// The demo archive used to be a hand-typed table of names, sizes and
+/// invented CRCs (`0xDEADBEEF` and friends). That was fine while nothing
+/// could read an archive, and became a lie the moment Test could: pressing
+/// it would have reported every file corrupt, because the checksums had
+/// never been computed from anything. Building a real ZIP instead means the
+/// demo goes through the same parser a real file does, so what the screen
+/// shows is what the format actually says — and Test, Extract and the sizes
+/// in the columns are all true of it.
+fn sample_archive_bytes() -> Vec<u8> {
+    /// Repeat `line` until the result is at least `want` bytes, so a demo
+    /// file has a plausible size *and* real content to checksum.
+    fn filler(line: &str, want: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(want.saturating_add(line.len()));
+        while out.len() < want {
+            out.extend_from_slice(line.as_bytes());
+        }
+        out
+    }
 
-    let sample_entries = vec![
-        ("src/", true, 0, 0, 1716000000, 0, "Stored"),
+    let members = [
+        ("src/", Vec::new(), true),
         (
             "src/main.rs",
+            filler(
+                "fn main() { println!(\"hello from the sample archive\"); }\n",
+                4096,
+            ),
             false,
-            4096,
-            1820,
-            1716000000,
-            0xABCD1234,
-            "Deflate",
         ),
         (
             "src/lib.rs",
+            filler("pub fn add(a: u32, b: u32) -> u32 { a + b }\n", 8192),
             false,
-            8192,
-            3100,
-            1716000000,
-            0x12345678,
-            "Deflate",
         ),
-        ("src/utils/", true, 0, 0, 1716000000, 0, "Stored"),
+        ("src/utils/", Vec::new(), true),
         (
             "src/utils/helpers.rs",
+            filler(
+                "pub fn clamp(v: i32, lo: i32, hi: i32) -> i32 { v.max(lo).min(hi) }\n",
+                2048,
+            ),
             false,
-            2048,
-            980,
-            1716000000,
-            0xDEADBEEF,
-            "Deflate",
         ),
-        ("tests/", true, 0, 0, 1716000000, 0, "Stored"),
+        ("tests/", Vec::new(), true),
         (
             "tests/test_main.rs",
+            filler("#[test]\nfn it_adds() { assert_eq!(1 + 1, 2); }\n", 1024),
             false,
-            1024,
-            620,
-            1716000000,
-            0xFEEDFACE,
-            "Deflate",
         ),
         (
             "Cargo.toml",
+            b"[package]\nname = \"project\"\nversion = \"0.1.0\"\nedition = \"2024\"\n".to_vec(),
             false,
-            512,
-            380,
-            1716000000,
-            0xCAFEBABE,
-            "Deflate",
         ),
         (
             "README.md",
+            filler(
+                "# project\n\nA sample archive, written by the archive manager itself.\n",
+                3072,
+            ),
             false,
-            3072,
-            1400,
-            1716000000,
-            0x87654321,
-            "Deflate",
         ),
         (
-            "LICENSE", false, 1070, 640, 1716000000, 0x11223344, "Deflate",
+            "LICENSE",
+            filler(
+                "Permission is hereby granted, free of charge, to any person.\n",
+                1070,
+            ),
+            false,
         ),
-        ("docs/", true, 0, 0, 1716000000, 0, "Stored"),
+        ("docs/", Vec::new(), true),
         (
             "docs/guide.md",
+            filler(
+                "## Guide\n\nEvery byte here is real, which is why Test passes.\n",
+                15360,
+            ),
             false,
-            15360,
-            5200,
-            1716000000,
-            0xAABBCCDD,
-            "Deflate",
         ),
         (
             "docs/api.md",
+            filler(
+                "## API\n\n`add(a, b)` returns the sum of its two arguments.\n",
+                8700,
+            ),
             false,
-            8700,
-            3100,
-            1716000000,
-            0x55667788,
-            "Deflate",
         ),
     ];
 
-    for (path_str, is_dir, size, compressed, modified, crc, method) in sample_entries {
-        let name = path_str
-            .trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(path_str)
-            .to_string();
-        archive.add_entry(ArchiveEntry {
-            path: path_str.trim_end_matches('/').to_string(),
-            name,
-            is_dir,
-            size,
-            compressed_size: compressed,
-            modified,
-            crc32: crc,
-            encrypted: false,
-            method: method.to_string(),
-            depth: path_str.matches('/').count() as u32,
-            expanded: false,
-            selected: false,
-            id: 0, // assigned by add_entry
-        });
-    }
+    let write: Vec<ziparchive::ZipWriteEntry> = members
+        .into_iter()
+        .map(|(name, data, is_dir)| ziparchive::ZipWriteEntry {
+            name: name.as_bytes().to_vec(),
+            data,
+            // A directory has no bytes to deflate, and storing it keeps the
+            // demo's Method column honest about which members are which.
+            store_only: is_dir,
+        })
+        .collect();
+    ziparchive::create(&write)
+}
 
-    archive.rebuild_tree();
-    archive
+/// Create a sample archive for demonstration/testing.
+///
+/// # Panics
+///
+/// Panics if the crate's own writer produces bytes its own reader rejects.
+/// That is not a runtime condition — it is the two halves of `ziparchive`
+/// disagreeing, which every test in this file would be meaningless under.
+#[must_use]
+pub fn create_sample_archive() -> ArchiveModel {
+    let path = PathBuf::from("/home/user/project.zip");
+    #[allow(clippy::expect_used)]
+    backend::parse_zip(&path, sample_archive_bytes())
+        .expect("the ZIP writer must produce something the ZIP reader accepts")
 }
 
 // ============================================================================
@@ -3091,7 +3398,20 @@ impl App for AppState {
         // opening frame at the default size whatever the window really is.
         self.window_width = width;
         self.window_height = height;
-        build_frame(self, width, height).into_tree()
+        let mut tree = build_frame(self, width, height).into_tree();
+        // Drawn after the frame, and at the full window size: the widget lays
+        // itself out from its own origin, and a finished list of absolute
+        // coordinates cannot be moved somewhere else afterwards.
+        //
+        // It is drawn straight into the tree rather than through the frame
+        // because it records no hit boxes — see `handle_event`, which is what
+        // makes it modal instead.
+        if let Some(choice) = self.choosing.as_ref() {
+            for cmd in choice.dialog.render(width, height) {
+                tree.push(cmd);
+            }
+        }
+        tree
     }
 }
 
@@ -3117,11 +3437,16 @@ impl Probe for AppState {
 }
 
 fn main() -> ExitCode {
-    let mut state = AppState {
-        archive: Some(create_sample_archive()),
-        ..AppState::default()
-    };
-    state.status_message = state.status_text();
+    let mut state = AppState::default();
+    // A path on the command line is the file manager's "open with" and the
+    // shell's `archivemanager foo.zip`. Without one the window comes up
+    // empty rather than showing a demo: a fabricated archive on screen looks
+    // exactly like a real one, and the first thing a user would do is press
+    // Extract on files that do not exist.
+    match std::env::args_os().nth(1) {
+        Some(arg) => state.open_path(Path::new(&arg)),
+        None => state.status_message = state.status_text(),
+    }
     app::launch("archivemanager", &mut state)
 }
 
@@ -4447,6 +4772,24 @@ mod tests {
         assert!(a.total_size > 0);
         assert!(a.total_compressed > 0);
         assert!(!a.tree.children.is_empty());
+        // The sample is a real ZIP, not a table of plausible-looking numbers:
+        // it has bytes behind it, every column was read out of the format,
+        // and the compression it claims actually happened.
+        let source = a.source.as_ref().expect("the sample has no bytes");
+        assert!(source.len() > 0, "the sample archive is empty");
+        assert!(
+            a.total_compressed < a.total_size,
+            "nothing was actually deflated: {} compressed vs {} stored",
+            a.total_compressed,
+            a.total_size
+        );
+        let readme = a
+            .entries
+            .iter()
+            .find(|e| e.path == "README.md")
+            .expect("no README.md in the sample");
+        assert_eq!(readme.method, "Deflate");
+        assert_ne!(readme.crc32, 0, "the checksum was invented, not computed");
     }
 
     // --- calendar boundaries, asserted through the surface that renders them ---
@@ -4788,7 +5131,7 @@ mod tests {
     }
 
     #[test]
-    fn open_reports_honestly_that_there_is_no_back_end_yet() {
+    fn open_puts_a_file_dialog_on_screen() {
         let mut state = loaded();
         let at = centre_of(
             &state,
@@ -4796,8 +5139,213 @@ mod tests {
             "Open button",
         );
         assert_eq!(click(&mut state, at), Action::Redraw);
+        let choice = state.choosing.as_ref().expect("Open drew no dialog");
+        assert_eq!(choice.purpose, DialogPurpose::OpenArchive);
+        // It has to be *visible*, not merely constructed: a dialog the
+        // renderer never draws is a program that has silently locked up,
+        // because the modal below is already swallowing the pointer.
+        let before = state.render(SIZE.0, SIZE.1).commands.len();
+        state.choosing = None;
+        let after = state.render(SIZE.0, SIZE.1).commands.len();
         assert!(
-            state.status_message.contains("not yet implemented"),
+            before > after,
+            "the dialog drew nothing: {before} commands with it, {after} without"
+        );
+    }
+
+    #[test]
+    fn the_dialog_swallows_the_bindings_behind_it() {
+        let mut state = loaded();
+        state.open_dialog(DialogPurpose::OpenArchive);
+        let before = state.archive.as_ref().expect("archive").entries.len();
+
+        // Ctrl+A selects everything when the list has focus. Behind a modal
+        // it must do nothing to the list at all.
+        state.handle_key(&ctrl(Key::A), SIZE);
+        assert!(
+            !state
+                .archive
+                .as_ref()
+                .expect("archive")
+                .entries
+                .iter()
+                .any(|e| e.selected),
+            "Ctrl+A reached the list through the dialog"
+        );
+
+        // Delete removes rows when the list has focus.
+        state.handle_key(&key(Key::Delete), SIZE);
+        assert_eq!(
+            state.archive.as_ref().expect("archive").entries.len(),
+            before,
+            "Delete reached the list through the dialog"
+        );
+
+        // And a click cannot sort a column that is not visible.
+        let sort_before = (state.sort.column, state.sort.direction);
+        assert_eq!(
+            state.handle_event(
+                &Event::Mouse(MouseEvent {
+                    x: SIZE.0 / 2.0,
+                    y: 100.0,
+                    kind: MouseEventKind::Press(MouseButton::Left),
+                }),
+                SIZE,
+            ),
+            Action::None,
+        );
+        assert_eq!(
+            (state.sort.column, state.sort.direction),
+            sort_before,
+            "a click got behind the dialog"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_dialog_rather_than_the_window() {
+        let mut state = loaded();
+        state.open_dialog(DialogPurpose::OpenArchive);
+        assert_eq!(state.handle_key(&key(Key::Escape), SIZE), Action::Redraw);
+        assert!(state.choosing.is_none(), "Escape left the dialog up");
+        // Only once it is gone does Escape mean "close the window".
+        assert_eq!(state.handle_key(&key(Key::Escape), SIZE), Action::Quit);
+    }
+
+    #[test]
+    fn the_close_button_still_works_behind_a_dialog() {
+        let mut state = loaded();
+        state.open_dialog(DialogPurpose::OpenArchive);
+        assert_eq!(
+            state.handle_event(&Event::CloseRequested, SIZE),
+            Action::Quit,
+            "a modal that cannot be closed is a program that must be killed"
+        );
+    }
+
+    #[test]
+    fn test_checks_the_sample_archives_real_checksums() {
+        let mut state = loaded();
+        let at = centre_of(
+            &state,
+            |t| matches!(t, Target::Toolbar(ToolbarAction::Test)),
+            "Test button",
+        );
+        assert_eq!(click(&mut state, at), Action::Redraw);
+        let results = state.test_results.as_ref().expect("Test recorded nothing");
+        assert!(results.tested > 0, "nothing was tested");
+        assert!(
+            results.all_passed(),
+            "the sample archive failed its own checksums: {:?}",
+            results.results
+        );
+        assert!(
+            state.status_message.contains("passed"),
+            "status was {:?}",
+            state.status_message
+        );
+    }
+
+    #[test]
+    fn a_model_with_no_bytes_behind_it_refuses_to_claim_it_passed() {
+        // The reassuring answer is the dangerous one here: a user who is told
+        // "all files OK" about an archive nothing ever read has been told
+        // something based on nothing, and will act on it.
+        let mut state = AppState {
+            archive: Some(ArchiveModel::new(
+                Path::new("/tmp/x.zip"),
+                ArchiveFormat::Zip,
+            )),
+            ..AppState::default()
+        };
+        state.run_toolbar(ToolbarAction::Test);
+        assert!(state.test_results.is_none(), "it invented a verdict");
+        assert!(
+            state.status_message.contains("not read from a file"),
+            "status was {:?}",
+            state.status_message
+        );
+    }
+
+    #[test]
+    fn extract_all_writes_every_member_where_it_was_told_to() {
+        let dest = std::env::temp_dir().join("archivemanager-extract-all-test");
+        let _ = std::fs::remove_dir_all(&dest);
+
+        let mut state = loaded();
+        state.extract(&dest, false);
+
+        assert!(
+            dest.join("src/main.rs").is_file(),
+            "src/main.rs was not written: {}",
+            state.status_message
+        );
+        assert!(
+            dest.join("docs/guide.md").is_file(),
+            "docs/guide.md missing"
+        );
+        assert!(dest.join("src/utils").is_dir(), "src/utils is not a folder");
+        let files = state.archive.as_ref().expect("archive").file_count;
+        assert!(
+            state.status_message.contains(&format!("{files} files")),
+            "status did not count what it wrote: {:?}",
+            state.status_message
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn extract_selected_writes_only_what_was_selected() {
+        let dest = std::env::temp_dir().join("archivemanager-extract-selected-test");
+        let _ = std::fs::remove_dir_all(&dest);
+
+        let mut state = loaded();
+        if let Some(archive) = &mut state.archive {
+            for entry in &mut archive.entries {
+                entry.selected = entry.path == "README.md";
+            }
+        }
+        state.extract(&dest, true);
+
+        assert!(
+            dest.join("README.md").is_file(),
+            "README.md was not written"
+        );
+        assert!(
+            !dest.join("src").exists(),
+            "extract-selected wrote members that were not selected"
+        );
+
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn creating_and_adding_say_which_half_is_missing() {
+        // "Not yet implemented" tells a user nothing; "this build reads
+        // archives, it cannot write them" tells them not to wait for it.
+        for action in [ToolbarAction::New, ToolbarAction::Add] {
+            let mut state = loaded();
+            state.run_toolbar(action);
+            assert!(
+                state.status_message.contains("cannot write"),
+                "{action:?} said {:?}",
+                state.status_message
+            );
+        }
+    }
+
+    #[test]
+    fn opening_a_file_that_is_not_an_archive_keeps_the_one_that_is_open() {
+        let mut state = loaded();
+        let before = state.archive.as_ref().expect("archive").entries.len();
+        state.open_path(Path::new("/definitely/not/here.zip"));
+        assert_eq!(
+            state.archive.as_ref().expect("archive").entries.len(),
+            before,
+            "a failed open threw away the archive the user still had"
+        );
+        assert!(
+            state.status_message.contains("Cannot open"),
             "status was {:?}",
             state.status_message
         );

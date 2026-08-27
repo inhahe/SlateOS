@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn test_event_names_short() {
         for n in [CGROUP2_EVT_POPULATED, CGROUP2_EVT_FROZEN] {
-            assert!(!n.is_empty());
+            assert!(!n.is_empty(), "a cgroup2 event-file name is empty");
             assert!(n.len() <= 16);
         }
     }

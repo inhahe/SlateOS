@@ -620,7 +620,10 @@ mod tests {
     #[test]
     fn test_identity_empty_input() {
         let (output, replacements) = convert(1, b"").expect("empty input should succeed");
-        assert!(output.is_empty());
+        assert!(
+            output.is_empty(),
+            "identity conversion of empty input must yield empty output"
+        );
         assert_eq!(replacements, 0);
     }
 
@@ -936,7 +939,10 @@ mod tests {
     #[test]
     fn test_latin1_to_utf8_empty() {
         let (output, replacements) = convert(4, b"").expect("empty Latin-1 → UTF-8");
-        assert!(output.is_empty());
+        assert!(
+            output.is_empty(),
+            "Latin-1 -> UTF-8 of empty input must yield empty output"
+        );
         assert_eq!(replacements, 0);
     }
 

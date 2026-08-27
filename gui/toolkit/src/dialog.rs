@@ -1178,6 +1178,62 @@ fn matches_any_pattern(filename: &str, patterns: &[&str]) -> bool {
     false
 }
 
+/// List `path` for a [`FileDialog`], in the shape [`FileDialog::set_entries`]
+/// wants.
+///
+/// The dialog does no I/O of its own — it is a widget and holds whatever
+/// listing it is handed — so every navigation has to be answered with a fresh
+/// listing. That split is deliberate (a widget that read the filesystem could
+/// not be driven by a test, and could not show a listing that came from
+/// somewhere other than the local disk), but it left every caller writing the
+/// same twenty lines: `apps/diskimager` had them, and `apps/archivemanager`
+/// was about to. The reader belongs next to the widget that consumes it.
+///
+/// An unreadable directory yields an empty listing rather than an error: the
+/// dialog is a place the user is *browsing*, and a permission-denied folder
+/// they wandered into is a normal thing to find, not a failure of the program.
+/// Entries whose metadata cannot be read are skipped for the same reason.
+///
+/// The name is taken from `file_name` as an `OsStr` and converted once. A path
+/// component is a byte string on this OS, and a listing is the one place a
+/// filename with no UTF-8 reading still has to be *shown*, so lossy conversion
+/// is the right answer here and only here — what is opened is rebuilt from
+/// `current_path` plus this name inside the dialog, so a substituted character
+/// would open the wrong file. That is a real limitation, and it belongs to
+/// [`DirEntry`]'s `String`-typed API rather than to this function; recorded in
+/// `known-issues.md`.
+#[must_use]
+pub fn list_directory(path: &str) -> Vec<DirEntry> {
+    let Ok(iter) = std::fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in iter.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let extension = name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_ascii_lowercase())
+            .unwrap_or_default();
+        out.push(DirEntry {
+            is_dir: meta.is_dir(),
+            size: if meta.is_dir() { 0 } else { meta.len() },
+            modified_timestamp: meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs()),
+            extension: if meta.is_dir() {
+                String::new()
+            } else {
+                extension
+            },
+            name,
+        });
+    }
+    out
+}
+
 // --- Tests ---
 
 #[cfg(test)]
@@ -1754,5 +1810,56 @@ mod tests {
         let mut dialog = FileDialog::open().with_initial_path("/home");
         dialog.navigate_to("/home");
         assert!(dialog.history_back.is_empty());
+    }
+
+    #[test]
+    fn a_directory_that_is_not_there_lists_as_empty_rather_than_failing() {
+        // A dialog is somewhere the user is browsing. A folder they cannot
+        // read is a normal thing to walk into, and the dialog showing it empty
+        // is a better answer than the program reporting an error at them.
+        assert!(list_directory("/no/such/directory/anywhere").is_empty());
+    }
+
+    #[test]
+    fn a_listing_names_its_own_files_and_folders_and_sizes_them() {
+        // The one test that touches the real filesystem, because the whole
+        // point of this function is that it does.
+        let dir = std::env::temp_dir().join(format!(
+            "guitk-list-directory-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).expect("create the fixture");
+        std::fs::write(dir.join("notes.TXT"), b"hello").expect("write the fixture");
+
+        let listing = list_directory(&dir.to_string_lossy());
+        let mut names: Vec<&str> = listing.iter().map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["notes.TXT", "sub"]);
+
+        let file = listing
+            .iter()
+            .find(|e| e.name == "notes.TXT")
+            .expect("the file is in its own directory");
+        assert!(!file.is_dir);
+        assert_eq!(file.size, 5, "the size is the file's, not a guess");
+        assert_eq!(
+            file.extension, "txt",
+            "lower-cased, because the filter patterns are"
+        );
+
+        let sub = listing
+            .iter()
+            .find(|e| e.name == "sub")
+            .expect("the directory is in its parent");
+        assert!(sub.is_dir);
+        assert_eq!(sub.size, 0, "a directory has no size worth showing");
+        assert!(
+            sub.extension.is_empty(),
+            "a directory has no extension to filter on"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("remove the fixture");
     }
 }

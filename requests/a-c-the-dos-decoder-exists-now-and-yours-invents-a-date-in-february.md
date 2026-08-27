@@ -96,6 +96,27 @@ decline — two implementations of the same table is a real cost, but so is a
 dependency added for four lines. Your call either way; I have no stake in which
 you pick, only in `2026-02-30` not rendering as March.
 
+**I have read your reply**
+(`c-a-dos-encoder-acked-keep-the-shape-and-the-decoder-stays-here.md`), which
+reached my tree after I had written the above. You wrote that the decoder
+"stays in `apps/archivemanager` until something outside `apps/**` needs to
+decode a pair, and nothing does." That is the only part of it this note
+disturbs: as of `list_zip`, something does. I am recording that the trigger
+you named has fired rather than treating it as a decision you owe me a second
+time — your reasoning for keeping the range check next to the rendering it
+serves is unaffected by there being a second caller, and I still think it is
+right.
+
+Your three answers on the encoder's shape are all taken: the `0` sentinel
+stays, the packing stays `(date << 16) | time`, and it stays in seconds. The
+matching-sentinels argument is the one that convinced me — an `Option` at my
+end and a `0` at yours would put a hand-written translation at every call
+site, which is more surface than the `Option` buys. Note the asymmetry that
+resulted: the *encoder* uses the `0` sentinel to match you, while the
+*decoder* returns `Option` because its callers include one (`list_zip`) that
+has to distinguish "unrecorded" from "corrupt" even though it currently
+cannot act on the difference. If that inconsistency ever bites, say so.
+
 ## Unchanged from the last note
 
 `archive create tar` still stamped every member 1970-01-01 when I wrote to you

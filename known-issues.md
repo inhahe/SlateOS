@@ -89934,15 +89934,15 @@ module away.
 
 ## `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW` (lane A, 2026-08-26)
 
-**Status:** OPEN — low severity, correct-at-boot, documented in code.
+**Status:** ✅ **FIXED 2026-08-27** — a `cpu_hotplug` notifier now rebuilds the
+per-node CPU sets on every CPU online/offline event. See "How it was fixed".
 
 **In short:** `/proc/numastat` lists, for each memory node, which CPUs are
-attached to it. That list is built once during boot and never rebuilt. If a CPU
-starts up after that moment, it is missing from the file for the rest of the
-boot — not reported as belonging elsewhere, just absent. Today that is a very
-narrow window and nothing user-visible depends on it, but the file's CPU lists
-are strictly a boot-time snapshot rather than a live view, and it is worth
-knowing that before anything is built on top of them.
+attached to it. That list used to be built once during boot and never rebuilt.
+If a CPU started up after that moment, it was missing from the file for the
+rest of the boot — not reported as belonging elsewhere, just absent. The window
+was narrow and nothing user-visible depended on it, but the file's CPU lists
+were strictly a boot-time snapshot rather than a live view.
 
 **Where.** `kernel/src/fs/numastat.rs` → `adopt_topology()`, called once from
 `kernel/src/main.rs` just after `numa::init()`. The per-node sets come from
@@ -89968,17 +89968,80 @@ of date. Fixed by having `adopt_topology()` return the count it enumerated and
 property one-shot adoption never promised). This is the same flake shape
 rejected earlier in the irqbalance cross-check.
 
-**The proper fix**, when something needs it: re-run adoption on a CPU
-online/offline event. `kernel/src/cpu_hotplug.rs` is the natural hook.
-`register_node` returns `AlreadyExists` on a second call for the same id, so
-refreshing an existing node's CPU set needs either an update path on the node
-row or a clear-and-re-adopt — the former is preferable, since the latter would
-briefly empty `/proc/numastat` for a concurrent reader.
+**How it was fixed.** Exactly as this entry proposed — an update path on the
+node row, not a clear-and-re-adopt — plus the prerequisite it did not know it
+had.
 
-**What happens if it is never fixed.** Nothing degrades over time and nothing is
-blocked. The file is correct on every boot observed so far (QEMU brings up its
-CPUs well inside the window). The risk is only that a future feature reads those
-CPU lists as authoritative and inherits the staleness silently.
+*The prerequisite.* Hooking `cpu_hotplug` would have been **inert on its own**:
+`cpu_hotplug::init()` sampled `smp::cpu_count()` in precisely the same way this
+module did, so no hotplug event ever fired for a late AP and there was nothing
+to subscribe to. That is tracked and now fixed as
+`A-CPU-HOTPLUG-INIT-SNAPSHOTS-A-CPU-COUNT-THAT-CAN-STILL-GROW`, and it had to
+land first. Worth remembering as a pattern: *a stale-snapshot bug cannot be
+fixed by subscribing to a notifier that is fed by the same stale snapshot.*
+
+*The fix here.*
+
+1. **`set_node_cpus(id, cpus)`** replaces one node's CPU set in place.
+   `register_node` refuses a repeat with `AlreadyExists` by design (so a second
+   adoption cannot zero the counters), which is why a separate update path was
+   needed. In place rather than remove-then-re-add because a concurrent
+   `/proc/numastat` reader would otherwise briefly see a machine with one fewer
+   node — or, if it were the last node, with no memory at all. The
+   allocation/access/migration counters are untouched: a CPU joining a node does
+   not un-count the pages already allocated there.
+2. **`refresh_topology()`** recomputes every present node's set and returns the
+   number of CPUs placed. A node that is present in the topology but has no row
+   (adoption hit `ResourceExhausted`, say) is registered here rather than
+   skipped, so a later refresh can recover from a transient failure instead of
+   leaving the row missing for the boot.
+3. **`adopt_topology()` subscribes, then sweeps — in that order.** It registers
+   the notifier and *then* calls `refresh_topology()` once. Doing it the other
+   way round leaves a gap between the sweep and the subscription in which an
+   event is lost for good, which is the exact bug being fixed. A CPU that
+   arrived *during* the adoption loop is caught by the explicit refresh; one
+   that arrives *after* is caught by the notifier. Registration is guarded by an
+   `AtomicBool` because `adopt_topology` is documented idempotent and really is
+   called more than once, while `cpu_hotplug::register_notifier` appends to a
+   fixed table with no duplicate check.
+4. **The notifier acts only on `Post*` events.** A `Pre*` event asks permission,
+   and this module has no grounds to veto — a node's CPU list is a description,
+   not a constraint. Acting on `PreOffline` would also be wrong on the merits:
+   it fires while the CPU is still running, so dropping it from the list there
+   would make the file disagree with reality for the duration of the migration.
+
+**Two semantic changes worth knowing about.**
+
+- **The derivation is now "CPUs that are online", not "indices below
+  `smp::cpu_count()`".** Those coincide at boot and diverge the moment a CPU in
+  the middle is offlined: smp's counter is a high-water mark of CPUs that ever
+  started, while this file is supposed to describe the CPUs a node currently
+  has. Linux's `nodeN/cpulist` reports the online set too. Concretely: offlining
+  a CPU now removes it from `/proc/numastat`, which it did not before.
+- **The online set is snapshotted once per pass, as a `u32` bitmask.** Every
+  per-node derivation in a pass reads the same mask, so two nodes in one pass
+  cannot disagree about which CPUs exist — previously a comment asking the
+  reader to remember, now structural. The mask also makes the derivation
+  allocation-free (a `[u32; MAX_CPUS]` scratch array), which matters because
+  `refresh_topology` can run from a straggling AP's own bring-up path, before
+  that AP has registered an idle task with the scheduler.
+
+**The self-test changed shape, and it is stronger.** `self_test_adoption`
+used to assert `sum(len(node.cpus)) == cpus_at_adoption`. A count is both weaker
+and racier than what it replaced it with: weaker because two CPUs swapped
+between nodes leave it unchanged, racier because an AP arriving mid-check moves
+it — and now that the notifier legitimately adds CPUs after adoption returned,
+the equality would flake outright. It now asserts, per element, that every CPU
+on a row really belongs to that row's node (`numa::cpu_node` agrees) and that no
+CPU appears on two rows; `cpus_at_adoption` survives only as a lower bound
+("nothing placed has been lost"). Per-element facts cannot be falsified by a CPU
+arriving mid-walk. A fourth check asserts `refresh_topology` is a fixed point —
+running it against an unchanged machine must leave the rows identical, counters
+included — because the notifier calls it on every event, so a version that
+drifted would corrupt the file a little more each time rather than failing once
+and visibly. `numastat::self_test` gained a ninth test covering `set_node_cpus`
+directly: grow, shrink (an `extend` without the `clear` passes the grow case and
+quietly accumulates), unknown-id refusal, and that no counter moves.
 
 ---
 
@@ -90818,16 +90881,31 @@ workaround is adequate and cheap.
 
 ## A-CPU-HOTPLUG-INIT-SNAPSHOTS-A-CPU-COUNT-THAT-CAN-STILL-GROW
 
-**Lane:** A **Date:** 2026-08-27 **Status:** OPEN (assertions hardened;
-the underlying gap is real and unfixed)
+**Lane:** A **Date:** 2026-08-27 **Status:** **FIXED 2026-08-27** — APs now
+register themselves via `cpu_hotplug::mark_online_self`, called from
+`ap_entry`, and the bounded wait says when it expires. See "How it was fixed".
 
-**In short:** if a CPU finishes starting up slightly too late, the kernel's
-CPU-hotplug bookkeeping never learns it exists. That CPU runs and schedules
-work normally, but the hotplug framework thinks it is absent forever: it
-cannot be taken offline, it is missing from the online count, and
-`/sys/devices/system/cpu` under-reports the machine. Nothing crashes, so the
-only symptom is a machine that quietly has fewer manageable CPUs than it has
-CPUs.
+**In short:** if a CPU finished starting up slightly too late, the kernel's
+CPU-hotplug bookkeeping never learned it existed. That CPU ran and scheduled
+work normally, but the hotplug framework thought it was absent forever: it
+could not be taken offline, it was missing from the online count, and
+`/sys/devices/system/cpu` under-reported the machine.
+
+**And it was worse than "under-reports", which is how this entry originally
+read.** Three subsystems ask `cpu_hotplug::is_online` before deciding what to
+do with a CPU, and each would have drawn the wrong conclusion about one that
+was demonstrably running:
+
+| Consumer | Behaviour on a live CPU it believes is offline |
+|---|---|
+| `kernel/src/rcu.rs:319` — grace-period wait | **Skips it.** `synchronize_rcu` could return while that CPU sat inside an RCU read-side critical section, after which the caller frees memory the CPU is still reading. A use-after-free, not a reporting gap. |
+| `kernel/src/sched/mod.rs:4363` — load balancing | Never migrates or steals work to it. A whole core stays idle under load. |
+| `kernel/src/irqbalance.rs:348,411` | Never routes an interrupt to it. |
+
+The RCU consequence is what took this off the "cosmetic, fix when convenient"
+pile. Nothing was observed to crash — the straggler case is rare and the window
+narrow — but the failure mode was silent memory corruption, not a wrong number
+in a file.
 
 **Where.** `kernel/src/cpu_hotplug.rs:160` (`init`) and `kernel/src/smp.rs:1230`
 (the bounded wait in `init`).
@@ -90873,27 +90951,51 @@ differ is what surfaced the bounded wait. The test was asserting a property
 that the code does not actually guarantee, and the assertion was the only
 thing pointing at the gap.
 
-**What was changed now.** Only the self-test, which used to walk
-`0..smp::cpu_count()` asserting each CPU was `is_online` — an assertion that
-would *fail* on the straggler, blaming the test rather than naming the defect.
-It now checks the framework against its own recorded view (`online_count()`),
-plus the inequality that is genuinely invariant (`recorded <= smp::cpu_count()`,
-sound because `NUM_CPUS_ONLINE` has one writer, `fetch_add`, and no decrement
-anywhere). So the test no longer flakes and no longer hides the gap.
+**What was changed first (2026-08-27, earlier).** Only the self-test, which
+used to walk `0..smp::cpu_count()` asserting each CPU was `is_online` — an
+assertion that would *fail* on the straggler, blaming the test rather than
+naming the defect. That stopped the flake without touching the gap.
 
-**What the proper fix is.** `cpu_hotplug` must be *told* when an AP comes
-online rather than sampling a count once. The natural shape is a registration
-call at the end of `ap_entry` — the same place that does
-`NUM_CPUS_ONLINE.fetch_add(1)` — marking that CPU `Online` and bumping
-`ONLINE_COUNT`, with `init()` reduced to seeding the BSP. That makes the
-framework's view derive from the same event that moves the counter, instead of
-racing it. It touches AP bringup, so it is a deliberate change and not a rider
-on the self-test fix.
+**How it was fixed (2026-08-27, later).** Exactly the shape this entry
+predicted: `cpu_hotplug` is now *told*, from the same event that moves the
+counter.
 
-**Also worth doing:** make the bounded wait say so. `smp::init` should log when
-it exits on the budget rather than on the count, because right now a machine
-that lost a CPU to the timeout is indistinguishable at the serial log from one
-that never had it.
+1. **`cpu_hotplug::mark_online_self(cpu)`**, called from `smp.rs`'s `ap_entry`
+   immediately after `NUM_CPUS_ONLINE.fetch_add(1)`. It transitions the CPU
+   `NotPresent → Online` with a `compare_exchange`, bumps `ONLINE_COUNT` once,
+   and fires the `PostOnline` notifier chain.
+2. **`init()` is now idempotent** rather than authoritative. It
+   `compare_exchange`s from `NotPresent` instead of storing blindly, and
+   recomputes `ONLINE_COUNT` by *scanning the states* instead of storing
+   `cpu_count()` over them. That is what makes the two paths commute: an AP
+   that self-registered before `init()` is not counted twice, and one that
+   registers after is not erased.
+3. Both directions are safe because the transition is only ever
+   `NotPresent → Online`. An AP racing a deliberate `offline()` cannot revert
+   it — `Parked` and `GoingOffline` are the BSP's decisions.
+4. The event is `PostOnline`, not `PreOnline`: the CPU is already executing by
+   the time it reaches this call, so there is nothing left to veto and a
+   notifier returning `false` could not un-start it. The return value is
+   ignored for that reason.
+5. `mark_online_self` logs `"registered after init (late AP)"` when it runs
+   after `init()`, so the case this whole entry is about is visible in the
+   serial log the first time it actually happens.
+
+**Also done:** the bounded wait now says which way it exited. `smp::init`
+tracks whether the loop broke on the count or ran out of budget and logs
+`"[smp] WARN: AP wait expired with N of M CPU(s) reporting in"` in the second
+case. That warning appearing in a boot log means `wait_limit` is too small for
+the host and the late-AP paths are carrying weight they were only meant to
+insure against.
+
+**Tests.** `cpu_hotplug::self_test` gained the invariant the old version could
+not state — `ONLINE_COUNT` equals the number of CPUs *in state* `Online`,
+counted by scanning, rather than "indices `0..online_count()` are all online",
+which is only equivalent while the online set is a contiguous prefix. Plus
+idempotence (re-announcing the BSP must be refused and must not move the count)
+and range-checking (`mark_online_self(MAX_CPUS)` refused). The offline/online
+cycle test now picks the highest index actually in state `Online` rather than
+`recorded - 1`, for the same non-contiguity reason.
 
 ---
 

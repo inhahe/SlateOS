@@ -13,5 +13,9 @@ guitk = { path = "../../gui/toolkit" }
 # this is a crate and not a module".
 tzrules = { path = "../../tzrules" }
 
+# The window. Without it this program builds a struct in `main`, drops it and
+# exits — a clock that draws no frame, and reads no clock.
+oswindow = { path = "../../gui/window" }
+
 [lints]
 workspace = true

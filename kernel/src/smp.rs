@@ -957,6 +957,26 @@ extern "C" fn ap_entry() -> ! {
     // Bump the online CPU count.
     NUM_CPUS_ONLINE.fetch_add(1, Ordering::Release);
 
+    // Announce ourselves to the hotplug framework, which is the view the rest
+    // of the kernel actually consults.
+    //
+    // `smp::init()` waits for us on a *bounded* spin (~50 ms) and then returns
+    // whether or not we reported in, and `cpu_hotplug::init()` runs off that
+    // same snapshot. So a straggler AP -- QEMU TCG sharing the host with a
+    // build is enough -- reaches this line after the framework has already
+    // decided how many CPUs exist, and would otherwise stay `NotPresent` for
+    // the rest of the boot while running real tasks a few lines below.
+    //
+    // That is a correctness bug, not a bookkeeping one: `rcu::synchronize`
+    // *skips* CPUs it believes are offline, so a grace period could complete
+    // while this CPU sat inside a read-side critical section and the caller
+    // would then free memory we are still reading. (The scheduler and
+    // irqbalance also consult it, but their failure mode is only an idle core.)
+    //
+    // Idempotent against `cpu_hotplug::init()` in either order: whichever runs
+    // second finds the state already `Online` and does nothing.
+    crate::cpu_hotplug::mark_online_self(cpu_index);
+
     serial_println!(
         "[smp] AP {} online (LAPIC ID={}, {} CPUs total)",
         cpu_index,
@@ -1229,11 +1249,33 @@ pub fn init() {
     // init.  We spin briefly here so the scheduler gets the correct count.
     let expected_cpus = (booted_count + 1) as u32; // +1 for BSP
     let wait_limit: u64 = 50_000_000; // ~50 ms
+    let mut all_arrived = false;
     for _ in 0..wait_limit {
         if NUM_CPUS_ONLINE.load(Ordering::Acquire) >= expected_cpus {
+            all_arrived = true;
             break;
         }
         core::hint::spin_loop();
+    }
+
+    // Say which way the loop exited.
+    //
+    // Exiting on the count and exiting on the budget leave the machine in
+    // observably different states -- in the second case at least one CPU is
+    // still mid-bringup and will announce itself afterwards, which every
+    // boot-time snapshot of the CPU count is then racing. Until this line, the
+    // two were indistinguishable in the serial log, so a machine that had lost
+    // a CPU to the timeout read exactly like one that never had it. If this
+    // warning ever appears in a boot log, `wait_limit` is too small for the
+    // host, and the late-AP paths (`cpu_hotplug::mark_online_self` and the
+    // numastat hotplug notifier) are carrying weight they were only meant to
+    // insure against.
+    if !all_arrived {
+        serial_println!(
+            "[smp] WARN: AP wait expired with {} of {} CPU(s) reporting in; stragglers will register themselves late",
+            NUM_CPUS_ONLINE.load(Ordering::Acquire),
+            expected_cpus
+        );
     }
 
     // Update the scheduler with the actual CPU count.

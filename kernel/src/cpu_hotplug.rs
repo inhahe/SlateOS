@@ -51,7 +51,7 @@
 
 use crate::serial_println;
 use crate::smp;
-use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -100,6 +100,17 @@ static CPU_STATES: [AtomicU8; smp::MAX_CPUS] = {
 
 /// Number of CPUs currently online (scheduling-eligible).
 static ONLINE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Whether [`init`] has run.
+///
+/// Only used to distinguish a CPU that registered itself *before* the
+/// framework was initialized (the ordinary case: every AP that made
+/// `smp::init`'s bounded wait) from one that registered *after* (a straggler
+/// that missed the window). Both are handled identically; the second is worth
+/// a line in the serial log because it is the case that used to be silently
+/// lost, and because seeing it means the AP bring-up wait is running tight on
+/// this host.
+static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
 /// CPU 0 (BSP) is always online and cannot be offlined.
 const BSP_CPU: usize = 0;
@@ -155,21 +166,116 @@ static TASKS_MIGRATED: AtomicU64 = AtomicU64::new(0);
 
 /// Initialize the hotplug framework.
 ///
-/// Marks all online CPUs as `Online` based on the SMP cpu_count().
-/// Call after SMP initialization.
+/// Marks every CPU the SMP layer has brought up as `Online`. Call after SMP
+/// initialization.
+///
+/// **This is a floor, not the whole truth, and must not be the only way a CPU
+/// becomes online.** `smp::init()` waits for application processors on a
+/// *bounded* spin (~50 ms), so an AP that misses that window finishes booting
+/// after `init()` has already run and would never be marked online here. That
+/// is why [`mark_online_self`] exists and why this function recomputes
+/// `ONLINE_COUNT` from the states rather than storing `cpu_count()` over it:
+/// an AP that self-registered before this ran must not be counted twice, and
+/// one that self-registers after must not be erased.
 pub fn init() {
     let cpus = smp::cpu_count();
     for i in 0..cpus {
         if let Some(s) = CPU_STATES.get(i) {
-            s.store(CpuState::Online as u8, Ordering::Release)
+            // `compare_exchange` rather than `store`: an AP that already
+            // called `mark_online_self` is *also* already counted in
+            // `ONLINE_COUNT`, and a blind store would let the recount below
+            // agree while silently discarding a `GoingOffline` in progress.
+            let _ = s.compare_exchange(
+                CpuState::NotPresent as u8,
+                CpuState::Online as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
         }
     }
-    ONLINE_COUNT.store(cpus as u64, Ordering::Release);
 
-    serial_println!(
-        "[hotplug] CPU hotplug framework initialized ({} CPUs online)",
-        cpus
-    );
+    // Recount rather than assume. `cpus` is a snapshot that a late AP can
+    // already have invalidated by the time this line runs.
+    let online = (0..smp::MAX_CPUS)
+        .filter(|&i| {
+            CPU_STATES
+                .get(i)
+                .is_some_and(|s| CpuState::from_u8(s.load(Ordering::Acquire)) == CpuState::Online)
+        })
+        .count();
+    ONLINE_COUNT.store(online as u64, Ordering::Release);
+    INITIALIZED.store(true, Ordering::Release);
+
+    serial_println!("[hotplug] CPU hotplug framework initialized ({online} CPUs online)");
+}
+
+/// Register the calling CPU as online, from the CPU itself, during its own
+/// bring-up.
+///
+/// # Why this exists
+///
+/// `smp::init()` waits for APs on a bounded ~50 ms spin and then returns
+/// regardless. An AP that finishes after that window bumps `NUM_CPUS_ONLINE`
+/// itself and proceeds to register an idle task, install its IRQ stack and
+/// `sti()` — it is, from that moment, a CPU running real work. Before this
+/// function existed, nothing told `cpu_hotplug`, so such a CPU stayed
+/// `NotPresent` for the rest of the boot while actually executing tasks.
+///
+/// That was not cosmetic. Three subsystems consult [`is_online`] and would
+/// each have drawn the wrong conclusion about a live CPU:
+///
+/// | Consumer | What it does with an "offline" CPU |
+/// |---|---|
+/// | `rcu::synchronize_rcu` | **Skips waiting for it.** A grace period could complete while that CPU was inside an RCU read-side critical section, and the caller would then free memory still being read. |
+/// | `sched` load balancing | Never migrates or steals work to it — a whole core stays idle under load. |
+/// | `irqbalance` | Never routes an interrupt to it. |
+///
+/// The RCU one is a use-after-free window, which is why an AP announces
+/// itself here rather than leaving `init()`'s snapshot to be corrected later.
+///
+/// # Ordering
+///
+/// Safe to call before or after [`init`]: the transition is a
+/// `compare_exchange` from a non-`Online` state, so whichever runs second is
+/// a no-op and `ONLINE_COUNT` is incremented exactly once either way.
+///
+/// Returns `true` if this call performed the transition.
+pub fn mark_online_self(cpu: usize) -> bool {
+    let Some(slot) = CPU_STATES.get(cpu) else {
+        return false;
+    };
+
+    // Only ever NotPresent -> Online here. An AP must not be able to undo a
+    // deliberate `offline()` that raced with its bring-up: `Parked` and
+    // `GoingOffline` are decisions made by the BSP and are not ours to revert.
+    if slot
+        .compare_exchange(
+            CpuState::NotPresent as u8,
+            CpuState::Online as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return false;
+    }
+
+    ONLINE_COUNT.fetch_add(1, Ordering::AcqRel);
+
+    if INITIALIZED.load(Ordering::Acquire) {
+        // The case this function was written for. Not an error -- the CPU is
+        // now correctly accounted for -- but worth seeing, because it means
+        // `smp::init`'s bounded AP wait expired before this core reported in.
+        serial_println!("[hotplug] CPU {cpu} registered after init (late AP), now online");
+    }
+
+    // Tell the subsystems that keep per-CPU views. `PostOnline` rather than
+    // `PreOnline` because the CPU is already running by the time it gets
+    // here -- there is nothing left to veto, and a notifier returning `false`
+    // could not un-start it. The return value is deliberately ignored for
+    // that reason.
+    let _ = notify_all(cpu, HotplugEvent::PostOnline);
+    true
 }
 
 /// Get the current state of a CPU.
@@ -396,49 +502,70 @@ pub fn self_test() {
     serial_println!("[hotplug] Running self-test...");
     let mut skips = crate::fs::selftest::Skips::new();
 
-    // Test 1: Every CPU this framework recorded at init is online.
+    // Test 1: `ONLINE_COUNT` is exactly the number of CPUs in state `Online`.
     //
-    // This used to read `smp::cpu_count()` and assert `online_count()` equalled
-    // it, then walk `0..cpu_count()` asserting each was online. Both counters
-    // are live and they are *different* counters -- `NUM_CPUS_ONLINE`, bumped
-    // by each AP as it finishes coming up, versus this module's `ONLINE_COUNT`,
-    // seeded once from a reading of the former in `init()`.
+    // This is the invariant that makes the counter trustworthy, and it is the
+    // one the old version of this test could not state. It used to walk
+    // `0..online_count()` asserting each index was online, which is only
+    // equivalent while the online set happens to be a contiguous prefix -- true
+    // at boot, false the moment any CPU in the middle is offlined. Count the
+    // states instead, so the test does not quietly depend on that layout.
     //
-    // An AP really can arrive after that seeding. `smp::init` waits for the APs
-    // on a *bounded* spin -- about 50 ms in `smp.rs` -- and then proceeds
-    // whether or not they all reported in, so on a slow or contended host (QEMU
-    // TCG sharing the machine with a build, say) a straggler bumps
-    // `NUM_CPUS_ONLINE` after `cpu_hotplug::init()` has already run. A bounded
-    // wait is a race window, not a barrier.
-    //
-    // So the framework's own view is the one to check against itself: the CPUs
-    // it recorded are the CPUs it marked Online. What it does *not* get to
-    // assume is that its count still equals smp's -- that comparison is left
-    // below as the inequality that is actually invariant.
-    //
-    // (A late AP being invisible to this module is a real defect and not one
-    // this test can paper over; it is logged as
-    // A-CPU-HOTPLUG-INIT-SNAPSHOTS-A-CPU-COUNT-THAT-CAN-STILL-GROW.)
+    // Two independent counters feed this and they are *different*:
+    // `smp::NUM_CPUS_ONLINE`, bumped by each AP as it finishes coming up,
+    // versus this module's `ONLINE_COUNT`. `init()` no longer copies the former
+    // into the latter -- it derives it from the states, exactly as this test
+    // does -- because a straggler AP can bump smp's counter at any moment.
+    // (`smp::init` waits for APs on a *bounded* ~50 ms spin and then proceeds
+    // regardless; a bounded wait is a race window, not a barrier.) Such an AP
+    // now calls `mark_online_self`, so it is present in both.
     let recorded = online_count();
-    for i in 0..recorded {
-        assert!(
-            i < smp::MAX_CPUS && is_online(i),
-            "CPU {} should be online",
-            i
-        );
-    }
-    // Exact and race-free in both directions: `ONLINE_COUNT` is seeded from a
-    // reading of `NUM_CPUS_ONLINE` and thereafter only tracks offline/online
-    // calls, while `NUM_CPUS_ONLINE` only ever grows, so the framework can
-    // never have recorded more CPUs than smp knows about. A straggler widens
-    // the gap; it cannot invert it.
+    let actually_online = (0..smp::MAX_CPUS).filter(|&i| is_online(i)).count();
+    assert_eq!(
+        recorded, actually_online,
+        "ONLINE_COUNT says {recorded} but {actually_online} CPUs are in state Online"
+    );
+    assert!(is_online(BSP_CPU), "BSP must always be online");
+
+    // The framework can never have recorded more CPUs than smp knows about:
+    // every path that marks a CPU online runs after that CPU has already bumped
+    // `NUM_CPUS_ONLINE` (`mark_online_self`) or after `init()` read it. smp's
+    // counter only grows during boot, so a straggler widens the gap between the
+    // two readings; it cannot invert it.
     assert!(
         recorded <= smp::cpu_count(),
         "hotplug recorded {} CPUs, more than smp's {}",
         recorded,
         smp::cpu_count()
     );
-    serial_println!("[hotplug]   All {} recorded CPUs online: OK", recorded);
+
+    // Test 1b: `mark_online_self` is idempotent.
+    //
+    // The whole scheme rests on it: an AP calls it during bring-up and `init()`
+    // may have already marked that CPU, in either order. A second call must not
+    // double-count. Re-announcing the BSP is the safe way to check -- it is
+    // unconditionally online already, so the call must be refused outright.
+    assert!(
+        !mark_online_self(BSP_CPU),
+        "re-announcing an already-online CPU must not perform a transition"
+    );
+    assert_eq!(
+        online_count(),
+        recorded,
+        "a refused mark_online_self must leave ONLINE_COUNT alone"
+    );
+    // Out of range is refused rather than panicking or corrupting the count.
+    assert!(
+        !mark_online_self(smp::MAX_CPUS),
+        "out-of-range CPU index must be refused"
+    );
+    assert_eq!(
+        online_count(),
+        recorded,
+        "refusal must not change the count"
+    );
+    serial_println!("[hotplug]   mark_online_self idempotent + range-checked: OK");
+    serial_println!("[hotplug]   ONLINE_COUNT == {recorded} CPUs in state Online: OK");
 
     // Test 2: Cannot offline BSP.
     let result = offline(0);
@@ -490,11 +617,23 @@ pub fn self_test() {
 
     // Test 7: On multi-CPU systems, test actual offline/online cycle.
     //
-    // Driven off `recorded` rather than a fresh `smp::cpu_count()`: the CPU
-    // being offlined has to be one this framework actually has a state slot
-    // for, and a straggler AP is precisely one that it does not.
+    // The target is the highest index actually in state `Online`, not
+    // `recorded - 1`: those coincide only while the online set is a contiguous
+    // prefix, and offlining a CPU that is already parked would fail for the
+    // wrong reason. Searching the states also keeps this correct for a
+    // straggler AP, which `mark_online_self` has now put in the set.
     if recorded > 1 {
-        let target = recorded - 1; // Last recorded CPU.
+        // `unwrap_or(BSP_CPU)` rather than an unwrap: the assertion below is
+        // the real check, and it catches the empty case too, since `BSP_CPU`
+        // is the one index this branch must never select.
+        let target = (0..smp::MAX_CPUS)
+            .rev()
+            .find(|&i| is_online(i))
+            .unwrap_or(BSP_CPU);
+        assert_ne!(
+            target, BSP_CPU,
+            "recorded {recorded} online CPUs but found no offlinable one"
+        );
         let result = offline(target);
         assert!(result.is_ok(), "offline should succeed on CPU {}", target);
         let migrated = result.unwrap();

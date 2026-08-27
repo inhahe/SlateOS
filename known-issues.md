@@ -82553,6 +82553,11 @@ working at all.
 > becomes the same lockout as `set` the moment that enforcement is written,
 > which is the argument for refusing the word now rather than when it bites. See
 > `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.
+>
+> **That moment arrived 2026-08-27**, when the enforcement landed. The `files`
+> arm's guessed `0` is an active lockout now, and the refusals recorded here are
+> what stop it — a case of the burn-down paying off before the fault it
+> anticipated could bite anyone.
 
 > **Burn-down log.** 2026-08-26 (twentieth batch): `cmd_shmem` (7) cleared —
 > 522 → 515 across 223 → 222 functions. Pinned by `kshell::self_test` rung 88.
@@ -85500,7 +85505,7 @@ build rather than shipping.
 
 ---
 
-## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **open**, tech debt
+## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **FIXED 2026-08-27**, tech debt
 
 **In short:** `diskquota` can limit two things: how many *bytes* a user may
 store, and how many *files*. The byte half works. The file half is a prop —
@@ -85542,6 +85547,47 @@ moment the enforcement above is written. The `set` arm's guessed `0` is a live
 lockout today, because the byte path is real.
 
 **Not a regression.** True since `set_file_limits` was written.
+
+**Fixed 2026-08-27 (lane A), as the entry above prescribed.** The file half is
+now compared everywhere the byte half is:
+
+- `QuotaEntry::status()` returns the **worse** of the byte and file verdicts.
+  The two dimensions are scored by a shared `dimension_status` helper and
+  combined by severity rank, with `SoftExceeded` and `GracePeriod` ranking
+  equal and ties going to the byte verdict — so the file half can only ever
+  make a status *worse*, never merely different at the same tier. Every
+  existing `status()` reader (kshell's `get` and `list` arms) is therefore
+  unchanged unless the file count is genuinely the worse of the two.
+- `check_quota` takes a `files: u64` parameter and tests both limits in one
+  call under one lock acquisition. A separate `check_file_quota` was rejected:
+  two functions invite a caller to check one and forget the other, which is
+  exactly how this gap arose.
+- It returns `QuotaVerdict` (`Allowed` / `Warned{bytes,files}` /
+  `Denied{bytes,files}`) rather than `bool`. A denial that cannot say which
+  limit fired sends the user hunting for a large file to delete when their
+  problem is two hundred small ones, and the caller cannot reconstruct the
+  reason afterwards without a racy re-read.
+- The grace clock is driven by the **union** of the two soft limits
+  (`QuotaEntry::over_soft`). There is one `grace_start_ns` per entry, so
+  keying it on bytes alone would have cleared a grace period the file count
+  still justified the moment the user deleted a large file.
+- kshell's `check` arm gains an optional `[files]` argument, given the §607
+  treatment `update` already gives `[file_delta]`: absent means the honest
+  default (a write extending an existing file creates none), present-but-
+  unreadable is refused. Its output now names the limit that fired.
+- `diskquota::self_test()` grew from 8 cases to 14. The six new ones use an
+  entry with `u64::MAX` byte limits so every verdict is attributable to the
+  file half alone: allowed under both, warned over soft, **denied over hard**
+  (the regression the change exists for), grace started by the file count with
+  zero bytes used, `status()` reporting `HardExceeded` while the byte half is
+  `Ok`, and the grace clock clearing when the count drops back under.
+
+**The latent/active note above is now spent.** `cmd_diskquota`'s `files` arm
+guessed `0` is no longer latent — a hard file limit silently guessed as zero
+would deny the user's very next file. The `required_num` refusals in that arm
+already prevent it; they were written before the enforcement they now guard,
+and were verified against it rather than assumed. The comment at the site has
+been updated to say so.
 
 ---
 
@@ -85934,11 +85980,12 @@ cannot be wrong and one that cannot be right, and the limit the user was asked
 for at `create` time influences neither.
 
 **Relation to `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.**
-That entry is the stricter version of this one — there the limit is stored and
+That entry is the stricter version of this one — there the limit was stored and
 never compared at all. Here the comparison happens; only its output is
 unreachable. The two share a cause worth naming: a limit operand is easy to
 accept and store, and the work of *acting* on it is a separate change that the
-shape of the code does not force anyone to make.
+shape of the code does not force anyone to make. (That entry was fixed
+2026-08-27; the shared cause it names is unaffected.)
 
 **Proper fix.** Add `high_events` to the `list` line and to `stats()`, so the
 comparison that already happens is visible. `swap_pages` needs the opposite

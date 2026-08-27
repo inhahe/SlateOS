@@ -85789,12 +85789,11 @@ fn cmd_diskquota(args: &str) {
             } else {
                 diskquota::QuotaTarget::User
             };
-            // The same guess as `set`, but its damage is *latent*: nothing in
-            // the tree ever reads `soft_limit_files` or `hard_limit_files`, so
-            // a file limit of zero locks nobody out today. It becomes the same
-            // lockout as `set` the moment that enforcement is written, which is
-            // the reason to refuse the word now rather than when it bites. See
-            // `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.
+            // The same guess as `set`, and no longer latent: `check_quota` now
+            // compares `soft_limit_files`/`hard_limit_files`, so a hard file
+            // limit silently guessed as zero denies the user's very next file.
+            // The `required_num` refusals below are what stop that, and they
+            // were written before the enforcement they now guard.
             let Some(soft) =
                 required_num::<u64>(&parts, 3, "diskquota", sub, "soft file-count limit")
             else {
@@ -85821,7 +85820,7 @@ fn cmd_diskquota(args: &str) {
         }
         "check" => {
             if parts.len() < 4 {
-                shell_println!("Usage: diskquota check <name> <user|group> <bytes>");
+                shell_println!("Usage: diskquota check <name> <user|group> <bytes> [files]");
                 set_exit(1);
                 return;
             }
@@ -85846,12 +85845,25 @@ fn cmd_diskquota(args: &str) {
             else {
                 return;
             };
-            match diskquota::check_quota(name, target, bytes) {
-                Ok(allowed) => shell_println!(
-                    "{} write of {} bytes: {}",
+            // `[files]` gets the §607 treatment `update` gives `[file_delta]`:
+            // *absent* means the honest default — a write that extends an
+            // existing file creates none — while *present and unreadable* is
+            // refused rather than silently read as that default.
+            let Some(files) = optional_num::<u64>(&parts, 4, "diskquota", sub, "new file count", 0)
+            else {
+                return;
+            };
+            match diskquota::check_quota(name, target, bytes, files) {
+                // The verdict names the limit that fired. A bare `DENIED` sends
+                // the user hunting for a large file to delete when their actual
+                // problem may be the file *count*.
+                Ok(v) => shell_println!(
+                    "{} write of {} bytes / {} new files: {} ({})",
                     name,
                     bytes,
-                    if allowed { "ALLOWED" } else { "DENIED" }
+                    files,
+                    if v.allowed() { "ALLOWED" } else { "DENIED" },
+                    v.label()
                 ),
                 Err(e) => {
                     shell_println!("Error: {:?}", e);

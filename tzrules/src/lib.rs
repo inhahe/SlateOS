@@ -136,7 +136,10 @@ impl TzName {
         let mut bytes = [0u8; TZ_NAME_CAP];
         // `src.len() <= TZ_NAME_CAP` was just checked, so the slice is in range.
         bytes.get_mut(..src.len())?.copy_from_slice(src);
-        Some(Self { bytes, len: src.len() as u8 })
+        Some(Self {
+            bytes,
+            len: src.len() as u8,
+        })
     }
 
     /// The name's bytes, without a trailing NUL.
@@ -315,7 +318,10 @@ impl Tz {
         } else {
             let name = p.name()?;
             // An omitted DST offset means one hour ahead of standard time.
-            let gmtoff = if p.peek().is_some_and(|c| c == b'+' || c == b'-' || c.is_ascii_digit()) {
+            let gmtoff = if p
+                .peek()
+                .is_some_and(|c| c == b'+' || c == b'-' || c.is_ascii_digit())
+            {
                 p.offset()?.checked_neg()?
             } else {
                 std_gmtoff.checked_add(3600)?
@@ -332,16 +338,29 @@ impl Tz {
                 // what glibc and musl also substitute.
                 (
                     TzTransition {
-                        date: TzDate::MonthWeekDay { month: 3, week: 2, day: 0 },
+                        date: TzDate::MonthWeekDay {
+                            month: 3,
+                            week: 2,
+                            day: 0,
+                        },
                         time: DEFAULT_TRANSITION_TIME,
                     },
                     TzTransition {
-                        date: TzDate::MonthWeekDay { month: 11, week: 1, day: 0 },
+                        date: TzDate::MonthWeekDay {
+                            month: 11,
+                            week: 1,
+                            day: 0,
+                        },
                         time: DEFAULT_TRANSITION_TIME,
                     },
                 )
             };
-            Some(TzDst { name, gmtoff, start, end })
+            Some(TzDst {
+                name,
+                gmtoff,
+                start,
+                end,
+            })
         };
 
         // Trailing junk means this was not a POSIX string after all; better to
@@ -349,7 +368,11 @@ impl Tz {
         if !p.at_end() {
             return None;
         }
-        Some(Self { std_name, std_gmtoff, dst })
+        Some(Self {
+            std_name,
+            std_gmtoff,
+            dst,
+        })
     }
 
     /// Whether this zone ever observes daylight saving (the POSIX `daylight`
@@ -364,12 +387,24 @@ impl Tz {
     #[allow(clippy::arithmetic_side_effects)]
     pub fn lookup(&self, t: i64) -> TzInfo {
         let Some(dst) = self.dst else {
-            return TzInfo { gmtoff: self.std_gmtoff, is_dst: false, name: self.std_name };
+            return TzInfo {
+                gmtoff: self.std_gmtoff,
+                is_dst: false,
+                name: self.std_name,
+            };
         };
         if self.is_dst_at(t, &dst) {
-            TzInfo { gmtoff: dst.gmtoff, is_dst: true, name: dst.name }
+            TzInfo {
+                gmtoff: dst.gmtoff,
+                is_dst: true,
+                name: dst.name,
+            }
         } else {
-            TzInfo { gmtoff: self.std_gmtoff, is_dst: false, name: self.std_name }
+            TzInfo {
+                gmtoff: self.std_gmtoff,
+                is_dst: false,
+                name: self.std_name,
+            }
         }
     }
 
@@ -381,7 +416,10 @@ impl Tz {
         // that year, so the answer is stable across the year boundary: for a
         // southern-hemisphere zone the DST window wraps and the comparison
         // below handles it explicitly.
-        let year = year_of_day(t.saturating_add(i64::from(self.std_gmtoff)).div_euclid(SECS_PER_DAY));
+        let year = year_of_day(
+            t.saturating_add(i64::from(self.std_gmtoff))
+                .div_euclid(SECS_PER_DAY),
+        );
         // Each boundary is expressed in the wall clock in force *just before*
         // it: DST begins at standard time and ends at daylight time.  Getting
         // this backwards shifts every transition by an hour.
@@ -412,7 +450,11 @@ impl Tz {
     #[allow(clippy::arithmetic_side_effects)]
     pub fn local_to_utc(&self, local: i64, isdst_hint: i32) -> (i64, TzInfo) {
         let Some(dst) = self.dst else {
-            let info = TzInfo { gmtoff: self.std_gmtoff, is_dst: false, name: self.std_name };
+            let info = TzInfo {
+                gmtoff: self.std_gmtoff,
+                is_dst: false,
+                name: self.std_name,
+            };
             return (local.saturating_sub(i64::from(self.std_gmtoff)), info);
         };
 
@@ -438,9 +480,23 @@ impl Tz {
         };
 
         if use_dst {
-            (dst_guess, TzInfo { gmtoff: dst.gmtoff, is_dst: true, name: dst.name })
+            (
+                dst_guess,
+                TzInfo {
+                    gmtoff: dst.gmtoff,
+                    is_dst: true,
+                    name: dst.name,
+                },
+            )
         } else {
-            (std_guess, TzInfo { gmtoff: self.std_gmtoff, is_dst: false, name: self.std_name })
+            (
+                std_guess,
+                TzInfo {
+                    gmtoff: self.std_gmtoff,
+                    is_dst: false,
+                    name: self.std_name,
+                },
+            )
         }
     }
 }
@@ -643,7 +699,11 @@ impl<'a> Cursor<'a> {
                 if !(0..=6).contains(&day) {
                     return None;
                 }
-                TzDate::MonthWeekDay { month: month as u8, week: week as u8, day: day as u8 }
+                TzDate::MonthWeekDay {
+                    month: month as u8,
+                    week: week as u8,
+                    day: day as u8,
+                }
             }
             _ => {
                 let n = self.number()?;
@@ -653,8 +713,11 @@ impl<'a> Cursor<'a> {
                 TzDate::ZeroBased(n as u16)
             }
         };
-        let time =
-            if self.eat(b'/') { self.transition_time()? } else { DEFAULT_TRANSITION_TIME };
+        let time = if self.eat(b'/') {
+            self.transition_time()?
+        } else {
+            DEFAULT_TRANSITION_TIME
+        };
         Some(TzTransition { date, time })
     }
 }
@@ -676,7 +739,9 @@ pub fn days_in_month(month: u32, year: i64) -> u32 {
     if month == 2 && is_leap(year) {
         29
     } else {
-        DAYS.get((month.max(1) as usize).saturating_sub(1)).copied().unwrap_or(30)
+        DAYS.get((month.max(1) as usize).saturating_sub(1))
+            .copied()
+            .unwrap_or(30)
     }
 }
 
@@ -907,9 +972,15 @@ mod tests {
         // than falling back to UTC.
         assert!(Tz::parse(b"America/New_York").is_none());
         assert!(Tz::parse(b"").is_none());
-        assert!(Tz::parse(b"AB1").is_none(), "a two-letter name is not a zone");
+        assert!(
+            Tz::parse(b"AB1").is_none(),
+            "a two-letter name is not a zone"
+        );
         assert!(Tz::parse(b"EST").is_none(), "an offset is mandatory");
-        assert!(Tz::parse(b"EST5!!!").is_none(), "trailing junk is not honoured");
+        assert!(
+            Tz::parse(b"EST5!!!").is_none(),
+            "trailing junk is not honoured"
+        );
     }
 
     #[test]
@@ -937,9 +1008,15 @@ mod tests {
     #[test]
     fn us_eastern_transitions_at_the_right_instants() {
         let tz = Tz::parse(b"EST5EDT,M3.2.0,M11.1.0").expect("valid");
-        assert!(!tz.lookup(US_SPRING_2021 - 1).is_dst, "one second before the spring jump");
+        assert!(
+            !tz.lookup(US_SPRING_2021 - 1).is_dst,
+            "one second before the spring jump"
+        );
         assert!(tz.lookup(US_SPRING_2021).is_dst, "at the spring jump");
-        assert!(tz.lookup(US_FALL_2021 - 1).is_dst, "one second before the autumn jump");
+        assert!(
+            tz.lookup(US_FALL_2021 - 1).is_dst,
+            "one second before the autumn jump"
+        );
         assert!(!tz.lookup(US_FALL_2021).is_dst, "at the autumn jump");
         assert_eq!(tz.lookup(US_SPRING_2021).gmtoff, -4 * 3600);
         assert_eq!(tz.lookup(US_SPRING_2021).name, name(b"EDT"));
@@ -953,7 +1030,10 @@ mod tests {
         // April, so January is inside the window and June is outside it.
         let tz = Tz::parse(b"<-04>4<-03>,M9.1.6/24,M4.1.6/24").expect("valid");
         // 2021-01-15T12:00:00Z
-        assert!(tz.lookup(1_610_712_000).is_dst, "January is southern summer");
+        assert!(
+            tz.lookup(1_610_712_000).is_dst,
+            "January is southern summer"
+        );
         // 2021-06-15T12:00:00Z
         assert!(!tz.lookup(1_623_758_400).is_dst, "June is southern winter");
     }
@@ -981,10 +1061,26 @@ mod tests {
     fn week_five_means_the_last_such_weekday() {
         // 2021-03: Sundays fall on the 7th, 14th, 21st and 28th, so "week 5"
         // must clamp to the 28th rather than run off the end of the month.
-        let last = TzDate::MonthWeekDay { month: 3, week: 5, day: 0 }.day_of_year(2021);
-        assert_eq!(last, days_from_civil(2021, 3, 28) - days_from_civil(2021, 1, 1));
-        let second = TzDate::MonthWeekDay { month: 3, week: 2, day: 0 }.day_of_year(2021);
-        assert_eq!(second, days_from_civil(2021, 3, 14) - days_from_civil(2021, 1, 1));
+        let last = TzDate::MonthWeekDay {
+            month: 3,
+            week: 5,
+            day: 0,
+        }
+        .day_of_year(2021);
+        assert_eq!(
+            last,
+            days_from_civil(2021, 3, 28) - days_from_civil(2021, 1, 1)
+        );
+        let second = TzDate::MonthWeekDay {
+            month: 3,
+            week: 2,
+            day: 0,
+        }
+        .day_of_year(2021);
+        assert_eq!(
+            second,
+            days_from_civil(2021, 3, 14) - days_from_civil(2021, 1, 1)
+        );
     }
 
     #[test]
@@ -999,7 +1095,11 @@ mod tests {
     #[test]
     fn local_to_utc_round_trips_outside_the_transitions() {
         let tz = Tz::parse(b"EST5EDT,M3.2.0,M11.1.0").expect("valid");
-        for t in [US_SPRING_2021 - 86_400, US_SPRING_2021 + 86_400, US_FALL_2021 + 86_400] {
+        for t in [
+            US_SPRING_2021 - 86_400,
+            US_SPRING_2021 + 86_400,
+            US_FALL_2021 + 86_400,
+        ] {
             let info = tz.lookup(t);
             let local = t + i64::from(info.gmtoff);
             let (back, back_info) = tz.local_to_utc(local, -1);
@@ -1015,7 +1115,10 @@ mod tests {
         // (-4) and again an hour later on EST (-5).  glibc returns the first.
         let local = US_FALL_2021 - 4 * 3600 + 1800 - 3600;
         let (t, info) = tz.local_to_utc(local, -1);
-        assert!(info.is_dst, "the earlier of the two readings is still on DST");
+        assert!(
+            info.is_dst,
+            "the earlier of the two readings is still on DST"
+        );
         assert_eq!(t, local - i64::from(info.gmtoff));
         // An explicit tm_isdst = 0 asks for the later, standard-time reading.
         let (t_std, info_std) = tz.local_to_utc(local, 0);
@@ -1029,7 +1132,10 @@ mod tests {
         // 02:30 local never happens: the clock goes 01:59:59 → 03:00:00.
         let local = US_SPRING_2021 - 5 * 3600 + 1800;
         let (t, _) = tz.local_to_utc(local, -1);
-        assert!(t >= US_SPRING_2021, "resolves after the jump, not before it");
+        assert!(
+            t >= US_SPRING_2021,
+            "resolves after the jump, not before it"
+        );
     }
 
     #[test]
@@ -1045,9 +1151,13 @@ mod tests {
 
     #[test]
     fn year_of_day_agrees_with_days_from_civil() {
-        for (y, m, d) in
-            [(1969, 12, 31), (1970, 1, 1), (2000, 2, 29), (2021, 3, 14), (2100, 12, 31)]
-        {
+        for (y, m, d) in [
+            (1969, 12, 31),
+            (1970, 1, 1),
+            (2000, 2, 29),
+            (2021, 3, 14),
+            (2100, 12, 31),
+        ] {
             assert_eq!(year_of_day(days_from_civil(y, m, d)), y, "{y}-{m}-{d}");
         }
     }
@@ -1063,8 +1173,14 @@ mod tests {
         let mut days = first;
         while days <= last {
             let (y, m, d) = civil_from_days(days);
-            assert!((1..=12).contains(&m), "month {m} out of range at day {days}");
-            assert!((1..=days_in_month(m, y)).contains(&d), "day {d} out of range for {y}-{m}");
+            assert!(
+                (1..=12).contains(&m),
+                "month {m} out of range at day {days}"
+            );
+            assert!(
+                (1..=days_in_month(m, y)).contains(&d),
+                "day {d} out of range for {y}-{m}"
+            );
             assert_eq!(days_from_civil(y, m, d), days, "round trip at {y}-{m}-{d}");
             days += 1;
         }
@@ -1084,7 +1200,11 @@ mod tests {
             (2000, 2, 29), // a real leap day, which the estimate moved to March
             (2000, 3, 1),
         ] {
-            assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d), "{y}-{m}-{d}");
+            assert_eq!(
+                civil_from_days(days_from_civil(y, m, d)),
+                (y, m, d),
+                "{y}-{m}-{d}"
+            );
         }
     }
 
@@ -1102,7 +1222,11 @@ mod tests {
             (-400, 2, 29),
             (9999, 12, 31),
         ] {
-            assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d), "{y}-{m}-{d}");
+            assert_eq!(
+                civil_from_days(days_from_civil(y, m, d)),
+                (y, m, d),
+                "{y}-{m}-{d}"
+            );
         }
     }
 
@@ -1125,8 +1249,14 @@ mod tests {
         assert!(Tz::parse(b"EST5EDT,M3.6.0,M11.1.0").is_none(), "week 6");
         assert!(Tz::parse(b"EST5EDT,M3.1.7,M11.1.0").is_none(), "weekday 7");
         assert!(Tz::parse(b"EST5EDT,J0,M11.1.0").is_none(), "Julian day 0");
-        assert!(Tz::parse(b"EST5EDT,J366,M11.1.0").is_none(), "Julian day 366");
-        assert!(Tz::parse(b"EST5EDT,M3.2.0").is_none(), "one rule is not two");
+        assert!(
+            Tz::parse(b"EST5EDT,J366,M11.1.0").is_none(),
+            "Julian day 366"
+        );
+        assert!(
+            Tz::parse(b"EST5EDT,M3.2.0").is_none(),
+            "one rule is not two"
+        );
         assert!(Tz::parse(b"EST25").is_none(), "an offset past 24 hours");
     }
 

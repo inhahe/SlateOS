@@ -195,17 +195,13 @@ pub fn parse_zip(path: &Path, bytes: Vec<u8>) -> Result<ArchiveModel, ArchiveErr
             is_dir: member.is_dir,
             size: member.uncompressed_size,
             compressed_size: member.compressed_size,
-            // The central directory does carry a modification time, and
-            // `ziparchive::ZipEntry` does not yet hand it over — see
-            // `requests/c-a-ziparchive-drops-the-one-field-a-date-column-needs.md`.
-            // Zero is what `ArchiveEntry::format_date` renders as `-`, "not
-            // known", which is the truth rather than a guessed date.
-            modified: 0,
+            modified: dos_datetime_to_unix(member.dos_datetime),
             crc32: member.crc32,
-            // Likewise: encryption is general-purpose bit 0, which the crate
-            // does not expose. Claiming `false` for an encrypted entry would be
-            // a lie, but it is the same lie the program told before it could
-            // read archives at all, and the fix is the same request.
+            // Encryption is general-purpose bit 0, which the crate does not
+            // expose. Claiming `false` for an encrypted entry would be a lie,
+            // but it is the same lie the program told before it could read
+            // archives at all, and the fix is another field on `ZipEntry` —
+            // `known-issues.md` → `C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT`.
             encrypted: false,
             method: method_name(member.method),
             path: display,
@@ -221,6 +217,66 @@ pub fn parse_zip(path: &Path, bytes: Vec<u8>) -> Result<ArchiveModel, ArchiveErr
     });
     model.rebuild_tree();
     Ok(model)
+}
+
+/// Seconds since the Unix epoch for the MS-DOS date/time pair a ZIP central
+/// directory stores, or `0` if it recorded no usable time.
+///
+/// `ziparchive` hands the pair over raw and undecoded, deliberately: it is
+/// `no_std` and will not own a calendar. This is the caller that wants a date,
+/// so the decoding lives here — and it reaches the *shared* calendar
+/// (`guitk::tzrules::days_from_civil`, the same one `format_date`,
+/// `guitk::datetime` and the taskbar clock render through) rather than
+/// transcribing a sixth private one into this file.
+///
+/// Two facts about the format shape this function:
+///
+/// * **Zero is "not recorded", not an instant.** A zero pair is day 0 of month
+///   0, which is not a date at all, so it maps to `0` — which
+///   `ArchiveEntry::format_date` renders as `-`. Rendering it as 1980-01-01
+///   would put a measurement where there is none. Archives SlateOS itself
+///   writes carry zero (design-decisions.md §618), so this is the common case,
+///   not an edge one. The same reasoning rejects any pair whose month or day is
+///   out of range: a malformed date is an unknown date, not a guessed one.
+/// * **A DOS timestamp has no zone.** The format records wall-clock time as the
+///   writer's machine saw it and stores nothing about where that machine was.
+///   There is no correct conversion to an absolute instant, so this reads it as
+///   UTC — which is also what `format_date` renders in
+///   (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), making the round trip show back
+///   exactly the digits the archive stored.
+#[must_use]
+pub fn dos_datetime_to_unix(pair: u32) -> u64 {
+    if pair == 0 {
+        return 0;
+    }
+    let time = (pair & 0xFFFF) as u16;
+    let date = (pair >> 16) as u16;
+
+    let year = i64::from(date >> 9).saturating_add(1980);
+    let month = u32::from((date >> 5) & 0x0F);
+    let day = u32::from(date & 0x1F);
+    // Out of range means the pair is not a date, and an invented one would be
+    // worse than the `-` an unknown time already renders as.
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return 0;
+    }
+
+    let hour = i64::from(time >> 11);
+    let minute = i64::from((time >> 5) & 0x3F);
+    // DOS stores seconds halved, so odd seconds are simply not representable —
+    // the lost bit is the format's, not ours.
+    let second = i64::from(time & 0x1F).saturating_mul(2);
+    if hour > 23 || minute > 59 || second > 59 {
+        return 0;
+    }
+
+    let days = guitk::tzrules::days_from_civil(year, month, day);
+    let secs = days
+        .saturating_mul(86_400)
+        .saturating_add(hour.saturating_mul(3600))
+        .saturating_add(minute.saturating_mul(60))
+        .saturating_add(second);
+    u64::try_from(secs).unwrap_or(0)
 }
 
 /// What to show in the Method column for a ZIP compression method number.
@@ -507,6 +563,93 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create the scratch directory");
         dir
+    }
+
+    /// The MS-DOS pair for a wall-clock date and time, as a ZIP stores it.
+    ///
+    /// The encoder is written out here rather than reusing anything from
+    /// production, so a test asserts the decode against an independently
+    /// spelled-out format rather than against itself.
+    fn dos(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> u32 {
+        let date = ((year - 1980) << 9) | (month << 5) | day;
+        let time = (hour << 11) | (minute << 5) | (second / 2);
+        (date << 16) | time
+    }
+
+    #[test]
+    fn a_dos_pair_decodes_to_the_instant_it_names() {
+        // 1980-01-01 00:00:00 UTC is 315532800, which is worth pinning as a
+        // literal: it is the DOS *minimum* date, and getting the epoch offset
+        // wrong would shift every date in the program by a decade while still
+        // looking plausible.
+        assert_eq!(dos_datetime_to_unix(dos(1980, 1, 1, 0, 0, 0)), 315_532_800);
+
+        // A date far from the epoch, to catch a leap-year rule that is only
+        // right near 1980. 2026-08-26 14:30:52 UTC.
+        assert_eq!(
+            dos_datetime_to_unix(dos(2026, 8, 26, 14, 30, 52)),
+            1_787_754_652
+        );
+
+        // And it renders, rather than being a number only this test sees.
+        assert_ne!(
+            ArchiveEntry::format_date(dos_datetime_to_unix(dos(2026, 8, 26, 14, 30, 52))),
+            "-",
+            "a decoded time must reach the Date column as a date"
+        );
+    }
+
+    #[test]
+    fn a_pair_that_names_no_instant_stays_unknown() {
+        // Zero is the case that actually occurs: `ziparchive::create` writes it,
+        // deliberately, so that archives SlateOS produces say "no time recorded"
+        // instead of claiming 1980-01-01.
+        assert_eq!(dos_datetime_to_unix(0), 0);
+        assert_eq!(
+            ArchiveEntry::format_date(0),
+            "-",
+            "zero must reach the Date column as `-`"
+        );
+
+        // Month and day are 1-based in the format, so a zero in either is a
+        // malformed pair rather than a date near the start of the year. An
+        // out-of-range field is refused rather than clamped: an invented date
+        // is worse than an admitted gap.
+        for bad in [
+            dos(2026, 0, 26, 12, 0, 0),
+            dos(2026, 8, 0, 12, 0, 0),
+            dos(2026, 13, 1, 12, 0, 0),
+            dos(2026, 8, 26, 24, 0, 0),
+            dos(2026, 8, 26, 12, 60, 0),
+        ] {
+            assert_eq!(
+                dos_datetime_to_unix(bad),
+                0,
+                "a malformed pair {bad:#010x} must be unknown, not guessed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_odd_second_is_the_formats_loss_and_not_a_wrong_answer() {
+        // DOS stores seconds halved, so 53 and 52 are the same stored value.
+        // The decode must land on the representable one rather than rounding up
+        // into a second the archive did not record.
+        assert_eq!(
+            dos_datetime_to_unix(dos(2026, 8, 26, 14, 30, 53)),
+            dos_datetime_to_unix(dos(2026, 8, 26, 14, 30, 52)),
+        );
+    }
+
+    #[test]
+    fn an_archive_we_wrote_ourselves_reports_no_time_rather_than_1980() {
+        // The end-to-end shape of the two rules above: our own writer records no
+        // time, the parser hands the zero through, and the model says so.
+        let bytes = ziparchive::create(&[member("a.txt", b"a")]);
+        let model = parse_zip(Path::new("/tmp/dates.zip"), bytes).expect("a well-formed archive");
+        let entry = &model.entries[0];
+        assert_eq!(entry.modified, 0);
+        assert_eq!(ArchiveEntry::format_date(entry.modified), "-");
     }
 
     #[test]

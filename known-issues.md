@@ -90040,3 +90040,30 @@ snapshots by giving the comparison a signature that takes only one.
 Same shape as `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`,
 fixed hours earlier the same day: an assertion against a freshly-read value
 where the correct operand was the value the code had actually used.
+
+### C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT — 2026-08-26 — LANE C, OPEN
+
+**In short:** The archive manager's Encrypted column says "no" for every member
+of every archive, including members that really are encrypted. It is not
+detecting anything — the value is a hardcoded `false`. A user who opens a
+password-protected ZIP is told, in a column that exists specifically to answer
+that question, that nothing in it is protected. Extraction of such a member
+then fails with a decompression error rather than a "this needs a password"
+message, because nothing upstream knew to ask.
+
+**Where:** `apps/archivemanager/src/backend.rs`, `parse_zip` — the
+`encrypted: false` line, with a comment saying as much.
+
+**Why it is like this:** ZIP records encryption in general-purpose bit 0 of the
+central-directory flags word. `ziparchive::ZipEntry` does not expose the flags
+word or any field derived from it, so the app has nothing to read. The `false`
+predates the app being able to read archives at all, when the column was part
+of a mock.
+
+**Proper fix:** a field on `ziparchive::ZipEntry` — either the raw `flags: u16`
+or a decoded `encrypted: bool` — and then `parse_zip` reads it instead of
+inventing one. That is lane A's crate, so it needs a request; the shape is
+exactly the one that got `dos_datetime` landed
+(`requests/c-a-ziparchive-drops-the-one-field-a-date-column-needs.md`). Worth
+doing together with a real "this member is encrypted" refusal in `extract`, so
+the column and the error message agree.

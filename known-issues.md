@@ -90311,3 +90311,68 @@ workaround is adequate and cheap.
 
 **Where it bites:** the whole tree; most visibly `userspace/**`. Check with
 `rustfmt +nightly-x86_64-pc-windows-gnu --edition 2024 --check <files>`.
+
+---
+
+## `B-WHICH-DOES-NOT-READ-ALIASES-FUNCTIONS-OR-~USER` (lane B, 2026-08-27) — **open**, missing feature
+
+**In short:** Our `which` now matches GNU which 2.21 for everything it does, but
+three of upstream's features are accepted-and-ignored rather than implemented.
+None of them can make `which` answer *wrongly* — each only makes it answer less
+than upstream would — but a script that relies on them will get a different
+answer than it does on Linux.
+
+**What is missing.**
+
+| Missing | Upstream behaviour | Ours |
+|---|---|---|
+| `--read-alias` / `-i` | Reads shell aliases on stdin (the shell function in `alias`(1)'s `which` wrapper pipes them in) and reports an alias before searching `PATH`. | Option parsed and ignored; only `PATH` is searched. |
+| `--read-functions` | Same, for shell function definitions. | Option parsed and ignored. |
+| `~user` in a `PATH` element | Expands to that user's home via `getpwnam`. | Left literal, so the element never matches. `~` and `~/…` *are* expanded from `$HOME` and work. |
+
+**Why they are not done.** The alias/function features are not really `which`
+features — they are a protocol between `which` and the shell that invoked it,
+and the useful half of that protocol (the `which` shell function that pipes
+`alias`/`declare -f` in) does not exist in our shell yet. Implementing the
+reader without the writer produces a feature nobody can reach. `~user` needs
+`getpwnam` and the `struct passwd` layout, which the coreutils crate does not
+bind today; `~` and `~/…` cover the case that actually appears in a `PATH`.
+
+**Proper fix.** For the aliases: land the shell-side wrapper first, then read
+stdin as bytes and match before the `PATH` scan. For `~user`: bind `getpwnam_r`
+(reentrant, so the returned buffer is ours) behind `#[cfg(unix)]` alongside the
+existing `euidaccess`/`geteuid` block in `which.rs`, and expand in
+`expand_tilde`, which already isolates the decision.
+
+**Where it lives:** `userspace/coreutils/src/bin/which.rs` — the ignored options
+are in `parse_args`, and `expand_tilde` is where `~user` would go. The module
+doc's "What is not implemented" section says the same thing at the code.
+
+---
+
+## `B-WHICH-DIVERGES-FROM-GNU-IN-FOUR-MEASURED-PLACES` (lane B, 2026-08-27) — **open**, deliberate divergence
+
+**In short:** Four places where our `which` deliberately does something other
+than what GNU which 2.21 was measured doing. Two are upstream bugs we declined
+to copy, one is a house rule about typed options, one is a message-shape choice.
+Recorded here so a future reader who diffs the two does not "fix" them back.
+
+| # | Upstream (measured) | Ours | Why |
+|---|---|---|---|
+| 1 | With `PATH` unset, the slash-split branch is skipped entirely, so `which /bin/sh` reports it missing even though it is right there. | An absolute or slashed command resolves without consulting `PATH` at all. | Upstream bug. The command names its own directory; `PATH` is irrelevant to it. |
+| 2 | `which /init` splits into directory `""` and searches nothing, reporting `no init in ()`. | A command directly under the root searches `/`. | Upstream bug — the empty string is the wrong reading of "the part before the last slash" when the slash is the first byte. |
+| 3 | An unrecognised option is reported and then *ignored*; the search proceeds. | Fatal: one diagnostic, `Try 'which --help' for more information.`, status 255. | Silently proceeding after ignoring an option the user typed is the same defect class this sweep exists to remove. The house `getopt` also ends its iteration at the first error. |
+| 4 | Diagnostics go to stderr unprefixed in some paths. | Every diagnostic is `which: …` through `stdfd::diag_bytes`, so a non-UTF-8 path survives it. | House rule; also what makes a `PATH` with arbitrary bytes reportable at all. |
+
+**Everything else was measured and matched**, including the surprising parts:
+the exit status is the *count* of commands not found, wrapped to a byte (300
+missing gives 44); `PATH=""` searches nothing while `PATH=":"` searches the
+working directory twice; `--skip-dot` drops every *relative* element, not only
+the dotted ones its own help text describes; `--skip-tilde` also drops absolute
+elements that sit under `$HOME`; a fifo with the execute bit matches, so the
+test is "not a directory, and `X_OK`", not `S_ISREG`; a leading `//` in a `PATH`
+element survives cleaning but `///` collapses to `/`; and `--tty-only` freezes
+only the four show/skip options written to its *right*.
+
+**Where it lives:** `userspace/coreutils/src/bin/which.rs`, "Where this
+deliberately diverges" in the module doc, and the tests named for each.

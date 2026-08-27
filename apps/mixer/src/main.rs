@@ -68,7 +68,7 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
+use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
 use guitk::text;
 use oswindow::app::{self, App, Response};
@@ -213,10 +213,16 @@ impl AudioStream {
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    reason = "clamped to 0.0..=100.0 on the line above, so the cast is exact"
+    reason = "the level is clamped to 0.0..=1.0 first, so 0..=100 and exact"
 )]
 pub fn percent_of(level: f32) -> u8 {
-    (level.clamp(0.0, 1.0) * 100.0).round().clamp(0.0, 100.0) as u8
+    // One clamp, not two. There used to be a second `.clamp(0.0, 100.0)` after
+    // the round, which is precisely the silent saturation the paragraph above
+    // objects to -- and, being downstream of the first clamp, it could never
+    // fire. Two guards of one invariant is one guard and one place for a
+    // mutation to hide: with the second clamp there, deleting the first
+    // changed nothing any test could see.
+    (level.clamp(0.0, 1.0) * 100.0).round() as u8
 }
 
 // ── Selection ──────────────────────────────────────────────────────────────
@@ -347,7 +353,12 @@ pub enum Picker {
 /// cannot drift from the program the way the old one had. That one named four
 /// shortcuts for a program that answered seven keys, and described `Tab` as
 /// "Cycle" and `Left/Right` as "Select" when they ran the same three lines.
-const SHORTCUTS: [(&str, &str); 6] = [
+/// A slice, not an array: the length is a fact about the table, and writing it
+/// into the type means adding a key to the program and forgetting the bar is a
+/// *compile* error only if you also touched the count — which is the one edit
+/// nobody forgets. As a slice the table can go wrong the way it really goes
+/// wrong, and the test is what stops it.
+const SHORTCUTS: &[(&str, &str)] = &[
     ("Left/Right", "select"),
     ("Tab", "next"),
     ("Up/Down", "volume"),
@@ -356,8 +367,34 @@ const SHORTCUTS: [(&str, &str); 6] = [
     ("I", "input"),
 ];
 
+/// The share of a step's gap a *rising* meter closes.
+///
+/// These four were bare literals inside `update_peak_meters()`, which is how a
+/// rate with no denominator gets written: nobody reading `0.6` in place asks
+/// what it is 0.6 *per*, so nobody noticed the function took no elapsed time.
+/// Named, they can also be tested against — "attack is faster than decay" is a
+/// bound derived from `DECAY_RATE`, not a number copied out of a passing run.
+const ATTACK_RATE: f32 = 0.6;
+
+/// The share of a step's gap a *falling* meter closes. Slower than the attack:
+/// that asymmetry is what makes a peak meter readable rather than a flicker.
+const DECAY_RATE: f32 = 0.15;
+
+/// What a silent stream's meter is multiplied by each step as it fades out.
+const SILENCE_RATE: f32 = 0.85;
+
+/// The level below which a fading meter is called silent and pinned to zero.
+///
+/// Without a floor the fade is a geometric series that never reaches zero, so
+/// `anything_moving()` stays true for ever and the clock never stops.
+const SILENCE_FLOOR: f32 = 0.01;
+
+/// How much of full scale the loudest possible sample sits at, leaving the top
+/// of every meter as visible headroom.
+const HEADROOM: f32 = 0.8;
+
 /// The keys the picker answers while it is open, drawn in its footer.
-const PICKER_SHORTCUTS: [(&str, &str); 3] = [
+const PICKER_SHORTCUTS: &[(&str, &str)] = &[
     ("Up/Down", "choose"),
     ("Enter", "use it"),
     ("Esc", "cancel"),
@@ -395,9 +432,21 @@ impl Default for MixerApp {
 }
 
 impl MixerApp {
-    /// A mixer with the stub device and stream list.
+    /// A mixer with the stub device and stream list, seeded from the kernel.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_seed(seed_from_system(FALLBACK_SEED))
+    }
+
+    /// The same mixer at a seed the caller names.
+    ///
+    /// The tests use this rather than `new`. On this host the kernel's random
+    /// device is out of reach, so `new` falls back to `FALLBACK_SEED` and two
+    /// mixers happen to agree — but that is a property of the host, not of the
+    /// program, and a suite that depends on it is a suite that goes red the
+    /// first time it is run somewhere the kernel answers.
+    #[must_use]
+    pub fn with_seed(seed: u64) -> Self {
         let streams = vec![
             AudioStream {
                 id: 1,
@@ -501,7 +550,7 @@ impl MixerApp {
             meter_accum: 0,
             steps: 0,
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
-            rng: seeded_from_system(FALLBACK_SEED),
+            rng: SeededRng::new(seed),
         }
     }
 
@@ -727,9 +776,14 @@ impl MixerApp {
                 }
             }
             Action::ChooseDevice => {
-                if self.picker_row >= self.picker_len() {
-                    return;
-                }
+                // No `picker_row >= picker_len()` guard here. There used to be
+                // one, and it was unreachable: every way of moving the row
+                // already bounds it (`SelectPickerRow` refuses an index past
+                // the end, `MovePickerRow` clamps, opening a sheet takes the
+                // row from the chosen device, closing one resets it). A third
+                // copy of a bound its two holders already keep is not defence
+                // in depth -- it is a place a fault can sit where no test can
+                // reach it, which is exactly what the mutation sweep found.
                 match self.picker {
                     Picker::None => {}
                     Picker::Output => self.selected_output = self.picker_row,
@@ -782,17 +836,17 @@ impl MixerApp {
 
         for (stream, &draw) in self.streams.iter_mut().zip(draws.iter()) {
             if stream.playing && !stream.muted {
-                let target = stream.volume * 0.8 * draw;
+                let target = stream.volume * HEADROOM * draw;
                 let rate = if target > stream.peak_level {
-                    0.6
+                    ATTACK_RATE
                 } else {
-                    0.15
+                    DECAY_RATE
                 };
                 stream.peak_level += (target - stream.peak_level) * rate;
                 stream.peak_level = stream.peak_level.clamp(0.0, 1.0);
             } else {
-                stream.peak_level *= 0.85;
-                if stream.peak_level < 0.01 {
+                stream.peak_level *= SILENCE_RATE;
+                if stream.peak_level < SILENCE_FLOOR {
                     stream.peak_level = 0.0;
                 }
             }
@@ -1627,9 +1681,9 @@ impl MixerApp {
         }
         fill(f, l.shortcuts, MANTLE, 0.0);
         let rows: &[(&str, &str)] = if self.picker == Picker::None {
-            &SHORTCUTS
+            SHORTCUTS
         } else {
-            &PICKER_SHORTCUTS
+            PICKER_SHORTCUTS
         };
         let n = rows.len().max(1) as f32;
         let cell_w = (l.shortcuts.w - l.pad * 2.0).max(0.0) / n;
@@ -1839,8 +1893,19 @@ mod tests {
         (1.0, 1.0),
     ];
 
+    /// The seed every test's mixer is built at.
+    ///
+    /// Named rather than taken from `new`, which seeds from the kernel: a suite
+    /// whose meters happen to repeat because this host's random device is out
+    /// of reach is a suite that goes red on the first host where it answers.
+    const TEST_SEED: u64 = 0x00C0_FFEE_0BAD_F00D;
+
     fn app() -> MixerApp {
-        let mut a = MixerApp::new();
+        seeded(TEST_SEED)
+    }
+
+    fn seeded(seed: u64) -> MixerApp {
+        let mut a = MixerApp::with_seed(seed);
         a.resize(WINDOW_WIDTH, WINDOW_HEIGHT);
         a
     }
@@ -2573,6 +2638,34 @@ mod tests {
         );
         press(&mut a, Key::M);
         assert_eq!(a.master_effective_volume(), was);
+
+        // And on a stream column, which is a different branch of the same
+        // action and used not to be tested here at all: the sweep made muting
+        // a stream a one-way switch and this test, which toggles the master
+        // twice, never noticed.
+        for i in 0..a.stream_count() {
+            let mut a = app();
+            a.apply(Action::Select(Selection::Stream(i)));
+            let vol = a.stream_at(i).map(|s| s.volume);
+            let was_muted = a.stream_at(i).is_some_and(|s| s.muted);
+            press(&mut a, Key::M);
+            assert_eq!(
+                a.stream_at(i).map(|s| s.muted),
+                Some(!was_muted),
+                "M did not change column {i}'s mute"
+            );
+            assert_eq!(
+                a.stream_at(i).map(|s| s.volume),
+                vol,
+                "muting column {i} moved its fader instead of gating it"
+            );
+            press(&mut a, Key::M);
+            assert_eq!(
+                a.stream_at(i).map(|s| s.muted),
+                Some(was_muted),
+                "M would not unmute column {i}, so mute is a one-way switch"
+            );
+        }
     }
 
     #[test]
@@ -2626,8 +2719,8 @@ mod tests {
         }
 
         for (open, rows) in [
-            (Action::ClosePicker, &SHORTCUTS[..]),
-            (Action::OpenOutput, &PICKER_SHORTCUTS[..]),
+            (Action::ClosePicker, SHORTCUTS),
+            (Action::OpenOutput, PICKER_SHORTCUTS),
         ] {
             let mut a = app();
             a.apply(open);
@@ -3060,14 +3153,11 @@ mod tests {
             }
             v
         };
-        let (mut a, mut b) = (app(), app());
-        assert_eq!(run(&mut a), run(&mut b), "the same mixer ran two ways");
-
-        let mut c = app();
-        c.rng = SeededRng::new(0x1234_5678_9ABC_DEF0);
+        let (mut a, mut b) = (seeded(TEST_SEED), seeded(TEST_SEED));
+        assert_eq!(run(&mut a), run(&mut b), "one seed ran two different ways");
         assert_ne!(
-            run(&mut c),
-            run(&mut app()),
+            run(&mut seeded(0x1234_5678_9ABC_DEF0)),
+            run(&mut seeded(TEST_SEED)),
             "two seeds drew the same meter run"
         );
     }
@@ -3237,6 +3327,12 @@ mod tests {
             before,
             "Down moved a fader as well as the sheet"
         );
+        // And Up, which this test is named for and used not to press: the
+        // sweep pointed Up at a fader instead of the sheet and every
+        // assertion above went on holding, because none of them was about Up.
+        press(&mut a, Key::Up);
+        assert_eq!(a.picker_row(), 0, "Up did not move the sheet back");
+        assert_eq!(columns(&a), before, "Up moved a fader as well as the sheet");
     }
 
     // ── The arithmetic and the ordering ────────────────────────────────────
@@ -3491,5 +3587,304 @@ mod tests {
         probe::key(&mut b, &key_ev(Key::Right, Modifiers::NONE, true));
         assert_eq!(b.selection(), Selection::Stream(0));
         assert_eq!(MixerApp::SIZE, (WINDOW_WIDTH, WINDOW_HEIGHT));
+    }
+
+    // ── Written after the mutation sweep ──────────────────────────────────
+    //
+    // Each of these closes a hole the sweep found: a change to the program
+    // that every one of the tests above went on passing through.
+
+    #[test]
+    fn a_column_that_does_not_exist_cannot_be_selected() {
+        let mut a = app();
+        let before = a.selection();
+        // One past the last stream, and far past it. `Select` is the action a
+        // click on a column raises, and nothing downstream re-checks the index
+        // -- `stream_at_mut` would quietly do nothing and the keyboard would
+        // then be pointed at a column that is not drawn, with no way back.
+        for i in [
+            a.stream_count(),
+            a.stream_count().saturating_add(7),
+            usize::MAX,
+        ] {
+            a.apply(Action::Select(Selection::Stream(i)));
+            assert_eq!(
+                a.selection(),
+                before,
+                "selecting stream {i}, which does not exist, moved the keyboard to it"
+            );
+        }
+        // And the last one that does exist is still reachable, so the guard is
+        // a bound and not a blanket refusal.
+        let last = a.stream_count().saturating_sub(1);
+        a.apply(Action::Select(Selection::Stream(last)));
+        assert_eq!(a.selection(), Selection::Stream(last));
+    }
+
+    #[test]
+    fn o_opens_the_output_picker_and_i_opens_the_input_one() {
+        // The two keys open two sheets that look alike, so "a picker opened"
+        // is true of both and says nothing. What separates them is the list:
+        // the outputs and the inputs share no name.
+        for (key, want, names) in [
+            (
+                Key::O,
+                Picker::Output,
+                vec!["Speakers", "Headphones", "HDMI Output"],
+            ),
+            (Key::I, Picker::Input, vec!["Microphone", "Line In"]),
+        ] {
+            let mut a = app();
+            press(&mut a, key);
+            assert_eq!(a.picker(), want, "{key:?} opened the wrong picker");
+            assert_eq!(
+                sheet_names(&a),
+                names,
+                "{key:?} opened a sheet listing the other kind of device"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sheet_lists_the_devices_of_the_kind_it_is_the_picker_for() {
+        // Deliberately not phrased against `output_devices()`/`input_devices()`
+        // by index: the drawing code reads one of those two lists, so an
+        // agreement test built from the same choice cannot see the choice go
+        // wrong. These are the names as written in the model's own stub.
+        let mut a = app();
+        a.apply(Action::OpenOutput);
+        assert_eq!(sheet_names(&a), ["Speakers", "Headphones", "HDMI Output"]);
+        a.apply(Action::ClosePicker);
+        a.apply(Action::OpenInput);
+        assert_eq!(sheet_names(&a), ["Microphone", "Line In"]);
+    }
+
+    #[test]
+    fn closing_the_sheet_forgets_the_row_it_was_on() {
+        let mut a = app();
+        a.apply(Action::OpenInput);
+        press(&mut a, Key::Down);
+        assert_eq!(a.picker_row(), 1, "Down did not move the sheet's cursor");
+        press(&mut a, Key::Escape);
+        assert_eq!(a.picker(), Picker::None);
+        assert_eq!(
+            a.picker_row(),
+            0,
+            "a closed sheet still remembers the row it was on, which is a row \
+             into a list that is no longer on screen"
+        );
+    }
+
+    #[test]
+    fn a_click_off_the_sheet_cancels_it_without_choosing_the_row_it_was_on() {
+        // The old version of this test moved nothing before clicking away, so
+        // the row under the cursor *was* the chosen device and cancelling and
+        // choosing came to the same thing. A cancel is only distinguishable
+        // from a choice once the two differ.
+        let mut a = app();
+        let was = a.selected_output();
+        a.apply(Action::OpenOutput);
+        press(&mut a, Key::Down);
+        assert_ne!(a.picker_row(), was, "the test never left the chosen row");
+
+        let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let l = a.layout();
+        let (x, y) = (l.window.x + 2.0, l.sheet.y / 2.0);
+        assert!(!l.sheet.contains(x, y), "the point picked is on the sheet");
+        assert_eq!(
+            hit_with_rect(&f, x, y).map(|p| p.0),
+            Some(Target::ClosePicker),
+            "the backdrop does not answer off the sheet"
+        );
+        click(&mut a, x, y);
+
+        assert_eq!(a.picker(), Picker::None, "the sheet stayed up");
+        assert_eq!(
+            a.selected_output(),
+            was,
+            "clicking away from the sheet chose the device the cursor was on"
+        );
+    }
+
+    #[test]
+    fn a_click_past_either_end_of_a_track_is_full_volume_or_none() {
+        // `value_at` is public, and the clamp in it is the only thing keeping
+        // a caller that hands it a `y` off the track from getting a volume
+        // that is not a volume. Through the pointer the two always agree --
+        // the box a click was tested against is the box it is measured in --
+        // so the clamp is only reachable, and only checkable, from here.
+        let r = Rect::new(10.0, 20.0, 8.0, 100.0);
+        assert!(
+            close(value_at(r, r.y), 1.0),
+            "the top of a track is not full"
+        );
+        assert!(
+            close(value_at(r, r.bottom()), 0.0),
+            "the foot of a track is not silence"
+        );
+        for y in [r.y - 1.0, r.y - 1e6, f32::NEG_INFINITY] {
+            assert!(
+                close(value_at(r, y), 1.0),
+                "a click above the track gave {}",
+                value_at(r, y)
+            );
+        }
+        for y in [r.bottom() + 1.0, r.bottom() + 1e6, f32::INFINITY] {
+            assert!(
+                close(value_at(r, y), 0.0),
+                "a click below the track gave {}",
+                value_at(r, y)
+            );
+        }
+        // A track with no height has no fraction to read, and dividing by it
+        // would answer with an infinity rather than a level.
+        assert!(close(value_at(Rect::new(0.0, 0.0, 4.0, 0.0), 3.0), 0.0));
+    }
+
+    #[test]
+    fn a_faders_hit_box_is_the_track_it_is_drawn_on() {
+        // The grid walk compares the frame's hit boxes against each other, so
+        // it is blind to a box that is the wrong *shape*: shrink every fader to
+        // its top half and the walk still agrees with itself. This ties the box
+        // back to the geometry the fader was drawn from.
+        for (w, h) in SIZES {
+            let a = app();
+            let f = a.frame(w, h);
+            let l = a.layout_at(w, h);
+            for (sel, target) in [
+                (Selection::Master, Target::MasterFader),
+                (Selection::Stream(0), Target::StreamFader(0)),
+            ] {
+                let Some(col) = l.column_of(sel) else {
+                    continue;
+                };
+                let want = l.fader_of(col);
+                let Some(got) = box_of(&f, target) else {
+                    assert!(
+                        want.is_empty(),
+                        "at {w}x{h} {target:?} was drawn but not recorded"
+                    );
+                    continue;
+                };
+                assert!(
+                    close(got.x, want.x)
+                        && close(got.y, want.y)
+                        && close(got.w, want.w)
+                        && close(got.h, want.h),
+                    "at {w}x{h} {target:?} is drawn on {want:?} but answers for {got:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_meter_rises_faster_than_it_falls() {
+        // A bound, not a golden number, and one that holds wherever a meter
+        // starts from. A step moves a meter to `p + (target - p) * rate`, and
+        // no target exceeds `HEADROOM` of the volume -- so the share of the
+        // remaining headroom a single rising step can close is exactly the
+        // rate, and never more. If attack and decay were one rate, no rise
+        // anywhere in a long run could close more than `DECAY_RATE` of the gap.
+        let ceiling_if_no_attack = DECAY_RATE;
+        let mut steepest: f32 = 0.0;
+        for seed in 0..20u64 {
+            let mut a = seeded(seed);
+            for _ in 0..25 {
+                let before: Vec<Option<f32>> = (0..a.stream_count())
+                    .map(|i| a.stream_at(i).map(|s| s.peak_level))
+                    .collect();
+                tick(&mut a, METER_STEP_MS);
+                for (i, was) in before.iter().enumerate() {
+                    let (Some(was), Some(s)) = (*was, a.stream_at(i)) else {
+                        continue;
+                    };
+                    let room = s.volume * HEADROOM - was;
+                    if s.peak_level > was && room > 0.0 {
+                        steepest = steepest.max((s.peak_level - was) / room);
+                    }
+                }
+            }
+        }
+        assert!(
+            steepest > ceiling_if_no_attack,
+            "the steepest rise in five hundred steps closed {steepest} of the \
+             gap it had left, and a meter that attacked no faster than it \
+             decays cannot close more than {ceiling_if_no_attack} -- so attack \
+             and decay are the same rate"
+        );
+    }
+
+    #[test]
+    fn the_shortcut_bar_is_the_band_given_up_first_when_the_window_is_short() {
+        // Both orders keep every band inside the window, so "everything fits"
+        // cannot see the order. What the order decides is *which* band is gone
+        // at a height where only one of them can stay -- and the device bar is
+        // the one that has to, because it is the only place the chosen output
+        // is written.
+        let a = app();
+        let mut saw_a_height_with_one_band = false;
+        let mut h = 1.0_f32;
+        while h <= 400.0 {
+            let l = a.layout_at(WINDOW_WIDTH, h);
+            let (dev, sc) = (l.shows(l.devices), l.shows(l.shortcuts));
+            if dev && !sc {
+                saw_a_height_with_one_band = true;
+            }
+            assert!(
+                !sc || dev,
+                "at height {h} the shortcut bar was kept and the device bar dropped"
+            );
+            h += 0.1;
+        }
+        assert!(
+            saw_a_height_with_one_band,
+            "no height drops exactly one band, so this test proves nothing"
+        );
+    }
+
+    /// The device name written on each of the sheet's rows, top to bottom.
+    ///
+    /// Read off the *rows* rather than off a vertical band: the sheet's title
+    /// sits in the same band, and a band filter alone reads it as the first
+    /// device in the list. A row is what the pointer can hit, so taking the
+    /// names from the rows also says the two agree.
+    fn sheet_names(a: &MixerApp) -> Vec<String> {
+        let f = a.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let mut rows: Vec<Rect> = f
+            .hits()
+            .iter()
+            .filter(|(t, _)| matches!(t, Target::OutputRow(_) | Target::InputRow(_)))
+            .map(|(_, r)| *r)
+            .collect();
+        rows.sort_by(|a, b| a.y.total_cmp(&b.y));
+        rows.iter()
+            .filter_map(|r| {
+                f.commands().iter().find_map(|c| match c {
+                    RenderCommand::Text { text, x, y, .. } if r.contains(*x, *y) => {
+                        Some(text.trim_start_matches(['*', ' ']).to_string())
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// Two lengths that are the same to within a pixel's rounding.
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 0.01
+    }
+
+    /// The layout a window of this size would get, without resizing the app.
+    ///
+    /// Built from the app's own stream count rather than a literal, so a test
+    /// that adds a stream does not have to remember to update the layout it
+    /// compares against.
+    trait LayoutAt {
+        fn layout_at(&self, w: f32, h: f32) -> Layout;
+    }
+    impl LayoutAt for MixerApp {
+        fn layout_at(&self, w: f32, h: f32) -> Layout {
+            Layout::new(w, h, self.stream_count())
+        }
     }
 }

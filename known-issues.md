@@ -92013,3 +92013,84 @@ service. Until that exists, an app must not pretend to know the date.
 **Trigger to revisit.** When a time service exists and is reachable from
 userspace: rename `Screen::Featured` back to a word of the day, seed the index
 from the civil date, and keep the arrows as a way to browse.
+
+### Lesson 51: a guard standing behind a duplicate of itself is a guard no test can reach (lane C, 2026-08-27)
+
+**In short:** the sound mixer checked two of its invariants twice — once where
+the value was produced and again where it was used. The second check never
+fired, because the first one had already made it true. That sounds harmless,
+and it is worse than harmless: it makes the *first* check untestable. Delete
+the first one and the program behaves identically, because the second quietly
+does its job. A 111-mutation sweep found both, and in each case the "surviving
+mutation" was not a hole in the tests at all — it was a piece of the program
+that could not be observed to matter.
+
+Both, in `apps/mixer/src/main.rs`:
+
+| Where | The redundant second guard | Why it could never fire |
+|---|---|---|
+| `percent_of` | after `level.clamp(0.0, 1.0) * 100.0` and `.round()`, a second `.clamp(0.0, 100.0)` | The first clamp already bounds the result to `0..=100`. |
+| `Action::ChooseDevice` | `if self.picker_row >= self.picker_len() { return; }` | All four ways of setting `picker_row` already bound it: `SelectPickerRow` refuses an index past the end, `MovePickerRow` clamps, opening a sheet takes the row from the chosen device, closing one resets it. |
+
+**Why the second clamp in `percent_of` was actively wrong, not merely
+redundant.** Its own doc comment read: "the clamp is before the cast rather
+than after it, because a cast out of range in Rust saturates silently and a
+level that arrived out of range is a bug worth not hiding behind a number that
+happens to look reasonable." The second clamp *is* that silent saturation,
+written out longhand. The comment and the code two lines below it said
+opposite things, and the code won.
+
+**The rule.** Defence in depth is two checks of two *different* invariants at
+two trust boundaries. Two checks of the *same* invariant in sequence is one
+check plus one hiding place — and the hiding place is upstream, where the
+check that people actually read lives. When a mutation sweep reports a guard's
+removal as harmless, the finding is usually not "write a better test": it is
+"one of these two guards is dead, and dead code in a safety position is worse
+than no code, because it reads as protection."
+
+**How to tell the two apart.** Ask what state the second check exists to
+catch, and then try to reach that state from the public API. If nothing can
+produce it, the check is dead. If something can — as with `value_at`, which is
+`pub` and whose caller need not be the pointer handler that happens to pass it
+a matching rectangle — the check is live, and it wants a test that reaches it
+directly rather than through the caller that makes it unnecessary.
+
+### Lesson 52: a test built out of the thing it is testing cannot fail (lane C, 2026-08-27)
+
+**In short:** two shapes of test look thorough, pass forever, and are blind by
+construction. An **agreement test** checks that two views of the program say
+the same thing — but if both views are computed through the same function,
+breaking that function breaks both views identically and they go on agreeing.
+A **symmetry test** checks that two operations undo each other — but two
+operations that have been *swapped* undo each other exactly as well as two that
+have not. In both cases the fault is inside the part the test cancels out, so
+no version of the fault can make it red.
+
+Both showed up in one 111-mutation sweep of `apps/mixer`:
+
+| The test | What it says | The fault it cannot see |
+|---|---|---|
+| `a_column_index_means_the_same_stream_to_the_screen_and_to_the_keyboard` | the name drawn on column *i* is the name of `stream_at(i)` | `stream_at` returning `streams[i]` instead of the *i*th column in draw order. Both sides call `stream_at`, so both moved together. |
+| `left_and_right_undo_each_other_from_every_column` | Left then Right returns you where you started | Left and Right swapped. Swapped keys still undo each other. |
+
+**What does catch them.** Not a better agreement test — a test that names an
+outside fact. For the column mapping: assert against the order the columns are
+*drawn* in ("column 0 is Discord, because playing streams sort first"), which
+is a claim about the sort, not about `stream_at`. For the arrow keys: assert
+which *way* a keystroke moves ("Right from Master selects column 0"), which is
+a claim about direction, not about invertibility.
+
+**The rule for writing them.** Before trusting a test of the form "X equals Y"
+or "f then g is identity", ask: *what does each side go through?* If the two
+sides share a step, the test is silent about that step, and you need a third
+statement that comes from outside the program — a literal, a hand-computed
+value, a fact from the design document. A test whose every term is defined by
+the code under test is a tautology with assertions in it.
+
+**Corollary for mutation sweeps.** When a sweep reports a mutation caught by
+tests *other than* the one you predicted would catch it, that is not a
+bookkeeping detail to fix by editing the expectation. It is the sweep telling
+you the test you named is blind — and the reason is usually one of these two
+shapes. Both entries above were found exactly that way: the harness reported
+`WRONG TESTS`, and the honest reading was not "my expectation was off" but "the
+test I wrote for this cannot see this."

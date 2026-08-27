@@ -64,3 +64,10 @@ echo "=== and the sourced body's own status survives a refused RETURN action"
 printf 'echo s1\n(exit 5)\n' > inc2.sh
 p "$R; K=99; trap 'echo RET' RETURN; trap c DEBUG; . ./inc2.sh; trap - RETURN; $E"
 p "$R; K=4;  trap 'echo RET' RETURN; trap c DEBUG; . ./inc2.sh; trap - RETURN; $E"
+# The harness gives each case a throwaway cwd, so these would go anyway — but a
+# case is also something a person runs by hand, and by hand the cwd is the
+# corpus directory itself. A `*.sh` left there becomes a corpus *case* on the
+# next run, which is how `inc.sh` and `inc2.sh` once turned a 664-case corpus
+# into a 666-case one. Every other case that writes a script cleans up after
+# itself for the same reason.
+rm -f inc.sh inc2.sh

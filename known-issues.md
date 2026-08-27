@@ -88796,7 +88796,36 @@ now asserts "the disk did not win" instead of pinning the neighbouring value.
 
 ---
 
-## `A-IRQBALANCE-CAN-NEVER-BALANCE-FOR-TWO-INDEPENDENT-REASONS` (lane A, 2026-08-26)
+## `A-IRQBALANCE-CAN-NEVER-BALANCE-FOR-TWO-INDEPENDENT-REASONS` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26, and it was three
+
+**Fixed** in `1ae48ea8c` (the wiring and the off-by-one) on top of `16d2a7857`
+(the counting). Boot-verified — see the closing note at the end of this entry.
+
+**There was a third reason, found only while fixing the first two**, and it is
+the interesting one: `balance()` computed the vector for IRQ *N* as `N + 32`,
+but `ioapic.rs` programs IOAPIC input *N* onto `IRQ_VECTOR_BASE + N` = **33** +
+*N*, deliberately "keeping vector 32 reserved for the LAPIC timer". So IRQ 0's
+rate was read from the *timer's* slot, IRQ 1's from IRQ 0's, and so on down the
+line.
+
+**That third defect was harmless only because of the second one.** With no
+hardware vector counted, every slot read zero — and a shifted index into an
+all-zero array also reads zero. The moment the counts became real, slot 32
+started carrying ~1000 ticks a second, far above `MIN_RATE_THRESHOLD`. Fixing
+reasons 1 and 2 alone would therefore have produced a balancer that concluded
+IRQ 0 was the busiest line on the machine and began migrating it on the strength
+of the timer's traffic. **Dead would have become actively wrong**, and the
+"fix" would have been the thing that armed it.
+
+The general lesson, which is worth more than the bug: *a dormant subsystem can
+hide defects in its own logic, because dormancy feeds it uniform inputs that
+every version of the logic maps to the same output.* Reviving one is not one
+change but two — turn it on, and separately re-derive whether its arithmetic was
+ever right. Do not assume the code between the entry and the exit was correct
+merely because nobody had complained; nobody could have.
+
+`vector_for_irq()` now derives the mapping from `ioapic::IRQ_VECTOR_BASE` rather
+than restating it, since restating it is exactly how the two drifted apart.
 
 **In short:** the interrupt balancer — `kernel/src/irqbalance.rs`, ~500 lines of
 greedy bin-packing that is supposed to spread device interrupts across CPUs —
@@ -88896,3 +88925,94 @@ scoping the `dispatch_vector` counting fix; `irqbalance` turned out to be the
 consumer with real consequences rather than display ones.
 
 **Not a regression.** True since the module was written.
+
+---
+
+## `A-ZIP-EXTRACT-ALLOCATED-A-BOMB-BEFORE-CHECKING-IT` — ✅ FIXED 2026-08-26
+
+**Status:** fixed in the same change that promoted `kernel/src/fs/zip.rs` to the
+root `ziparchive` crate. Recorded because the *shape* of the bug is worth
+keeping, not because anything is outstanding.
+
+**What it was.** `extract_entry` inflated an entry with no output bound, then
+verified its CRC-32:
+
+```rust
+let decompressed = inflate(raw)?;          // unbounded
+if crc32(&decompressed) != entry.crc32 { return Err(CorruptedData); }
+```
+
+Every ZIP entry states its own uncompressed size in the central directory. That
+number was parsed into `ZipEntry.uncompressed_size`, shown by `unzip -l`, and
+then **never used as a check anywhere**. So a decompression bomb — a small entry
+crafted to expand enormously — was allocated in full and only then rejected, by
+a checksum that could not run until the allocation had already happened.
+
+**Why it was easy to miss.** The code was not missing a check; it *had* one, and
+the check was correct. It was in the wrong order relative to the thing it was
+protecting. A reviewer asking "is corruption detected?" gets a yes. The question
+that finds this one is "does the detection happen before or after the cost?" —
+and that question is not part of most review habits.
+
+The second half is the more interesting one: the defence that was missing
+(`len() == uncompressed_size`) was missing *because a working substitute
+existed*. The CRC caught the same archives, eventually, so nothing ever failed
+in a way that pointed here. Compare
+`A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS`, where a total
+that summed the whole array was similarly not wrong — only unfalsifiable.
+
+**The fix.** `min(declared, limit)` as the inflater's cap, then exact equality
+against `declared`, then the CRC. See design-decisions.md §615 for the ordering
+argument and the leniency tradeoff.
+
+**Related, still open elsewhere in the tree.** `userspace/zip/src/main.rs` (lane
+B) contains an independent ZIP reader and DEFLATE decoder, so this fix does not
+reach it; whether it has the same hole has not been checked. Filed as
+`requests/a-b-userspace-zip-carries-a-third-deflate-and-a-second-zip-parser.md`.
+That is the concrete cost of duplicated parsers of untrusted input, and it is
+why §610 exists.
+
+## `TD-B-OSH-ANNOUNCES-EVERY-STAGE-OF-A-BACKGROUND-PIPELINE-BEFORE-STARTING-ANY` (lane B, 2026-08-26) — **open**, tech debt
+
+**In short:** with a debugger's DEBUG trap armed, bash tells the trap about a
+background pipeline's stages *one at a time, starting each before it mentions
+the next*, while osh mentions all of them first and only then starts any. Every
+status, every `${PIPESTATUS[@]}` and every verdict comes out the same; the only
+thing that differs is the order in which a stage's own output can interleave
+with the trap's, and even in bash that order is a race.
+
+**Where:** `userspace/oils/src/interp.rs`, `Shell::announce_async` (the loop over
+`ao.first.commands`) and its caller in the item loop, which hands the whole job
+to `Shell::exec_background` once the loop has finished.
+
+**Reproduce** (bash 5.2.21 / glibc 2.39, `osh` built from this tree):
+
+```sh
+shopt -s extdebug
+c(){ echo "F<$BASH_COMMAND>" >&2; [ "$BASH_COMMAND" != "$W" ] || return 2; }
+f(){ { exit 3; } | exit 4 | exit 5 & echo after; }
+W="exit 5"; trap c DEBUG; f
+```
+
+bash prints `F<exit 4>`, `F<exit 3>`, `F<exit 5>`; osh prints `F<exit 4>`,
+`F<exit 5>`, `F<exit 3>`. The `F<exit 3>` is the *group* stage's own child
+announcing its body — a group stage is not announced by the owning shell, so the
+only shell that can name `exit 3` is the child running it. bash has already
+forked that child before it announces `exit 5`, so the child's line can land in
+the middle; osh forks nothing until the loop is over, so it always lands after.
+
+**Why it is only an ordering difference:** the child is concurrent with the
+parent either way, so its position in the stream is a race in bash too — replace
+the group with `{ sleep 2; exit 3; }` and bash reorders to `F<exit 4>`,
+`F<sleep 2>`, `F<exit 5>`, `F<exit 3>`. Nothing a script can read depends on it:
+the answer, the array and which stages ran are identical, which is what
+`tests/corpus/debug-trap-verdict-takes-a-pipeline-stage.sh` checks. No corpus
+section asserts the interleaving, deliberately — a racy expectation would be a
+flaky test.
+
+**Proper fix:** interleave announcement and start, the way `Shell::exec_pipeline`
+would have to as well. That means `announce_async` cannot decide the whole
+`skips` vector up front and hand it to a clone; the job's stages would have to be
+forked by the announcing shell as it goes, which is a different division of
+labour between the parent and the `&` job's clone than osh currently has. Worth
+doing only if a real observable is found that depends on it.

@@ -841,7 +841,12 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
                     errors += 1;
                 }
             }
-            ManifestEntry::Symlink { target: _, path } => {
+            // `target` looks unused on a non-unix host, because only the
+            // `#[cfg(unix)]` arm below reads it — but binding it as `target: _`
+            // to quiet that warning breaks every unix build, SlateOS included
+            // (`toolchain/x86_64-slateos.json` sets `"target-family": ["unix"]`).
+            // It is bound for real and discarded explicitly in the other arm.
+            ManifestEntry::Symlink { target, path } => {
                 if !files_filter.is_empty()
                     && !files_filter.iter().any(|f| path.starts_with(f.as_str()))
                 {
@@ -866,6 +871,7 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
                 }
                 #[cfg(not(unix))]
                 {
+                    let _ = target;
                     eprintln!("  warning: symlinks not supported on this platform: {path}");
                 }
             }

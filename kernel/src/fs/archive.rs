@@ -341,7 +341,17 @@ fn list_zip(data: &[u8]) -> KernelResult<Vec<ArchiveEntry>> {
             } else {
                 EntryKind::File
             },
-            mtime: 0,
+            // ZIP stores a packed DOS date/time pair, not Unix seconds, so
+            // this is the one lister that needs a decoder rather than a
+            // passthrough. `None` covers both the "not recorded" sentinel and
+            // any pair whose fields the calendar cannot name; both collapse to
+            // `0` here only because `ArchiveEntry::mtime` has nowhere to say
+            // "unknown". The `try_from` guards the pre-1970 case that the DOS
+            // range makes impossible today but that a widened decoder would
+            // admit -- a negative second must not wrap into a far-future one.
+            mtime: tzrules::unix_from_dos_datetime(e.dos_datetime)
+                .and_then(|s| u64::try_from(s).ok())
+                .unwrap_or(0),
             mode: 0,
             uid: 0,
             gid: 0,
@@ -1117,10 +1127,12 @@ fn test_extract_rejects_traversal() {
 /// exists to prevent — `archive create` previously passed a literal `0` to all
 /// four writers, stamping every tar/cpio/ar member 1970-01-01.
 ///
-/// The ZIP arm is checked against `zip::parse` rather than [`list`], because
-/// `list_zip` still throws the DOS pair away (tracked as
-/// `A-ARCHIVE-LIST-DISCARDS-THE-ZIP-TIMESTAMP-IT-JUST-LEARNED-TO-WRITE`).
-/// Going through `list` would report the writer as broken when it is not.
+/// The ZIP arm is checked twice over: against `zip::parse` for the exact
+/// packed pair, and against [`list_format`] alongside the other three for the
+/// decoded seconds. The first would pass even if `list_zip` discarded the
+/// value (as it did until `unix_from_dos_datetime` existed) and the second
+/// would pass against an encoder and decoder that were wrong in mirror-image
+/// ways, so neither check subsumes the other.
 fn test_mtime_reaches_every_writer() {
     // 2020-09-13 12:26:40 UTC, with sub-second slop that must be truncated
     // away rather than rounded up: a stored time may read earlier than the
@@ -1153,6 +1165,7 @@ fn test_mtime_reaches_every_writer() {
     );
 
     for (fmt, label) in [
+        (ArchiveFormat::Zip, "zip"),
         (ArchiveFormat::Tar, "tar"),
         (ArchiveFormat::Cpio, "cpio"),
         (ArchiveFormat::Ar, "ar"),

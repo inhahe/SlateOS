@@ -41,9 +41,10 @@ set -euo pipefail
 
 VER="${CPYTHON_VER:-3.12.3}"
 SYSROOT="$SLATE_SYSROOT"
-# Scratch keyed by worktree so two lanes building at once cannot write each
-# other's objects.
-WORK="/tmp/cpython-spike-$SLATE_LANE"
+# Keyed by worktree so two lanes building at once cannot write each other's
+# objects. Durable ($SLATE_WORK), not /tmp — see worktree.sh.
+WORK="$SLATE_WORK/cpython-spike"
+slate_adopt_legacy_work "/tmp/cpython-spike-$SLATE_LANE" "$WORK"
 
 # Everything except the sysroot lives off /mnt/d: the 9p mount is slow, and a
 # CPython build is thousands of compiler invocations rather than pkgconf's tens.

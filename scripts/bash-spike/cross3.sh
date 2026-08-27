@@ -16,7 +16,8 @@
 set -x
 SPIKE="$SLATE_SPIKE"
 # Must match cross2.sh, which created this tree, and slatelink.sh, which reads it.
-BUILD="/tmp/bash-cross-$SLATE_LANE"
+BUILD="$SLATE_WORK/bash-cross"
+slate_adopt_legacy_work "/tmp/bash-cross-$SLATE_LANE" "$BUILD"
 cd "$BUILD" || exit 1
 
 # Same pinned toolchain cross2.sh configured with. Resolving it again (rather

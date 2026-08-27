@@ -29,7 +29,11 @@ LANE="$SLATE_LANE"
 # Must match cross2.sh/cross3.sh. This was `/tmp/bash-cross` — unkeyed — while
 # the sysroot copy beside it was keyed, so two lanes relinking concurrently
 # shared one object tree and produced each other's bash-slateos.elf.
-BUILD="/tmp/bash-cross-$LANE"
+BUILD="$SLATE_WORK/bash-cross"
+slate_adopt_legacy_work "/tmp/bash-cross-$LANE" "$BUILD"
+# The sysroot copy stays scratch on purpose: it is re-copied from
+# toolchain/sysroot on every run, so losing it costs nothing and keeping it
+# would risk linking against a libc.a older than the one in the tree.
 SLATE_SYSROOT_COPY="/tmp/slate-sysroot-$LANE"
 
 # The pinned, hash-verified cross-toolchain. This script previously invoked a
@@ -44,8 +48,10 @@ slate_make_zig_wrappers || exit 1
 
 if [ ! -d "$BUILD" ]; then
     echo "ERROR: $BUILD does not exist — bash's objects have not been compiled yet."
-    echo "       See scripts/bash-spike/README.md (the configure + make step) first;"
-    echo "       this script only relinks objects that step produced."
+    echo "       This script only relinks objects the compile step produced. Run:"
+    echo "         bash scripts/bash-spike/cross2.sh   # cross-configure + compile"
+    echo "         bash scripts/bash-spike/cross3.sh   # work around a 5.2 configure bug"
+    echo "       then this script again. See scripts/bash-spike/README.md."
     exit 1
 fi
 cd "$BUILD" || exit 1

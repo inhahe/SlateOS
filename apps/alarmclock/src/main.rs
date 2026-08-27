@@ -11,16 +11,33 @@
 //!   lap statistics, lap history table.
 //!
 //! Uses the guitk library for UI rendering with a Catppuccin Mocha dark theme.
+//!
+//! # Drawing and hit testing are one walk
+//!
+//! Every view draws into a [`Frame`], which records a [`Target`] for each
+//! control at the same moment it emits the rectangle for it. There is no second
+//! table of "where the buttons are" to drift out of step with the drawing, and
+//! a control scrolled out of its pane is not clickable because the frame trims
+//! its hit box to the clip in force. See [`guitk::frame`].
+//!
+//! # This program's whole point is that it is ticked
+//!
+//! An alarm clock that is not sent [`Event::Tick`] is a clock that does not
+//! run: countdowns freeze, snoozes never expire, and the time on screen is
+//! whatever it was when the window opened. [`App::tick_interval`] is therefore
+//! the single most important method in this file, and it varies — a running
+//! stopwatch needs a fast clock to show hundredths, and everything else is
+//! content with twice a second.
 
-#[allow(unused_imports)]
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-#[allow(unused_imports)]
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
-
-#[allow(unused_imports)]
-use std::collections::VecDeque;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -103,13 +120,287 @@ const SNOOZE_OPTIONS: [u32; 4] = [5, 10, 15, 30];
 /// Quick timer presets in minutes.
 const TIMER_PRESETS: [u32; 7] = [1, 3, 5, 10, 15, 30, 60];
 
+/// Height of one alarm card, and the gap under it.
+const ALARM_ROW_H: f32 = 72.0;
+const ALARM_ROW_GAP: f32 = 8.0;
+
+/// Height of one timer card, and the gap under it.
+const TIMER_ROW_H: f32 = 120.0;
+const TIMER_ROW_GAP: f32 = 8.0;
+
+/// Height of one lap row in the stopwatch table.
+const LAP_ROW_H: f32 = 22.0;
+
+/// Height of the clock band at the top of the alarm tab.
+const CLOCK_H: f32 = 84.0;
+
+/// Height of the `+ Add Alarm` button, of one quick-start preset chip, and of
+/// the custom-duration row. Named rather than repeated, so the rectangle that
+/// is drawn and the one that is clicked cannot drift apart.
+const ADD_BUTTON_H: f32 = 36.0;
+const PRESET_H: f32 = 32.0;
+const CUSTOM_H: f32 = 36.0;
+
+/// Gap between two chips in a row of them.
+const CHIP_GAP: f32 = 8.0;
+
+/// Presets per row on the timer tab. Seven in rows of four is two rows with a
+/// ragged end, which is what a wrapped grid looks like; four across is the
+/// widest that keeps `60 min` legible at [`MIN_WIDTH`].
+const PRESETS_PER_ROW: usize = 4;
+
+/// Longest label a user may type. Not a styling choice: the label is drawn into
+/// a fixed-width card and is stored per alarm, so an unbounded field is an
+/// unbounded allocation driven straight from the keyboard.
+const MAX_LABEL_LEN: usize = 64;
+
+/// The smallest window this layout is drawn for. Below it rectangles start to
+/// overlap rather than merely crowd, so the size handed to [`AlarmClockApp::frame`]
+/// is clamped up to this and the view is allowed to run off the bottom edge —
+/// a scrolled pane is usable, an overlapping one is not.
+const MIN_WIDTH: f32 = 360.0;
+const MIN_HEIGHT: f32 = 320.0;
+
+/// How often the app is ticked while the stopwatch is running.
+///
+/// The stopwatch shows hundredths, so a slower clock would show a display that
+/// visibly jumps. It advances by the *measured* `elapsed_ms` of each tick, not
+/// by this number, so a late tick costs nothing but a late repaint.
+const TICK_FAST: Duration = Duration::from_millis(50);
+
+/// How often the app is ticked the rest of the time.
+///
+/// Never `None`: the alarm list shows a running clock and alarms fire from it,
+/// so an app that stopped its clock whenever the stopwatch was stopped would be
+/// an alarm clock that only rings while you are timing something.
+const TICK_SLOW: Duration = Duration::from_millis(500);
+
+// ============================================================================
+// Targets — every control the pointer can land on
+// ============================================================================
+
+/// A control the pointer can land on.
+///
+/// One variant per thing a user can click. Payloads are stable identifiers
+/// (`AlarmId`, `TimerId`) and never indices into a `Vec`, so a hit box recorded
+/// while drawing still names the right alarm after a delete reorders the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// One of the three tabs across the top.
+    Tab(ActiveTab),
+    /// The big clock on the alarm tab. Clicking it swaps 12- and 24-hour.
+    ClockFormat,
+
+    // ---- alarm list ----
+    /// The `+ Add Alarm` button.
+    AddAlarm,
+    /// An alarm card, anywhere that is not one of the controls on it.
+    AlarmRow(AlarmId),
+    /// The enable/disable pill on an alarm card.
+    AlarmToggle(AlarmId),
+    /// The delete cross on an alarm card.
+    AlarmDelete(AlarmId),
+    /// `Snooze`, shown only while that alarm is ringing.
+    AlarmSnooze(AlarmId),
+    /// `Dismiss`, shown while ringing or snoozed.
+    AlarmDismiss(AlarmId),
+
+    // ---- alarm editor ----
+    /// Step the hour being edited by one, up or down.
+    EditHour(Step),
+    /// Step the minute being edited by one, up or down.
+    EditMinute(Step),
+    /// The label entry field.
+    EditLabel,
+    /// One of the seven repeat-day chips.
+    EditDay(Weekday),
+    /// Cycle the alarm sound.
+    EditSound,
+    /// Cycle the snooze duration.
+    EditSnooze,
+    /// Commit the editor.
+    EditSave,
+    /// Abandon the editor.
+    EditCancel,
+
+    // ---- timer tab ----
+    /// A quick-start preset, in minutes.
+    Preset(u32),
+    /// One of the three custom-duration entry fields.
+    CustomField(HmsField),
+    /// Start a timer for whatever the custom fields say.
+    CustomStart,
+    /// A timer card, anywhere that is not one of the controls on it.
+    TimerRow(TimerId),
+    /// Start/pause on a timer card.
+    TimerToggle(TimerId),
+    /// Reset on a timer card.
+    TimerReset(TimerId),
+    /// Delete on a timer card.
+    TimerDelete(TimerId),
+
+    // ---- stopwatch tab ----
+    /// Start/pause the stopwatch.
+    SwToggle,
+    /// Record a lap.
+    SwLap,
+    /// Reset the stopwatch and clear the laps.
+    SwReset,
+}
+
+/// Which way a stepper points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Step {
+    Up,
+    Down,
+}
+
+/// One of the three custom-duration entry fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HmsField {
+    Hours,
+    Minutes,
+    Seconds,
+}
+
+impl HmsField {
+    /// The three fields left to right.
+    pub const ALL: [HmsField; 3] = [HmsField::Hours, HmsField::Minutes, HmsField::Seconds];
+
+    /// The placeholder shown when the field is empty.
+    #[must_use]
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::Hours => "HH",
+            Self::Minutes => "MM",
+            Self::Seconds => "SS",
+        }
+    }
+
+    /// Position in [`Self::ALL`], which is also the index into the entry
+    /// buffers.
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Self::Hours => 0,
+            Self::Minutes => 1,
+            Self::Seconds => 2,
+        }
+    }
+}
+
+/// What has the keyboard.
+///
+/// Exactly one thing can, and `None` is a real state rather than a stand-in for
+/// "the label field": with nothing focused, a bare letter is a shortcut. That is
+/// the distinction that stops typing a label from resetting the stopwatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Focus {
+    /// The editor's label field.
+    Label,
+    /// One of the custom-duration fields.
+    Custom(HmsField),
+}
+
+/// A frame being drawn. See [`guitk::frame`] for why drawing and hit-testing
+/// are the same walk.
+pub type Frame = guitk::frame::Frame<Target>;
+
+/// What a handled event asks the window to do next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Nothing changed; do not repaint.
+    None,
+    /// State changed; repaint.
+    Redraw,
+    /// Close the window.
+    Quit,
+}
+
+// ============================================================================
+// Drawing helpers
+// ============================================================================
+
+/// Fill a rounded rectangle.
+fn fill(f: &mut Frame, rect: Rect, color: Color, radius: f32) {
+    f.push(RenderCommand::FillRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.w,
+        height: rect.h,
+        color,
+        corner_radii: CornerRadii::all(radius),
+    });
+}
+
+/// Draw a run of text with its top-left corner at `(x, y)`.
+fn text(
+    f: &mut Frame,
+    x: f32,
+    y: f32,
+    body: impl Into<String>,
+    color: Color,
+    size: f32,
+    weight: FontWeightHint,
+    max_width: f32,
+) {
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: body.into(),
+        color,
+        font_size: size,
+        font_weight: weight,
+        max_width: Some(max_width.max(0.0)),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// Draw a run of text centred horizontally in `[x, x + width)`.
+///
+/// Centred by measuring, not by a hand-tuned offset. The offsets this file used
+/// to carry (`x + width / 2.0 - 80.0`) were correct for one string at one font
+/// size and drifted the moment either changed — and the clock string changes
+/// width whenever the format is toggled, which is a control the user can reach.
+fn text_centred(
+    f: &mut Frame,
+    x: f32,
+    y: f32,
+    width: f32,
+    body: &str,
+    color: Color,
+    size: f32,
+    weight: FontWeightHint,
+) {
+    let measured = guitk::text::measure(body, size, weight).min(width);
+    let left = x + (width - measured) / 2.0;
+    text(f, left, y, body, color, size, weight, width);
+}
+
+/// A filled button with a centred label and a hit box, drawn in one call so the
+/// two can never name different rectangles.
+fn button(f: &mut Frame, rect: Rect, label: &str, bg: Color, fg: Color, target: Target) {
+    let size = 13.0;
+    fill(f, rect, bg, (rect.h / 2.0).min(8.0));
+    text_centred(
+        f,
+        rect.x,
+        rect.y + (rect.h - size) / 2.0 - 1.0,
+        rect.w,
+        label,
+        fg,
+        size,
+        FontWeightHint::Bold,
+    );
+    f.hit(target, rect);
+}
+
 // ============================================================================
 // Active tab
 // ============================================================================
 
 /// Which tab is currently selected.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ActiveTab {
     #[default]
     Alarm,
@@ -130,7 +421,6 @@ impl ActiveTab {
         [Self::Alarm, Self::Timer, Self::Stopwatch]
     }
 }
-
 
 // ============================================================================
 // Days of the week
@@ -216,8 +506,7 @@ impl Weekday {
 // ============================================================================
 
 /// Whether to display time in 12-hour or 24-hour format.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TimeFormat {
     #[default]
     TwelveHour,
@@ -233,7 +522,7 @@ impl TimeFormat {
                 let display_hour = match hour {
                     0 => 12,
                     1..=12 => hour,
-                    _ => hour - 12,
+                    _ => hour.saturating_sub(12),
                 };
                 (display_hour, Some(period))
             }
@@ -242,14 +531,12 @@ impl TimeFormat {
     }
 }
 
-
 // ============================================================================
 // Sound selection
 // ============================================================================
 
 /// Available alarm/timer sounds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum AlarmSound {
     #[default]
     Default,
@@ -299,7 +586,6 @@ impl AlarmSound {
     }
 }
 
-
 // ============================================================================
 // Snooze duration
 // ============================================================================
@@ -326,7 +612,9 @@ impl SnoozeDuration {
 
 impl Default for SnoozeDuration {
     fn default() -> Self {
-        Self { minutes: SNOOZE_OPTIONS[0] }
+        Self {
+            minutes: SNOOZE_OPTIONS[0],
+        }
     }
 }
 
@@ -473,42 +761,74 @@ impl Alarm {
         if !self.enabled || self.ringing || self.snoozed_remaining.is_some() {
             return None;
         }
-        let alarm_mins = u32::from(self.hour) * 60 + u32::from(self.minute);
-        let current_mins = u32::from(current_hour) * 60 + u32::from(current_minute);
+        /// Minutes in a day.
+        const DAY: u32 = 24 * 60;
+
+        // Saturating throughout. Every value here is bounded by construction —
+        // `hour` is 0..=23 and `minute` 0..=59, both clamped by `Alarm::new` —
+        // but the arguments are `u8`s a caller supplies, and a wrapped
+        // subtraction would put the next alarm 71 million minutes away rather
+        // than report an out-of-range input.
+        let minutes_of =
+            |h: u8, m: u8| u32::from(h).saturating_mul(60).saturating_add(u32::from(m));
+        let alarm_mins = minutes_of(self.hour, self.minute);
+        let current_mins = minutes_of(current_hour, current_minute);
 
         if !self.is_repeating() {
             // One-shot alarm: fires later today, or tomorrow if time passed.
-            return if alarm_mins > current_mins {
-                Some(alarm_mins - current_mins)
+            return Some(if alarm_mins > current_mins {
+                alarm_mins.saturating_sub(current_mins)
             } else {
-                Some(24 * 60 - current_mins + alarm_mins)
-            };
+                DAY.saturating_sub(current_mins).saturating_add(alarm_mins)
+            });
         }
 
         // Repeating alarm: find the nearest enabled day.
         let wd = current_weekday_idx.unwrap_or(0);
         for offset in 0u32..8 {
-            let day_idx = (wd + offset as usize) % 7;
+            let day_idx = wd.saturating_add(offset as usize) % 7;
             if !self.repeat_days.get(day_idx).copied().unwrap_or(false) {
                 continue;
             }
             if offset == 0 && alarm_mins > current_mins {
-                return Some(alarm_mins - current_mins);
+                return Some(alarm_mins.saturating_sub(current_mins));
             } else if offset > 0 {
                 return Some(
-                    offset * 24 * 60 + alarm_mins - current_mins,
+                    offset
+                        .saturating_mul(DAY)
+                        .saturating_add(alarm_mins)
+                        .saturating_sub(current_mins),
                 );
             }
             // offset == 0 but alarm_mins <= current_mins: check subsequent days.
         }
         // Fallback — next week same day.
-        Some(7 * 24 * 60 - current_mins + alarm_mins)
+        Some(
+            DAY.saturating_mul(7)
+                .saturating_sub(current_mins)
+                .saturating_add(alarm_mins),
+        )
     }
 
-    /// Produce render commands for this alarm entry in the alarm list.
-    pub fn render(&self, x: f32, y: f32, width: f32, format: TimeFormat) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-        let item_height = 72.0;
+    /// How tall this alarm's card is.
+    ///
+    /// A ringing or snoozed alarm grows a strip for `Snooze`/`Dismiss`. The list
+    /// asks each card its own height rather than assuming a constant, because a
+    /// list that steps by a constant while one row is taller draws the rest of
+    /// the rows on top of it — and the buttons that appear at exactly the moment
+    /// the user needs them would be the ones buried.
+    #[must_use]
+    pub fn card_height(&self) -> f32 {
+        if self.ringing || self.snoozed_remaining.is_some() {
+            ALARM_ROW_H + 34.0
+        } else {
+            ALARM_ROW_H
+        }
+    }
+
+    /// Draw this alarm's card into `f`, recording its controls.
+    pub fn draw(&self, f: &mut Frame, x: f32, y: f32, width: f32, format: TimeFormat) {
+        let height = self.card_height();
         let bg_color = if self.ringing {
             Color::rgba(RED.r, RED.g, RED.b, 40)
         } else if self.snoozed_remaining.is_some() {
@@ -517,87 +837,137 @@ impl Alarm {
             SURFACE0
         };
 
-        // Background card.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: item_height,
-            color: bg_color,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        let card = Rect::new(x, y, width, height);
+        fill(f, card, bg_color, 8.0);
+        // The card itself first, so the controls drawn on top of it below win
+        // the hit test — `hit_test` reads back to front.
+        f.hit(Target::AlarmRow(self.id), card);
 
         // Time display.
-        let time_str = self.format_time(format);
         let time_color = if self.enabled { TEXT_COLOR } else { OVERLAY0 };
-        cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: y + 12.0,
-            text: time_str,
-            color: time_color,
-            font_size: 28.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width * 0.6),
-            overflow: TextOverflow::Ellipsis,
-        });
+        text(
+            f,
+            x + PADDING,
+            y + 12.0,
+            self.format_time(format),
+            time_color,
+            28.0,
+            FontWeightHint::Bold,
+            width * 0.6,
+        );
 
         // Label.
         if !self.label.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + PADDING,
-                y: y + 46.0,
-                text: self.label.clone(),
-                color: SUBTEXT0,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width * 0.5),
-                overflow: TextOverflow::Ellipsis,
-            });
+            text(
+                f,
+                x + PADDING,
+                y + 46.0,
+                self.label.clone(),
+                SUBTEXT0,
+                13.0,
+                FontWeightHint::Regular,
+                width * 0.5,
+            );
         }
 
         // Repeat summary.
-        let summary = self.repeat_summary();
-        cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: y + 46.0 + if self.label.is_empty() { 0.0 } else { 16.0 },
-            text: summary,
-            color: OVERLAY1,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width * 0.5),
-            overflow: TextOverflow::Ellipsis,
-        });
+        text(
+            f,
+            x + PADDING,
+            y + 46.0 + if self.label.is_empty() { 0.0 } else { 16.0 },
+            self.repeat_summary(),
+            OVERLAY1,
+            11.0,
+            FontWeightHint::Regular,
+            width * 0.5,
+        );
 
-        // Enable/disable toggle indicator.
-        let toggle_x = x + width - 56.0;
-        let toggle_y = y + 24.0;
-        let toggle_w = 40.0;
-        let toggle_h = 22.0;
+        // Delete cross, top right.
+        let delete = Rect::new(x + width - 30.0, y + 8.0, 22.0, 22.0);
+        text_centred(
+            f,
+            delete.x,
+            delete.y + 4.0,
+            delete.w,
+            "\u{2715}",
+            OVERLAY0,
+            13.0,
+            FontWeightHint::Regular,
+        );
+        f.hit(Target::AlarmDelete(self.id), delete);
+
+        // Enable/disable pill.
+        let toggle = Rect::new(x + width - 62.0, y + 38.0, 44.0, 24.0);
         let toggle_color = if self.enabled { BLUE } else { SURFACE2 };
-        cmds.push(RenderCommand::FillRect {
-            x: toggle_x,
-            y: toggle_y,
-            width: toggle_w,
-            height: toggle_h,
-            color: toggle_color,
-            corner_radii: CornerRadii::all(toggle_h / 2.0),
-        });
+        fill(f, toggle, toggle_color, toggle.h / 2.0);
+        let knob_d = toggle.h - 6.0;
         let knob_x = if self.enabled {
-            toggle_x + toggle_w - toggle_h + 2.0
+            toggle.x + toggle.w - knob_d - 3.0
         } else {
-            toggle_x + 2.0
+            toggle.x + 3.0
         };
-        cmds.push(RenderCommand::FillRect {
-            x: knob_x,
-            y: toggle_y + 2.0,
-            width: toggle_h - 4.0,
-            height: toggle_h - 4.0,
-            color: TEXT_COLOR,
-            corner_radii: CornerRadii::all((toggle_h - 4.0) / 2.0),
-        });
+        fill(
+            f,
+            Rect::new(knob_x, toggle.y + 3.0, knob_d, knob_d),
+            TEXT_COLOR,
+            knob_d / 2.0,
+        );
+        f.hit(Target::AlarmToggle(self.id), toggle);
 
-        cmds
+        // The ringing/snoozed strip.
+        if self.ringing || self.snoozed_remaining.is_some() {
+            let strip_y = y + ALARM_ROW_H;
+            if let Some(remaining) = self.snoozed_remaining {
+                // `remaining` is the count still to run, so the user is told how
+                // long they have — not how long they asked for, which they
+                // already know.
+                text(
+                    f,
+                    x + PADDING,
+                    strip_y + 6.0,
+                    format!(
+                        "Snoozed — {} left",
+                        format_duration_hms(clamp_u32(remaining))
+                    ),
+                    YELLOW,
+                    12.0,
+                    FontWeightHint::Regular,
+                    width * 0.5,
+                );
+            }
+            let btn_w = 84.0f32.min((width - PADDING * 2.0 - 8.0) / 2.0);
+            let btn_h = 26.0;
+            let mut btn_x = x + width - PADDING - btn_w;
+            button(
+                f,
+                Rect::new(btn_x, strip_y + 2.0, btn_w, btn_h),
+                "Dismiss",
+                SURFACE1,
+                TEXT_COLOR,
+                Target::AlarmDismiss(self.id),
+            );
+            if self.ringing {
+                btn_x -= btn_w + 8.0;
+                button(
+                    f,
+                    Rect::new(btn_x, strip_y + 2.0, btn_w, btn_h),
+                    "Snooze",
+                    BLUE,
+                    CRUST,
+                    Target::AlarmSnooze(self.id),
+                );
+            }
+        }
     }
+}
+
+/// Narrow a `u64` second count to the `u32` the duration formatter takes.
+///
+/// Saturating rather than `as`: a snooze cannot be 136 years, but a wrapped
+/// count would display as a plausible-looking small number, which is worse than
+/// an obviously-pegged one.
+fn clamp_u32(seconds: u64) -> u32 {
+    u32::try_from(seconds).unwrap_or(u32::MAX)
 }
 
 // ============================================================================
@@ -703,101 +1073,109 @@ impl Timer {
         format_duration_hms(self.total_seconds)
     }
 
-    /// Produce render commands for this timer entry in the timer list.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-        let item_height = 120.0;
+    /// The action the start/pause button on this timer's card performs.
+    ///
+    /// One button, four meanings — Start, Pause, Resume, Restart — named here so
+    /// the label the user reads and the effect a click has come from the same
+    /// `match`. Two `match`es over `state` is how a button comes to say "Pause"
+    /// and start the timer.
+    #[must_use]
+    pub fn toggle_label(&self) -> &'static str {
+        match self.state {
+            TimerState::Idle => "Start",
+            TimerState::Running => "Pause",
+            TimerState::Paused => "Resume",
+            TimerState::Finished => "Restart",
+        }
+    }
+
+    /// Apply what [`toggle_label`](Self::toggle_label) promises.
+    pub fn toggle(&mut self) {
+        match self.state {
+            TimerState::Idle | TimerState::Paused => self.start(),
+            TimerState::Running => self.pause(),
+            // A finished timer's button restarts it from the top, because the
+            // alternative — start a timer already at zero — finishes again on
+            // the next tick and looks like the button did nothing.
+            TimerState::Finished => {
+                self.reset();
+                self.start();
+            }
+        }
+    }
+
+    /// Draw this timer's card into `f`, recording its controls.
+    pub fn draw(&self, f: &mut Frame, x: f32, y: f32, width: f32) {
         let bg_color = match self.state {
             TimerState::Finished => Color::rgba(RED.r, RED.g, RED.b, 40),
-            TimerState::Running => SURFACE0,
             TimerState::Paused => Color::rgba(YELLOW.r, YELLOW.g, YELLOW.b, 20),
-            TimerState::Idle => SURFACE0,
+            TimerState::Running | TimerState::Idle => SURFACE0,
         };
 
-        // Background card.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: item_height,
-            color: bg_color,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        let card = Rect::new(x, y, width, TIMER_ROW_H);
+        fill(f, card, bg_color, 8.0);
+        f.hit(Target::TimerRow(self.id), card);
 
         // Timer label.
         if !self.label.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + PADDING,
-                y: y + 8.0,
-                text: self.label.clone(),
-                color: SUBTEXT0,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - PADDING * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            text(
+                f,
+                x + PADDING,
+                y + 8.0,
+                self.label.clone(),
+                SUBTEXT0,
+                13.0,
+                FontWeightHint::Regular,
+                width - PADDING * 2.0,
+            );
         }
 
-        let text_y = if self.label.is_empty() { y + 16.0 } else { y + 28.0 };
+        let text_y = if self.label.is_empty() {
+            y + 16.0
+        } else {
+            y + 28.0
+        };
 
         // Remaining time.
-        let time_str = self.format_remaining();
         let time_color = match self.state {
             TimerState::Finished => RED,
             TimerState::Paused => YELLOW,
-            _ => TEXT_COLOR,
+            TimerState::Running | TimerState::Idle => TEXT_COLOR,
         };
-        cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: text_y,
-            text: time_str,
-            color: time_color,
-            font_size: 32.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width * 0.6),
-            overflow: TextOverflow::Ellipsis,
-        });
+        text(
+            f,
+            x + PADDING,
+            text_y,
+            self.format_remaining(),
+            time_color,
+            32.0,
+            FontWeightHint::Bold,
+            width * 0.5,
+        );
 
         // Total time indicator.
-        cmds.push(RenderCommand::Text {
-            x: x + PADDING,
-            y: text_y + 40.0,
-            text: format!("of {}", self.format_total()),
-            color: OVERLAY0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width * 0.4),
-            overflow: TextOverflow::Ellipsis,
-        });
+        text(
+            f,
+            x + PADDING,
+            text_y + 40.0,
+            format!("of {}", self.format_total()),
+            OVERLAY0,
+            12.0,
+            FontWeightHint::Regular,
+            width * 0.4,
+        );
 
         // Progress bar.
-        let bar_x = x + PADDING;
-        let bar_y = text_y + 60.0;
-        let bar_w = width - PADDING * 2.0;
-        let bar_h = 6.0;
-        cmds.push(RenderCommand::FillRect {
-            x: bar_x,
-            y: bar_y,
-            width: bar_w,
-            height: bar_h,
-            color: SURFACE2,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        let fill_w = bar_w * self.progress();
+        let bar = Rect::new(x + PADDING, text_y + 60.0, width - PADDING * 2.0, 6.0);
+        fill(f, bar, SURFACE2, 3.0);
+        let fill_w = bar.w * self.progress();
         let fill_color = match self.state {
             TimerState::Finished => RED,
             TimerState::Paused => YELLOW,
-            _ => BLUE,
+            TimerState::Running | TimerState::Idle => BLUE,
         };
         if fill_w > 0.0 {
-            cmds.push(RenderCommand::FillRect {
-                x: bar_x,
-                y: bar_y,
-                width: fill_w,
-                height: bar_h,
-                color: fill_color,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            fill(f, Rect::new(bar.x, bar.y, fill_w, bar.h), fill_color, 3.0);
         }
 
         // State badge.
@@ -813,18 +1191,50 @@ impl Timer {
             TimerState::Paused => YELLOW,
             TimerState::Finished => RED,
         };
-        cmds.push(RenderCommand::Text {
-            x: x + width - 80.0,
-            y: y + 12.0,
-            text: badge_text.to_string(),
-            color: badge_color,
-            font_size: 11.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(72.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        text(
+            f,
+            x + width - 84.0,
+            y + 10.0,
+            badge_text,
+            badge_color,
+            11.0,
+            FontWeightHint::Bold,
+            76.0,
+        );
 
-        cmds
+        // Controls, right-hand column: Start/Pause over Reset, with the delete
+        // cross below both.
+        let delete = Rect::new(x + width - 30.0, y + TIMER_ROW_H - 30.0, 22.0, 22.0);
+        text_centred(
+            f,
+            delete.x,
+            delete.y + 4.0,
+            delete.w,
+            "\u{2715}",
+            OVERLAY0,
+            13.0,
+            FontWeightHint::Regular,
+        );
+        f.hit(Target::TimerDelete(self.id), delete);
+
+        let btn_w = 80.0f32.min(width * 0.35);
+        let btn_x = x + width - PADDING - btn_w;
+        button(
+            f,
+            Rect::new(btn_x, y + 30.0, btn_w, 28.0),
+            self.toggle_label(),
+            BLUE,
+            CRUST,
+            Target::TimerToggle(self.id),
+        );
+        button(
+            f,
+            Rect::new(btn_x, y + 64.0, btn_w, 28.0),
+            "Reset",
+            SURFACE1,
+            TEXT_COLOR,
+            Target::TimerReset(self.id),
+        );
     }
 }
 
@@ -849,7 +1259,8 @@ pub fn render_progress_ring(
     // Draw the track (full circle) as line segments.
     for i in 0..RING_SEGMENTS {
         let angle0 = 2.0 * core::f32::consts::PI * (i as f32) / (RING_SEGMENTS as f32);
-        let angle1 = 2.0 * core::f32::consts::PI * ((i + 1) as f32) / (RING_SEGMENTS as f32);
+        let angle1 =
+            2.0 * core::f32::consts::PI * (i.saturating_add(1) as f32) / (RING_SEGMENTS as f32);
         cmds.push(RenderCommand::Line {
             x1: cx + radius * angle0.cos(),
             y1: cy + radius * angle0.sin(),
@@ -866,8 +1277,8 @@ pub fn render_progress_ring(
     let offset = -core::f32::consts::FRAC_PI_2;
     for i in 0..filled_segments {
         let angle0 = offset + 2.0 * core::f32::consts::PI * (i as f32) / (RING_SEGMENTS as f32);
-        let angle1 =
-            offset + 2.0 * core::f32::consts::PI * ((i + 1) as f32) / (RING_SEGMENTS as f32);
+        let angle1 = offset
+            + 2.0 * core::f32::consts::PI * (i.saturating_add(1) as f32) / (RING_SEGMENTS as f32);
         cmds.push(RenderCommand::Line {
             x1: cx + radius * angle0.cos(),
             y1: cy + radius * angle0.sin(),
@@ -974,7 +1385,7 @@ impl Stopwatch {
             return;
         }
         let split = self.elapsed_ms.saturating_sub(self.segment_start_ms);
-        let number = self.laps.len() as u32 + 1;
+        let number = (self.laps.len() as u32).saturating_add(1);
         self.laps.push(Lap {
             number,
             split_ms: split,
@@ -1006,7 +1417,7 @@ impl Stopwatch {
             }
             total = total.saturating_add(lap.split_ms);
         }
-        let avg = total / self.laps.len() as u64;
+        let avg = total.checked_div(self.laps.len() as u64).unwrap_or(0);
         Some(LapStats {
             best_ms: best,
             worst_ms: worst,
@@ -1015,27 +1426,58 @@ impl Stopwatch {
         })
     }
 
-    /// Produce render commands for the stopwatch display.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// The action the start/pause button performs, and the word on it.
+    #[must_use]
+    pub fn toggle_label(&self) -> &'static str {
+        match self.state {
+            StopwatchState::Running => "Pause",
+            StopwatchState::Paused => "Resume",
+            StopwatchState::Stopped => "Start",
+        }
+    }
 
+    /// Apply what [`toggle_label`](Self::toggle_label) promises.
+    pub fn toggle(&mut self) {
+        match self.state {
+            StopwatchState::Running => self.pause(),
+            StopwatchState::Paused | StopwatchState::Stopped => self.start(),
+        }
+    }
+
+    /// Height of the lap table's content, which is what the pane scrolls over.
+    #[must_use]
+    pub fn lap_content_height(&self) -> f32 {
+        self.laps.len() as f32 * LAP_ROW_H
+    }
+
+    /// Where the lap table starts, measured from the top of the tab's content
+    /// area. The scroll clamp and the drawing both need it, and a second copy
+    /// is a second thing to get wrong.
+    pub const LAP_TABLE_TOP: f32 = 190.0;
+
+    /// Draw the whole stopwatch tab into `f`.
+    ///
+    /// Takes the pane's height as well as its width because the lap table is
+    /// scrolled and clipped: a lap that has scrolled out of the pane must not be
+    /// drawn over the buttons above it, and — since the frame trims hit boxes to
+    /// the clip — must not be clickable either.
+    pub fn draw(&self, f: &mut Frame, x: f32, y: f32, width: f32, height: f32, scroll: f32) {
         // Elapsed time — large display.
-        let time_str = self.format_elapsed();
         let time_color = match self.state {
             StopwatchState::Running => GREEN,
             StopwatchState::Paused => YELLOW,
             StopwatchState::Stopped => TEXT_COLOR,
         };
-        cmds.push(RenderCommand::Text {
-            x: x + width / 2.0 - 100.0,
-            y: y + 20.0,
-            text: time_str,
-            color: time_color,
-            font_size: 48.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width - PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        text_centred(
+            f,
+            x,
+            y + 16.0,
+            width,
+            &self.format_elapsed(),
+            time_color,
+            48.0,
+            FontWeightHint::Bold,
+        );
 
         // State indicator.
         let state_text = match self.state {
@@ -1043,145 +1485,159 @@ impl Stopwatch {
             StopwatchState::Paused => "PAUSED",
             StopwatchState::Stopped => "STOPPED",
         };
-        cmds.push(RenderCommand::Text {
-            x: x + width / 2.0 - 30.0,
-            y: y + 76.0,
-            text: state_text.to_string(),
-            color: OVERLAY0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(120.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        text_centred(
+            f,
+            x,
+            y + 78.0,
+            width,
+            state_text,
+            OVERLAY0,
+            12.0,
+            FontWeightHint::Regular,
+        );
+
+        // Controls.
+        let gap = 8.0;
+        let btn_w = ((width - gap * 2.0) / 3.0).max(48.0);
+        let btn_y = y + 100.0;
+        let btn_h = 34.0;
+        button(
+            f,
+            Rect::new(x, btn_y, btn_w, btn_h),
+            self.toggle_label(),
+            BLUE,
+            CRUST,
+            Target::SwToggle,
+        );
+        // Lap is only meaningful while running — a lap of a stopped stopwatch
+        // would be a zero-length split. Drawn dimmed rather than hidden, so the
+        // row of three buttons does not reflow under the pointer.
+        let lap_live = self.state == StopwatchState::Running;
+        button(
+            f,
+            Rect::new(x + btn_w + gap, btn_y, btn_w, btn_h),
+            "Lap",
+            if lap_live { SURFACE1 } else { SURFACE0 },
+            if lap_live { TEXT_COLOR } else { OVERLAY0 },
+            Target::SwLap,
+        );
+        button(
+            f,
+            Rect::new(x + (btn_w + gap) * 2.0, btn_y, btn_w, btn_h),
+            "Reset",
+            SURFACE1,
+            TEXT_COLOR,
+            Target::SwReset,
+        );
 
         // Lap stats.
         if let Some(stats) = self.lap_stats() {
-            let stats_y = y + 100.0;
-            cmds.push(RenderCommand::Text {
-                x: x + PADDING,
-                y: stats_y,
-                text: format!(
+            text(
+                f,
+                x,
+                y + 146.0,
+                format!(
                     "Best: {}  Worst: {}  Avg: {}  ({} laps)",
                     format_duration_ms(stats.best_ms),
                     format_duration_ms(stats.worst_ms),
                     format_duration_ms(stats.average_ms),
                     stats.count,
                 ),
-                color: SUBTEXT0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - PADDING * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+                SUBTEXT0,
+                12.0,
+                FontWeightHint::Regular,
+                width,
+            );
+        }
+
+        if self.laps.is_empty() {
+            return;
         }
 
         // Lap table header.
-        let table_y = y + 130.0;
-        if !self.laps.is_empty() {
-            // Header line.
-            cmds.push(RenderCommand::Line {
-                x1: x + PADDING,
-                y1: table_y,
-                x2: x + width - PADDING,
-                y2: table_y,
-                color: SURFACE2,
-                width: 1.0,
-            });
+        let table_y = y + Self::LAP_TABLE_TOP - 24.0;
+        f.push(RenderCommand::Line {
+            x1: x,
+            y1: table_y,
+            x2: x + width,
+            y2: table_y,
+            color: SURFACE2,
+            width: 1.0,
+        });
 
-            let col_num_x = x + PADDING;
-            let col_split_x = x + 80.0;
-            let col_elapsed_x = x + 220.0;
-
-            cmds.push(RenderCommand::Text {
-                x: col_num_x,
-                y: table_y + 4.0,
-                text: "Lap".to_string(),
-                color: OVERLAY1,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(60.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: col_split_x,
-                y: table_y + 4.0,
-                text: "Split".to_string(),
-                color: OVERLAY1,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(120.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: col_elapsed_x,
-                y: table_y + 4.0,
-                text: "Elapsed".to_string(),
-                color: OVERLAY1,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(120.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Lap rows (most recent first, limited display).
-            let stats = self.lap_stats();
-            let row_height = 22.0;
-            let max_visible = 10;
-            let start = if self.laps.len() > max_visible {
-                self.laps.len() - max_visible
-            } else {
-                0
-            };
-            for (i, lap) in self.laps[start..].iter().rev().enumerate() {
-                let row_y = table_y + 24.0 + (i as f32) * row_height;
-
-                // Highlight best/worst laps.
-                let split_color = if let Some(ref s) = stats {
-                    if self.laps.len() > 1 && lap.split_ms == s.best_ms {
-                        GREEN
-                    } else if self.laps.len() > 1 && lap.split_ms == s.worst_ms {
-                        RED
-                    } else {
-                        TEXT_COLOR
-                    }
-                } else {
-                    TEXT_COLOR
-                };
-
-                cmds.push(RenderCommand::Text {
-                    x: col_num_x,
-                    y: row_y,
-                    text: format!("#{}", lap.number),
-                    color: SUBTEXT0,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(50.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cmds.push(RenderCommand::Text {
-                    x: col_split_x,
-                    y: row_y,
-                    text: lap.format_split(),
-                    color: split_color,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(120.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cmds.push(RenderCommand::Text {
-                    x: col_elapsed_x,
-                    y: row_y,
-                    text: lap.format_elapsed(),
-                    color: SUBTEXT0,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(120.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
+        let col_num_x = x;
+        let col_split_x = x + width * 0.28;
+        let col_elapsed_x = x + width * 0.62;
+        for (cx, title, w) in [
+            (col_num_x, "Lap", width * 0.26),
+            (col_split_x, "Split", width * 0.32),
+            (col_elapsed_x, "Elapsed", width * 0.36),
+        ] {
+            text(
+                f,
+                cx,
+                table_y + 4.0,
+                title,
+                OVERLAY1,
+                12.0,
+                FontWeightHint::Bold,
+                w,
+            );
         }
 
-        cmds
+        // Lap rows, most recent first, inside a scrolled and clipped pane.
+        let pane = Rect::new(
+            x,
+            y + Self::LAP_TABLE_TOP,
+            width,
+            (height - Self::LAP_TABLE_TOP).max(0.0),
+        );
+        f.clip(pane);
+        f.translate(0.0, -scroll);
+        let stats = self.lap_stats();
+        for (i, lap) in self.laps.iter().rev().enumerate() {
+            let row_y = pane.y + (i as f32) * LAP_ROW_H;
+            // The best and worst laps are only worth colouring once there is
+            // something to compare against; with one lap it is both, and
+            // painting it green and red at once says nothing.
+            let split_color = match stats {
+                Some(ref s) if self.laps.len() > 1 && lap.split_ms == s.best_ms => GREEN,
+                Some(ref s) if self.laps.len() > 1 && lap.split_ms == s.worst_ms => RED,
+                _ => TEXT_COLOR,
+            };
+            text(
+                f,
+                col_num_x,
+                row_y,
+                format!("#{}", lap.number),
+                SUBTEXT0,
+                12.0,
+                FontWeightHint::Regular,
+                width * 0.26,
+            );
+            text(
+                f,
+                col_split_x,
+                row_y,
+                lap.format_split(),
+                split_color,
+                12.0,
+                FontWeightHint::Regular,
+                width * 0.32,
+            );
+            text(
+                f,
+                col_elapsed_x,
+                row_y,
+                lap.format_elapsed(),
+                SUBTEXT0,
+                12.0,
+                FontWeightHint::Regular,
+                width * 0.36,
+            );
+        }
+        f.untranslate();
+        f.unclip();
     }
 }
 
@@ -1201,6 +1657,112 @@ pub struct LapStats {
 }
 
 // ============================================================================
+// Alarm editor
+// ============================================================================
+
+/// The alarm being composed, held apart from the alarm it will become.
+///
+/// A user who opens an existing alarm, changes the hour and then presses
+/// Cancel must get the alarm back unchanged — which is only possible if the
+/// edits were never applied to it in the first place. So the editor is a
+/// separate value that is copied *out of* an alarm on open and *into* it on
+/// save, rather than a set of flags pointing at the live one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlarmEditor {
+    pub hour: u8,
+    pub minute: u8,
+    pub label: String,
+    pub repeat_days: [bool; 7],
+    pub sound: AlarmSound,
+    /// Index into [`SNOOZE_OPTIONS`], cycled by the snooze row.
+    pub snooze_index: usize,
+    /// The alarm this will overwrite, or `None` for one that does not exist
+    /// yet. Held as an `AlarmId` and not an index, so deleting some *other*
+    /// alarm while the editor is open cannot redirect the save onto a
+    /// neighbour.
+    pub editing: Option<AlarmId>,
+}
+
+impl AlarmEditor {
+    /// An editor for a brand-new alarm at `hour:minute`.
+    #[must_use]
+    pub fn new_alarm(hour: u8, minute: u8) -> Self {
+        Self {
+            hour: hour.min(23),
+            minute: minute.min(59),
+            label: String::new(),
+            repeat_days: [false; 7],
+            sound: AlarmSound::default(),
+            snooze_index: 0,
+            editing: None,
+        }
+    }
+
+    /// An editor loaded from an existing alarm.
+    #[must_use]
+    pub fn from_alarm(alarm: &Alarm) -> Self {
+        Self {
+            hour: alarm.hour,
+            minute: alarm.minute,
+            label: alarm.label.clone(),
+            repeat_days: alarm.repeat_days,
+            sound: alarm.sound,
+            snooze_index: SNOOZE_OPTIONS
+                .iter()
+                .position(|&m| m == alarm.snooze_duration.minutes)
+                .unwrap_or(0),
+            editing: Some(alarm.id),
+        }
+    }
+
+    /// The snooze duration the index names.
+    #[must_use]
+    pub fn snooze(&self) -> SnoozeDuration {
+        SnoozeDuration::new(
+            SNOOZE_OPTIONS
+                .get(self.snooze_index)
+                .copied()
+                .unwrap_or(SNOOZE_OPTIONS[0]),
+        )
+    }
+
+    /// Step the hour, wrapping at both ends.
+    pub fn step_hour(&mut self, step: Step) {
+        self.hour = wrap_step(self.hour, step, 24);
+    }
+
+    /// Step the minute, wrapping at both ends.
+    pub fn step_minute(&mut self, step: Step) {
+        self.minute = wrap_step(self.minute, step, 60);
+    }
+
+    /// Copy the editor's fields onto an alarm, leaving its runtime state
+    /// (`enabled`, `ringing`, `snoozed_remaining`) alone — those belong to the
+    /// alarm, not to the form.
+    pub fn apply_to(&self, alarm: &mut Alarm) {
+        alarm.hour = self.hour;
+        alarm.minute = self.minute;
+        alarm.label.clone_from(&self.label);
+        alarm.repeat_days = self.repeat_days;
+        alarm.sound = self.sound;
+        alarm.snooze_duration = self.snooze();
+    }
+}
+
+/// Add or subtract one, wrapping within `0..modulus`.
+///
+/// `rem_euclid` and not `%`: stepping 0 down has to reach `modulus - 1`, and
+/// `-1 % 24` is `-1` in Rust, which is not an hour.
+fn wrap_step(value: u8, step: Step, modulus: i32) -> u8 {
+    let delta = match step {
+        Step::Up => 1,
+        Step::Down => -1,
+    };
+    let next = i32::from(value).saturating_add(delta).rem_euclid(modulus);
+    u8::try_from(next).unwrap_or(0)
+}
+
+// ============================================================================
 // Application state
 // ============================================================================
 
@@ -1217,6 +1779,34 @@ pub struct AlarmClockApp {
     pub current_time: (u8, u8, u8),
     /// Current weekday index (0=Mon).
     pub current_weekday: usize,
+    /// The size the window was last drawn at.
+    ///
+    /// Kept because a click arrives without one: [`handle_click`] has to
+    /// re-draw the frame to hit-test against it, and drawing it at the default
+    /// size would test against a layout the user is not looking at.
+    ///
+    /// [`handle_click`]: AlarmClockApp::handle_click
+    pub window_size: (f32, f32),
+    /// Scroll offsets in pixels for the alarm list, the timer list and the lap
+    /// table. Pixels rather than row indices because the alarm rows are not all
+    /// the same height — a ringing one grows a button strip.
+    pub alarm_scroll: f32,
+    pub timer_scroll: f32,
+    pub lap_scroll: f32,
+    /// The open alarm editor, if there is one.
+    pub editor: Option<AlarmEditor>,
+    /// What has the keyboard.
+    pub focus: Option<Focus>,
+    /// The three custom-duration entry buffers, indexed by [`HmsField::index`].
+    pub custom: [String; 3],
+    /// Milliseconds banked toward the next whole second.
+    ///
+    /// The alarms and the timers advance once per second, but ticks arrive
+    /// every 50 ms while the stopwatch runs. Banking the remainder is what
+    /// keeps a one-second timer taking one second at both tick rates; a
+    /// handler that fired the per-second work on every tick would run a
+    /// countdown ten times too fast whenever the stopwatch happened to be on.
+    tick_accum_ms: u64,
 }
 
 impl AlarmClockApp {
@@ -1231,6 +1821,14 @@ impl AlarmClockApp {
             next_timer_id: 1,
             current_time: (0, 0, 0),
             current_weekday: 0,
+            window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            alarm_scroll: 0.0,
+            timer_scroll: 0.0,
+            lap_scroll: 0.0,
+            editor: None,
+            focus: None,
+            custom: [String::new(), String::new(), String::new()],
+            tick_accum_ms: 0,
         }
     }
 
@@ -1322,7 +1920,7 @@ impl AlarmClockApp {
 
     /// Create a timer from a preset (minutes).
     pub fn create_timer_preset(&mut self, minutes: u32) -> TimerId {
-        self.create_timer(minutes * 60)
+        self.create_timer(minutes.saturating_mul(60))
     }
 
     /// Create a timer with custom hours:minutes:seconds.
@@ -1374,12 +1972,18 @@ impl AlarmClockApp {
 
     /// Count running timers.
     pub fn running_timer_count(&self) -> usize {
-        self.timers.iter().filter(|t| t.state == TimerState::Running).count()
+        self.timers
+            .iter()
+            .filter(|t| t.state == TimerState::Running)
+            .count()
     }
 
     /// Count finished timers.
     pub fn finished_timer_count(&self) -> usize {
-        self.timers.iter().filter(|t| t.state == TimerState::Finished).count()
+        self.timers
+            .iter()
+            .filter(|t| t.state == TimerState::Finished)
+            .count()
     }
 
     // ---- Stopwatch delegation ----
@@ -1441,9 +2045,11 @@ impl AlarmClockApp {
             }
             if alarm.hour == hour && alarm.minute == minute {
                 // Check repeat days if applicable.
-                if alarm.is_repeating() && !alarm.repeats_on(
-                    Weekday::from_index(self.current_weekday).unwrap_or(Weekday::Monday),
-                ) {
+                if alarm.is_repeating()
+                    && !alarm.repeats_on(
+                        Weekday::from_index(self.current_weekday).unwrap_or(Weekday::Monday),
+                    )
+                {
                     continue;
                 }
                 alarm.ringing = true;
@@ -1462,359 +2068,1073 @@ impl AlarmClockApp {
         };
     }
 
+    // ---- Wall clock ----
+
+    /// Set the clock from a UTC instant, in seconds since the epoch.
+    ///
+    /// Pure, and separated from the wall-clock read on purpose: an alarm that
+    /// fires at 07:00 can only be tested if the test can say what time it is.
+    /// [`refresh_clock`](Self::refresh_clock) is the one place in this file
+    /// that asks the system.
+    ///
+    /// # Zone
+    ///
+    /// UTC, said out loud. There is no per-process zone to read yet
+    /// (`known-issues.md` -> `TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), and every
+    /// lane-C surface that renders an instant marks itself with an explicit
+    /// `Tz::utc()` so `rg 'Tz::utc' apps/ gui/` finds all of them at once.
+    /// Going through `lookup().gmtoff` rather than writing `secs % 86_400` is
+    /// what makes this a one-line change when a real zone arrives — and
+    /// `% 86_400` is itself the exact bug the taskbar clock shipped: correct
+    /// looking, and five hours out.
+    pub fn set_time_from_utc(&mut self, utc_secs: i64) {
+        let zone = tzrules::Tz::utc();
+        let local = utc_secs.saturating_add(i64::from(zone.lookup(utc_secs).gmtoff));
+
+        // `rem_euclid`, not `%`: a pre-1970 instant with `%` gives a negative
+        // remainder, which is not a time of day at all.
+        let secs_into_day = local.rem_euclid(86_400);
+        // Each division is bounded by the line above, so no cast can lose
+        // anything: 0..86_400 / 3600 is 0..24 and the remainders are 0..60.
+        let (hour, minute, second) = (
+            (secs_into_day / 3600) as u8,
+            ((secs_into_day / 60) % 60) as u8,
+            (secs_into_day % 60) as u8,
+        );
+
+        // The civil date comes from `guitk::date`, the toolkit's one calendar,
+        // rather than a private day-of-week formula in this file — which is how
+        // an alarm set for "Mon" comes to fire on Sunday.
+        let day = guitk::date::Date::from_unix_utc(local).weekday();
+        self.set_current_time(hour, minute, second, weekday_index(day));
+    }
+
+    /// Set the clock from the system's idea of now.
+    ///
+    /// A clock that cannot be read leaves the previous reading standing rather
+    /// than falling back to midnight: a stuck clock is visible, and an alarm
+    /// clock that silently reads 00:00 is not.
+    pub fn refresh_clock(&mut self) {
+        if let Ok(since_epoch) = SystemTime::now().duration_since(UNIX_EPOCH) {
+            self.set_time_from_utc(i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX));
+        }
+    }
+
+    // ---- Editor ----
+
+    /// Open the editor on a new alarm, defaulted to the next whole hour.
+    ///
+    /// The next hour rather than the current time, because an alarm saved at
+    /// the very minute it is set for either fires immediately or waits a whole
+    /// day, and neither is what "add an alarm" means.
+    pub fn open_new_alarm(&mut self) {
+        let (hour, _, _) = self.current_time;
+        self.editor = Some(AlarmEditor::new_alarm(hour.wrapping_add(1).min(23), 0));
+        self.focus = None;
+    }
+
+    /// Open the editor on an existing alarm. No-op if the id is unknown.
+    pub fn open_alarm(&mut self, id: AlarmId) {
+        if let Some(alarm) = self.find_alarm(id) {
+            self.editor = Some(AlarmEditor::from_alarm(alarm));
+            self.focus = None;
+        }
+    }
+
+    /// Commit the open editor, creating or overwriting an alarm.
+    ///
+    /// Returns the alarm's id, or `None` if no editor was open.
+    pub fn save_editor(&mut self) -> Option<AlarmId> {
+        let editor = self.editor.take()?;
+        self.focus = None;
+        let id = match editor.editing {
+            Some(id) if self.find_alarm(id).is_some() => id,
+            // Either a new alarm, or one that was deleted from under the open
+            // editor. Creating it in the second case loses nothing and is far
+            // less surprising than a Save that silently does nothing.
+            _ => self.create_alarm(editor.hour, editor.minute),
+        };
+        if let Some(alarm) = self.find_alarm_mut(id) {
+            editor.apply_to(alarm);
+        }
+        Some(id)
+    }
+
+    /// Abandon the open editor.
+    pub fn cancel_editor(&mut self) {
+        self.editor = None;
+        self.focus = None;
+    }
+
+    // ---- Custom timer entry ----
+
+    /// The duration the three custom fields currently spell, in seconds.
+    ///
+    /// Empty fields read as zero, so typing only `MM` starts a timer in
+    /// minutes. Out-of-range text reads as zero rather than rejecting the whole
+    /// entry: the fields are clamped on the way in, so this only fires for a
+    /// value programmatically stuffed in.
+    #[must_use]
+    pub fn custom_seconds(&self) -> u32 {
+        let field = |f: HmsField| -> u32 {
+            self.custom
+                .get(f.index())
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0)
+        };
+        let hours = field(HmsField::Hours);
+        let minutes = field(HmsField::Minutes);
+        let seconds = field(HmsField::Seconds);
+        hours
+            .saturating_mul(3600)
+            .saturating_add(minutes.saturating_mul(60))
+            .saturating_add(seconds)
+    }
+
+    /// Start a timer for whatever the custom fields say, and clear them.
+    ///
+    /// Returns the new timer's id, or `None` when the fields spell zero — a
+    /// zero-second timer would be created already finished, which looks exactly
+    /// like the button having malfunctioned.
+    pub fn start_custom_timer(&mut self) -> Option<TimerId> {
+        let total = self.custom_seconds();
+        if total == 0 {
+            return None;
+        }
+        let id = self.create_timer(total);
+        self.start_timer(id);
+        self.custom = [String::new(), String::new(), String::new()];
+        self.focus = None;
+        Some(id)
+    }
+
+    // ---- Layout ----
+
+    /// The rectangle the active tab draws into.
+    #[must_use]
+    pub fn content_rect(width: f32, height: f32) -> Rect {
+        let top = TAB_BAR_HEIGHT + 8.0;
+        Rect::new(
+            PADDING,
+            top,
+            (width - PADDING * 2.0).max(0.0),
+            (height - top - PADDING).max(0.0),
+        )
+    }
+
+    /// The scrolling pane the alarm cards are drawn in.
+    fn alarm_list_rect(content: Rect) -> Rect {
+        let top = content.y + CLOCK_H + CHIP_GAP + ADD_BUTTON_H + CHIP_GAP;
+        Rect::new(
+            content.x,
+            top,
+            content.w,
+            (content.y + content.h - top).max(0.0),
+        )
+    }
+
+    /// The scrolling pane the timer cards are drawn in.
+    fn timer_list_rect(content: Rect) -> Rect {
+        let top = content.y + preset_block_height() + CHIP_GAP + CUSTOM_H + CHIP_GAP;
+        Rect::new(
+            content.x,
+            top,
+            content.w,
+            (content.y + content.h - top).max(0.0),
+        )
+    }
+
+    /// Total height of the alarm cards, gaps included.
+    ///
+    /// Summed rather than multiplied by a constant because a ringing alarm's
+    /// card is taller — see [`Alarm::card_height`].
+    #[must_use]
+    pub fn alarm_content_height(&self) -> f32 {
+        self.alarms
+            .iter()
+            .map(|a| a.card_height() + ALARM_ROW_GAP)
+            .sum()
+    }
+
+    /// Total height of the timer cards, gaps included.
+    #[must_use]
+    pub fn timer_content_height(&self) -> f32 {
+        self.timers.len() as f32 * (TIMER_ROW_H + TIMER_ROW_GAP)
+    }
+
+    /// Pull every scroll offset back inside its pane.
+    ///
+    /// Called whenever content is removed as well as when the window resizes:
+    /// deleting the last alarm of a scrolled list would otherwise leave the
+    /// pane parked past the end, showing nothing, with no way back except the
+    /// wheel.
+    fn clamp_scrolls(&mut self, width: f32, height: f32) {
+        let content = Self::content_rect(width, height);
+        let alarms = Self::alarm_list_rect(content);
+        self.alarm_scroll = clamp_scroll(self.alarm_scroll, self.alarm_content_height(), alarms.h);
+        let timers = Self::timer_list_rect(content);
+        self.timer_scroll = clamp_scroll(self.timer_scroll, self.timer_content_height(), timers.h);
+        let laps = (content.h - Stopwatch::LAP_TABLE_TOP).max(0.0);
+        self.lap_scroll = clamp_scroll(self.lap_scroll, self.stopwatch.lap_content_height(), laps);
+    }
+
     // ---- Rendering ----
 
-    /// Produce all render commands for the application window.
-    pub fn render(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// Draw the whole window, recording a hit box for every control.
+    #[must_use]
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let width = width.max(MIN_WIDTH);
+        let height = height.max(MIN_HEIGHT);
+        let mut f = Frame::new(width, height);
+        fill(&mut f, Rect::new(0.0, 0.0, width, height), BASE, 0.0);
+        self.draw_tab_bar(&mut f, width);
 
-        // Window background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: WINDOW_WIDTH,
-            height: WINDOW_HEIGHT,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
+        let content = Self::content_rect(width, height);
+        match self.active_tab {
+            ActiveTab::Alarm => self.draw_alarm_tab(&mut f, content),
+            ActiveTab::Timer => self.draw_timer_tab(&mut f, content),
+            ActiveTab::Stopwatch => self.stopwatch.draw(
+                &mut f,
+                content.x,
+                content.y,
+                content.w,
+                content.h,
+                self.lap_scroll,
+            ),
+        }
+        f
+    }
 
-        // Title bar area.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: WINDOW_WIDTH,
-            height: TAB_BAR_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Tab buttons.
-        let tab_width = WINDOW_WIDTH / 3.0;
-        for (i, tab) in ActiveTab::all().iter().enumerate() {
+    /// The three tabs across the top.
+    fn draw_tab_bar(&self, f: &mut Frame, width: f32) {
+        fill(f, Rect::new(0.0, 0.0, width, TAB_BAR_HEIGHT), MANTLE, 0.0);
+        let tab_width = width / 3.0;
+        for (i, tab) in ActiveTab::all().into_iter().enumerate() {
             let tx = i as f32 * tab_width;
-            let is_active = *tab == self.active_tab;
-            if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tx,
-                    y: 0.0,
-                    width: tab_width,
-                    height: TAB_BAR_HEIGHT,
-                    color: SURFACE0,
-                    corner_radii: CornerRadii::ZERO,
-                });
-                // Active indicator line.
-                cmds.push(RenderCommand::FillRect {
-                    x: tx,
-                    y: TAB_BAR_HEIGHT - 3.0,
-                    width: tab_width,
-                    height: 3.0,
-                    color: BLUE,
-                    corner_radii: CornerRadii::ZERO,
-                });
+            let rect = Rect::new(tx, 0.0, tab_width, TAB_BAR_HEIGHT);
+            let active = tab == self.active_tab;
+            if active {
+                fill(f, rect, SURFACE0, 0.0);
+                fill(
+                    f,
+                    Rect::new(tx, TAB_BAR_HEIGHT - 3.0, tab_width, 3.0),
+                    BLUE,
+                    0.0,
+                );
             }
-            cmds.push(RenderCommand::Text {
-                x: tx + tab_width / 2.0 - 24.0,
-                y: TAB_BAR_HEIGHT / 2.0 - 8.0,
-                text: tab.label().to_string(),
-                color: if is_active { BLUE } else { SUBTEXT0 },
-                font_size: 15.0,
-                font_weight: if is_active {
+            text_centred(
+                f,
+                tx,
+                TAB_BAR_HEIGHT / 2.0 - 8.0,
+                tab_width,
+                tab.label(),
+                if active { BLUE } else { SUBTEXT0 },
+                15.0,
+                if active {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(tab_width - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            );
+            f.hit(Target::Tab(tab), rect);
         }
-
-        // Content area.
-        let content_y = TAB_BAR_HEIGHT + 8.0;
-        let content_width = WINDOW_WIDTH - PADDING * 2.0;
-        match self.active_tab {
-            ActiveTab::Alarm => {
-                cmds.extend(self.render_alarms(PADDING, content_y, content_width));
-            }
-            ActiveTab::Timer => {
-                cmds.extend(self.render_timers(PADDING, content_y, content_width));
-            }
-            ActiveTab::Stopwatch => {
-                cmds.extend(self.stopwatch.render(PADDING, content_y, content_width));
-            }
-        }
-
-        cmds
     }
 
-    /// Render the alarm list view.
-    fn render_alarms(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// The alarm tab: clock, add button, and the scrolling list — or the
+    /// editor, which replaces all three while it is open.
+    fn draw_alarm_tab(&self, f: &mut Frame, content: Rect) {
+        if let Some(editor) = self.editor.as_ref() {
+            self.draw_editor(f, editor, content);
+            return;
+        }
 
-        // Current time display.
+        // The clock. The whole band is the format toggle, which is a large
+        // target for a control with no other home; the alternative — a 12/24
+        // chip somewhere — is a second thing on screen saying what the clock
+        // already says.
+        let clock = Rect::new(content.x, content.y, content.w, CLOCK_H);
+        fill(f, clock, SURFACE0, 10.0);
         let (hour, minute, second) = self.current_time;
         let (display_hour, period) = self.time_format.format_hour(hour);
-        let time_str = match period {
+        let now = match period {
             Some(p) => format!("{}:{:02}:{:02} {}", display_hour, minute, second, p),
             None => format!("{:02}:{:02}:{:02}", display_hour, minute, second),
         };
-        cmds.push(RenderCommand::Text {
-            x: x + width / 2.0 - 80.0,
-            y,
-            text: time_str,
-            color: TEXT_COLOR,
-            font_size: 36.0,
-            font_weight: FontWeightHint::Light,
-            max_width: Some(width),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Next alarm indicator.
-        let indicator_y = y + 46.0;
-        if let Some((alarm, mins)) = self.next_alarm() {
-            let hours_until = mins / 60;
-            let mins_until = mins % 60;
-            let until_str = if hours_until > 0 {
+        text_centred(
+            f,
+            clock.x,
+            clock.y + 10.0,
+            clock.w,
+            &now,
+            TEXT_COLOR,
+            34.0,
+            FontWeightHint::Bold,
+        );
+        let today = Weekday::from_index(self.current_weekday).unwrap_or(Weekday::Monday);
+        let sub = match self.next_alarm() {
+            Some((alarm, mins)) => {
+                let label = if alarm.label.is_empty() {
+                    alarm.format_time(self.time_format)
+                } else {
+                    alarm.label.clone()
+                };
                 format!(
-                    "Next: {} in {}h {}m",
-                    alarm.format_time(self.time_format),
-                    hours_until,
-                    mins_until,
+                    "{} — {} in {}",
+                    today.short_name(),
+                    label,
+                    humanise_minutes(mins)
                 )
-            } else {
-                format!(
-                    "Next: {} in {}m",
-                    alarm.format_time(self.time_format),
-                    mins_until,
-                )
-            };
-            cmds.push(RenderCommand::Text {
-                x,
-                y: indicator_y,
-                text: until_str,
-                color: BLUE,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-        } else {
-            cmds.push(RenderCommand::Text {
-                x,
-                y: indicator_y,
-                text: "No upcoming alarms".to_string(),
-                color: OVERLAY0,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Separator.
-        cmds.push(RenderCommand::Line {
-            x1: x,
-            y1: indicator_y + 24.0,
-            x2: x + width,
-            y2: indicator_y + 24.0,
-            color: SURFACE1,
-            width: 1.0,
-        });
-
-        // Alarm entries.
-        let mut entry_y = indicator_y + 32.0;
-        if self.alarms.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + width / 2.0 - 60.0,
-                y: entry_y + 40.0,
-                text: "No alarms set".to_string(),
-                color: OVERLAY0,
-                font_size: 16.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-        } else {
-            for alarm in &self.alarms {
-                cmds.extend(alarm.render(x, entry_y, width, self.time_format));
-                entry_y += 80.0;
             }
+            None => format!("{} — no alarm set", today.short_name()),
+        };
+        text_centred(
+            f,
+            clock.x,
+            clock.y + 58.0,
+            clock.w,
+            &sub,
+            SUBTEXT0,
+            12.0,
+            FontWeightHint::Regular,
+        );
+        f.hit(Target::ClockFormat, clock);
+
+        button(
+            f,
+            Rect::new(
+                content.x,
+                content.y + CLOCK_H + CHIP_GAP,
+                content.w,
+                ADD_BUTTON_H,
+            ),
+            "+ Add Alarm",
+            BLUE,
+            CRUST,
+            Target::AddAlarm,
+        );
+
+        let list = Self::alarm_list_rect(content);
+        if self.alarms.is_empty() {
+            text_centred(
+                f,
+                list.x,
+                list.y + 24.0,
+                list.w,
+                "No alarms yet",
+                OVERLAY0,
+                14.0,
+                FontWeightHint::Regular,
+            );
+            return;
         }
-
-        // "Add Alarm" button.
-        let btn_y = entry_y + 8.0;
-        let btn_w = 140.0;
-        let btn_h = 40.0;
-        let btn_x = x + (width - btn_w) / 2.0;
-        cmds.push(RenderCommand::FillRect {
-            x: btn_x,
-            y: btn_y,
-            width: btn_w,
-            height: btn_h,
-            color: BLUE,
-            corner_radii: CornerRadii::all(btn_h / 2.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: btn_x + btn_w / 2.0 - 36.0,
-            y: btn_y + 10.0,
-            text: "+ Add Alarm".to_string(),
-            color: CRUST,
-            font_size: 15.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(btn_w - 16.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        cmds
+        f.clip(list);
+        f.translate(0.0, -self.alarm_scroll);
+        let mut y = list.y;
+        for alarm in &self.alarms {
+            alarm.draw(f, list.x, y, list.w, self.time_format);
+            y += alarm.card_height() + ALARM_ROW_GAP;
+        }
+        f.untranslate();
+        f.unclip();
     }
 
-    /// Render the timer list view.
-    fn render_timers(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-
-        // Quick preset buttons.
-        cmds.push(RenderCommand::Text {
+    /// The alarm editor, drawn over the alarm tab's content area.
+    fn draw_editor(&self, f: &mut Frame, editor: &AlarmEditor, content: Rect) {
+        fill(f, content, SURFACE0, 10.0);
+        f.clip(content);
+        let x = content.x + 10.0;
+        let w = (content.w - 20.0).max(0.0);
+        text(
+            f,
             x,
-            y,
-            text: "Quick Start".to_string(),
-            color: SUBTEXT1,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width),
-            overflow: TextOverflow::Ellipsis,
-        });
+            content.y + 10.0,
+            if editor.editing.is_some() {
+                "Edit alarm"
+            } else {
+                "New alarm"
+            },
+            TEXT_COLOR,
+            15.0,
+            FontWeightHint::Bold,
+            w,
+        );
 
-        let preset_y = y + 24.0;
-        let preset_btn_w = 56.0;
-        let preset_btn_h = 32.0;
-        let gap = 8.0;
-        for (i, &preset_min) in TIMER_PRESETS.iter().enumerate() {
-            let px = x + (i as f32) * (preset_btn_w + gap);
-            cmds.push(RenderCommand::FillRect {
-                x: px,
-                y: preset_y,
-                width: preset_btn_w,
-                height: preset_btn_h,
-                color: SURFACE1,
-                corner_radii: CornerRadii::all(preset_btn_h / 2.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: px + preset_btn_w / 2.0 - 12.0,
-                y: preset_y + 7.0,
-                text: format!("{}m", preset_min),
-                color: TEXT_COLOR,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(preset_btn_w - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        // Two spinners, hour and minute, each an up button over a big number
+        // over a down button.
+        let col_w = 84.0;
+        let gap = 16.0;
+        let hour_x = content.x + (content.w - col_w * 2.0 - gap) / 2.0;
+        let minute_x = hour_x + col_w + gap;
+        let top = content.y + 38.0;
+        for (col_x, value, up, down) in [
+            (
+                hour_x,
+                u32::from(editor.hour),
+                Target::EditHour(Step::Up),
+                Target::EditHour(Step::Down),
+            ),
+            (
+                minute_x,
+                u32::from(editor.minute),
+                Target::EditMinute(Step::Up),
+                Target::EditMinute(Step::Down),
+            ),
+        ] {
+            button(
+                f,
+                Rect::new(col_x, top, col_w, 26.0),
+                "\u{25B2}",
+                SURFACE1,
+                TEXT_COLOR,
+                up,
+            );
+            text_centred(
+                f,
+                col_x,
+                top + 32.0,
+                col_w,
+                &format!("{:02}", value),
+                TEXT_COLOR,
+                32.0,
+                FontWeightHint::Bold,
+            );
+            button(
+                f,
+                Rect::new(col_x, top + 76.0, col_w, 26.0),
+                "\u{25BC}",
+                SURFACE1,
+                TEXT_COLOR,
+                down,
+            );
         }
+        text_centred(
+            f,
+            hour_x + col_w,
+            top + 44.0,
+            gap,
+            ":",
+            SUBTEXT0,
+            22.0,
+            FontWeightHint::Bold,
+        );
 
-        // Custom timer input area.
-        let custom_y = preset_y + preset_btn_h + 16.0;
-        cmds.push(RenderCommand::Text {
-            x,
-            y: custom_y,
-            text: "Custom Timer".to_string(),
-            color: SUBTEXT1,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // HH:MM:SS input fields (placeholder display).
-        let input_y = custom_y + 24.0;
-        let field_w = 60.0;
-        let colon_w = 16.0;
-        let fields_total_w = field_w * 3.0 + colon_w * 2.0;
-        let start_x = x + (width - fields_total_w) / 2.0;
-
-        for (i, label) in ["HH", "MM", "SS"].iter().enumerate() {
-            let fx = start_x + (i as f32) * (field_w + colon_w);
-            cmds.push(RenderCommand::FillRect {
-                x: fx,
-                y: input_y,
-                width: field_w,
-                height: 40.0,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: fx + field_w / 2.0 - 10.0,
-                y: input_y + 10.0,
-                text: label.to_string(),
-                color: OVERLAY0,
-                font_size: 16.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(field_w - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if i < 2 {
-                let cx = fx + field_w + 2.0;
-                cmds.push(RenderCommand::Text {
-                    x: cx,
-                    y: input_y + 8.0,
-                    text: ":".to_string(),
-                    color: OVERLAY1,
-                    font_size: 18.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(colon_w),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-        }
-
-        // Separator.
-        let sep_y = input_y + 56.0;
-        cmds.push(RenderCommand::Line {
-            x1: x,
-            y1: sep_y,
-            x2: x + width,
-            y2: sep_y,
-            color: SURFACE1,
-            width: 1.0,
-        });
-
-        // Active timers list.
-        let mut timer_y = sep_y + 8.0;
-        if self.timers.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + width / 2.0 - 50.0,
-                y: timer_y + 20.0,
-                text: "No active timers".to_string(),
-                color: OVERLAY0,
-                font_size: 16.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
+        // Label.
+        let mut row_y = top + 116.0;
+        let label_rect = Rect::new(x, row_y, w, 32.0);
+        let focused = self.focus == Some(Focus::Label);
+        fill(
+            f,
+            label_rect,
+            if focused { SURFACE2 } else { SURFACE1 },
+            6.0,
+        );
+        let body = if editor.label.is_empty() && !focused {
+            "Label…".to_string()
+        } else if focused {
+            format!("{}\u{2502}", editor.label)
         } else {
-            let running = self.running_timer_count();
-            let finished = self.finished_timer_count();
-            cmds.push(RenderCommand::Text {
-                x,
-                y: timer_y,
-                text: format!(
-                    "{} timer{} ({} running, {} finished)",
-                    self.timers.len(),
-                    if self.timers.len() == 1 { "" } else { "s" },
-                    running,
-                    finished,
-                ),
-                color: SUBTEXT0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            timer_y += 20.0;
-            for timer in &self.timers {
-                cmds.extend(timer.render(x, timer_y, width));
-                timer_y += 128.0;
-            }
+            editor.label.clone()
+        };
+        text(
+            f,
+            x + 8.0,
+            row_y + 8.0,
+            body,
+            if editor.label.is_empty() && !focused {
+                OVERLAY0
+            } else {
+                TEXT_COLOR
+            },
+            13.0,
+            FontWeightHint::Regular,
+            w - 16.0,
+        );
+        f.hit(Target::EditLabel, label_rect);
+
+        // Repeat-day chips.
+        row_y += 40.0;
+        let chip_w = ((w - CHIP_GAP * 6.0) / 7.0).max(1.0);
+        for (i, day) in Weekday::all().into_iter().enumerate() {
+            let cx = x + i as f32 * (chip_w + CHIP_GAP);
+            let on = editor
+                .repeat_days
+                .get(day.index())
+                .copied()
+                .unwrap_or(false);
+            button(
+                f,
+                Rect::new(cx, row_y, chip_w, 30.0),
+                day.single_letter(),
+                if on { BLUE } else { SURFACE1 },
+                if on { CRUST } else { SUBTEXT0 },
+                Target::EditDay(day),
+            );
         }
 
-        cmds
+        // Sound and snooze, each a chip that cycles on click.
+        row_y += 38.0;
+        let half = ((w - CHIP_GAP) / 2.0).max(1.0);
+        button(
+            f,
+            Rect::new(x, row_y, half, 30.0),
+            &format!("Sound: {}", editor.sound.label()),
+            SURFACE1,
+            SUBTEXT1,
+            Target::EditSound,
+        );
+        button(
+            f,
+            Rect::new(x + half + CHIP_GAP, row_y, half, 30.0),
+            &format!("Snooze: {}", editor.snooze().label()),
+            SURFACE1,
+            SUBTEXT1,
+            Target::EditSnooze,
+        );
+
+        // Save and cancel.
+        row_y += 40.0;
+        button(
+            f,
+            Rect::new(x, row_y, half, 34.0),
+            "Save",
+            GREEN,
+            CRUST,
+            Target::EditSave,
+        );
+        button(
+            f,
+            Rect::new(x + half + CHIP_GAP, row_y, half, 34.0),
+            "Cancel",
+            SURFACE2,
+            TEXT_COLOR,
+            Target::EditCancel,
+        );
+        f.unclip();
+    }
+
+    /// The timer tab: quick presets, the custom-duration row, and the list.
+    fn draw_timer_tab(&self, f: &mut Frame, content: Rect) {
+        let per_row = PRESETS_PER_ROW as f32;
+        let chip_w = ((content.w - CHIP_GAP * (per_row - 1.0)) / per_row).max(1.0);
+        for (i, minutes) in TIMER_PRESETS.into_iter().enumerate() {
+            let (row, col) = (i / PRESETS_PER_ROW, i % PRESETS_PER_ROW);
+            let cx = content.x + col as f32 * (chip_w + CHIP_GAP);
+            let cy = content.y + row as f32 * (PRESET_H + CHIP_GAP);
+            button(
+                f,
+                Rect::new(cx, cy, chip_w, PRESET_H),
+                &format!("{} min", minutes),
+                SURFACE1,
+                TEXT_COLOR,
+                Target::Preset(minutes),
+            );
+        }
+
+        // Custom duration: HH : MM : SS, then Start.
+        let custom_y = content.y + preset_block_height() + CHIP_GAP;
+        let start_w = 76.0;
+        let field_w = ((content.w - start_w - CHIP_GAP * 3.0) / 3.0).max(1.0);
+        for (i, hms) in HmsField::ALL.into_iter().enumerate() {
+            let fx = content.x + i as f32 * (field_w + CHIP_GAP);
+            let rect = Rect::new(fx, custom_y, field_w, CUSTOM_H);
+            let focused = self.focus == Some(Focus::Custom(hms));
+            fill(f, rect, if focused { SURFACE2 } else { SURFACE1 }, 6.0);
+            let entry = self.custom.get(hms.index()).map_or("", String::as_str);
+            let (body, color) = if entry.is_empty() {
+                (hms.placeholder().to_string(), OVERLAY0)
+            } else if focused {
+                (format!("{}\u{2502}", entry), TEXT_COLOR)
+            } else {
+                (entry.to_string(), TEXT_COLOR)
+            };
+            text_centred(
+                f,
+                rect.x,
+                rect.y + 10.0,
+                rect.w,
+                &body,
+                color,
+                15.0,
+                FontWeightHint::Regular,
+            );
+            f.hit(Target::CustomField(hms), rect);
+        }
+        button(
+            f,
+            Rect::new(content.x + content.w - start_w, custom_y, start_w, CUSTOM_H),
+            "Start",
+            GREEN,
+            CRUST,
+            Target::CustomStart,
+        );
+
+        let list = Self::timer_list_rect(content);
+        if self.timers.is_empty() {
+            text_centred(
+                f,
+                list.x,
+                list.y + 24.0,
+                list.w,
+                "No timers running",
+                OVERLAY0,
+                14.0,
+                FontWeightHint::Regular,
+            );
+            return;
+        }
+        f.clip(list);
+        f.translate(0.0, -self.timer_scroll);
+        for (i, timer) in self.timers.iter().enumerate() {
+            let y = list.y + i as f32 * (TIMER_ROW_H + TIMER_ROW_GAP);
+            timer.draw(f, list.x, y, list.w);
+        }
+        f.untranslate();
+        f.unclip();
+    }
+
+    // ---- Interaction ----
+
+    /// Route a click at window coordinates `(x, y)`.
+    ///
+    /// The frame is redrawn to hit-test against, which is the whole point of
+    /// the frame: the rectangles tested are by construction the ones drawn, so
+    /// a control cannot be clickable where it is not visible.
+    pub fn handle_click(
+        &mut self,
+        x: f32,
+        y: f32,
+        button: MouseButton,
+        size: (f32, f32),
+    ) -> Action {
+        if button != MouseButton::Left {
+            return Action::None;
+        }
+        let Some(target) = self.frame(size.0, size.1).hit_test(x, y) else {
+            // A click on nothing drops the keyboard, so clicking away from a
+            // field commits nothing and stops swallowing shortcuts.
+            return if self.focus.take().is_some() {
+                Action::Redraw
+            } else {
+                Action::None
+            };
+        };
+        self.activate(target, size)
+    }
+
+    /// Apply whatever the named control does.
+    ///
+    /// Split out from [`handle_click`](Self::handle_click) so a test can drive
+    /// a control by name, and so a keyboard shortcut and the button it mirrors
+    /// run the same code rather than two copies that can disagree.
+    pub fn activate(&mut self, target: Target, size: (f32, f32)) -> Action {
+        match target {
+            Target::Tab(tab) => {
+                if self.active_tab == tab {
+                    return Action::None;
+                }
+                self.active_tab = tab;
+                self.focus = None;
+            }
+            Target::ClockFormat => self.toggle_time_format(),
+
+            Target::AddAlarm => self.open_new_alarm(),
+            Target::AlarmRow(id) => self.open_alarm(id),
+            Target::AlarmToggle(id) => {
+                if self.toggle_alarm(id).is_none() {
+                    return Action::None;
+                }
+            }
+            Target::AlarmDelete(id) => {
+                if !self.delete_alarm(id) {
+                    return Action::None;
+                }
+                // An editor open on the deleted alarm is closed with it: a form
+                // whose Save would resurrect the row the user just deleted is
+                // worse than no form.
+                if self.editor.as_ref().and_then(|e| e.editing) == Some(id) {
+                    self.cancel_editor();
+                }
+                self.clamp_scrolls(size.0, size.1);
+            }
+            Target::AlarmSnooze(id) => self.snooze_alarm(id),
+            Target::AlarmDismiss(id) => {
+                self.dismiss_alarm(id);
+                self.clamp_scrolls(size.0, size.1);
+            }
+
+            Target::EditHour(step) => match self.editor.as_mut() {
+                Some(editor) => editor.step_hour(step),
+                None => return Action::None,
+            },
+            Target::EditMinute(step) => match self.editor.as_mut() {
+                Some(editor) => editor.step_minute(step),
+                None => return Action::None,
+            },
+            Target::EditLabel => self.focus = Some(Focus::Label),
+            Target::EditDay(day) => match self.editor.as_mut() {
+                Some(editor) => {
+                    if let Some(slot) = editor.repeat_days.get_mut(day.index()) {
+                        *slot = !*slot;
+                    }
+                }
+                None => return Action::None,
+            },
+            Target::EditSound => match self.editor.as_mut() {
+                Some(editor) => {
+                    let next = editor
+                        .sound
+                        .index()
+                        .saturating_add(1)
+                        .checked_rem(AlarmSound::all().len())
+                        .unwrap_or(0);
+                    editor.sound = AlarmSound::from_index(next).unwrap_or_default();
+                }
+                None => return Action::None,
+            },
+            Target::EditSnooze => match self.editor.as_mut() {
+                Some(editor) => {
+                    editor.snooze_index = editor
+                        .snooze_index
+                        .saturating_add(1)
+                        .checked_rem(SNOOZE_OPTIONS.len())
+                        .unwrap_or(0);
+                }
+                None => return Action::None,
+            },
+            Target::EditSave => {
+                if self.save_editor().is_none() {
+                    return Action::None;
+                }
+                self.clamp_scrolls(size.0, size.1);
+            }
+            Target::EditCancel => {
+                if self.editor.is_none() {
+                    return Action::None;
+                }
+                self.cancel_editor();
+            }
+
+            Target::Preset(minutes) => {
+                let id = self.create_timer_preset(minutes);
+                self.start_timer(id);
+            }
+            Target::CustomField(field) => self.focus = Some(Focus::Custom(field)),
+            Target::CustomStart => {
+                if self.start_custom_timer().is_none() {
+                    return Action::None;
+                }
+            }
+            Target::TimerRow(_) => return Action::None,
+            Target::TimerToggle(id) => match self.find_timer_mut(id) {
+                Some(timer) => timer.toggle(),
+                None => return Action::None,
+            },
+            Target::TimerReset(id) => match self.find_timer_mut(id) {
+                Some(timer) => timer.reset(),
+                None => return Action::None,
+            },
+            Target::TimerDelete(id) => {
+                if !self.delete_timer(id) {
+                    return Action::None;
+                }
+                self.clamp_scrolls(size.0, size.1);
+            }
+
+            Target::SwToggle => self.stopwatch.toggle(),
+            Target::SwLap => {
+                // Only meaningful while running, and the button is drawn dimmed
+                // when it is not — `lap` itself already refuses, but returning
+                // `None` here keeps a dead click from repainting.
+                if self.stopwatch.state != StopwatchState::Running {
+                    return Action::None;
+                }
+                self.stopwatch.lap();
+            }
+            Target::SwReset => {
+                self.stopwatch.reset();
+                self.lap_scroll = 0.0;
+            }
+        }
+        Action::Redraw
+    }
+
+    /// Route a keystroke.
+    pub fn handle_key(&mut self, event: &KeyEvent, size: (f32, f32)) -> Action {
+        if !event.pressed {
+            return Action::None;
+        }
+        let m = event.modifiers;
+
+        // Ctrl-Q closes, and is checked before anything else so it works even
+        // with a text field focused.
+        if m.ctrl && event.key == Key::Q {
+            return Action::Quit;
+        }
+
+        if event.key == Key::Escape {
+            if self.editor.is_some() {
+                self.cancel_editor();
+                return Action::Redraw;
+            }
+            return if self.focus.take().is_some() {
+                Action::Redraw
+            } else {
+                Action::None
+            };
+        }
+
+        // A focused field owns the keyboard: while the user is typing a label,
+        // `r` is the letter r and not "reset the stopwatch".
+        if let Some(focus) = self.focus {
+            return self.type_into(focus, event);
+        }
+
+        // Nothing focused, so bare keys are shortcuts — but only bare ones.
+        // Alt-Tab belongs to the window manager, and a program that acted on
+        // the Tab of it would switch its own tab every time the user switched
+        // windows.
+        if m.ctrl || m.alt || m.super_key {
+            return Action::None;
+        }
+
+        match event.key {
+            Key::Tab => {
+                let step = if m.shift { -1 } else { 1 };
+                let tabs = ActiveTab::all();
+                let here = tabs.iter().position(|t| *t == self.active_tab).unwrap_or(0);
+                let next = (here as isize)
+                    .saturating_add(step)
+                    .rem_euclid(tabs.len() as isize) as usize;
+                self.active_tab = tabs.get(next).copied().unwrap_or_default();
+                Action::Redraw
+            }
+            Key::Num1 => self.activate(Target::Tab(ActiveTab::Alarm), size),
+            Key::Num2 => self.activate(Target::Tab(ActiveTab::Timer), size),
+            Key::Num3 => self.activate(Target::Tab(ActiveTab::Stopwatch), size),
+            Key::N if self.active_tab == ActiveTab::Alarm => self.activate(Target::AddAlarm, size),
+            Key::F => self.activate(Target::ClockFormat, size),
+            Key::Space if self.active_tab == ActiveTab::Stopwatch => {
+                self.activate(Target::SwToggle, size)
+            }
+            Key::L if self.active_tab == ActiveTab::Stopwatch => self.activate(Target::SwLap, size),
+            Key::R if self.active_tab == ActiveTab::Stopwatch => {
+                self.activate(Target::SwReset, size)
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// Feed a keystroke to the focused field.
+    fn type_into(&mut self, focus: Focus, event: &KeyEvent) -> Action {
+        match focus {
+            Focus::Label => {
+                let Some(editor) = self.editor.as_mut() else {
+                    // The field cannot be focused without an editor; if it
+                    // somehow is, drop the focus rather than swallow keys.
+                    self.focus = None;
+                    return Action::Redraw;
+                };
+                match event.key {
+                    Key::Enter => {
+                        self.save_editor();
+                        return Action::Redraw;
+                    }
+                    Key::Backspace => {
+                        if editor.label.pop().is_none() {
+                            return Action::None;
+                        }
+                        return Action::Redraw;
+                    }
+                    _ => {}
+                }
+                let mut typed = false;
+                for ch in event.typed() {
+                    if editor.label.chars().count() >= MAX_LABEL_LEN {
+                        break;
+                    }
+                    editor.label.push(ch);
+                    typed = true;
+                }
+                if typed { Action::Redraw } else { Action::None }
+            }
+            Focus::Custom(field) => {
+                match event.key {
+                    Key::Enter => {
+                        return if self.start_custom_timer().is_some() {
+                            Action::Redraw
+                        } else {
+                            Action::None
+                        };
+                    }
+                    Key::Tab => {
+                        let step = if event.modifiers.shift { -1 } else { 1 };
+                        let here = field.index();
+                        let next = (here as isize)
+                            .saturating_add(step)
+                            .rem_euclid(HmsField::ALL.len() as isize)
+                            as usize;
+                        self.focus = HmsField::ALL.get(next).copied().map(Focus::Custom);
+                        return Action::Redraw;
+                    }
+                    Key::Backspace => {
+                        let Some(entry) = self.custom.get_mut(field.index()) else {
+                            return Action::None;
+                        };
+                        return if entry.pop().is_some() {
+                            Action::Redraw
+                        } else {
+                            Action::None
+                        };
+                    }
+                    _ => {}
+                }
+                let Some(entry) = self.custom.get_mut(field.index()) else {
+                    return Action::None;
+                };
+                let mut typed = false;
+                for ch in event.typed() {
+                    // Digits only, two of them. A duration field that accepted
+                    // letters would parse to zero at the moment Start is
+                    // pressed, which reads as the button being broken rather
+                    // than as the entry being rejected.
+                    if !ch.is_ascii_digit() || entry.len() >= 2 {
+                        continue;
+                    }
+                    entry.push(ch);
+                    typed = true;
+                }
+                if typed { Action::Redraw } else { Action::None }
+            }
+        }
+    }
+
+    /// Route any event that is not a resize.
+    pub fn handle_event(&mut self, event: &Event, size: (f32, f32)) -> Action {
+        match event {
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Press(button) => self.handle_click(mouse.x, mouse.y, button, size),
+                MouseEventKind::Scroll { dx: _, dy } => self.scroll(mouse.x, mouse.y, dy, size),
+                _ => Action::None,
+            },
+            Event::Key(key) => self.handle_key(key, size),
+            Event::Tick { elapsed_ms } => self.tick(*elapsed_ms),
+            Event::CloseRequested => Action::Quit,
+            _ => Action::None,
+        }
+    }
+
+    /// Scroll whichever pane the pointer is over.
+    fn scroll(&mut self, x: f32, y: f32, dy: f32, size: (f32, f32)) -> Action {
+        let content = Self::content_rect(size.0.max(MIN_WIDTH), size.1.max(MIN_HEIGHT));
+        // A continuous pixel offset, so `wheel::pixels` and not the row
+        // accumulator: the alarm rows are not a uniform height, so there is no
+        // row count for an accumulator to bank.
+        let (rect, offset, content_h) = match self.active_tab {
+            ActiveTab::Alarm if self.editor.is_none() => (
+                Self::alarm_list_rect(content),
+                &mut self.alarm_scroll,
+                self.alarms
+                    .iter()
+                    .map(|a| a.card_height() + ALARM_ROW_GAP)
+                    .sum::<f32>(),
+            ),
+            ActiveTab::Timer => (
+                Self::timer_list_rect(content),
+                &mut self.timer_scroll,
+                self.timers.len() as f32 * (TIMER_ROW_H + TIMER_ROW_GAP),
+            ),
+            ActiveTab::Stopwatch => (
+                Rect::new(
+                    content.x,
+                    content.y + Stopwatch::LAP_TABLE_TOP,
+                    content.w,
+                    (content.h - Stopwatch::LAP_TABLE_TOP).max(0.0),
+                ),
+                &mut self.lap_scroll,
+                self.stopwatch.lap_content_height(),
+            ),
+            ActiveTab::Alarm => return Action::None,
+        };
+        if !rect.contains(x, y) {
+            return Action::None;
+        }
+        let before = *offset;
+        *offset = clamp_scroll(
+            before + guitk::wheel::pixels(dy, LAP_ROW_H),
+            content_h,
+            rect.h,
+        );
+        if (*offset - before).abs() < f32::EPSILON {
+            Action::None
+        } else {
+            Action::Redraw
+        }
+    }
+
+    /// Advance everything by `elapsed_ms` of real time.
+    ///
+    /// `elapsed_ms` is what actually elapsed, not what was asked for: a tick
+    /// that arrives late because the machine was busy still advances the
+    /// stopwatch by the time that passed. The per-second work is driven off a
+    /// banked remainder rather than off the tick itself, so it runs once a
+    /// second at either tick rate.
+    pub fn tick(&mut self, elapsed_ms: u64) -> Action {
+        self.stopwatch.tick(elapsed_ms);
+        self.tick_accum_ms = self.tick_accum_ms.saturating_add(elapsed_ms);
+        let whole_seconds = self.tick_accum_ms / 1000;
+        self.tick_accum_ms %= 1000;
+        for _ in 0..whole_seconds {
+            self.tick_timers();
+            self.tick_alarm_snoozes();
+            self.check_alarm_triggers();
+        }
+        if whole_seconds > 0 {
+            // The wall clock is read once per second, not once per tick: at
+            // `TICK_FAST` that would be twenty `SystemTime::now()` calls a
+            // second to move a display that shows whole seconds.
+            self.refresh_clock();
+            self.check_alarm_triggers();
+        }
+        // Always a repaint: at `TICK_SLOW` the seconds digit has moved, and at
+        // `TICK_FAST` the stopwatch's hundredths have.
+        Action::Redraw
+    }
+}
+
+/// Clamp a scroll offset to the range a pane of `viewport` height can show of
+/// `content` height.
+fn clamp_scroll(scroll: f32, content: f32, viewport: f32) -> f32 {
+    if !scroll.is_finite() {
+        return 0.0;
+    }
+    scroll.clamp(0.0, (content - viewport).max(0.0))
+}
+
+/// Height of the preset block on the timer tab, gaps included.
+fn preset_block_height() -> f32 {
+    let rows = TIMER_PRESETS.len().div_ceil(PRESETS_PER_ROW) as f32;
+    (rows * (PRESET_H + CHIP_GAP) - CHIP_GAP).max(0.0)
+}
+
+/// This crate's weekday index (0 = Monday) for a `guitk::date` weekday
+/// (0 = Sunday).
+///
+/// The two calendars disagree about where a week starts, and this is the one
+/// place that reconciles them — an alarm set for "Mon" that fires on Sunday is
+/// what a second, inline copy of this subtraction buys.
+fn weekday_index(day: guitk::date::Weekday) -> usize {
+    usize::try_from(day.index().saturating_sub(1).rem_euclid(7)).unwrap_or(0)
+}
+
+/// "in 3 h 20 min" rather than "in 200 min".
+fn humanise_minutes(total: u32) -> String {
+    let hours = total / 60;
+    let minutes = total % 60;
+    match (hours, minutes) {
+        (0, 0) => "under a minute".to_string(),
+        (0, m) => format!("{} min", m),
+        (h, 0) => format!("{} h", h),
+        (h, m) => format!("{} h {} min", h, m),
     }
 }
 
@@ -1873,12 +3193,109 @@ pub fn parse_duration_hms(input: &str) -> Option<u32> {
 }
 
 // ============================================================================
-// Main entry point (placeholder — real entry wires into OS event loop)
+// Window integration
 // ============================================================================
 
-fn main() {
-    // Placeholder: the real application will be launched by the OS window manager
-    // and will integrate with the compositor event loop.
+impl App for AlarmClockApp {
+    fn title(&self) -> String {
+        "Clock".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "alarmclock".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// Ask to be woken, always, and faster while the stopwatch runs.
+    ///
+    /// **Never `None`.** An alarm clock that stopped its own clock would show
+    /// the time the window opened at, and its alarms — which fire from that
+    /// clock in [`check_alarm_triggers`] — would never fire at all. The rate
+    /// varies because only the stopwatch needs a fast one: it shows hundredths,
+    /// and at [`TICK_SLOW`] those digits would visibly jump. Everything else
+    /// moves once a second, so twice a second is enough to keep the display
+    /// within half a second of the truth while leaving an idle window mostly
+    /// asleep.
+    ///
+    /// This method is consulted after *every* event, so the switch takes effect
+    /// on the tick after the one that started the stopwatch.
+    ///
+    /// [`check_alarm_triggers`]: AlarmClockApp::check_alarm_triggers
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(if self.stopwatch.state == StopwatchState::Running {
+            TICK_FAST
+        } else {
+            TICK_SLOW
+        })
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if let Event::Resize { width, height } = *event {
+            let size = (
+                (width as f32).max(MIN_WIDTH),
+                (height as f32).max(MIN_HEIGHT),
+            );
+            self.window_size = size;
+            // A window made taller shows more of a scrolled list, so an offset
+            // that was legal at the old height can be past the end at the new
+            // one — leaving the pane blank until the user scrolls back.
+            self.clamp_scrolls(size.0, size.1);
+            return Response::Redraw;
+        }
+        let size = self.window_size;
+        match self.handle_event(event, size) {
+            Action::None => Response::Idle,
+            Action::Redraw => Response::Redraw,
+            Action::Quit => Response::Exit,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The handed size wins over the recorded one: the first frame is drawn
+        // before any `Event::Resize` arrives, so trusting the record would lay
+        // the first window out at a size it is not — and every hit box in it
+        // would then name the wrong rectangle.
+        let size = (width.max(MIN_WIDTH), height.max(MIN_HEIGHT));
+        if self.window_size != size {
+            self.window_size = size;
+            self.clamp_scrolls(size.0, size.1);
+        }
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for AlarmClockApp {
+    type Target = Target;
+    type Outcome = Action;
+
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.handle_click(x, y, button, size)
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.handle_key(key, size)
+    }
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+fn main() -> ExitCode {
+    let mut state = AlarmClockApp::new();
+    // Read the clock before the first frame, so the window does not open on
+    // 00:00:00 and correct itself half a second later.
+    state.refresh_clock();
+    app::launch("alarmclock", &mut state)
 }
 
 // ============================================================================
@@ -1887,7 +3304,19 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    // A test module's job is to fail loudly the instant the code under test is
+    // wrong, so the defensive lints that forbid exactly that in production code
+    // are off here — as `CLAUDE.md` prescribes.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
+    use guitk::probe;
 
     // ---- Weekday tests ----
 
@@ -2154,7 +3583,7 @@ mod tests {
         alarm.snoozed_remaining = Some(2);
         assert!(!alarm.tick_snooze()); // 2 -> 1
         assert!(!alarm.tick_snooze()); // 1 -> 0
-        assert!(alarm.tick_snooze());  // 0 -> ringing
+        assert!(alarm.tick_snooze()); // 0 -> ringing
         assert!(alarm.ringing);
         assert!(alarm.snoozed_remaining.is_none());
     }
@@ -2212,10 +3641,32 @@ mod tests {
     }
 
     #[test]
-    fn test_alarm_render_not_empty() {
-        let alarm = Alarm::new(AlarmId(1), 8, 30);
-        let cmds = alarm.render(0.0, 0.0, 400.0, TimeFormat::TwelveHour);
-        assert!(!cmds.is_empty());
+    fn alarm_card_records_its_own_controls() {
+        let alarm = Alarm::new(AlarmId(7), 8, 30);
+        let mut f: Frame = Frame::new(400.0, 200.0);
+        alarm.draw(&mut f, 0.0, 0.0, 400.0, TimeFormat::TwelveHour);
+        let targets: Vec<Target> = f.hits().iter().map(|(t, _)| *t).collect();
+        assert!(targets.contains(&Target::AlarmRow(AlarmId(7))));
+        assert!(targets.contains(&Target::AlarmToggle(AlarmId(7))));
+        assert!(targets.contains(&Target::AlarmDelete(AlarmId(7))));
+        assert!(f.is_balanced(), "a card must not leave a clip open");
+    }
+
+    #[test]
+    fn a_ringing_alarm_grows_snooze_and_dismiss() {
+        let mut alarm = Alarm::new(AlarmId(7), 8, 30);
+        let quiet = alarm.card_height();
+        alarm.ringing = true;
+        assert!(
+            alarm.card_height() > quiet,
+            "the strip has to be paid for in height, or the next card covers it"
+        );
+
+        let mut f: Frame = Frame::new(400.0, 200.0);
+        alarm.draw(&mut f, 0.0, 0.0, 400.0, TimeFormat::TwelveHour);
+        let targets: Vec<Target> = f.hits().iter().map(|(t, _)| *t).collect();
+        assert!(targets.contains(&Target::AlarmSnooze(AlarmId(7))));
+        assert!(targets.contains(&Target::AlarmDismiss(AlarmId(7))));
     }
 
     // ---- Timer tests ----
@@ -2273,7 +3724,7 @@ mod tests {
         timer.start();
         assert!(!timer.tick()); // 3 -> 2
         assert!(!timer.tick()); // 2 -> 1
-        assert!(timer.tick());  // 1 -> 0 (finished!)
+        assert!(timer.tick()); // 1 -> 0 (finished!)
         assert_eq!(timer.state, TimerState::Finished);
     }
 
@@ -2343,10 +3794,40 @@ mod tests {
     }
 
     #[test]
-    fn test_timer_render_not_empty() {
-        let timer = Timer::new(TimerId(1), 300);
-        let cmds = timer.render(0.0, 0.0, 400.0);
-        assert!(!cmds.is_empty());
+    fn timer_card_records_its_own_controls() {
+        let timer = Timer::new(TimerId(3), 300);
+        let mut f: Frame = Frame::new(400.0, 200.0);
+        timer.draw(&mut f, 0.0, 0.0, 400.0);
+        let targets: Vec<Target> = f.hits().iter().map(|(t, _)| *t).collect();
+        assert!(targets.contains(&Target::TimerRow(TimerId(3))));
+        assert!(targets.contains(&Target::TimerToggle(TimerId(3))));
+        assert!(targets.contains(&Target::TimerReset(TimerId(3))));
+        assert!(targets.contains(&Target::TimerDelete(TimerId(3))));
+        assert!(f.is_balanced());
+    }
+
+    #[test]
+    fn the_one_timer_button_says_what_it_will_do() {
+        let mut timer = Timer::new(TimerId(1), 300);
+        assert_eq!(timer.toggle_label(), "Start");
+        timer.toggle();
+        assert_eq!(timer.state, TimerState::Running);
+        assert_eq!(timer.toggle_label(), "Pause");
+        timer.toggle();
+        assert_eq!(timer.state, TimerState::Paused);
+        assert_eq!(timer.toggle_label(), "Resume");
+        timer.toggle();
+        assert_eq!(timer.state, TimerState::Running);
+
+        // A finished timer restarts from the top rather than "starting" at
+        // zero, which would finish again on the next tick and look like the
+        // button did nothing.
+        timer.state = TimerState::Finished;
+        timer.remaining_seconds = 0;
+        assert_eq!(timer.toggle_label(), "Restart");
+        timer.toggle();
+        assert_eq!(timer.state, TimerState::Running);
+        assert_eq!(timer.remaining_seconds, 300);
     }
 
     // ---- Stopwatch tests ----
@@ -2497,10 +3978,32 @@ mod tests {
     }
 
     #[test]
-    fn test_stopwatch_render_not_empty() {
+    fn stopwatch_records_its_three_buttons_and_closes_its_clip() {
         let sw = Stopwatch::new();
-        let cmds = sw.render(0.0, 0.0, 400.0);
-        assert!(!cmds.is_empty());
+        let mut f: Frame = Frame::new(400.0, 500.0);
+        sw.draw(&mut f, 0.0, 0.0, 400.0, 500.0, 0.0);
+        let targets: Vec<Target> = f.hits().iter().map(|(t, _)| *t).collect();
+        assert!(targets.contains(&Target::SwToggle));
+        assert!(targets.contains(&Target::SwLap));
+        assert!(targets.contains(&Target::SwReset));
+        assert!(
+            f.is_balanced(),
+            "the lap table's clip and translation must both be closed"
+        );
+    }
+
+    #[test]
+    fn a_lap_scrolled_out_of_the_pane_is_not_clickable() {
+        // The lap rows carry no targets of their own, so what this actually
+        // proves is the invariant they rely on: the frame trims to the clip, so
+        // nothing drawn past the bottom of a scrolled pane can be hit.
+        let mut f: Frame = Frame::new(400.0, 300.0);
+        f.clip(Rect::new(0.0, 100.0, 400.0, 50.0));
+        f.hit(Target::SwLap, Rect::new(0.0, 0.0, 400.0, 400.0));
+        f.unclip();
+        assert_eq!(f.hit_test(200.0, 10.0), None, "above the clip");
+        assert_eq!(f.hit_test(200.0, 120.0), Some(Target::SwLap), "inside it");
+        assert_eq!(f.hit_test(200.0, 200.0), None, "below the clip");
     }
 
     #[test]
@@ -2717,7 +4220,9 @@ mod tests {
         let mut app = AlarmClockApp::new();
         let id = app.create_alarm(8, 30);
         // Only repeat on Tuesday (index 1).
-        app.find_alarm_mut(id).unwrap().set_day(Weekday::Tuesday, true);
+        app.find_alarm_mut(id)
+            .unwrap()
+            .set_day(Weekday::Tuesday, true);
         // Current day is Monday (index 0).
         app.set_current_time(8, 30, 0, 0);
         let triggered = app.check_alarm_triggers();
@@ -2756,37 +4261,661 @@ mod tests {
         assert_eq!(app.stopwatch.state, StopwatchState::Stopped);
     }
 
+    // ---- Frame / hit-testing ----
+
     #[test]
-    fn test_app_render_not_empty() {
-        let app = AlarmClockApp::new();
-        let cmds = app.render();
-        assert!(!cmds.is_empty());
+    fn every_tab_draws_and_closes_every_clip_it_opens() {
+        for tab in ActiveTab::all() {
+            let mut app = AlarmClockApp::new();
+            app.active_tab = tab;
+            app.create_alarm(8, 0);
+            app.create_timer(300);
+            app.stopwatch.start();
+            app.stopwatch.tick(1500);
+            app.stopwatch.lap();
+
+            let f = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+            assert!(!f.hits().is_empty(), "{:?} drew no controls at all", tab);
+            assert!(f.is_balanced(), "{:?} left a clip or translation open", tab);
+        }
     }
 
     #[test]
-    fn test_app_render_alarm_tab() {
+    fn the_tab_bar_is_on_every_tab() {
+        for tab in ActiveTab::all() {
+            let mut app = AlarmClockApp::new();
+            app.active_tab = tab;
+            for other in ActiveTab::all() {
+                assert!(
+                    probe::is_visible(&app, Target::Tab(other)),
+                    "{:?} is unreachable from {:?}",
+                    other,
+                    tab
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clicking_a_tab_selects_it() {
         let mut app = AlarmClockApp::new();
-        app.active_tab = ActiveTab::Alarm;
-        app.create_alarm(8, 0);
-        let cmds = app.render();
-        assert!(cmds.len() > 10);
+        assert_eq!(app.active_tab, ActiveTab::Alarm);
+        assert_eq!(
+            probe::click(&mut app, Target::Tab(ActiveTab::Timer)),
+            Action::Redraw
+        );
+        assert_eq!(app.active_tab, ActiveTab::Timer);
+        // Re-selecting the tab already shown changes nothing, so it must not
+        // ask for a repaint.
+        assert_eq!(
+            probe::click(&mut app, Target::Tab(ActiveTab::Timer)),
+            Action::None
+        );
     }
 
     #[test]
-    fn test_app_render_timer_tab() {
+    fn clicking_the_clock_swaps_the_time_format() {
+        let mut app = AlarmClockApp::new();
+        assert_eq!(app.time_format, TimeFormat::TwelveHour);
+        assert_eq!(probe::click(&mut app, Target::ClockFormat), Action::Redraw);
+        assert_eq!(app.time_format, TimeFormat::TwentyFourHour);
+    }
+
+    #[test]
+    fn the_window_is_still_usable_at_its_minimum_size() {
+        let mut app = AlarmClockApp::new();
+        app.create_alarm(8, 0);
+        let f = app.frame(MIN_WIDTH, MIN_HEIGHT);
+        assert!(f.is_balanced());
+        assert!(
+            f.hits().iter().any(|(t, _)| *t == Target::AddAlarm),
+            "the one control this tab exists for must survive the smallest window"
+        );
+    }
+
+    #[test]
+    fn a_size_below_the_minimum_is_clamped_rather_than_collapsed() {
+        // A window driven to 1x1 must not produce negative-width rectangles,
+        // which draw as nothing and hit-test as nothing.
+        let app = AlarmClockApp::new();
+        let f = app.frame(1.0, 1.0);
+        assert!(f.is_balanced());
+        for (target, rect) in f.hits() {
+            assert!(
+                rect.w >= 0.0 && rect.h >= 0.0,
+                "{:?} has {:?}",
+                target,
+                rect
+            );
+        }
+    }
+
+    // ---- Alarm list ----
+
+    #[test]
+    fn add_alarm_opens_the_editor_rather_than_creating_one_blind() {
+        let mut app = AlarmClockApp::new();
+        assert_eq!(probe::click(&mut app, Target::AddAlarm), Action::Redraw);
+        assert!(app.editor.is_some());
+        assert!(
+            app.alarms.is_empty(),
+            "nothing is created until Save; Cancel must leave no trace"
+        );
+        assert_eq!(probe::click(&mut app, Target::EditCancel), Action::Redraw);
+        assert!(app.alarms.is_empty());
+    }
+
+    #[test]
+    fn a_new_alarm_defaults_to_the_next_whole_hour() {
+        let mut app = AlarmClockApp::new();
+        app.set_current_time(7, 43, 12, 0);
+        app.open_new_alarm();
+        let editor = app.editor.clone().expect("editor open");
+        assert_eq!((editor.hour, editor.minute), (8, 0));
+    }
+
+    #[test]
+    fn saving_the_editor_creates_the_alarm_it_shows() {
+        let mut app = AlarmClockApp::new();
+        probe::click(&mut app, Target::AddAlarm);
+        probe::click(&mut app, Target::EditHour(Step::Up));
+        probe::click(&mut app, Target::EditMinute(Step::Down));
+        probe::click(&mut app, Target::EditDay(Weekday::Wednesday));
+        probe::click(&mut app, Target::EditLabel);
+        probe::type_str(&mut app, "Gym");
+        let (hour, minute) = {
+            let editor = app.editor.as_ref().expect("editor open");
+            (editor.hour, editor.minute)
+        };
+
+        assert_eq!(probe::click(&mut app, Target::EditSave), Action::Redraw);
+        assert!(app.editor.is_none());
+        assert_eq!(app.alarms.len(), 1);
+        let alarm = app.alarms.first().expect("one alarm");
+        assert_eq!((alarm.hour, alarm.minute), (hour, minute));
+        assert_eq!(alarm.label, "Gym");
+        assert!(alarm.repeats_on(Weekday::Wednesday));
+    }
+
+    #[test]
+    fn cancelling_an_edit_leaves_the_alarm_untouched() {
+        let mut app = AlarmClockApp::new();
+        let id = app.create_alarm_with_label(6, 15, "Work");
+        app.open_alarm(id);
+        probe::click(&mut app, Target::EditHour(Step::Up));
+        probe::click(&mut app, Target::EditLabel);
+        probe::type_str(&mut app, "!!!");
+        assert_eq!(probe::click(&mut app, Target::EditCancel), Action::Redraw);
+
+        let alarm = app.find_alarm(id).expect("still there");
+        assert_eq!((alarm.hour, alarm.minute), (6, 15));
+        assert_eq!(alarm.label, "Work");
+    }
+
+    #[test]
+    fn the_hour_spinner_wraps_at_both_ends() {
+        let mut app = AlarmClockApp::new();
+        app.editor = Some(AlarmEditor::new_alarm(0, 0));
+        probe::click(&mut app, Target::EditHour(Step::Down));
+        assert_eq!(app.editor.as_ref().map(|e| e.hour), Some(23));
+        probe::click(&mut app, Target::EditHour(Step::Up));
+        assert_eq!(app.editor.as_ref().map(|e| e.hour), Some(0));
+
+        app.editor = Some(AlarmEditor::new_alarm(0, 0));
+        probe::click(&mut app, Target::EditMinute(Step::Down));
+        assert_eq!(app.editor.as_ref().map(|e| e.minute), Some(59));
+    }
+
+    #[test]
+    fn the_alarm_pill_and_cross_do_what_they_say() {
+        let mut app = AlarmClockApp::new();
+        let id = app.create_alarm(8, 0);
+        assert!(app.find_alarm(id).is_some_and(|a| a.enabled));
+        assert_eq!(
+            probe::click(&mut app, Target::AlarmToggle(id)),
+            Action::Redraw
+        );
+        assert!(app.find_alarm(id).is_some_and(|a| !a.enabled));
+        assert_eq!(
+            probe::click(&mut app, Target::AlarmDelete(id)),
+            Action::Redraw
+        );
+        assert!(app.find_alarm(id).is_none());
+    }
+
+    #[test]
+    fn deleting_the_alarm_under_an_open_editor_closes_it() {
+        // Otherwise Save would resurrect the row the user just deleted.
+        let mut app = AlarmClockApp::new();
+        let id = app.create_alarm(8, 0);
+        app.open_alarm(id);
+        app.activate(Target::AlarmDelete(id), AlarmClockApp::SIZE);
+        assert!(app.editor.is_none());
+        assert!(app.alarms.is_empty());
+    }
+
+    #[test]
+    fn clicking_an_alarm_card_opens_it_for_editing() {
+        let mut app = AlarmClockApp::new();
+        let id = app.create_alarm_with_label(9, 45, "Standup");
+        assert_eq!(probe::click(&mut app, Target::AlarmRow(id)), Action::Redraw);
+        let editor = app.editor.clone().expect("editor open");
+        assert_eq!(editor.editing, Some(id));
+        assert_eq!((editor.hour, editor.minute), (9, 45));
+        assert_eq!(editor.label, "Standup");
+    }
+
+    #[test]
+    fn snooze_and_dismiss_are_reachable_only_while_ringing() {
+        let mut app = AlarmClockApp::new();
+        let id = app.create_alarm(8, 0);
+        assert!(!probe::is_visible(&app, Target::AlarmSnooze(id)));
+
+        app.set_current_time(8, 0, 0, 0);
+        app.check_alarm_triggers();
+        assert!(app.find_alarm(id).is_some_and(|a| a.ringing));
+        assert!(probe::is_visible(&app, Target::AlarmSnooze(id)));
+
+        assert_eq!(
+            probe::click(&mut app, Target::AlarmSnooze(id)),
+            Action::Redraw
+        );
+        let alarm = app.find_alarm(id).expect("still there");
+        assert!(!alarm.ringing);
+        assert_eq!(alarm.snoozed_remaining, Some(5 * 60));
+
+        assert_eq!(
+            probe::click(&mut app, Target::AlarmDismiss(id)),
+            Action::Redraw
+        );
+        let alarm = app.find_alarm(id).expect("still there");
+        assert_eq!(alarm.snoozed_remaining, None);
+        assert!(!alarm.ringing);
+    }
+
+    // ---- Timers ----
+
+    #[test]
+    fn every_preset_starts_a_running_timer() {
+        for minutes in TIMER_PRESETS {
+            let mut app = AlarmClockApp::new();
+            app.active_tab = ActiveTab::Timer;
+            assert_eq!(
+                probe::click(&mut app, Target::Preset(minutes)),
+                Action::Redraw
+            );
+            let timer = app.timers.first().expect("one timer");
+            assert_eq!(timer.total_seconds, minutes.saturating_mul(60));
+            assert_eq!(
+                timer.state,
+                TimerState::Running,
+                "a preset that had to be started by hand is two clicks for one intention"
+            );
+        }
+    }
+
+    #[test]
+    fn the_custom_fields_take_digits_only_and_two_of_them() {
         let mut app = AlarmClockApp::new();
         app.active_tab = ActiveTab::Timer;
-        app.create_timer(300);
-        let cmds = app.render();
-        assert!(cmds.len() > 10);
+        probe::click(&mut app, Target::CustomField(HmsField::Minutes));
+        probe::type_str(&mut app, "9x99");
+        assert_eq!(
+            app.custom
+                .get(HmsField::Minutes.index())
+                .map(String::as_str),
+            Some("99")
+        );
     }
 
     #[test]
-    fn test_app_render_stopwatch_tab() {
+    fn the_custom_row_starts_the_duration_it_spells() {
+        let mut app = AlarmClockApp::new();
+        app.active_tab = ActiveTab::Timer;
+        probe::click(&mut app, Target::CustomField(HmsField::Hours));
+        probe::type_str(&mut app, "1");
+        probe::click(&mut app, Target::CustomField(HmsField::Seconds));
+        probe::type_str(&mut app, "30");
+        assert_eq!(app.custom_seconds(), 3600 + 30);
+
+        assert_eq!(probe::click(&mut app, Target::CustomStart), Action::Redraw);
+        let timer = app.timers.first().expect("one timer");
+        assert_eq!(timer.total_seconds, 3630);
+        assert_eq!(timer.state, TimerState::Running);
+        assert_eq!(
+            app.custom,
+            [String::new(), String::new(), String::new()],
+            "the fields clear, or the next Start silently repeats the last one"
+        );
+    }
+
+    #[test]
+    fn start_with_empty_fields_does_nothing_at_all() {
+        // A zero-second timer is created already finished, which is
+        // indistinguishable from the button having malfunctioned.
+        let mut app = AlarmClockApp::new();
+        app.active_tab = ActiveTab::Timer;
+        assert_eq!(probe::click(&mut app, Target::CustomStart), Action::None);
+        assert!(app.timers.is_empty());
+    }
+
+    #[test]
+    fn timer_card_buttons_route_to_that_timer() {
+        let mut app = AlarmClockApp::new();
+        app.active_tab = ActiveTab::Timer;
+        let a = app.create_timer(60);
+        let b = app.create_timer(120);
+
+        probe::click(&mut app, Target::TimerToggle(b));
+        assert_eq!(app.find_timer(a).map(|t| t.state), Some(TimerState::Idle));
+        assert_eq!(
+            app.find_timer(b).map(|t| t.state),
+            Some(TimerState::Running)
+        );
+
+        probe::click(&mut app, Target::TimerDelete(a));
+        assert!(app.find_timer(a).is_none());
+        assert!(
+            app.find_timer(b).is_some(),
+            "deleting by id must survive the list reordering under it"
+        );
+    }
+
+    // ---- Stopwatch ----
+
+    #[test]
+    fn the_stopwatch_buttons_drive_the_stopwatch() {
         let mut app = AlarmClockApp::new();
         app.active_tab = ActiveTab::Stopwatch;
-        let cmds = app.render();
-        assert!(cmds.len() > 5);
+        assert_eq!(probe::click(&mut app, Target::SwToggle), Action::Redraw);
+        assert_eq!(app.stopwatch.state, StopwatchState::Running);
+
+        app.stopwatch.tick(1_500);
+        assert_eq!(probe::click(&mut app, Target::SwLap), Action::Redraw);
+        assert_eq!(app.stopwatch.laps.len(), 1);
+
+        assert_eq!(probe::click(&mut app, Target::SwToggle), Action::Redraw);
+        assert_eq!(app.stopwatch.state, StopwatchState::Paused);
+        // Lap is dimmed while paused and must not record one.
+        assert_eq!(probe::click(&mut app, Target::SwLap), Action::None);
+        assert_eq!(app.stopwatch.laps.len(), 1);
+
+        assert_eq!(probe::click(&mut app, Target::SwReset), Action::Redraw);
+        assert_eq!(app.stopwatch.elapsed_ms, 0);
+        assert!(app.stopwatch.laps.is_empty());
+    }
+
+    // ---- Ticking ----
+
+    #[test]
+    fn the_tick_interval_is_never_none() {
+        // The bug this file was wired to fix: with no interval the window is
+        // never woken, so countdowns freeze and alarms never fire.
+        let mut app = AlarmClockApp::new();
+        assert_eq!(app.tick_interval(), Some(TICK_SLOW));
+        app.stopwatch.start();
+        assert_eq!(app.tick_interval(), Some(TICK_FAST));
+        app.stopwatch.pause();
+        assert_eq!(app.tick_interval(), Some(TICK_SLOW));
+    }
+
+    #[test]
+    fn a_countdown_takes_the_same_time_at_either_tick_rate() {
+        // The per-second work is banked off measured elapsed time, so a fast
+        // tick must not run a timer ten times too quickly.
+        for (step, count) in [(500_u64, 20_u64), (50, 200)] {
+            let mut app = AlarmClockApp::new();
+            let id = app.create_timer(60);
+            app.start_timer(id);
+            for _ in 0..count {
+                app.tick(step);
+            }
+            assert_eq!(
+                app.find_timer(id).map(|t| t.remaining_seconds),
+                Some(50),
+                "ten seconds of ticks at {} ms",
+                step
+            );
+        }
+    }
+
+    #[test]
+    fn a_late_tick_advances_by_what_actually_elapsed() {
+        let mut app = AlarmClockApp::new();
+        app.stopwatch.start();
+        let id = app.create_timer(60);
+        app.start_timer(id);
+        // One tick standing in for three seconds of a stalled machine.
+        app.tick(3_000);
+        assert_eq!(app.stopwatch.elapsed_ms, 3_000);
+        assert_eq!(app.find_timer(id).map(|t| t.remaining_seconds), Some(57));
+    }
+
+    #[test]
+    fn sub_second_ticks_bank_rather_than_round_away() {
+        let mut app = AlarmClockApp::new();
+        let id = app.create_timer(10);
+        app.start_timer(id);
+        // Nine ticks of 100 ms is under a second: nothing may move yet.
+        for _ in 0..9 {
+            app.tick(100);
+        }
+        assert_eq!(app.find_timer(id).map(|t| t.remaining_seconds), Some(10));
+        app.tick(100);
+        assert_eq!(app.find_timer(id).map(|t| t.remaining_seconds), Some(9));
+    }
+
+    // ---- Keyboard ----
+
+    #[test]
+    fn digits_select_tabs_and_tab_cycles_them() {
+        let mut app = AlarmClockApp::new();
+        probe::key(&mut app, &probe::press(Key::Num3));
+        assert_eq!(app.active_tab, ActiveTab::Stopwatch);
+        probe::key(&mut app, &probe::press(Key::Tab));
+        assert_eq!(app.active_tab, ActiveTab::Alarm, "the cycle wraps");
+        probe::key(&mut app, &probe::shift(Key::Tab));
+        assert_eq!(app.active_tab, ActiveTab::Stopwatch);
+    }
+
+    #[test]
+    fn alt_tab_is_the_window_managers_and_not_ours() {
+        let mut app = AlarmClockApp::new();
+        let mut event = probe::press(Key::Tab);
+        event.modifiers.alt = true;
+        assert_eq!(probe::key(&mut app, &event), Action::None);
+        assert_eq!(app.active_tab, ActiveTab::Alarm);
+    }
+
+    #[test]
+    fn space_drives_the_stopwatch_only_on_its_own_tab() {
+        let mut app = AlarmClockApp::new();
+        app.active_tab = ActiveTab::Alarm;
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Space)),
+            Action::None
+        );
+        assert_eq!(app.stopwatch.state, StopwatchState::Stopped);
+
+        app.active_tab = ActiveTab::Stopwatch;
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Space)),
+            Action::Redraw
+        );
+        assert_eq!(app.stopwatch.state, StopwatchState::Running);
+    }
+
+    #[test]
+    fn typing_a_label_is_not_a_pile_of_shortcuts() {
+        // The whole reason `focus` is an `Option`: with the label focused, `r`
+        // is the letter r and must not reset the stopwatch.
+        let mut app = AlarmClockApp::new();
+        app.stopwatch.start();
+        app.stopwatch.tick(5_000);
+        probe::click(&mut app, Target::AddAlarm);
+        probe::click(&mut app, Target::EditLabel);
+        probe::type_str(&mut app, "run");
+        assert_eq!(app.editor.as_ref().map(|e| e.label.as_str()), Some("run"));
+        assert_eq!(app.stopwatch.elapsed_ms, 5_000);
+        assert_eq!(app.stopwatch.state, StopwatchState::Running);
+    }
+
+    #[test]
+    fn escape_closes_the_editor_then_stops_doing_anything() {
+        let mut app = AlarmClockApp::new();
+        probe::click(&mut app, Target::AddAlarm);
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Escape)),
+            Action::Redraw
+        );
+        assert!(app.editor.is_none());
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::Escape)),
+            Action::None,
+            "Escape with nothing open must not be reported as a change"
+        );
+    }
+
+    #[test]
+    fn ctrl_q_quits_even_with_a_field_focused() {
+        let mut app = AlarmClockApp::new();
+        probe::click(&mut app, Target::AddAlarm);
+        probe::click(&mut app, Target::EditLabel);
+        assert_eq!(probe::key(&mut app, &probe::ctrl(Key::Q)), Action::Quit);
+    }
+
+    #[test]
+    fn the_label_field_is_bounded() {
+        let mut app = AlarmClockApp::new();
+        probe::click(&mut app, Target::AddAlarm);
+        probe::click(&mut app, Target::EditLabel);
+        probe::type_str(&mut app, &"x".repeat(MAX_LABEL_LEN + 20));
+        assert_eq!(
+            app.editor.as_ref().map(|e| e.label.chars().count()),
+            Some(MAX_LABEL_LEN)
+        );
+    }
+
+    #[test]
+    fn clicking_away_from_a_field_drops_the_keyboard() {
+        let mut app = AlarmClockApp::new();
+        app.active_tab = ActiveTab::Timer;
+        probe::click(&mut app, Target::CustomField(HmsField::Hours));
+        assert_eq!(app.focus, Some(Focus::Custom(HmsField::Hours)));
+        let (x, y) = probe::bare_point(&app, AlarmClockApp::SIZE).expect("empty space somewhere");
+        assert_eq!(
+            app.handle_click(x, y, MouseButton::Left, AlarmClockApp::SIZE),
+            Action::Redraw
+        );
+        assert_eq!(app.focus, None);
+    }
+
+    // ---- Scrolling ----
+
+    #[test]
+    fn the_wheel_scrolls_the_alarm_list_and_stops_at_both_ends() {
+        let mut app = AlarmClockApp::new();
+        for hour in 0..20 {
+            app.create_alarm(hour, 0);
+        }
+        let size = AlarmClockApp::SIZE;
+        let list = AlarmClockApp::alarm_list_rect(AlarmClockApp::content_rect(size.0, size.1));
+        let (x, y) = (list.x + list.w / 2.0, list.y + list.h / 2.0);
+
+        // Up at the top is already as far as it goes.
+        assert_eq!(app.scroll(x, y, 1.0, size), Action::None);
+        assert_eq!(app.scroll(x, y, -1.0, size), Action::Redraw);
+        assert!(app.alarm_scroll > 0.0);
+
+        for _ in 0..500 {
+            app.scroll(x, y, -1.0, size);
+        }
+        let max = app.alarm_content_height() - list.h;
+        assert!((app.alarm_scroll - max).abs() < 1.0, "clamped to the end");
+        assert_eq!(app.scroll(x, y, -1.0, size), Action::None);
+    }
+
+    #[test]
+    fn deleting_the_content_under_a_scrolled_pane_pulls_it_back() {
+        let mut app = AlarmClockApp::new();
+        let mut ids = Vec::new();
+        for hour in 0..20 {
+            ids.push(app.create_alarm(hour, 0));
+        }
+        let size = AlarmClockApp::SIZE;
+        app.alarm_scroll = 5_000.0;
+        app.clamp_scrolls(size.0, size.1);
+        for id in ids {
+            app.activate(Target::AlarmDelete(id), size);
+        }
+        assert!(
+            app.alarm_scroll.abs() < f32::EPSILON,
+            "an emptied list parked past its end shows nothing, with no way back"
+        );
+    }
+
+    #[test]
+    fn the_wheel_over_a_pane_that_is_not_there_does_nothing() {
+        let mut app = AlarmClockApp::new();
+        app.open_new_alarm();
+        let size = AlarmClockApp::SIZE;
+        assert_eq!(
+            app.scroll(size.0 / 2.0, size.1 / 2.0, -1.0, size),
+            Action::None,
+            "the editor covers the list; scrolling it would move something unseen"
+        );
+    }
+
+    // ---- Clock ----
+
+    #[test]
+    fn the_clock_reads_through_the_zone_and_the_toolkit_calendar() {
+        let mut app = AlarmClockApp::new();
+        // 2026-08-26T13:45:07Z is a Wednesday.
+        app.set_time_from_utc(1_787_751_907);
+        assert_eq!(app.current_time, (13, 45, 7));
+        assert_eq!(
+            Weekday::from_index(app.current_weekday),
+            Some(Weekday::Wednesday)
+        );
+    }
+
+    #[test]
+    fn a_pre_epoch_instant_is_still_a_time_of_day() {
+        // `%` would give a negative remainder here, which is not a clock
+        // reading at all. The argument is not required to come from
+        // `SystemTime::now`.
+        let mut app = AlarmClockApp::new();
+        app.set_time_from_utc(-1);
+        assert_eq!(app.current_time, (23, 59, 59));
+    }
+
+    #[test]
+    fn the_two_weekday_calendars_are_reconciled_in_one_place() {
+        // `guitk::date` counts from Sunday and this crate counts from Monday.
+        // An alarm set for "Mon" that fires on Sunday is what an inline second
+        // copy of this subtraction buys.
+        assert_eq!(weekday_index(guitk::date::Weekday::Monday), 0);
+        assert_eq!(weekday_index(guitk::date::Weekday::Sunday), 6);
+        assert_eq!(weekday_index(guitk::date::Weekday::Saturday), 5);
+    }
+
+    #[test]
+    fn the_next_alarm_line_reads_in_hours_and_minutes() {
+        assert_eq!(humanise_minutes(0), "under a minute");
+        assert_eq!(humanise_minutes(45), "45 min");
+        assert_eq!(humanise_minutes(120), "2 h");
+        assert_eq!(humanise_minutes(200), "3 h 20 min");
+    }
+
+    #[test]
+    fn every_control_the_frame_records_is_reachable_by_name() {
+        // Guards against a hit box recorded for a target the router forgot: a
+        // control that is drawn, is clickable, and does nothing.
+        let mut app = AlarmClockApp::new();
+        app.create_alarm(8, 0);
+        app.create_timer(300);
+        app.stopwatch.start();
+        let mut seen: Vec<String> = Vec::new();
+        for tab in ActiveTab::all() {
+            app.active_tab = tab;
+            seen.extend(probe::control_names(&app));
+        }
+        app.open_new_alarm();
+        app.active_tab = ActiveTab::Alarm;
+        seen.extend(probe::control_names(&app));
+        for name in [
+            "Tab",
+            "ClockFormat",
+            "AddAlarm",
+            "AlarmRow",
+            "AlarmToggle",
+            "AlarmDelete",
+            "EditHour",
+            "EditMinute",
+            "EditLabel",
+            "EditDay",
+            "EditSound",
+            "EditSnooze",
+            "EditSave",
+            "EditCancel",
+            "Preset",
+            "CustomField",
+            "CustomStart",
+            "TimerRow",
+            "TimerToggle",
+            "TimerReset",
+            "TimerDelete",
+            "SwToggle",
+            "SwLap",
+            "SwReset",
+        ] {
+            assert!(
+                seen.iter().any(|s| s.starts_with(name)),
+                "{} is never drawn anywhere",
+                name
+            );
+        }
     }
 
     #[test]

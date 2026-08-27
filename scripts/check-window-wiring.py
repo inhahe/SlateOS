@@ -142,7 +142,7 @@ def main_line(text: str) -> int:
 # The count of findings as of 2026-08-26, so the gate can ratchet. Lower this
 # whenever apps are wired; the check fails if it is ever exceeded. It is a
 # ceiling, not a target -- see the module docstring on why it is not zero.
-BASELINE = 119
+BASELINE = 118
 
 
 # --------------------------------------------------------------------------

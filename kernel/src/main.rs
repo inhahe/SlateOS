@@ -6325,6 +6325,17 @@ extern "C" fn kernel_main() -> ! {
     numa::init();
     numa::self_test();
 
+    // Hand the topology `numa::init` just worked out to the module that
+    // reports it.  Until this call existed, `/proc/numastat` said `nodes: 0`
+    // on every machine -- not "unknown", but a false count, since a machine
+    // with memory has at least one node.  It must come after `numa::init()`
+    // (nothing to adopt before) and after `smp::init()` (the per-node CPU sets
+    // are built by asking `numa::cpu_node` about each online CPU); both are
+    // above.  `fs::numastat::self_test` at the top of boot ran long before
+    // either, so there is no fixture left here to collide with.
+    fs::numastat::adopt_topology();
+    fs::numastat::self_test_adoption();
+
     // Kernel symbol table self-test.
     ksyms::self_test();
 

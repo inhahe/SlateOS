@@ -144,32 +144,36 @@ where
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Initialise an **empty** signal-queue table.
+///
+/// Seeds NO processes and zero counters.  Real signal accounting enters this
+/// table through [`send`], which creates the target's record on the first
+/// signal queued to it; [`deliver`], [`block`] and [`unblock`] all return
+/// `NotFound` for a pid that has never been sent one.  Until a signal is
+/// actually sent the table is genuinely empty, so `/proc/signalq` and the
+/// `signalq` kshell command report zeros rather than fabricated numbers — the
+/// kernel's hard "never invent data in procfs" rule.
+///
+/// NOTE: this previously seeded two fictional processes (pid 1 with
+/// `total_delivered: 5`, pid 100 with `total_delivered: 2`) plus a matching
+/// invented aggregate `total_delivered: 7`, which `/proc/signalq`, `signalq
+/// stats` and `signalq list` then displayed in the same columns and the same
+/// formatting as figures that had actually been measured.  Nothing had sent
+/// those seven signals.  That demo data was removed; the self-test now builds
+/// its own fixtures explicitly via the real API (see [`self_test`]).
+///
+/// `total_delivered` is the one column an operator would read to decide
+/// whether signal delivery is working at all, which is what made a non-zero
+/// value here worse than merely untidy.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() {
         return;
     }
     *guard = Some(State {
-        processes: alloc::vec![
-            ProcessSignalState {
-                pid: 1,
-                pending: Vec::new(),
-                blocked_mask: 0,
-                total_sent: 0,
-                total_delivered: 5,
-                total_blocked: 0
-            },
-            ProcessSignalState {
-                pid: 100,
-                pending: Vec::new(),
-                blocked_mask: 0,
-                total_sent: 0,
-                total_delivered: 2,
-                total_blocked: 0
-            },
-        ],
+        processes: Vec::new(),
         total_sent: 0,
-        total_delivered: 7,
+        total_delivered: 0,
         total_dropped: 0,
         ops: 0,
     });
@@ -332,11 +336,26 @@ fn self_test_inner() {
     crate::serial_println!("signalq::self_test() — running tests...");
     init_defaults();
 
-    // 1: Defaults.
-    assert_eq!(list_processes().len(), 2);
-    crate::serial_println!("  [1/8] defaults: OK");
+    // 1: Defaults.  The table starts genuinely empty -- asserted rather than
+    // assumed, because this module used to seed two processes and seven
+    // deliveries here, and every count below is stated as an absolute rather
+    // than a delta so that a seed reappearing fails immediately instead of
+    // shifting every figure by a constant.
+    assert!(
+        list_processes().is_empty(),
+        "init_defaults must seed no processes"
+    );
+    let (_, sent0, delivered0, dropped0, _) = stats();
+    assert_eq!(
+        (sent0, delivered0, dropped0),
+        (0, 0, 0),
+        "init_defaults must seed zero counters"
+    );
+    crate::serial_println!("  [1/8] defaults: OK (empty)");
 
-    // 2: Send signal.
+    // 2: Send signal.  This is also what brings pid 1 into existence: with no
+    // seed there is no other entry point, so the block/unblock steps below
+    // depend on this send having created the record.
     send(0, 1, Signal::PageFault, 0x1000).expect("send");
     let p = pending(1);
     assert_eq!(p.len(), 1);
@@ -361,9 +380,11 @@ fn self_test_inner() {
     assert_eq!(pending(1).len(), 1);
     crate::serial_println!("  [5/8] unblock: OK");
 
-    // 6: Auto-create process.
+    // 6: Auto-create process.  Test 2 already exercised create-on-first-send
+    // for pid 1; what this adds is that a *second*, distinct pid gets its own
+    // record rather than being folded into the first.
     send(1, 999, Signal::DivideError, 0).expect("send3");
-    assert_eq!(list_processes().len(), 3);
+    assert_eq!(list_processes().len(), 2, "pid 1 from test 2, plus pid 999");
     crate::serial_println!("  [6/8] auto-create: OK");
 
     // 7: Signal numbers.
@@ -380,12 +401,15 @@ fn self_test_inner() {
     // `send` leave the counter at 3, which is what makes this assertion worth
     // stating exactly -- it asserted `>= 4` and failed the first time it ran.
     //
-    // `total_delivered` is 8 because `init_defaults` seeds it at 7 (matching
-    // the 5 + 2 it seeds on the two processes) and test 3 delivers one more.
+    // `total_delivered` is 1: the single delivery test 3 performed, and
+    // nothing else.  It used to read 8 -- the 7 `init_defaults` invented plus
+    // that one real delivery -- which is exactly the shape of the defect:
+    // a measured figure and a fabricated one summed into a single column, so
+    // that neither could be recovered from the total.
     let (procs, sent, delivered, dropped, ops) = stats();
-    assert_eq!(procs, 3);
+    assert_eq!(procs, 2);
     assert_eq!(sent, 3, "four sends, one of them blocked before queueing");
-    assert_eq!(delivered, 8, "seeded 7, plus the one test 3 delivered");
+    assert_eq!(delivered, 1, "only test 3's delivery; nothing is seeded");
     assert_eq!(dropped, 0, "nothing reached MAX_PENDING");
     // The send that did not count as sent counted as blocked. Asserted here
     // rather than left implicit: it is the whole reason `sent` is 3, and

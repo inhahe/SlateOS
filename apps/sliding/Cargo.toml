@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
 randrange = { path = "../../randrange" }
+# The window. Without it `main` built a `SlidingPuzzle`, dropped it and exited:
+# no tile ever reached a screen, and no key or click ever arrived.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

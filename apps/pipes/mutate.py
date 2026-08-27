@@ -330,40 +330,50 @@ def run_tests():
 
 
 def main():
-    if not BAK.exists():
-        BAK.write_text(SRC.read_text(encoding="utf-8", newline=""), encoding="utf-8", newline="")
-    original = BAK.read_text(encoding="utf-8", newline="")
-    SRC.write_text(original, encoding="utf-8", newline="")
+    # The backup is written fresh from the source on every run, and removed
+    # again when the run ends. It must NOT be reused across runs: an earlier
+    # version of this script said `if not BAK.exists()`, which meant a second
+    # sweep read the `.bak` left by the first, wrote it over `main.rs`, and
+    # silently threw away every fix made between the two sweeps -- then
+    # reported the same survivors as before, as if the fixes had failed. A
+    # runner that can revert the source it measures produces output that looks
+    # like evidence and is not.
+    original = SRC.read_text(encoding="utf-8", newline="")
+    BAK.write_text(original, encoding="utf-8", newline="")
     verdicts = []
     only = sys.argv[1:]
-    for name, old, new, expect in MUTATIONS:
-        if only and not any(o in name for o in only):
-            continue
-        if original.count(old) != 1:
-            verdicts.append((name, f"SKIP anchor appears {original.count(old)}x"))
-            print(f"[skip] {name}: anchor appears {original.count(old)} times")
-            continue
-        SRC.write_text(original.replace(old, new), encoding="utf-8", newline="")
-        compiled, failed, timed_out, out = run_tests()
-        if timed_out:
-            # A mutant that hangs is caught: the test it hangs in is the one
-            # whose whole job is to prove the loop is bounded.
-            verdicts.append((name, "caught by a hang (bound removed)"))
-            print(f"[ok]   {name}: caught \u2014 the suite hung, as the bound is gone")
-        elif not compiled:
-            verdicts.append((name, "SKIP did not compile"))
-            print(f"[skip] {name}: mutant did not compile")
-            print(out.stdout[-2000:])
-        elif set(expect) <= failed:
-            verdicts.append((name, f"caught by {len(failed)} test(s)"))
-            print(f"[ok]   {name}: caught ({', '.join(sorted(failed))})")
-        elif failed:
-            verdicts.append((name, f"WRONG TESTS: {sorted(failed)}"))
-            print(f"[??]   {name}: expected {expect}, got {sorted(failed)}")
-        else:
-            verdicts.append((name, "SURVIVED"))
-            print(f"[BAD]  {name}: SURVIVED \u2014 no test failed")
+    try:
+        for name, old, new, expect in MUTATIONS:
+            if only and not any(o in name for o in only):
+                continue
+            if original.count(old) != 1:
+                verdicts.append((name, f"SKIP anchor appears {original.count(old)}x"))
+                print(f"[skip] {name}: anchor appears {original.count(old)} times")
+                continue
+            SRC.write_text(original.replace(old, new), encoding="utf-8", newline="")
+            compiled, failed, timed_out, out = run_tests()
+            if timed_out:
+                # A mutant that hangs is caught: the test it hangs in is the one
+                # whose whole job is to prove the loop is bounded.
+                verdicts.append((name, "caught by a hang (bound removed)"))
+                print(f"[ok]   {name}: caught \u2014 the suite hung, as the bound is gone")
+            elif not compiled:
+                verdicts.append((name, "SKIP did not compile"))
+                print(f"[skip] {name}: mutant did not compile")
+                print(out.stdout[-2000:])
+            elif set(expect) <= failed:
+                verdicts.append((name, f"caught by {len(failed)} test(s)"))
+                print(f"[ok]   {name}: caught ({', '.join(sorted(failed))})")
+            elif failed:
+                verdicts.append((name, f"WRONG TESTS: {sorted(failed)}"))
+                print(f"[??]   {name}: expected {expect}, got {sorted(failed)}")
+            else:
+                verdicts.append((name, "SURVIVED"))
+                print(f"[BAD]  {name}: SURVIVED \u2014 no test failed")
+            SRC.write_text(original, encoding="utf-8", newline="")
+    finally:
         SRC.write_text(original, encoding="utf-8", newline="")
+        BAK.unlink(missing_ok=True)
     print("\n=== summary ===")
     for name, v in verdicts:
         print(f"{v:<34} {name}")

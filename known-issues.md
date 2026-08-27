@@ -80699,6 +80699,24 @@ tree and reporting "clean" — arrived at from the opposite direction: not a
 gate that stopped reading the files, but a gate that read them and was talked
 out of its finding by the evidence of its own success.
 
+**Running tally (appended 2026-08-27, lane C).** The five above were the ones
+the gate and the hand search found in one afternoon. Two more have turned up
+since, both while wiring a simulation `main` to a real window, and neither was
+visible to `check-tick-wiring.py` — because an app with no `handle_event` at
+all fails the gate's first condition and is therefore never reported:
+
+| # | App | Symptom |
+|---|---|---|
+| 6 | `apps/maze` | The advertised "Timer tracking" never ticked: `elapsed_secs` was set to zero in two places, read only by `format_time`, and incremented nowhere — and `format_time` was itself never called by `render`, so even a working clock would not have reached the screen. |
+| 7 | `apps/magnifier` | No `tick_interval`, so the smoothing that `smooth_edges` promised could not have eased anything. The field was settable from the keyboard and changed nothing observable. |
+
+The addition to the lesson: **an unwired `main` hides an unwired clock.** The
+gate looks for an app that receives events and ignores the time one; an app
+that receives no events at all is a strictly worse case and scores clean. Any
+app still on the window-wiring backlog should be assumed to have this fault
+until its clock is checked, and the check belongs in the wiring work rather
+than in a separate sweep — which is how both of these were found.
+
 ---
 
 ### Lesson 48: a gate must be measured on the tree it will gate, not the tree it was written on (lane A, 2026-08-25)

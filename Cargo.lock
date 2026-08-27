@@ -195,6 +195,8 @@ name = "alarmclock"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "tzrules",
 ]
 
 [[package]]
@@ -12192,6 +12194,10 @@ name = "stickynotes"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "safeio",
+ "scratchdir",
+ "settingsfile",
 ]
 
 [[package]]

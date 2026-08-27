@@ -222,6 +222,128 @@ impl ExtF80 {
         round(neg, u128::from(frac | (1 << 52)), exp2, false)
     }
 
+    /// Narrow to an `f64`, rounding to nearest and ties to even — the x87
+    /// `FSTP m64` a C compiler emits for `(double) x`.
+    ///
+    /// This is the inverse of [`from_f64`](Self::from_f64) and, unlike it, is
+    /// lossy: the 64-bit significand does not fit in a `double`'s 53 bits, and
+    /// the exponent range is far wider, so a value may round, overflow to an
+    /// infinity, or underflow to a subnormal or to zero.
+    ///
+    /// It exists because gnulib's `cl_strtod` is `strtod` and not `strtold` —
+    /// utilities that read *one* number off the command line and then do
+    /// ordinary arithmetic with it (`sleep`'s interval is the first) want the
+    /// glibc grammar that [`strtold`] implements and a `double` at the end of
+    /// it. Utilities that must *print* the number back, like `seq` and
+    /// `printf`, keep the [`ExtF80`] and never call this.
+    ///
+    /// # Why it is written out rather than done in floating point
+    ///
+    /// The obvious shorthand — turn the significand into an `f64` and scale it
+    /// by a power of two — rounds twice, once into the 53-bit significand and
+    /// again when the scaling lands in the subnormal range, and double rounding
+    /// is off by one ulp on the ties. Rounding once, from the exact integer, is
+    /// the only way to agree with the hardware on every input.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn to_f64(self) -> f64 {
+        // NaN and infinity carry the sign through, for the same reason
+        // `from_f64` does: narrowing is an x87 store, which copies the sign bit.
+        if self.is_nan() {
+            return f64::from_bits(u64::from(self.neg) << 63 | f64::NAN.to_bits());
+        }
+        if self.is_infinite() {
+            return if self.neg {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+        }
+        let sign = u64::from(self.neg) << 63;
+        if self.is_zero() {
+            return f64::from_bits(sign);
+        }
+
+        // `value == sig * 2^e`. Normalise so the top bit of `sig` is bit 63,
+        // which a subnormal's is not, so that `big_e` below is the exponent of
+        // the leading one wherever it started.
+        let (mut sig, mut e) = self.decompose();
+        let shift = sig.leading_zeros();
+        sig <<= shift;
+        e -= shift as i32;
+        // `value == 1.f * 2^big_e`: the unbiased exponent an `f64` would use.
+        let big_e = e + 63;
+
+        if big_e > 1023 {
+            return if self.neg {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+        }
+
+        // Bits of `sig` to discard. Eleven for a result that lands in the
+        // normal range — 64 significand bits down to 53 — and one more for
+        // every power of two below the smallest normal, because a subnormal
+        // buys its exponent with significand bits.
+        let drop = if big_e >= -1022 {
+            11u32
+        } else {
+            11 + (-1022 - big_e) as u32
+        };
+
+        // Round to nearest, ties to even, from the exact integer. `sticky`
+        // records whether anything below the round bit was set, which is what
+        // separates a tie from a value just above one.
+        let (kept, round_bit, sticky) = if drop >= 64 {
+            // Everything is discarded. The round bit is bit `drop - 1` of a
+            // 64-bit number, so it exists only at `drop == 64`, where it is the
+            // leading one — a value exactly half the smallest subnormal, which
+            // ties to even and so to zero.
+            let round_bit = drop == 64;
+            (
+                0u64,
+                round_bit,
+                if round_bit { sig != 1 << 63 } else { true },
+            )
+        } else {
+            let kept = sig >> drop;
+            let rem = sig & ((1u64 << drop) - 1);
+            (
+                kept,
+                rem >> (drop - 1) & 1 == 1,
+                rem & ((1u64 << (drop - 1)) - 1) != 0,
+            )
+        };
+        let mut m = kept;
+        if round_bit && (sticky || m & 1 == 1) {
+            m += 1;
+        }
+
+        if big_e < -1022 {
+            // Subnormal. The encoding does the promotion for free: `m` reaching
+            // `1 << 52` sets what is read back as a biased exponent of 1 with a
+            // zero fraction, which is the smallest normal — exactly the value
+            // the rounding produced.
+            return f64::from_bits(sign | m);
+        }
+        // A carry out of the significand is a power of two: halve it and take
+        // the exponent back, which may in turn overflow.
+        let (m, big_e) = if m == 1 << 53 {
+            (m >> 1, big_e + 1)
+        } else {
+            (m, big_e)
+        };
+        if big_e > 1023 {
+            return if self.neg {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+        }
+        f64::from_bits(sign | ((big_e + 1023) as u64) << 52 | (m & 0x000f_ffff_ffff_ffff))
+    }
+
     /// An `f32`, exactly.
     #[must_use]
     pub fn from_f32(v: f32) -> Self {
@@ -2092,5 +2214,152 @@ mod tests {
             let text = f("%.20Le", v);
             assert!(p(&text).eq_value(v), "{s} -> {text}");
         }
+    }
+
+    // ---------------- narrowing to f64 ----------------
+
+    /// Bit patterns rather than values: `assert_eq!` on two `f64`s cannot tell
+    /// `0.0` from `-0.0`, and says two NaNs differ. Both distinctions are ones
+    /// [`ExtF80::to_f64`] is required to get right.
+    fn bits(v: f64) -> u64 {
+        v.to_bits()
+    }
+
+    #[test]
+    fn every_f64_survives_the_widening_and_the_narrowing() {
+        for v in [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            // The smallest subnormal, and one with bits set through the middle
+            // of the field: the two ends of the range `to_f64` reconstructs
+            // without a biased exponent.
+            f64::from_bits(1),
+            f64::from_bits(0x000a_bcde_f012_3456),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            3.141_592_653_589_793,
+            1e-300,
+            6.02e23,
+        ] {
+            assert_eq!(
+                bits(ExtF80::from_f64(v).to_f64()),
+                bits(v),
+                "{v:?} did not survive"
+            );
+        }
+    }
+
+    /// The sign of a NaN is carried, as it is on the way in — an x87 store
+    /// copies the bit through, and `printf` prints `-nan`.
+    #[test]
+    fn a_nan_narrows_to_a_nan_of_the_same_sign() {
+        assert!(ExtF80::NAN.to_f64().is_nan());
+        assert!(!ExtF80::NAN.to_f64().is_sign_negative());
+        let neg = ExtF80 {
+            neg: true,
+            ..ExtF80::NAN
+        };
+        assert!(neg.to_f64().is_nan());
+        assert!(neg.to_f64().is_sign_negative());
+    }
+
+    /// The eleven bits an `f64` cannot hold are rounded to nearest, and a tie
+    /// goes to the even significand. 2^53+1 is exactly between two `double`s
+    /// and 2^53 is the even one; 2^53+3 is exactly between two others and
+    /// 2^53+4 is the even one, so the two ties break in opposite directions.
+    #[test]
+    fn a_tie_goes_to_the_even_significand() {
+        assert_eq!(
+            bits(p("9007199254740993").to_f64()),
+            bits(9_007_199_254_740_992.0)
+        );
+        assert_eq!(
+            bits(p("9007199254740995").to_f64()),
+            bits(9_007_199_254_740_996.0)
+        );
+        // Not a tie: above the midpoint, so it rounds up whatever the parity.
+        assert_eq!(
+            bits(p("9007199254740993.5").to_f64()),
+            bits(9_007_199_254_740_994.0)
+        );
+    }
+
+    /// Past the top of the `double` range the answer is an infinity of the
+    /// right sign, not a wrapped exponent.
+    #[test]
+    fn a_value_too_large_for_a_double_becomes_an_infinity() {
+        assert_eq!(bits(pr("1e400").to_f64()), bits(f64::INFINITY));
+        assert_eq!(bits(pr("-1e400").to_f64()), bits(f64::NEG_INFINITY));
+        // The boundary is not `f64::MAX` but half an ulp above it — the value
+        // that would round *up* to 2^1024. Computed: `2^1024 - 2^970` is
+        // 1.7976931348623158079...e308, so the numeral below it still narrows
+        // to a finite `f64::MAX` and the one above overflows. Getting this
+        // wrong in the safe direction is what an `x > f64::MAX` test would do,
+        // and it would call every value in the gap an infinity.
+        assert_eq!(bits(p("1.7976931348623158e308").to_f64()), bits(f64::MAX));
+        assert_eq!(
+            bits(p("1.797693134862315808e308").to_f64()),
+            bits(f64::INFINITY)
+        );
+    }
+
+    /// Below the smallest normal an `f64` buys exponent with significand bits,
+    /// so the value keeps arriving — with fewer digits — until it does not.
+    #[test]
+    fn a_value_too_small_for_a_normal_becomes_a_subnormal_then_zero() {
+        for s in ["1e-320", "4.9e-324", "1e-310"] {
+            let want: f64 = s.parse().expect("a double");
+            assert_eq!(bits(pr(s).to_f64()), bits(want), "{s}");
+        }
+        // Underflow all the way. The sign is kept: `strtold` gives -0 here and
+        // narrowing must not turn it into +0.
+        assert_eq!(bits(pr("1e-400").to_f64()), bits(0.0));
+        assert_eq!(bits(pr("-1e-400").to_f64()), bits(-0.0));
+    }
+
+    /// Exactly half the smallest subnormal is a tie with zero on one side, and
+    /// zero is the even one. Written as bits because no decimal numeral is
+    /// exactly 2^-1075 in fewer than 751 digits.
+    #[test]
+    fn half_the_smallest_subnormal_ties_to_zero() {
+        // `sig * 2^(exp - BIAS - 63)` with the integer bit alone set is
+        // `2^(exp - BIAS)`, so `exp = BIAS - 1075` is 2^-1075.
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let exp = (BIAS - 1075) as u16;
+        let half = ExtF80 {
+            neg: false,
+            exp,
+            sig: 1 << 63,
+        };
+        assert_eq!(bits(half.to_f64()), bits(0.0));
+        // One bit above the midpoint is no longer a tie, so it rounds up to the
+        // smallest subnormal.
+        let over = ExtF80 {
+            sig: (1 << 63) | 1,
+            ..half
+        };
+        assert_eq!(bits(over.to_f64()), bits(f64::from_bits(1)));
+    }
+
+    /// A pseudo-denormal — exponent zero with the integer bit set — is an
+    /// ordinary number, and narrowing must normalise it rather than read the
+    /// significand as if the leading one were still at bit 63.
+    #[test]
+    fn a_subnormal_extf80_narrows_by_its_true_exponent() {
+        // Every `long double` subnormal is far below the `double` range, so
+        // they all narrow to a signed zero. The test is that it does not read
+        // as some large number instead.
+        let tiny = ExtF80 {
+            neg: false,
+            exp: 0,
+            sig: 1 << 62,
+        };
+        assert_eq!(bits(tiny.to_f64()), bits(0.0));
     }
 }

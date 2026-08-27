@@ -27,13 +27,10 @@ userspace/coreutils/src/bin/more.rs:argv-as-string
 userspace/coreutils/src/bin/patch.rs:argv-as-string
 userspace/coreutils/src/bin/ps.rs:argv-as-string
 userspace/coreutils/src/bin/renice.rs:argv-as-string
-userspace/coreutils/src/bin/sed.rs:argv-as-string
 userspace/coreutils/src/bin/sh.rs:argv-as-string
 userspace/coreutils/src/bin/sh.rs:env-as-string
-userspace/coreutils/src/bin/sleep.rs:argv-as-string
 userspace/coreutils/src/bin/strings.rs:argv-as-string
 userspace/coreutils/src/bin/tar.rs:argv-as-string
 userspace/coreutils/src/bin/time_cmd.rs:argv-as-string
-userspace/coreutils/src/bin/tty.rs:argv-as-string
 userspace/coreutils/src/bin/which.rs:argv-as-string
 userspace/coreutils/src/bin/xargs.rs:argv-as-string

@@ -87220,13 +87220,22 @@ fn cmd_prochistory(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "start" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: prochistory start <name> <pid> [args]");
+            let Some(name) = parts.get(1).copied() else {
+                shell_println!("prochistory: start: missing process name");
                 set_exit(1);
                 return;
-            }
-            let name = parts[1];
-            let pid = parts[2].parse::<u32>().unwrap_or(0);
+            };
+            // A guessed pid does not merely mislabel a row — it strands one.
+            // `record_exit` closes the newest entry with `pid == p &&
+            // end_ns.is_none()`, so a start filed under a pid nobody will ever
+            // type again can never be closed: it stays RUNNING in `running`
+            // and `recent` for the rest of the boot, and only `MAX_HISTORY`
+            // eviction removes it. `record_start` cannot fail, so the guess was
+            // always reported as a success — with the pid printed back, which
+            // is the one thing that made it look checked.
+            let Some(pid) = required_num::<u32>(&parts, 2, "prochistory", sub, "pid") else {
+                return;
+            };
             let pargs = if parts.len() > 3 {
                 parts[3..].join(" ")
             } else {
@@ -87241,21 +87250,51 @@ fn cmd_prochistory(args: &str) {
             }
         }
         "exit" => {
-            if parts.len() < 3 {
-                shell_println!("Usage: prochistory exit <pid> <exit_code> [reason] [mem_kb]");
-                set_exit(1);
+            // The two zeroes here corroborated each other, which is what made
+            // them hard to see. `record_exit(0, …)` normally answers NotFound
+            // and is at least visible — but a `start` that guessed pid 0 has
+            // manufactured the running entry that makes this one *succeed*,
+            // closing a record the operator never named.
+            let Some(pid) = required_num::<u32>(&parts, 1, "prochistory", sub, "pid") else {
                 return;
-            }
-            let pid = parts[1].parse::<u32>().unwrap_or(0);
-            let code = parts[2].parse::<i32>().unwrap_or(0);
-            let reason = parts
-                .get(3)
-                .map(|s| parse_exit_reason(s))
-                .unwrap_or(prochistory::ExitReason::Normal);
-            let mem = parts
-                .get(4)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
+            };
+            // An exit code is the one field where zero is not neutral filler:
+            // it is the value that means the process succeeded. A mistyped
+            // code was recorded as success and then printed beside a `reason`
+            // that may well say Crashed — a row that contradicts itself, in a
+            // table whose whole purpose is post-mortem.
+            let Some(code) = required_num::<i32>(&parts, 2, "prochistory", sub, "exit code") else {
+                return;
+            };
+            // `reason` decides more than a label: `record_exit` bumps
+            // `total_crashed` only for Crashed and OutOfMemory, so a mistyped
+            // `crahsed` filed the entry as Unknown *and* left the crash count
+            // one short. The miscounted crash stays visible in `crashed`,
+            // so `stats` and the listing disagree with no way to tell which
+            // is wrong. Absent still means Normal — that default is what the
+            // `[reason]` in the usage line promises.
+            let reason = match parts.get(3) {
+                None => prochistory::ExitReason::Normal,
+                Some(word) => {
+                    let Some(r) = parse_exit_reason(word) else {
+                        shell_println!(
+                            "prochistory: exit: `{}' is not an exit reason (normal, crashed, killed, timeout, oom, unknown)",
+                            word
+                        );
+                        set_exit(1);
+                        return;
+                    };
+                    r
+                }
+            };
+            // Absent means "not measured", which is what `record_start` seeds
+            // and what `optional_num` preserves. Unreadable is a guess, and
+            // this one prints as `mem=0KB` in the `crashed` listing — beside
+            // an OOM kill, a flat contradiction.
+            let Some(mem) = optional_num::<u64>(&parts, 4, "prochistory", sub, "kilobyte count", 0)
+            else {
+                return;
+            };
             match prochistory::record_exit(pid, code, reason, mem) {
                 Ok(()) => shell_println!("Exited pid={} code={} ({})", pid, code, reason.label()),
                 Err(e) => {
@@ -87265,10 +87304,14 @@ fn cmd_prochistory(args: &str) {
             }
         }
         "recent" => {
-            let max = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            // Absent means ten; unreadable used to mean ten as well, so
+            // `recent 5O` (letter O) printed ten rows indistinguishable from a
+            // successful `recent 10`. Nothing in a truncated listing tells you
+            // whether the number you typed was the one that truncated it.
+            let Some(max) = optional_num::<usize>(&parts, 1, "prochistory", sub, "entry count", 10)
+            else {
+                return;
+            };
             let hist = prochistory::recent(max);
             if hist.is_empty() {
                 shell_println!("No process history");
@@ -87296,10 +87339,13 @@ fn cmd_prochistory(args: &str) {
             }
         }
         "crashed" => {
-            let max = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            // Same shape as `recent`, and worse to get wrong: this is the
+            // listing an operator reads to decide whether a crash happened at
+            // all, so a silently-substituted limit can hide the newest ones.
+            let Some(max) = optional_num::<usize>(&parts, 1, "prochistory", sub, "entry count", 10)
+            else {
+                return;
+            };
             let crashes = prochistory::crashed(max);
             if crashes.is_empty() {
                 shell_println!("No crashes recorded");
@@ -87368,19 +87414,38 @@ fn cmd_prochistory(args: &str) {
             shell_println!("  crashed [n]                        Crash history");
             shell_println!("  search <query>                     Search by name");
             shell_println!("  stats / test / init");
+            shell_println!(
+                "  reason: normal | crashed | killed | timeout | oom | unknown (default normal)"
+            );
+            end_help_arm("prochistory", sub);
         }
     }
 }
 
-fn parse_exit_reason(s: &str) -> crate::fs::prochistory::ExitReason {
+/// The `reason` word of `prochistory exit`.
+///
+/// Returns `None` for a word outside the vocabulary rather than
+/// [`ExitReason::Unknown`](crate::fs::prochistory::ExitReason::Unknown), which
+/// is what it used to do. `Unknown` is a reason a caller can legitimately
+/// *mean* — a process whose fate genuinely was not determined — so using it as
+/// the fallback recorded "the caller did not know" and "the caller typed
+/// something I could not read" as the same fact, with no way afterwards to
+/// tell which had happened.
+///
+/// It is also not a label-only mistake. `record_exit` increments
+/// `total_crashed` for `Crashed` and `OutOfMemory` and for nothing else, so a
+/// mistyped `crahsed` used to exempt a crash from the crash count while
+/// leaving the entry itself in the history.
+fn parse_exit_reason(s: &str) -> Option<crate::fs::prochistory::ExitReason> {
     use crate::fs::prochistory::ExitReason;
     match s.to_lowercase().as_str() {
-        "normal" | "ok" => ExitReason::Normal,
-        "crashed" | "crash" => ExitReason::Crashed,
-        "killed" | "kill" => ExitReason::Killed,
-        "timeout" => ExitReason::Timeout,
-        "oom" | "outofmemory" => ExitReason::OutOfMemory,
-        _ => ExitReason::Unknown,
+        "normal" | "ok" => Some(ExitReason::Normal),
+        "crashed" | "crash" => Some(ExitReason::Crashed),
+        "killed" | "kill" => Some(ExitReason::Killed),
+        "timeout" => Some(ExitReason::Timeout),
+        "oom" | "outofmemory" => Some(ExitReason::OutOfMemory),
+        "unknown" | "?" => Some(ExitReason::Unknown),
+        _ => None,
     }
 }
 

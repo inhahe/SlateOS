@@ -165,7 +165,6 @@ cmd_prefetch 2
 cmd_printf 5
 cmd_printmgr 2
 cmd_printqueue 1
-cmd_prochistory 6
 cmd_prociso 6
 cmd_procstat 4
 cmd_progmgr 2

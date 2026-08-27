@@ -857,46 +857,53 @@ impl TetrisApp {
     }
 
     /// Clear completed lines and return the count.
+    ///
+    /// The field is rebuilt rather than shifted in place, and that is the whole
+    /// point of the function's shape. The obvious implementation — collect the
+    /// full rows' indices, then for each one shift everything above it down a
+    /// row — is wrong for a reason that only shows up on a multi-line clear:
+    /// **the first shift moves the rows that the remaining indices name.** With
+    /// rows 21 and 23 full, clearing 23 slides row 21's contents down to 22, so
+    /// the recorded index 21 now points at an innocent row; that row is deleted
+    /// instead and the full one survives as a solid line the player can never
+    /// get rid of. Every double, triple and tetris left one behind, and the
+    /// board silently filled from the bottom.
+    ///
+    /// The tests missed it because they asserted the returned *count*, which
+    /// was right the whole time — the count is taken before any shifting, so it
+    /// cannot see the damage the shifting does.
+    ///
+    /// Keeping the surviving rows in order and pushing them to the bottom of a
+    /// fresh field has no such coupling: nothing is indexed after it has moved,
+    /// because nothing moves until every row has been classified.
     fn clear_lines(&mut self) -> usize {
-        let mut lines_to_clear = Vec::new();
+        let mut kept: Vec<Option<Color>> = Vec::with_capacity(self.field.len());
+        let mut kept_rows = 0usize;
 
-        // Check each visible row (hidden rows + visible field)
         for row in 0..TOTAL_ROWS {
-            let mut full = true;
+            if (0..FIELD_COLS).all(|col| self.field_get(row, col).is_some()) {
+                continue;
+            }
             for col in 0..FIELD_COLS {
-                if self.field_get(row, col).is_none() {
-                    full = false;
-                    break;
-                }
+                kept.push(self.field_get(row, col));
             }
-            if full {
-                lines_to_clear.push(row);
-            }
+            kept_rows = kept_rows.saturating_add(1);
         }
 
-        if lines_to_clear.is_empty() {
+        let cleared = TOTAL_ROWS.saturating_sub(kept_rows);
+        if cleared == 0 {
             return 0;
         }
 
-        let count = lines_to_clear.len();
+        // The blank rows go on top, so the survivors keep their order and land
+        // as far down as the cleared count allows — which is what "everything
+        // above falls" means once it is stated as a whole-field property rather
+        // than as a sequence of row moves.
+        let mut field = vec![None; cleared.saturating_mul(FIELD_COLS)];
+        field.extend(kept);
+        self.field = field;
 
-        // Remove the full lines and shift everything down.
-        // Process from bottom to top so indices remain valid.
-        for &row in lines_to_clear.iter().rev() {
-            // Shift all rows above down by one
-            for r in (1..=row).rev() {
-                for c in 0..FIELD_COLS {
-                    let above = self.field_get(r - 1, c);
-                    self.field_set(r, c, above);
-                }
-            }
-            // Clear the top row
-            for c in 0..FIELD_COLS {
-                self.field_set(0, c, None);
-            }
-        }
-
-        count
+        cleared
     }
 
     // ── Gravity and timing ──────────────────────────────────────────
@@ -2162,6 +2169,154 @@ mod tests {
         fill_row_except(&mut app, TOTAL_ROWS - 2, 3);
         let cleared = app.clear_lines();
         assert_eq!(cleared, 2);
+    }
+
+    /// Every row of the field, as `#` for occupied and `.` for empty, so a
+    /// clear can be asserted against the board it leaves rather than against
+    /// the number it returns. The count was never the bug; the board was.
+    fn board(app: &TetrisApp) -> Vec<String> {
+        (0..TOTAL_ROWS)
+            .map(|row| {
+                (0..FIELD_COLS)
+                    .map(|col| {
+                        if app.field_get(row, col).is_some() {
+                            '#'
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Regression: `clear_lines` used to walk a list of full-row indices and
+    /// shift the field down once per entry. The first shift moved the rows the
+    /// *later* indices named, so the second entry deleted an innocent row and
+    /// left the full one behind as a solid line no play could ever remove.
+    /// Every double, triple and tetris leaked one, and the board filled from
+    /// the bottom until the game ended on its own.
+    #[test]
+    fn a_multi_line_clear_leaves_no_full_row_behind() {
+        for gap in [0usize, 1, 2, 3] {
+            let mut app = app_no_piece();
+            let low = TOTAL_ROWS - 1;
+            let high = low - 1 - gap;
+            fill_row(&mut app, low);
+            fill_row(&mut app, high);
+
+            let cleared = app.clear_lines();
+            assert_eq!(cleared, 2, "two full rows with a gap of {gap} between them");
+
+            for row in 0..TOTAL_ROWS {
+                assert!(
+                    (0..FIELD_COLS).any(|col| app.field_get(row, col).is_none()),
+                    "row {row} is still full after the clear (gap {gap}); board {:?}",
+                    board(&app)
+                );
+            }
+        }
+    }
+
+    /// The survivors must keep their order and their contents, not merely their
+    /// count — a rebuild that dropped or reordered a row would pass the "no
+    /// full row left" check above while scrambling the stack the player built.
+    #[test]
+    fn the_rows_that_survive_a_clear_keep_their_order_and_fall_together() {
+        let mut app = app_no_piece();
+        // Three markers in distinct columns, interleaved with two full rows, so
+        // a shift that is off by one row shows up as the wrong column order.
+        app.field_set(TOTAL_ROWS - 6, 0, Some(GREEN));
+        fill_row(&mut app, TOTAL_ROWS - 5);
+        app.field_set(TOTAL_ROWS - 4, 1, Some(BLUE));
+        fill_row(&mut app, TOTAL_ROWS - 3);
+        app.field_set(TOTAL_ROWS - 2, 2, Some(RED));
+
+        assert_eq!(app.clear_lines(), 2);
+
+        // Two rows went, so the survivors close up from the top: the marker
+        // that was three rows above the lowest full row is now directly above
+        // the next marker, and the columns still read 0, 1, 2 downwards.
+        assert_eq!(
+            app.field_get(TOTAL_ROWS - 4, 0),
+            Some(GREEN),
+            "board {:?}",
+            board(&app)
+        );
+        assert_eq!(
+            app.field_get(TOTAL_ROWS - 3, 1),
+            Some(BLUE),
+            "board {:?}",
+            board(&app)
+        );
+        assert_eq!(
+            app.field_get(TOTAL_ROWS - 2, 2),
+            Some(RED),
+            "board {:?}",
+            board(&app)
+        );
+
+        // And nothing was invented above them.
+        for row in 0..TOTAL_ROWS - 4 {
+            for col in 0..FIELD_COLS {
+                assert_eq!(
+                    app.field_get(row, col),
+                    None,
+                    "row {row} col {col} should be empty; board {:?}",
+                    board(&app)
+                );
+            }
+        }
+    }
+
+    /// A tetris is four *contiguous* rows, which the old shift-in-place also
+    /// got wrong — contiguity does not save it, because the indices still move.
+    #[test]
+    fn a_tetris_empties_all_four_rows_and_drops_what_sat_on_them() {
+        let mut app = app_no_piece();
+        app.field_set(TOTAL_ROWS - 5, 7, Some(MAUVE));
+        for i in 0..4 {
+            fill_row(&mut app, TOTAL_ROWS - 1 - i);
+        }
+
+        assert_eq!(app.clear_lines(), 4);
+
+        assert_eq!(
+            app.field_get(TOTAL_ROWS - 1, 7),
+            Some(MAUVE),
+            "the block above a tetris falls all four rows; board {:?}",
+            board(&app)
+        );
+        for row in 0..TOTAL_ROWS {
+            let occupied = (0..FIELD_COLS)
+                .filter(|&col| app.field_get(row, col).is_some())
+                .count();
+            let expected = usize::from(row == TOTAL_ROWS - 1);
+            assert_eq!(
+                occupied,
+                expected,
+                "row {row} holds {occupied} blocks; board {:?}",
+                board(&app)
+            );
+        }
+    }
+
+    /// The whole board full is the extreme case of the same rebuild: every row
+    /// goes, nothing survives, and the field must come back empty rather than
+    /// keeping a copy of the last row it shifted.
+    #[test]
+    fn clearing_every_row_at_once_empties_the_field() {
+        let mut app = app_no_piece();
+        for row in 0..TOTAL_ROWS {
+            fill_row(&mut app, row);
+        }
+        assert_eq!(app.clear_lines(), TOTAL_ROWS);
+        assert_eq!(
+            app.field.len(),
+            TOTAL_ROWS * FIELD_COLS,
+            "field keeps its size"
+        );
+        assert!(app.field.iter().all(Option::is_none), "field is empty");
     }
 
     // ── Scoring tests ───────────────────────────────────────────────

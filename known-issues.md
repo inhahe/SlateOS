@@ -90036,17 +90036,85 @@ yields `(1980, 0, 0, 0, 0, 0)` and only breaks if that is passed to
 an absent date oddly is a visible problem, whereas a tool that renders a
 fabricated date cleanly is an invisible one.
 
-**What is still missing.** `create()` cannot record the *real* mtime, because
-`ZipWriteEntry` has no field to carry one — and this is not an unknown value:
-`kernel/src/fs/archive.rs` and `apps/archivemanager` both hold a real mtime for
-every file they add and drop it at the crate boundary. Adding
-`ZipWriteEntry::dos_datetime` would break every struct literal in lane C's tree
-(`apps/archivemanager/src/main.rs`, `apps/archivemanager/src/backend.rs`), so it
-is theirs to schedule rather than lane A's to impose. Filed as
-`requests/a-c-ziparchive-has-your-mtime-field-and-a-question-about-the-writer.md`;
-lane A would update its three call sites (`kernel/src/fs/zip.rs`,
-`kernel/src/fs/archive.rs`, `kernel/src/kshell.rs`) in the same merge. Until
-then archives SlateOS writes carry no time, and say so.
+**What is still missing.** ~~`create()` cannot record the *real* mtime, because
+`ZipWriteEntry` has no field to carry one.~~ **Resolved 2026-08-27:** lane C
+approved the field in
+`requests/c-a-yes-put-dos-datetime-on-zipwriteentry.md` and
+`ZipWriteEntry::dos_datetime` now exists; `create()` writes it into both the
+local and central headers, and all nine construction sites across the three
+lanes were updated in the same commit (lane C pre-authorised their three).
+
+What remains is one rung further out and is **lane A's**, not lane C's: the
+callers still pass `0` even where they are holding a real mtime. Split out as
+`A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` below, because it is
+a different defect from this one — this entry was about the writer *fabricating*
+a time it never had, which is fixed; that one is about the writer *discarding*
+a time it does have. Until it is done, archives SlateOS writes still carry no
+time, and still say so.
+
+---
+
+## `A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` (lane A, 2026-08-27)
+
+**Status:** OPEN.
+
+**In short:** SlateOS can now record, for each file it puts into a ZIP archive,
+when that file was last changed — the slot in the file format exists and the
+writer fills it in. But the two places in the kernel that actually create
+archives still pass "not recorded", even though one of them has already looked
+up the real time and is throwing it away. So a `zip` command run on the shell
+produces an archive whose Date column is empty, and it does not have to be.
+
+**Where it lives.**
+
+| Site | Has an mtime? | Passes |
+|---|---|---|
+| `kernel/src/kshell.rs` (`zip` command, ~line 131500) | **yes** — calls `Vfs::lstat`, whose `FileMeta::modified_ns` is a real wall-clock time | `dos_datetime: 0` |
+| `kernel/src/fs/archive.rs` `create_zip` (~line 696) | no — `CreateEntry` has no time field at all | `dos_datetime: 0` |
+
+The two are not the same problem. `kshell` is discarding a value it holds:
+`Vfs::lstat(&abs)` is called for every top-level argument, and the `Ok(meta)`
+arm looks only at `meta.entry_type`. `archive.rs` genuinely has nothing to pass
+— `CreateEntry` is `{ name, data, kind }` — so fixing it means widening that
+struct, which the tar and cpio writers alongside it would also want to honour.
+
+**Why it is not already fixed.** The missing piece is an *encoder*: something
+that turns nanoseconds-since-the-Unix-epoch into the packed MS-DOS date/time
+pair the format wants. That needs a calendar, and the decision recorded in
+design-decisions.md §621 is that `ziparchive` must not own one — it is `no_std`
+and linked into the kernel. The right home is `tzrules`, the shared
+dependency-free calendar crate that already backs the taskbar clock,
+`guitk::datetime` and lane C's ZIP *decoder*, and which the kernel already
+depends on (`kernel/Cargo.toml:26`).
+
+**What the proper fix looks like.**
+
+1. Add `tzrules::dos_datetime_from_unix(secs: i64) -> u32` (and its inverse, if
+   a second caller wants one), built on the existing `civil_from_days`. It must
+   return `0` for anything before 1980-01-01 or after 2107-12-31, because those
+   are unrepresentable in the DOS pair and `0` is the "not recorded" encoding —
+   clamping to the minimum would re-create the exact fabrication that
+   `A-ZIPARCHIVE-CREATE-STAMPED-EVERY-MEMBER-1980-01-01` was about. Seconds are
+   stored halved, so an odd second must round consistently; round *down*, so a
+   recorded time is never later than the real one.
+2. In `kshell.rs`, keep the `FileMeta` from the `lstat` that already happens,
+   carry `modified_ns` alongside the path in `input_files`, and convert at the
+   `ZipWriteEntry` construction. Note the recursive arm: `zip_collect_files`
+   does not currently stat what it collects, so it needs the same treatment or
+   it will silently keep passing `0` for everything under `-r`.
+3. Decide separately whether `CreateEntry` grows a `modified_ns`; that is a
+   wider change touching tar/cpio/ar and is worth its own task.
+
+**Note on timezone.** DOS timestamps are *local* time with no zone recorded.
+The kernel has no user timezone, so a kernel-side encoder will be writing UTC
+into a slot that readers interpret as local. That is a real, known inaccuracy
+of the format rather than of this fix, and every OS writing ZIPs has it; it is
+worth a comment at the conversion site so the next reader does not "fix" it.
+
+**How it was found.** Not by looking for it. While adding
+`ZipWriteEntry::dos_datetime` for lane C, the mechanical step of putting
+`dos_datetime: 0` at each construction site meant reading each one — and
+`kshell.rs` turned out to have an `lstat` result in scope three lines up.
 
 ---
 
@@ -90115,7 +90183,7 @@ Same shape as `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`,
 fixed hours earlier the same day: an assertion against a freshly-read value
 where the correct operand was the value the code had actually used.
 
-### C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT — 2026-08-26 — LANE C, OPEN
+### C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT — 2026-08-26 — LANE C, **FIXED 2026-08-27**
 
 **In short:** The archive manager's Encrypted column says "no" for every member
 of every archive, including members that really are encrypted. It is not
@@ -90141,6 +90209,57 @@ exactly the one that got `dos_datetime` landed
 (`requests/c-a-ziparchive-drops-the-one-field-a-date-column-needs.md`). Worth
 doing together with a real "this member is encrypted" refusal in `extract`, so
 the column and the error message agree.
+
+**Lane A note, 2026-08-27 — the crate half is done; this is unblocked.**
+`ziparchive::ZipEntry` now carries **both** shapes you offered: the raw
+`flags: u16` (parsed from central+8) and a decoded `is_encrypted()` that tests
+bit 0. Reasoning for exposing both rather than picking one is in
+design-decisions.md §621 — briefly, sixteen independent bits means a `pub` field
+per bit breaks every construction site each time one is decoded, so `flags` is
+the field and `is_encrypted()` is the one accessor anybody has needed so far.
+Ask for another and it is a one-line addition, not a breaking change.
+
+Four tests pin it: `what_we_write_is_not_encrypted_and_says_so`,
+`an_encrypted_member_is_reported_as_encrypted`,
+`other_general_purpose_bits_are_not_mistaken_for_encryption` (sets bit 11, the
+UTF-8 name flag, and asserts it does not read as encrypted — the failure mode of
+a `!= 0` test instead of a `& 1` test), and `strong_encryption_still_sets_bit_zero`
+(bits 6 + 0, which the spec requires together).
+
+Not done, and deliberately left to lane C because it is app-side: `parse_zip`'s
+hardcoded `encrypted: false`, and the "this member is encrypted" refusal in
+`extract`. This entry stays OPEN until those land.
+
+**Lane C, 2026-08-27 — the app half has landed; FIXED.** `parse_zip` reads
+`member.is_encrypted()`, so the padlock icon the row renderer already drew for
+`entry.encrypted` is reachable for the first time.
+
+Both places that could have contradicted the column now read the same bit:
+
+- **`extract` refuses an encrypted member before the inflater is asked**, with a
+  new `SkipReason::Encrypted` reading "it is encrypted and this build cannot
+  decrypt". The old path was not merely unhelpful but actively wrong: the
+  inflater expands ciphertext into whatever it happens to expand to, and the
+  size/CRC check at the end rejects it — so the program blamed an intact archive
+  for being damaged and sent a user who needed a password to look for another
+  copy.
+- **`verify` (the Test button) returns `TestResult::DecryptionFailed`** rather
+  than `Corrupted`. It still counts against the pass rate, which is right — the
+  button cannot vouch for data it cannot read — but it names the actual problem.
+
+Three tests: `an_encrypted_member_is_shown_as_encrypted` (and the plain case
+still reads false, now from the bit rather than from a constant),
+`an_encrypted_member_is_refused_by_name_rather_than_called_corrupt` (asserts the
+reason is `Encrypted`, that the message names encryption, and that no ciphertext
+is left on disk under the member's own name), and
+`testing_an_encrypted_member_reports_a_password_not_damage`. The fixture patches
+bit 0 into the central header of a real archive and leaves the *data* as real
+deflate on purpose — that is what makes the test able to tell "refused because
+the bit is set" from "failed because ciphertext does not inflate", which are the
+old behaviour and the new one.
+
+What is still missing is decryption itself, which is a feature and not a bug:
+SlateOS cannot read a password-protected member at all, and now says so.
 
 ### C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY — benchmark struck off — 2026-08-26 — LANE C
 
@@ -90596,6 +90715,68 @@ honest about having no data.
 **Where it bites:** `apps/defrag/src/main.rs` — `ScanFn`, `DefragUI::scan`,
 `DefragUI::analyze_selected_drive`, `DefragUI::action_available`, and `main`.
 
+## `C-PDFVIEWER-HAS-NO-PDF-PARSER-AND-NO-PRINT-SPOOLER` (lane C, 2026-08-26) — **open**, missing backends
+
+**In short:** The PDF viewer now opens as a real window and everything in it
+works — tabs, zoom, rotation, continuous scrolling, the sidebar's thumbnail /
+bookmark / annotation panels, find-in-page, the print dialog — but it cannot
+open a PDF and it cannot print one. Nothing in SlateOS can yet turn a `.pdf`
+file into pages, and there is no print spooler for anything to be sent to. So
+the app opens on an empty tab, the recent-files list is inert, and the Print
+button is not drawn. It is a complete, tested front end waiting for two back
+ends.
+
+**What is missing, precisely.** Two things, neither of which exists anywhere in
+the tree:
+
+1. **A PDF parser.** Everything the app draws is derived from `PdfDocument` —
+   page sizes, the page count, the outline that fills the Bookmarks panel, the
+   `/Title` metadata that names the tab, the text that find-in-page searches.
+   `PdfDocument` is a plain data structure with no reader: there is no code that
+   can produce one from a file. A real one is a substantial port (xref tables,
+   object streams, Flate/LZW/DCT filters, font and CMap handling), not a
+   weekend's parsing.
+2. **A print spooler.** There is no print service, no queue, and no driver
+   interface. The dialog collects a page range, a copy count and duplex/colour
+   choices, and has nowhere to send them.
+
+**How the gaps are held open rather than papered over.** Each is a function
+pointer seam on `PdfViewerApp`, following the precedent set by defrag's
+`ScanFn` (see `C-DEFRAG-HAS-NO-WAY-TO-SCAN-A-DRIVE`):
+
+| Seam | Type | Gate |
+|---|---|---|
+| `open` | `OpenFn = fn(&Path) -> Option<PdfDocument>` | `can_open()` |
+| `print` | `PrintFn = fn(&PdfDocument, &[usize]) -> bool` | `can_print()` |
+
+Both are `None` in the shipping binary. Each gate governs the control's hit box
+and its appearance off the *same* condition, so a control that cannot work is
+never drawn as though it can: with no parser the recent-file rows are drawn as
+plain text and record no hit box, and with no spooler the Print button goes
+through `render_disabled_button`, which greys it and — the part that matters —
+records nothing for `hit_test` to find. There are no dead buttons.
+
+Every test that exercises either path installs its own backend (`a_document` /
+`refuses` for the parser, `accepts` for the spooler; installed through
+`set_opener` / `set_printer`), and each path is
+tested from **both** sides: the control is absent with no backend, and present
+and working with one. That makes the missing backends impossible to forget
+while working on this file.
+
+**Two alternatives were rejected**, for the same reasons as in defrag. Shipping
+a fabricated document so the viewer has something to draw would put a lie on
+screen. Shipping a Print button wired to a function that always fails would be a
+control that looks live and does nothing — the exact failure this lane has spent
+weeks removing from app after app.
+
+**Proper fix.** When a PDF library exists, write the real `OpenFn` against it
+and set `app.open = Some(...)` in `main`; likewise `app.print` when a spooler
+exists. Nothing in the UI needs to change — the seams were chosen so that the
+window is already correct on the day the data arrives.
+
+**Where it bites:** `apps/pdfviewer/src/main.rs` — `OpenFn`, `PrintFn`,
+`PdfViewerApp::open`, `PdfViewerApp::print`, `PdfViewerApp::can_open`,
+`PdfViewerApp::can_print`, `render_disabled_button`, and `main`.
 ---
 
 ## `B-WHICH-DOES-NOT-READ-ALIASES-FUNCTIONS-OR-~USER` (lane B, 2026-08-27) — **open**, missing feature
@@ -90709,10 +90890,67 @@ deliberately diverges" in the module doc, `unsupported()`, and the test
 
 ---
 
+## `C-TASKSCHEDULER-HAS-NO-EXECUTOR` (lane C, 2026-08-27) — **open**, missing backend
+
+**In short:** The Task Scheduler now opens as a real window and everything in
+it works — the task list, the add/edit form, the delete confirmation, the
+history tab, keyboard and wheel — and it correctly computes *when* every task
+is next due, including full cron expressions. What it cannot do is **run** one.
+Nothing in SlateOS can yet start a process on another program's behalf, so a
+task's command is a string the scheduler stores, displays and schedules, but
+never executes. A user can build a perfectly correct schedule and nothing will
+ever happen at the appointed time.
+
+**What is missing, precisely.** A way to spawn a process and wait for its exit
+status. That is a kernel/userland facility (lane A/B), not a graphics one: the
+`posix` layer has the syscalls, but nothing exposes a "run this command line
+and tell me how it went" service to an application in `apps/`.
+
+**How the gap is held open rather than papered over.** A function-pointer seam
+on `TaskScheduler`, following the precedent set by defrag's `ScanFn` (see
+`C-DEFRAG-HAS-NO-WAY-TO-SCAN-A-DRIVE`) and pdfviewer's `OpenFn`/`PrintFn`:
+
+| Seam | Type | Gate |
+|---|---|---|
+| `runner` | `RunFn = fn(&str) -> Result<u64, TaskRunError>` | `can_run()` |
+
+`Ok(duration_ms)` records a success in the history and reschedules; `Err` goes
+through the existing retry policy. The seam is `None` in the shipping binary.
+
+**The policy that matters: with no runner, a due task stays overdue.**
+`run_due_tasks` returns early when `runner` is `None` and — this is the part
+worth reading twice — does *not* advance any task's `next_run_timestamp`. A
+scheduler that could not execute a command but rescheduled the task anyway
+would have moved a nightly backup's "next run" to tomorrow without ever having
+run it, and the history would show nothing amiss. Leaving the task overdue is
+the honest state, and it is the state the window shows.
+
+**Alternatives rejected.** Fabricating a success so the history tab has
+something in it would put a lie on screen and, worse, a lie about a backup
+having run. A `runner` that always returns `Err` would fill the history with
+failures the user cannot act on and would burn through each task's retry
+budget. Both were rejected for the same reason as their equivalents in defrag
+and pdfviewer.
+
+**Proper fix.** When a process-spawning service exists, write the real `RunFn`
+against it and call `scheduler.set_runner(...)` in `main`. Nothing in the UI
+needs to change: the tick handler already calls `run_due_tasks` once a second,
+so the window becomes live on the day the backend arrives. At that point
+`can_run()` should also gate a user-visible hint — a scheduler that cannot run
+anything ought to say so in its status bar — which is deliberately *not* done
+now, because there is no second state to contrast it with.
+
+**Where it bites:** `apps/taskscheduler/src/main.rs` — `RunFn`, `TaskRunError`,
+`TaskScheduler::runner`, `TaskScheduler::run_due_tasks`,
+`TaskScheduler::set_runner`, `TaskScheduler::can_run`, and
+`SchedulerUI::refresh_clock`, which is the only caller.
+
+---
+
 ## `B-CAL-REPRODUCES-TWO-UPSTREAM-ALIGNMENT-BUGS` (lane B, 2026-08-27) — **open**, deliberate divergence
 
 **In short:** our `cal` is a byte-for-byte transcription of util-linux 2.39.3
-(§621). Two of util-linux's own output bugs are therefore in our output too, on
+(§622). Two of util-linux's own output bugs are therefore in our output too, on
 purpose. Both are in *vertical* mode — the layout you get with `-v`, where the
 weekdays run down the left edge and the dates run across instead of the usual
 way round. Recorded here so that a future reader who notices the misalignment

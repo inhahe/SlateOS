@@ -131479,6 +131479,7 @@ fn cmd_zip(args: &str) {
                 name: name.clone().into_vec(),
                 data: Vec::new(),
                 store_only: true,
+                dos_datetime: 0,
             });
             continue;
         }
@@ -131501,6 +131502,7 @@ fn cmd_zip(args: &str) {
             name: name.clone().into_vec(),
             data: raw_data,
             store_only,
+            dos_datetime: 0,
         });
     }
 

@@ -1469,6 +1469,7 @@ name = "calculator"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -1767,6 +1768,7 @@ name = "charmap"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -3512,6 +3514,7 @@ name = "emojipicker"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -9384,6 +9387,7 @@ name = "pdfviewer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -12660,6 +12664,7 @@ name = "taskscheduler"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

@@ -220,9 +220,48 @@ pub struct ZipEntry {
     /// **`0` means the archive recorded no time**, and is distinct from any
     /// real instant: a zero date is day 0 of month 0, which is not a date at
     /// all.  Render it as "unknown", not as 1980-01-01 — those are different
-    /// facts.  Archives written by [`create`] carry `0`, because
-    /// [`ZipWriteEntry`] has no field to carry a real one.
+    /// facts.  Archives written by [`create`] carry `0` unless the caller
+    /// supplied a real pair in [`ZipWriteEntry::dos_datetime`], which is what
+    /// that field is for.
     pub dos_datetime: u32,
+    /// The general-purpose bit flag, raw, exactly as the central directory
+    /// stores it.
+    ///
+    /// Raw and whole rather than one decoded `bool` per interesting bit: the
+    /// field is sixteen independent facts about the member, four of which
+    /// (0 encrypted, 3 sizes-in-data-descriptor, 6 strong encryption,
+    /// 11 name-is-UTF-8) already have callers or obvious ones, and adding a
+    /// `pub` field to this struct every time one of the others is wanted is a
+    /// breaking change to every construction site in two lanes.  One raw field
+    /// costs that once.
+    ///
+    /// Unlike [`dos_datetime`](Self::dos_datetime), the bits *are* decoded here
+    /// where a decoding exists — see [`ZipEntry::is_encrypted`].  The two are
+    /// not inconsistent: a date needs a calendar, which lives outside the ZIP
+    /// specification and which this crate has no business owning, whereas the
+    /// meaning of bit 0 *is* the specification.  Leaving it undecoded would not
+    /// keep knowledge out of the crate, it would only push the same `& 1` into
+    /// every caller, which is how four callers end up with four answers.
+    pub flags: u16,
+}
+
+impl ZipEntry {
+    /// True if this member's data is encrypted and cannot be read without a
+    /// password.
+    ///
+    /// General-purpose bit 0.  This crate cannot decrypt, so the practical use
+    /// is refusing the member with an honest reason rather than extracting the
+    /// ciphertext and failing a CRC check — which is what a caller that could
+    /// not see this bit had to do.
+    ///
+    /// Bit 6 (strong encryption, an AES/PKWARE extension) is *also* covered:
+    /// the specification requires bit 0 to be set alongside it, so bit 0 alone
+    /// answers "is this readable as-is". `flags` is public for a caller that
+    /// needs to tell the two schemes apart.
+    #[must_use]
+    pub fn is_encrypted(&self) -> bool {
+        self.flags & 0x0001 != 0
+    }
 }
 
 /// An entry to be written into a new ZIP archive.
@@ -235,6 +274,27 @@ pub struct ZipWriteEntry {
     /// True to store without compression (method 0).
     /// False to try DEFLATE, falling back to stored if it doesn't shrink.
     pub store_only: bool,
+    /// Modification time as the MS-DOS date/time pair, or `0` for "not
+    /// recorded".  Same encoding and same table as [`ZipEntry::dos_datetime`],
+    /// and deliberately the same raw `u32` rather than anything
+    /// calendar-shaped.
+    ///
+    /// Raw on the *write* side for the same reason it is raw on the read side:
+    /// the crate would otherwise have to own a calendar to accept a
+    /// `SystemTime`, and it is `no_std`.  A caller that has a real mtime also
+    /// has a real date library; a caller that does not passes `0`, which is
+    /// what [`create`] wrote unconditionally before this field existed.
+    ///
+    /// `0` is not a small date — it is day 0 of month 0, which is not a
+    /// representable date at all, so a reader can tell "no time was recorded"
+    /// from "recorded as the earliest instant DOS can express" (`0x0021 << 16`,
+    /// i.e. 1980-01-01).  Those are different facts and [`create`] must not
+    /// conflate them; see design-decisions.md §618.
+    ///
+    /// Written into both the local file header and the central directory, which
+    /// are required to agree — `local_header_and_central_directory_agree_on_the
+    /// _time` pins that, because a reader may trust either one.
+    pub dos_datetime: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +421,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<ZipEntry>> {
             break;
         }
 
+        let flags = le_u16(data, off.wrapping_add(8));
         let method = le_u16(data, off.wrapping_add(10));
         // The two halves are stored as separate little-endian `u16`s, time
         // first at +12 and date at +14, and are combined `(date << 16) | time`
@@ -404,6 +465,7 @@ pub fn parse(data: &[u8]) -> Result<Vec<ZipEntry>> {
             local_header_offset,
             is_dir,
             dos_datetime,
+            flags,
         });
 
         off = off
@@ -592,15 +654,19 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         write_u16(&mut archive, if need_zip64 { 45 } else { 20 }); // version needed
         write_u16(&mut archive, 0); // general purpose bit flag
         write_u16(&mut archive, method);
-        // Both halves zero: "no modification time recorded".
+        // The caller's pair, split back into the two little-endian halves the
+        // format stores: time at +10, date at +12.  `0` -- which is what every
+        // caller passed before `ZipWriteEntry` had this field, and what a
+        // caller with no mtime to offer still passes -- writes both halves
+        // zero, meaning "no modification time recorded".
         //
-        // This used to write date `0x0021`, which looks like an absent value
-        // and is not one -- it is the DOS *minimum* date, year bits 0 (= 1980),
-        // month 1, day 1.  Every member of every archive SlateOS produced was
-        // therefore stamped 1980-01-01 00:00:00, a timestamp for a file whose
-        // time we never looked at.  A reader has no way to tell that apart from
-        // a file genuinely last written on that day, so it is a fabricated
-        // measurement, not a placeholder.
+        // This used to write date `0x0021` unconditionally, which looks like an
+        // absent value and is not one -- it is the DOS *minimum* date, year
+        // bits 0 (= 1980), month 1, day 1.  Every member of every archive
+        // SlateOS produced was therefore stamped 1980-01-01 00:00:00, a
+        // timestamp for a file whose time we never looked at.  A reader has no
+        // way to tell that apart from a file genuinely last written on that
+        // day, so it is a fabricated measurement, not a placeholder.
         //
         // Zero is the encoding for "none": it is day 0 of month 0, which is not
         // a representable date, so it cannot be mistaken for one.  A UI can then
@@ -609,11 +675,13 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         // garbage for it (Python's `zipfile` yields `(1980, 0, 0, 0, 0, 0)`),
         // which is preferable to minting a time that was never measured.
         //
-        // The real fix is to carry the file's actual mtime; `ZipWriteEntry` has
-        // no field for one yet. See
-        // requests/a-c-ziparchive-has-your-mtime-field-and-a-question-about-the-writer.md
-        write_u16(&mut archive, 0); // mod time -- not recorded
-        write_u16(&mut archive, 0); // mod date -- not recorded
+        // Not validated: a pair this crate cannot check is still the caller's
+        // to state.  Encoding one needs a calendar, so refusing a malformed one
+        // would need the same calendar -- see design-decisions.md §621 and
+        // `ZipWriteEntry::dos_datetime`.  The read side does range-check, which
+        // is where a bad pair is actually consumed.
+        write_u16(&mut archive, (entry.dos_datetime & 0xFFFF) as u16); // mod time
+        write_u16(&mut archive, (entry.dos_datetime >> 16) as u16); // mod date
         write_u32(&mut archive, crc32);
         write_u32(&mut archive, comp32);
         write_u32(&mut archive, uncomp32);
@@ -631,6 +699,7 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
             uncomp_size,
             header_offset,
             need_zip64,
+            dos_datetime: entry.dos_datetime,
         });
     }
 
@@ -662,10 +731,13 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
         write_u16(&mut archive, rec.method);
         // Must match the local header written above, byte for byte -- a reader
         // that trusts one and validates against the other would otherwise call
-        // our archives inconsistent.  See the local-header comment for why zero
-        // rather than the DOS minimum date.
-        write_u16(&mut archive, 0); // mod time -- not recorded
-        write_u16(&mut archive, 0); // mod date -- not recorded
+        // our archives inconsistent.  That is why `DirRecord` carries the pair
+        // forward instead of this loop re-reading `entries`: the two writes
+        // then have one source, and cannot drift apart when one of them is
+        // later edited.  See the local-header comment for why `0` rather than
+        // the DOS minimum date.
+        write_u16(&mut archive, (rec.dos_datetime & 0xFFFF) as u16); // mod time
+        write_u16(&mut archive, (rec.dos_datetime >> 16) as u16); // mod date
         write_u32(&mut archive, rec.crc32);
         write_u32(&mut archive, comp32);
         write_u32(&mut archive, uncomp32);
@@ -753,6 +825,10 @@ struct DirRecord {
     uncomp_size: u64,
     header_offset: u64,
     need_zip64: bool,
+    /// Carried from the local header rather than re-derived, so the central
+    /// directory cannot disagree with it: the two copies of this field must be
+    /// byte-identical and a reader may trust either.
+    dos_datetime: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -770,11 +846,16 @@ mod tests {
     use alloc::vec;
 
     /// Build a one-entry archive, the shape most tests start from.
+    ///
+    /// No recorded time, because that is what a caller with nothing to record
+    /// passes and is the case the bulk of these tests are about; the ones that
+    /// are about the time say so by calling `create` directly.
     fn one(name: &[u8], data: &[u8], store_only: bool) -> Vec<u8> {
         create(&[ZipWriteEntry {
             name: name.to_vec(),
             data: data.to_vec(),
             store_only,
+            dos_datetime: 0,
         }])
     }
 
@@ -822,26 +903,36 @@ mod tests {
 
     #[test]
     fn multi_entry_round_trip_preserves_order_and_content() {
+        // Four *different* timestamps, one of them absent: the writer keeps a
+        // per-entry `DirRecord`, so a bug that wrote one entry's pair into
+        // every central-directory record would pass a test where they all
+        // matched. The absent one is in the middle rather than at an end so
+        // that "wrote the previous entry's value" and "wrote the next one's"
+        // both fail.
         let entries = vec![
             ZipWriteEntry {
                 name: b"a.txt".to_vec(),
                 data: b"first".to_vec(),
                 store_only: false,
+                dos_datetime: (0x2C21 << 16) | 0x6000, // 2002-01-01 12:00:00
             },
             ZipWriteEntry {
                 name: b"dir/".to_vec(),
                 data: Vec::new(),
                 store_only: true,
+                dos_datetime: 0, // not recorded
             },
             ZipWriteEntry {
                 name: b"dir/b.txt".to_vec(),
                 data: b"second".to_vec(),
                 store_only: false,
+                dos_datetime: (0x5B3E << 16) | 0xBF7D, // 2025-09-30 23:59:58
             },
             ZipWriteEntry {
                 name: b"c.bin".to_vec(),
                 data: vec![0xAB; 300],
                 store_only: false,
+                dos_datetime: 0x0021 << 16, // 1980-01-01 00:00:00, the minimum
             },
         ];
         let archive = create(&entries);
@@ -855,7 +946,20 @@ mod tests {
                 "content mismatch for {:?}",
                 orig.name
             );
+            assert_eq!(
+                got.dos_datetime, orig.dos_datetime,
+                "time not round-tripped for {:?}",
+                orig.name
+            );
         }
+        // Stated separately from the loop: the point of the last entry is that
+        // the DOS minimum date survives as itself. It is the value `create`
+        // used to mint for everything, and the one an "is it absent?" test
+        // must not treat as absent.
+        assert_ne!(
+            parsed[3].dos_datetime, 0,
+            "1980-01-01 was asked for explicitly; it is a date, not an absence"
+        );
     }
 
     #[test]
@@ -864,6 +968,7 @@ mod tests {
             name: b"dir/".to_vec(),
             data: Vec::new(),
             store_only: true,
+            dos_datetime: 0,
         }]);
         let parsed = parse(&archive).expect("parse");
         assert!(parsed[0].is_dir, "a name ending in / is a directory entry");
@@ -998,18 +1103,25 @@ mod tests {
         );
     }
 
+    /// The four mod-time bytes as written into each of the two headers.
+    ///
+    /// Local header is at offset 0 for a single-entry archive, time at +10 and
+    /// date at +12; the central header puts them at +12 and +14.  Returned as
+    /// raw slices rather than decoded, because what is being checked is that
+    /// the two are byte-identical, and decoding both through the same function
+    /// would hide a packing bug that hits them equally.
+    fn header_time_pairs(archive: &[u8]) -> (&[u8], &[u8]) {
+        let central = first_central_header(archive);
+        (&archive[10..14], &archive[central + 12..central + 16])
+    }
+
     #[test]
     fn local_and_central_headers_agree_on_the_absent_time() {
         // A reader may take the time from either header.  If they disagreed,
         // our archives would be internally inconsistent, and which time a tool
         // showed would depend on which header it happened to trust.
         let archive = one(b"t.txt", b"x", true);
-        let central = first_central_header(&archive);
-
-        // Local header is at offset 0 for a single-entry archive; time at +10,
-        // date at +12.  Central header: time at +12, date at +14.
-        let local_pair = &archive[10..14];
-        let central_pair = &archive[central + 12..central + 16];
+        let (local_pair, central_pair) = header_time_pairs(&archive);
         assert_eq!(
             local_pair, central_pair,
             "local and central mod-time pairs must be identical"
@@ -1018,11 +1130,46 @@ mod tests {
     }
 
     #[test]
+    fn local_and_central_headers_agree_on_a_recorded_time() {
+        // The companion to the test above, and the one that can actually
+        // regress now that the pair is a caller's value rather than a constant:
+        // the two headers are written by different loops, several hundred lines
+        // apart, and only one of them reads `ZipWriteEntry` directly.  Zero
+        // agreeing with zero would not have caught a second loop that dropped
+        // the field, because its "wrong" answer is also zero.
+        let stamp: u32 = (0x2C21 << 16) | 0x6000; // 2002-01-01 12:00:00
+        let archive = create(&[ZipWriteEntry {
+            name: b"t.txt".to_vec(),
+            data: b"x".to_vec(),
+            store_only: true,
+            dos_datetime: stamp,
+        }]);
+        let (local_pair, central_pair) = header_time_pairs(&archive);
+        assert_eq!(
+            local_pair, central_pair,
+            "local and central mod-time pairs must be identical"
+        );
+
+        // Little-endian time then little-endian date, which is the on-disk
+        // order and the reason the packing is `(date << 16) | time` rather than
+        // the other way round.
+        let want = [0x00u8, 0x60, 0x21, 0x2C];
+        assert_eq!(local_pair, &want, "the caller's pair, not a re-derived one");
+
+        // And it survives the round trip, which is the property a caller cares
+        // about.
+        let parsed = parse(&archive).expect("parse");
+        assert_eq!(parsed[0].dos_datetime, stamp);
+    }
+
+    #[test]
     fn a_recorded_time_is_read_back_from_the_central_directory() {
-        // `create` writes zero, so proving the *read* path needs an archive
-        // with a real pair in it.  Patch one in: this is the only place the
-        // crate is exercised against a third-party-style timestamp, which is
-        // what every archive not written by us will carry.
+        // `create` can now write a real pair, but only one this crate itself
+        // packed -- so a round-trip through it would check the writer's packing
+        // against the reader's unpacking and pass even if both were wrong in
+        // the same direction.  Patching the bytes in directly is what makes
+        // this a test of the *format* rather than of our self-consistency, and
+        // the format is what every archive not written by us will carry.
         //
         // 2026-08-26 14:30:52, built from the fields rather than hardcoded so
         // the test states the encoding it is checking.
@@ -1051,5 +1198,116 @@ mod tests {
 
         // A non-zero pair must not be confusable with the absent case.
         assert_ne!(got, 0);
+    }
+
+    #[test]
+    fn an_impossible_date_is_stored_verbatim_rather_than_corrected() {
+        // The writer does not own a calendar, so it does not own an opinion
+        // about whether a pair names a real day.  This pins that division of
+        // responsibility, which a caller is relying on in both directions:
+        //
+        //   - The *writer* must not silently repair or drop a nonsense pair.
+        //     An archive we produce has to carry the bits it was handed, or a
+        //     caller that encoded a date wrongly would see a plausible date
+        //     come back and never learn its encoder was broken.
+        //   - The *reader* is where range checking belongs, and
+        //     `apps/archivemanager` does exactly that -- it refuses any pair
+        //     whose month or day is out of range and renders it as unknown,
+        //     rather than guessing what was meant.
+        //
+        // 0x5B3F is month 9, day 31 -- September has thirty days, so this pair
+        // is well-formed as bits and impossible as a date.  It is the value a
+        // buggy encoder that forgot months have different lengths would emit.
+        let nonsense: u32 = (0x5B3F << 16) | 0xBF7D;
+        assert_eq!((nonsense >> 21) & 0x0F, 9, "month 9");
+        assert_eq!((nonsense >> 16) & 0x1F, 31, "day 31, which September lacks");
+
+        let archive = create(&[ZipWriteEntry {
+            name: b"t.txt".to_vec(),
+            data: b"x".to_vec(),
+            store_only: true,
+            dos_datetime: nonsense,
+        }]);
+        let parsed = parse(&archive).expect("parse");
+        assert_eq!(
+            parsed[0].dos_datetime, nonsense,
+            "an out-of-range pair must survive unaltered, not be normalised"
+        );
+
+        // And both headers still agree -- a writer that validated in one loop
+        // and not the other would make the two disagree, which is the failure
+        // this crate can actually cause.
+        let (local_pair, central_pair) = header_time_pairs(&archive);
+        assert_eq!(local_pair, central_pair);
+    }
+
+    #[test]
+    fn what_we_write_is_not_encrypted_and_says_so() {
+        // The baseline the Encrypted column needs: a member with no flags set
+        // must report false, and must do so because bit 0 is clear rather than
+        // because nothing ever looks.  Before `flags` existed the caller had a
+        // hardcoded `false` here, which is the same answer for the wrong
+        // reason -- and the wrong answer for the archive below.
+        let archive = one(b"plain.txt", b"data", true);
+        let parsed = parse(&archive).expect("parse");
+        assert_eq!(parsed[0].flags, 0, "create() sets no general-purpose bits");
+        assert!(!parsed[0].is_encrypted());
+    }
+
+    #[test]
+    fn an_encrypted_member_is_reported_as_encrypted() {
+        // Bit 0 patched into the central header, for the same reason the
+        // timestamp test patches: this crate cannot *produce* an encrypted
+        // member, so the only honest fixture for reading one is the bytes a
+        // real archiver would have written.
+        let mut archive = one(b"secret.txt", b"data", true);
+        let central = first_central_header(&archive);
+        archive[central + 8..central + 10].copy_from_slice(&1u16.to_le_bytes());
+
+        let parsed = parse(&archive).expect("parse");
+        assert_eq!(parsed[0].flags, 1);
+        assert!(
+            parsed[0].is_encrypted(),
+            "general-purpose bit 0 means the data needs a password"
+        );
+    }
+
+    #[test]
+    fn other_general_purpose_bits_are_not_mistaken_for_encryption() {
+        // Bit 11 (the name claims to be UTF-8) is the one most likely to be set
+        // in the wild on a member that is not encrypted at all -- any modern
+        // archiver sets it for a non-ASCII name.  Reporting that as encrypted
+        // would make the Encrypted column wrong in the common case rather than
+        // the rare one, which is the failure mode a `!= 0` test would have.
+        let mut archive = one(b"na\xC3\xAFve.txt", b"data", true);
+        let central = first_central_header(&archive);
+        archive[central + 8..central + 10].copy_from_slice(&0x0800u16.to_le_bytes());
+
+        let parsed = parse(&archive).expect("parse");
+        assert_eq!(parsed[0].flags, 0x0800, "the whole field is preserved");
+        assert!(
+            !parsed[0].is_encrypted(),
+            "bit 11 is a claim about the name's encoding, not about the data"
+        );
+    }
+
+    #[test]
+    fn strong_encryption_still_sets_bit_zero() {
+        // Bit 6 is AES/PKWARE strong encryption, and the specification requires
+        // bit 0 alongside it.  `is_encrypted` therefore answers "unreadable
+        // as-is" for both schemes off bit 0 alone; `flags` is what a caller
+        // uses to tell them apart, which is why it is public rather than
+        // replaced by a bool.
+        let mut archive = one(b"strong.txt", b"data", true);
+        let central = first_central_header(&archive);
+        archive[central + 8..central + 10].copy_from_slice(&0x0041u16.to_le_bytes());
+
+        let parsed = parse(&archive).expect("parse");
+        assert!(parsed[0].is_encrypted());
+        assert_eq!(
+            parsed[0].flags & 0x0040,
+            0x0040,
+            "the strong-encryption bit is still visible to a caller that cares"
+        );
     }
 }

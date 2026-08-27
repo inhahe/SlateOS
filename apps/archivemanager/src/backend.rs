@@ -197,12 +197,12 @@ pub fn parse_zip(path: &Path, bytes: Vec<u8>) -> Result<ArchiveModel, ArchiveErr
             compressed_size: member.compressed_size,
             modified: dos_datetime_to_unix(member.dos_datetime),
             crc32: member.crc32,
-            // Encryption is general-purpose bit 0, which the crate does not
-            // expose. Claiming `false` for an encrypted entry would be a lie,
-            // but it is the same lie the program told before it could read
-            // archives at all, and the fix is another field on `ZipEntry` —
-            // `known-issues.md` → `C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT`.
-            encrypted: false,
+            // General-purpose bit 0, read rather than assumed. This column used
+            // to be a hardcoded `false`, which was the right answer for every
+            // archive SlateOS writes and the wrong one for every archive that
+            // needs a password — and the two are indistinguishable to a user
+            // looking at a column that always says the same thing.
+            encrypted: member.is_encrypted(),
             method: method_name(member.method),
             path: display,
             expanded: false,
@@ -318,6 +318,16 @@ pub enum SkipReason {
     UnnameableHere,
     /// The name has no components at all — `/`, or `././`.
     Empty,
+    /// The member needs a password, and this build has no decryption at all.
+    ///
+    /// Separate from [`Self::Zip`] because the two say opposite things about the
+    /// archive. Handing an encrypted member to the inflater does not fail
+    /// cleanly: it decompresses ciphertext into whatever that happens to expand
+    /// to, and the size or CRC check at the end rejects it as corrupt. That
+    /// report is wrong twice over — it blames the archive for a file that is
+    /// perfectly intact, and it tells a user whose only real problem is a
+    /// missing password to go and find an undamaged copy.
+    Encrypted,
     /// The member would not decompress.
     Zip(ziparchive::Error),
     /// The file or its directory could not be written.
@@ -330,6 +340,7 @@ impl fmt::Display for SkipReason {
             Self::Escapes => f.write_str("its name points outside the destination"),
             Self::UnnameableHere => f.write_str("its name is not text this system can write"),
             Self::Empty => f.write_str("its name is empty"),
+            Self::Encrypted => f.write_str("it is encrypted and this build cannot decrypt"),
             Self::Zip(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "{e}"),
         }
@@ -460,6 +471,18 @@ pub fn extract(source: &ArchiveSource, members: &[&ArchiveEntry], dest: &Path) -
             }
             continue;
         }
+        // Checked before the inflater is asked, not after it fails. The
+        // difference is what the user is told: refused here, the report names a
+        // missing password; left to `extract_entry`, the ciphertext inflates to
+        // rubbish and the size/CRC check calls an intact archive corrupt. It is
+        // also the only place the Encrypted column and the error message can be
+        // made to agree, since both now read the same bit.
+        if member.is_encrypted() {
+            report
+                .skipped
+                .push((entry.path.clone(), SkipReason::Encrypted));
+            continue;
+        }
         let data = match ziparchive::extract_entry(source.bytes(), member) {
             Ok(d) => d,
             Err(e) => {
@@ -509,6 +532,13 @@ pub fn verify(model: &ArchiveModel) -> ArchiveTestResults {
     for entry in files {
         let result = match source.member(entry.id) {
             None => TestResult::Corrupted(String::from("no record of this entry in the archive")),
+            // An encrypted member is not tested rather than tested and failed.
+            // It counts against the pass rate either way — the Test button
+            // cannot vouch for data it cannot read — but "Decrypt Failed" sends
+            // the user to look for a password, which is the thing that would
+            // actually help, whereas "Corrupted" sends them to look for another
+            // copy of an archive that is not damaged.
+            Some(member) if member.is_encrypted() => TestResult::DecryptionFailed,
             Some(member) => match ziparchive::extract_entry(source.bytes(), member) {
                 Ok(_) => TestResult::Ok,
                 // The parser checks the declared size first and the CRC second
@@ -550,6 +580,10 @@ mod tests {
             name: name.as_bytes().to_vec(),
             data: data.to_vec(),
             store_only: false,
+            // Left unrecorded on purpose: this helper backs
+            // `an_archive_we_wrote_ourselves_reports_no_time_rather_than_1980`,
+            // whose whole point is that an absent time reads as absent.
+            dos_datetime: 0,
         }
     }
 
@@ -563,6 +597,31 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create the scratch directory");
         dir
+    }
+
+    /// A one-member archive whose member claims to be encrypted.
+    ///
+    /// The bit is patched into the bytes rather than asked for, because
+    /// `ziparchive::create` cannot *write* an encrypted member — nothing in
+    /// SlateOS can. The only honest fixture for reading one is therefore the
+    /// bytes a real archiver would have produced, which for the purpose of every
+    /// assertion below is an ordinary archive with general-purpose bit 0 set.
+    ///
+    /// Only the central header is patched, which is exactly where `parse` reads
+    /// the field. That leaves the local header disagreeing with it — a real
+    /// encrypted archive would set both — but the member's *data* is real
+    /// deflate either way, which is the point: it makes the test able to tell
+    /// "refused because the bit is set" from "failed because ciphertext does not
+    /// inflate". Only the first is a correct refusal, and only this fixture can
+    /// distinguish them.
+    fn encrypted_archive(name: &str, data: &[u8]) -> Vec<u8> {
+        let mut bytes = ziparchive::create(&[member(name, data)]);
+        let central = bytes
+            .windows(4)
+            .position(|w| w == [0x50, 0x4B, 0x01, 0x02])
+            .expect("a central directory header");
+        bytes[central + 8..central + 10].copy_from_slice(&1u16.to_le_bytes());
+        bytes
     }
 
     /// The MS-DOS pair for a wall-clock date and time, as a ZIP stores it.
@@ -729,6 +788,7 @@ mod tests {
                 name: b"docs/".to_vec(),
                 data: Vec::new(),
                 store_only: true,
+                dos_datetime: 0,
             },
             member("docs/guide.md", b"# Guide\n"),
             member("LICENSE", b"do what you like\n"),
@@ -828,6 +888,86 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).expect("remove the scratch directory");
+    }
+
+    #[test]
+    fn an_encrypted_member_is_shown_as_encrypted() {
+        let model = parse_zip(
+            Path::new("/tmp/locked.zip"),
+            encrypted_archive("secret.txt", b"pretend this is ciphertext"),
+        )
+        .expect("well-formed");
+        assert!(
+            model.entries[0].encrypted,
+            "the padlock column must read the bit, not a constant"
+        );
+
+        // And the ordinary case still reads false, from the same bit rather than
+        // from the hardcoded answer it used to be.
+        let plain = parse_zip(
+            Path::new("/tmp/plain.zip"),
+            ziparchive::create(&[member("open.txt", b"no password needed")]),
+        )
+        .expect("well-formed");
+        assert!(!plain.entries[0].encrypted);
+    }
+
+    #[test]
+    fn an_encrypted_member_is_refused_by_name_rather_than_called_corrupt() {
+        // The whole point of the change. Handed to the inflater, an encrypted
+        // member fails the size or CRC check and gets reported as damaged — an
+        // answer that is wrong about the archive and useless to the user, who
+        // needs a password and is being told to find another copy.
+        let dir = scratch("encrypted-extract");
+        let model = parse_zip(
+            Path::new("/tmp/locked.zip"),
+            encrypted_archive("secret.txt", b"pretend this is ciphertext"),
+        )
+        .expect("well-formed");
+        let all: Vec<&ArchiveEntry> = model.entries.iter().collect();
+        let report = extract(model.source.as_ref().expect("a source"), &all, &dir);
+
+        assert_eq!(report.written, 0, "nothing readable was in there");
+        assert_eq!(report.skipped.len(), 1, "{:?}", report.skipped);
+        let (name, why) = &report.skipped[0];
+        assert_eq!(name, "secret.txt");
+        assert!(
+            matches!(why, SkipReason::Encrypted),
+            "refused for the wrong reason: {why}"
+        );
+        assert!(
+            why.to_string().contains("encrypted"),
+            "the reason a user reads must name the password, not the checksum: {why}"
+        );
+        assert!(
+            !dir.join("secret.txt").exists(),
+            "a member we cannot decrypt must not leave ciphertext on disk under its own name"
+        );
+
+        fs::remove_dir_all(&dir).expect("remove the scratch directory");
+    }
+
+    #[test]
+    fn testing_an_encrypted_member_reports_a_password_not_damage() {
+        // `verify` backs the Test button, and it is the other place the two
+        // could disagree: a row showing a padlock and a result reading
+        // "Corrupted" are two different explanations of one fact.
+        let model = parse_zip(
+            Path::new("/tmp/locked.zip"),
+            encrypted_archive("secret.txt", b"pretend this is ciphertext"),
+        )
+        .expect("well-formed");
+        let results = verify(&model);
+
+        assert!(matches!(
+            results.results.get("secret.txt"),
+            Some(TestResult::DecryptionFailed)
+        ));
+        assert_eq!(
+            results.failed, 1,
+            "a member we cannot read must not count as passing"
+        );
+        assert!(!results.all_passed());
     }
 
     #[test]

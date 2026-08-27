@@ -18,6 +18,8 @@
 
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
@@ -833,30 +835,8 @@ impl Default for NetManagerApp {
 }
 
 // ============================================================================
-// Geometry, targets, and the frame that carries both
+// Targets, and the frame that carries them
 // ============================================================================
-
-/// An axis-aligned rectangle in window coordinates.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-impl Rect {
-    #[must_use]
-    const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
-        Self { x, y, w, h }
-    }
-
-    /// Half-open on both axes, so two adjacent rects cannot both claim a pixel.
-    #[must_use]
-    fn contains(self, x: f32, y: f32) -> bool {
-        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
-    }
-}
 
 /// A text field that can hold the keyboard.
 ///
@@ -904,51 +884,20 @@ pub enum Target {
 /// A frame being built: the commands to draw, and the clickable rects that
 /// drawing them created.
 ///
-/// Rendering and hit-testing are the *same walk*. Every renderer that draws a
-/// control also records where it drew it, and the hit-test gets its geometry by
-/// running the renderer and reading `hits` — so the two cannot disagree. The
-/// alternative, a `Layout` computed once for the renderer and once for the
-/// hit-test, is how a click comes to land on the row above the one it was aimed
-/// at, and it survives review because both copies look right.
-pub struct Frame {
-    /// The commands drawn so far.
-    pub tree: RenderTree,
-    /// Clickable rects in draw order: later entries are drawn on top, so the
-    /// hit-test reads this back to front.
-    hits: Vec<(Target, Rect)>,
-    /// The viewport this frame is being drawn for.
-    width: f32,
-    height: f32,
-}
+/// Rendering and hit-testing are the *same walk* — see [`guitk::frame`] for
+/// why, and for how the clip in force around the detail panel trims what is
+/// clickable. This alias is here so the renderers below can keep saying
+/// `&mut Frame` without repeating the target type on every signature.
+pub type Frame = guitk::frame::Frame<Target>;
 
-impl Frame {
-    fn new(width: f32, height: f32) -> Self {
-        Self {
-            tree: RenderTree::new(),
-            hits: Vec::new(),
-            width: width.max(MIN_WIDTH),
-            height: height.max(MIN_HEIGHT),
-        }
-    }
-
-    fn push(&mut self, command: RenderCommand) {
-        self.tree.push(command);
-    }
-
-    /// Record that whatever was just drawn at `rect` is clickable.
-    fn hit(&mut self, target: Target, rect: Rect) {
-        self.hits.push((target, rect));
-    }
-
-    /// The topmost target under a point, or `None` for bare background.
-    #[must_use]
-    fn hit_test(&self, x: f32, y: f32) -> Option<Target> {
-        self.hits
-            .iter()
-            .rev()
-            .find(|(_, rect)| rect.contains(x, y))
-            .map(|(target, _)| *target)
-    }
+/// A frame sized for a window of `width` by `height`, never smaller than the
+/// minimum the layout is designed for.
+///
+/// Below that the panels overlap and the window is unusable, so the renderer
+/// draws the smallest sensible layout and lets it clip rather than producing
+/// negative widths.
+fn new_frame(width: f32, height: f32) -> Frame {
+    Frame::new(width.max(MIN_WIDTH), height.max(MIN_HEIGHT))
 }
 
 // ============================================================================
@@ -962,7 +911,7 @@ impl Frame {
 /// reads `Frame::hits`; it does not recompute anything.
 #[must_use]
 pub fn render_frame(app: &NetManagerApp, width: f32, height: f32) -> Frame {
-    let mut frame = Frame::new(width, height);
+    let mut frame = new_frame(width, height);
 
     // Background
     frame.push(RenderCommand::FillRect {
@@ -989,7 +938,7 @@ pub fn render_frame(app: &NetManagerApp, width: f32, height: f32) -> Frame {
 /// through [`render_frame`] with the size the compositor actually gave it.
 #[must_use]
 pub fn render_app(app: &NetManagerApp) -> RenderTree {
-    render_frame(app, WINDOW_WIDTH, WINDOW_HEIGHT).tree
+    render_frame(app, WINDOW_WIDTH, WINDOW_HEIGHT).into_tree()
 }
 
 /// Render the title bar at the top of the window.
@@ -3189,7 +3138,28 @@ impl App for NetManagerApp {
         // `Resize` arrives, so this is the only place the real size is known
         // on frame one.
         self.window_size = (width, height);
-        render_frame(self, width, height).tree
+        render_frame(self, width, height).into_tree()
+    }
+}
+
+/// Lets the tests drive this window by naming its controls rather than
+/// measuring them. Three lines of forwarding; the helpers are in
+/// [`guitk::probe`].
+impl Probe for NetManagerApp {
+    type Target = Target;
+    type Outcome = Action;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        render_frame(self, size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Action {
+        self.handle_click(x, y, button, size)
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, _size: (f32, f32)) -> Action {
+        self.handle_key(key)
     }
 }
 
@@ -3957,9 +3927,8 @@ mod tests {
 
         let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         render_tab_diagnostics(&mut frame, &app, 0.0, 0.0, 600.0);
-        let tree = &frame.tree;
-        let detail = tree
-            .commands
+        let cmds = frame.commands();
+        let detail = cmds
             .iter()
             .find_map(|c| match c {
                 RenderCommand::Text {
@@ -3986,9 +3955,8 @@ mod tests {
         app.diagnostics[0].details = "OK".to_string();
         let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         render_tab_diagnostics(&mut frame, &app, 0.0, 0.0, 600.0);
-        let tree = &frame.tree;
-        let detail = tree
-            .commands
+        let cmds = frame.commands();
+        let detail = cmds
             .iter()
             .find_map(|c| match c {
                 RenderCommand::Text {
@@ -4144,9 +4112,8 @@ mod tests {
     fn drawn_interfaces(app: &NetManagerApp) -> Vec<String> {
         let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         render_sidebar(&mut frame, app);
-        let tree = &frame.tree;
-        tree.commands
-            .iter()
+        let cmds = frame.commands();
+        cmds.iter()
             .filter_map(|c| match c {
                 RenderCommand::Text { text, .. }
                     if text.len() == 4
@@ -4174,8 +4141,8 @@ mod tests {
                 app.sidebar_scroll = offset;
                 let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
                 render_sidebar(&mut frame, &app);
-                let tree = &frame.tree;
-                for cmd in &tree.commands {
+                let cmds = frame.commands();
+                for cmd in cmds {
                     let (label, y) = match cmd {
                         RenderCommand::Text { text, y, .. } => (text.clone(), *y),
                         RenderCommand::FillRect { y, height, .. } => {
@@ -4203,9 +4170,9 @@ mod tests {
         assert_eq!(drawn_interfaces(&app), ["I000", "I001", "I002", "I003"]);
         let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         render_sidebar(&mut frame, &app);
-        let tree = &frame.tree;
+        let cmds = frame.commands();
         assert!(
-            !tree.commands.iter().any(|c| matches!(
+            !cmds.iter().any(|c| matches!(
                 c,
                 RenderCommand::Text { text, .. } if text.ends_with(" more")
             )),
@@ -4307,9 +4274,8 @@ mod tests {
         assert!(shown < 60, "60 interfaces should not fit a 680px window");
         let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         render_sidebar(&mut frame, &app);
-        let tree = &frame.tree;
-        let note = tree
-            .commands
+        let cmds = frame.commands();
+        let note = cmds
             .iter()
             .find_map(|c| match c {
                 RenderCommand::Text { text, .. } if text.ends_with(" more") => Some(text.clone()),
@@ -4333,10 +4299,9 @@ mod tests {
 
         let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         render_sidebar(&mut frame, &app);
-        let tree = &frame.tree;
+        let cmds = frame.commands();
         // The highlight is the only rounded full-width row rect in SURFACE0.
-        let highlights: Vec<f32> = tree
-            .commands
+        let highlights: Vec<f32> = cmds
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::FillRect {
@@ -4368,60 +4333,13 @@ mod tests {
     /// The size the tests click at. Not `WINDOW_WIDTH`/`WINDOW_HEIGHT` by
     /// coincidence: the app remembers the size it last drew at, and these
     /// tests exercise the same path the window does.
-    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+    const SIZE: (f32, f32) = <NetManagerApp as Probe>::SIZE;
 
-    /// The rect the renderer recorded for `target`, or `None` if nothing was
-    /// drawn for it in this state.
-    fn rect_of(app: &NetManagerApp, target: Target) -> Option<Rect> {
-        render_frame(app, SIZE.0, SIZE.1)
-            .hits
-            .iter()
-            .rev()
-            .find(|(t, _)| *t == target)
-            .map(|(_, rect)| *rect)
-    }
-
-    /// Click the middle of whatever the renderer drew for `target`.
-    ///
-    /// Panics if nothing was drawn for it, which is the point: a control that
-    /// is not on screen cannot be clicked, and a test that silently skipped
-    /// the click would pass while the button was missing.
-    fn click(app: &mut NetManagerApp, target: Target) -> Action {
-        let rect =
-            rect_of(app, target).unwrap_or_else(|| panic!("nothing on screen for {target:?}"));
-        app.handle_click(
-            rect.x + rect.w / 2.0,
-            rect.y + rect.h / 2.0,
-            MouseButton::Left,
-            SIZE,
-        )
-    }
-
-    /// A keystroke that types `text`.
-    fn typing(text: &str) -> KeyEvent {
-        KeyEvent {
-            key: Key::A,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: text.to_string(),
-        }
-    }
-
-    /// A keystroke that types nothing.
-    fn press(key: Key) -> KeyEvent {
-        KeyEvent {
-            key,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        }
-    }
-
-    fn type_str(app: &mut NetManagerApp, text: &str) {
-        for ch in text.chars() {
-            app.handle_key(&typing(&ch.to_string()));
-        }
-    }
+    /// Finding a control by name, clicking it, and typing at it are the same
+    /// four lines in every program, so they live in the toolkit — see
+    /// [`guitk::probe`] for what each one guarantees. Imported under their
+    /// bare names because that is what the tests below already say.
+    use guitk::probe::{click, press, rect_of, type_str, typing};
 
     #[test]
     fn clicking_a_sidebar_row_selects_that_interface() {
@@ -4492,7 +4410,7 @@ mod tests {
         let mut previous: Option<Rect> = None;
         for tab in DetailTab::all() {
             let rect = frame
-                .hits
+                .hits()
                 .iter()
                 .find(|(t, _)| *t == Target::Tab(*tab))
                 .map(|(_, r)| *r)
@@ -4724,8 +4642,7 @@ mod tests {
 
         let carets = |app: &NetManagerApp| {
             render_frame(app, SIZE.0, SIZE.1)
-                .tree
-                .commands
+                .commands()
                 .iter()
                 .filter(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "1.2.3.4_"))
                 .count()
@@ -5138,7 +5055,7 @@ mod tests {
 
         let wide = (1400.0_f32, 900.0_f32);
         let at_wide = render_frame(&app, wide.0, wide.1)
-            .hits
+            .hits()
             .iter()
             .rev()
             .find(|(t, _)| *t == Target::ProfileRemove(0))
@@ -5195,7 +5112,7 @@ mod tests {
         let frame = render_frame(&app, 100.0, 50.0);
         assert!(frame.width >= MIN_WIDTH);
         assert!(frame.height >= MIN_HEIGHT);
-        for (target, rect) in &frame.hits {
+        for (target, rect) in frame.hits() {
             assert!(
                 rect.w > 0.0 && rect.h > 0.0,
                 "{target:?} was given an unclickable rect {rect:?}"
@@ -5213,8 +5130,8 @@ mod tests {
         for tab in DetailTab::all() {
             app.set_tab(*tab);
             let frame = render_frame(&app, SIZE.0, SIZE.1);
-            for (i, (a, ra)) in frame.hits.iter().enumerate() {
-                for (b, rb) in frame.hits.iter().skip(i + 1) {
+            for (i, (a, ra)) in frame.hits().iter().enumerate() {
+                for (b, rb) in frame.hits().iter().skip(i + 1) {
                     let overlaps = ra.x < rb.x + rb.w
                         && rb.x < ra.x + ra.w
                         && ra.y < rb.y + rb.h
@@ -5234,5 +5151,70 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A list long enough to overflow the detail panel at the smallest window
+    /// the layout supports.
+    fn app_with_overflowing_profiles() -> NetManagerApp {
+        let mut app = NetManagerApp::new();
+        app.set_tab(DetailTab::Profiles);
+        for i in 0..24 {
+            app.add_profile(&format!("profile-{i}"), SecurityLevel::Public, false);
+        }
+        app
+    }
+
+    #[test]
+    fn a_list_row_past_the_bottom_of_its_panel_is_not_clickable() {
+        // `render_tab_profiles` draws *every* profile, with no visible-row
+        // limit — it relies on the `PushClip` around the detail panel to stop
+        // the overflow. That works for the ink, because the compositor honours
+        // the clip. It did not work for the clicks: the frame recorded each
+        // row's full rect regardless, so with 24 profiles in a 320px-tall
+        // window, twenty rows were "clickable" below the bottom edge of the
+        // window and one straddled the status bar — a click on the status bar
+        // selected a profile that was nowhere on screen.
+        let app = app_with_overflowing_profiles();
+        let frame = render_frame(&app, MIN_WIDTH, MIN_HEIGHT);
+        let panel_bottom = MIN_HEIGHT - STATUS_BAR_HEIGHT;
+
+        for (target, rect) in frame.hits() {
+            assert!(
+                rect.bottom() <= panel_bottom + 0.01 || !matches!(target, Target::Profile(_)),
+                "{target:?} is clickable down to {} but the panel ends at {panel_bottom}",
+                rect.bottom()
+            );
+        }
+
+        let reachable = frame
+            .hits()
+            .iter()
+            .filter(|(t, _)| matches!(t, Target::Profile(_)))
+            .count();
+        assert!(
+            reachable < app.profiles.len(),
+            "all {} profiles were recorded as clickable, so the clip is not \
+             being applied to the hit rects at all",
+            app.profiles.len()
+        );
+        assert!(reachable > 0, "the visible rows must still be clickable");
+    }
+
+    #[test]
+    fn clicking_the_status_bar_does_not_select_an_off_screen_profile() {
+        let mut app = app_with_overflowing_profiles();
+        assert_eq!(app.selected_profile, None);
+        // Just inside the status bar, which is where the first row to overflow
+        // the panel spills to. Aiming at the middle of the status bar instead
+        // would miss: that row only reaches a little way past the panel edge,
+        // so a test that clicked the centre would pass even with the clip
+        // removed and would prove nothing.
+        let y = MIN_HEIGHT - STATUS_BAR_HEIGHT + 2.0;
+        let size = (MIN_WIDTH, MIN_HEIGHT);
+        app.handle_click(MIN_WIDTH / 2.0, y, MouseButton::Left, size);
+        assert_eq!(
+            app.selected_profile, None,
+            "a click on the status bar selected a profile drawn behind it"
+        );
     }
 }

@@ -141,8 +141,14 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             }
             // No cleanup needed for these types — they're either
             // permission tokens (PortIo, DeviceIrq, IoScheduler, NetRaw,
-            // SystemClock, PrivilegedPort, ResourceLimit) or managed by other
-            // subsystems (Socket, Service, Namespace).
+            // SystemClock, PrivilegedPort, ResourceLimit, BlockDevice) or
+            // managed by other subsystems (Socket, Service, Namespace).
+            //
+            // BlockDevice is a token and not a handle because an open of
+            // `/dev/vda` is an ordinary VFS open and registers an ordinary
+            // `File` handle, cleaned up above; the token is consulted on each
+            // read/write by `fs::devfs`, which is the only code that can tell a
+            // block node from a regular file.
             // NetRaw's exclusive NIC claim is released lazily by
             // `net::raw::is_claimed` when it observes the owner has died.
             //
@@ -165,6 +171,7 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             | ResourceType::SystemClock
             | ResourceType::PrivilegedPort
             | ResourceType::ResourceLimit
+            | ResourceType::BlockDevice
             | ResourceType::Namespace => {}
         }
     }

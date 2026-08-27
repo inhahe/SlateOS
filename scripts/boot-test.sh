@@ -3139,6 +3139,64 @@ check_production_unwrap() {
 
 check_production_unwrap
 
+# Refuse to build when a library module's entire public surface is named by
+# nothing outside it.  Requested by lane C in
+# requests/c-a-please-add-the-orphan-module-ratchet-to-the-pre-build-gate.md.
+#
+# WHY IT NEEDS A GATE.  `cargo build` cannot warn about an unused `pub` item,
+# and a module's own unit tests keep the suite green, so an unreachable module
+# is invisible to everything else in the build.  That is the same question
+# check_self_tests_wired asks -- does anything actually reach this code? --
+# asked one level up, at module rather than function scale.
+#
+# IT IS A RATCHET, NOT A CLEAN-TREE TEST.  47 modules are pinned in
+# scripts/orphan-modules-baseline.txt and the gate is silent about every one of
+# them: the existing pile is blocked on an operator decision (open-questions.md
+# -> C-Q6, which decides whether the shell's settings pages survive at all), so
+# it cannot be paid down today.  What --check refuses is a *newly* unreachable
+# module, which keeps the pile from growing while that question sits.
+#
+# IT CANNOT FAIL ON LANE A'S OWN TREE.  Candidate modules are drawn from lane
+# C's roots only (gui/**, apps/**, pkg/**, net*/**); kernel/**, posix/**,
+# userspace/** and services/** are never reported.  It reads them, because a
+# lane-C type used by lane B is used -- but it has no opinion about them.
+#
+# COST: ~39 s measured here, against a boot whose QEMU window alone is 400-900 s.
+check_orphan_modules() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Orphan module check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that no NEW library module is unreachable ==="
+    # Exit 2 means the check could not run -- a missing baseline, or a working
+    # directory with no modules in it.  Treated as failure along with 1, and
+    # deliberately so: the script spells "cannot fire" differently from
+    # "passed" precisely so that a caller can refuse both.
+    if "$py" "$PROJECT_ROOT/scripts/scan-orphan-modules.py" --check; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  Each module above defines public items" >&2
+    echo "that no other file in the repository names, so nothing reaches it:" >&2
+    echo "cargo cannot warn about an unused pub item and its own tests still" >&2
+    echo "pass, which is why this shape ships green." >&2
+    echo "" >&2
+    echo "Wire it up, delete it, or -- if it is an island on purpose, e.g. a" >&2
+    echo "crate consumed outside this tree -- add it to" >&2
+    echo "scripts/orphan-modules-baseline.txt in the same commit, with the" >&2
+    echo "reason in the commit message." >&2
+    exit 1
+}
+
+check_orphan_modules
+
 # Resolved once, here, because two things now need it: the clippy gate below
 # and the build after it.  Hoisted out of the build block rather than
 # duplicated -- a gate that resolves `cargo` differently from the build it
@@ -3189,6 +3247,29 @@ fi
 # WHY THE SAME PROFILE AS THE BUILD.  `cfg(debug_assertions)` selects real code
 # in this kernel, so linting debug while shipping release would leave a hole of
 # precisely the size of the difference.  The gate checks what the run builds.
+#
+# `-p kernel` DOES COVER THE ROOT LEAF CRATES.  Worth stating outright, because
+# the log below looks exactly as though it does not: every one of its ~18,000
+# lines is a `kernel\...` path, and `crc32`, `deflate`, `sha2`, `netipc`,
+# `netring`, `tzrules` and `ziparchive` contribute none.  That is cargo
+# declining to *print* warnings for non-primary packages, not clippy declining
+# to run on them.  Errors are not suppressed the same way.
+#
+# Verified 2026-08-26 by planting a deny-level `clippy::needless_return` in
+# `ziparchive/src/lib.rs` and running this gate's exact command: it exited 101
+# and named `ziparchive\src\lib.rs:112:5`.  Nothing else establishes this --
+# a clean log is equally consistent with "linted and clean" and "never linted",
+# and those two differ by every shared parser of untrusted input in the tree.
+#
+# Two corollaries, both of which cost an hour to learn:
+#   - Adding `-p ziparchive` here changes nothing.  Tested with a cold cache;
+#     the crate is a dependency of `kernel` in the same invocation, so it is
+#     built in that role regardless of also being named.
+#   - The absence of *warnings* from those crates is real but is not this
+#     gate's business: the noisy pedantic lints (`cast_possible_truncation` and
+#     friends) are `allow` at workspace scope, and these crates are small and
+#     genuinely near-clean.  Their pedantic backlog is simply not visible here.
+#     To see it, lint one on its own: `cargo clippy -p deflate`.
 #
 # Skipped under --no-build: that mode boots an already-built kernel, so there is
 # no new source for the gate to have an opinion about, and 113 s buys nothing.

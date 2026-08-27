@@ -20920,6 +20920,7 @@ fn ls_list_dir(
                 crate::fs::EntryType::Symlink => 'l',
                 crate::fs::EntryType::VolumeLabel => 'v',
                 crate::fs::EntryType::CharDevice => 'c',
+                crate::fs::EntryType::BlockDevice => 'b',
             };
 
             if let Some(Some(meta)) = metas.get(i) {
@@ -20989,6 +20990,7 @@ fn ls_list_dir(
                 crate::fs::EntryType::Symlink => "<LINK>   ",
                 crate::fs::EntryType::VolumeLabel => "<VOL>    ",
                 crate::fs::EntryType::CharDevice => "<CHR>    ",
+                crate::fs::EntryType::BlockDevice => "<BLK>    ",
             };
             let size_str = if human_sizes {
                 alloc::format!("{:>8}", format_size_human(entry.size))
@@ -21239,6 +21241,7 @@ fn cmd_stat(args: &str) {
                 crate::fs::EntryType::Symlink => "symbolic link",
                 crate::fs::EntryType::VolumeLabel => "volume label",
                 crate::fs::EntryType::CharDevice => "character special file",
+                crate::fs::EntryType::BlockDevice => "block special file",
             };
             shell_println!("  File: {}", path.display());
             shell_println!(
@@ -30880,6 +30883,7 @@ fn cmd_lsplus(args: &str) {
                     crate::fs::EntryType::Symlink => "LINK",
                     crate::fs::EntryType::VolumeLabel => "VOL ",
                     crate::fs::EntryType::CharDevice => "CHR ",
+                    crate::fs::EntryType::BlockDevice => "BLK ",
                 };
                 let size = entry.meta.as_ref().map_or(0, |m| m.size);
                 shell_println!("  {:4} {:>10} {}", type_str, size, entry.name.display());
@@ -96340,7 +96344,18 @@ fn cmd_signalq(args: &str) {
     match sub {
         "list" => {
             signalq::init_defaults();
-            for ps in signalq::list_processes() {
+            let processes = signalq::list_processes();
+            if processes.is_empty() {
+                // Say so explicitly.  The table used to be seeded with two
+                // fabricated processes, so it was never empty and this arm
+                // never had to answer the question; now that the seed is gone
+                // an empty table is the normal state on a fresh boot, and
+                // printing nothing at all would read as a failed command
+                // rather than as the answer "nothing has been signalled".
+                shell_println!("No process has been sent a signal yet.");
+                return;
+            }
+            for ps in processes {
                 shell_println!(
                     "pid={}: pending={} delivered={} blocked={} mask={:#x}",
                     ps.pid,
@@ -96969,66 +96984,68 @@ fn cmd_irqstat(args: &str) {
     let sub = parts.first().copied().unwrap_or("");
     match sub {
         "lines" | "list" => {
-            irqstat::init_defaults();
-            for line in irqstat::irq_lines() {
-                shell_println!(
-                    "IRQ{}: {} ({}) count={} spurious={} affinity={:#x}",
-                    line.irq_num,
-                    line.name,
-                    line.irq_type.label(),
-                    line.count,
-                    line.spurious,
-                    line.affinity_mask
-                );
+            let lines = irqstat::irq_lines();
+            if lines.is_empty() {
+                shell_println!("No interrupt vector has fired yet.");
+                return;
             }
-        }
-        "cpus" => {
-            irqstat::init_defaults();
-            for cs in irqstat::per_cpu() {
-                shell_println!(
-                    "cpu{}: total={} ipi={} timer={} spurious={} avg_lat={}ns max_lat={}ns",
-                    cs.cpu_id,
-                    cs.total_irqs,
-                    cs.total_ipi,
-                    cs.total_timer,
-                    cs.total_spurious,
-                    cs.avg_latency_ns,
-                    cs.max_latency_ns
-                );
-            }
-        }
-        "register" => {
-            irqstat::init_defaults();
-            let num = parts
-                .get(1)
-                .copied()
-                .unwrap_or("0")
-                .parse::<u32>()
-                .unwrap_or(0);
-            let name = parts.get(2).copied().unwrap_or("irqN");
-            match irqstat::register_irq(num, irqstat::IrqType::Other(num), name, 0xF) {
-                Ok(()) => shell_println!("Registered IRQ{} ({}).", num, name),
-                Err(e) => {
-                    shell_println!("Error: {:?}", e);
-                    set_exit(1);
+            for line in lines {
+                // Keyed by vector, with the IOAPIC input shown only where one
+                // exists.  The timer, the IPIs and the spurious vector are not
+                // IOAPIC inputs, and printing them as "IRQ n" is the confusion
+                // that hid an off-by-one in the balancer.
+                match line.irq_num {
+                    Some(irq) => shell_println!(
+                        "vector {:>3}: {:<20} ({:<10}) irq={:<2} count={}",
+                        line.vector,
+                        line.name,
+                        line.irq_type.label(),
+                        irq,
+                        line.count
+                    ),
+                    None => shell_println!(
+                        "vector {:>3}: {:<20} ({:<10})        count={}",
+                        line.vector,
+                        line.name,
+                        line.irq_type.label(),
+                        line.count
+                    ),
                 }
             }
         }
+        "cpus" => {
+            // Answer the question rather than printing an empty table: a blank
+            // listing here reads as "all CPUs idle", which would be a claim the
+            // kernel has no measurement to support.
+            shell_println!("Per-CPU interrupt attribution is not available.");
+            shell_println!("  The interrupt counters (idt::VECTOR_COUNTS) are one flat global");
+            shell_println!("  array, so a count carries no record of which CPU took it.");
+            shell_println!("  Making them per-CPU would also cut cross-CPU cache-line");
+            shell_println!("  contention, but it changes an interrupt hot path and needs its");
+            shell_println!("  own change and its own benchmark.");
+        }
         "stats" | "" => {
-            irqstat::init_defaults();
-            let (irqs, cpus, total, spurious, _samples, ops) = irqstat::stats();
-            shell_println!("IRQ Statistics:");
-            shell_println!("  IRQ lines:        {}", irqs);
-            shell_println!("  CPUs:             {}", cpus);
-            shell_println!("  Total IRQs:       {}", total);
-            shell_println!("  Total spurious:   {}", spurious);
-            shell_println!("  Ops:              {}", ops);
+            let t = irqstat::totals();
+            shell_println!("IRQ Statistics (projected from idt::vector_counts):");
+            shell_println!("  Live vectors:     {}", t.lines);
+            shell_println!("  Total IRQs:       {}", t.hardware);
+            shell_println!("    timer:          {}", t.timer);
+            shell_println!("    device:         {}", t.device);
+            shell_println!("    ipi:            {}", t.ipi);
+            shell_println!("    spurious:       {}", t.spurious);
+            shell_println!("    unassigned:     {}", t.unassigned);
+            if t.unassigned > 0 {
+                shell_println!(
+                    "  NOTE: {} interrupt(s) on vectors with no handler arm.",
+                    t.unassigned
+                );
+            }
         }
         "test" => {
             irqstat::self_test();
         }
         _ => {
-            shell_println!("Usage: irqstat [lines|cpus|register <num> <name>|stats|test]");
+            shell_println!("Usage: irqstat [lines|cpus|stats|test]");
             set_exit(1);
         }
     }
@@ -106351,8 +106368,11 @@ fn cmd_file(args: &str) {
             }
         }
         crate::fs::EntryType::File => {
-            // Heuristic: /dev/* entries with size 0 are character specials
-            // (the VFS doesn't have a CharDevice entry type).
+            // Heuristic, and now only a fallback: devfs reports its device
+            // nodes as `CharDevice`/`BlockDevice`, which the arms below and
+            // above handle exactly. What is left here are the utility files
+            // (`/dev/null`, `/dev/zero`, …), which devfs genuinely does type
+            // as regular files and which are character specials on Linux.
             if path.starts_with("/dev/") && entry.size == 0 {
                 shell_println!("{}: character special", path.display());
             } else {
@@ -106379,6 +106399,13 @@ fn cmd_file(args: &str) {
         }
         crate::fs::EntryType::CharDevice => {
             shell_println!("{}: character special", path.display());
+        }
+        crate::fs::EntryType::BlockDevice => {
+            // The size is the whole point of naming it here: it is the one
+            // device node whose size is a real number, and `file` on a disk
+            // that reads back as 0 bytes is how you find out a driver never
+            // reported its geometry.
+            shell_println!("{}: block special, {} bytes", path.display(), entry.size);
         }
     }
 }
@@ -106880,7 +106907,10 @@ fn find_recurse_filtered(path: &Path, filter: &FindFilter<'_>, tally: &mut FindT
                 crate::fs::EntryType::Directory => "/",
                 crate::fs::EntryType::Symlink => "@",
                 crate::fs::EntryType::VolumeLabel => "*",
-                crate::fs::EntryType::CharDevice => "",
+                // Neither device kind gets a suffix: `ls -F` marks what a
+                // name can be *done with* (entered, followed), and a device
+                // node is neither.
+                crate::fs::EntryType::CharDevice | crate::fs::EntryType::BlockDevice => "",
             };
             shell_println!("{}{}", child_path.display(), type_str);
             tally.matches = tally.matches.saturating_add(1);
@@ -108217,6 +108247,7 @@ fn cmd_lsp(args: &str) {
                         crate::fs::vfs::EntryType::Symlink => "LINK",
                         crate::fs::vfs::EntryType::VolumeLabel => "VOL",
                         crate::fs::vfs::EntryType::CharDevice => "CHR",
+                        crate::fs::vfs::EntryType::BlockDevice => "BLK",
                     };
                     shell_println!("{:<5} {:<8} {}", type_str, entry.size, entry.name.display(),);
                 }
@@ -123390,7 +123421,14 @@ fn cmd_diag() {
     );
 
     // --- Exceptions ---
-    let exc_total: u64 = crate::idt::vector_counts().iter().sum();
+    // Vectors 0–31 only.  This summed the whole array until hardware vectors
+    // started being counted, at which point "Exceptions: total=" would silently
+    // have become "every interrupt since boot" -- and since the timer alone
+    // fires ~1000 times a second, the `> 100` HIGH indicator below would have
+    // latched within the first second of uptime and never cleared again.  The
+    // old code was not so much wrong as unfalsifiable: correct only for as long
+    // as the array it summed happened to hold nothing but exceptions.
+    let exc_total: u64 = crate::idt::vector_counts().iter().take(32).sum();
     let pf_count = crate::idt::vector_count(14);
     let non_pf_exceptions = exc_total.saturating_sub(pf_count);
     let status_exc = if non_pf_exceptions > 100 {
@@ -123550,12 +123588,7 @@ fn cmd_exceptions() {
         if count == 0 {
             continue;
         }
-        let name = if i < 32 {
-            idt::EXCEPTION_NAMES[i]
-        } else {
-            "IRQ"
-        };
-        shell_println!("{:<6} {:<32} {:>12}", i, name, count);
+        shell_println!("{:<6} {:<32} {:>12}", i, idt::vector_name(i), count);
     }
 
     // Summary line.
@@ -123594,11 +123627,7 @@ fn cmd_exclog() {
         if entry.tick == 0 {
             continue;
         }
-        let name = if (entry.vector as usize) < 32 {
-            idt::EXCEPTION_NAMES[entry.vector as usize]
-        } else {
-            "IRQ"
-        };
+        let name = idt::vector_name(entry.vector as usize);
         shell_println!(
             "{:<8} {:<5} {:<4} {:#018x} {:#018x}",
             entry.tick,
@@ -127701,23 +127730,20 @@ fn cmd_irqrate() {
     shell_println!("  Vec  Name                    Rate");
     shell_println!("  ---  ----                    ----");
 
+    // Iterate the array rather than a hardcoded bound.  This read `0..48` back
+    // when the array was 48 long; the two are now free to disagree, and the
+    // literal would have hidden every vector past 47 -- which is all of the
+    // IOAPIC's upper inputs plus both IPIs and the spurious vector.  Zero-rate
+    // vectors are skipped below, so widening the walk does not widen the output:
+    // it shows exactly the vectors that are actually live.
     let mut any = false;
-    for i in 0..48 {
-        let rate_x10 = rates.rates_x10[i];
+    for (i, &rate_x10) in rates.rates_x10.iter().enumerate() {
         if rate_x10 == 0 {
             continue;
         }
         any = true;
 
-        let name = if i < 32 {
-            crate::idt::EXCEPTION_NAMES[i]
-        } else {
-            match i {
-                32 => "APIC Timer",
-                33..=47 => "Device IRQ",
-                _ => "Unknown",
-            }
-        };
+        let name = crate::idt::vector_name(i);
 
         #[allow(clippy::arithmetic_side_effects)]
         let whole = rate_x10 / 10;
@@ -129662,7 +129688,7 @@ fn cmd_unzip(args: &str) {
                 entry.uncompressed_size,
                 entry.compressed_size,
                 method_str,
-                entry.name.display()
+                Path::new(&entry.name).display()
             );
             total_size = total_size.saturating_add(entry.uncompressed_size);
             total_compressed = total_compressed.saturating_add(entry.compressed_size);
@@ -129697,8 +129723,11 @@ fn cmd_unzip(args: &str) {
         let Ok(out_path) = crate::fs::pathutil::confine_under(&target_dir, &entry.name) else {
             // A name that resolves to nothing under the base is an archive
             // artefact, not an attack; only report a real escape.
-            if entry.name.components().any(|c| c == Path::new("..")) {
-                shell_println!("  unzip: refusing unsafe member '{}'", entry.name.display());
+            // The `zip` crate carries entry names as raw bytes -- an archive
+            // member name is not a path until `confine_under` has accepted it.
+            let name = Path::new(&entry.name);
+            if name.components().any(|c| c == Path::new("..")) {
+                shell_println!("  unzip: refusing unsafe member '{}'", name.display());
                 errors = errors.saturating_add(1);
             }
             continue;
@@ -129731,7 +129760,7 @@ fn cmd_unzip(args: &str) {
         let file_data = match zip::extract_entry(&data, entry) {
             Ok(d) => d,
             Err(e) => {
-                shell_println!("  unzip: '{}': {:?}", entry.name.display(), e);
+                shell_println!("  unzip: '{}': {:?}", Path::new(&entry.name).display(), e);
                 errors = errors.saturating_add(1);
                 set_exit(1);
                 continue;
@@ -131382,7 +131411,7 @@ fn cmd_zip(args: &str) {
         if abs_path.is_empty() {
             // Directory marker.
             entries.push(zip::ZipWriteEntry {
-                name: name.clone(),
+                name: name.clone().into_vec(),
                 data: Vec::new(),
                 store_only: true,
             });
@@ -131404,7 +131433,7 @@ fn cmd_zip(args: &str) {
         total_in = total_in.wrapping_add(raw_data.len() as u64);
 
         entries.push(zip::ZipWriteEntry {
-            name: name.clone(),
+            name: name.clone().into_vec(),
             data: raw_data,
             store_only,
         });

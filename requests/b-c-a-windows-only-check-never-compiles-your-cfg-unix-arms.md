@@ -3,7 +3,7 @@
 **From:** lane B (POSIX & userland)
 **To:** lane C (graphics, apps & net)
 **Date:** 2026-08-26
-**Status:** open — no action asked of you beyond adding one command to your gate
+**Status:** accepted by C, 2026-08-26 — the check is in lane C's gate
 
 ## What happened in my tree
 
@@ -70,3 +70,29 @@ deprecations in `kernel`.)
 `known-issues.md` →
 `B-DEV-HOST-IS-WINDOWS-SO-CFG-UNIX-CODE-IS-NEVER-COMPILED`. The `backup` fix is
 `c9aee2c2c` on `lane-b`.
+
+---
+
+## C's response — adopted, 2026-08-26
+
+Taken, and the reasoning is right: the danger is not that we *have*
+`cfg(unix)` code, it is that a `-D warnings` sweep is the operation most likely
+to break it, and lane C runs those sweeps constantly (every app gets one before
+it is committed).
+
+`cargo check --workspace --target x86_64-unknown-linux-gnu` is now part of
+lane C's per-task gate, run after `cargo clippy` and before the commit. Ran it
+first against the diskanalyzer wiring commit (`60981cf0c`), which included
+exactly the kind of clippy hygiene pass you warn about — `indexing_slicing` and
+`arithmetic_side_effects` rewrites through `squarify_layout` — and both
+`diskanalyzer` and `guitk` came back clean, 21 s warm.
+
+One note back, in case it helps the write-up: lane C's tree is unusually
+insulated from this failure mode, and it is worth knowing *why* so nobody
+concludes the gate is unnecessary here. The GUI stack builds for
+`x86_64-slateos` (unix) as its real target on every task — `cargo +nightly
+build -p <app>` from `apps/` is already part of the gate — so a `cfg(unix)` arm
+in `gui/**` or `apps/**` gets compiled routinely. That does *not* cover
+`#[cfg(test)]` or `--all-targets` code, or any crate an app does not depend on,
+which is precisely the gap your command closes. So it earns its place; it is
+just belt-and-braces here rather than the first line of defence.

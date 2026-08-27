@@ -153,13 +153,21 @@ def main() -> int:
         if not _report(path.name, rc, out, time.monotonic() - t):
             failures += 1
 
-    # The unwrap/expect scan is not a check-*.py, so the glob above misses it --
-    # which is exactly the kind of gap this script exists to close.
-    scan = SCRIPTS / "scan-unwrap.py"
-    if scan.is_file():
+    # The scan-*.py gates are not check-*.py, so the glob above misses them --
+    # which is exactly the kind of gap this script exists to close.  Each also
+    # takes a bespoke flag, which is the reason they cannot simply be renamed
+    # into the glob: the glob runs a script bare, and both of these do something
+    # else when run bare (a full report rather than a verdict).
+    for name, flag, why in (
+        ("scan-unwrap.py", "--summary", "unwrap/expect in kernel production paths"),
+        ("scan-orphan-modules.py", "--check", "newly unreachable library modules"),
+    ):
+        scan = SCRIPTS / name
+        if not scan.is_file():
+            continue
         t = time.monotonic()
-        rc, out = _run([sys.executable, str(scan), "--summary"])
-        if not _report("scan-unwrap.py --summary", rc, out, time.monotonic() - t):
+        rc, out = _run([sys.executable, str(scan), flag])
+        if not _report(f"{name} {flag}  ({why})", rc, out, time.monotonic() - t):
             failures += 1
 
     # Clippy last: it is the long pole (~113s after a source edit, ~5s warm --
@@ -178,6 +186,16 @@ def main() -> int:
     # Matches boot-test.sh's invocation: debug profile (its default), short
     # format.  A different profile would lint a different cfg and could pass
     # here while failing there.
+    #
+    # `-p kernel` covers the root leaf crates too (`crc32`, `deflate`, `sha2`,
+    # `ziparchive`, ...), even though every line of the log below is a
+    # `kernel\...` path.  Cargo does not print warnings for non-primary
+    # packages; it does surface their errors, which is what this gate checks.
+    # Verified by planting a deny-level lint in `ziparchive` and watching this
+    # command exit 101 naming it -- see boot-test.sh's check_kernel_clippy for
+    # the full note.  Do not "fix" the apparent gap by adding `-p` flags: the
+    # crates are dependencies of `kernel` in the same invocation and are built
+    # in that role regardless of being named.
     rc, out = _run([cargo, "clippy", "-p", "kernel", "--message-format=short"])
 
     # Kept, not discarded.  The ~18,000 pedantic-level lines are the known

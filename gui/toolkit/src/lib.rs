@@ -36,6 +36,7 @@ pub mod dnd;
 pub mod event;
 pub mod filetypes;
 pub mod fontdb;
+pub mod frame;
 pub mod grid;
 pub mod history;
 pub mod idseq;
@@ -45,6 +46,7 @@ pub mod menu;
 pub mod menubar;
 pub mod modal;
 pub mod pathbar;
+pub mod probe;
 pub mod ratio;
 pub mod render;
 /// Random numbers — see [`randrange`] for the whole story.

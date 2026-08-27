@@ -81467,7 +81467,7 @@ one too many.
 
 ---
 
-## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 516 of 1940
+## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 515 of 1937
 
 **In short:** the kernel has ~430 small modules that each keep a table of numbers
 and print it — how much swap is compressed, which signals a process has blocked,
@@ -81571,6 +81571,7 @@ naive way.
 |---|---|---|---|
 | 2026-08-26 | `pagecache` | 516 (unchanged, and that is the point) | category 3, fixed *without* moving this count. `mm/page_cache.rs` carries the comment "Counters (monitoring; mirror what fs::pagecache exposes for stats)" above its `STAT_HITS`/`STAT_MISSES`/`STAT_EVICTIONS` — the two halves of one intent, never joined, so `/proc/pagecache` reported a 0.00% hit rate while the cache served VFS reads and demand paging. Joined at *read* time (a projected `kernel` row) rather than by calling `record_hit` on the cache's fast path, which would put this module's spin lock and a per-device string compare inside an operation whose purpose is to beat the disk. The four `record_*` stay unreachable and now legitimately so, reserved for a per-device source that does not exist. **Lesson for the metric: it counts functions, but the defect is an unfed table.** Where the subsystem already keeps free counters, projection is the fix and the count will not move. Do not read a flat count as no progress. |
 | 2026-08-26 | `futexstat` | 516 | category 3, the sharpest instance found so far. `procfs.rs` publishes `futexstat::stats()` and `hotspots(10)` under `/proc`, and the `futexstat` shell command prints the same table — while all four of `record_wait` / `record_wake` / `record_timeout` / `record_contention` were unreachable. So `/proc`'s futex hotspot list was permanently empty and its wait/wake/timeout totals permanently zero, on a kernel whose futex implementation works. A reader takes that as *measured* zero contention. Fixed by wiring the four recorders into `kernel/src/ipc/futex.rs` at the real blocking and waking points. |
+| 2026-08-26 | `irqstat` | 515 (and 222 → 220 modules, 1940 → 1937 mutators) | category 3, the third projection — and **the first one where deleting the mutators was right**, against this entry's own standing advice. `/proc/irqstat` and the `irqstat` command served per-IRQ-line counts, per-CPU interrupt totals and ISR latency while all six of `record`/`record_latency`/`mark_spurious`/`register_irq`/`register_cpu`/`init_defaults` were unreachable; before that the table was seeded with five fictional IRQ lines and four fictional per-CPU rows. Rewritten as a stateless projection of `idt::vector_counts()` — no `STATE`, no lock, nothing to seed or reset — which also makes `A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT` inapplicable to this module by construction rather than by care. **Why deletion, when the rule above says the function is usually right and the caller is what is missing:** here the functions were the wrong *shape*, not merely uncalled. `record(cpu, irq)` presumes a per-CPU per-line table the kernel's counter architecture cannot feed (`VECTOR_COUNTS` is one flat global array), and `IrqLine::spurious`/`affinity_mask` and the whole `CpuIrqState` latency pair had no source at all — they *were* the fabrication surface. Keeping them would not have preserved evidence of an unfed number; it would have preserved an invitation to the wrong fix, namely a second counter of the same event on the ISR path, which is two numbers that can disagree with nothing to say which is right. The `IrqType` enum went the same way: `Timer`/`Keyboard`/`Disk`/`Network`/`Usb`/`Gpu` is a guess about which device sits behind a line, and the kernel does not know that, so it is now `Timer`/`Device`/`Ipi`/`Spurious`/`Unassigned` — derived from the vector number, which the kernel *does* know. **Read the count change with care:** unlike the two rows below, this one moves the metric by removing functions rather than by wiring callers, so the drop is not five modules' worth of progress. That is the mirror of the `pagecache` lesson — the metric counts functions, and the defect is an unfed table. |
 | 2026-08-26 | `netdev` | 516 (unchanged, and that is the point) | category 3, the second projection. `/proc/netdev` listed no interfaces and reported `total_rx_bytes: 0` on a kernel that had just completed a DHCP exchange, because all six of `record_rx`/`record_tx`/`record_error`/`record_drop`/`register_iface`/`set_link_state` were unreachable -- while `net::interface` counted every frame in six relaxed atomics that `netstat -i` was already printing. The two halves of one intent, never joined, exactly as with `pagecache`. Joined at *read* time (a projected `kernel` row) rather than by calling `record_rx` per frame, which would put this module's spin lock and a string compare per interface on the path of every packet. The six `record_*`/`register_*` stay unreachable and now legitimately so, reserved for a per-NIC source that does not exist. **New finding while naming the row:** `net::interface`'s counters are not one NIC's -- `net::veth::poll` records into the same atomics, so the total includes frames that never reached the wire. The projected row is therefore named `kernel` and not `eth0`, and the conflation is logged separately as `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`. |
 
 The futexstat fix is worth reading before doing the next category-3 module,
@@ -81649,7 +81650,36 @@ turned into user signals.
 
 ---
 
-## `A-SIGNALQ-INIT-DEFAULTS-SEEDS-SEVEN-DELIVERIES-THAT-NEVER-HAPPENED` (lane A, 2026-08-26) — **open**
+## `A-SIGNALQ-INIT-DEFAULTS-SEEDS-SEVEN-DELIVERIES-THAT-NEVER-HAPPENED` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**Fixed** exactly as the plan below prescribes: `init_defaults()` now seeds
+`processes: Vec::new()` with all four counters at zero, and carries zramstat's
+doc comment recording what the removed fixtures claimed. The self-test builds
+its own fixtures through the real API.
+
+Three notes on what the fix turned up beyond the plan:
+
+1. **The self-test's counts are now stated as absolutes, not deltas.** Tests 1,
+   6 and 8 all depended on the seed (`len() == 2`, `len() == 3`,
+   `delivered == 8`). The temptation was to rewrite them as "whatever the seed
+   left, plus what the test did". Stated that way a seed creeping back in would
+   shift every figure by a constant and still pass. They are stated absolutely
+   instead — `is_empty()`, `len() == 2`, `delivered == 1` — so a reappearing
+   seed fails on the first assertion.
+2. **Test 2 was silently load-bearing and now says so.** With no seed there is
+   no other way for pid 1 to exist, so `send(0, 1, ...)` in test 2 is what
+   creates the record that tests 4 and 5 block and unblock. Test 6's comment
+   was also wrong once the seed went: it is no longer the first auto-create,
+   it is the check that a *second* pid gets its own record.
+3. **`signalq list` printed nothing at all on an empty table.** The seed
+   guaranteed two rows, so this arm had never had to answer the empty case;
+   with the seed gone, silence is the normal fresh-boot output and reads as a
+   failed command rather than as "nothing has been signalled". It now says so
+   explicitly, matching `pending`'s existing wording. *This is the general
+   hazard in removing fabricated seed data: the seed was also suppressing every
+   empty-state code path downstream of it, and those paths have never run.*
+
+**Original report follows.**
 
 **In short:** `signalq` reports how many signals each process has been sent and
 delivered. Before anything runs, it already claims seven deliveries. They are
@@ -81687,8 +81717,22 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **439 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **438 of 800 remain**
 
+> **Burn-down log.** 2026-08-26: `cmd_irqstat` (1) cleared — 439 → 438 across
+> 210 → 209 functions. **Not a burn-down; a side effect, and worth recording as
+> one.** The `irqstat register <num> <name>` subcommand guessed `0` for an
+> unparseable IRQ number and `"irqN"` for a missing name. It was not fixed — it
+> was *deleted*, along with the whole mutable table it wrote into, when
+> `fs::irqstat` became a projection of `idt::vector_counts()` (see
+> `A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS`). There is no
+> longer a table to register a line in, so the arm has no meaning to restore.
+> The general lesson: a guessed operand is sometimes a symptom of a command that
+> should not exist, rather than of a missing parse. `check-option-refusal.py`
+> found this on its own — the ledger entry claiming a site that no longer existed
+> failed the gate, which is the behaviour its header advertises and the reason
+> the counts are kept per-function rather than as a global total.
+>
 > **Burn-down log.** 2026-08-26 (thirty-second batch): `cmd_signalq` (6)
 > cleared — 445 → 439 across 211 → 210 functions. Not pinned by a rung.
 >
@@ -88140,7 +88184,27 @@ projection, to decide what the projected row could truthfully be called.
 
 ## `A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS` (lane A, 2026-08-26)
 
-**Status:** OPEN
+**Status:** ✅ FIXED 2026-08-26 — all four steps landed. Steps 1–3 (count at
+`dispatch_vector`'s choke point, widen `VECTOR_STATS_SIZE` to 256, repoint
+`kcounters`/`kstat` and narrow `kshell`'s exception line to `take(32)`) landed
+earlier; **step 4, the `fs::irqstat` projection, landed with this note.**
+
+Two corrections to the plan below, both found while implementing step 4 and
+worth keeping because both would have produced a *passing-looking* wrong result:
+
+1. **The suggested `apic::tick_count()` cross-check must be `>=`, not `==`.**
+   `TICK_COUNT` is deliberately bumped by the BSP only, so that `tick_count()`
+   stays wall-clock rate instead of advancing N× on an N-CPU machine
+   (`apic.rs:1101`). `dispatch_vector` counts the timer on *every* CPU. BSP ticks
+   are therefore a strict subset of counted timer interrupts, and the equality
+   this entry originally called for would fail on any SMP boot. The `>=` form
+   still catches the failure that was actually worth catching — a timer entry
+   path reaching `handle_timer_irq` without passing the choke point — so nothing
+   is lost. Asserted in `fs::irqstat::self_test` test 5, which reads the ticks
+   *first* so an interleaved tick can only widen the margin, never flake it.
+2. **Per-CPU attribution was not merely deferred, it was removed from the
+   output.** See the `irqstat` row in
+   `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH`'s burn-down log.
 
 **In short:** the `counters` command reports `irq.timer_irqs: 0` on a machine
 whose timer has fired millions of times, and reports `irq.total_interrupts` as a
@@ -88209,6 +88273,83 @@ path and deserves its own change and its own benchmark.
 `/proc/irqstat`, after the same search succeeded for `pagecache` and `netdev`.
 
 **Not a regression.** True since the IOAPIC device vectors were installed.
+
+### Addendum, 2026-08-26 — a choke point, and a landmine in the display side
+
+Two findings from reading the consumers before implementing. Both change the
+plan above materially, so they are recorded here rather than discovered again
+halfway through the edit.
+
+**1. Step 1 should be one call, not five.** The list above — `isr_timer`,
+`handle_device_irq`, the two IPI ISRs, `isr_spurious` — is not where the count
+belongs. `idt.rs`'s `dispatch_vector` is a single function that *every* hardware
+vector already funnels through:
+
+```rust
+extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
+    match vector {
+        32 => crate::apic::handle_timer_irq(frame_ref, 0),
+        251 => crate::tlb::handle_tlb_shootdown_irq(frame_ref, 0),
+        252 => crate::apic::handle_reschedule_irq(frame_ref, 0),
+        255 => crate::apic::handle_spurious_irq(frame_ref, 0),
+        v @ 33..=56 => { ... crate::ioapic::handle_device_irq(irq); }
+        _ => {}
+    }
+}
+```
+
+So `count_vector(vector as usize)` at the top of it covers 32, 33–56, 251, 252
+and 255 in one line — and, more to the point, covers whatever vector is added
+next *without anyone remembering to*. This is the same argument that decided the
+block-device capability gate in `devfs`: one call at the point every caller
+passes through beats a call each caller must not forget. Prefer it. The
+five-site version in step 1 is strictly worse and should not be implemented.
+
+Note the ordering constraint that comes with it: the count must be taken
+*before* the `match`, not inside each arm, or the `_ => {}` arm — an interrupt
+on an installed-but-unhandled vector, which is exactly the event worth
+counting — stays invisible.
+
+**2. Fixing the count breaks `kshell`'s exception health line.** At
+`kernel/src/kshell.rs:123411`:
+
+```rust
+let exc_total: u64 = crate::idt::vector_counts().iter().sum();
+```
+
+printed as `"Exceptions: total="`, with a companion
+`if non_pf_exceptions > 100 { "HIGH" }` indicator. That label is accurate
+**only because nothing currently counts hardware vectors.** The moment step 1
+lands, every timer tick — millions of them — folds into a figure labelled
+"Exceptions", and the HIGH indicator pins on within the first second of uptime
+and never clears.
+
+This is the asymmetry that makes the fix one careful commit rather than a
+one-liner: the same change flips `kstat.rs:159` and `kcounters.rs:279` from
+wrong to right, and flips this line from right to wrong. `exc_total` must be
+narrowed to `vector_counts().iter().take(32).sum()` **in the same commit**, not
+in a follow-up — a commit that is correct on its own terms and leaves a
+permanently-red health indicator behind it is worse than no commit.
+
+**Also in the same blast radius**, all in `kshell.rs`:
+
+| site | what is wrong | why it matters after the fix |
+|---|---|---|
+| `cmd_irqrate` (127706) | hardcodes `for i in 0..48` | 48–56, 251, 252, 255 never print |
+| `cmd_irqrate` | `33..=47 => "Device IRQ"` | IOAPIC maps 33–**56**, so 48–56 print "Unknown" |
+| `cmd_irqrate` | `rates.rates_x10[i]` / `EXCEPTION_NAMES[i]` with `[]` | widening `VECTOR_STATS_SIZE` makes the two arrays different lengths; index them with `.get()` |
+| `cmd_exceptions` (123556) | names every `i >= 32` as just `"IRQ"` | the whole point of counting them is telling them apart |
+| `kcounters.rs:288` | `irq_counts[32]` with `[]` | fine today, but `.get(32).copied().unwrap_or(0)` costs nothing and cannot panic |
+
+`cmd_irqrate` already skips zero-rate vectors, so widening the loop will not
+flood its output — it will show exactly the vectors that are actually live.
+
+**Sizing note.** Widening `VECTOR_STATS_SIZE` 48 → 256 makes `InterruptRates`
+(`rates_x10: [u64; VECTOR_STATS_SIZE]`) a ~2 KB by-value return. Acceptable:
+`vector_rates()` is called only from a hand-run diagnostic command, never from
+an interrupt path.
+
+---
 
 ## C-NETMANAGER-HAD-NO-WINDOW-AND-NO-EVENT-HANDLER-AT-ALL (lane C, 2026-08-26) — ✅ FIXED 2026-08-26
 
@@ -88443,6 +88584,624 @@ geometry, the other against archive bytes. This mirrors what was done for
 `apps/diskcleanup`, which was wired first and given a real back end in the
 following commit.
 
+## C-NETMANAGER-CLICKED-ROWS-THAT-WERE-NOT-ON-SCREEN (lane C, 2026-08-26) — FIXED 2026-08-26
+
+**In short:** in the Network Connections window, clicking the status bar along
+the bottom could select a network profile that was scrolled off the bottom of
+the list and not visible anywhere on screen. The profile list drew as many rows
+as there were profiles and let the window's clipping hide the overflow — which
+worked for what you *saw*, but not for what you could *click*. With 24 profiles
+in a small window, twenty rows were clickable below the bottom edge of the
+window entirely, and one straddled the status bar.
+
+**Where it lived:** `apps/netmanager/src/main.rs`. The app had its own private
+`Frame` type — the thing that records where each control was drawn so a click
+can be matched back to it — and that copy did not track the clip stack.
+`render_tab_profiles` has no visible-row limit; it loops over every profile and
+relies on the enclosing `PushClip` to stop the overflow. The compositor honours
+that clip for drawing. The hit-test did not honour it at all, because the copy
+of `Frame` in this app had never been taught about clips.
+
+**Why it existed:** the same `Frame` was written twice, once in
+`apps/archivemanager` and once here. The archivemanager copy grew clip tracking
+when a scrolling file list needed it. The netmanager copy did not, because
+nothing there looked like it needed it — and the one place that did, an
+unbounded profile list, was not the place anyone was looking. Two copies of an
+invariant, and the bug is in whichever one you are not currently reading.
+
+**The fix:** `gui/toolkit/src/frame.rs` now holds a single generic
+`Frame<T>` and `Rect`, and both apps use it. It intersects every recorded rect
+with the clip in force and drops it entirely if nothing is visible. It also
+tracks `PushTranslate`/`PopTranslate`, which *neither* private copy did: a
+scrolling pane that draws its rows inside a translation is painted somewhere
+else entirely, so a rect recorded verbatim would be clickable at coordinates
+nothing was drawn at. Both stacks mirror the compositor's own semantics
+(`ClipStack`/`TranslateStack` in `gui/compositor/src/lib.rs`) so the ink and the
+click target cannot end up in different places.
+
+**Regression tests** (both confirmed to fail when the clip trimming is mutated
+out of the toolkit):
+
+| Test | Catches |
+|---|---|
+| `a_list_row_past_the_bottom_of_its_panel_is_not_clickable` | any `Profile` rect reaching past the panel, and all rows being reachable when only some are drawn |
+| `clicking_the_status_bar_does_not_select_an_off_screen_profile` | the user-visible symptom, clicking 2px inside the status bar |
+
+Plus 19 unit tests and a doctest on `guitk::frame` itself.
+
+**What this means for the other 123 unwired programs:** each one needs the same
+"record what you draw, hit-test by reading it back" machinery, and each would
+have been a fresh transcription of it. They now get a reviewed one with an
+import. Net effect on the two apps that had copies: 107 lines deleted.
+
+## C-VPNMANAGER-SORTING-MOVED-THE-SELECTION-TO-A-DIFFERENT-PROFILE (lane C, 2026-08-26) — FIXED 2026-08-26
+
+**In short:** in the VPN Manager window, changing the sort order silently moved
+the highlight onto a *different* VPN profile than the one the user had picked —
+whichever profile happened to land on the row number the old one had been on.
+Everything the window then did (Connect, Disconnect, Remove, and every on/off
+switch on the detail panel) acted on that other profile. Removing the wrong VPN
+profile is not a cosmetic bug.
+
+**Where it lived:** `apps/vpnmanager/src/main.rs`, `VpnManager::sort_profiles`.
+`selected_profile` is an `Option<usize>` — an *index* into `self.profiles` — and
+`sort_profiles` reorders that vector in place. Nothing re-pointed the index
+afterwards.
+
+**Why it went unnoticed:** the sort order could not be changed. The toolbar drew
+`Sort: Name` as a label and nothing clicked it, so `set_sort_order` had no
+caller outside the tests, and the tests all asserted on `profiles` rather than
+on `selected_profile`. The bug existed for as long as the control that triggers
+it was a picture.
+
+**The fix:** `sort_profiles` now records the selected profile's **id** before
+sorting and looks the index back up afterwards. The list is small and the sort
+is not on any hot path, so a linear search costs nothing worth measuring.
+
+**Regression test:** `sorting_keeps_the_selection_on_the_profile_the_user_chose`
+— it clicks a row, clicks the Sort control twice, and asserts both that the
+row number *did* change (or the test proves nothing) and that the selected id
+did not. Confirmed to fail when the id re-lookup is mutated out.
+
+**The general shape, for the other 122 unwired programs:** a selection stored as
+an index into a list the program itself re-orders is a bug waiting for the
+control that re-orders it to be wired up. Store the id.
+
+## C-VPNMANAGER-A-REJECTED-SAVE-THREW-AWAY-THE-WHOLE-FORM (lane C, 2026-08-26) — FIXED 2026-08-26
+
+**In short:** in the VPN Manager's Add/Edit Profile dialog, pressing Save with
+one field left blank closed the dialog and discarded *everything else* that had
+been typed into it — and the explanation of what was wrong was returned to a
+dialog that no longer existed, so it was never shown. The user's only clue was
+that nothing happened.
+
+**Where it lived:** `apps/vpnmanager/src/main.rs`, `VpnManager::confirm_edit`.
+It did `self.editing_profile.take()` and set `show_add_dialog = false` *before*
+calling `validate`, then returned the `Err(String)` to a caller that had no
+surface left to display it on.
+
+**Two separate faults, both fixed:**
+
+1. `confirm_edit` now clones the profile, tries the add-or-update, and only
+   clears `editing_profile`/`show_add_dialog` **if it succeeded**. A refused
+   Save leaves the dialog exactly as the user left it.
+2. There was nowhere readable to *put* the complaint. The status bar is behind
+   the dialog's scrim (63% black over the whole window), so writing it there is
+   a Save button that appears to do nothing. `VpnManager` gained a
+   `dialog_error` field, rendered in red inside the dialog under the fields it
+   is about, and cleared as soon as the user edits any dialog field — so the
+   complaint does not sit under the corrected value still claiming the field is
+   blank.
+
+**Why it went unnoticed:** same reason as the entry above — nothing clicked the
+Save button. `test_confirm_edit_add` called `confirm_edit` only on a *valid*
+profile.
+
+**Regression test:**
+`a_rejected_save_keeps_the_dialog_up_with_everything_typed_into_it` — types a
+name, saves without a server, and asserts the dialog is still up, the name is
+still in it, no profile was added, and the string
+`"Server address is required"` is among the `RenderCommand::Text` the frame
+actually draws. Confirmed to fail when the early-close is mutated back in.
+
+## C-VPNMANAGER-IMPORT-EXPORT-HAVE-NO-FILE-PICKER (lane C, 2026-08-26)
+
+**In short:** the VPN Manager's Import and Export buttons work, but they always
+read and write **one fixed file** — `$HOME/.config/slateos/vpn/profiles.txt` —
+rather than letting the user choose where. Export names that path in the status
+bar afterwards, so nothing is hidden; but there is no way to export two
+different sets of profiles to two different files, or to import one a colleague
+sent you without first moving it to that exact path.
+
+**Where it lives:** `apps/vpnmanager/src/main.rs` — `PROFILE_FILE`,
+`profile_file()`, `VpnManager::export_to_file`, `VpnManager::import_from_file`.
+
+**Why it is a fixed path rather than a chooser.** `guitk::dialog::FileDialog`
+exists but cannot serve as one here, for three separate reasons:
+
+| What a picker needs | What `FileDialog` does |
+|---|---|
+| respond to clicks | keyboard-only; it records no hit targets, so nothing in it can be clicked |
+| know what is in the directory | does not read the filesystem — the caller must hand it a listing |
+| be one widget | is a second full application's worth of state to drive from inside this one |
+
+So wiring it in would not be a button; it would be a second program. A fixed,
+*named* path is honest and usable today. The alternative that was rejected is
+`apps/archivemanager`'s current precedent of writing "not yet implemented" into
+the status bar, which is strictly worse: it gives the user nothing.
+
+**The proper fix:** `guitk::dialog::FileDialog` needs (a) hit-target recording
+via `guitk::frame`, and (b) a directory-listing source. That is toolkit work
+that every app with an Open/Save button will need — the file manager, the text
+editor, the image viewer and the archive manager all want the same widget — so
+it should be done once in `gui/toolkit`, not once per app. Tracked separately
+alongside
+`TD-C-FILEDIALOG-PATHS-ARE-STRINGS-SO-A-NON-UTF-8-FILENAME-OPENS-THE-WRONG-FILE`,
+which the same rework has to fix; this entry is the caller waiting on both.
+
+**Until then:** Export says where it wrote, Import says how many profiles it
+read and names the first failure if a block was malformed, and both refuse
+clearly (`"Cannot export: $HOME is not set"`) rather than failing silently.
+
+## `A-KCOUNTERS-REGISTRY-HAS-NO-REGISTRANTS-AND-CMD-COUNTERS-HIDES-THAT` (lane A, 2026-08-26)
+
+**In short:** `kernel/src/kcounters.rs` has two halves — a registry that
+subsystems are meant to add counters to, and a hardcoded aggregator that reads
+existing atomics directly. The registry half has **zero registrants**: nothing
+in the tree invokes `define_counter!`, so `snapshot()` returns an empty vector
+on every call and `count()` returns 0, permanently. The `counters` shell command
+concatenates that empty list onto the aggregator's real one, so it prints a
+healthy-looking table and nothing ever reveals that half the module contributes
+nothing.
+
+**The dead surface**, all in `kernel/src/kcounters.rs`, all with no callers
+anywhere in the repository:
+
+| item | line | state |
+|---|---|---|
+| `define_counter!` | 161 | never invoked; only the doc examples at 22-23 |
+| `counter_inc!` | 176 | never invoked; only the doc example at 26 |
+| `counter_add!` | 184 | never invoked; only the doc example at 29 |
+| `CounterDesc` | 50 | constructed only by `define_counter!` |
+| `register()` | 93 | `pub unsafe fn`, no callers |
+| `seal()` | 105 | no callers, so `REGISTRATION_DONE` is never set |
+| `Registry` / `MAX_COUNTERS` (64) | 47-75 | array of 64 `None`, never written |
+
+**Why it is worse than plain dead code.** `kshell.rs:124919` (`cmd_counters`)
+does:
+
+```rust
+let builtin = crate::kcounters::builtin_snapshot();   // real values
+let registered = crate::kcounters::snapshot();        // always empty
+let all = builtin.iter().chain(registered.iter()) ... // looks complete
+```
+
+`builtin_snapshot()` supplies genuine data, so the command's output is correct
+and useful — which is exactly what stops anyone noticing. The empty half is
+masked by the live half. Compare the tick-wiring gate's lesson: state that is
+never advanced shows a plausible zero rather than an obvious absence, and a
+plausible zero is not reportable by any test that only asks "did it print
+something sensible?". The command's own doc comment leads with the dead half
+("Shows all registered counters ... plus built-in counters"), which is the
+reverse of what it actually does.
+
+Note `register()` is an `unsafe fn` with a `# Safety` contract about
+single-threaded boot ordering that has never had a caller — so the contract has
+never been exercised or reviewed against a real call site.
+
+**The tree has already chosen, in writing.** `builtin_snapshot()`'s own doc
+comment (line ~197) says it pulls from subsystem atomics *"rather than requiring
+every subsystem to use our macro"*. So the bypass was a deliberate decision; what
+was not done is removing the mechanism it bypassed. That is what makes this tech
+debt rather than an open design question.
+
+**The proper fix** — delete the registry half, keeping the aggregator:
+
+1. Remove `CounterDesc`, `Registry`, `MAX_COUNTERS`, `REGISTRY`,
+   `REGISTRATION_DONE`, `register()`, `seal()`, `snapshot()`, `count()`, and the
+   three macros. This also removes two `static mut` accesses and one `unsafe fn`
+   from the kernel, which is a security-surface reduction, not just tidying.
+2. Simplify `cmd_counters` to read `builtin_snapshot()` alone and fix its doc
+   comment to describe what it does.
+3. Rewrite the module `//!` doc, whose entire usage example (lines 22-29) is of
+   the deleted API.
+
+Keeping `counter_inc!`/`counter_add!` is tempting since they are harmless
+one-liners, but they are `fetch_add(1, Relaxed)` spelled longer, and leaving two
+macros behind as the residue of a deleted subsystem invites someone to reach for
+the registry that no longer exists.
+
+**If instead the registry should live**, the fix is the opposite and larger:
+migrate the ~20 hardcoded pulls in `builtin_snapshot()` onto `define_counter!`
+and call `seal()` from boot. That is a real option — a registry scales to
+subsystems this file does not know about, whereas the aggregator must be edited
+for every new counter — but nobody has wanted it in the time the module has
+existed, and an unused generalisation that costs a `static mut` is not free.
+
+**How it was found.** Looking for real counters to project into `/proc`-style
+files (the same search that produced the `netdev` and `irqstat` entries above);
+`kcounters` looked like a rich source until the registry turned out to be empty.
+
+**Not a regression.** True since the module was written — it has never had a
+registrant.
+
+---
+
+## `A-DEVFS-READ-FILE-AND-READ-AT-SERVE-DIFFERENT-NODES` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**Fixed** in `f43685b4a`, by the first of the two options below — but not by
+extending the second table to match the first. `read_file` no longer *has* a
+table: it looks the node up in `DEV_NODES` and hands the read to `read_at`.
+That is the substance of the fix. Two hand-written dispatch tables over one
+node set will drift again no matter how carefully they are reconciled today;
+one table cannot drift from itself.
+
+Three things worth carrying forward:
+
+* **The guard is `parent().is_empty()`, not `CharDevice`.** Two refusals had
+  to survive the delegation, and only the root-only test preserves both: block
+  devices stay whole-file-refused (so a recursive walk cannot become a 500 GB
+  read), and the syscall-layer nodes under `input/`, `dri/` and `snd/` are
+  intercepted at `open`, so devfs must keep answering "not that way". A plain
+  `CharDevice` test would have quietly served both.
+* **The mount root had to be special-cased back in.** `find_node("")` is
+  `None`, so the delegating version reported `NotFound` for a directory that
+  plainly exists — a regression I wrote and caught before the boot test. It
+  now returns `IsADirectory` via an explicit early return, matching every
+  other path in the file.
+* **One observable length changed.** A whole-file read of `/dev/random` or
+  `/dev/urandom` yields 4096 bytes rather than 256. Any bound on an endless
+  stream is arbitrary; no caller in the tree reads either node whole, and none
+  could depend on a particular count of random bytes being the last ones.
+
+The self-test now drives **both** paths across all eleven root nodes rather
+than `read_at` alone, plus the two refusals as explicit checks. Asserting only
+the surviving path is what let the split live undetected in the first place.
+
+---
+
+**Original report.**
+
+**In short:** There are two ways to read a file in this kernel — ask for the
+whole thing (`read_file`), or ask for a byte range (`read_at`). For `/dev`,
+those two answer differently about *which devices exist*. Reading all of
+`/dev/kmsg` is refused; reading the first 64 bytes of it works. Nothing is
+corrupted and nothing crashes — a caller that gets the refusal is told
+`NotSupported`, which is a coherent "use the other path" — but the split is
+undocumented and a caller has no way to know which nodes are on which side.
+
+`kernel/src/fs/devfs.rs`. `read_file` (`match rel`) serves `null`, `zero`,
+`full`, `random`, `urandom`, `console`, `tty` and nothing else at the root;
+`stdin`, `stdout`, `stderr`, `kmsg` and `uptime` fall to `_ => unserved(rel)`,
+which returns `NotSupported` for a node that exists. `read_at` serves **all**
+of them, including `kmsg` (drains the klog ring) and `uptime` (formats elapsed
+time).
+
+**Why it is not simply a bug.** `unserved`'s doc comment makes the case for the
+split deliberately, for block devices: `NotFound` "for a device `stat` just
+described would send the caller hunting for an absent node instead of using
+`read_at`". A whole-file read of an endless stream is meaningless, so refusing
+it is defensible. What is *not* defensible is that the line between the two
+sets looks arbitrary: `/dev/zero` is just as endless as `/dev/kmsg`, and it is
+served by both.
+
+**The proper fix** is to decide the rule and apply it uniformly. Two coherent
+choices:
+
+* **Every root character device serves both**, with `read_file` returning a
+  bounded chunk — which is what `zero`/`random` already do (4096 and 256 bytes
+  respectively). Cheapest, and makes `cat /dev/kmsg` work through the VFS.
+* **No root character device serves `read_file`**, all of them answering
+  `NotSupported` so a caller must use `read_at`. More honest about the fact
+  that these are streams, but it breaks any existing caller reading `/dev/zero`
+  whole, and the devfs self-test does exactly that.
+
+The first is recommended: it matches the majority of the current behaviour and
+breaks nothing.
+
+**How it was found.** Writing the regression rung for
+`A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES`. The rung's first draft asserted
+the eleven retyped nodes were readable via `read_file` and would have failed on
+four of them. It was rewritten to use `read_at`.
+
+**Not a regression.** `read_file` dispatches on the node's path and never on
+its `EntryType`, so retyping the nodes to `CharDevice` did not change which
+side of the split any of them is on. True since the nodes were added.
+
+---
+
+## `A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**Fixed.** The eleven root nodes are now `DevNode::chr_served(path, mode)` — a
+new constructor, not a reuse of `chr`. That distinction is the substance of the
+fix: `chr` documents itself as "served by the syscall layer, not by devfs" and
+hardcodes `0o660`, whereas these eleven are served by devfs's own read/write
+and carry conventional modes (`/dev/null` is `crw-rw-rw-`, `/dev/console` is
+`crw-------`). Retyping them to `chr` would have made `cat /dev/zero` an error.
+`uptime` stays `file`; it is the one node here that genuinely is one.
+
+All four blast-radius sites listed below were walked. Three findings:
+
+1. **The retype fixes a second bug that was never filed.** `container.rs`'s
+   `CharDevice | BlockDevice` arm skips device nodes when archiving, arguing
+   that writing one as an empty regular file "would be worse than skipping it:
+   extracting the archive would replace a device with a plain file of the same
+   name." That is exactly what a `tar` of `/dev` did until now, because `null`
+   was typed `File`. The walk now skips it.
+2. **`/dev/random` was escaping the page cache only by accident.**
+   `read_file_routed` skips the cache when `entry_type != File` **or**
+   `ino == 0`; devfs reports `ino: 0` from `FileMeta::minimal`, so it was the
+   second clause doing all the work. Had devfs ever gained stable inodes,
+   `/dev/random` would have silently begun serving the same bytes forever, and
+   nothing would have caught it. The exclusion is now structural, by type.
+3. **`read_file` and `read_at` serve different sets of nodes**, which the new
+   rung had to be written around. `read_file` handles null/zero/full/random/
+   urandom/console/tty; `stdin`, `stdout`, `stderr` and `kmsg` fall through to
+   `unserved` → `NotSupported` ("served here, just not by the whole-file
+   path"). Not a regression — `read_file` dispatches on path, never on
+   `EntryType`, so the retype did not change it — but it means a whole-file
+   read of `/dev/kmsg` through the VFS is refused while `read_at` works. Filed
+   below as its own entry.
+
+**Regression test.** A new rung asserts the pairing that nothing else did:
+these eleven are `CharDevice` **and** readable via `read_at`. The two halves
+catch opposite regressions — typed `file`, `[ -c ]` is false; typed `chr`, the
+syscall layer intercepts and devfs refuses the read. The existing
+`/input`,`/dri`,`/snd` loop pins the opposite pairing (CharDevice, read refused
+with `NotSupported`). `/uptime` is asserted to remain `File`, so a careless
+"make everything in here a device" fails.
+
+**Original report follows.**
+
+**In short:** `stat("/dev/null")` reports `S_IFREG` — a regular file — instead
+of `S_IFCHR`, a character device. Eleven of the twelve nodes at the devfs root
+are declared with `DevNode::file`, so `ls -l /dev/null` shows `-rw-rw-rw-`
+rather than `crw-rw-rw-`, and the standard shell test `[ -c /dev/null ]` is
+false. The devices *work* — reads and writes do the right thing — so nothing
+fails loudly; only the type is wrong.
+
+**The affected nodes**, all in `DEV_NODES` at `kernel/src/fs/devfs.rs:215`:
+
+| node | declared | should be |
+|---|---|---|
+| `null`, `zero`, `full`, `random`, `urandom` | `file` | `chr` |
+| `console`, `tty` | `file` | `chr` |
+| `stdin`, `stdout`, `stderr` | `file` | `chr` (Linux makes these symlinks to `/proc/self/fd/N`; `chr` is the closer of the two available answers) |
+| `kmsg` | `file` | `chr` |
+| `uptime` | `file` | **stays `file`** — it is a text file, and the only one here that genuinely is one |
+
+The nested nodes are already correct: `input/event0`, `input/event1`,
+`dri/card0`, `dri/renderD128` and the three `snd/*` are `DevNode::chr`.
+
+**The tree already knows why this matters** — it just never applied the
+reasoning at the root. `syscall/linux.rs:19852`, on the `CharDevice` arm of
+`meta_mode_bits`:
+
+```
+// The point of the variant: libinput refuses a node that is not
+// S_ISCHR, and libdrm and ALSA make the same check.
+```
+
+That is exactly the argument for `null` and `tty` as well; the variant was
+added for the device *directories* and the root nodes were left as they were.
+
+**Why it is worth fixing rather than shrugging at.** `[ -c /dev/null ]` and
+`[ -c /dev/tty ]` are ordinary idioms in configure scripts and shell libraries,
+and a program that special-cases a character device to avoid seeking, buffering
+or truncating will take the regular-file path on all eleven. The failure is
+quiet in the same way the others in this file are: the node behaves correctly
+when used, so only code that *asks what it is* gets a wrong answer, and that
+code usually responds by silently choosing a different strategy rather than by
+erroring.
+
+**Care needed — this is not a one-word change.** `EntryType` is load-bearing in
+routing, not only in `stat`:
+
+1. `Vfs::read_at_routed` page-caches only `EntryType::File` with a stable
+   inode. Retyping these to `CharDevice` removes them from the page cache —
+   which is *correct* (a device must not be cached; that is the property that
+   makes block nodes safe for verify-after-write) but it is a behaviour change
+   on the read path and needs checking, not assuming.
+2. `container.rs` merges `CharDevice | BlockDevice` into an arm that refuses
+   `read_file`, so an archive walk does not descend into a device. `/dev/null`
+   moving into that arm changes what a recursive walk does with it.
+3. `kshell`'s `ls -F`, `file`, and long-listing arms all switch on the type, as
+   does `d_type` in `getdents64`.
+4. `devfs`'s own self-tests assert entry types in several places.
+
+**The proper fix:** change the eleven declarations, leave `uptime` alone, then
+walk each of the four sites above and confirm the new routing is the intended
+one — in particular re-run the devfs and container self-tests, which is where a
+wrong answer will show up first.
+
+**How it was found.** A block-device self-test asserted that registering a disk
+named `null` could not shadow `/dev/null`, and expected the survivor to stat as
+`CharDevice`. It stats as `File`. The anti-shadowing property held; the
+expectation was wrong, and it was wrong because the node is mistyped. That rung
+now asserts "the disk did not win" instead of pinning the neighbouring value.
+
+**Not a regression.** True since devfs was written.
+
+---
+
+## `A-IRQBALANCE-CAN-NEVER-BALANCE-FOR-TWO-INDEPENDENT-REASONS` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26, and it was three
+
+**Fixed** in `1ae48ea8c` (the wiring and the off-by-one) on top of `16d2a7857`
+(the counting). Boot-verified — see the closing note at the end of this entry.
+
+**There was a third reason, found only while fixing the first two**, and it is
+the interesting one: `balance()` computed the vector for IRQ *N* as `N + 32`,
+but `ioapic.rs` programs IOAPIC input *N* onto `IRQ_VECTOR_BASE + N` = **33** +
+*N*, deliberately "keeping vector 32 reserved for the LAPIC timer". So IRQ 0's
+rate was read from the *timer's* slot, IRQ 1's from IRQ 0's, and so on down the
+line.
+
+**That third defect was harmless only because of the second one.** With no
+hardware vector counted, every slot read zero — and a shifted index into an
+all-zero array also reads zero. The moment the counts became real, slot 32
+started carrying ~1000 ticks a second, far above `MIN_RATE_THRESHOLD`. Fixing
+reasons 1 and 2 alone would therefore have produced a balancer that concluded
+IRQ 0 was the busiest line on the machine and began migrating it on the strength
+of the timer's traffic. **Dead would have become actively wrong**, and the
+"fix" would have been the thing that armed it.
+
+The general lesson, which is worth more than the bug: *a dormant subsystem can
+hide defects in its own logic, because dormancy feeds it uniform inputs that
+every version of the logic maps to the same output.* Reviving one is not one
+change but two — turn it on, and separately re-derive whether its arithmetic was
+ever right. Do not assume the code between the entry and the exit was correct
+merely because nobody had complained; nobody could have.
+
+`vector_for_irq()` now derives the mapping from `ioapic::IRQ_VECTOR_BASE` rather
+than restating it, since restating it is exactly how the two drifted apart.
+
+**In short:** the interrupt balancer — `kernel/src/irqbalance.rs`, ~500 lines of
+greedy bin-packing that is supposed to spread device interrupts across CPUs —
+has never moved a single interrupt, and cannot. Its `balance()` pass takes an
+early `return` on every invocation, for **two separate reasons, either of which
+alone is sufficient.** Its self-test prints `[irqbalance] Self-test PASSED` on
+every boot.
+
+**Reason 1 — no IRQ is ever marked active.** `balance()` skips any IRQ whose
+`state.active` flag is false:
+
+```rust
+for (i, state) in IRQ_STATES.iter().enumerate() {
+    if !state.active.load(Ordering::Relaxed) { continue; }      // always taken
+```
+
+The only thing that sets that flag is `notify_irq()`, whose doc says *"call from
+ISR path"*. It has **no callers on any ISR path** — the only two calls in the
+repository are at `irqbalance.rs:465` and `:490`, both inside the module's own
+`self_test`. So the loop body never executes in production and `active_count`
+stays 0.
+
+**Reason 2 — the counts it would read are all zero.** Even with the flag set,
+the rate comes from:
+
+```rust
+let vector = i + 32;
+let current = vector_counts.get(vector).copied().unwrap_or(0);
+let delta = current.saturating_sub(last);
+if delta >= MIN_RATE_THRESHOLD  // = 10
+```
+
+`idt::vector_counts()` is only ever incremented by `count_vector()`, which is
+called exclusively from the CPU **exception** handlers. `dispatch_vector()` —
+the one function every hardware interrupt passes through — never calls it (see
+`A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS` above). So every
+vector at 32 and up reads 0 forever, `delta` is 0, and 0 is never `>= 10`.
+
+Then:
+
+```rust
+if active_count == 0 {
+    BALANCE_OPS.fetch_add(1, Ordering::Relaxed);
+    return; // Nothing to balance.
+}
+```
+
+`BALANCE_OPS` still increments, so `irqbalance` stats report a healthy and
+rising number of balance passes. Every one of them did nothing.
+
+**Why no test caught it — and it is the lesson already written down in this
+tree.** `self_test`'s Test 4 is:
+
+```rust
+assert!(!IRQ_STATES[10].active.load(Ordering::Relaxed));
+notify_irq(10);
+assert!(IRQ_STATES[10].active.load(Ordering::Relaxed));
+```
+
+It calls `notify_irq` itself and checks the flag moved. That verifies the
+setter, and is structurally incapable of detecting that nothing else in the
+kernel ever calls it. `check-tick-wiring.py`'s own failure text says this in as
+many words: *"write the regression test through handle_event, never against the
+advancing function: a test that calls tick() directly cannot tell a wired app
+from an unwired one, which is how all five of these shipped green."* This is the
+same shape one subsystem over, and it is worth noting that the existing gate
+cannot see it — that gate asks about `Event::Tick` in GUI apps specifically, not
+about kernel ISR wiring.
+
+**The proper fix**, and both halves are required — fixing one leaves the
+balancer just as dead:
+
+1. Call `count_vector(vector as usize)` at the top of `idt::dispatch_vector`,
+   and widen `VECTOR_STATS_SIZE` from 48 to 256 so vectors 251/252/255 are not
+   silently dropped by the `.get()`. This is the other known-issue entry and
+   fixes reason 2 for every consumer at once (`kstat`, `kcounters`, `irqstat`,
+   `irqrate`) because `dispatch_vector` is the single choke point.
+2. Call `irqbalance::notify_irq(irq)` from `ioapic::handle_device_irq`, which is
+   where the ISR path actually knows the IRQ number. That fixes reason 1.
+3. Then write the regression test **through the dispatch path**, not through
+   `notify_irq` — otherwise the replacement test has the same blind spot as the
+   one it replaces.
+
+**Do not "fix" this by lowering `MIN_RATE_THRESHOLD`.** The threshold is not the
+bug; it is the only thing that would stop a balancer fed real data from
+migrating an IRQ that fired twice. It becomes load-bearing the moment reason 2
+is fixed.
+
+**Open question once it works.** Nobody has ever observed this algorithm running
+against real counts, so its behaviour is entirely untested in the sense that
+matters — greedy bin-packing that migrates an interrupt every pass would be
+worse than not balancing at all. Expect to need a damping/hysteresis rule, and
+measure before trusting it.
+
+**How it was found.** Tracing the consumers of `idt::vector_counts()` while
+scoping the `dispatch_vector` counting fix; `irqbalance` turned out to be the
+consumer with real consequences rather than display ones.
+
+**Not a regression.** True since the module was written.
+
+---
+
+## `A-ZIP-EXTRACT-ALLOCATED-A-BOMB-BEFORE-CHECKING-IT` — ✅ FIXED 2026-08-26
+
+**Status:** fixed in the same change that promoted `kernel/src/fs/zip.rs` to the
+root `ziparchive` crate. Recorded because the *shape* of the bug is worth
+keeping, not because anything is outstanding.
+
+**What it was.** `extract_entry` inflated an entry with no output bound, then
+verified its CRC-32:
+
+```rust
+let decompressed = inflate(raw)?;          // unbounded
+if crc32(&decompressed) != entry.crc32 { return Err(CorruptedData); }
+```
+
+Every ZIP entry states its own uncompressed size in the central directory. That
+number was parsed into `ZipEntry.uncompressed_size`, shown by `unzip -l`, and
+then **never used as a check anywhere**. So a decompression bomb — a small entry
+crafted to expand enormously — was allocated in full and only then rejected, by
+a checksum that could not run until the allocation had already happened.
+
+**Why it was easy to miss.** The code was not missing a check; it *had* one, and
+the check was correct. It was in the wrong order relative to the thing it was
+protecting. A reviewer asking "is corruption detected?" gets a yes. The question
+that finds this one is "does the detection happen before or after the cost?" —
+and that question is not part of most review habits.
+
+The second half is the more interesting one: the defence that was missing
+(`len() == uncompressed_size`) was missing *because a working substitute
+existed*. The CRC caught the same archives, eventually, so nothing ever failed
+in a way that pointed here. Compare
+`A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS`, where a total
+that summed the whole array was similarly not wrong — only unfalsifiable.
+
+**The fix.** `min(declared, limit)` as the inflater's cap, then exact equality
+against `declared`, then the CRC. See design-decisions.md §615 for the ordering
+argument and the leniency tradeoff.
+
+**Related, still open elsewhere in the tree.** `userspace/zip/src/main.rs` (lane
+B) contains an independent ZIP reader and DEFLATE decoder, so this fix does not
+reach it; whether it has the same hole has not been checked. Filed as
+`requests/a-b-userspace-zip-carries-a-third-deflate-and-a-second-zip-parser.md`.
+That is the concrete cost of duplicated parsers of untrusted input, and it is
+why §610 exists.
+
+---
+
 ## `TD-B-OSH-ANNOUNCES-EVERY-STAGE-OF-A-BACKGROUND-PIPELINE-BEFORE-STARTING-ANY` (lane B, 2026-08-26) — **open**, tech debt
 
 **In short:** with a debugger's DEBUG trap armed, bash tells the trap about a
@@ -88487,6 +89246,45 @@ would have to as well. That means `announce_async` cannot decide the whole
 forked by the announcing shell as it goes, which is a different division of
 labour between the parent and the `&` job's clone than osh currently has. Worth
 doing only if a real observable is found that depends on it.
+
+### BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY. `a_reopened_descriptor_starts_at_zero_and_does_not_move_the_shells_cursor` fails on the Windows dev host — 2026-08-26 — LANE B, REPORTED
+
+**In short:** `cargo test --workspace` has exactly one failing test, and it is a
+test rather than a bug. The shell (`osh`) can be told to read a file "through a
+descriptor number" — `read b </dev/fd/3`. On Linux that re-opens the file from
+the beginning; on Windows there is no way to name a file that way, so the shell
+falls back to sharing the existing descriptor, and the read continues from where
+the last one stopped. The fallback is deliberate and documented. The test is
+not: it asserts the Linux answer on every host, so it is red for anybody running
+the suite on this machine. Nothing a user can do is broken by it — but a
+permanently-red suite is, because it trains everyone to ignore the failure line.
+
+**Repro:**
+
+```
+cargo test -p oils --lib --target x86_64-pc-windows-gnu a_reopened_descriptor_starts_at_zero
+```
+
+```
+assertion `left == right` failed        (userspace/oils/src/interp.rs:106519)
+  left: "[one][two][]\n"
+ right: "[one][one][two]\n"
+```
+
+**Where:** `userspace/oils/src/interp.rs`. The test arrived with `4b65729b0`;
+the fallback it collides with is `file_reopen_path` / `host_reopen_path`
+(~65942/65930), whose `#[cfg(not(unix))]` arms return `None`, so
+`Shell::resolve_special_redirect` yields `SpecialRedirect::Duplicated` and the
+redirect becomes `<&3`. Under a dup, `b` reads `two` and leaves fd 3 at EOF, so
+`c` reads nothing — precisely the observed `[one][two][]`.
+
+**Whose:** lane B (`userspace/**`). Lane C does not edit it. Filed as
+`requests/c-b-the-reopen-test-is-red-on-the-windows-dev-host.md`, which suggests
+splitting the test so the dev host asserts the documented dup and the Unix build
+asserts the re-open — that covers the fallback rather than merely excusing it.
+
+**Proper fix:** lane B's call; either `#[cfg(unix)]` with a reason, or the split
+above.
 
 ## `TD-OILS-ENABLE-F-AND-D-FOLLOW-THE-NO-DLOPEN-BUILD` (lane B, 2026-08-26) — **open**, `SCOPE: out of frozen scope (§305)`
 
@@ -88587,6 +89385,83 @@ recorded as "re-run with `--timeout-scale 5`", which could never have worked: a
 deadlock does not finish at any multiple of the budget, it just fails more
 slowly. The probe is now removed and the reasoning left in its place, which
 makes the case measurable again.
+### TD-C-ARCHIVEMANAGER-HOLDS-THE-WHOLE-ARCHIVE-IN-MEMORY — 2026-08-26 — LANE C, OPEN
+
+**In short:** Opening a ZIP in the archive manager reads the entire file into
+memory and keeps it there for as long as the window is open. A 400 MB archive
+therefore costs 400 MB of RAM to *look* at, even to read one small file out of
+it, and archives over 512 MB are refused outright with a message saying so
+rather than being opened. Nothing gives a wrong answer; the program is simply
+much more expensive than it needs to be on big files, and puts a ceiling where
+there should not be one.
+
+**Where:** `apps/archivemanager/src/backend.rs` — `MAX_ARCHIVE_BYTES` and
+`open`, which does `fs::read(path)` and stores the result in
+`ArchiveSource::bytes`. Every read after that (`ziparchive::entry_data`,
+`extract_entry`) takes a `&[u8]` covering the whole archive.
+
+**Why it is like this:** `ziparchive` is a `no_std` crate with a slice API — it
+parses a `&[u8]` and hands back offsets into it. There is no seeking reader to
+give it, so the only way to call it is to have the whole file in memory. The
+512 MB cap is not arbitrary caution: without it, opening a DVD image with a
+`.zip` extension would try to allocate several gigabytes and be killed, which
+looks to the user like the program crashing on a file it should have refused.
+
+**Proper fix:** on the crate side, not this one. `ziparchive` wants a reader
+trait — something that can be asked for a byte range — so the central directory
+can be parsed from the tail of the file and each member inflated by streaming
+its own extent. The archive manager would then hold a file handle and a parsed
+directory, and `MAX_ARCHIVE_BYTES` would disappear along with the refusal
+message. That is a lane A change; it is not filed as a request yet because the
+current behaviour is correct for every archive a desktop user is likely to open,
+and the crate is a week old — asking for a second API before the first one has
+been used in anger is how APIs get designed twice.
+
+### TD-C-NOTHING-CAN-ACTUALLY-COPY-AND-PASTE-BETWEEN-PROGRAMS — 2026-08-26 — LANE C, OPEN
+
+**In short:** Copy and Paste do not cross between programs. Every window that
+has a Copy button — the colour picker, the text editor, the clipboard manager,
+the Run box — copies into a `String` field of its own, which no other program
+can see. Copying a hex colour and pasting it into the editor puts nothing in
+the editor. The clipboard *service* that is supposed to hold the one shared
+copy exists and is written, but nothing is connected to it at either end.
+
+**Where:**
+
+| Piece | State |
+|---|---|
+| `gui/clipboard/src/main.rs` | The service. Formats, history ring, sensitive-entry expiry and a full request/response enum are all written and tested. `fn main` runs a self-test and returns; three `TODO`s at lines 788-790 mark the missing register-with-service-manager, open-endpoint and event-loop steps. |
+| `gui/clipboard/Cargo.toml` | **Binary only — there is no `lib` target**, so no program can even link against `ClipboardRequest`/`ClipboardResponse` to build a message. |
+| `gui/toolkit` | No clipboard API of any kind. A widget that wants to copy has nowhere to call. |
+| `apps/colorpicker`, `apps/editor`, `apps/tmux`, `gui/desktop/src/run_dialog.rs` | Each keeps a private `clipboard: String`. Correct in isolation, invisible to everyone else. |
+| `apps/clipmanager` | A clipboard *manager* over its own in-process store: it shows and searches a history the rest of the system does not put anything into. |
+
+**Why it is like this:** the service was written before there was any IPC to
+carry it, and each app grew a local `String` in the meantime because a Copy
+button that does nothing at all is worse than one that at least feeds the
+program's own Paste. Nothing here is wrong so much as unconnected — the shape
+of the fix is not in doubt, only the plumbing.
+
+**Proper fix, in the order the pieces have to land:**
+
+1. **Give `gui/clipboard` a `lib` target** (`src/lib.rs` holding the types,
+   `src/main.rs` reduced to the service loop). Without this there is no shared
+   vocabulary and every caller would invent its own message encoding.
+2. **Finish the service loop** — register with the service manager, open a
+   channel endpoint, and dispatch `ClipboardRequest` off it. That is the
+   existing three `TODO`s, and it is a lane B/A dependency: it needs the
+   service-manager registration path and channel IPC to be callable from a
+   userspace binary.
+3. **Add `guitk::clipboard`** — a `get(format)` / `set(entry)` pair over that
+   channel, which is what every widget and app should call. This is the piece
+   lane C owns, and it is the one that deletes all four private `String`s.
+4. **Rewire the four apps and `clipmanager`** onto it. `clipmanager` in
+   particular should be reading the service's history rather than its own,
+   which is the whole point of the program.
+
+Nothing above should be started before step 2 is possible, and step 2 is not
+lane C's to make possible; this entry is here so that whoever gets there does
+not conclude the service is missing and write a second one.
 
 ## `B-DEV-HOST-IS-WINDOWS-SO-CFG-UNIX-CODE-IS-NEVER-COMPILED` (lane B, 2026-08-26) — **open**, process gap
 
@@ -88681,3 +89556,70 @@ implemented) keeps the assertion meaningful where it is true and stops it lying
 where it is not. Deleting them would lose real cover on the SlateOS side;
 `#[ignore]` would lose it on both. Same shape as
 `BUG-OILS-REOPEN-TEST-IS-UNIX-ONLY` above, and worth doing in one pass with it.
+
+---
+
+## `A-PROC-NUMASTAT-REPORTS-ZERO-NODES-ON-A-MACHINE-THAT-HAS-SOME` (lane A, 2026-08-26)
+
+**Status:** OPEN
+
+**In short:** NUMA is the fact that on a big machine, memory is divided into
+banks ("nodes") and each CPU is nearer to some banks than others. The kernel
+*does* work out that layout at boot — it reads it from a firmware table, and
+falls back to "one node holding all the RAM" when there is no such table.
+`/proc/numastat`, the file that is supposed to report that layout, says
+`nodes: 0` on every machine anyway. Zero nodes is not a possible state: a
+machine with memory has at least one. The file is not empty-because-unknown,
+it is wrong.
+
+**Where.** Two modules that never met:
+
+| | `kernel/src/numa.rs` | `kernel/src/fs/numastat.rs` |
+|---|---|---|
+| What it is | the real topology | the reporting face |
+| Fed by | `numa::init()` at `main.rs:6325` — parses the ACPI SRAT, else `init_uma()` | `register_node()` / `set_distance()` |
+| Called by | boot | **nothing** |
+
+`grep` for callers of `numastat::register_node`, `set_distance`,
+`record_local_alloc`, `record_remote_alloc`, `record_access`,
+`record_migration` outside the module itself returns nothing. The table is
+therefore permanently empty, and `gen_numastat` (`procfs.rs:11387`) renders
+that emptiness as `nodes: 0` followed by no rows.
+
+**It is documented as wired.** `init_defaults`'s doc comment says the rows are
+"populated from the ACPI SRAT at bring-up" and that "the memory subsystem is
+expected to call `register_node`/`set_distance`". That expectation was never
+met. A doc comment asserting a wiring that does not exist is worse than no
+comment: it is the reason nobody looked.
+
+**What is genuinely unknowable, and must stay zero.** Only the *topology* is
+available today. The allocation, access-latency and migration counters have no
+producer — the frame allocator does not record which node a page came from —
+so they must keep reading zero. The fix must populate what is known without
+inventing what is not.
+
+**Distances must stay empty too, and this is the subtle part.** It is tempting
+to fill the distance matrix from `numa::distance()`, which is right there. But
+that function's own doc says "We don't parse SLIT yet, so we assume uniform
+remote access cost" — it returns 10 for same-node and 20 for everything else,
+a model, not a measurement. `numastat::NodeDistance` has no field
+distinguishing modelled from measured, so writing those numbers into
+`/proc/numastat` would launder a guess into a reading. That is the same
+failure as the seed data removed from this module earlier, arriving by a
+longer route.
+
+**The proper fix.** A `numastat::adopt_topology()` called from `main.rs` right
+after `numa::init()`, registering one row per present node with its real
+memory size and the CPU set taken from `numa::cpu_node(cpu)` for each online
+CPU — the same map the scheduler places threads by, so the two instruments
+agree by construction rather than by coincidence. It must no-op when `numa`
+has not initialised yet (detectable: no node reports `present`), so that
+running `numastat test` from kshell can call it again to restore the real
+topology the self-test wipes, instead of leaving the table empty for the rest
+of the boot.
+
+**How it was found.** Auditing the modules whose fabricated seed data had been
+removed, to check whether removing the seed had left them reporting nothing
+where something real was available. For `signalq` the emptiness was correct —
+no signals had been sent. For `numastat` it was not: the data existed one
+module away.

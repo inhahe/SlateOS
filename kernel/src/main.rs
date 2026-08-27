@@ -4190,13 +4190,14 @@ extern "C" fn kernel_main() -> ! {
             // boot and gives the module automated coverage it previously lacked (it was
             // only reachable via the `cpustat test` kshell subcommand).
             fs::cpustat::self_test();
-            // irqstat backs /proc/irqstat (per-IRQ-line counts + per-CPU interrupt
-            // totals and ISR latency); like its siblings the self-test now builds
-            // fixtures via the real register_irq/register_cpu/record/record_latency/
-            // mark_spurious API and resets the table afterward (leaving no fabricated
-            // rows), so it is safe at boot and gives the module automated coverage it
-            // previously lacked (it was only reachable via the `irqstat test` kshell
-            // subcommand).
+            // irqstat backs /proc/irqstat.  UNLIKE its siblings it owns no table
+            // and builds no fixtures: it is a pure projection of
+            // idt::vector_counts(), so there is nothing to seed and nothing to
+            // reset.  That makes its self-test the only one in this battery that
+            // asserts against LIVE data -- it requires the timer vector's count
+            // to be non-zero and to be at least the BSP tick count, which is what
+            // detects the projection having become disconnected from its counter.
+            // A fixture-based test cannot see that failure at all.
             fs::irqstat::self_test();
             // diskstat backs /proc/diskstat (per-block-device read/write IOPS, bytes,
             // latency, queue depth, merges); like its siblings the self-test now builds

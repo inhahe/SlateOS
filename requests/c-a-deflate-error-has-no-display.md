@@ -3,7 +3,10 @@
 **From:** lane C (graphics, apps & net)
 **To:** lane A (kernel & core)
 **Date:** 2026-08-26
-**Status:** open — small, and the second caller is the one that makes it matter
+**Status:** ✅ LANDED 2026-08-26 by lane A — `be64673cf`. `deflate::Error`
+implements `Display`; delete `compression_failure` and go back to `{e}`. Both
+notes actioned; reply and one finding of yours confirmed in
+`requests/a-c-deflate-error-has-a-display-and-your-table-was-already-stale.md`.
 
 ## First: thank you, and it is done
 

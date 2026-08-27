@@ -34,7 +34,7 @@
 
 #[allow(unused_imports)]
 use guitk::color::Color;
-use guitk::dialog::{DialogAction, DirEntry, FileDialog};
+use guitk::dialog::{DialogAction, FileDialog, list_directory};
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -59,7 +59,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha color palette
@@ -1908,7 +1908,7 @@ impl DiskImagerApp {
         let mut dialog = FileDialog::open()
             .with_filter("Disk images", &["*.iso", "*.img", "*.bin"])
             .with_initial_path(start_dir);
-        dialog.set_entries(read_directory(start_dir));
+        dialog.set_entries(list_directory(start_dir));
         self.open_dialog = Some(dialog);
     }
 
@@ -1925,7 +1925,7 @@ impl DiskImagerApp {
                 self.load_image_from_path(&path);
             }
             DialogAction::NavigatedTo(path) => {
-                dialog.set_entries(read_directory(&path));
+                dialog.set_entries(list_directory(&path));
             }
             DialogAction::Cancelled => self.open_dialog = None,
             DialogAction::None => {}
@@ -4392,51 +4392,6 @@ fn parent_directory(path: &str) -> String {
         Some(i) => path.get(..i).unwrap_or(".").to_string(),
         None => ".".to_string(),
     }
-}
-
-/// List `path` for the file-open dialog.
-///
-/// An unreadable directory yields an empty listing rather than an error: the
-/// dialog is a place the user is browsing, and a permission-denied folder they
-/// wandered into is a normal thing to find, not a failure of the program.
-/// Entries whose metadata cannot be read are skipped for the same reason.
-///
-/// The name is taken from `file_name` as an `OsStr` and converted once; a path
-/// component is a byte string on this OS, and a listing is the one place a
-/// filename with no UTF-8 reading still has to be *shown*, so lossy conversion
-/// is the right answer here and only here -- what is opened is rebuilt from
-/// `current_path` plus this name inside the dialog, so a substituted character
-/// would open the wrong file. That is a real limitation and it is the dialog's
-/// `String`-typed API, not this function; recorded in known-issues.md.
-fn read_directory(path: &str) -> Vec<DirEntry> {
-    let Ok(iter) = fs::read_dir(path) else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for entry in iter.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let extension = name
-            .rsplit_once('.')
-            .map(|(_, ext)| ext.to_ascii_lowercase())
-            .unwrap_or_default();
-        out.push(DirEntry {
-            is_dir: meta.is_dir(),
-            size: if meta.is_dir() { 0 } else { meta.len() },
-            modified_timestamp: meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_secs()),
-            extension: if meta.is_dir() {
-                String::new()
-            } else {
-                extension
-            },
-            name,
-        });
-    }
-    out
 }
 
 /// Extract a trimmed ASCII string from ISO data at a given offset and length.

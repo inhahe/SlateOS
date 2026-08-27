@@ -113,7 +113,6 @@ cmd_iosched 1
 cmd_iotdevice 2
 cmd_ipclog 3
 cmd_iperf 6
-cmd_irqstat 1
 cmd_kbmacro 2
 cmd_kbsettings 4
 cmd_kernlog 1

@@ -436,6 +436,7 @@ version = "0.1.0"
 dependencies = [
  "guitk",
  "oswindow",
+ "ziparchive",
 ]
 
 [[package]]
@@ -1952,6 +1953,7 @@ name = "clipmanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -2094,6 +2096,7 @@ name = "colorpicker"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -2943,6 +2946,8 @@ name = "diskanalyzer"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
+ "scratchdir",
 ]
 
 [[package]]
@@ -6108,6 +6113,7 @@ dependencies = [
  "sha2",
  "spin",
  "tzrules",
+ "ziparchive",
 ]
 
 [[package]]
@@ -13796,6 +13802,7 @@ name = "vpnmanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -14762,6 +14769,14 @@ name = "zip"
 version = "0.1.0"
 dependencies = [
  "quoting",
+]
+
+[[package]]
+name = "ziparchive"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "deflate",
 ]
 
 [[package]]

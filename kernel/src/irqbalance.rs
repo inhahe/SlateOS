@@ -109,7 +109,14 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Tick counter for scheduling balance runs.
 static TICK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Total balance operations performed.
+/// Total balance *passes* run — including those that found nothing to do.
+///
+/// Not a measure of work done: it is incremented on the "nothing to balance"
+/// early return as well as on a completed pass, so it climbs at a steady rate
+/// on a perfectly idle machine.  For years it did exactly that while the
+/// balancer was incapable of balancing anything, and a rising number under a
+/// heading that read "operations performed" is why nobody looked.  `MIGRATIONS`
+/// is the counter that answers "did this subsystem ever actually do anything".
 static BALANCE_OPS: AtomicU64 = AtomicU64::new(0);
 
 /// Total IRQ migrations performed.
@@ -256,6 +263,25 @@ pub fn notify_irq(irq: u8) {
 // Balance algorithm
 // ---------------------------------------------------------------------------
 
+/// IDT vector carrying IOAPIC input `irq`.
+///
+/// Derived from `ioapic::IRQ_VECTOR_BASE` rather than restated, because
+/// restating it is how this went wrong: `balance()` computed `irq + 32`, which
+/// is off by one against the mapping `ioapic.rs` actually programs. Vector 32
+/// is the LAPIC timer and is not an IOAPIC input at all, so IRQ 0's rate was
+/// read from the timer's slot, IRQ 1's from IRQ 0's, and so on down the line.
+///
+/// The error was undetectable for as long as nothing counted hardware vectors:
+/// every slot read zero, so a shifted index read zero too. It stops being
+/// undetectable the moment those counts are real — slot 32 then carries ~1000
+/// ticks a second, far above `MIN_RATE_THRESHOLD`, so the balancer would have
+/// concluded IRQ 0 was the busiest line on the machine and begun migrating it
+/// on the strength of the timer's traffic.
+#[inline]
+fn vector_for_irq(irq: usize) -> usize {
+    usize::from(crate::ioapic::IRQ_VECTOR_BASE).saturating_add(irq)
+}
+
 /// Perform a balance pass.
 ///
 /// Reads current interrupt counts, computes deltas, and redistributes
@@ -279,8 +305,7 @@ fn balance() {
             continue;
         }
 
-        // Vector number = IRQ + 32 (after exception vectors).
-        let vector = i + 32;
+        let vector = vector_for_irq(i);
         let current = vector_counts.get(vector).copied().unwrap_or(0);
         let last = state.last_count.swap(current, Ordering::Relaxed);
         let delta = current.saturating_sub(last);
@@ -464,7 +489,10 @@ pub fn self_test() {
     assert!(!IRQ_STATES[10].active.load(Ordering::Relaxed));
     notify_irq(10);
     assert!(IRQ_STATES[10].active.load(Ordering::Relaxed));
-    // Clean up.
+    // Clean up.  This is load-bearing for Test 9, not mere tidiness: Test 9
+    // asserts that every line marked active was counted by `idt`, and IRQ 10
+    // was marked active here by a direct call with no interrupt behind it.
+    // Leaving it set would fail Test 9 with a message blaming the ISR path.
     IRQ_STATES[10].active.store(false, Ordering::Relaxed);
     serial_println!("[irqbalance]   Notify: OK");
 
@@ -490,6 +518,84 @@ pub fn self_test() {
     notify_irq(255);
     set_hint(255, 0);
     serial_println!("[irqbalance]   Out-of-range safety: OK");
+
+    // Test 8: the IRQ -> vector mapping agrees with the one the IOAPIC
+    // programs.  This is the deterministic half of the off-by-one regression:
+    // `balance()` used to compute `irq + 32`, reading the LAPIC timer's slot as
+    // IRQ 0's rate.  Test 4 above cannot catch that, or anything like it -- it
+    // calls `notify_irq` directly and asserts the flag it just set, so it
+    // passes identically whether or not anything in the kernel ever calls it.
+    assert_eq!(
+        vector_for_irq(0),
+        crate::ioapic::IRQ_VECTOR_BASE as usize,
+        "IRQ 0 must land on IRQ_VECTOR_BASE, not on the LAPIC timer's vector"
+    );
+    assert_ne!(
+        vector_for_irq(0),
+        32,
+        "vector 32 is the LAPIC timer and is not an IOAPIC input"
+    );
+    serial_println!(
+        "[irqbalance]   IRQ->vector mapping: OK (IRQ 0 -> vector {})",
+        vector_for_irq(0)
+    );
+
+    // Test 9: evidence that the ISR path actually reaches this module -- and
+    // that the vector it reaches through is the one `vector_for_irq` names.
+    //
+    // Which IOAPIC lines have fired by now is a property of the emulated
+    // hardware and of boot ordering, not of this module, so the *count* is
+    // reported rather than asserted: requiring that some device have
+    // interrupted would be flaky.  What IS asserted is the agreement between
+    // the two records of whatever did fire (see below), which is a property of
+    // this kernel and holds no matter what the hardware did.
+    //
+    // If `notify_irq`'s call in `ioapic::handle_device_irq` is ever removed,
+    // this prints `none` forever after -- visible and greppable rather than
+    // silent.  Note that this self-test is sequenced late enough in boot for
+    // that to be meaningful: it runs after `keyboard::init` unmasks IRQ 1,
+    // whereas `fs::irqstat::self_test` runs before any device IRQ is unmasked
+    // at all and so can only ever observe the timer.
+    let mut active: [u8; MAX_IRQS] = [0; MAX_IRQS];
+    let mut n_active = 0usize;
+    for (i, state) in IRQ_STATES.iter().enumerate() {
+        if state.active.load(Ordering::Relaxed) {
+            if let (Some(slot), Ok(irq_u8)) = (active.get_mut(n_active), u8::try_from(i)) {
+                *slot = irq_u8;
+                n_active = n_active.saturating_add(1);
+            }
+        }
+    }
+    if n_active == 0 {
+        serial_println!("[irqbalance]   Live IRQ lines: none have fired yet");
+    } else {
+        // Two independent instruments record the same event, and until now
+        // neither checked the other.  This module sets `active` from
+        // `notify_irq`, called by `ioapic::handle_device_irq`; `idt` counts the
+        // raw vector in `dispatch_vector`, one frame earlier on the same path.
+        // An IRQ that reached here therefore MUST have been counted there, and
+        // in the slot `vector_for_irq` names -- which is the off-by-one this
+        // function's doc comment describes, re-checked against live traffic
+        // rather than against arithmetic.
+        //
+        // This is an assertion where the count alone could only ever be a
+        // report: it is conditional on what actually fired, so it neither
+        // depends on a device happening to interrupt nor on where in the boot
+        // this self-test is sequenced.  Nothing fired, nothing is claimed.
+        for &irq in active.get(..n_active).unwrap_or(&[]) {
+            let vector = vector_for_irq(usize::from(irq));
+            let counted = crate::idt::vector_count(vector);
+            assert!(
+                counted > 0,
+                "IRQ {irq} is marked active but vector {vector} was never counted by idt::dispatch_vector. Either the two instruments disagree, or vector_for_irq names the wrong slot, or an earlier test in this function called notify_irq directly and failed to clear the flag (see Test 4's cleanup)"
+            );
+        }
+        serial_println!(
+            "[irqbalance]   Live IRQ lines: {} seen via the ISR path {:?} (all cross-checked against idt vector counts): OK",
+            n_active,
+            active.get(..n_active).unwrap_or(&[])
+        );
+    }
 
     serial_println!("[irqbalance] Self-test PASSED");
 }

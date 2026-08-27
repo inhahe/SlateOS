@@ -47830,3 +47830,448 @@ worse than admitting there is none.
 `scripts/check-selftest-reinit.py`. See known-issues.md
 `A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT` for the measurement and
 the burn-down.
+
+---
+
+## 613. Userspace reaches a raw disk through `/dev`, as ordinary file I/O behind a capability — not through a bespoke syscall or a userspace driver
+
+*Date: 2026-08-26*
+
+**Decided by:** Claude (autonomous)
+
+**In short:** Two programs lane C is building — a disk imager (writes a
+downloaded `.iso` onto a USB stick) and a partition editor — need to read and
+write a whole *storage device*, not files stored on it. Nothing in the system
+let a userspace program do that at all, so both were stuck. This decides *how*
+they get to: the disk shows up as `/dev/vda` and you `read`/`write` it like a
+file, except that moving bytes either way first requires holding a specific
+permission token (a "capability" — an unforgeable object a program must be
+*given*, as opposed to a right it has just for being root). Merely *listing*
+which disks exist requires nothing.
+
+`design.txt` does not settle this. It mandates a microkernel with drivers in
+userspace and capability security from day one, both of which the chosen shape
+honours, but it says nothing about whether a raw device is nameable in the
+filesystem — so the fork was real and this entry records the call.
+
+**The options.**
+
+| | *What changes:* |
+|---|---|
+| **(a) Nothing** (status quo) | The imager and the partition editor cannot be written. Neither can `fsck`, `dd`, or a backup tool. |
+| **(b) `/dev/<disk>` as ordinary file I/O, gated** (chosen) | `dd if=x.iso of=/dev/vda` works, if you hold the capability. Every existing tool that opens a path already knows how. |
+| **(c) A bespoke syscall pair** (`SYS_BLOCK_READ`/`SYS_BLOCK_WRITE`) | Same power, reached by a name no ported program knows. Every tool needs porting; the ABI grows two entries that duplicate `read`/`write`. |
+| **(d) Route through a userspace storage daemon over IPC** | Same power, one process hop further away. The daemon does not exist, and would need this same kernel interface underneath it to do its job. |
+
+**Why (b).** The decisive argument is not convenience, it is that the
+alternatives do not actually remove the kernel interface — they wrap it. (d) is
+the microkernel-purist answer, and it is the right *eventual* shape for
+scheduling and arbitration, but a storage daemon has to reach the sectors
+somehow, and the way it would reach them is (b). Building (d) first means
+building (b) anyway and then hiding it, which is a larger change that leaves
+the same attack surface. (c) is (b) with the names changed and every ported
+program broken.
+
+The real question behind the fork is whether *naming* a device in the
+filesystem is what grants access to it — the mistake Unix makes, where holding
+root gets you `/dev/sda` by ambient authority. It is not, here: the name is
+public and the bytes are not. `readdir` and `stat` answer freely; `read` and
+`write` demand `ResourceType::BlockDevice` with `READ` or `WRITE`
+respectively. So a settings panel can draw a list of disks without being
+launched with the authority to erase them, which is the property (a)-through-(d)
+were really being judged on.
+
+**Why reads are gated and not just writes.** Writing a raw disk is the most
+destructive thing a userspace program here can do, so gating it needs no
+argument. Gating reads does: raw sectors contain every file the caller could
+not open through the ordinary path, plus every file that was deleted and not
+yet overwritten. Ungated reads would make the filesystem's permission bits
+advisory. Keeping the two rights separate is what lets a backup tool hold the
+authority to capture an image without holding the authority to destroy one.
+
+**The safety property that made this the *easy* call.** `Vfs::read_at_routed`
+page-caches only `EntryType::File` with a stable inode. A block node is
+therefore uncached *by construction*, not by a flag someone must remember to
+set. That is load-bearing for the imager's verify-after-write pass: with a
+cache in the path it would compare the image against itself and report success
+on a stick that was never written. An interface that made verification lie
+would have been a reason to prefer (c) or (d); this one cannot.
+
+**What this does not decide.** Partition-table parsing, device model/serial
+strings, and hot-plug notification are all absent — `blkdev::BlockDeviceInfo`
+carries only name, sector count, sector size and a read-only flag, and
+`/sys/hardware/block` will report only what is actually known rather than
+inventing plausible values. See the reply in
+`requests/a-c-block-devices-are-served-but-sys-hardware-has-no-producer.md`.
+
+**Where it bites.** `kernel/src/fs/devfs.rs` (`find_block`, `block_read_at`,
+`block_write_at`, `require_block_cap`); `kernel/src/cap/mod.rs`
+(`ResourceType::BlockDevice`); `kernel/src/fs/vfs.rs`
+(`EntryType::BlockDevice`). Requested in
+`requests/c-a-expose-block-devices-to-userspace.md`.
+
+---
+
+## 614. Interrupts are counted once at the dispatch choke point, in a flat array sized for the whole 256-vector space
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** the kernel keeps a running tally of how many times each interrupt
+has fired. Until now it only tallied CPU *faults* (page faults and the like) and
+silently ignored real hardware interrupts -- so the "timer interrupts" counter
+read zero on a machine whose timer had fired millions of times. The fix has to
+decide two things: where to do the counting, and how big the table should be.
+Both were decided in favour of the version that cannot quietly go wrong again,
+at a cost of one atomic add per interrupt and 2 KiB of memory.
+
+**The two decisions.**
+
+*Where.* Every hardware vector already funnels through one function,
+`idt::dispatch_vector`, which switches on the vector number and calls the right
+handler. The count goes there -- once, before the switch -- rather than in each
+of the five handlers it dispatches to.
+
+The alternative (a call in `isr_timer`, `handle_device_irq`, the two IPI
+handlers and `isr_spurious`) is what the tracking entry originally proposed, and
+it is correct exactly as long as every future author of a new arm remembers to
+add the call. That is precisely the property that had already failed: vectors
+33-56 were installed without anyone noticing they went uncounted. A convention
+that has already been broken once should not be re-adopted as the fix for having
+broken it.
+
+Putting it before the switch rather than inside the arms also buys the one case
+no per-handler count can ever see: an interrupt arriving on a vector that has a
+stub installed but no handler (`_ => {}`). That is the single most diagnostic
+event in the whole table, and the per-handler design structurally cannot count
+it.
+
+*How big.* The array went from 48 entries to 256 -- the entire vector space --
+rather than to 57, or to "48 plus a few". 48 was itself a reasoned number once
+(32 exceptions + 16 device IRQs) and it was wrong within one feature: the IOAPIC
+has 24 inputs, not 16, and the two IPIs and the spurious vector live up at 251,
+252 and 255. Any bound short of 256 is another guess of the same kind, and the
+guesses are not free -- `count_vector` uses `.get()`, so an out-of-range vector
+is *dropped in silence*, which is the failure mode that hid this bug for its
+entire life.
+
+**What it costs.**
+
+| cost | size | assessment |
+|---|---|---|
+| one relaxed `fetch_add` per hardware interrupt | a few ns | noise beside the ISR body; the exception paths already paid it |
+| `.bss` for `VECTOR_COUNTS` + `RATE_SNAPSHOT_COUNTS` | 2 KiB each | irrelevant against a 16 KiB page |
+| `vector_counts()` / `InterruptRates` returned by value | ~2 KiB of stack | 3% of the 64 KiB `TASK_STACK_SIZE`, and only on hand-run diagnostic paths, never in an ISR |
+
+**The real tradeoff is the cache line, not the cycles.** `VECTOR_COUNTS` is a
+flat global, so slot 32 is one cache line that every CPU's timer ISR now
+contends for at the tick rate. On a 4-core machine at 1 kHz that is 4000
+contended atomic adds a second -- measurable in a microbenchmark, invisible in a
+profile. It was accepted because the alternative is a per-CPU array, and that
+is a different change with a different justification: it makes the counter
+faster *and* makes per-CPU attribution possible (which `fs::irqstat::per_cpu()`
+wants and still has no source for), but it touches an interrupt hot path and
+deserves its own benchmark rather than being smuggled in beside a correctness
+fix. Recorded as deferred, not as rejected.
+
+**A correctness fix that breaks a display, in the same commit.** Counting
+hardware vectors makes `kstat`'s "interrupts" and `kcounters`' `total_interrupts`
+true for the first time -- and makes `kshell`'s `Exceptions: total=` false, since
+it summed the whole array. It was never *right*; it was unfalsifiable, correct
+only for as long as the array it summed happened to contain nothing but
+exceptions. Left alone, its `> 100` HIGH health indicator would have latched
+within the first second of uptime and never cleared. Narrowing it to vectors
+0-31 is part of this change and not a follow-up: a commit that is defensible on
+its own terms while leaving a permanently-red health indicator behind it is
+worse than no commit.
+
+**Where it bites.** `kernel/src/idt.rs` (`VECTOR_STATS_SIZE`, `dispatch_vector`,
+the new `vector_name`); `kernel/src/kshell.rs` (`cmd_health`, `cmd_exceptions`,
+`cmd_exclog`, `cmd_irqrate`); `kernel/src/kcounters.rs`; `kernel/src/kstat.rs`.
+Tracked as `A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS`.
+
+---
+
+## 615. An archive entry's declared size is a promise it must keep, checked before the allocation and again after
+
+*Date: 2026-08-26*
+
+**Decided by:** Claude (autonomous)
+
+**In short:** A ZIP file states, in its own header, how big each item inside it
+is before you unpack it. The old code ignored that number while unpacking and
+only noticed a problem afterwards, using a checksum — which means a booby-trapped
+archive claiming to hold 4 KB but actually expanding to 4 GB got its 4 GB
+allocated first and was rejected second. That is backwards: the check that
+would have prevented the damage ran after the damage. The decision is to treat
+the declared size as binding — refuse to produce more than it, and afterwards
+refuse anything that is not *exactly* it. The cost is that archives whose
+headers disagree with their contents are now rejected rather than leniently
+unpacked.
+
+This came out of promoting `kernel/src/fs/zip.rs` into the root `ziparchive`
+crate (§610's rule applied a third time, at lane C's request in
+`requests/c-a-zip-is-trapped-in-the-kernel-binary.md`). Lane C had asked only
+for an output-limit *parameter*; the parameter alone would not have fixed this,
+because every existing caller would have kept passing the default.
+
+**Glossary, once.** *Decompression bomb* (or "zip bomb"): a small archive
+crafted to expand enormously, so that merely opening it exhausts memory.
+*CRC-32*: a checksum stored alongside each entry, which detects damaged bytes
+but only once you already hold all of them.
+
+### What the old code did
+
+```rust
+// before
+let decompressed = inflate(raw)?;          // no bound of any kind
+if crc32(&decompressed) != entry.crc32 { return Err(CorruptedData); }
+```
+
+Two separate faults, and the second is the one that is easy to miss:
+
+1. The inflater was **unbounded**. Nothing limited the output.
+2. The result was **never compared to `entry.uncompressed_size`** at all. The
+   header's own statement of the size was read into the struct, displayed by
+   `unzip -l`, and then never used as a check.
+
+The CRC did eventually reject a bomb — a bomb's payload does not match its
+declared checksum — so the code was not *wrong* so much as ordered wrongly. The
+defence worked only after the attack had already succeeded at the thing it was
+trying to do, which was to make us allocate.
+
+### What it does now
+
+```rust
+let declared = usize::try_from(entry.uncompressed_size).unwrap_or(usize::MAX);
+let cap = declared.min(limit);
+let decompressed = inflate_limited(raw, cap)?;      // refuses past the cap
+if decompressed.len() != declared { return Err(CorruptedData); }
+if crc32(&decompressed) != entry.crc32 { return Err(CorruptedData); }
+```
+
+The ordering is the point. The cap stops a bomb *during* inflation. The equality
+check catches a header that lies in the other direction. The CRC then does what
+a CRC is for — detecting corruption in bytes we have already agreed to hold.
+
+**Why check size before CRC, when the CRC would catch it anyway?** Because the
+two failures deserve different reports. A size that disagrees with the payload
+is a structural fault in the archive; a checksum that disagrees is damage to the
+data. Running the CRC first would report every size lie as "checksum failed",
+which sends whoever is debugging it looking for bit rot in a file whose problem
+is that its index is wrong.
+
+### The tradeoff, stated honestly
+
+**Against.** This is strictly less permissive than before. A ZIP whose central
+directory disagrees with its actual payload used to extract fine if the CRC
+happened to match, and now does not. Such archives exist: buggy writers, files
+truncated and repaired, streaming writers that patched the local header but not
+the central one. We will reject some archives that other tools open. If that
+turns out to bite real files, the right response is a `--force`-style opt-in on
+the *caller*, not a relaxation here.
+
+**For.** The permissiveness bought nothing. An entry whose size we cannot trust
+is an entry whose contents we cannot trust either — we would be extracting bytes
+into a file while knowing the archive is internally inconsistent. And the strict
+version is what makes the bomb case cheap: the refusal costs one comparison and
+happens before the allocation, rather than costing the allocation and happening
+after.
+
+**Rejected alternative: a limit parameter only** (what was asked for). It puts
+the burden on every caller to know a good bound, and callers do not — the
+archive is the only party that knows how big its contents are. A parameter is
+still offered (`extract_entry_limited`) for callers who genuinely have a tighter
+bound, but it narrows the cap rather than being the cap.
+
+**Rejected alternative: cap at a fixed `MAX_ENTRY_SIZE` only.** 64 MiB still
+remains as a backstop for an entry that declares something absurd, but as the
+*primary* defence it is far too loose: a bomb that declares 1 KB and delivers
+64 MiB would sail through, and it is the declared size that makes that
+detectable.
+
+### The related call: entry names stay bytes
+
+`ZipEntry.name` is a `Vec<u8>`, not the kernel's `PathBuf`. `no_std` forced the
+question, but the answer is one I would want anyway: a member name out of an
+untrusted archive **is not yet a path**. It becomes one only after being
+confined under a destination directory — `../../etc/passwd` is a legal ZIP
+member name, and Zip Slip is the bug that comes from forgetting it. Keeping the
+type distinct makes the confinement step something a caller has to perform
+rather than something they can inherit by accident. Callers who genuinely want a
+path write `Path::new(&entry.name)`, which is free: the kernel's `Path` is a
+`[u8]` newtype.
+
+**Cost:** three adaptation sites in `kernel/src/fs/archive.rs` and five in
+`kernel/src/kshell.rs`, all one-liners.
+
+**Where it bites.** `ziparchive/src/lib.rs` (`extract_entry`,
+`extract_entry_limited`); `kernel/src/fs/zip.rs` (now a shim, keeping the boot
+self-test per `compress.rs`'s precedent); `kernel/src/fs/archive.rs`;
+`kernel/src/kshell.rs` (`zip`/`unzip`). Verified by 13 host tests in the crate
+and the coarse boot battery.
+
+---
+
+## 616. A statistics module that has no counter of its own projects from the real one — and its unreachable mutators are deleted, not kept
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** `/proc/irqstat` is the file you read to see how many times each
+hardware interrupt has fired. It had its own private table of those numbers,
+which nothing in the kernel ever wrote to — so it reported either invented
+figures or zeros, on a machine taking thousands of interrupts a second. The
+choice was between wiring the interrupt handler to write into that table, or
+throwing the table away and computing the file from the counter the kernel
+already keeps. The second was chosen, and — unusually — the now-unused functions
+were deleted rather than left in place as evidence of a gap.
+
+**Decision 1: project, do not add a second counter.**
+
+`idt::dispatch_vector` already bumps one relaxed atomic per interrupt at the one
+point every hardware vector passes through (§614). `fs::irqstat` now derives
+every number it prints from that array, on demand, and owns no state at all.
+
+The alternative — call `irqstat::record(cpu, irq)` from the interrupt path — is
+the obvious repair and is wrong twice over:
+
+* **It makes two counters of one event.** Two counters can disagree, and when
+  they do there is nothing to say which is right. One missed call site, one
+  early return, one new vector whose author does not know this module exists,
+  and `/proc/irqstat` and `counters` report different interrupt totals. A
+  projection cannot drift, because there is only ever one number.
+* **It costs a lock in an ISR.** This module kept its table behind a spin lock.
+  The existing count is one relaxed `fetch_add`; the alternative is a lock
+  acquisition on the interrupt path, which is the "long operation under
+  IRQs-disabled" anti-pattern in miniature.
+
+This is the third projection of this shape (`pagecache`, `netdev`), and the
+argument has been the same each time: where the subsystem already keeps the
+number for free, join the two halves at *read* time.
+
+**Decision 2: delete the unreachable mutators, against the standing rule.**
+
+`known-issues.md`'s `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` says
+plainly: do not fix an unreachable mutator by deleting it, because the function
+is usually right and the missing caller is the defect, and deleting it removes
+the evidence that a number is unfed. That rule is good and was followed for
+`pagecache` and `netdev`, whose `record_*` functions remain — reserved for a
+per-device source that could plausibly exist later.
+
+It was not followed here, because the premise does not hold. These functions
+were the wrong *shape*, not merely uncalled:
+
+| removed | why no caller could ever be right |
+|---|---|
+| `record(cpu, irq)` | presumes a per-CPU, per-line table; `VECTOR_COUNTS` is one flat global array, so the `cpu` argument has no source |
+| `record_latency` | nothing samples ISR latency anywhere in the kernel |
+| `mark_spurious(cpu, irq)` | per-line spurious counts have no source; the APIC spurious vector is a single global count |
+| `IrqLine::affinity_mask`, `CpuIrqState` | pure fabrication surface — the fields the fictional seed data used to fill |
+
+Keeping them would not have preserved evidence of an unfed number — the number
+is now fed, from the real counter. It would have preserved an *invitation to the
+wrong fix*, sitting one call away from an ISR, which is exactly decision 1's
+failure mode. The rule's purpose is to stop a gap being papered over; here
+deleting is what closes the gap, and keeping is what would leave it open.
+
+The `IrqType` enum went the same way, for the same reason.
+`Timer`/`Keyboard`/`Cascade`/`Serial`/`Disk`/`Network`/`Usb`/`Gpu` is a claim
+about which device sits behind an IOAPIC input. The kernel does not know that —
+it is a runtime property of ACPI routing and driver binding — so the enum could
+only ever have been populated by guessing. It is now
+`Timer`/`Device`/`Ipi`/`Spurious`/`Unassigned`, derived from the vector number,
+which the kernel *does* know because it assigned it.
+
+**What is still missing, and is reported as missing rather than as zero.**
+Per-CPU attribution and ISR latency have no source. The module emits neither,
+and `/proc/irqstat` carries the line
+`per_cpu: unavailable (interrupt counters are not per-CPU)` instead of a table
+of `cpu0: total=0` rows. A zero is not a blank — it is a claim that the machine
+measured zero, and "every AP is idle" is a far more misleading thing to publish
+than "we do not know". Making the counters per-CPU is a real option that would
+also cut cross-CPU cache-line contention, but it changes an interrupt hot path
+and belongs to its own change with its own benchmark.
+
+**The cost accepted.** `irq_lines()` and `totals()` each walk 256 array slots
+per call instead of reading a cached table. Both are called only from `/proc`
+reads and a hand-run shell command, never from an interrupt path, so this is
+free in every case that matters.
+
+**Where it bites.** `kernel/src/fs/irqstat.rs` (rewritten);
+`kernel/src/fs/procfs.rs` (`gen_irqstat`); `kernel/src/kshell.rs`
+(`cmd_irqstat` — the `register` subcommand is gone with the table it wrote to);
+`kernel/src/main.rs` (boot battery note). Verified by a 6-test boot self-test
+that asserts against *live* data — including that the timer vector's count is
+non-zero and is at least `apic::tick_count()` — which is the assertion a
+fixture-based test structurally cannot make, and the one that detects the
+projection having become disconnected from its counter.
+
+## 617. Where two instruments record the same event, the self-test asserts they agree — conditionally, so it never depends on hardware
+
+**Date:** 2026-08-26
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel keeps two separate records of "a device interrupt
+happened": `irqbalance` flips a per-IRQ *did this line fire* flag, and `idt`
+increments a per-vector counter. They are written one function call apart on
+the same code path, so they can never legitimately disagree — but nothing
+checked, so if one drifted from the other, nothing would notice. The
+self-test now asserts they agree about whatever fired. The decision was how
+to assert that without making the test depend on a device having happened to
+interrupt during boot, which would be flaky.
+
+**The problem with the obvious version.** The natural assertion is "at least
+one device IRQ has fired, and its vector was counted." That is flaky by
+construction: which IOAPIC lines have fired by the time a self-test runs is a
+property of the emulated hardware and of where in boot the test is sequenced,
+neither of which the module controls. On a headless automated boot nobody
+types, so the keyboard may never interrupt at all.
+
+Concretely, this is not hypothetical — the two interrupt self-tests in this
+kernel sit on opposite sides of the line:
+
+| Self-test | Runs at (serial line) | Device IRQs possible? |
+|---|---|---|
+| `fs::irqstat::self_test` | 39822 | **No** — first unmask is at 44698 |
+| `irqbalance::self_test`  | 44781 | Yes — saw IRQ 1, unmasked at 44698 |
+
+`irqstat`'s battery runs before `keyboard::init` unmasks IRQ 1, so it can only
+ever observe the timer. An unconditional "a device fired" assertion there
+could never pass; the same assertion in `irqbalance` would pass today and
+break the first time boot order changed.
+
+**The decision.** Assert *conditionally on what actually fired*: for every IRQ
+line marked active, require that its vector was counted. Nothing fired,
+nothing is claimed. The count itself stays a report.
+
+*What this buys:* the assertion tests a property of **this kernel** (two
+records of one event agree, and `vector_for_irq` names the slot the IOAPIC was
+actually programmed with) rather than a property of the hardware. It is
+immune to boot ordering, to CPU count, and to whether QEMU delivered anything.
+It also re-checks the `irq + 32` off-by-one that §616 describes against live
+traffic instead of against arithmetic — the arithmetic check (Test 8) and this
+one fail for different reasons.
+
+*What it costs — and this is a real cost:* a conditional assertion is vacuous
+when the condition is empty. If device interrupts ever stopped reaching this
+module entirely, Test 9 would assert nothing and still pass. That failure is
+not silent — the line prints `none have fired yet`, which is greppable and
+which the surrounding comment calls out — but it is a report, not a failure.
+The alternative (assert unconditionally) trades a rare vacuous pass for a
+regular false failure, which is worse: a test that cries wolf gets deleted.
+
+**Considered and rejected:** asserting this from `boot-test.sh` against the
+serial log instead, where the QEMU environment is controlled. That was the
+previously-recorded idea. It is worse for two reasons — it can only check what
+the kernel chose to print, and it puts the check in a different language and
+file from the invariant it protects, where a kernel-side refactor will not
+drag it along.
+
+**Fragility noted and guarded.** Test 4 in the same function calls
+`notify_irq(10)` directly and clears the flag afterward. That cleanup was
+tidiness; it is now load-bearing, because a leaked flag would fail Test 9 with
+a message blaming the ISR path for a fixture's mess. Both ends now say so, and
+the assertion message names the possibility explicitly.
+
+**Where it bites:** `kernel/src/irqbalance.rs` (Test 4's cleanup, Test 9).

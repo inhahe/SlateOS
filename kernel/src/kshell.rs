@@ -19543,6 +19543,107 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 96: the archive writer looked up each member's modification time \
+         and then stored no time at all, in the recursive arm as well as the plain one"
+    );
+    // `zip` stats every input it is given -- it has to, to tell a file from a
+    // directory -- and then wrote `dos_datetime: 0` for every member, which the
+    // format defines as "no modification time recorded". Every archive SlateOS
+    // produced therefore listed a blank Date column, and lane C's archive
+    // manager showed `-` for all of them
+    // (A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE).
+    //
+    // This rung asserts the encoding, not merely that *something* nonzero got
+    // stored: it recomputes the expected pair from what `Vfs::metadata` reports
+    // for the same file and demands equality. A test that only checked
+    // `!= 0` would pass against an encoder that packed the wrong field order,
+    // the wrong epoch, or the file's *size*, all of which are nonzero.
+    //
+    // Both arms are covered because they take different paths to the time. The
+    // top-level arm reads it from the `metadata` call next to the `lstat` that
+    // classified the argument; `zip_collect_files` makes its own call per entry,
+    // since `readdir` yields no timestamps. The recursive arm is the one that
+    // would silently keep storing zeros if only the first were wired, and it is
+    // also the arm that handles the great majority of members in a real archive.
+    {
+        use crate::fs::vfs::Vfs;
+        use crate::fs::zip;
+
+        let dir = "/tmp/kshell_ziptime_selftest";
+        let nested = "/tmp/kshell_ziptime_selftest/inner.txt";
+        let plain = "/tmp/kshell_ziptime_selftest_plain.txt";
+        let archive = "/tmp/kshell_ziptime_selftest.zip";
+
+        let _ = Vfs::remove(archive);
+        Vfs::write_file(plain, b"top-level member\n")?;
+        let _ = Vfs::mkdir(dir);
+        Vfs::write_file(nested, b"recursive member\n")?;
+
+        // The expectation comes from the filesystem, so this rung stays true
+        // across reboots and cannot be satisfied by a hardcoded date.
+        let plain_ns = Vfs::metadata(plain)?.modified_ns;
+        let nested_ns = Vfs::metadata(nested)?.modified_ns;
+
+        // The precondition the whole feature rests on: memfs must actually
+        // stamp what it creates. `metadata_now_ns` returns 0 until the RTC is
+        // up, and a 0 here would make every assertion below trivially true
+        // while the Date column stayed as empty as before the fix.
+        assert!(
+            plain_ns != 0 && nested_ns != 0,
+            "the filesystem must record a modification time, or there is none to store"
+        );
+
+        let expect_plain = zip_dos_time(plain_ns);
+        let expect_nested = zip_dos_time(nested_ns);
+        assert!(
+            expect_plain != 0 && expect_nested != 0,
+            "a wall-clock time from this decade is inside the 1980..=2107 DOS range"
+        );
+
+        let _ = capture_command(
+            "zip /tmp/kshell_ziptime_selftest.zip /tmp/kshell_ziptime_selftest_plain.txt \
+             -r /tmp/kshell_ziptime_selftest",
+        );
+        assert_eq!(last_exit(), 0, "`zip' with readable inputs succeeds");
+
+        let raw = Vfs::read_file(archive)?;
+        let members = zip::parse(&raw)?;
+
+        let mut saw_plain = false;
+        let mut saw_nested = false;
+        for member in &members {
+            if member.name.as_slice() == b"kshell_ziptime_selftest_plain.txt".as_slice() {
+                assert_eq!(
+                    member.dos_datetime, expect_plain,
+                    "the top-level member carries the time the filesystem reports for it"
+                );
+                saw_plain = true;
+            } else if member.name.as_slice() == b"kshell_ziptime_selftest/inner.txt".as_slice() {
+                assert_eq!(
+                    member.dos_datetime, expect_nested,
+                    "a member found by recursion carries its own time, not zero"
+                );
+                saw_nested = true;
+            }
+        }
+        assert!(
+            saw_plain,
+            "the named file must appear in the archive under its basename"
+        );
+        assert!(
+            saw_nested,
+            "the file below the directory must appear, or the recursive arm went untested"
+        );
+
+        // Tear the fixture down, so a later rung reading /tmp does not find
+        // files this one invented.
+        let _ = Vfs::remove(archive);
+        let _ = Vfs::remove(plain);
+        let _ = Vfs::remove(nested);
+        let _ = Vfs::rmdir(dir);
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -131302,17 +131403,52 @@ fn cmd_unrar(args: &str) {
 // zip — ZIP archive creation (uses fs::zip module)
 // ---------------------------------------------------------------------------
 
-/// Recursively collect all files under a directory, returning
-/// (relative_path, absolute_path) pairs.
+/// One member on its way into a ZIP: the name it will carry inside the
+/// archive, the file to read its contents from, and its modification time
+/// already encoded as an MS-DOS date/time pair.
+///
+/// A struct rather than the `(PathBuf, PathBuf)` tuple this used to be,
+/// because the two paths are not interchangeable and adding a third field to
+/// a tuple gives call sites `.0`/`.1`/`.2` with nothing to say which is which.
+struct ZipInput {
+    /// The member name stored in the archive, relative and `/`-separated. A
+    /// trailing `/` marks a directory.
+    name: PathBuf,
+    /// Where to read the contents from. Empty for a directory marker, which
+    /// has no contents to read.
+    source: PathBuf,
+    /// Modification time as `(dos_date << 16) | dos_time`, or `0` for "no
+    /// time recorded" — see [`zip_dos_time`].
+    dos_datetime: u32,
+}
+
+/// Encode a VFS modification timestamp as the MS-DOS date/time pair that ZIP
+/// stores, or `0` when there is no usable time.
+///
+/// The DOS pair is *local* time and the format has nowhere to record a zone,
+/// so this writes UTC into a slot every reader will interpret as local. That
+/// is not an oversight to be corrected here: the kernel has no user timezone
+/// to apply, and shifting by a guessed offset would turn a known-imprecise
+/// time into a confidently wrong one. Every OS that writes ZIPs has the same
+/// limitation.
+fn zip_dos_time(modified_ns: crate::fs::vfs::Timestamp) -> u32 {
+    // `modified_ns` is unsigned nanoseconds, so even `u64::MAX` divides down to
+    // ~1.8e10 seconds — far inside `i64`. `try_from` cannot fail here; it is
+    // used rather than a cast so that the claim is checked rather than assumed.
+    let secs = i64::try_from(modified_ns / 1_000_000_000).unwrap_or(0);
+    // A filesystem reporting no mtime (`0`) and an instant DOS cannot name are
+    // the same fact to a reader: no time recorded. Unix `0` is 1970, which is
+    // before the DOS epoch, so `dos_datetime_from_unix` already maps the
+    // sentinel to `0` and it needs no special case. Note it refuses rather
+    // than clamps: an unrepresentable time yields "none", never 1980-01-01.
+    tzrules::dos_datetime_from_unix(secs)
+}
+
+/// Recursively collect all files under a directory.
 ///
 /// Directories themselves are added as entries with trailing `/`
 /// (ZIP convention for directory markers).
-fn zip_collect_files(
-    base: &Path,
-    prefix: &Path,
-    files: &mut Vec<(PathBuf, PathBuf)>,
-    depth: usize,
-) {
+fn zip_collect_files(base: &Path, prefix: &Path, files: &mut Vec<ZipInput>, depth: usize) {
     use crate::fs::Vfs;
 
     if depth > 16 {
@@ -131332,15 +131468,31 @@ fn zip_collect_files(
         let abs_path = base.join(&entry.name);
         let rel_path = prefix.join(&entry.name);
 
+        // `readdir` results carry no timestamps and neither does `lstat`, which
+        // returns a directory entry — `metadata` is the only call that yields
+        // an mtime, so it costs one extra stat per member. A stat that fails is
+        // not fatal: the member still belongs in the archive, it just goes in
+        // reporting no time rather than a fabricated one, which is exactly what
+        // a filesystem that does not track mtimes produces anyway.
+        let dos_datetime = Vfs::metadata(&abs_path).map_or(0, |m| zip_dos_time(m.modified_ns));
+
         if entry.entry_type == crate::fs::vfs::EntryType::Directory {
             // A ZIP directory marker is the name with a trailing `/`, and an
             // empty source path is what marks it as "no file to read".
             let mut marker = rel_path.clone();
             marker.extend_bytes(b"/");
-            files.push((marker, PathBuf::new()));
+            files.push(ZipInput {
+                name: marker,
+                source: PathBuf::new(),
+                dos_datetime,
+            });
             zip_collect_files(&abs_path, &rel_path, files, depth.saturating_add(1));
         } else {
-            files.push((rel_path, abs_path));
+            files.push(ZipInput {
+                name: rel_path,
+                source: abs_path,
+                dos_datetime,
+            });
         }
     }
 }
@@ -131426,38 +131578,57 @@ fn cmd_zip(args: &str) {
 
     let archive_path = resolve_path(positional[0]);
 
-    // Collect all input files.
-    // (name_in_zip, abs_path); an empty abs_path marks a directory entry.
-    let mut input_files: Vec<(PathBuf, PathBuf)> = Vec::new();
+    // Collect all input files. An empty `source` marks a directory entry.
+    let mut input_files: Vec<ZipInput> = Vec::new();
 
     for &token in positional.iter().skip(1) {
         let abs = resolve_path(token);
 
-        match Vfs::lstat(&abs) {
-            Ok(meta) if meta.entry_type == crate::fs::vfs::EntryType::Directory => {
-                if recursive {
-                    // The member name is the argument's last component, so a
-                    // trailing separator must not be mistaken for the name.
-                    // `file_name` is `components().next_back()`, which already
-                    // ignores one.
-                    let dir_name = abs.file_name().unwrap_or(abs.as_path()).to_path_buf();
-                    let mut marker = dir_name.clone();
-                    marker.extend_bytes(b"/");
-                    input_files.push((marker, PathBuf::new()));
-                    zip_collect_files(&abs, &dir_name, &mut input_files, 0);
-                } else {
-                    shell_println!("zip: '{}' is a directory (use -r)", token);
-                }
-            }
-            Ok(_) => {
-                let name = abs.file_name().unwrap_or(abs.as_path()).to_path_buf();
-                input_files.push((name, abs));
-            }
+        // `lstat` classifies without following a symlink, which is what decides
+        // whether `-r` recurses — following one could walk out of the tree the
+        // user named, or into a cycle.
+        let listing = match Vfs::lstat(&abs) {
+            Ok(l) => l,
             Err(e) => {
                 shell_println!("zip: '{}': {:?}", token, e);
                 set_exit(1);
                 return;
             }
+        };
+
+        // A second call, because `lstat` yields a directory entry and only
+        // `metadata` carries timestamps. `metadata` *does* follow symlinks,
+        // which is right here rather than merely tolerable: the contents this
+        // member will hold come from `read_file`, which follows the link too,
+        // so the time recorded describes the same bytes that get stored. A
+        // failure leaves the member timeless rather than dropping it.
+        let dos_datetime = Vfs::metadata(&abs).map_or(0, |m| zip_dos_time(m.modified_ns));
+
+        if listing.entry_type == crate::fs::vfs::EntryType::Directory {
+            if recursive {
+                // The member name is the argument's last component, so a
+                // trailing separator must not be mistaken for the name.
+                // `file_name` is `components().next_back()`, which already
+                // ignores one.
+                let dir_name = abs.file_name().unwrap_or(abs.as_path()).to_path_buf();
+                let mut marker = dir_name.clone();
+                marker.extend_bytes(b"/");
+                input_files.push(ZipInput {
+                    name: marker,
+                    source: PathBuf::new(),
+                    dos_datetime,
+                });
+                zip_collect_files(&abs, &dir_name, &mut input_files, 0);
+            } else {
+                shell_println!("zip: '{}' is a directory (use -r)", token);
+            }
+        } else {
+            let name = abs.file_name().unwrap_or(abs.as_path()).to_path_buf();
+            input_files.push(ZipInput {
+                name,
+                source: abs,
+                dos_datetime,
+            });
         }
     }
 
@@ -131472,37 +131643,41 @@ fn cmd_zip(args: &str) {
     let mut total_in: u64 = 0;
     let mut errors: usize = 0;
 
-    for (name, abs_path) in &input_files {
-        if abs_path.is_empty() {
+    for input in &input_files {
+        if input.source.is_empty() {
             // Directory marker.
             entries.push(zip::ZipWriteEntry {
-                name: name.clone().into_vec(),
+                name: input.name.clone().into_vec(),
                 data: Vec::new(),
                 store_only: true,
-                dos_datetime: 0,
+                dos_datetime: input.dos_datetime,
             });
             continue;
         }
 
-        let raw_data = match Vfs::read_file(abs_path) {
+        let raw_data = match Vfs::read_file(&input.source) {
             Ok(d) => d,
             Err(e) => {
-                shell_println!("  zip: read '{}': {:?}", abs_path.display(), e);
+                shell_println!("  zip: read '{}': {:?}", input.source.display(), e);
                 errors = errors.saturating_add(1);
                 set_exit(1);
                 continue;
             }
         };
 
-        shell_println!("  adding: {} ({} bytes)", name.display(), raw_data.len());
+        shell_println!(
+            "  adding: {} ({} bytes)",
+            input.name.display(),
+            raw_data.len()
+        );
 
         total_in = total_in.wrapping_add(raw_data.len() as u64);
 
         entries.push(zip::ZipWriteEntry {
-            name: name.clone().into_vec(),
+            name: input.name.clone().into_vec(),
             data: raw_data,
             store_only,
-            dos_datetime: 0,
+            dos_datetime: input.dos_datetime,
         });
     }
 

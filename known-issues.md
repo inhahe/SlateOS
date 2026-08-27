@@ -90048,37 +90048,61 @@ What remains is one rung further out and is **lane A's**, not lane C's: the
 callers still pass `0` even where they are holding a real mtime. Split out as
 `A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` below, because it is
 a different defect from this one — this entry was about the writer *fabricating*
-a time it never had, which is fixed; that one is about the writer *discarding*
-a time it does have. Until it is done, archives SlateOS writes still carry no
-time, and still say so.
+a time it never had, which is fixed; that one is about the writer failing to
+*look up* a time that was available for the asking.
+
+**Update 2026-08-27:** that split-out entry is now fixed for the `zip` shell
+command, so archives written by `zip` carry real dates. `archive create` still
+writes none, tracked as `A-CREATEENTRY-HAS-NO-MTIME-SO-EVERY-ARCHIVE-FORMAT-LOSES-IT`.
 
 ---
 
 ## `A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` (lane A, 2026-08-27)
 
-**Status:** OPEN.
+**Status: FIXED 2026-08-27 for `kshell`** (steps 1 and 2 below); the
+`archive.rs` half is **split out** as its own entry,
+`A-CREATEENTRY-HAS-NO-MTIME-SO-EVERY-ARCHIVE-FORMAT-LOSES-IT`, because it is a
+different change to a different struct shared with the tar/cpio/ar writers.
+
+`tzrules::dos_datetime_from_unix` landed in `37c04848e`; the `kshell` wiring and
+its boot self-test rung 96 follow. Boot test PASS with rung 96 green, which is
+what proves it: the rung recomputes the expected DOS pair from what
+`Vfs::metadata` reports for the same file and demands the archive match, in the
+recursive arm as well as the plain one.
 
 **In short:** SlateOS can now record, for each file it puts into a ZIP archive,
 when that file was last changed — the slot in the file format exists and the
 writer fills it in. But the two places in the kernel that actually create
-archives still pass "not recorded", even though one of them has already looked
-up the real time and is throwing it away. So a `zip` command run on the shell
-produces an archive whose Date column is empty, and it does not have to be.
+archives still passed "not recorded", so a `zip` command run on the shell
+produced an archive whose Date column is empty, and it did not have to be.
 
 **Where it lives.**
 
 | Site | Has an mtime? | Passes |
 |---|---|---|
-| `kernel/src/kshell.rs` (`zip` command, ~line 131500) | **yes** — calls `Vfs::lstat`, whose `FileMeta::modified_ns` is a real wall-clock time | `dos_datetime: 0` |
+| `kernel/src/kshell.rs` (`zip` command, ~line 131500) | can get one for the cost of a second stat | `dos_datetime: 0` |
 | `kernel/src/fs/archive.rs` `create_zip` (~line 696) | no — `CreateEntry` has no time field at all | `dos_datetime: 0` |
 
-The two are not the same problem. `kshell` is discarding a value it holds:
-`Vfs::lstat(&abs)` is called for every top-level argument, and the `Ok(meta)`
-arm looks only at `meta.entry_type`. `archive.rs` genuinely has nothing to pass
-— `CreateEntry` is `{ name, data, kind }` — so fixing it means widening that
-struct, which the tar and cpio writers alongside it would also want to honour.
+The two are not the same problem. `kshell` already stats every input, so the
+time is one call away. `archive.rs` genuinely has nothing to pass — `CreateEntry`
+is `{ name, data, kind }` — so fixing it means widening that struct, which the
+tar and cpio writers alongside it would also want to honour.
 
-**Why it is not already fixed.** The missing piece is an *encoder*: something
+**Correction, 2026-08-27, found while fixing this.** The sentence originally
+here — that `kshell` "is discarding a value it holds", because `Vfs::lstat(&abs)`
+returns a `FileMeta` whose `modified_ns` the `Ok(meta)` arm ignores — was
+**wrong**, and so was the title's "THEY ALREADY HAVE". `Vfs::lstat` returns a
+`DirEntry` (`vfs.rs:3458`), which is `{ name, entry_type, size }` and carries no
+timestamps at all; the only call that yields an mtime is `Vfs::metadata`
+(`vfs.rs:2996`), which nothing on this path made. The defect is real and the fix
+below is unchanged in substance, but it costs an extra stat per member rather
+than being free. Recorded rather than silently edited because the mistake is
+instructive: the entry was written from a grep for `lstat` plus an assumption
+about what it returns, and a reader who trusted step 2 verbatim would have
+written `meta.modified_ns` and hit `E0609`. It did — see the compile error in
+the fixing session.
+
+**Why it was not already fixed.** The missing piece was an *encoder*: something
 that turns nanoseconds-since-the-Unix-epoch into the packed MS-DOS date/time
 pair the format wants. That needs a calendar, and the decision recorded in
 design-decisions.md §621 is that `ziparchive` must not own one — it is `no_std`
@@ -90097,24 +90121,117 @@ depends on (`kernel/Cargo.toml:26`).
    `A-ZIPARCHIVE-CREATE-STAMPED-EVERY-MEMBER-1980-01-01` was about. Seconds are
    stored halved, so an odd second must round consistently; round *down*, so a
    recorded time is never later than the real one.
-2. In `kshell.rs`, keep the `FileMeta` from the `lstat` that already happens,
-   carry `modified_ns` alongside the path in `input_files`, and convert at the
-   `ZipWriteEntry` construction. Note the recursive arm: `zip_collect_files`
-   does not currently stat what it collects, so it needs the same treatment or
-   it will silently keep passing `0` for everything under `-r`.
+   **Done** — `37c04848e`, with seven tests including both range edges, a leap
+   day, odd-second rounding, and a walk over every representable day.
+2. In `kshell.rs`, carry the mtime alongside the path in `input_files` and
+   convert at the `ZipWriteEntry` construction. Note the recursive arm:
+   `zip_collect_files` does not currently stat what it collects, so it needs the
+   same treatment or it will silently keep passing `0` for everything under
+   `-r`.
+
+   **Done**, with three deviations from the plan as written, all forced by the
+   correction above:
+
+   - The `(PathBuf, PathBuf)` tuple became a `ZipInput { name, source,
+     dos_datetime }` struct. A third element would have made every call site
+     read `.0`/`.1`/`.2` over two paths that are not interchangeable.
+   - Both arms call `Vfs::metadata` explicitly, since `lstat` has no mtime to
+     carry. In `cmd_zip` that is a second call next to the `lstat`, which is
+     still needed to classify *without* following a symlink — `metadata` does
+     follow, and recursing into a symlinked directory could leave the tree the
+     user named or loop.
+   - That `metadata` follows symlinks is right rather than merely tolerable
+     here: the member's bytes come from `read_file`, which follows the link
+     too, so the recorded time describes the same bytes that get stored.
+
+   A stat that fails leaves the member timeless rather than dropping it —
+   the same outcome as a filesystem that does not track mtimes.
 3. Decide separately whether `CreateEntry` grows a `modified_ns`; that is a
-   wider change touching tar/cpio/ar and is worth its own task.
+   wider change touching tar/cpio/ar and is worth its own task. **Split out**
+   as `A-CREATEENTRY-HAS-NO-MTIME-SO-EVERY-ARCHIVE-FORMAT-LOSES-IT`.
 
 **Note on timezone.** DOS timestamps are *local* time with no zone recorded.
 The kernel has no user timezone, so a kernel-side encoder will be writing UTC
 into a slot that readers interpret as local. That is a real, known inaccuracy
 of the format rather than of this fix, and every OS writing ZIPs has it; it is
 worth a comment at the conversion site so the next reader does not "fix" it.
+Done — `zip_dos_time`'s doc comment says so, and says why shifting by a guessed
+offset would turn a known-imprecise time into a confidently wrong one.
 
 **How it was found.** Not by looking for it. While adding
 `ZipWriteEntry::dos_datetime` for lane C, the mechanical step of putting
 `dos_datetime: 0` at each construction site meant reading each one — and
-`kshell.rs` turned out to have an `lstat` result in scope three lines up.
+`kshell.rs` turned out to be stat-ing every input already.
+
+---
+
+## `A-CREATEENTRY-HAS-NO-MTIME-SO-EVERY-ARCHIVE-FORMAT-LOSES-IT` (lane A, 2026-08-27)
+
+**Status:** OPEN. Split out of
+`A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` above, whose `kshell`
+half is fixed. This is the other half, and it is a different change to a
+different struct.
+
+**In short:** the `archive create` command can write four archive formats — zip,
+tar, cpio and ar. None of them records when any file was last changed, because
+the struct the command hands to all four (`CreateEntry`) has no field for a
+time. For tar, cpio and ar this is worse than merely missing: those formats have
+no way to say "unknown", so the zero being written **is** a date, and it reads
+as **1970-01-01 00:00:00**. Every file in every tar SlateOS writes claims to
+have been last modified at the dawn of the Unix epoch.
+
+**Why zip and tar differ, and why that matters.** In ZIP, `0` is not a date at
+all — it is day 0 of month 0, which no calendar can name, so a reader shows a
+blank and is telling the truth (design-decisions.md §618, §621). In tar, cpio
+and ar the field is a plain count of seconds since 1970, so `0` is exactly as
+valid as any other value and a reader has no way to tell a missing time from a
+genuine one. The same literal zero is honest in one format and a fabrication in
+the other three. This is the same trap as
+`A-ZIPARCHIVE-CREATE-STAMPED-EVERY-MEMBER-1980-01-01`, arrived at from the
+opposite direction: there a made-up date was written where none was known; here
+a "none" sentinel is written into a format that reads it as a date.
+
+**Where it lives.** `kernel/src/fs/archive.rs`:
+
+| Site | Field | Currently | What a reader sees |
+|---|---|---|---|
+| `CreateEntry` (~115) | — | `{ name, data, kind }`, no time at all | — |
+| `create_zip` (~692) | `dos_datetime` | `0` | blank — honest |
+| `create_tar` (~712) | `mtime` | `0` | `1970-01-01` — a fabrication |
+| `create_cpio` (~735) | `mtime` | `0` | `1970-01-01` — a fabrication |
+| `create_ar` (~760) | `mtime` | `0` | `1970-01-01` — a fabrication |
+
+Note that three of the four writers **already have the field** and are passing a
+literal zero into it. Only the source of the value is missing, which is why this
+is one change to `CreateEntry` and not four changes to four writers.
+
+**What the proper fix looks like.**
+
+1. Add `pub modified_ns: Timestamp` to `CreateEntry`, using the same `0 = not
+   available` convention as `FileMeta::modified_ns`, and update the construction
+   sites (there are several in `archive.rs`'s own self-tests).
+2. `create_zip` converts with `tzrules::dos_datetime_from_unix(modified_ns /
+   1_000_000_000)`, which already maps 0 → 0 because 1970 is before the DOS
+   epoch. That helper exists as of `37c04848e`; this is now the second caller,
+   which is the condition §621 said should trigger sharing it.
+3. tar/cpio/ar take `modified_ns / 1_000_000_000` directly — no calendar needed,
+   the field is already Unix seconds. **They still need a decision for the
+   unknown case**, since 0 means 1970 to them and there is no sentinel. The
+   likely answer is that the caller must supply a real time and the writers stop
+   pretending otherwise; a survey of what GNU tar does with an unknown mtime
+   would settle it.
+4. Whoever calls `archive::create` must then actually stat its inputs. Check
+   each caller — a widened struct that everyone fills with `0` fixes nothing.
+
+**Why it is worth doing separately.** Widening `CreateEntry` touches every
+construction site and all four writers, and step 3 contains a real open question
+about formats with no "unknown" encoding. Bundling that into the `kshell` fix
+would have held a working, tested, boot-verified change behind an unresolved
+design question.
+
+**How it was found.** By fixing the entry above: `archive.rs` was the second of
+the two sites listed there, and reading it showed that the missing time was not
+merely unwired but had nowhere to live.
 
 ---
 
@@ -90944,3 +91061,69 @@ now, because there is no second state to contrast it with.
 `TaskScheduler::runner`, `TaskScheduler::run_due_tasks`,
 `TaskScheduler::set_runner`, `TaskScheduler::can_run`, and
 `SchedulerUI::refresh_clock`, which is the only caller.
+
+---
+
+## `B-CAL-REPRODUCES-TWO-UPSTREAM-ALIGNMENT-BUGS` (lane B, 2026-08-27) — **open**, deliberate divergence
+
+**In short:** our `cal` is a byte-for-byte transcription of util-linux 2.39.3
+(§622). Two of util-linux's own output bugs are therefore in our output too, on
+purpose. Both are in *vertical* mode — the layout you get with `-v`, where the
+weekdays run down the left edge and the dates run across instead of the usual
+way round. Recorded here so that a future reader who notices the misalignment
+fixes it *upstream first*, rather than "fixing" it here and silently breaking
+the golden tests that exist to prove we match.
+
+| # | How to see it | What it looks like | Upstream cause |
+|---|---|---|---|
+| 1 | `cal -v 2 2024` | The line of month names is three bytes wider than every line under it, so the block has a ragged right edge. | The header writer appends its inter-month gutter after the *last* month as well as between months. |
+| 2 | `cal -v -w 8 2026` on a terminal (so today's week number is highlighted) | The one highlighted week number sits a column left of all the others. | The highlighted number is printed at field width `day_width - narrow` instead of `day_width` — the escape sequence is counted against the field. |
+
+**Why not fix them.** The whole value of the transcription is that "matches
+upstream" is a mechanical fact: the goldens in the test module are *generated*
+by running the real `/usr/local/bin/cal`, not typed out. The moment we start
+correcting upstream where we think it is wrong, that oracle becomes an opinion
+and every future disagreement needs a human ruling. If these are fixed in a
+later util-linux, we regenerate the goldens and take the fix.
+
+**How to tell these from our own mistakes.** Rebuild the reference
+(`/var/tmp/ul/util-linux-2.39.3` in WSL, binary at `/usr/local/bin/cal`) and run
+the same command. If the reference misaligns identically, it is this entry. If
+it does not, it is our bug and should be fixed.
+
+---
+
+## `B-CAL-IS-NARROWER-THAN-UPSTREAM-IN-FIVE-PLACES` (lane B, 2026-08-27) — **open**, deliberate limitation
+
+**In short:** five things util-linux's `cal` does that ours does not, each
+because the thing it depends on does not exist in this build yet. None of them
+change a printed calendar in the default case; the first is the one most likely
+to be noticed, because it means `cal -3` will not widen itself to fill a very
+wide terminal window unless the shell has told it how wide the window is.
+
+| # | Upstream | Ours | What it depends on |
+|---|---|---|---|
+| 1 | Asks the terminal its width with the `TIOCGWINSZ` ioctl (a request meaning "how big is this window?"), falling back to the `COLUMNS` environment variable. | `COLUMNS` only, defaulting to 80. | `TIOCGWINSZ` is not wired up in this build's terminal layer. Until it is, `cal --columns=auto` in a 200-column window still lays out for 80 unless `COLUMNS` is exported. |
+| 2 | Reads `_NL_TIME_WEEK_1STDAY` from the locale to decide whether the week starts on Sunday or Monday. | Sunday — which is what the `C` locale answers — unless `-m`/`--monday`, `-s`/`--sunday` or `--iso` says otherwise. | A locale database with the `LC_TIME` week fields. We have no locale support beyond `C`. |
+| 3 | Has configurable `workday` and `weekend` colour sequences alongside the highlight. | Omitted entirely. | Nothing — upstream's built-in values for both are the *empty string*, so shipping them would add two settings that produce no bytes. Add them if and when a colour scheme file exists to set them. |
+| 4 | `--version` prints `cal from util-linux 2.39.3`. | `cal from SlateOS coreutils 0.1.0`. | Deliberate: the sentence shape is upstream's (so a script that greps `from` still works), but claiming to be util-linux would be a lie, and a version-sniffing script would then expect the two vertical bugs above to be fixable by upgrading. |
+| 5 | Diagnostics name `argv[0]` as typed, so `/usr/local/bin/cal -Z` says `/usr/local/bin/cal: invalid option`. | Always `cal:`. | House rule across this coreutils — the program name is a constant, not an attacker-controlled string. |
+
+**Two more differences that are implementation, not behaviour**, noted so a
+reader diffing against `cal.c` does not go looking for a bug: we render the
+whole calendar into one `String` and write it once (upstream writes as it goes,
+so a full disk truncates it mid-month; ours either writes all of it or reports
+the failure), and operands echoed back in an error message go through
+`quote::escape_unprintable`, so a month name made of arbitrary bytes cannot
+smuggle escape sequences into the terminal.
+
+**The proper fix for #1**, which is the only one with a user-visible cost:
+`TIOCGWINSZ` needs to reach `coreutils::stdfd` as a `winsize(fd) -> Option<(u16,
+u16)>`. Several other commands want it (`ls` column layout, `less`, `ps`
+truncation), so it belongs there and not in `cal`. Once it exists, `cal.rs`'s
+`terminal_width()` is the single call site to change.
+
+**Where it lives:** `userspace/coreutils/src/bin/cal.rs` — "Where this
+deliberately diverges" in the module doc (7 items, of which these are 5), and
+the tests `a_wide_terminal_never_widens_the_row_but_columns_auto_does` and
+`a_pipe_removes_both_of_the_things_a_colour_would_have_marked`.

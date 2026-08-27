@@ -82606,6 +82606,11 @@ working at all.
 > becomes the same lockout as `set` the moment that enforcement is written,
 > which is the argument for refusing the word now rather than when it bites. See
 > `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.
+>
+> **That moment arrived 2026-08-27**, when the enforcement landed. The `files`
+> arm's guessed `0` is an active lockout now, and the refusals recorded here are
+> what stop it — a case of the burn-down paying off before the fault it
+> anticipated could bite anyone.
 
 > **Burn-down log.** 2026-08-26 (twentieth batch): `cmd_shmem` (7) cleared —
 > 522 → 515 across 223 → 222 functions. Pinned by `kshell::self_test` rung 88.
@@ -85553,7 +85558,7 @@ build rather than shipping.
 
 ---
 
-## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **open**, tech debt
+## `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED` (lane A, 2026-08-26) — **FIXED 2026-08-27**, tech debt
 
 **In short:** `diskquota` can limit two things: how many *bytes* a user may
 store, and how many *files*. The byte half works. The file half is a prop —
@@ -85595,6 +85600,47 @@ moment the enforcement above is written. The `set` arm's guessed `0` is a live
 lockout today, because the byte path is real.
 
 **Not a regression.** True since `set_file_limits` was written.
+
+**Fixed 2026-08-27 (lane A), as the entry above prescribed.** The file half is
+now compared everywhere the byte half is:
+
+- `QuotaEntry::status()` returns the **worse** of the byte and file verdicts.
+  The two dimensions are scored by a shared `dimension_status` helper and
+  combined by severity rank, with `SoftExceeded` and `GracePeriod` ranking
+  equal and ties going to the byte verdict — so the file half can only ever
+  make a status *worse*, never merely different at the same tier. Every
+  existing `status()` reader (kshell's `get` and `list` arms) is therefore
+  unchanged unless the file count is genuinely the worse of the two.
+- `check_quota` takes a `files: u64` parameter and tests both limits in one
+  call under one lock acquisition. A separate `check_file_quota` was rejected:
+  two functions invite a caller to check one and forget the other, which is
+  exactly how this gap arose.
+- It returns `QuotaVerdict` (`Allowed` / `Warned{bytes,files}` /
+  `Denied{bytes,files}`) rather than `bool`. A denial that cannot say which
+  limit fired sends the user hunting for a large file to delete when their
+  problem is two hundred small ones, and the caller cannot reconstruct the
+  reason afterwards without a racy re-read.
+- The grace clock is driven by the **union** of the two soft limits
+  (`QuotaEntry::over_soft`). There is one `grace_start_ns` per entry, so
+  keying it on bytes alone would have cleared a grace period the file count
+  still justified the moment the user deleted a large file.
+- kshell's `check` arm gains an optional `[files]` argument, given the §607
+  treatment `update` already gives `[file_delta]`: absent means the honest
+  default (a write extending an existing file creates none), present-but-
+  unreadable is refused. Its output now names the limit that fired.
+- `diskquota::self_test()` grew from 8 cases to 14. The six new ones use an
+  entry with `u64::MAX` byte limits so every verdict is attributable to the
+  file half alone: allowed under both, warned over soft, **denied over hard**
+  (the regression the change exists for), grace started by the file count with
+  zero bytes used, `status()` reporting `HardExceeded` while the byte half is
+  `Ok`, and the grace clock clearing when the count drops back under.
+
+**The latent/active note above is now spent.** `cmd_diskquota`'s `files` arm
+guessed `0` is no longer latent — a hard file limit silently guessed as zero
+would deny the user's very next file. The `required_num` refusals in that arm
+already prevent it; they were written before the enforcement they now guard,
+and were verified against it rather than assumed. The comment at the site has
+been updated to say so.
 
 ---
 
@@ -85704,7 +85750,7 @@ be opened.
 
 ---
 
-## `A-IPCNS-RECORDS-ONLY-ACCUMULATE-AND-NOTHING-EVER-RELEASES` (lane A, 2026-08-26) — **open**
+## `A-IPCNS-RECORDS-ONLY-ACCUMULATE-AND-NOTHING-EVER-RELEASES` (lane A, 2026-08-26) — **FIXED 2026-08-27**
 
 **In short:** the IPC-namespace accounting can be told that a shared-memory
 segment, a semaphore set or a message queue was *created*, but there is no way
@@ -85750,7 +85796,7 @@ totals survive even that.
 ```
 ipcns init
 ipcns create demo          → id N
-ipcns shm N 1024
+ipcns shm N 1024           (`ipcns shm add N 1024` since the fix below)
 ipcns stats                → SHM: 1
 ipcns destroy N
 ipcns list                 → demo is gone
@@ -85773,6 +85819,43 @@ the caller to remember the size it passed in, and a caller that misremembers
 silently corrupts the total in the other direction. That is the same class of
 mistake this subsystem's parsing has just been cleaned of, so it should not be
 reintroduced in the API.
+
+### Fixed, 2026-08-27 — with two deliberate departures from the recipe above
+
+`release_shm(ns_id, bytes)`, `release_sem(ns_id, count)` and
+`release_msg(ns_id, bytes)` exist; `destroy_ns` subtracts the departing
+namespace's rows from the global totals; the shell reaches all three as
+`ipcns shm|sem|msg del <ns_id> <amount>`, with the matching `add` verb now
+required rather than implied. Reasoning is `design-decisions.md` §628. The
+reproduction above ends `SHM: 0` now, and `ipcns::self_test` grew from 8 cases
+to 10 to pin it. Two places where the fix is *not* what this entry prescribed,
+recorded because the entry is what a future reader will find first:
+
+- **Not `saturating_sub` — a release that does not fit is refused whole.**
+  This entry argued "an underflowing counter is a worse lie than a stale one",
+  which is true and is not the choice on offer. Each row has *two* counters —
+  a count of segments and the sum of their sizes — so clamping does not produce
+  a stale number, it produces an impossible one: release "8192 bytes" from a
+  namespace holding one 4096-byte segment and `saturating_sub` reports success
+  and leaves `shm=0(0 B)`, or, clamping only one column, `shm=0(4096 B)` — no
+  segments and 4096 bytes inside them. Both are plausible enough to survive
+  unexamined forever, because the call returned `Ok`. So both halves are
+  validated before either is written, and a release that would underflow either
+  returns `InvalidArgument` having changed nothing. `self_test` case 7 reads the
+  columns back after a refused release specifically so that a `saturating_sub`
+  implementation fails there rather than passing.
+
+- **`record_*` still takes a size, not an object identity.** The entry's worry
+  is real — the caller must remember what it recorded — but the fix would be to
+  make this module a registry of individual objects, which is a different
+  module: it would need an id space, a per-object table, and a lifetime story
+  for ids, to serve a subsystem that today exists only to *report* aggregates to
+  `/proc/ipcns`. The refusal above is what makes the current shape safe rather
+  than merely convenient: a caller that misremembers gets an error, not a
+  corrupted total, in every case except passing the size of a *different*
+  segment in the same namespace. If a real IPC implementation ever drives this
+  instead of the shell, revisit it then — that caller will have object
+  identities already, and will not have to invent them.
 
 **Not a regression.** True since the subsystem was written; the `record_*`
 functions have never had counterparts.
@@ -85987,11 +86070,12 @@ cannot be wrong and one that cannot be right, and the limit the user was asked
 for at `create` time influences neither.
 
 **Relation to `A-DISKQUOTA-FILE-COUNT-LIMITS-ARE-STORED-AND-NEVER-COMPARED`.**
-That entry is the stricter version of this one — there the limit is stored and
+That entry is the stricter version of this one — there the limit was stored and
 never compared at all. Here the comparison happens; only its output is
 unreachable. The two share a cause worth naming: a limit operand is easy to
 accept and store, and the work of *acting* on it is a separate change that the
-shape of the code does not force anyone to make.
+shape of the code does not force anyone to make. (That entry was fixed
+2026-08-27; the shared cause it names is unaffected.)
 
 **Proper fix.** Add `high_events` to the `list` line and to `stats()`, so the
 comparison that already happens is visible. `swap_pages` needs the opposite
@@ -91605,3 +91689,71 @@ bug** — recorded here so it is not filed as one later. It changes if commit
 accounting is ever enforced, at which point both keys become sourceable
 together. Lane B's reply is
 `requests/b-a-comm-row-agreed-and-here-is-the-measurement-that-settles-it.md`.
+
+## `A-A-STRAY-D-VISUAL-TURNED-EVERY-WORD-SPLIT-OF-OUR-OWN-PATH-INTO-A-SILENT-SUCCESS` (lane A, 2026-08-27) -- **FIXED 2026-08-27**, environment
+
+**In short:** our checkout lives under `D:\visual studio projects\`, a path with
+spaces in it. Any command that splits that path on whitespace -- an unquoted
+variable, `xargs` without `-d '\n'` -- turns one filename into three words, the
+first of which is `D:\visual`. That should fail loudly. It did not, because a
+stray 88-byte *file* named `D:\visual` was sitting in the root of the drive, so
+the split path **opened successfully** and the tool read 88 bytes of nonsense
+instead of reporting a missing file. The file is now renamed, so the failure is
+loud again.
+
+**How the landmine got there.** On 2026-07-19 a throwaway probe of `osh` (lane
+C's shell port) interpolated a scratch directory into the shell string it was
+testing, without quoting it:
+
+```sh
+D="D:/visual studio projects/os/target/tmptest"
+"$OSH" -c "echo one > $D/e.txt 2>&1; echo two >> $D/e.txt; ..."
+```
+
+The shell under test word-split `$D`, so the redirect target became `D:/visual`
+and the remainder became extra `echo` arguments. `D:\visual` was created with
+exactly the two lines it still held today:
+
+```
+one studio projects/os/target/tmptest/e.txt
+two studio projects/os/target/tmptest/e.txt
+```
+
+Birth and last write were both 2026-07-19 08:35 -- it was written once and never
+again. Everything after that was a *read*.
+
+**What it cost, twice.**
+
+- **2026-08-08** the operator reported "something keeps trying to write to and
+  launch `visual`, hundreds of times". Lane C found and killed a genuine
+  14-hour fork storm (two orphaned `bash /tmp/g4.sh` job-control probes) and
+  correctly identified the quoting bug as its own -- but treated the file as
+  spent and left it on disk. That is why the report came back.
+- **2026-08-22/23** a sweep in an unrelated project ran
+  `xargs -a /tmp/allftsl.txt -n 400 ./harness_intree.exe` over 2595
+  space-containing absolute paths. Without `-d '\n'`, `xargs` split every one,
+  the harness opened `D:\visual` on every batch, and both parsers under test
+  reported *identical* parse errors quoting
+  `projects/os/target/tmptest/e.txt`. Identical failures across two independent
+  parsers read as a grammar bug; it was an invocation bug wearing a costume,
+  and it invalidated the whole 2595-file sweep. Re-running with `-d '\n'` gave
+  `MATCH 2595/2595`.
+
+Both times the diagnosis cost real operator attention, and both times the actual
+defect was one missing pair of quotes.
+
+**Fixed.** `D:\visual` renamed to
+`D:\visual.stray-from-unquoted-path-2026-07-19.txt` -- content preserved, but
+nothing resolves `D:\visual` any more, so the next word-split fails at `open`
+with a name that says what went wrong. Verified: no other extensionless
+single-word file at `D:\` root shadows a prefix of our path, and nothing on the
+machine had written the file since July.
+
+**Standing rules this leaves behind.** Neither is enforced by a gate; both are
+cheap and both were violated by an expert-looking one-liner.
+
+1. **Quote every interpolation of a repo path**, including inside the command
+   string handed to a shell *under test* -- that string is parsed a second time,
+   so one level of quoting is not enough.
+2. **`xargs` over our paths needs `-d '\n'` or `-0`.** Bare `xargs` splits on
+   whitespace, and our paths all contain it.

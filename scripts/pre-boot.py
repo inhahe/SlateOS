@@ -44,11 +44,29 @@ with a broken checker exits in seconds rather than two minutes -- which is the
 right trade in the case that actually happens, where the cheap gate caught the
 same edit clippy would have.
 
+One gate here is NOT in boot-test.sh
+------------------------------------
+`cargo check --workspace --target x86_64-unknown-linux-gnu`, which compiles the
+`#[cfg(unix)]` arms this Windows host otherwise never checks, runs here and only
+here.  It is a superset rather than a mirror, so the promise above narrows: a
+clean run still means the boot test's gate phase will pass, but a *failing* run
+may be reporting something the boot test would not have minded.  The line that
+says so tells you which.
+
+It is deliberately not in `boot-test.sh`.  That script is the shared blocking
+gate -- it also takes the cross-worktree lock that serialises QEMU -- and a
+workspace-wide compile check there would let any lane's red tree stop any other
+lane's boot test, the exact coupling `boot-test.sh` already refuses for clippy.
+Here, a failure outside lane A's own files is reported loudly and does not
+block, because lane A is forbidden from writing the fix.  The full argument is
+above `_LANE_BY_PREFIX` below.
+
 Usage
 -----
-    python scripts/pre-boot.py            # everything
-    python scripts/pre-boot.py --no-fmt   # skip the rustfmt pass
-    python scripts/pre-boot.py --quick    # skip clippy (the ~113 second pole)
+    python scripts/pre-boot.py                  # everything
+    python scripts/pre-boot.py --no-fmt         # skip the rustfmt pass
+    python scripts/pre-boot.py --quick          # skip clippy (the ~113 second pole)
+    python scripts/pre-boot.py --no-unix-check  # skip the cfg(unix) compile gate
 
 Exit codes: 0 all clear; 1 a gate failed (its output is printed); 2 could not
 run (bad cwd, missing cargo, or a boot test appears to be in progress).
@@ -93,6 +111,98 @@ def _boot_lock_held():
     return (ROOT / "build" / ".boot-lock").is_dir()
 
 
+# The unix-target check, and why its failures are triaged by lane
+# --------------------------------------------------------------------------
+# `#[cfg(unix)]` code is NEVER COMPILED on this Windows dev host: rustc discards
+# the tokens rather than checking them, so such an arm can contain plain name
+# and syntax errors while `cargo build`, `cargo clippy` and `cargo test` all
+# come back green.  SlateOS is a unix -- `toolchain/x86_64-slateos.json` sets
+# `"target-family": ["unix"]` -- so the arm that is never checked is the arm
+# that ships.  Lane B lost `userspace/backup` to this for three months
+# (2026-06-03 to 2026-08-26) and asked all lanes to add one command; lane C
+# adopted it the same day.  See
+# requests/b-a-a-windows-only-check-never-compiles-your-cfg-unix-arms.md and
+# known-issues.md B-DEV-HOST-IS-WINDOWS-SO-CFG-UNIX-CODE-IS-NEVER-COMPILED.
+#
+# `x86_64-unknown-linux-gnu` rather than `x86_64-slateos`: the latter needs
+# `-Zbuild-std` and is far slower, and for `cfg(unix)` coverage the two are
+# equivalent.
+#
+# WHY THIS IS TRIAGED BY LANE INSTEAD OF SIMPLY FAILING.  The command is
+# necessarily `--workspace` -- a `cfg(unix)` arm anywhere is the point -- but a
+# workspace-wide gate hands every lane a veto over every other lane's ability
+# to make progress.  `boot-test.sh` rejects exactly this coupling for clippy
+# ("a workspace-wide clippy would let a red crate in lane B's or lane C's tree
+# block lane A's boot test, which is the exact coupling the lane split exists
+# to prevent").  The asymmetry is that lane A *cannot* fix another lane's crate
+# -- writing outside its globs is forbidden -- so a hard failure would convert
+# "another lane broke their tree" into "lane A cannot commit", with the only
+# remedy being to file a request and wait.
+#
+# So: a failure in lane A's own files fails this gate, and a failure anywhere
+# else is reported loudly, names the owning lane, and does not block.  That
+# keeps the detection lane B asked for -- the breakage is found, and found on
+# the most frequently run gate in the tree -- without giving it a veto it was
+# never meant to carry.
+#
+# Note that lane A owns *no* `cfg(unix)` code today: zero occurrences in
+# `kernel/**` and `bench/**` (checked 2026-08-26; all 515 in the tree are in
+# lane B's `userspace/**` or lane C's `apps/**`, `gui/**`, `randrange/**`).
+# That makes this gate almost entirely a service to the other two lanes right
+# now, which is a reason to keep it non-blocking, not a reason to omit it: the
+# kernel is bare-metal today and need not stay that way, and `bench/**` is
+# ordinary std code that could grow a unix arm at any time.
+UNIX_CHECK_TARGET = "x86_64-unknown-linux-gnu"
+
+# Path prefix -> owning lane.  Mirrors scripts/which-lane.py, which mirrors the
+# ownership table in roadmap.md; that table is the authority.  Anything not
+# listed (the root leaf crates -- crc32, deflate, sha2, ziparchive, ...) is
+# lane A's by default, which is the safe direction: it makes this gate stricter
+# on us rather than looser.
+_LANE_BY_PREFIX = (
+    ("posix/", "B"),
+    ("userspace/", "B"),
+    ("services/", "B"),
+    ("init/", "B"),
+    ("gui/", "C"),
+    ("apps/", "C"),
+    ("pkg/", "C"),
+    ("net/", "C"),
+    ("netipc/", "C"),
+    ("netproto/", "C"),
+    ("netring/", "C"),
+    ("randrange/", "C"),
+)
+
+
+def _lane_of(path: str) -> str:
+    """Which lane owns `path`?  'A' for lane A's tree and for anything
+    unattributed -- see _LANE_BY_PREFIX on why unknown defaults to us."""
+    p = path.replace("\\", "/").lstrip("./")
+    for prefix, lane in _LANE_BY_PREFIX:
+        if p.startswith(prefix):
+            return lane
+    return "A"
+
+
+def _unix_check_paths(out: str):
+    """Source paths named by rustc `--> path:line:col` lines in `out`.
+
+    Parsed from the diagnostic locations rather than from `could not compile
+    \\`name\\`` because a path attributes to a lane directly, whereas a package
+    name would need a `cargo metadata` round-trip to locate.
+    """
+    seen = []
+    for line in out.splitlines():
+        s = line.strip()
+        if not s.startswith("--> "):
+            continue
+        path = s[4:].split(":", 1)[0].strip()
+        if path and path not in seen:
+            seen.append(path)
+    return seen
+
+
 def _report(label, rc, out, elapsed):
     """Print one result line; on failure print the captured output too."""
     if rc == 0:
@@ -117,6 +227,11 @@ def main() -> int:
         "--force",
         action="store_true",
         help="run even if the boot lock looks held",
+    )
+    ap.add_argument(
+        "--no-unix-check",
+        action="store_true",
+        help=f"skip the cargo check --workspace --target {UNIX_CHECK_TARGET} gate",
     )
     args = ap.parse_args()
 
@@ -169,6 +284,61 @@ def main() -> int:
         rc, out = _run([sys.executable, str(scan), flag])
         if not _report(f"{name} {flag}  ({why})", rc, out, time.monotonic() - t):
             failures += 1
+
+    # The one gate here that boot-test.sh does NOT run -- see the long note
+    # above _LANE_BY_PREFIX.  Deliberately not added to boot-test.sh: that is
+    # the shared blocking gate that also serialises QEMU across all three
+    # worktrees, and a workspace-wide compile check there would let one lane's
+    # red tree stop another lane's boot test.  Here a non-lane-A failure is
+    # advisory, so the detection happens without the veto.
+    if not args.no_unix_check:
+        t = time.monotonic()
+        rc, out = _run(
+            [cargo, "check", "--workspace", "--target", UNIX_CHECK_TARGET]
+        )
+        elapsed = time.monotonic() - t
+        label = f"cargo check --workspace --target {UNIX_CHECK_TARGET}  (cfg(unix) arms)"
+        if rc == 0:
+            print(f"ok    {label}  ({elapsed:.0f}s)")
+        else:
+            paths = _unix_check_paths(out)
+            ours = [p for p in paths if _lane_of(p) == "A"]
+            theirs = [p for p in paths if _lane_of(p) != "A"]
+
+            if ours:
+                # Lane A's own cfg(unix) code does not compile for a unix
+                # target.  That is ours to fix and it blocks.
+                failures += 1
+                print(f"FAIL  {label}  ({elapsed:.0f}s)")
+            else:
+                print(f"WARN  {label}  ({elapsed:.0f}s)  -- not lane A's; not blocking")
+            print()
+            errors = [
+                ln
+                for ln in out.splitlines()
+                if ln.startswith("error") or " error[" in ln
+            ]
+            for line in errors[:20]:
+                print(f"    {line}")
+            if len(errors) > 20:
+                print(f"    ... and {len(errors) - 20} more")
+            print()
+            for p in ours[:10]:
+                print(f"    lane A: {p}")
+            for p in theirs[:10]:
+                print(f"    lane {_lane_of(p)}: {p}")
+            print()
+            if ours:
+                print("[pre-boot] a cfg(unix) arm in lane A's tree does not compile.")
+                print("           rustc discards those tokens on this Windows host, so")
+                print("           nothing else in the gate would ever have told you.")
+            else:
+                print("[pre-boot] the breakage is in another lane's tree, so this does")
+                print("           NOT block you -- lane A must not write there.  File")
+                print("           requests/a-<lane>-<slug>.md naming the paths above.")
+                print("           (This is the failure mode lane B asked us all to")
+                print("           watch for; finding it here is the gate working.)")
+            print()
 
     # Clippy last: it is the long pole (~113s after a source edit, ~5s warm --
     # boot-test.sh's own measured table), and there is no point paying it while

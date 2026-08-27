@@ -5,6 +5,10 @@ edition = "2024"
 description = "SlateOS Calculator — graphical scientific calculator"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window itself: `app::launch` is what turns the renderer below into a
+# program the desktop can open, rather than a keypad that lays itself out once
+# and returns from `main`.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

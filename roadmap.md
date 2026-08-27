@@ -6376,13 +6376,17 @@ _Depends on: Phase 3 (GUI toolkit and desktop shell). Goal: usable daily-driver 
   - [x] Keyboard translation (special keys → escape sequences, Ctrl+letter)
   - [x] Selection support, visual bell, configurable tab stops, color scheme
   - [x] PTY integration with child process (pty.rs: PtyPair, ByteChannel, cooked/raw mode, line discipline, PtyManager, ChildProcess)
-- [x] Calculator:
+- [x] Calculator (apps/calculator: **windowed** — app::launch, Frame hit boxes, Layout from the live window size):
   - [x] Standard and Scientific modes
   - [x] Recursive descent expression parser (proper operator precedence)
   - [x] Trig functions (sin/cos/tan/asin/acos/atan) with degree/radian toggle
   - [x] ln, log10, sqrt, pow, factorial, pi, e, abs, floor, ceil, mod
   - [x] History (last 20), memory operations (MS/MR/M+/M-/MC)
   - [x] Keyboard shortcuts, error handling (div by zero, overflow, domain errors)
+  - [x] Every key is identified by the label it draws, which is the same string the click dispatcher matches on, so a key's picture, its clickable area and its meaning are one fact rather than three that can drift apart
+  - [x] History panel scrolls by the wheel, and a row can be clicked to bring its answer back into the expression (a row recording an error is not recallable)
+  - [x] Memory readout in the status strip, so MR is not a guess; unclosed-paren count in the display
+  - [x] 94 tests, including no-two-keys-overlap, a window too small to draw in offering nothing to press, and a NaN window size laid out rather than propagated
 - [x] Settings/configuration UI (comprehensive, centralized):
   - [x] 8 category sidebar (System/Network/Personalization/Apps/Accounts/Privacy/Accessibility/Update)
   - [x] Display page: resolution, refresh rate, scaling, night light

@@ -92094,3 +92094,56 @@ you the test you named is blind — and the reason is usually one of these two
 shapes. Both entries above were found exactly that way: the harness reported
 `WRONG TESTS`, and the honest reading was not "my expectation was off" but "the
 test I wrote for this cannot see this."
+
+### Lesson 53: an `else` is a two-way choice, and some choices have three ways (lane C, 2026-08-27)
+
+**In short:** `if a > b { up } else { down }` reads as "go up, or else go
+down". It is really "go up, or else go down *including when there is nowhere
+to go*". Whenever the two branches are directions and the quantity can also be
+**equal**, the `else` silently annexes the third case and runs it backwards.
+The word search shipped exactly this and it made most of the game unplayable.
+
+**The fault.** `apps/wordsearch`'s `walk(start, end, i)` answers "where is the
+`i`th cell of the line from `start` to `end`, along one axis". It was:
+
+```rust
+fn walk(start: usize, end: usize, i: usize) -> usize {
+    if end > start { start.saturating_add(i) } else { start.saturating_sub(i) }
+}
+```
+
+A horizontal line does not move on the row axis at all: for the line from
+`(2, 3)` to `(2, 7)`, `walk` is called with `start == end == 2`. `2 > 2` is
+false, so it took the "count down" branch and produced rows `2, 1, 0, 0, 0`.
+Every horizontal mark below row 0 previewed as a staircase running off the top
+of the board, and — because the marked cells then matched no placed word — **no
+word lying along any row or column but the first could be marked at all.** The
+same for vertical words and the column axis. The `saturating_sub` is what made
+it look plausible rather than crash: the wrong answer was clamped into a legal
+coordinate.
+
+**Why review does not catch it.** The bug is invisible at the call site
+(`walk(sr, er, i)` is unremarkable) and invisible in the function (both
+branches are correct code). It lives in the *boundary between* them, which is
+the one place an `if/else` does not name. The `else` keyword is an
+unconditional catch-all wearing the appearance of a complement.
+
+**What catches it.** Two things, and the first is cheaper:
+
+1. **Write the comparison as a `match` on `Ordering`.** `match end.cmp(&start)`
+   forces all three arms to be spelled out; the compiler will not let the
+   `Equal` case be forgotten. (Clippy's `comparison_chain` pushes the same way
+   from the other side, by objecting to `if a > b … else if a < b …` chains.)
+   In this file that turned a bug into three lines that state their intent.
+2. **A test that exercises the still axis specifically.** The old suite tested
+   `cells_between` on diagonals, where both axes move and the fault is absent,
+   and on a horizontal line *on row 0*, where `saturating_sub` clamps to the
+   right answer by luck. The general rule: when a function takes a pair of
+   values that can be `<`, `==` or `>`, the `==` case is a case, and a suite
+   that omits it has tested two thirds of a three-way branch.
+
+**Where else to look.** Any `if x > y { .. } else { .. }` whose branches are
+*opposite actions* rather than *a thing and its absence*: direction of travel,
+sort comparators, scroll/clamp arithmetic, "grow or shrink". Where the branches
+are "do it" / "don't", `else` is genuinely the complement and this lesson does
+not apply.

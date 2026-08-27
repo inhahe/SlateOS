@@ -200,7 +200,16 @@ fn first_interrupt_vector() -> usize {
 /// on Linux behaves the same way.
 #[must_use]
 pub fn irq_lines() -> Vec<IrqLine> {
-    let counts = crate::idt::vector_counts();
+    lines_from(&crate::idt::vector_counts())
+}
+
+/// [`irq_lines`] over a snapshot the caller already holds.
+///
+/// Split out for the reason given on [`totals_from`]: the two views are only
+/// required to agree when they are derived from the *same* reading, and a
+/// caller that compares them has to be able to say so.
+#[must_use]
+pub fn lines_from(counts: &[u64]) -> Vec<IrqLine> {
     let mut out = Vec::new();
     for (vector, &count) in counts.iter().enumerate() {
         if vector < first_interrupt_vector() || count == 0 {
@@ -229,7 +238,28 @@ pub fn irq_lines() -> Vec<IrqLine> {
 /// Aggregate totals, computed from the same snapshot in one pass.
 #[must_use]
 pub fn totals() -> IrqTotals {
-    let counts = crate::idt::vector_counts();
+    totals_from(&crate::idt::vector_counts())
+}
+
+/// [`totals`] over a snapshot the caller already holds.
+///
+/// # Why this exists
+///
+/// `totals()` and `irq_lines()` each take their own [`crate::idt::vector_counts`]
+/// snapshot, which is right for a `/proc` reader — each answers a question at
+/// the moment it is asked — but wrong for any caller that compares them. The
+/// counters are live and monotonic, so two snapshots taken microseconds apart
+/// legitimately differ by the timer interrupts that landed in between, and an
+/// equality check across them is a race, not a test.
+///
+/// That is not hypothetical: `self_test` rung 6 asserted
+/// `line_sum == t.hardware` across two snapshots and panicked the kernel with
+/// `left: 39171, right: 39170` — exactly one tick. The rung was correct about
+/// the property; it simply had no way to hold both views still. These two
+/// functions are pure over the slice, so a caller that wants the comparison to
+/// mean something takes one snapshot and derives both from it.
+#[must_use]
+pub fn totals_from(counts: &[u64]) -> IrqTotals {
     let mut t = IrqTotals::default();
     for (vector, &count) in counts.iter().enumerate() {
         if vector < first_interrupt_vector() || count == 0 {
@@ -299,10 +329,24 @@ pub fn self_test() {
     );
     crate::serial_println!("  [2/6] timer is not IRQ 0: OK");
 
+    // ONE snapshot feeds rungs 3, 4 and 6.  Every property they assert is a
+    // property of a single reading of the counters, and the counters do not
+    // hold still: the timer fires on every CPU throughout this function, so
+    // two `vector_counts()` calls a few microseconds apart differ by however
+    // many ticks landed between them.  Rung 6 learned this the hard way — it
+    // compared a fresh `irq_lines()` against a `totals()` taken three rungs
+    // earlier and panicked the kernel with `left: 39171, right: 39170`, one
+    // tick.  Not a wrong assertion; an assertion with nothing to hold still.
+    //
+    // Rung 5 is deliberately NOT part of this snapshot: it cross-checks
+    // against a *different* counter (`apic::TICK_COUNT`), so it has to read
+    // both live and is ordered to make the drift harmless. See its comment.
+    let counts = crate::idt::vector_counts();
+
     // 3: The buckets partition the total exactly.  A vector assignment added
     //    later that falls into no category would break this rather than vanish
     //    from the aggregates.
-    let t = totals();
+    let t = totals_from(&counts);
     let summed = t
         .timer
         .saturating_add(t.device)
@@ -346,9 +390,11 @@ pub fn self_test() {
     );
     crate::serial_println!("  [5/6] tick cross-check ({counted_timer} >= {ticks}): OK");
 
-    // 6: The line table agrees with the aggregate it was computed from, and the
-    //    timer's row carries the timer's count under the timer's name.
-    let lines = irq_lines();
+    // 6: The line table agrees with the aggregate it was computed from — and it
+    //    now literally IS the aggregate it was computed from, because both are
+    //    derived from `counts` above.  Equality is the right relation here and
+    //    can be asserted honestly only because neither side can move.
+    let lines = lines_from(&counts);
     assert_eq!(lines.len(), t.lines);
     let line_sum: u64 = lines.iter().map(|l| l.count).sum();
     assert_eq!(line_sum, t.hardware);

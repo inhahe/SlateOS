@@ -81717,8 +81717,57 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **438 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **432 of 800 remain**
 
+> **Burn-down log.** 2026-08-26 (thirty-third batch): `cmd_prochistory` (6)
+> cleared — 438 → 432 across 209 → 208 functions. Not pinned by a rung.
+>
+> **In short:** `prochistory` is the shell's record of which processes ran and
+> how they ended. Six of its operands were guessed when they could not be read,
+> and the guesses were **0, 0, 0, 0, 10, 10**.
+>
+> * **The exit code is the site that matters, and it is a new shape.** Every
+>   earlier row in this log is about a guess that names the *wrong thing* — the
+>   wrong cpu, the wrong pid, the wrong limit. `prochistory exit 412 l` (a
+>   lowercase L for a 1) recorded exit code **0**, and 0 is not merely a wrong
+>   code: it is the code that means *the process succeeded*. The row then prints
+>   next to whatever `reason` was given, so `Crashed` and `exit=0` can appear on
+>   the same line of the crash listing — a record that contradicts itself, in a
+>   table whose entire purpose is reading after the fact.
+> * **Batch 29's rule again, by a different mechanism.** `record_exit` normally
+>   answers `NotFound` for a pid it cannot find, so a guessed pid 0 on the
+>   `exit` arm was at least visible. But `record_start` **cannot fail** — it
+>   pushes unconditionally — so a guessed pid 0 there *manufactures the running
+>   entry* that makes the next guess succeed. Again the forging path and the
+>   checking path are one function apart in the same file.
+> * **A guessed pid strands a row rather than mislabelling it.** `record_exit`
+>   closes the newest entry matching `pid == p && end_ns.is_none()`. An entry
+>   filed under a pid nobody will type again can therefore *never* be closed: it
+>   shows as RUNNING in `running` and `recent` for the rest of the boot, and
+>   only `MAX_HISTORY` eviction removes it. The guess is not correctable by
+>   repeating the command correctly.
+> * **A word-vocabulary guess that moved a counter.** Not a `.parse()` site, so
+>   the gate never counted it, but it was the same defect: `parse_exit_reason`
+>   fell back to `ExitReason::Unknown` for any word outside its vocabulary.
+>   `Unknown` is a reason a caller can legitimately *mean*, so "did not know"
+>   and "typed something unreadable" became the same record. Worse,
+>   `record_exit` increments `total_crashed` only for `Crashed` and
+>   `OutOfMemory` — so a mistyped `crahsed` filed the entry as Unknown *and*
+>   left the crash count one short, after which `stats` and the `crashed`
+>   listing disagree with nothing to say which is right. It now returns
+>   `Option`, `unknown` is in the vocabulary explicitly, and the refusal names
+>   the whole vocabulary.
+> * **The two `[n]` limits are the quiet ones.** `recent 5O` printed ten rows,
+>   indistinguishable from a successful `recent 10`: nothing in a truncated
+>   listing tells you whether the number you typed is the number that truncated
+>   it. `crashed [n]` is the same and worse to get wrong, being the listing an
+>   operator reads to decide whether a crash happened at all.
+>
+> The help arm moves to `end_help_arm` (so `prochistory help` exits 0 while an
+> unknown subcommand exits 1) and gained a line naming the `reason` vocabulary.
+> The `cmd_prochistory` ledger line is deleted rather than zeroed, since a count
+> larger than the number of real sites is itself reported by the gate.
+>
 > **Burn-down log.** 2026-08-26: `cmd_irqstat` (1) cleared — 439 → 438 across
 > 210 → 209 functions. **Not a burn-down; a side effect, and worth recording as
 > one.** The `irqstat register <num> <name>` subcommand guessed `0` for an
@@ -89734,7 +89783,32 @@ dev host that is Windows.
 
 ## `A-PROC-NUMASTAT-REPORTS-ZERO-NODES-ON-A-MACHINE-THAT-HAS-SOME` (lane A, 2026-08-26)
 
-**Status:** OPEN
+**Status:** ✅ FIXED 2026-08-26 (`266ba1ea5`) — `numastat::adopt_topology()` now
+runs from `main.rs` right after `numa::init()`, exactly as the proper fix below
+described, and `/proc/numastat` reports the real node count, per-node memory and
+per-node CPU sets. Verified in QEMU: `[numastat] adopted 1 of 1 node(s) from
+numa topology (UMA fallback), 1 CPU(s) placed`.
+
+Three things worth carrying forward:
+
+* **The distances are still empty, on purpose**, for the reason argued below —
+  `numa::distance()` is a uniform-remote-cost model, not the SLIT, and
+  `NodeDistance` cannot say which it is holding. The refusal is documented at
+  all three places a future reader might try to "fix" it. design-decisions.md
+  §618 records the general form of this argument.
+* **A second self-test, `self_test_adoption()`, was added** rather than putting
+  assertions in `adopt_topology()` — production code, where the project's
+  `unwrap_used`/`panic` lints and `scan-unwrap.py` both apply. Its sharpest rung
+  is the CPU tally: node counts and memory sizes are copied straight across and
+  would have to be corrupted to differ, but the CPU sets are *derived*, so a CPU
+  whose node reports itself absent vanishes silently while every other number
+  stays right.
+* **The CPU count is threaded from `adopt_topology` into `self_test_adoption`
+  rather than re-read.** See the follow-up entry
+  `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW` — a fresh
+  `smp::cpu_count()` in the check would have been a genuine boot-failing flake.
+
+**Original report.**
 
 **In short:** NUMA is the fact that on a big machine, memory is divided into
 banks ("nodes") and each CPU is nearer to some banks than others. The kernel
@@ -89796,3 +89870,215 @@ removed, to check whether removing the seed had left them reporting nothing
 where something real was available. For `signalq` the emptiness was correct —
 no signals had been sent. For `numastat` it was not: the data existed one
 module away.
+
+---
+
+## `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW` (lane A, 2026-08-26)
+
+**Status:** OPEN — low severity, correct-at-boot, documented in code.
+
+**In short:** `/proc/numastat` lists, for each memory node, which CPUs are
+attached to it. That list is built once during boot and never rebuilt. If a CPU
+starts up after that moment, it is missing from the file for the rest of the
+boot — not reported as belonging elsewhere, just absent. Today that is a very
+narrow window and nothing user-visible depends on it, but the file's CPU lists
+are strictly a boot-time snapshot rather than a live view, and it is worth
+knowing that before anything is built on top of them.
+
+**Where.** `kernel/src/fs/numastat.rs` → `adopt_topology()`, called once from
+`kernel/src/main.rs` just after `numa::init()`. The per-node sets come from
+querying `numa::cpu_node(cpu)` for `cpu` in `0..smp::cpu_count()`, and nothing
+re-runs on a CPU coming online.
+
+**The window is real, not theoretical.** `smp::init()` brings up application
+processors and then waits for them on a *bounded* spin — `kernel/src/smp.rs`
+around line 1231, ~50 ms — before returning. An AP bumps `NUM_CPUS_ONLINE`
+itself (`smp.rs:958`) once its GDT/IDT/APIC are up. So an AP that misses that
+window increments the online count *after* `smp::init()` has returned, which is
+after adoption has already enumerated the CPU set.
+
+**What this cost, and what it nearly cost.** The verification self-test
+`self_test_adoption()` asserts that the CPUs adoption enumerated each land on
+exactly one node — a sharp check, because the sets are derived rather than
+copied. It originally re-read `smp::cpu_count()` for the expected value. That
+would have panicked the boot whenever a late AP appeared between the two calls:
+a self-test failure on a table that is entirely correct and merely one CPU out
+of date. Fixed by having `adopt_topology()` return the count it enumerated and
+`self_test_adoption(cpus_at_adoption)` take it — so the assertion tests the
+*derivation* (the actual bug class it exists for) and not the *recency* (a
+property one-shot adoption never promised). This is the same flake shape
+rejected earlier in the irqbalance cross-check.
+
+**The proper fix**, when something needs it: re-run adoption on a CPU
+online/offline event. `kernel/src/cpu_hotplug.rs` is the natural hook.
+`register_node` returns `AlreadyExists` on a second call for the same id, so
+refreshing an existing node's CPU set needs either an update path on the node
+row or a clear-and-re-adopt — the former is preferable, since the latter would
+briefly empty `/proc/numastat` for a concurrent reader.
+
+**What happens if it is never fixed.** Nothing degrades over time and nothing is
+blocked. The file is correct on every boot observed so far (QEMU brings up its
+CPUs well inside the window). The risk is only that a future feature reads those
+CPU lists as authoritative and inherits the staleness silently.
+
+---
+
+## `A-ZIPARCHIVE-CREATE-STAMPED-EVERY-MEMBER-1980-01-01` (lane A, 2026-08-26)
+
+**Status:** ✅ FIXED 2026-08-26 for the fabrication; the underlying capability
+gap is OPEN and is lane C's call — see "What is still missing" below.
+
+**In short:** Every file inside every ZIP archive SlateOS created claimed it was
+last modified on 1 January 1980. We never looked at the real time; the writer
+just put a fixed value in the slot, and the value it chose happens to be a
+valid-looking date. Anyone opening one of our archives would see that date and
+have no way to tell it was made up. It now writes a value that is not a date at
+all, so the file honestly says "no time recorded".
+
+**The bug.** `ziparchive/src/lib.rs`, `create()`, in both the local file header
+and the central directory header:
+
+```rust
+write_u16(&mut archive, 0);      // mod time
+write_u16(&mut archive, 0x0021); // mod date (1980-01-01)
+```
+
+`0x0021` reads like a placeholder and is not one. DOS packs the date as
+`(year - 1980) << 9 | month << 5 | day`, so `0x0021` is year bits `0` (= 1980),
+month `1`, day `1` — the format's *minimum* representable date, which is
+indistinguishable from a file genuinely last written that day.
+
+**How it was found.** Not by looking for it. Lane C asked for the modification
+time to be exposed on the *read* side, for the archive manager's Date column
+(`requests/c-a-ziparchive-drops-the-one-field-a-date-column-needs.md`). Tracing
+what that field would actually contain for archives we write turned up the
+writer. Had only the requested read field landed, lane C's Date column would
+have gone from honestly blank — their `format_date` renders `0` as `-`, with a
+doc comment noting that unknown and epoch are different facts — to showing
+`1980-01-01` on every row of every archive SlateOS produced. The request would
+have been met and the result would have been worse than before.
+
+**The fix.** Both halves now write `0`, the "not recorded" encoding: a zero DOS
+date is day 0 of month 0, not a representable date, so it cannot be mistaken for
+one. Reasoning in design-decisions.md §618. Three tests pin it:
+`created_archives_record_no_time_rather_than_1980` (names `0x0021` explicitly,
+so a revert is identified by the failure message),
+`local_and_central_headers_agree_on_the_absent_time` (a reader may trust either
+header; if they disagreed, the time shown would depend on which one a tool
+happened to read), and `a_recorded_time_is_read_back_from_the_central_directory`
+(patches a real pair into a fixture, since `create` now writes zero and could
+not otherwise exercise the decode path — which is the path every archive *not*
+written by us takes).
+
+**The accepted cost.** A third-party tool that converts the date eagerly may
+show garbage or refuse. Info-ZIP and `unzip -l` are fine; Python's `zipfile`
+yields `(1980, 0, 0, 0, 0, 0)` and only breaks if that is passed to
+`datetime()`. Taken deliberately over minting a timestamp: a tool that renders
+an absent date oddly is a visible problem, whereas a tool that renders a
+fabricated date cleanly is an invisible one.
+
+**What is still missing.** `create()` cannot record the *real* mtime, because
+`ZipWriteEntry` has no field to carry one — and this is not an unknown value:
+`kernel/src/fs/archive.rs` and `apps/archivemanager` both hold a real mtime for
+every file they add and drop it at the crate boundary. Adding
+`ZipWriteEntry::dos_datetime` would break every struct literal in lane C's tree
+(`apps/archivemanager/src/main.rs`, `apps/archivemanager/src/backend.rs`), so it
+is theirs to schedule rather than lane A's to impose. Filed as
+`requests/a-c-ziparchive-has-your-mtime-field-and-a-question-about-the-writer.md`;
+lane A would update its three call sites (`kernel/src/fs/zip.rs`,
+`kernel/src/fs/archive.rs`, `kernel/src/kshell.rs`) in the same merge. Until
+then archives SlateOS writes carry no time, and say so.
+
+---
+
+## `A-IRQSTAT-SELF-TEST-COMPARED-TWO-SNAPSHOTS-OF-A-COUNTER-THAT-NEVER-STOPS` (lane A, 2026-08-26)
+
+**Status: FIXED 2026-08-26** — `kernel/src/fs/irqstat.rs`. Reached `origin/main`
+in `8c860ade0`, so all three lanes were exposed to it between then and the fix.
+
+**In short:** `/proc/irqstat` counts interrupts. Its boot self-test checked that
+the per-vector table adds up to the totals line — a correct thing to check — but
+it read the table and the totals at two different moments, and interrupts keep
+arriving in between. One timer tick landing in that gap made the two disagree by
+exactly 1, the assertion failed, and **the kernel panicked and the boot test
+went red on a tree with nothing wrong with it.**
+
+**The failure, verbatim:**
+
+```
+  irqstat::self_test() — running tests...
+    [4/6] live timer count (39170): OK
+    [5/6] tick cross-check (39171 >= 39171): OK
+  !!! KERNEL PANIC !!!
+  panicked at kernel\src\fs\irqstat.rs:354:5:
+  assertion `left == right` failed
+    left: 39171
+   right: 39170
+```
+
+39171 − 39170 = one timer interrupt. Rung 3 had done `let t = totals();`; rung 6,
+three rungs and three serial lines later, did `let lines = irq_lines();` — and
+each of those calls takes its own `idt::vector_counts()` snapshot.
+
+**Why it was rare rather than constant.** The window is only the few
+microseconds those three rungs take; the timer fires about every 1 ms. So it
+lost the race roughly once in a few hundred boots — which is the worst possible
+frequency, because it is far too rare to be reproduced on demand and far too
+common to never be seen. It was hit on the first boot test after the module
+landed, and the tree it failed on was green.
+
+**The fix — remove the race, don't widen the tolerance.** `totals_from(&[u64])`
+and `lines_from(&[u64])` are now pure over a snapshot the caller supplies;
+`totals()` and `irq_lines()` are one-line wrappers that grab their own, which
+stays right for a `/proc` reader answering a question at the moment it is asked.
+The self-test takes **one** `vector_counts()` and derives both views from it, so
+rung 6 is no longer comparing two readings that agree only if nothing happened —
+it is comparing two derivations of the same reading, which is what the property
+was always about. Rungs 3 and 4 share the snapshot too.
+
+The alternative — relaxing `==` to `>=`, as rung 5 legitimately does — was
+rejected. Rung 5 compares two genuinely *different* counters (`apic::TICK_COUNT`
+is BSP-only, `dispatch_vector` counts every CPU) where a subset relation is the
+real property. Rung 6's property is equality; weakening it to an inequality
+would have kept the rung green while letting a line table that double-counted a
+vector pass.
+
+**The uncomfortable part, recorded because it is the lesson.** Rung 5's own
+comment reasons the race out correctly and in detail — *"Read the ticks FIRST: a
+tick landing between the two reads can only then make the count look larger,
+never smaller, so this cannot flake."* The same author, in the same function,
+one rung later, compared two live samples with `==`. Knowing that a counter
+moves is not the same as noticing every place you have assumed it did not. The
+structural fix is the one applied here: make it *impossible* to compare two
+snapshots by giving the comparison a signature that takes only one.
+
+Same shape as `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`,
+fixed hours earlier the same day: an assertion against a freshly-read value
+where the correct operand was the value the code had actually used.
+
+### C-ARCHIVEMANAGER-CANNOT-SEE-THE-ENCRYPTED-BIT — 2026-08-26 — LANE C, OPEN
+
+**In short:** The archive manager's Encrypted column says "no" for every member
+of every archive, including members that really are encrypted. It is not
+detecting anything — the value is a hardcoded `false`. A user who opens a
+password-protected ZIP is told, in a column that exists specifically to answer
+that question, that nothing in it is protected. Extraction of such a member
+then fails with a decompression error rather than a "this needs a password"
+message, because nothing upstream knew to ask.
+
+**Where:** `apps/archivemanager/src/backend.rs`, `parse_zip` — the
+`encrypted: false` line, with a comment saying as much.
+
+**Why it is like this:** ZIP records encryption in general-purpose bit 0 of the
+central-directory flags word. `ziparchive::ZipEntry` does not expose the flags
+word or any field derived from it, so the app has nothing to read. The `false`
+predates the app being able to read archives at all, when the column was part
+of a mock.
+
+**Proper fix:** a field on `ziparchive::ZipEntry` — either the raw `flags: u16`
+or a decoded `encrypted: bool` — and then `parse_zip` reads it instead of
+inventing one. That is lane A's crate, so it needs a request; the shape is
+exactly the one that got `dos_datetime` landed
+(`requests/c-a-ziparchive-drops-the-one-field-a-date-column-needs.md`). Worth
+doing together with a real "this member is encrypted" refusal in `extract`, so
+the column and the error message agree.

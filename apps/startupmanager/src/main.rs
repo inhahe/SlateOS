@@ -20,20 +20,18 @@
 //! StartupUI       -- guitk-based GUI with table, toolbar, details panel
 //! ```
 
-#![allow(dead_code)]
-// Widget-heavy GUI crate: render helpers take many positional
-// parameters (theme, geometry, hit-test state, etc.).
-#![allow(clippy::too_many_arguments)]
+use std::collections::BTreeMap;
+use std::process::ExitCode;
 
-#[allow(unused_imports)]
 use guitk::color::Color;
-#[allow(unused_imports)]
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-#[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
-
-use std::collections::BTreeMap;
+use guitk::wheel;
+use oswindow::app::{self, App, Response};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -82,6 +80,42 @@ const COL_STATUS_WIDTH: f32 = 90.0;
 const COL_IMPACT_WIDTH: f32 = 80.0;
 const COL_TYPE_WIDTH: f32 = 90.0;
 const COL_PATH_WIDTH: f32 = 260.0;
+
+/// One toolbar button per `ToolbarAction`, and one table column per
+/// `SortColumn`. Named so the layout's arrays are sized by the thing they
+/// describe rather than by a literal that drifts when a variant is added.
+const TOOLBAR_BUTTON_COUNT: usize = 5;
+const COLUMN_COUNT: usize = 6;
+
+/// Gap between adjacent buttons.
+const BUTTON_GAP: f32 = 8.0;
+/// Inset of the search field inside its strip, on all four sides.
+const SEARCH_FIELD_INSET: f32 = 4.0;
+/// Baseline-to-baseline distance in the details panel.
+const DETAIL_LINE_SPACING: f32 = 18.0;
+
+// Dialog geometry.
+const DIALOG_WIDTH: f32 = 440.0;
+const DIALOG_HEIGHT: f32 = 380.0;
+const CONFIRM_WIDTH: f32 = 360.0;
+const CONFIRM_HEIGHT: f32 = 160.0;
+/// Top of the first form field, measured from the top of the dialog box.
+const DIALOG_FIELD_TOP: f32 = 44.0;
+/// Distance between the tops of consecutive form fields.
+const FIELD_GAP: f32 = 42.0;
+/// Height of a field's caption, above its input box.
+const FIELD_LABEL_HEIGHT: f32 = 14.0;
+const FIELD_INPUT_HEIGHT: f32 = 24.0;
+
+// The type/impact cyclers on the row below the form fields, as offsets from
+// the dialog's left content edge.
+const SELECTOR_TYPE_VALUE_X: f32 = 80.0;
+const SELECTOR_IMPACT_LABEL_X: f32 = 200.0;
+const SELECTOR_IMPACT_VALUE_X: f32 = 280.0;
+const SELECTOR_WIDTH: f32 = 110.0;
+const SELECTOR_HEIGHT: f32 = 22.0;
+/// How far a cycler's click box reaches above its text baseline.
+const SELECTOR_PAD: f32 = 4.0;
 
 // ============================================================================
 // StartupType
@@ -593,17 +627,18 @@ impl StartupManager {
         };
         for entry in self.entries.values() {
             if entry.enabled {
-                s.enabled += 1;
+                s.enabled = s.enabled.saturating_add(1);
                 s.total_impact_weight = s.total_impact_weight.saturating_add(entry.impact.weight());
             } else {
-                s.disabled += 1;
+                s.disabled = s.disabled.saturating_add(1);
             }
-            match entry.startup_type {
-                StartupType::Login => s.login_count += 1,
-                StartupType::Service => s.service_count += 1,
-                StartupType::Scheduled => s.scheduled_count += 1,
-                StartupType::Driver => s.driver_count += 1,
-            }
+            let bucket = match entry.startup_type {
+                StartupType::Login => &mut s.login_count,
+                StartupType::Service => &mut s.service_count,
+                StartupType::Scheduled => &mut s.scheduled_count,
+                StartupType::Driver => &mut s.driver_count,
+            };
+            *bucket = bucket.saturating_add(1);
         }
         s
     }
@@ -819,7 +854,6 @@ impl StartupConfig {
                 if id >= max_id {
                     max_id = id;
                 }
-                continue;
             }
 
             // Unknown line types are silently skipped for forward compatibility.
@@ -1009,43 +1043,412 @@ impl AddEditDialog {
 
     /// Cycle the startup type forward.
     pub fn next_type(&mut self) {
-        let count = StartupType::all().len();
-        if count > 0 {
-            self.startup_type_index = (self.startup_type_index + 1) % count;
-        }
+        self.startup_type_index = self
+            .startup_type_index
+            .saturating_add(1)
+            .checked_rem(StartupType::all().len())
+            .unwrap_or(0);
     }
 
     /// Cycle the impact level forward.
     pub fn next_impact(&mut self) {
-        let count = StartupImpact::all().len();
-        if count > 0 {
-            self.impact_index = (self.impact_index + 1) % count;
+        self.impact_index = self
+            .impact_index
+            .saturating_add(1)
+            .checked_rem(StartupImpact::all().len())
+            .unwrap_or(0);
+    }
+
+    /// Number of text fields that can be focused.
+    pub const FIELD_COUNT: usize = 5;
+
+    /// The text fields in focus order, as `(caption, value)`.
+    ///
+    /// The renderer, the hit test and `focused_text_mut` all walk this one
+    /// list, so a sixth field cannot be drawn without also being typeable.
+    pub fn fields(&self) -> [(&'static str, &str); Self::FIELD_COUNT] {
+        [
+            ("Name", &self.name),
+            ("Path", &self.path),
+            ("Arguments", &self.args),
+            ("Publisher", &self.publisher),
+            ("Description", &self.description),
+        ]
+    }
+
+    /// The focused field's text, to type into.
+    pub fn focused_text_mut(&mut self) -> &mut String {
+        match self.focused_field {
+            1 => &mut self.path,
+            2 => &mut self.args,
+            3 => &mut self.publisher,
+            4 => &mut self.description,
+            // 0 -- and anything a stale index could hold. Name is the field the
+            // dialog opens on, so it is where a stray keystroke does least harm.
+            _ => &mut self.name,
         }
     }
 
     /// Number of text fields that can be focused.
     pub fn field_count(&self) -> usize {
-        5
+        Self::FIELD_COUNT
     }
 
     /// Move focus to the next field.
     pub fn focus_next(&mut self) {
-        self.focused_field = (self.focused_field + 1) % self.field_count();
+        self.focused_field = self
+            .focused_field
+            .saturating_add(1)
+            .checked_rem(Self::FIELD_COUNT)
+            .unwrap_or(0);
     }
 
     /// Move focus to the previous field.
     pub fn focus_prev(&mut self) {
-        if self.focused_field == 0 {
-            self.focused_field = self.field_count() - 1;
+        self.focused_field = if self.focused_field == 0 {
+            Self::FIELD_COUNT.saturating_sub(1)
         } else {
-            self.focused_field -= 1;
-        }
+            self.focused_field.saturating_sub(1)
+        };
     }
 }
 
 // ============================================================================
-// StartupUI — GUI state and rendering
+// StartupUI — GUI state, layout, events and rendering
 // ============================================================================
+
+/// One of the five toolbar actions.
+///
+/// A named action rather than a button index, because the keyboard reaches the
+/// same five things (`Delete`, `F5`, `Ctrl+N`) and an index would make the two
+/// routes agree only by counting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolbarAction {
+    /// Open the add dialog.
+    Add,
+    /// Open the confirm-delete dialog for the selected entry.
+    Remove,
+    /// Enable the selected entry.
+    Enable,
+    /// Disable the selected entry.
+    Disable,
+    /// Re-read the list: drop a stale selection and pull the viewport back in.
+    Refresh,
+}
+
+impl ToolbarAction {
+    /// Button text.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Add => "Add",
+            Self::Remove => "Remove",
+            Self::Enable => "Enable",
+            Self::Disable => "Disable",
+            Self::Refresh => "Refresh",
+        }
+    }
+
+    /// Accent colour for the button.
+    fn color(self) -> Color {
+        match self {
+            Self::Add => COLOR_BLUE,
+            Self::Remove => COLOR_RED,
+            Self::Enable => COLOR_GREEN,
+            Self::Disable => COLOR_PEACH,
+            Self::Refresh => COLOR_SUBTEXT,
+        }
+    }
+
+    /// All actions, in toolbar order.
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Add,
+            Self::Remove,
+            Self::Enable,
+            Self::Disable,
+            Self::Refresh,
+        ]
+    }
+}
+
+/// Every control the window draws, and the whole vocabulary the event handlers
+/// speak.
+///
+/// The renderer records a hit box for each of these *as it draws it*, so a
+/// test can ask "where is Save?" rather than recomputing the dialog geometry
+/// and agreeing with the renderer by luck.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The search field. Clicking it takes the caret; typing then filters.
+    Search,
+    /// A toolbar button.
+    Toolbar(ToolbarAction),
+    /// A table column header — clicking sorts by it, or flips the order.
+    Column(SortColumn),
+    /// A table row, named by entry **id** and not by position: the row under
+    /// the pointer is the row that gets selected even after a re-sort has
+    /// moved it since the frame was drawn.
+    Row(u64),
+    /// The table viewport. Recorded *under* the rows, so the wheel works over
+    /// the empty space below the last one and a click there deselects.
+    Table,
+    /// A text field of the add/edit dialog, by index into its field order.
+    DialogField(usize),
+    /// The type cycler in the add/edit dialog.
+    DialogType,
+    /// The impact cycler in the add/edit dialog.
+    DialogImpact,
+    /// The add/edit dialog's Save button.
+    DialogSave,
+    /// The add/edit dialog's Cancel button.
+    DialogCancel,
+    /// The confirm-delete dialog's Delete button.
+    DeleteConfirm,
+    /// The confirm-delete dialog's Cancel button.
+    DeleteCancel,
+    /// Everything an open dialog covers. It swallows the click rather than
+    /// letting it fall through to the table underneath.
+    Scrim,
+}
+
+/// The frame type this app draws into.
+type Frame = guitk::frame::Frame<Target>;
+
+/// A width or height that arrived from outside, made usable.
+///
+/// A window can be handed a zero, and a compositor that has lost its mind can
+/// hand over a NaN; either would propagate through every rectangle below.
+fn sane(v: f32) -> f32 {
+    if v.is_finite() { v.max(0.0) } else { 0.0 }
+}
+
+/// Take `want` pixels off the top of what is left between `y` and `limit`, or
+/// whatever is left if there is less than that.
+///
+/// Layouts here **shrink; they never clamp.** `Frame` does not clip to the
+/// window, so a rectangle that kept its full height in a short window would
+/// record a hit box below the bottom edge — a control you could click by
+/// clicking nothing.
+fn take_top(y: &mut f32, limit: f32, width: f32, want: f32) -> Rect {
+    let h = want.min((limit - *y).max(0.0));
+    let r = Rect::new(0.0, *y, width, h);
+    *y += h;
+    r
+}
+
+/// The mirror of [`take_top`], working up from `bottom` and never crossing
+/// `floor` (the point the top-down half of the layout reached).
+fn take_bottom(bottom: &mut f32, floor: f32, width: f32, want: f32) -> Rect {
+    let h = want.min((*bottom - floor).max(0.0));
+    *bottom -= h;
+    Rect::new(0.0, *bottom, width, h)
+}
+
+/// A `want_w` x `want_h` box centred in the window, shrunk to fit if the
+/// window is smaller than it.
+fn centred(width: f32, height: f32, want_w: f32, want_h: f32) -> Rect {
+    let w = want_w.min(width);
+    let h = want_h.min(height);
+    Rect::new(
+        ((width - w) / 2.0).max(0.0),
+        ((height - h) / 2.0).max(0.0),
+        w,
+        h,
+    )
+}
+
+/// Trim `r` to `bounds`, collapsing it if nothing is left.
+fn trim(r: Rect, bounds: Rect) -> Rect {
+    r.intersect(bounds).unwrap_or(Rect::EMPTY)
+}
+
+/// Where everything sits for one particular window size.
+///
+/// Derived from the live size on every frame and never remembered: a stored
+/// layout is a layout that disagrees with the window the moment it is resized.
+struct Layout {
+    /// The sanitised window width the rest of these rectangles were built for.
+    width: f32,
+    /// The sanitised window height.
+    height: f32,
+    header: Rect,
+    toolbar: Rect,
+    buttons: [Rect; TOOLBAR_BUTTON_COUNT],
+    search_bar: Rect,
+    search: Rect,
+    table_header: Rect,
+    columns: [Rect; COLUMN_COUNT],
+    table: Rect,
+    details: Rect,
+    status: Rect,
+    dialog: Rect,
+    confirm: Rect,
+}
+
+impl Layout {
+    fn new(width: f32, height: f32) -> Self {
+        let width = sane(width);
+        let height = sane(height);
+
+        // Chrome from the top, then chrome from the bottom; the table gets
+        // what is left between them, which may legitimately be nothing.
+        let mut y = 0.0_f32;
+        let header = take_top(&mut y, height, width, HEADER_HEIGHT);
+        let toolbar = take_top(&mut y, height, width, TOOLBAR_HEIGHT);
+        let search_bar = take_top(&mut y, height, width, SEARCH_BAR_HEIGHT);
+        let table_header = take_top(&mut y, height, width, TABLE_HEADER_HEIGHT);
+
+        let mut b = height;
+        let status = take_bottom(&mut b, y, width, STATUS_BAR_HEIGHT);
+        let details = take_bottom(&mut b, y, width, DETAILS_PANEL_HEIGHT);
+        let table = Rect::new(0.0, y, width, (b - y).max(0.0));
+
+        let by = toolbar.y + ((toolbar.h - BUTTON_HEIGHT) / 2.0).max(0.0);
+        let bh = BUTTON_HEIGHT.min(toolbar.h);
+        let mut buttons = [Rect::EMPTY; TOOLBAR_BUTTON_COUNT];
+        for (i, slot) in buttons.iter_mut().enumerate() {
+            let bx = PADDING + i as f32 * (BUTTON_WIDTH + BUTTON_GAP);
+            *slot = trim(Rect::new(bx, by, BUTTON_WIDTH, bh), toolbar);
+        }
+
+        let search = trim(
+            Rect::new(
+                PADDING,
+                search_bar.y + SEARCH_FIELD_INSET,
+                (width - PADDING * 2.0).max(0.0),
+                (SEARCH_BAR_HEIGHT - SEARCH_FIELD_INSET * 2.0).max(0.0),
+            ),
+            search_bar,
+        );
+
+        let mut columns = [Rect::EMPTY; COLUMN_COUNT];
+        let mut cx = PADDING;
+        for (slot, col) in columns.iter_mut().zip(SortColumn::all()) {
+            *slot = trim(
+                Rect::new(cx, table_header.y, col.width(), table_header.h),
+                table_header,
+            );
+            cx += col.width();
+        }
+
+        Self {
+            width,
+            height,
+            header,
+            toolbar,
+            buttons,
+            search_bar,
+            search,
+            table_header,
+            columns,
+            table,
+            details,
+            status,
+            dialog: centred(width, height, DIALOG_WIDTH, DIALOG_HEIGHT),
+            confirm: centred(width, height, CONFIRM_WIDTH, CONFIRM_HEIGHT),
+        }
+    }
+
+    /// The whole window, for the scrim and for bounds checks.
+    fn window(&self) -> Rect {
+        Rect::new(0.0, 0.0, self.width, self.height)
+    }
+
+    /// How many table rows fit in the viewport.
+    fn rows(&self) -> usize {
+        if ROW_HEIGHT <= 0.0 {
+            return 0;
+        }
+        (self.table.h / ROW_HEIGHT) as usize
+    }
+
+    /// Screen rectangle of the `i`th row *of the viewport* (not of the list).
+    fn row(&self, i: usize) -> Rect {
+        trim(
+            Rect::new(
+                self.table.x,
+                self.table.y + i as f32 * ROW_HEIGHT,
+                self.table.w,
+                ROW_HEIGHT,
+            ),
+            self.table,
+        )
+    }
+
+    /// Top edge of the `i`th labelled block in the add/edit dialog. Index
+    /// `FIELD_COUNT` is the type/impact selector row that follows the fields.
+    fn dialog_field_top(&self, i: usize) -> f32 {
+        self.dialog.y + DIALOG_FIELD_TOP + i as f32 * FIELD_GAP
+    }
+
+    /// The input box of the `i`th text field.
+    fn dialog_field(&self, i: usize) -> Rect {
+        trim(
+            Rect::new(
+                self.dialog.x + PADDING,
+                self.dialog_field_top(i) + FIELD_LABEL_HEIGHT,
+                (self.dialog.w - PADDING * 2.0).max(0.0),
+                FIELD_INPUT_HEIGHT,
+            ),
+            self.dialog,
+        )
+    }
+
+    /// Baseline of the type/impact selector row.
+    fn selector_y(&self) -> f32 {
+        self.dialog_field_top(AddEditDialog::FIELD_COUNT)
+    }
+
+    /// Click box of the type cycler.
+    fn dialog_type(&self) -> Rect {
+        self.selector_box(SELECTOR_TYPE_VALUE_X)
+    }
+
+    /// Click box of the impact cycler.
+    fn dialog_impact(&self) -> Rect {
+        self.selector_box(SELECTOR_IMPACT_VALUE_X)
+    }
+
+    fn selector_box(&self, dx: f32) -> Rect {
+        trim(
+            Rect::new(
+                self.dialog.x + PADDING + dx,
+                self.selector_y() - SELECTOR_PAD,
+                SELECTOR_WIDTH,
+                SELECTOR_HEIGHT,
+            ),
+            self.dialog,
+        )
+    }
+
+    /// The `(cancel, confirm)` pair along the bottom of a dialog box.
+    fn buttons_in(dlg: Rect) -> (Rect, Rect) {
+        let y = dlg.bottom() - BUTTON_HEIGHT - PADDING;
+        let cancel = Rect::new(
+            dlg.right() - BUTTON_WIDTH * 2.0 - PADDING - BUTTON_GAP,
+            y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+        );
+        let confirm = Rect::new(
+            dlg.right() - BUTTON_WIDTH - PADDING,
+            y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+        );
+        (trim(cancel, dlg), trim(confirm, dlg))
+    }
+
+    /// `(Cancel, Save)` of the add/edit dialog.
+    fn dialog_buttons(&self) -> (Rect, Rect) {
+        Self::buttons_in(self.dialog)
+    }
+
+    /// `(Cancel, Delete)` of the confirm-delete dialog.
+    fn confirm_buttons(&self) -> (Rect, Rect) {
+        Self::buttons_in(self.confirm)
+    }
+}
 
 /// Full application state for the startup manager UI.
 pub struct StartupUI {
@@ -1055,9 +1458,18 @@ pub struct StartupUI {
     pub search_query: String,
     pub selected_id: Option<u64>,
     pub dialog: DialogState,
+    /// First visible row of the table, as an index into the filtered list.
     pub scroll_offset: usize,
     pub window_width: f32,
     pub window_height: f32,
+    /// Whether typing goes to the search box. A click puts the caret there and
+    /// a click anywhere else takes it away, so keystrokes meant for the table
+    /// cannot silently filter it instead.
+    pub search_focused: bool,
+    /// The last thing the app has to say — a validation refusal, or the result
+    /// of an action. Drawn in the dialog footer while a dialog is open, and in
+    /// the header otherwise.
+    pub status: String,
 }
 
 impl StartupUI {
@@ -1075,38 +1487,88 @@ impl StartupUI {
             scroll_offset: 0,
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
+            search_focused: false,
+            status: String::new(),
         }
+    }
+
+    // ========================================================================
+    // Geometry
+    // ========================================================================
+
+    /// The layout for the size the window is currently believed to be.
+    fn layout(&self) -> Layout {
+        Layout::new(self.window_width, self.window_height)
     }
 
     /// How many table rows fit in the visible area.
     pub fn visible_rows(&self) -> usize {
-        let available = self.window_height
-            - HEADER_HEIGHT
-            - TOOLBAR_HEIGHT
-            - SEARCH_BAR_HEIGHT
-            - TABLE_HEADER_HEIGHT
-            - DETAILS_PANEL_HEIGHT
-            - STATUS_BAR_HEIGHT;
-        if available <= 0.0 {
-            return 0;
-        }
-        (available / ROW_HEIGHT) as usize
+        self.layout().rows()
+    }
+
+    /// The filtered, sorted list in full.
+    fn all_entries(&self) -> Vec<&StartupEntry> {
+        self.manager
+            .filtered_sorted(&self.search_query, self.sort_column, self.sort_order)
+    }
+
+    /// The slice of the list that `l`'s viewport shows.
+    fn entries_in(&self, l: &Layout) -> Vec<&StartupEntry> {
+        let all = self.all_entries();
+        let start = self.scroll_offset.min(all.len());
+        let end = start.saturating_add(l.rows()).min(all.len());
+        all.get(start..end).unwrap_or(&[]).to_vec()
     }
 
     /// Get the currently visible filtered and sorted entries.
     pub fn visible_entries(&self) -> Vec<&StartupEntry> {
-        let all =
-            self.manager
-                .filtered_sorted(&self.search_query, self.sort_column, self.sort_order);
-        let start = self.scroll_offset.min(all.len());
-        let end = (start + self.visible_rows()).min(all.len());
-        all.get(start..end).unwrap_or(&[]).to_vec()
+        self.entries_in(&self.layout())
     }
 
     /// Total number of filtered entries.
     pub fn filtered_count(&self) -> usize {
         self.manager.search_entries(&self.search_query).len()
     }
+
+    /// The largest first-visible-row index that still fills the viewport.
+    fn max_scroll(&self) -> usize {
+        self.filtered_count().saturating_sub(self.visible_rows())
+    }
+
+    /// Pull the offset back inside its bounds after the list or the viewport
+    /// changed shape under it.
+    pub fn clamp_scroll(&mut self) {
+        self.scroll_offset = self.scroll_offset.min(self.max_scroll());
+    }
+
+    /// Adopt a new window size and pull anything that hung off the old one
+    /// back inside.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.window_width = sane(width);
+        self.window_height = sane(height);
+        self.clamp_scroll();
+    }
+
+    /// Scroll the viewport so the entry at list position `pos` is on screen.
+    fn scroll_into_view(&mut self, pos: usize) {
+        let vis = self.visible_rows();
+        if pos < self.scroll_offset {
+            self.scroll_offset = pos;
+        } else if vis > 0 && pos >= self.scroll_offset.saturating_add(vis) {
+            self.scroll_offset = pos.saturating_sub(vis).saturating_add(1);
+        }
+        self.clamp_scroll();
+    }
+
+    /// Position of the selected entry in the filtered list, if it is in it.
+    fn selected_pos(&self) -> Option<usize> {
+        let id = self.selected_id?;
+        self.all_entries().iter().position(|e| e.id == id)
+    }
+
+    // ========================================================================
+    // Commands
+    // ========================================================================
 
     /// Sort by the given column, toggling order if same column.
     pub fn sort_by(&mut self, column: SortColumn) {
@@ -1118,58 +1580,40 @@ impl StartupUI {
         }
     }
 
+    /// Move the selection to list position `pos`, dragging the viewport along.
+    fn select_pos(&mut self, pos: usize) {
+        let id = self.all_entries().get(pos).map(|e| e.id);
+        if let Some(id) = id {
+            self.selected_id = Some(id);
+            self.scroll_into_view(pos);
+        }
+    }
+
     /// Select the next entry in the filtered list.
     pub fn select_next(&mut self) {
-        let entries =
-            self.manager
-                .filtered_sorted(&self.search_query, self.sort_column, self.sort_order);
-        if entries.is_empty() {
+        let len = self.all_entries().len();
+        if len == 0 {
             return;
         }
-        let current_pos = self
-            .selected_id
-            .and_then(|id| entries.iter().position(|e| e.id == id));
-        let next_pos = match current_pos {
-            Some(pos) if pos + 1 < entries.len() => pos + 1,
-            Some(pos) => pos,
+        let next = match self.selected_pos() {
             Option::None => 0,
+            Some(pos) => pos.saturating_add(1).min(len.saturating_sub(1)),
         };
-        if let Some(entry) = entries.get(next_pos) {
-            self.selected_id = Some(entry.id);
-        }
-        // Adjust scroll to keep selection visible.
-        let vis = self.visible_rows();
-        if vis > 0 && next_pos >= self.scroll_offset + vis {
-            self.scroll_offset = next_pos - vis + 1;
-        }
+        self.select_pos(next);
     }
 
     /// Select the previous entry in the filtered list.
     pub fn select_prev(&mut self) {
-        let entries =
-            self.manager
-                .filtered_sorted(&self.search_query, self.sort_column, self.sort_order);
-        if entries.is_empty() {
+        if self.all_entries().is_empty() {
             return;
         }
-        let current_pos = self
-            .selected_id
-            .and_then(|id| entries.iter().position(|e| e.id == id));
-        let prev_pos = match current_pos {
-            Some(0) => 0,
-            Some(pos) => pos - 1,
-            Option::None => 0,
-        };
-        if let Some(entry) = entries.get(prev_pos) {
-            self.selected_id = Some(entry.id);
-        }
-        if prev_pos < self.scroll_offset {
-            self.scroll_offset = prev_pos;
-        }
+        let prev = self.selected_pos().unwrap_or(0).saturating_sub(1);
+        self.select_pos(prev);
     }
 
     /// Open the add dialog.
     pub fn open_add_dialog(&mut self) {
+        self.status.clear();
         self.dialog = DialogState::AddEdit(AddEditDialog::new_add());
     }
 
@@ -1179,6 +1623,7 @@ impl StartupUI {
             && let Some(entry) = self.manager.get_entry(id)
         {
             self.dialog = DialogState::AddEdit(AddEditDialog::new_edit(entry));
+            self.status.clear();
         }
     }
 
@@ -1188,12 +1633,14 @@ impl StartupUI {
             && self.manager.get_entry(id).is_some()
         {
             self.dialog = DialogState::ConfirmDelete(id);
+            self.status.clear();
         }
     }
 
     /// Close any open dialog.
     pub fn close_dialog(&mut self) {
         self.dialog = DialogState::Closed;
+        self.status.clear();
     }
 
     /// Confirm adding/editing from the dialog.
@@ -1230,6 +1677,7 @@ impl StartupUI {
         }
 
         self.dialog = DialogState::Closed;
+        self.clamp_scroll();
         Ok(())
     }
 
@@ -1242,6 +1690,7 @@ impl StartupUI {
             }
         }
         self.dialog = DialogState::Closed;
+        self.clamp_scroll();
     }
 
     /// Enable the selected entry.
@@ -1258,453 +1707,785 @@ impl StartupUI {
         }
     }
 
+    /// Drop a selection that no longer names a live entry and pull the
+    /// viewport back inside the list.
+    ///
+    /// In a build that read the real system this would re-scan it; here the
+    /// manager *is* the list, so the only honest work left is the tidying —
+    /// which is exactly what a refresh is for after an entry disappears.
+    pub fn refresh(&mut self) {
+        if let Some(id) = self.selected_id
+            && self.manager.get_entry(id).is_none()
+        {
+            self.selected_id = Option::None;
+        }
+        self.clamp_scroll();
+        self.status = format!("{} entries", self.manager.entry_count());
+    }
+
+    /// Run a toolbar action, from the button or from its keyboard shortcut.
+    pub fn run(&mut self, action: ToolbarAction) {
+        match action {
+            ToolbarAction::Add => self.open_add_dialog(),
+            ToolbarAction::Remove => {
+                if self.selected_id.is_some() {
+                    self.open_delete_dialog();
+                } else {
+                    self.status = String::from("Select an entry first");
+                }
+            }
+            ToolbarAction::Enable => {
+                if self.selected_id.is_some() {
+                    self.enable_selected();
+                    self.status = String::from("Enabled");
+                } else {
+                    self.status = String::from("Select an entry first");
+                }
+            }
+            ToolbarAction::Disable => {
+                if self.selected_id.is_some() {
+                    self.disable_selected();
+                    self.status = String::from("Disabled");
+                } else {
+                    self.status = String::from("Select an entry first");
+                }
+            }
+            ToolbarAction::Refresh => self.refresh(),
+        }
+    }
+
+    /// Save from the add/edit dialog, leaving the dialog open and saying why
+    /// when the fields do not validate.
+    fn save_dialog(&mut self) {
+        match self.confirm_add_edit() {
+            Ok(()) => self.status = String::from("Saved"),
+            Err(msg) => self.status = String::from(msg),
+        }
+    }
+
+    // ========================================================================
+    // Events
+    // ========================================================================
+
+    /// The control under `(x, y)`, or `None` for bare background.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.window_width, self.window_height)
+            .hit_test(x, y)
+    }
+
+    /// Handle a UI event (keyboard or mouse).
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Resize { width, height } => {
+                self.resize(*width as f32, *height as f32);
+                EventResult::Consumed
+            }
+            Event::Mouse(mouse) => {
+                let (x, y) = (mouse.x, mouse.y);
+                match mouse.kind {
+                    MouseEventKind::Press(MouseButton::Left) => self.handle_click(x, y),
+                    MouseEventKind::DoubleClick(MouseButton::Left) => self.handle_double(x, y),
+                    MouseEventKind::Scroll { dy, .. } => self.handle_scroll(x, y, dy),
+                    _ => EventResult::Ignored,
+                }
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        match self.target_at(x, y) {
+            Some(Target::Table | Target::Row(_)) => {
+                self.scroll_rows(wheel::rows_f(dy));
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Move the viewport by `rows`, positive towards the end of the list.
+    fn scroll_rows(&mut self, rows: f32) {
+        if !rows.is_finite() {
+            return;
+        }
+        let current = isize::try_from(self.scroll_offset).unwrap_or(isize::MAX);
+        let moved = current.saturating_add(rows.round() as isize).max(0);
+        self.scroll_offset = usize::try_from(moved).unwrap_or(0);
+        self.clamp_scroll();
+    }
+
+    /// A double-click on a row edits it — the same thing Enter does, for the
+    /// half of the world that reaches for the mouse.
+    fn handle_double(&mut self, x: f32, y: f32) -> EventResult {
+        if let Some(Target::Row(id)) = self.target_at(x, y) {
+            self.selected_id = Some(id);
+            self.open_edit_dialog();
+            return EventResult::Consumed;
+        }
+        self.handle_click(x, y)
+    }
+
+    fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
+        let target = self.target_at(x, y);
+        // Any click that is not in the search box takes the caret out of it,
+        // so the next keystroke does not silently filter the table.
+        if target != Some(Target::Search) {
+            self.search_focused = false;
+        }
+
+        match target {
+            Some(Target::Search) => {
+                self.search_focused = true;
+                EventResult::Consumed
+            }
+            Some(Target::Toolbar(action)) => {
+                self.run(action);
+                EventResult::Consumed
+            }
+            Some(Target::Column(column)) => {
+                self.sort_by(column);
+                self.clamp_scroll();
+                EventResult::Consumed
+            }
+            Some(Target::Row(id)) => {
+                self.selected_id = Some(id);
+                EventResult::Consumed
+            }
+            Some(Target::Table) => {
+                self.selected_id = Option::None;
+                EventResult::Consumed
+            }
+            Some(Target::DialogField(i)) => {
+                if let DialogState::AddEdit(dlg) = &mut self.dialog {
+                    dlg.focused_field = i.min(AddEditDialog::FIELD_COUNT.saturating_sub(1));
+                }
+                EventResult::Consumed
+            }
+            Some(Target::DialogType) => {
+                if let DialogState::AddEdit(dlg) = &mut self.dialog {
+                    dlg.next_type();
+                }
+                EventResult::Consumed
+            }
+            Some(Target::DialogImpact) => {
+                if let DialogState::AddEdit(dlg) = &mut self.dialog {
+                    dlg.next_impact();
+                }
+                EventResult::Consumed
+            }
+            Some(Target::DialogSave) => {
+                self.save_dialog();
+                EventResult::Consumed
+            }
+            Some(Target::DeleteConfirm) => {
+                self.confirm_delete();
+                EventResult::Consumed
+            }
+            Some(Target::DialogCancel | Target::DeleteCancel) => {
+                self.close_dialog();
+                EventResult::Consumed
+            }
+            // The scrim exists to eat the click, which is the whole of its job.
+            Some(Target::Scrim) => EventResult::Consumed,
+            Option::None => EventResult::Ignored,
+        }
+    }
+
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if matches!(self.dialog, DialogState::AddEdit(_)) {
+            return self.handle_add_edit_key(key);
+        }
+        if matches!(self.dialog, DialogState::ConfirmDelete(_)) {
+            return match key.key {
+                Key::Escape => {
+                    self.close_dialog();
+                    EventResult::Consumed
+                }
+                Key::Enter => {
+                    self.confirm_delete();
+                    EventResult::Consumed
+                }
+                _ => EventResult::Consumed,
+            };
+        }
+        self.handle_table_key(key)
+    }
+
+    fn handle_add_edit_key(&mut self, key: &KeyEvent) -> EventResult {
+        match key.key {
+            Key::Escape => {
+                self.close_dialog();
+                return EventResult::Consumed;
+            }
+            Key::Enter => {
+                self.save_dialog();
+                return EventResult::Consumed;
+            }
+            _ => {}
+        }
+
+        let DialogState::AddEdit(dlg) = &mut self.dialog else {
+            return EventResult::Ignored;
+        };
+        match key.key {
+            Key::Tab if key.modifiers.shift => dlg.focus_prev(),
+            Key::Tab | Key::Down => dlg.focus_next(),
+            Key::Up => dlg.focus_prev(),
+            Key::Backspace => {
+                dlg.focused_text_mut().pop();
+            }
+            _ => {
+                if !key.text.is_empty() && !key.modifiers.ctrl && !key.modifiers.alt {
+                    dlg.focused_text_mut().push_str(&key.text);
+                }
+            }
+        }
+        EventResult::Consumed
+    }
+
+    fn handle_table_key(&mut self, key: &KeyEvent) -> EventResult {
+        if key.modifiers.ctrl {
+            return match key.key {
+                Key::N => {
+                    self.run(ToolbarAction::Add);
+                    EventResult::Consumed
+                }
+                Key::F => {
+                    self.search_focused = true;
+                    EventResult::Consumed
+                }
+                _ => EventResult::Ignored,
+            };
+        }
+
+        match key.key {
+            Key::Escape => self.handle_escape(),
+            Key::Up => {
+                self.select_prev();
+                EventResult::Consumed
+            }
+            Key::Down => {
+                self.select_next();
+                EventResult::Consumed
+            }
+            Key::Home => {
+                self.select_pos(0);
+                EventResult::Consumed
+            }
+            Key::End => {
+                self.select_pos(self.all_entries().len().saturating_sub(1));
+                EventResult::Consumed
+            }
+            Key::PageUp | Key::PageDown => {
+                let page = self.visible_rows().max(1);
+                let pos = self.selected_pos().unwrap_or(0);
+                let target = if key.key == Key::PageUp {
+                    pos.saturating_sub(page)
+                } else {
+                    pos.saturating_add(page)
+                        .min(self.all_entries().len().saturating_sub(1))
+                };
+                self.select_pos(target);
+                EventResult::Consumed
+            }
+            Key::Enter => {
+                self.open_edit_dialog();
+                EventResult::Consumed
+            }
+            Key::Delete => {
+                self.run(ToolbarAction::Remove);
+                EventResult::Consumed
+            }
+            Key::F5 => {
+                self.run(ToolbarAction::Refresh);
+                EventResult::Consumed
+            }
+            Key::Backspace if self.search_focused => {
+                self.search_query.pop();
+                self.scroll_offset = 0;
+                self.clamp_scroll();
+                EventResult::Consumed
+            }
+            _ if self.search_focused && !key.text.is_empty() && !key.modifiers.alt => {
+                self.search_query.push_str(&key.text);
+                self.scroll_offset = 0;
+                self.clamp_scroll();
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Escape backs out of one thing at a time: the caret, then the filter,
+    /// then the selection. It never closes the window.
+    fn handle_escape(&mut self) -> EventResult {
+        if self.search_focused {
+            self.search_focused = false;
+        } else if !self.search_query.is_empty() {
+            self.search_query.clear();
+            self.scroll_offset = 0;
+        } else if self.selected_id.is_some() {
+            self.selected_id = Option::None;
+        } else if !self.status.is_empty() {
+            self.status.clear();
+        } else {
+            return EventResult::Ignored;
+        }
+        self.clamp_scroll();
+        EventResult::Consumed
+    }
+
     // ========================================================================
     // Rendering
     // ========================================================================
 
     /// Render the full UI into a `RenderTree`.
+    ///
+    /// Kept alongside [`App::render`] because it needs no window: a test can
+    /// ask what the app draws without standing one up.
     pub fn render(&self) -> RenderTree {
-        let mut tree = RenderTree::new();
+        self.frame(self.window_width, self.window_height)
+            .into_tree()
+    }
 
-        // Background fill.
-        tree.push(RenderCommand::FillRect {
+    /// Draw the window at `width` x `height`, recording a hit box for every
+    /// control as it goes.
+    fn frame(&self, width: f32, height: f32) -> Frame {
+        let l = Layout::new(width, height);
+        let mut frame = Frame::new(l.width, l.height);
+
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
+            width: l.width,
+            height: l.height,
             color: COLOR_BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
-        self.render_header(&mut tree);
-        self.render_toolbar(&mut tree);
-        self.render_search_bar(&mut tree);
-        self.render_table_header(&mut tree);
-        self.render_table_body(&mut tree);
-        self.render_details_panel(&mut tree);
-        self.render_status_bar(&mut tree);
+        self.draw_header(&mut frame, &l);
+        self.draw_toolbar(&mut frame, &l);
+        self.draw_search(&mut frame, &l);
+        self.draw_table_header(&mut frame, &l);
+        self.draw_table(&mut frame, &l);
+        self.draw_details(&mut frame, &l);
+        self.draw_status(&mut frame, &l);
 
-        // Dialogs render on top.
         match &self.dialog {
             DialogState::Closed => {}
-            DialogState::AddEdit(dlg) => self.render_add_edit_dialog(&mut tree, dlg),
-            DialogState::ConfirmDelete(id) => self.render_confirm_delete_dialog(&mut tree, *id),
+            DialogState::AddEdit(dlg) => {
+                // Everything under the dialog stops being clickable the moment
+                // the dialog is up; the scrim below takes its place.
+                frame.discard_hits();
+                Self::draw_scrim(&mut frame, &l);
+                self.draw_add_edit_dialog(&mut frame, &l, dlg);
+            }
+            DialogState::ConfirmDelete(id) => {
+                frame.discard_hits();
+                Self::draw_scrim(&mut frame, &l);
+                self.draw_confirm_delete_dialog(&mut frame, &l, *id);
+            }
         }
 
-        tree
+        frame
     }
 
-    /// Render the header bar.
-    fn render_header(&self, tree: &mut RenderTree) {
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: HEADER_HEIGHT,
+    fn draw_header(&self, frame: &mut Frame, l: &Layout) {
+        if l.header.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: l.header.x,
+            y: l.header.y,
+            width: l.header.w,
+            height: l.header.h,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: PADDING,
-            y: (HEADER_HEIGHT - FONT_SIZE_HEADING) / 2.0,
-            text: "Startup Apps Manager".to_string(),
+            y: l.header.y + ((l.header.h - FONT_SIZE_HEADING) / 2.0).max(0.0),
+            text: String::from("Startup Apps Manager"),
             color: COLOR_TEXT,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Option::None,
             overflow: TextOverflow::Clip,
         });
-        // Separator line.
-        tree.push(RenderCommand::Line {
+
+        // The status line only lives here while no dialog is open; a dialog
+        // shows it in its own footer, next to the button that produced it.
+        if !self.status.is_empty() && self.dialog == DialogState::Closed {
+            let w = text::measure(&self.status, FONT_SIZE_SMALL, FontWeightHint::Regular);
+            frame.push(RenderCommand::Text {
+                x: (l.width - PADDING - w).max(PADDING),
+                y: l.header.y + ((l.header.h - FONT_SIZE_SMALL) / 2.0).max(0.0),
+                text: self.status.clone(),
+                color: COLOR_YELLOW,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((l.width / 2.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
+        frame.push(RenderCommand::Line {
             x1: 0.0,
-            y1: HEADER_HEIGHT,
-            x2: self.window_width,
-            y2: HEADER_HEIGHT,
+            y1: l.header.bottom(),
+            x2: l.width,
+            y2: l.header.bottom(),
             color: COLOR_SURFACE0,
             width: 1.0,
         });
     }
 
-    /// Render the toolbar with action buttons.
-    fn render_toolbar(&self, tree: &mut RenderTree) {
-        let y = HEADER_HEIGHT;
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.window_width,
-            height: TOOLBAR_HEIGHT,
-            color: COLOR_SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let buttons = ["Add", "Remove", "Enable", "Disable", "Refresh"];
-        let button_colors = [
-            COLOR_BLUE,
-            COLOR_RED,
-            COLOR_GREEN,
-            COLOR_PEACH,
-            COLOR_SUBTEXT,
-        ];
-
-        let mut bx = PADDING;
-        let by = y + (TOOLBAR_HEIGHT - BUTTON_HEIGHT) / 2.0;
-
-        for (i, label) in buttons.iter().enumerate() {
-            let color = button_colors.get(i).copied().unwrap_or(COLOR_SUBTEXT);
-            self.render_button(tree, bx, by, BUTTON_WIDTH, BUTTON_HEIGHT, label, color);
-            bx += BUTTON_WIDTH + 8.0;
+    fn draw_toolbar(&self, frame: &mut Frame, l: &Layout) {
+        if !l.toolbar.is_empty() {
+            frame.push(RenderCommand::FillRect {
+                x: l.toolbar.x,
+                y: l.toolbar.y,
+                width: l.toolbar.w,
+                height: l.toolbar.h,
+                color: COLOR_SURFACE0,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+        for (rect, action) in l.buttons.iter().zip(ToolbarAction::all()) {
+            Self::draw_button(
+                frame,
+                Target::Toolbar(*action),
+                *rect,
+                action.label(),
+                action.color(),
+            );
         }
     }
 
-    /// Render a single button.
-    fn render_button(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        label: &str,
-        color: Color,
-    ) {
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
+    /// Draw a button and record it. An empty rectangle draws and records
+    /// nothing — a window too small for the control simply does not have it.
+    fn draw_button(frame: &mut Frame, target: Target, rect: Rect, label: &str, color: Color) {
+        if rect.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
             color: Color::rgba(color.r, color.g, color.b, 40),
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        tree.push(RenderCommand::StrokeRect {
-            x,
-            y,
-            width: w,
-            height: h,
+        frame.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
             color,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        tree.push(RenderCommand::Text {
-            x: text::center_x(label, x + w / 2.0, FONT_SIZE, FontWeightHint::Bold),
-            y: y + (h - FONT_SIZE) / 2.0,
+        frame.push(RenderCommand::Text {
+            x: text::center_x(
+                label,
+                rect.x + rect.w / 2.0,
+                FONT_SIZE,
+                FontWeightHint::Bold,
+            ),
+            y: rect.y + ((rect.h - FONT_SIZE) / 2.0).max(0.0),
             text: label.to_string(),
             color,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(w - 8.0),
+            max_width: Some((rect.w - 8.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
+        frame.hit(target, rect);
     }
 
-    /// Render the search bar.
-    fn render_search_bar(&self, tree: &mut RenderTree) {
-        let y = HEADER_HEIGHT + TOOLBAR_HEIGHT;
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.window_width,
-            height: SEARCH_BAR_HEIGHT,
-            color: COLOR_BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Search field background.
-        let field_x = PADDING;
-        let field_y = y + 4.0;
-        let field_w = self.window_width - PADDING * 2.0;
-        let field_h = SEARCH_BAR_HEIGHT - 8.0;
-
-        tree.push(RenderCommand::FillRect {
-            x: field_x,
-            y: field_y,
-            width: field_w,
-            height: field_h,
+    fn draw_search(&self, frame: &mut Frame, l: &Layout) {
+        if !l.search_bar.is_empty() {
+            frame.push(RenderCommand::FillRect {
+                x: l.search_bar.x,
+                y: l.search_bar.y,
+                width: l.search_bar.w,
+                height: l.search_bar.h,
+                color: COLOR_BASE,
+                corner_radii: CornerRadii::ZERO,
+            });
+        }
+        if l.search.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: l.search.x,
+            y: l.search.y,
+            width: l.search.w,
+            height: l.search.h,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
+        if self.search_focused {
+            frame.push(RenderCommand::StrokeRect {
+                x: l.search.x,
+                y: l.search.y,
+                width: l.search.w,
+                height: l.search.h,
+                color: COLOR_BLUE,
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(4.0),
+            });
+        }
 
-        let display_text = if self.search_query.is_empty() {
+        let empty = self.search_query.is_empty();
+        let display = if empty {
             "Search by name, publisher, or path..."
         } else {
             &self.search_query
         };
-        let text_color = if self.search_query.is_empty() {
-            COLOR_OVERLAY0
-        } else {
-            COLOR_TEXT
-        };
-
-        tree.push(RenderCommand::Text {
-            x: field_x + 8.0,
-            y: field_y + (field_h - FONT_SIZE) / 2.0,
-            text: display_text.to_string(),
-            color: text_color,
+        frame.push(RenderCommand::Text {
+            x: l.search.x + 8.0,
+            y: l.search.y + ((l.search.h - FONT_SIZE) / 2.0).max(0.0),
+            text: display.to_string(),
+            color: if empty { COLOR_OVERLAY0 } else { COLOR_TEXT },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(field_w - 16.0),
+            max_width: Some((l.search.w - 16.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
+        frame.hit(Target::Search, l.search);
     }
 
-    /// Render the table header row.
-    fn render_table_header(&self, tree: &mut RenderTree) {
-        let y = HEADER_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT;
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.window_width,
-            height: TABLE_HEADER_HEIGHT,
-            color: COLOR_SURFACE1,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let mut cx = PADDING;
-        for col in SortColumn::all() {
-            let is_active = *col == self.sort_column;
-            let color = if is_active { COLOR_BLUE } else { COLOR_TEXT };
-            let weight = if is_active {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            };
-
-            let mut label = col.header().to_string();
-            if is_active {
-                let arrow = match self.sort_order {
-                    SortOrder::Ascending => " ^",
-                    SortOrder::Descending => " v",
-                };
-                label.push_str(arrow);
-            }
-
-            tree.push(RenderCommand::Text {
-                x: cx + 4.0,
-                y: y + (TABLE_HEADER_HEIGHT - FONT_SIZE_SMALL) / 2.0,
-                text: label,
-                color,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: weight,
-                max_width: Some(col.width() - 8.0),
-                overflow: TextOverflow::Ellipsis,
+    fn draw_table_header(&self, frame: &mut Frame, l: &Layout) {
+        if !l.table_header.is_empty() {
+            frame.push(RenderCommand::FillRect {
+                x: l.table_header.x,
+                y: l.table_header.y,
+                width: l.table_header.w,
+                height: l.table_header.h,
+                color: COLOR_SURFACE1,
+                corner_radii: CornerRadii::ZERO,
             });
-            cx += col.width();
         }
 
-        // Bottom border.
-        tree.push(RenderCommand::Line {
-            x1: 0.0,
-            y1: y + TABLE_HEADER_HEIGHT,
-            x2: self.window_width,
-            y2: y + TABLE_HEADER_HEIGHT,
-            color: COLOR_SURFACE0,
-            width: 1.0,
-        });
+        for (rect, col) in l.columns.iter().zip(SortColumn::all()) {
+            if rect.is_empty() {
+                continue;
+            }
+            let active = *col == self.sort_column;
+            let mut label = col.header().to_string();
+            if active {
+                label.push_str(match self.sort_order {
+                    SortOrder::Ascending => " ^",
+                    SortOrder::Descending => " v",
+                });
+            }
+            frame.push(RenderCommand::Text {
+                x: rect.x + 4.0,
+                y: rect.y + ((rect.h - FONT_SIZE_SMALL) / 2.0).max(0.0),
+                text: label,
+                color: if active { COLOR_BLUE } else { COLOR_TEXT },
+                font_size: FONT_SIZE_SMALL,
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
+                max_width: Some((rect.w - 8.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.hit(Target::Column(*col), *rect);
+        }
+
+        if !l.table_header.is_empty() {
+            frame.push(RenderCommand::Line {
+                x1: 0.0,
+                y1: l.table_header.bottom(),
+                x2: l.width,
+                y2: l.table_header.bottom(),
+                color: COLOR_SURFACE0,
+                width: 1.0,
+            });
+        }
     }
 
-    /// Render the table body rows.
-    fn render_table_body(&self, tree: &mut RenderTree) {
-        let base_y = HEADER_HEIGHT + TOOLBAR_HEIGHT + SEARCH_BAR_HEIGHT + TABLE_HEADER_HEIGHT;
-        let entries = self.visible_entries();
+    fn draw_table(&self, frame: &mut Frame, l: &Layout) {
+        if l.table.is_empty() {
+            return;
+        }
+        // Recorded first, so the rows drawn on top of it win the hit test
+        // where they are drawn and the wheel still works everywhere else.
+        frame.hit(Target::Table, l.table);
 
-        for (i, entry) in entries.iter().enumerate() {
-            let row_y = base_y + i as f32 * ROW_HEIGHT;
-            let is_selected = self.selected_id == Some(entry.id);
-
-            // Row background.
-            let bg = if is_selected {
+        for (i, entry) in self.entries_in(l).iter().enumerate() {
+            let row = l.row(i);
+            if row.is_empty() {
+                continue;
+            }
+            let selected = self.selected_id == Some(entry.id);
+            let bg = if selected {
                 Color::rgba(COLOR_BLUE.r, COLOR_BLUE.g, COLOR_BLUE.b, 30)
             } else if i % 2 == 1 {
                 Color::rgba(COLOR_SURFACE0.r, COLOR_SURFACE0.g, COLOR_SURFACE0.b, 80)
             } else {
                 COLOR_BASE
             };
-
-            tree.push(RenderCommand::FillRect {
-                x: 0.0,
-                y: row_y,
-                width: self.window_width,
-                height: ROW_HEIGHT,
+            frame.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
                 color: bg,
                 corner_radii: CornerRadii::ZERO,
             });
-
-            // Selection indicator.
-            if is_selected {
-                tree.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: row_y,
-                    width: 3.0,
-                    height: ROW_HEIGHT,
+            if selected {
+                frame.push(RenderCommand::FillRect {
+                    x: row.x,
+                    y: row.y,
+                    width: 3.0_f32.min(row.w),
+                    height: row.h,
                     color: COLOR_BLUE,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
 
-            let text_y = row_y + (ROW_HEIGHT - FONT_SIZE) / 2.0;
+            let text_y = row.y + ((row.h - FONT_SIZE) / 2.0).max(0.0);
+            let cells: [(&str, Color, f32, FontWeightHint, f32); 6] = [
+                (
+                    &entry.name,
+                    COLOR_TEXT,
+                    COL_NAME_WIDTH,
+                    FontWeightHint::Regular,
+                    FONT_SIZE,
+                ),
+                (
+                    &entry.publisher,
+                    COLOR_SUBTEXT,
+                    COL_PUBLISHER_WIDTH,
+                    FontWeightHint::Regular,
+                    FONT_SIZE,
+                ),
+                (
+                    entry.status_label(),
+                    entry.status_color(),
+                    COL_STATUS_WIDTH,
+                    FontWeightHint::Bold,
+                    FONT_SIZE,
+                ),
+                (
+                    entry.impact.label(),
+                    entry.impact.color(),
+                    COL_IMPACT_WIDTH,
+                    FontWeightHint::Regular,
+                    FONT_SIZE,
+                ),
+                (
+                    entry.startup_type.label(),
+                    COLOR_SUBTEXT,
+                    COL_TYPE_WIDTH,
+                    FontWeightHint::Regular,
+                    FONT_SIZE,
+                ),
+                (
+                    &entry.path,
+                    COLOR_OVERLAY0,
+                    COL_PATH_WIDTH,
+                    FontWeightHint::Regular,
+                    FONT_SIZE_SMALL,
+                ),
+            ];
             let mut cx = PADDING;
+            for (value, color, width, weight, size) in cells {
+                frame.push(RenderCommand::Text {
+                    x: cx + 4.0,
+                    y: text_y,
+                    text: value.to_string(),
+                    color,
+                    font_size: size,
+                    font_weight: weight,
+                    max_width: Some((width - 8.0).max(0.0)),
+                    overflow: TextOverflow::Ellipsis,
+                });
+                cx += width;
+            }
 
-            // Name.
-            tree.push(RenderCommand::Text {
-                x: cx + 4.0,
-                y: text_y,
-                text: entry.name.clone(),
-                color: COLOR_TEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(COL_NAME_WIDTH - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cx += COL_NAME_WIDTH;
-
-            // Publisher.
-            tree.push(RenderCommand::Text {
-                x: cx + 4.0,
-                y: text_y,
-                text: entry.publisher.clone(),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(COL_PUBLISHER_WIDTH - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cx += COL_PUBLISHER_WIDTH;
-
-            // Status.
-            tree.push(RenderCommand::Text {
-                x: cx + 4.0,
-                y: text_y,
-                text: entry.status_label().to_string(),
-                color: entry.status_color(),
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(COL_STATUS_WIDTH - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cx += COL_STATUS_WIDTH;
-
-            // Impact.
-            tree.push(RenderCommand::Text {
-                x: cx + 4.0,
-                y: text_y,
-                text: entry.impact.label().to_string(),
-                color: entry.impact.color(),
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(COL_IMPACT_WIDTH - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cx += COL_IMPACT_WIDTH;
-
-            // Type.
-            tree.push(RenderCommand::Text {
-                x: cx + 4.0,
-                y: text_y,
-                text: entry.startup_type.label().to_string(),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(COL_TYPE_WIDTH - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cx += COL_TYPE_WIDTH;
-
-            // Path.
-            tree.push(RenderCommand::Text {
-                x: cx + 4.0,
-                y: text_y,
-                text: entry.path.clone(),
-                color: COLOR_OVERLAY0,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(COL_PATH_WIDTH - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            frame.hit(Target::Row(entry.id), row);
         }
     }
 
-    /// Render the details panel at the bottom (above status bar).
-    fn render_details_panel(&self, tree: &mut RenderTree) {
-        let y = self.window_height - DETAILS_PANEL_HEIGHT - STATUS_BAR_HEIGHT;
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.window_width,
-            height: DETAILS_PANEL_HEIGHT,
+    fn draw_details(&self, frame: &mut Frame, l: &Layout) {
+        if l.details.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: l.details.x,
+            y: l.details.y,
+            width: l.details.w,
+            height: l.details.h,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // Top border.
-        tree.push(RenderCommand::Line {
+        frame.push(RenderCommand::Line {
             x1: 0.0,
-            y1: y,
-            x2: self.window_width,
-            y2: y,
+            y1: l.details.y,
+            x2: l.width,
+            y2: l.details.y,
             color: COLOR_SURFACE0,
             width: 1.0,
         });
 
-        if let Some(id) = self.selected_id
-            && let Some(entry) = self.manager.get_entry(id)
-        {
-            self.render_details_content(tree, y, entry);
+        let entry = self.selected_id.and_then(|id| self.manager.get_entry(id));
+        let Some(entry) = entry else {
+            frame.push(RenderCommand::Text {
+                x: PADDING,
+                y: l.details.y + (l.details.h / 2.0 - FONT_SIZE / 2.0).max(0.0),
+                text: String::from("Select an entry to view details"),
+                color: COLOR_OVERLAY0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Option::None,
+                overflow: TextOverflow::Clip,
+            });
             return;
-        }
+        };
 
-        // No selection message.
-        tree.push(RenderCommand::Text {
-            x: PADDING,
-            y: y + DETAILS_PANEL_HEIGHT / 2.0 - FONT_SIZE / 2.0,
-            text: "Select an entry to view details".to_string(),
-            color: COLOR_OVERLAY0,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Option::None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    /// Render details content for a selected entry.
-    fn render_details_content(&self, tree: &mut RenderTree, base_y: f32, entry: &StartupEntry) {
         let x_left = PADDING;
-        let x_right = self.window_width / 2.0;
-        let mut ly = base_y + 8.0;
-        let line_spacing = 18.0;
+        let x_right = l.width / 2.0;
+        let mut ly = l.details.y + 8.0;
 
-        // Name (bold heading).
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: x_left,
             y: ly,
             text: entry.name.clone(),
             color: COLOR_TEXT,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(self.window_width - PADDING * 2.0),
+            max_width: Some((l.width - PADDING * 2.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
-        ly += line_spacing + 4.0;
+        ly += DETAIL_LINE_SPACING + 4.0;
 
-        // Left column: path, args.
-        self.render_detail_row(tree, x_left, ly, "Path:", &entry.path);
-        ly += line_spacing;
+        let mut ry = ly;
+        Self::draw_detail_row(frame, l, x_left, ly, "Path:", &entry.path);
+        ly += DETAIL_LINE_SPACING;
         if !entry.args.is_empty() {
-            self.render_detail_row(tree, x_left, ly, "Args:", &entry.args);
-            ly += line_spacing;
+            Self::draw_detail_row(frame, l, x_left, ly, "Args:", &entry.args);
+            ly += DETAIL_LINE_SPACING;
         }
-        self.render_detail_row(tree, x_left, ly, "Publisher:", &entry.publisher);
+        Self::draw_detail_row(frame, l, x_left, ly, "Publisher:", &entry.publisher);
 
-        // Right column: type, impact, status.
-        let mut ry = base_y + 8.0 + line_spacing + 4.0;
-        self.render_detail_row(tree, x_right, ry, "Type:", entry.startup_type.label());
-        ry += line_spacing;
-        self.render_detail_row(tree, x_right, ry, "Impact:", entry.impact.label());
-        ry += line_spacing;
-        self.render_detail_row(tree, x_right, ry, "Status:", entry.status_label());
+        Self::draw_detail_row(frame, l, x_right, ry, "Type:", entry.startup_type.label());
+        ry += DETAIL_LINE_SPACING;
+        Self::draw_detail_row(frame, l, x_right, ry, "Impact:", entry.impact.label());
+        ry += DETAIL_LINE_SPACING;
+        Self::draw_detail_row(frame, l, x_right, ry, "Status:", entry.status_label());
     }
 
-    /// Render a "Label: Value" pair.
-    fn render_detail_row(&self, tree: &mut RenderTree, x: f32, y: f32, label: &str, value: &str) {
-        tree.push(RenderCommand::Text {
+    fn draw_detail_row(frame: &mut Frame, l: &Layout, x: f32, y: f32, label: &str, value: &str) {
+        if y + FONT_SIZE_SMALL > l.details.bottom() {
+            return;
+        }
+        frame.push(RenderCommand::Text {
             x,
             y,
             text: label.to_string(),
@@ -1714,34 +2495,37 @@ impl StartupUI {
             max_width: Option::None,
             overflow: TextOverflow::Clip,
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: x + text::measure(label, FONT_SIZE_SMALL, FontWeightHint::Bold) + 8.0,
             y,
             text: value.to_string(),
             color: COLOR_TEXT,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(self.window_width / 2.0 - 40.0),
+            max_width: Some((l.width / 2.0 - 40.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
     }
 
-    /// Render the status bar at the bottom.
-    fn render_status_bar(&self, tree: &mut RenderTree) {
-        let y = self.window_height - STATUS_BAR_HEIGHT;
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
+    fn draw_status(&self, frame: &mut Frame, l: &Layout) {
+        if l.status.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: l.status.x,
+            y: l.status.y,
+            width: l.status.w,
+            height: l.status.h,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
 
         let stats = self.manager.stats();
+        let shown = self.filtered_count();
         let summary = format!(
-            "Total: {}  |  Enabled: {}  |  Disabled: {}  |  Login: {}  Service: {}  Scheduled: {}  Driver: {}  |  Boot Impact: {}",
+            "Total: {}  |  Shown: {}  |  Enabled: {}  |  Disabled: {}  |  Login: {}  Service: {}  Scheduled: {}  Driver: {}  |  Boot Impact: {}",
             stats.total,
+            shown,
             stats.enabled,
             stats.disabled,
             stats.login_count,
@@ -1750,176 +2534,219 @@ impl StartupUI {
             stats.driver_count,
             stats.impact_summary(),
         );
-
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: PADDING,
-            y: y + (STATUS_BAR_HEIGHT - FONT_SIZE_SMALL) / 2.0,
+            y: l.status.y + ((l.status.h - FONT_SIZE_SMALL) / 2.0).max(0.0),
             text: summary,
             color: COLOR_SUBTEXT,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(self.window_width - PADDING * 2.0),
+            max_width: Some((l.width - PADDING * 2.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
     }
 
-    /// Render a semi-transparent dialog backdrop.
-    fn render_dialog_backdrop(&self, tree: &mut RenderTree) {
-        tree.push(RenderCommand::FillRect {
+    /// The dimmer behind an open dialog, and the hit box that makes the window
+    /// behind it inert.
+    fn draw_scrim(frame: &mut Frame, l: &Layout) {
+        let window = l.window();
+        if window.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
+            width: l.width,
+            height: l.height,
             color: Color::rgba(0, 0, 0, 150),
             corner_radii: CornerRadii::ZERO,
         });
+        frame.hit(Target::Scrim, window);
     }
 
-    /// Render the add/edit dialog.
-    fn render_add_edit_dialog(&self, tree: &mut RenderTree, dlg: &AddEditDialog) {
-        self.render_dialog_backdrop(tree);
-
-        let dlg_w = 440.0_f32;
-        let dlg_h = 380.0_f32;
-        let dlg_x = (self.window_width - dlg_w) / 2.0;
-        let dlg_y = (self.window_height - dlg_h) / 2.0;
-
-        // Dialog background.
-        tree.push(RenderCommand::FillRect {
-            x: dlg_x,
-            y: dlg_y,
-            width: dlg_w,
-            height: dlg_h,
+    /// Box, border and title of a dialog. Returns nothing: the caller already
+    /// has the rectangle.
+    fn draw_dialog_chrome(frame: &mut Frame, rect: Rect, title: &str, border: Color, tint: Color) {
+        if rect.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::all(8.0),
         });
-        tree.push(RenderCommand::StrokeRect {
-            x: dlg_x,
-            y: dlg_y,
-            width: dlg_w,
-            height: dlg_h,
-            color: COLOR_SURFACE1,
+        frame.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: border,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
+        frame.push(RenderCommand::Text {
+            x: rect.x + PADDING,
+            y: rect.y + 12.0,
+            text: title.to_string(),
+            color: tint,
+            font_size: FONT_SIZE_HEADING,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((rect.w - PADDING * 2.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
 
-        // Title.
+    /// The status line, drawn in a dialog's footer beside its buttons — where
+    /// "Name is required" belongs, next to the Save that refused.
+    fn draw_dialog_status(&self, frame: &mut Frame, rect: Rect) {
+        if self.status.is_empty() || rect.is_empty() {
+            return;
+        }
+        let width = (rect.w - PADDING * 2.0 - BUTTON_WIDTH * 2.0 - BUTTON_GAP * 2.0).max(0.0);
+        if width <= 0.0 {
+            return;
+        }
+        frame.push(RenderCommand::Text {
+            x: rect.x + PADDING,
+            y: rect.bottom() - BUTTON_HEIGHT - PADDING + (BUTTON_HEIGHT - FONT_SIZE_SMALL) / 2.0,
+            text: self.status.clone(),
+            color: COLOR_YELLOW,
+            font_size: FONT_SIZE_SMALL,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(width),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+
+    fn draw_add_edit_dialog(&self, frame: &mut Frame, l: &Layout, dlg: &AddEditDialog) {
         let title = if dlg.editing_id.is_some() {
             "Edit Startup Entry"
         } else {
             "Add Startup Entry"
         };
-        tree.push(RenderCommand::Text {
-            x: dlg_x + PADDING,
-            y: dlg_y + 12.0,
-            text: title.to_string(),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE_HEADING,
-            font_weight: FontWeightHint::Bold,
-            max_width: Option::None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Form fields.
-        let field_x = dlg_x + PADDING;
-        let field_w = dlg_w - PADDING * 2.0;
-        let mut fy = dlg_y + 44.0;
-        let field_gap = 42.0;
-
-        let fields: [(&str, &str, usize); 5] = [
-            ("Name", &dlg.name, 0),
-            ("Path", &dlg.path, 1),
-            ("Arguments", &dlg.args, 2),
-            ("Publisher", &dlg.publisher, 3),
-            ("Description", &dlg.description, 4),
-        ];
-
-        for (label, value, idx) in &fields {
-            let is_focused = dlg.focused_field == *idx;
-            self.render_form_field(tree, field_x, fy, field_w, label, value, is_focused);
-            fy += field_gap;
+        Self::draw_dialog_chrome(frame, l.dialog, title, COLOR_SURFACE1, COLOR_TEXT);
+        if l.dialog.is_empty() {
+            return;
         }
 
-        // Type selector.
-        let sel_y = fy;
-        tree.push(RenderCommand::Text {
-            x: field_x,
-            y: sel_y,
-            text: "Type:".to_string(),
-            color: COLOR_SUBTEXT,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: Option::None,
-            overflow: TextOverflow::Clip,
-        });
-        tree.push(RenderCommand::Text {
-            x: field_x + 80.0,
-            y: sel_y,
-            text: dlg.selected_type().label().to_string(),
-            color: COLOR_BLUE,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Option::None,
-            overflow: TextOverflow::Clip,
-        });
+        for (i, (label, value)) in dlg.fields().into_iter().enumerate() {
+            Self::draw_form_field(
+                frame,
+                Target::DialogField(i),
+                l.dialog_field(i),
+                l.dialog_field_top(i),
+                label,
+                value,
+                dlg.focused_field == i,
+            );
+        }
 
-        // Impact selector.
-        tree.push(RenderCommand::Text {
-            x: field_x + 200.0,
-            y: sel_y,
-            text: "Impact:".to_string(),
-            color: COLOR_SUBTEXT,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: Option::None,
-            overflow: TextOverflow::Clip,
-        });
-        tree.push(RenderCommand::Text {
-            x: field_x + 280.0,
-            y: sel_y,
-            text: dlg.selected_impact().label().to_string(),
-            color: dlg.selected_impact().color(),
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Option::None,
-            overflow: TextOverflow::Clip,
-        });
+        Self::draw_selector(
+            frame,
+            Target::DialogType,
+            l.dialog_type(),
+            (l.dialog.x + PADDING, l.selector_y()),
+            "Type:",
+            dlg.selected_type().label(),
+            COLOR_BLUE,
+        );
+        Self::draw_selector(
+            frame,
+            Target::DialogImpact,
+            l.dialog_impact(),
+            (
+                l.dialog.x + PADDING + SELECTOR_IMPACT_LABEL_X,
+                l.selector_y(),
+            ),
+            "Impact:",
+            dlg.selected_impact().label(),
+            dlg.selected_impact().color(),
+        );
 
-        // Dialog buttons (Cancel / Save).
-        let btn_y = dlg_y + dlg_h - BUTTON_HEIGHT - 12.0;
-        self.render_button(
-            tree,
-            dlg_x + dlg_w - BUTTON_WIDTH * 2.0 - PADDING - 8.0,
-            btn_y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
+        self.draw_dialog_status(frame, l.dialog);
+        let (cancel, save) = l.dialog_buttons();
+        Self::draw_button(
+            frame,
+            Target::DialogCancel,
+            cancel,
             "Cancel",
             COLOR_OVERLAY0,
         );
-        self.render_button(
-            tree,
-            dlg_x + dlg_w - BUTTON_WIDTH - PADDING,
-            btn_y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            "Save",
-            COLOR_GREEN,
-        );
+        Self::draw_button(frame, Target::DialogSave, save, "Save", COLOR_GREEN);
     }
 
-    /// Render a labeled text input field.
-    fn render_form_field(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        w: f32,
+    /// A labelled text input. `label_y` is where the caption goes; `input` is
+    /// the box, which is also the hit box.
+    fn draw_form_field(
+        frame: &mut Frame,
+        target: Target,
+        input: Rect,
+        label_y: f32,
         label: &str,
         value: &str,
         focused: bool,
     ) {
-        tree.push(RenderCommand::Text {
-            x,
+        if input.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::Text {
+            x: input.x,
+            y: label_y,
+            text: label.to_string(),
+            color: COLOR_SUBTEXT,
+            font_size: FONT_SIZE_SMALL,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(input.w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        frame.push(RenderCommand::FillRect {
+            x: input.x,
+            y: input.y,
+            width: input.w,
+            height: input.h,
+            color: COLOR_BASE,
+            corner_radii: CornerRadii::all(4.0),
+        });
+        frame.push(RenderCommand::StrokeRect {
+            x: input.x,
+            y: input.y,
+            width: input.w,
+            height: input.h,
+            color: if focused { COLOR_BLUE } else { COLOR_SURFACE1 },
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(4.0),
+        });
+
+        let empty = value.is_empty();
+        frame.push(RenderCommand::Text {
+            x: input.x + 6.0,
+            y: input.y + ((input.h - FONT_SIZE) / 2.0).max(0.0),
+            text: if empty { label } else { value }.to_string(),
+            color: if empty { COLOR_OVERLAY0 } else { COLOR_TEXT },
+            font_size: FONT_SIZE,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((input.w - 12.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        frame.hit(target, input);
+    }
+
+    /// A "Label: Value" pair whose value cycles when clicked.
+    fn draw_selector(
+        frame: &mut Frame,
+        target: Target,
+        hit: Rect,
+        label_pos: (f32, f32),
+        label: &str,
+        value: &str,
+        color: Color,
+    ) {
+        let (label_x, y) = label_pos;
+        frame.push(RenderCommand::Text {
+            x: label_x,
             y,
             text: label.to_string(),
             color: COLOR_SUBTEXT,
@@ -1928,133 +2755,62 @@ impl StartupUI {
             max_width: Option::None,
             overflow: TextOverflow::Clip,
         });
-
-        let input_y = y + 14.0;
-        let input_h = 24.0_f32;
-        let border_color = if focused { COLOR_BLUE } else { COLOR_SURFACE1 };
-
-        tree.push(RenderCommand::FillRect {
-            x,
-            y: input_y,
-            width: w,
-            height: input_h,
-            color: COLOR_BASE,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        tree.push(RenderCommand::StrokeRect {
-            x,
-            y: input_y,
-            width: w,
-            height: input_h,
-            color: border_color,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        let display = if value.is_empty() { label } else { value };
-        let text_color = if value.is_empty() {
-            COLOR_OVERLAY0
-        } else {
-            COLOR_TEXT
-        };
-
-        tree.push(RenderCommand::Text {
-            x: x + 6.0,
-            y: input_y + (input_h - FONT_SIZE) / 2.0,
-            text: display.to_string(),
-            color: text_color,
+        if hit.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::Text {
+            x: hit.x,
+            y,
+            text: value.to_string(),
+            color,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(w - 12.0),
+            max_width: Some(hit.w),
             overflow: TextOverflow::Ellipsis,
         });
+        frame.hit(target, hit);
     }
 
-    /// Render the confirm-delete dialog.
-    fn render_confirm_delete_dialog(&self, tree: &mut RenderTree, id: u64) {
-        self.render_dialog_backdrop(tree);
-
-        let dlg_w = 360.0_f32;
-        let dlg_h = 160.0_f32;
-        let dlg_x = (self.window_width - dlg_w) / 2.0;
-        let dlg_y = (self.window_height - dlg_h) / 2.0;
-
-        tree.push(RenderCommand::FillRect {
-            x: dlg_x,
-            y: dlg_y,
-            width: dlg_w,
-            height: dlg_h,
-            color: COLOR_SURFACE0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-        tree.push(RenderCommand::StrokeRect {
-            x: dlg_x,
-            y: dlg_y,
-            width: dlg_w,
-            height: dlg_h,
-            color: COLOR_RED,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        tree.push(RenderCommand::Text {
-            x: dlg_x + PADDING,
-            y: dlg_y + 16.0,
-            text: "Confirm Delete".to_string(),
-            color: COLOR_RED,
-            font_size: FONT_SIZE_HEADING,
-            font_weight: FontWeightHint::Bold,
-            max_width: Option::None,
-            overflow: TextOverflow::Clip,
-        });
+    fn draw_confirm_delete_dialog(&self, frame: &mut Frame, l: &Layout, id: u64) {
+        Self::draw_dialog_chrome(frame, l.confirm, "Confirm Delete", COLOR_RED, COLOR_RED);
+        if l.confirm.is_empty() {
+            return;
+        }
 
         let name = self
             .manager
             .get_entry(id)
-            .map(|e| e.name.as_str())
-            .unwrap_or("Unknown");
-        let msg = format!("Remove \"{}\" from startup?", name);
-        tree.push(RenderCommand::Text {
-            x: dlg_x + PADDING,
-            y: dlg_y + 50.0,
-            text: msg,
+            .map_or("Unknown", |e| e.name.as_str());
+        frame.push(RenderCommand::Text {
+            x: l.confirm.x + PADDING,
+            y: l.confirm.y + 50.0,
+            text: format!("Remove \"{name}\" from startup?"),
             color: COLOR_TEXT,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(dlg_w - PADDING * 2.0),
+            max_width: Some((l.confirm.w - PADDING * 2.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
-
-        tree.push(RenderCommand::Text {
-            x: dlg_x + PADDING,
-            y: dlg_y + 74.0,
-            text: "This action cannot be undone.".to_string(),
+        frame.push(RenderCommand::Text {
+            x: l.confirm.x + PADDING,
+            y: l.confirm.y + 74.0,
+            text: String::from("This action cannot be undone."),
             color: COLOR_SUBTEXT,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
-            max_width: Option::None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((l.confirm.w - PADDING * 2.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
 
-        let btn_y = dlg_y + dlg_h - BUTTON_HEIGHT - 12.0;
-        self.render_button(
-            tree,
-            dlg_x + dlg_w - BUTTON_WIDTH * 2.0 - PADDING - 8.0,
-            btn_y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
+        let (cancel, delete) = l.confirm_buttons();
+        Self::draw_button(
+            frame,
+            Target::DeleteCancel,
+            cancel,
             "Cancel",
             COLOR_OVERLAY0,
         );
-        self.render_button(
-            tree,
-            dlg_x + dlg_w - BUTTON_WIDTH - PADDING,
-            btn_y,
-            BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            "Delete",
-            COLOR_RED,
-        );
+        Self::draw_button(frame, Target::DeleteConfirm, delete, "Delete", COLOR_RED);
     }
 }
 
@@ -2064,11 +2820,74 @@ impl Default for StartupUI {
     }
 }
 
+impl App for StartupUI {
+    fn title(&self) -> String {
+        String::from("Startup Apps Manager")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        // Ctrl+Q closes the window. Escape does not: here it backs out of a
+        // dialog, a filter or a selection, which is what the key is for.
+        if let Event::Key(key) = event
+            && key.pressed
+            && key.key == Key::Q
+            && key.modifiers.ctrl
+        {
+            return Response::Exit;
+        }
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The remembered size is only ever a starting guess; this is the real
+        // one, and the hit test reads it back through `handle_event`.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for StartupUI {
+    type Target = Target;
+    type Outcome = EventResult;
+
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Key(key.clone()))
+    }
+}
+
 // ============================================================================
 // Entry point
 // ============================================================================
 
-fn main() {}
+fn main() -> ExitCode {
+    app::launch("startupmanager", &mut StartupUI::new())
+}
 
 // ============================================================================
 // Tests
@@ -2076,7 +2895,24 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // A test that cannot index a slice or unwrap an `Option` it has just built
+    // is a test that spends more lines apologising than asserting. Panicking on
+    // bad data is the point here -- it is how the test fails.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
+    // Not in the production imports: nothing outside the tests names a
+    // modifier set, because the app reads `key.modifiers.ctrl` off the event
+    // the window hands it.
+    use guitk::event::Modifiers;
+    use guitk::probe;
 
     // -- StartupType tests --------------------------------------------------
 
@@ -3397,5 +4233,706 @@ mod tests {
     fn test_startup_ui_default() {
         let ui = StartupUI::default();
         assert!(ui.manager.entry_count() > 0);
+    }
+
+    // -- Wiring: layout, hit testing, events --------------------------------
+    //
+    // Everything below drives the app the way the window does -- a click at a
+    // coordinate, a keystroke, a wheel notch -- and reads the result out of
+    // the same frame the renderer produced. Nothing here recomputes geometry.
+
+    /// The default layout, at the size the window opens at.
+    fn layout() -> Layout {
+        Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// A window short enough that only three table rows fit, for the scroll
+    /// tests: 400 - (48 + 40 + 36 + 32 + 120 + 28) = 96px of table.
+    const SHORT: (f32, f32) = (WINDOW_WIDTH, 400.0);
+
+    /// Controls the frame always records, whatever the state.
+    const ALWAYS_DRAWN: [Target; 8] = [
+        Target::Search,
+        Target::Toolbar(ToolbarAction::Add),
+        Target::Toolbar(ToolbarAction::Remove),
+        Target::Toolbar(ToolbarAction::Enable),
+        Target::Toolbar(ToolbarAction::Disable),
+        Target::Toolbar(ToolbarAction::Refresh),
+        Target::Column(SortColumn::Name),
+        Target::Column(SortColumn::Path),
+    ];
+
+    /// Select the first visible row and return the entry id it holds.
+    fn select_first_row(ui: &mut StartupUI) -> u64 {
+        let id = ui.visible_entries().first().map(|e| e.id).unwrap();
+        assert_eq!(probe::click(ui, Target::Row(id)), EventResult::Consumed);
+        assert_eq!(ui.selected_id, Some(id));
+        id
+    }
+
+    #[test]
+    fn every_control_answers_where_the_frame_draws_it() {
+        let ui = StartupUI::new();
+        for target in ALWAYS_DRAWN {
+            let rect =
+                probe::rect_of(&ui, target).unwrap_or_else(|| panic!("{target:?} was never drawn"));
+            let (x, y) = rect.centre();
+            assert_eq!(
+                ui.target_at(x, y),
+                Some(target),
+                "{target:?} does not answer at the centre of its own hit box"
+            );
+        }
+    }
+
+    #[test]
+    fn no_size_puts_a_hit_box_outside_the_window() {
+        // A `Frame` does not clip to the window, so a layout that clamped
+        // instead of shrinking would record controls off the edge -- clickable
+        // by clicking nothing. Includes a dialog, which is the widest thing
+        // drawn and therefore the first to hang over.
+        for (w, h) in [
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+            (640.0, 480.0),
+            (320.0, 240.0),
+            (200.0, 120.0),
+            (40.0, 40.0),
+            (1.0, 1.0),
+        ] {
+            for open_dialog in [false, true] {
+                let mut ui = StartupUI::new();
+                if open_dialog {
+                    ui.open_add_dialog();
+                }
+                let frame = ui.frame(w, h);
+                let window = Rect::new(0.0, 0.0, w, h);
+                for (target, rect) in frame.hits() {
+                    assert!(
+                        rect.intersect(window) == Some(*rect),
+                        "{target:?} at {rect:?} sticks out of a {w}x{h} window"
+                    );
+                }
+                assert!(frame.is_balanced(), "unbalanced clip/translate at {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_selects_the_row_it_lands_on() {
+        let mut ui = StartupUI::new();
+        assert!(ui.selected_id.is_none());
+        let second = ui.visible_entries().get(1).map(|e| e.id).unwrap();
+        assert_eq!(
+            probe::click(&mut ui, Target::Row(second)),
+            EventResult::Consumed
+        );
+        assert_eq!(ui.selected_id, Some(second));
+    }
+
+    #[test]
+    fn the_empty_table_below_the_last_row_deselects() {
+        let mut ui = StartupUI::new();
+        select_first_row(&mut ui);
+        // The default window fits 11 rows and the sample data has 8, so the
+        // bottom of the viewport is bare table.
+        let l = layout();
+        let (x, y) = l.row(l.rows().saturating_sub(1)).centre();
+        assert_eq!(ui.target_at(x, y), Some(Target::Table));
+        assert_eq!(
+            ui.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            })),
+            EventResult::Consumed
+        );
+        assert!(ui.selected_id.is_none());
+    }
+
+    #[test]
+    fn a_column_header_sorts_by_it_and_a_second_click_flips_the_order() {
+        let mut ui = StartupUI::new();
+        assert_eq!(ui.sort_column, SortColumn::Name);
+
+        probe::click(&mut ui, Target::Column(SortColumn::Impact));
+        assert_eq!(ui.sort_column, SortColumn::Impact);
+        assert_eq!(ui.sort_order, SortOrder::Ascending);
+
+        probe::click(&mut ui, Target::Column(SortColumn::Impact));
+        assert_eq!(ui.sort_column, SortColumn::Impact);
+        assert_eq!(ui.sort_order, SortOrder::Descending);
+
+        // And the table really is in that order, not merely labelled so.
+        let impacts: Vec<StartupImpact> = ui.visible_entries().iter().map(|e| e.impact).collect();
+        assert!(
+            impacts.windows(2).all(|w| w[0] >= w[1]),
+            "the header says descending impact but the rows read {impacts:?}"
+        );
+
+        probe::click(&mut ui, Target::Column(SortColumn::Name));
+        assert_eq!(
+            ui.sort_order,
+            SortOrder::Ascending,
+            "a new column starts ascending"
+        );
+        let names: Vec<String> = ui
+            .visible_entries()
+            .iter()
+            .map(|e| e.name.to_ascii_lowercase())
+            .collect();
+        assert!(
+            names.windows(2).all(|w| w[0] <= w[1]),
+            "not by name: {names:?}"
+        );
+    }
+
+    #[test]
+    fn typing_only_reaches_the_search_box_once_it_has_been_clicked() {
+        let mut ui = StartupUI::new();
+        probe::type_str(&mut ui, "audio");
+        assert_eq!(ui.search_query, "", "the table stole the keystrokes");
+
+        probe::click(&mut ui, Target::Search);
+        assert!(ui.search_focused);
+        probe::type_str(&mut ui, "audio");
+        assert_eq!(ui.search_query, "audio");
+        assert_eq!(ui.filtered_count(), 1);
+        assert_eq!(
+            ui.visible_entries().first().map(|e| e.name.as_str()),
+            Some("Audio Service")
+        );
+    }
+
+    #[test]
+    fn a_click_anywhere_else_takes_the_caret_out_of_the_search_box() {
+        let mut ui = StartupUI::new();
+        probe::click(&mut ui, Target::Search);
+        assert!(ui.search_focused);
+        probe::click(&mut ui, Target::Column(SortColumn::Name));
+        assert!(!ui.search_focused);
+        probe::type_str(&mut ui, "x");
+        assert_eq!(ui.search_query, "");
+    }
+
+    #[test]
+    fn backspace_edits_the_search_box_and_resets_the_viewport() {
+        let mut ui = StartupUI::new();
+        probe::click(&mut ui, Target::Search);
+        probe::type_str(&mut ui, "cloud");
+        assert_eq!(ui.filtered_count(), 1);
+        for _ in 0..5 {
+            probe::key(&mut ui, &probe::press(Key::Backspace));
+        }
+        assert_eq!(ui.search_query, "");
+        assert_eq!(ui.scroll_offset, 0);
+        assert_eq!(ui.filtered_count(), ui.manager.entry_count());
+    }
+
+    #[test]
+    fn escape_backs_out_of_one_thing_at_a_time() {
+        let mut ui = StartupUI::new();
+        probe::click(&mut ui, Target::Search);
+        probe::type_str(&mut ui, "s");
+        select_first_row(&mut ui);
+        // The row click already dropped the caret, so re-take it.
+        probe::click(&mut ui, Target::Search);
+
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Escape)),
+            EventResult::Consumed
+        );
+        assert!(!ui.search_focused, "first escape gives up the caret");
+        assert_eq!(ui.search_query, "s");
+
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert_eq!(ui.search_query, "", "second escape clears the filter");
+        assert!(ui.selected_id.is_some());
+
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert!(ui.selected_id.is_none(), "third escape drops the selection");
+
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Escape)),
+            EventResult::Ignored,
+            "with nothing left to back out of, escape is not ours"
+        );
+    }
+
+    #[test]
+    fn an_open_dialog_takes_the_clicks_of_everything_it_covers() {
+        let mut ui = StartupUI::new();
+        let search = probe::rect_of(&ui, Target::Search).unwrap();
+        ui.open_add_dialog();
+        assert!(
+            probe::rect_of(&ui, Target::Search).is_none(),
+            "the search box is still clickable behind a modal dialog"
+        );
+        let (x, y) = search.centre();
+        assert_eq!(ui.target_at(x, y), Some(Target::Scrim));
+        assert_eq!(
+            ui.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            })),
+            EventResult::Consumed
+        );
+        assert!(!ui.search_focused);
+        assert!(
+            matches!(ui.dialog, DialogState::AddEdit(_)),
+            "the scrim closed the dialog"
+        );
+    }
+
+    #[test]
+    fn the_add_dialog_registers_an_entry_that_was_typed_into_it() {
+        let mut ui = StartupUI::new();
+        let before = ui.manager.entry_count();
+
+        probe::click(&mut ui, Target::Toolbar(ToolbarAction::Add));
+        assert!(matches!(ui.dialog, DialogState::AddEdit(_)));
+
+        probe::click(&mut ui, Target::DialogField(0));
+        probe::type_str(&mut ui, "Backup Agent");
+        probe::click(&mut ui, Target::DialogField(1));
+        probe::type_str(&mut ui, "/opt/backup/agent");
+        probe::click(&mut ui, Target::DialogField(3));
+        probe::type_str(&mut ui, "BackupCo");
+        probe::click(&mut ui, Target::DialogSave);
+
+        assert_eq!(ui.dialog, DialogState::Closed);
+        assert_eq!(ui.manager.entry_count(), before + 1);
+        let added = ui
+            .selected_id
+            .and_then(|id| ui.manager.get_entry(id))
+            .unwrap();
+        assert_eq!(added.name, "Backup Agent");
+        assert_eq!(added.path, "/opt/backup/agent");
+        assert_eq!(added.publisher, "BackupCo");
+    }
+
+    #[test]
+    fn the_add_dialog_stays_open_and_says_why_when_it_cannot_save() {
+        let mut ui = StartupUI::new();
+        let before = ui.manager.entry_count();
+        probe::click(&mut ui, Target::Toolbar(ToolbarAction::Add));
+        probe::click(&mut ui, Target::DialogField(0));
+        probe::type_str(&mut ui, "No Path");
+        probe::click(&mut ui, Target::DialogSave);
+
+        assert!(
+            matches!(ui.dialog, DialogState::AddEdit(_)),
+            "it closed anyway"
+        );
+        assert_eq!(ui.manager.entry_count(), before);
+        assert!(
+            ui.status.contains("Path"),
+            "the refusal was silent: status is {:?}",
+            ui.status
+        );
+        // And the message is on screen, not just in a field.
+        let tree = ui.render();
+        assert!(
+            tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } if text == &ui.status
+            )),
+            "the status was never drawn"
+        );
+    }
+
+    #[test]
+    fn the_dialog_cyclers_walk_the_type_and_the_impact() {
+        let mut ui = StartupUI::new();
+        ui.open_add_dialog();
+        let type_of = |ui: &StartupUI| match &ui.dialog {
+            DialogState::AddEdit(d) => d.selected_type(),
+            _ => panic!("dialog closed"),
+        };
+        let impact_of = |ui: &StartupUI| match &ui.dialog {
+            DialogState::AddEdit(d) => d.selected_impact(),
+            _ => panic!("dialog closed"),
+        };
+
+        let start = type_of(&ui);
+        probe::click(&mut ui, Target::DialogType);
+        assert_ne!(type_of(&ui), start);
+        for _ in 1..StartupType::all().len() {
+            probe::click(&mut ui, Target::DialogType);
+        }
+        assert_eq!(type_of(&ui), start, "the cycler does not come back around");
+
+        let start = impact_of(&ui);
+        probe::click(&mut ui, Target::DialogImpact);
+        assert_ne!(impact_of(&ui), start);
+    }
+
+    #[test]
+    fn tab_walks_the_dialog_fields_and_shift_tab_walks_back() {
+        let mut ui = StartupUI::new();
+        ui.open_add_dialog();
+        let focus = |ui: &StartupUI| match &ui.dialog {
+            DialogState::AddEdit(d) => d.focused_field,
+            _ => panic!("dialog closed"),
+        };
+        assert_eq!(focus(&ui), 0);
+        probe::key(&mut ui, &probe::press(Key::Tab));
+        assert_eq!(focus(&ui), 1);
+        probe::key(&mut ui, &probe::shift(Key::Tab));
+        assert_eq!(focus(&ui), 0);
+        probe::key(&mut ui, &probe::shift(Key::Tab));
+        assert_eq!(
+            focus(&ui),
+            AddEditDialog::FIELD_COUNT - 1,
+            "shift-tab wraps"
+        );
+
+        // And typing lands in whichever field the focus reached.
+        probe::type_str(&mut ui, "notes");
+        match &ui.dialog {
+            DialogState::AddEdit(d) => assert_eq!(d.description, "notes"),
+            _ => panic!("dialog closed"),
+        }
+    }
+
+    #[test]
+    fn enter_edits_the_selected_entry_and_the_dialog_saves_the_change() {
+        let mut ui = StartupUI::new();
+        let id = select_first_row(&mut ui);
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Enter)),
+            EventResult::Consumed
+        );
+        match &ui.dialog {
+            DialogState::AddEdit(d) => assert_eq!(d.editing_id, Some(id)),
+            other => panic!("expected the edit dialog, got {other:?}"),
+        }
+
+        probe::click(&mut ui, Target::DialogField(3));
+        probe::type_str(&mut ui, "!");
+        probe::click(&mut ui, Target::DialogSave);
+        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(ui.manager.get_entry(id).unwrap().publisher.ends_with('!'));
+        assert_eq!(
+            ui.manager.entry_count(),
+            8,
+            "editing an entry created a second one"
+        );
+    }
+
+    #[test]
+    fn delete_asks_first_and_only_removes_when_confirmed() {
+        let mut ui = StartupUI::new();
+        let id = select_first_row(&mut ui);
+        let before = ui.manager.entry_count();
+
+        probe::click(&mut ui, Target::Toolbar(ToolbarAction::Remove));
+        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        probe::click(&mut ui, Target::DeleteCancel);
+        assert_eq!(ui.dialog, DialogState::Closed);
+        assert_eq!(ui.manager.entry_count(), before, "cancel deleted it anyway");
+
+        probe::key(&mut ui, &probe::press(Key::Delete));
+        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        probe::click(&mut ui, Target::DeleteConfirm);
+        assert_eq!(ui.manager.entry_count(), before - 1);
+        assert!(ui.manager.get_entry(id).is_none());
+        assert!(ui.selected_id.is_none(), "the selection outlived its entry");
+    }
+
+    #[test]
+    fn remove_with_nothing_selected_says_so_instead_of_opening_a_dialog() {
+        let mut ui = StartupUI::new();
+        assert!(ui.selected_id.is_none());
+        probe::click(&mut ui, Target::Toolbar(ToolbarAction::Remove));
+        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(ui.status.contains("Select"), "status is {:?}", ui.status);
+    }
+
+    #[test]
+    fn the_enable_and_disable_buttons_toggle_the_selected_entry() {
+        let mut ui = StartupUI::new();
+        let id = select_first_row(&mut ui);
+        assert!(ui.manager.get_entry(id).unwrap().enabled);
+
+        probe::click(&mut ui, Target::Toolbar(ToolbarAction::Disable));
+        assert!(!ui.manager.get_entry(id).unwrap().enabled);
+        probe::click(&mut ui, Target::Toolbar(ToolbarAction::Enable));
+        assert!(ui.manager.get_entry(id).unwrap().enabled);
+    }
+
+    #[test]
+    fn refresh_drops_a_selection_whose_entry_is_gone() {
+        let mut ui = StartupUI::new();
+        let id = select_first_row(&mut ui);
+        // Remove it behind the UI's back, the way a rescan would find.
+        ui.manager.remove_entry(id);
+        assert_eq!(ui.selected_id, Some(id));
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::F5)),
+            EventResult::Consumed
+        );
+        assert!(ui.selected_id.is_none());
+        assert!(ui.status.contains('7'), "status is {:?}", ui.status);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_table_and_stops_at_both_ends() {
+        let mut ui = StartupUI::new();
+        ui.resize(SHORT.0, SHORT.1);
+        assert_eq!(
+            ui.visible_rows(),
+            3,
+            "the short window should fit three rows"
+        );
+
+        let (x, y) = probe::rect_of_sized(&ui, Target::Table, SHORT)
+            .unwrap()
+            .centre();
+        let wheel_at = |ui: &mut StartupUI, dy: f32| {
+            ui.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            }))
+        };
+
+        assert_eq!(wheel_at(&mut ui, -1.0), EventResult::Consumed);
+        assert_eq!(ui.scroll_offset, 3, "one notch is three rows");
+        wheel_at(&mut ui, -10.0);
+        assert_eq!(ui.scroll_offset, 5, "8 entries less a 3-row viewport");
+        wheel_at(&mut ui, 10.0);
+        assert_eq!(ui.scroll_offset, 0, "the wheel scrolled past the top");
+    }
+
+    #[test]
+    fn the_wheel_over_the_toolbar_leaves_the_table_alone() {
+        let mut ui = StartupUI::new();
+        ui.resize(SHORT.0, SHORT.1);
+        let (x, y) = probe::rect_of_sized(&ui, Target::Toolbar(ToolbarAction::Add), SHORT)
+            .unwrap()
+            .centre();
+        assert_eq!(
+            ui.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+            })),
+            EventResult::Ignored
+        );
+        assert_eq!(ui.scroll_offset, 0);
+    }
+
+    #[test]
+    fn the_arrows_walk_the_selection_and_drag_the_viewport_with_them() {
+        // Every event goes in at `SHORT`, not at `Probe::SIZE`: the probe
+        // helpers resize to the default first, which would silently give the
+        // viewport all eight rows and make the scrolling untestable.
+        let mut ui = StartupUI::new();
+        for _ in 0..8 {
+            ui.key_at(&probe::press(Key::Down), SHORT);
+        }
+        assert_eq!(ui.scroll_offset, 5, "the selection walked off the bottom");
+        let last = ui.selected_id;
+        // Still there after one more: the walk stops at the end of the list.
+        ui.key_at(&probe::press(Key::Down), SHORT);
+        assert_eq!(ui.selected_id, last);
+
+        for _ in 0..8 {
+            ui.key_at(&probe::press(Key::Up), SHORT);
+        }
+        assert_eq!(ui.scroll_offset, 0, "the viewport did not follow back up");
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_ends_of_the_list() {
+        let mut ui = StartupUI::new();
+        ui.key_at(&probe::press(Key::End), SHORT);
+        assert_eq!(ui.scroll_offset, 5);
+        let last = ui.all_entries().last().map(|e| e.id);
+        assert_eq!(ui.selected_id, last);
+
+        ui.key_at(&probe::press(Key::Home), SHORT);
+        assert_eq!(ui.scroll_offset, 0);
+        assert_eq!(ui.selected_id, ui.all_entries().first().map(|e| e.id));
+    }
+
+    #[test]
+    fn a_selection_that_scrolled_out_of_view_is_still_the_selection() {
+        let mut ui = StartupUI::new();
+        ui.resize(SHORT.0, SHORT.1);
+        let id = ui.visible_entries().first().map(|e| e.id).unwrap();
+        probe::click_sized(&mut ui, Target::Row(id), MouseButton::Left, SHORT);
+        assert_eq!(ui.selected_id, Some(id));
+        ui.scroll_rows(3.0);
+        assert_eq!(ui.scroll_offset, 3);
+        assert_eq!(ui.selected_id, Some(id));
+        assert!(
+            probe::rect_of_sized(&ui, Target::Row(id), SHORT).is_none(),
+            "the row is off screen but still drawn"
+        );
+    }
+
+    #[test]
+    fn ctrl_n_opens_the_add_dialog_and_ctrl_f_takes_the_caret() {
+        let mut ui = StartupUI::new();
+        probe::key(&mut ui, &probe::ctrl(Key::N));
+        assert!(matches!(ui.dialog, DialogState::AddEdit(_)));
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert_eq!(ui.dialog, DialogState::Closed);
+
+        probe::key(&mut ui, &probe::ctrl(Key::F));
+        assert!(ui.search_focused);
+        probe::type_str(&mut ui, "gpu");
+        assert_eq!(ui.filtered_count(), 1);
+    }
+
+    #[test]
+    fn a_resized_window_lays_out_again_and_the_hit_test_follows() {
+        let mut ui = StartupUI::new();
+        let wide = probe::rect_of(&ui, Target::Search).unwrap();
+        assert_eq!(
+            ui.handle_event(&Event::Resize {
+                width: 500,
+                height: 400,
+            }),
+            EventResult::Consumed
+        );
+        let narrow = probe::rect_of_sized(&ui, Target::Search, (500.0, 400.0)).unwrap();
+        assert!(
+            narrow.w < wide.w,
+            "the search box did not shrink with the window"
+        );
+        let (x, y) = narrow.centre();
+        assert_eq!(ui.target_at(x, y), Some(Target::Search));
+    }
+
+    #[test]
+    fn render_lays_out_at_the_size_it_is_handed() {
+        let mut ui = StartupUI::new();
+        let tree = App::render(&mut ui, 700.0, 500.0);
+        assert!(!tree.commands.is_empty());
+        assert_eq!(ui.window_width, 700.0);
+        assert_eq!(ui.window_height, 500.0);
+        // 500 - (48 + 40 + 36 + 32 + 120 + 28) = 196 -> six rows.
+        assert_eq!(ui.visible_rows(), 6);
+    }
+
+    #[test]
+    fn a_degenerate_size_does_not_poison_the_layout() {
+        let mut ui = StartupUI::new();
+        for (w, h) in [(0.0, 0.0), (f32::NAN, 100.0), (-40.0, f32::INFINITY)] {
+            let tree = App::render(&mut ui, w, h);
+            assert!(ui.window_width.is_finite() && ui.window_width >= 0.0);
+            assert!(ui.window_height.is_finite() && ui.window_height >= 0.0);
+            // Drawing nothing is a perfectly good answer for a zero-size
+            // window; drawing a NaN rectangle is not.
+            for command in &tree.commands {
+                if let RenderCommand::FillRect { x, y, .. } = command {
+                    assert!(x.is_finite() && y.is_finite(), "NaN geometry at {w}x{h}");
+                }
+            }
+            assert_eq!(ui.visible_rows(), 0);
+        }
+    }
+
+    #[test]
+    fn ctrl_q_closes_the_window_and_the_close_button_does_too() {
+        let mut ui = StartupUI::new();
+        let quit = KeyEvent {
+            key: Key::Q,
+            pressed: true,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            text: String::new(),
+        };
+        assert_eq!(ui.on_event(&Event::Key(quit)), Response::Exit);
+        assert_eq!(ui.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn only_an_event_that_changes_something_asks_for_a_frame() {
+        let mut ui = StartupUI::new();
+        // A move over the window changes nothing and must not repaint.
+        assert_eq!(
+            ui.on_event(&Event::Mouse(MouseEvent {
+                x: 10.0,
+                y: 10.0,
+                kind: MouseEventKind::Move,
+            })),
+            Response::Idle
+        );
+        assert_eq!(ui.on_event(&Event::FocusIn), Response::Idle);
+        let add = probe::rect_of(&ui, Target::Toolbar(ToolbarAction::Add)).unwrap();
+        let (x, y) = add.centre();
+        assert_eq!(
+            ui.on_event(&Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            })),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn every_target_the_frame_records_is_one_the_app_handles() {
+        // Three states, because the dialogs replace the whole hit list.
+        let states: [fn(&mut StartupUI); 3] = [
+            |_| {},
+            |ui| ui.open_add_dialog(),
+            |ui| {
+                ui.select_next();
+                ui.open_delete_dialog();
+            },
+        ];
+        let mut seen: Vec<String> = Vec::new();
+        for build in states {
+            let mut probe_ui = StartupUI::new();
+            build(&mut probe_ui);
+            let targets: Vec<Target> = probe_ui
+                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .hits()
+                .iter()
+                .map(|(t, _)| *t)
+                .collect();
+            for name in probe::control_names(&probe_ui) {
+                if !seen.contains(&name) {
+                    seen.push(name);
+                }
+            }
+            for target in targets {
+                let mut fresh = StartupUI::new();
+                build(&mut fresh);
+                assert_eq!(
+                    probe::click(&mut fresh, target),
+                    EventResult::Consumed,
+                    "{target:?} is drawn but nothing handles it"
+                );
+            }
+        }
+
+        for expected in [
+            "Search",
+            "Toolbar",
+            "Column",
+            "Row",
+            "Table",
+            "DialogField",
+            "DialogType",
+            "DialogImpact",
+            "DialogSave",
+            "DialogCancel",
+            "DeleteConfirm",
+            "DeleteCancel",
+            "Scrim",
+        ] {
+            assert!(
+                seen.iter().any(|n| n == expected),
+                "{expected} is a target no state ever draws; seen: {seen:?}"
+            );
+        }
     }
 }

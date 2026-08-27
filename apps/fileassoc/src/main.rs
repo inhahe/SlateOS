@@ -6,17 +6,19 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha).
 
-#![allow(dead_code)]
-
-#[allow(unused_imports)]
-use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-#[allow(unused_imports)]
-use guitk::style::CornerRadii;
-
-use guitk::kv;
 use std::collections::BTreeMap;
+use std::process::ExitCode;
+
+use guitk::color::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::Rect;
+use guitk::kv;
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::wheel;
+use oswindow::app::{self, App, Response};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -51,7 +53,6 @@ const PADDING: f32 = 10.0;
 const FONT_SIZE: f32 = 13.0;
 const FONT_SIZE_SMALL: f32 = 11.0;
 const FONT_SIZE_HEADING: f32 = 16.0;
-const BUTTON_WIDTH: f32 = 100.0;
 const BUTTON_HEIGHT: f32 = 30.0;
 const CORNER_RADIUS: f32 = 6.0;
 const SEARCH_WIDTH: f32 = 260.0;
@@ -60,6 +61,33 @@ const SIDEBAR_ITEM_HEIGHT: f32 = 34.0;
 const DIALOG_WIDTH: f32 = 400.0;
 const DIALOG_HEIGHT: f32 = 360.0;
 const DIALOG_APP_ROW_HEIGHT: f32 = 36.0;
+
+// The toolbar's three buttons. They are different widths because their
+// captions are: one shared width either truncated "Add File Type" or left
+// "Reset" swimming in empty space.
+const ADD_WIDTH: f32 = 110.0;
+const EXPORT_WIDTH: f32 = 90.0;
+const RESET_WIDTH: f32 = 80.0;
+/// The gap between two buttons sitting side by side.
+const BUTTON_GAP: f32 = 8.0;
+
+/// Height of the "CATEGORIES" caption above the sidebar's category list.
+const CATEGORY_LABEL_HEIGHT: f32 = 24.0;
+/// A row in the details panel's "Opens with" list.
+const COMPAT_ROW_HEIGHT: f32 = 28.0;
+/// The label column in the details panel, so the values line up.
+const DETAIL_LABEL_WIDTH: f32 = 84.0;
+
+/// The dialog's title strip, and the footer that holds its buttons.
+const DIALOG_TITLE_HEIGHT: f32 = 44.0;
+const DIALOG_FOOTER_HEIGHT: f32 = 52.0;
+const DIALOG_BUTTON_WIDTH: f32 = 88.0;
+const DIALOG_BUTTON_HEIGHT: f32 = 30.0;
+/// The "always use this app" tick box.
+const CHECKBOX_SIZE: f32 = 16.0;
+/// A text field in the "Add File Type" dialog, and its caption above it.
+const FIELD_HEIGHT: f32 = 28.0;
+const FIELD_LABEL_HEIGHT: f32 = 18.0;
 
 // ============================================================================
 // File type categories
@@ -307,6 +335,12 @@ pub enum AssocError {
     UnsupportedExtension { app_id: String, extension: String },
     /// An association already exists (when adding duplicates).
     AlreadyExists(String),
+    /// The extension typed into the "Add File Type" dialog is not usable.
+    ///
+    /// Distinct from `ParseError`, which is about a *config file* and carries a
+    /// line number there is no honest value for when the text came from a text
+    /// box the user is still standing in front of.
+    InvalidExtension(String),
     /// Config parse error at a given line number.
     ParseError { line_number: usize, detail: String },
 }
@@ -320,6 +354,7 @@ impl core::fmt::Display for AssocError {
                 write!(f, "App '{app_id}' does not support .{extension}")
             }
             Self::AlreadyExists(ext) => write!(f, "Association already exists for .{ext}"),
+            Self::InvalidExtension(detail) => write!(f, "Not a usable extension: {detail}"),
             Self::ParseError {
                 line_number,
                 detail,
@@ -974,10 +1009,309 @@ impl AssociationRegistry {
 pub enum ActiveDialog {
     /// No dialog open; main view is active.
     None,
-    /// "Open With" dialog for a given extension index.
+    /// "Open With" dialog for the extension in `dialog_target_ext`.
     OpenWith,
     /// Add New File Type dialog.
     AddFileType,
+}
+
+/// Which of the "Add File Type" dialog's three text fields has the caret.
+///
+/// The dialog is the reason this exists at all: `ActiveDialog::AddFileType`
+/// was declared and then never drawn, never opened and never handled, so the
+/// variant was a promise the program did not keep. A dialog that types needs
+/// to know *what* is being typed into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NewField {
+    Extension,
+    MimeType,
+    Description,
+}
+
+impl NewField {
+    const ALL: [Self; 3] = [Self::Extension, Self::MimeType, Self::Description];
+
+    /// The caption drawn beside the box.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Extension => "Extension",
+            Self::MimeType => "MIME Type",
+            Self::Description => "Description",
+        }
+    }
+
+    /// The field Tab moves to, wrapping at the end.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Extension => Self::MimeType,
+            Self::MimeType => Self::Description,
+            Self::Description => Self::Extension,
+        }
+    }
+}
+
+/// Everything the user can point at.
+///
+/// The renderer records these as it draws, so "where is the Export button?"
+/// and "what did the user just click?" are answered by the same walk. There
+/// was no answer to the second question at all before: this program drew a
+/// toolbar, a sidebar, a table and a modal dialog, and handled no events, so
+/// every control in it was a picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The search box. Clicking it puts the caret in it.
+    Search,
+    AddButton,
+    ExportButton,
+    ResetButton,
+    /// A sidebar entry. `None` is "All Types".
+    Category(Option<FileCategory>),
+    /// A row of the file-type table, by index into the *filtered* list.
+    Row(usize),
+    /// The table under its rows: the wheel scrolls anywhere over it, but a
+    /// click below the last row selects nothing because no row is drawn there.
+    Table,
+    OpenWithButton,
+    ClearButton,
+    /// An entry of the details panel's "Compatible Apps" list.
+    CompatibleApp(usize),
+    /// A row of the "Open With" dialog's application list.
+    DialogApp(usize),
+    DialogAlwaysUse,
+    DialogOk,
+    DialogCancel,
+    /// One of the "Add File Type" dialog's text boxes.
+    DialogField(NewField),
+    /// The "Add File Type" dialog's category button, which cycles.
+    DialogCategory,
+    /// Everything an open dialog covers.
+    Scrim,
+}
+
+type Frame = guitk::frame::Frame<Target>;
+
+/// Where every control is, for one window size.
+///
+/// Derived from the live size rather than remembered, because a compositor may
+/// hand `render` a size it has never sent a `Resize` for. Nothing is clamped up
+/// to a minimum: a control laid out past the window's edge would keep its hit
+/// box and so stay clickable while invisible, which is worse than a cramped
+/// window. Every piece shrinks instead, down to nothing, and a final trim
+/// against the window rectangle catches the positions that are fixed offsets
+/// from the toolbar.
+struct Layout {
+    width: f32,
+    height: f32,
+    search: Rect,
+    /// Where the last action's outcome is reported, between the search box and
+    /// the buttons. Whatever room is left over, which may be none.
+    status: Rect,
+    add: Rect,
+    export: Rect,
+    reset: Rect,
+    sidebar: Rect,
+    all_types: Rect,
+    /// The top of the first category row; they run downwards from here.
+    categories_top: f32,
+    table: Rect,
+    table_header: Rect,
+    /// The part of the table the rows are visible in.
+    rows: Rect,
+    /// Absolute x of the Ext / Description / MIME / Default App columns.
+    columns: [f32; 4],
+    details: Rect,
+    dialog: Rect,
+}
+
+impl Layout {
+    fn new(width: f32, height: f32) -> Self {
+        // A compositor mid-resize can report a zero-width window, and a NaN
+        // would poison every comparison downstream -- once `scroll_offset` is
+        // NaN the table never moves again.
+        let width = if width.is_finite() {
+            width.max(1.0)
+        } else {
+            WINDOW_WIDTH
+        };
+        let height = if height.is_finite() {
+            height.max(1.0)
+        } else {
+            WINDOW_HEIGHT
+        };
+
+        // --- toolbar: buttons right-aligned, search and status take the rest -
+        let btn_y = (TOOLBAR_HEIGHT - BUTTON_HEIGHT) / 2.0;
+        let reset = Rect::new(
+            (width - RESET_WIDTH - PADDING).max(0.0),
+            btn_y,
+            RESET_WIDTH,
+            BUTTON_HEIGHT,
+        );
+        let export = Rect::new(
+            (reset.x - EXPORT_WIDTH - BUTTON_GAP).max(0.0),
+            btn_y,
+            EXPORT_WIDTH,
+            BUTTON_HEIGHT,
+        );
+        let add = Rect::new(
+            (export.x - ADD_WIDTH - BUTTON_GAP).max(0.0),
+            btn_y,
+            ADD_WIDTH,
+            BUTTON_HEIGHT,
+        );
+
+        let sidebar_w = SIDEBAR_WIDTH.min(width);
+        let search_x = sidebar_w + PADDING;
+        let search = Rect::new(
+            search_x,
+            (TOOLBAR_HEIGHT - SEARCH_HEIGHT) / 2.0,
+            SEARCH_WIDTH.min((add.x - BUTTON_GAP - search_x).max(0.0)),
+            SEARCH_HEIGHT,
+        );
+        let status_x = search.right() + PADDING;
+        let status = Rect::new(
+            status_x,
+            btn_y,
+            (add.x - BUTTON_GAP - status_x).max(0.0),
+            BUTTON_HEIGHT,
+        );
+
+        // --- body: sidebar | table | details --------------------------------
+        let body_y = TOOLBAR_HEIGHT.min(height);
+        let body_h = (height - body_y).max(0.0);
+        let sidebar = Rect::new(0.0, body_y, sidebar_w, body_h);
+        let all_types = Rect::new(0.0, body_y, sidebar_w, SIDEBAR_ITEM_HEIGHT.min(body_h));
+        // The "CATEGORIES" caption sits in the gap between the two.
+        let categories_top = body_y + SIDEBAR_ITEM_HEIGHT + CATEGORY_LABEL_HEIGHT;
+
+        // The details panel gives way first when the window narrows, so the
+        // table -- the part of the window that has content in it -- keeps the
+        // larger share instead of being squeezed to nothing behind a panel of
+        // fixed width.
+        let details_w = DETAILS_PANEL_WIDTH.min((width - sidebar_w).max(0.0) / 2.0);
+        let details = Rect::new(width - details_w, body_y, details_w, body_h);
+        let table = Rect::new(sidebar_w, body_y, (details.x - sidebar_w).max(0.0), body_h);
+        let header_h = TABLE_HEADER_HEIGHT.min(table.h);
+        let table_header = Rect::new(table.x, table.y, table.w, header_h);
+        let rows = Rect::new(
+            table.x,
+            table.y + header_h,
+            table.w,
+            (table.h - header_h).max(0.0),
+        );
+
+        // Fractions of the table's own width rather than offsets from its left
+        // edge, so a narrow table draws four narrow columns instead of putting
+        // "Default App" past its right edge.
+        let inner = (table.w - 2.0 * PADDING).max(0.0);
+        let col = |f: f32| table.x + PADDING + f * inner;
+        let columns = [col(0.0), col(0.14), col(0.46), col(0.80)];
+
+        let dw = DIALOG_WIDTH.min(width);
+        let dh = DIALOG_HEIGHT.min(height);
+        let dialog = Rect::new((width - dw) / 2.0, (height - dh) / 2.0, dw, dh);
+
+        let window = Rect::new(0.0, 0.0, width, height);
+        let trim = |r: Rect| r.intersect(window).unwrap_or(Rect::EMPTY);
+
+        Self {
+            width,
+            height,
+            search: trim(search),
+            status: trim(status),
+            add: trim(add),
+            export: trim(export),
+            reset: trim(reset),
+            sidebar: trim(sidebar),
+            all_types: trim(all_types),
+            categories_top,
+            table: trim(table),
+            table_header: trim(table_header),
+            rows: trim(rows),
+            columns,
+            details: trim(details),
+            dialog: trim(dialog),
+        }
+    }
+
+    /// The `i`th sidebar category row, trimmed to the sidebar.
+    fn category_row(&self, i: usize) -> Rect {
+        let y = self.categories_top + i as f32 * SIDEBAR_ITEM_HEIGHT;
+        Rect::new(0.0, y, self.sidebar.w, SIDEBAR_ITEM_HEIGHT)
+            .intersect(self.sidebar)
+            .unwrap_or(Rect::EMPTY)
+    }
+
+    /// The "Open With" dialog's application list viewport.
+    fn dialog_list(&self) -> Rect {
+        Rect::new(
+            self.dialog.x,
+            self.dialog.y + DIALOG_TITLE_HEIGHT,
+            self.dialog.w,
+            (self.dialog.h - DIALOG_TITLE_HEIGHT - DIALOG_FOOTER_HEIGHT).max(0.0),
+        )
+        .intersect(self.dialog)
+        .unwrap_or(Rect::EMPTY)
+    }
+
+    /// The dialog's `Cancel` and `OK` buttons, in that order.
+    fn dialog_buttons(&self) -> (Rect, Rect) {
+        let h = DIALOG_BUTTON_HEIGHT.min(self.dialog.h);
+        let y = self.dialog.bottom() - PADDING - h;
+        let ok_x = self.dialog.right() - PADDING - DIALOG_BUTTON_WIDTH;
+        let cancel_x = ok_x - BUTTON_GAP - DIALOG_BUTTON_WIDTH;
+        let clip = |r: Rect| r.intersect(self.dialog).unwrap_or(Rect::EMPTY);
+        (
+            clip(Rect::new(cancel_x, y, DIALOG_BUTTON_WIDTH, h)),
+            clip(Rect::new(ok_x, y, DIALOG_BUTTON_WIDTH, h)),
+        )
+    }
+
+    /// The "Always use this app" checkbox, and the whole clickable strip that
+    /// includes its caption -- a 16-pixel box is a hard target for a mouse and
+    /// a harder one for a finger.
+    fn dialog_checkbox(&self) -> (Rect, Rect) {
+        let y = self.dialog.bottom() - DIALOG_FOOTER_HEIGHT + PADDING;
+        let box_rect = Rect::new(self.dialog.x + PADDING, y, CHECKBOX_SIZE, CHECKBOX_SIZE);
+        let strip = Rect::new(
+            self.dialog.x + PADDING,
+            y - 4.0,
+            (self.dialog.w - 2.0 * PADDING).max(0.0),
+            CHECKBOX_SIZE + 8.0,
+        );
+        let clip = |r: Rect| r.intersect(self.dialog).unwrap_or(Rect::EMPTY);
+        (clip(box_rect), clip(strip))
+    }
+
+    /// The `i`th text box of the "Add File Type" dialog.
+    fn dialog_field(&self, i: usize) -> Rect {
+        let y = self.dialog.y
+            + DIALOG_TITLE_HEIGHT
+            + PADDING
+            + i as f32 * (FIELD_HEIGHT + FIELD_LABEL_HEIGHT + PADDING)
+            + FIELD_LABEL_HEIGHT;
+        Rect::new(
+            self.dialog.x + PADDING,
+            y,
+            (self.dialog.w - 2.0 * PADDING).max(0.0),
+            FIELD_HEIGHT,
+        )
+        .intersect(self.dialog)
+        .unwrap_or(Rect::EMPTY)
+    }
+
+    /// The category button below the three text boxes.
+    fn dialog_category(&self) -> Rect {
+        let last = self.dialog_field(NewField::ALL.len().saturating_sub(1));
+        Rect::new(
+            self.dialog.x + PADDING,
+            last.bottom() + PADDING + FIELD_LABEL_HEIGHT,
+            (self.dialog.w - 2.0 * PADDING).max(0.0),
+            FIELD_HEIGHT,
+        )
+        .intersect(self.dialog)
+        .unwrap_or(Rect::EMPTY)
+    }
 }
 
 /// Full UI state for the file association manager.
@@ -988,9 +1322,11 @@ pub struct FileAssocUI {
     pub selected_category: Option<FileCategory>,
     /// Current search query string.
     pub search_query: String,
+    /// Whether typed text goes to the search box.
+    pub search_focused: bool,
     /// Index of the selected file type in the current filtered list.
     pub selected_index: Option<usize>,
-    /// Scroll offset for the file type list.
+    /// Scroll offset for the file type list, in pixels.
     pub scroll_offset: f32,
     /// Currently active dialog.
     pub active_dialog: ActiveDialog,
@@ -1000,6 +1336,23 @@ pub struct FileAssocUI {
     pub dialog_always_use: bool,
     /// The extension that the "Open With" dialog is targeting.
     pub dialog_target_ext: String,
+    /// The "Add File Type" dialog's three text fields.
+    pub new_ext: String,
+    pub new_mime: String,
+    pub new_desc: String,
+    /// The category the new file type will be filed under.
+    pub new_category: FileCategory,
+    /// Which of the three fields has the caret.
+    pub new_field: NewField,
+    /// What the last action did, reported in the toolbar.
+    ///
+    /// Export and Reset used to be buttons that could not be pressed; now that
+    /// they can, they have to say something, because "the config was exported"
+    /// is otherwise indistinguishable from "the click missed".
+    pub status: String,
+    /// The text the Export button last produced, kept so the status line can
+    /// describe it and a test can prove the button really exported.
+    pub last_export: String,
     /// Window dimensions.
     pub window_width: f32,
     pub window_height: f32,
@@ -1018,12 +1371,20 @@ impl FileAssocUI {
             registry: AssociationRegistry::with_defaults(),
             selected_category: None,
             search_query: String::new(),
+            search_focused: false,
             selected_index: None,
             scroll_offset: 0.0,
             active_dialog: ActiveDialog::None,
             dialog_selected_app: None,
             dialog_always_use: false,
             dialog_target_ext: String::new(),
+            new_ext: String::new(),
+            new_mime: String::new(),
+            new_desc: String::new(),
+            new_category: FileCategory::Other,
+            new_field: NewField::Extension,
+            status: String::new(),
+            last_export: String::new(),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
         }
@@ -1052,15 +1413,43 @@ impl FileAssocUI {
 
     /// Open the "Open With" dialog for the currently selected file type.
     pub fn open_open_with_dialog(&mut self) {
-        if let Some(idx) = self.selected_index {
-            let filtered = self.filtered_file_types();
-            if let Some(ft) = filtered.get(idx) {
-                self.dialog_target_ext = ft.extension.clone();
-                self.active_dialog = ActiveDialog::OpenWith;
-                self.dialog_selected_app = Some(0);
-                self.dialog_always_use = false;
-            }
-        }
+        // `filtered_file_types` hands back borrows *into* the registry, so
+        // everything wanted from the row is taken as owned values before a
+        // single field of `self` is written. Nothing here is expensive enough
+        // for that to matter, and the alternative — holding the borrow across
+        // the assignment — is what the borrow checker is objecting to.
+        let Some(idx) = self.selected_index else {
+            return;
+        };
+        let Some((ext, current)) = self
+            .filtered_file_types()
+            .get(idx)
+            .map(|ft| (ft.extension.clone(), ft.default_app_id.clone()))
+        else {
+            return;
+        };
+
+        // Start on the app that is already the default, so pressing OK with
+        // "always use" ticked confirms what is already true rather than
+        // silently changing it to whichever app happens to sort first.
+        let compatible = self.registry.apps_for_extension(&ext);
+        self.dialog_selected_app = current
+            .as_deref()
+            .and_then(|id| compatible.iter().position(|a| a.id == id))
+            .or(if compatible.is_empty() { None } else { Some(0) });
+        self.dialog_target_ext = ext;
+        self.active_dialog = ActiveDialog::OpenWith;
+        self.dialog_always_use = false;
+    }
+
+    /// Open the "Add File Type" dialog with empty fields.
+    pub fn open_add_file_type_dialog(&mut self) {
+        self.new_ext.clear();
+        self.new_mime.clear();
+        self.new_desc.clear();
+        self.new_category = self.selected_category.unwrap_or(FileCategory::Other);
+        self.new_field = NewField::Extension;
+        self.active_dialog = ActiveDialog::AddFileType;
     }
 
     /// Confirm the "Open With" dialog selection.
@@ -1070,19 +1459,80 @@ impl FileAssocUI {
         }
 
         let ext = self.dialog_target_ext.clone();
-        let compatible = self.registry.apps_for_extension(&ext);
+        let chosen = self.dialog_selected_app.and_then(|i| {
+            self.registry
+                .apps_for_extension(&ext)
+                .get(i)
+                .map(|a| a.id.clone())
+        });
 
-        if let Some(sel_idx) = self.dialog_selected_app
-            && let Some(app) = compatible.get(sel_idx)
-        {
-            let app_id = app.id.clone();
+        let mut outcome = Ok(());
+        if let Some(app_id) = chosen {
             if self.dialog_always_use {
-                self.registry.set_default_app(&ext, &app_id)?;
+                outcome = self.registry.set_default_app(&ext, &app_id);
+                self.status = match &outcome {
+                    Ok(()) => format!(".{ext} now opens with {app_id}"),
+                    Err(e) => format!("Could not set the default for .{ext}: {e}"),
+                };
+            } else {
+                // Without "always", the choice is a one-off launch. There is no
+                // launcher to hand it to yet, so say so rather than pretending
+                // the association changed.
+                self.status = format!("Opened .{ext} with {app_id} once (not made default)");
             }
         }
 
         self.active_dialog = ActiveDialog::None;
+        outcome
+    }
+
+    /// Confirm the "Add File Type" dialog, registering the new type.
+    ///
+    /// The extension is the only required field: a MIME type nobody knows and
+    /// a description nobody wrote are better left blank than guessed at, and
+    /// both are visible in the table where they can be seen to be missing.
+    pub fn confirm_add_file_type(&mut self) -> Result<(), AssocError> {
+        if self.active_dialog != ActiveDialog::AddFileType {
+            return Ok(());
+        }
+
+        let ext = self.new_ext.trim().trim_start_matches('.').to_string();
+        if ext.is_empty() {
+            self.status = String::from("A file type needs an extension");
+            return Err(AssocError::InvalidExtension(String::from(
+                "the extension box is empty",
+            )));
+        }
+        if self.registry.get_file_type(&ext).is_some() {
+            self.status = format!(".{ext} is already registered");
+            return Err(AssocError::AlreadyExists(ext));
+        }
+
+        let mime = if self.new_mime.trim().is_empty() {
+            String::from("application/octet-stream")
+        } else {
+            self.new_mime.trim().to_string()
+        };
+        let desc = if self.new_desc.trim().is_empty() {
+            format!("{} file", ext.to_uppercase())
+        } else {
+            self.new_desc.trim().to_string()
+        };
+
+        self.registry
+            .register_file_type(FileType::new(&ext, &mime, &desc), self.new_category);
+        self.status = format!(".{ext} added to {}", self.new_category.label());
+        self.active_dialog = ActiveDialog::None;
+        // The new row may not be in the current filter at all, so the selection
+        // is dropped rather than left pointing at whatever moved into its slot.
+        self.selected_index = None;
+        self.clamp_scroll();
         Ok(())
+    }
+
+    /// Shut whichever dialog is open, changing nothing.
+    pub fn cancel_dialog(&mut self) {
+        self.active_dialog = ActiveDialog::None;
     }
 
     /// Select a category in the sidebar.
@@ -1114,224 +1564,721 @@ impl FileAssocUI {
         filtered.get(idx).copied()
     }
 
-    // -- Rendering -----------------------------------------------------------
+    // ========================================================================
+    // Layout and scrolling
+    // ========================================================================
+
+    fn layout(&self) -> Layout {
+        Layout::new(self.window_width, self.window_height)
+    }
+
+    /// How far the table can scroll before its last row sits on the bottom of
+    /// the viewport.
+    pub fn max_scroll(&self) -> f32 {
+        self.max_scroll_in(&self.layout())
+    }
+
+    fn max_scroll_in(&self, l: &Layout) -> f32 {
+        let content = self.filtered_file_types().len() as f32 * ROW_HEIGHT;
+        (content - l.rows.h).max(0.0)
+    }
+
+    /// Pull the offset back inside its bounds after the list or the viewport
+    /// changed shape under it.
+    pub fn clamp_scroll(&mut self) {
+        self.scroll_offset = self.scroll_offset.clamp(0.0, self.max_scroll());
+    }
+
+    fn scroll_by(&mut self, delta: f32) {
+        if !delta.is_finite() {
+            return;
+        }
+        self.scroll_offset += delta;
+        self.clamp_scroll();
+    }
+
+    /// Bring the selected row inside the viewport, moving as little as
+    /// possible. Keyboard navigation is useless without it: Down would walk
+    /// the selection off the bottom of a list that never followed.
+    fn scroll_selection_into_view(&mut self) {
+        let Some(i) = self.selected_index else {
+            return;
+        };
+        let l = self.layout();
+        let top = i as f32 * ROW_HEIGHT;
+        let bottom = top + ROW_HEIGHT;
+        if top < self.scroll_offset {
+            self.scroll_offset = top;
+        } else if bottom > self.scroll_offset + l.rows.h {
+            self.scroll_offset = bottom - l.rows.h;
+        }
+        self.clamp_scroll();
+    }
+
+    /// Every visible table row, as `(screen y of its top, index into the
+    /// filtered list)`.
+    ///
+    /// The renderer and the hit test read the same numbers rather than merely
+    /// agreeing on a formula.
+    fn table_rows(&self, l: &Layout) -> Vec<(f32, usize)> {
+        let top = l.rows.y - self.scroll_offset;
+        (0..self.filtered_file_types().len())
+            .map(|i| (top + i as f32 * ROW_HEIGHT, i))
+            .filter(|&(y, _)| y + ROW_HEIGHT > l.rows.y && y < l.rows.bottom())
+            .collect()
+    }
+
+    /// Adopt a new window size and pull anything that hung off the old one
+    /// back inside.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.window_width = width;
+        self.window_height = height;
+        self.clamp_scroll();
+    }
+
+    // ========================================================================
+    // Events
+    // ========================================================================
+
+    /// The control under `(x, y)`, or `None` for bare background.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.window_width, self.window_height)
+            .hit_test(x, y)
+    }
+
+    /// Handle a UI event (keyboard or mouse).
+    pub fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) if key.pressed => self.handle_key(key),
+            Event::Resize { width, height } => {
+                self.resize(*width as f32, *height as f32);
+                EventResult::Consumed
+            }
+            Event::Mouse(mouse) => {
+                let (x, y) = (mouse.x, mouse.y);
+                match mouse.kind {
+                    MouseEventKind::Press(MouseButton::Left) => self.handle_click(x, y),
+                    // `dy` is a notch count, not a distance (see `guitk::wheel`),
+                    // and three rows a notch is the toolkit's convention.
+                    MouseEventKind::Scroll { dy, .. } => self.handle_scroll(x, y, dy),
+                    _ => EventResult::Ignored,
+                }
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn handle_scroll(&mut self, x: f32, y: f32, dy: f32) -> EventResult {
+        match self.target_at(x, y) {
+            Some(Target::Table | Target::Row(_)) => {
+                self.scroll_by(wheel::pixels(dy, ROW_HEIGHT));
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
+        let target = self.target_at(x, y);
+        // Any click that is not in the search box takes the caret out of it,
+        // so the next keystroke does not silently filter the table.
+        if target != Some(Target::Search) {
+            self.search_focused = false;
+        }
+
+        match target {
+            Some(Target::Search) => {
+                self.search_focused = true;
+                EventResult::Consumed
+            }
+            Some(Target::AddButton) => {
+                self.open_add_file_type_dialog();
+                EventResult::Consumed
+            }
+            Some(Target::ExportButton) => {
+                self.last_export = self.registry.export_config();
+                self.status = format!(
+                    "Exported {} association(s)",
+                    self.registry.association_count()
+                );
+                EventResult::Consumed
+            }
+            Some(Target::ResetButton) => {
+                self.registry.reset_to_defaults();
+                self.selected_index = None;
+                self.clamp_scroll();
+                self.status = String::from("Associations reset to defaults");
+                EventResult::Consumed
+            }
+            Some(Target::Category(cat)) => {
+                self.select_category(cat);
+                EventResult::Consumed
+            }
+            Some(Target::Row(i)) => {
+                self.select_file_type(i);
+                EventResult::Consumed
+            }
+            Some(Target::OpenWithButton) => {
+                self.open_open_with_dialog();
+                EventResult::Consumed
+            }
+            Some(Target::ClearButton) => {
+                let ext = self.selected_file_type().map(|ft| ft.extension.clone());
+                if let Some(ext) = ext {
+                    self.status = match self.registry.clear_association(&ext) {
+                        Ok(()) => format!(".{ext} has no default app"),
+                        Err(e) => format!("Could not clear .{ext}: {e}"),
+                    };
+                }
+                EventResult::Consumed
+            }
+            Some(Target::CompatibleApp(i)) => {
+                // Clicking an app in "Compatible Apps" makes it the default.
+                // The list is otherwise a read-out, and the shortest path from
+                // "I can see the app I want" to "that app opens it" should not
+                // be a trip through a modal dialog.
+                let pair = self
+                    .selected_file_type()
+                    .map(|ft| ft.extension.clone())
+                    .and_then(|ext| {
+                        self.registry
+                            .apps_for_extension(&ext)
+                            .get(i)
+                            .map(|a| (ext.clone(), a.id.clone()))
+                    });
+                if let Some((ext, app_id)) = pair {
+                    self.status = match self.registry.set_default_app(&ext, &app_id) {
+                        Ok(()) => format!(".{ext} now opens with {app_id}"),
+                        Err(e) => format!("Could not set the default for .{ext}: {e}"),
+                    };
+                }
+                EventResult::Consumed
+            }
+            Some(Target::DialogApp(i)) => {
+                self.dialog_selected_app = Some(i);
+                EventResult::Consumed
+            }
+            Some(Target::DialogAlwaysUse) => {
+                self.dialog_always_use = !self.dialog_always_use;
+                EventResult::Consumed
+            }
+            Some(Target::DialogOk) => {
+                self.confirm_dialog();
+                EventResult::Consumed
+            }
+            // The scrim is recorded as a target rather than left to a
+            // fall-through, so a control added later cannot be clicked through
+            // an open dialog.
+            Some(Target::DialogCancel | Target::Scrim) => {
+                self.cancel_dialog();
+                EventResult::Consumed
+            }
+            Some(Target::DialogField(field)) => {
+                self.new_field = field;
+                EventResult::Consumed
+            }
+            Some(Target::DialogCategory) => {
+                self.cycle_new_category();
+                EventResult::Consumed
+            }
+            Some(Target::Table) | None => EventResult::Ignored,
+        }
+    }
+
+    /// Whichever dialog is open, do the thing its OK button says.
+    fn confirm_dialog(&mut self) {
+        match self.active_dialog {
+            ActiveDialog::OpenWith => {
+                // The status line already carries the outcome, including the
+                // failure, so the `Result` has nothing left to tell anyone.
+                let _confirmed = self.confirm_open_with();
+            }
+            ActiveDialog::AddFileType => {
+                // Same: a rejected extension leaves the dialog open with the
+                // reason in the status line, which is the point of returning
+                // the error at all.
+                let _added = self.confirm_add_file_type();
+            }
+            ActiveDialog::None => {}
+        }
+    }
+
+    fn cycle_new_category(&mut self) {
+        let pos = FileCategory::ALL
+            .iter()
+            .position(|c| *c == self.new_category)
+            .unwrap_or(0);
+        // `checked_rem` rather than `%`: the list is a `const` with seven
+        // entries today, but a wrap that divides by its length should not be
+        // the thing that panics if someone ever empties it.
+        let next = pos
+            .checked_add(1)
+            .and_then(|n| n.checked_rem(FileCategory::ALL.len()))
+            .unwrap_or(0);
+        if let Some(cat) = FileCategory::ALL.get(next) {
+            self.new_category = *cat;
+        }
+    }
+
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // Typed text goes wherever the caret is, and is checked before the
+        // named keys so a key that produces text is not also read as a command.
+        if !key.text.is_empty() && !key.modifiers.ctrl && !key.modifiers.alt {
+            return self.type_text(&key.text);
+        }
+
+        match key.key {
+            Key::Escape => self.handle_escape(),
+            Key::Enter => {
+                if self.active_dialog == ActiveDialog::None {
+                    if self.selected_index.is_some() {
+                        self.open_open_with_dialog();
+                        return EventResult::Consumed;
+                    }
+                    return EventResult::Ignored;
+                }
+                self.confirm_dialog();
+                EventResult::Consumed
+            }
+            Key::Tab if self.active_dialog == ActiveDialog::AddFileType => {
+                self.new_field = self.new_field.next();
+                EventResult::Consumed
+            }
+            Key::Backspace => self.backspace(),
+            Key::Up => self.move_selection(-1),
+            Key::Down => self.move_selection(1),
+            Key::E if key.modifiers.ctrl => {
+                self.last_export = self.registry.export_config();
+                self.status = format!(
+                    "Exported {} association(s)",
+                    self.registry.association_count()
+                );
+                EventResult::Consumed
+            }
+            Key::F if key.modifiers.ctrl => {
+                self.search_focused = true;
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Escape backs out of exactly one thing, innermost first.
+    fn handle_escape(&mut self) -> EventResult {
+        if self.active_dialog != ActiveDialog::None {
+            self.cancel_dialog();
+            return EventResult::Consumed;
+        }
+        if self.search_focused || !self.search_query.is_empty() {
+            self.search_focused = false;
+            if !self.search_query.is_empty() {
+                self.set_search_query("");
+            }
+            return EventResult::Consumed;
+        }
+        if self.selected_index.is_some() {
+            self.selected_index = None;
+            return EventResult::Consumed;
+        }
+        EventResult::Ignored
+    }
+
+    fn type_text(&mut self, text: &str) -> EventResult {
+        // A control character is not text a field wants: a Backspace that also
+        // carried "\u{8}" would delete a character and then insert one.
+        if text.chars().any(char::is_control) {
+            return EventResult::Ignored;
+        }
+        match self.active_dialog {
+            ActiveDialog::AddFileType => {
+                self.new_field_mut().push_str(text);
+                EventResult::Consumed
+            }
+            // The "Open With" dialog has nothing to type into.
+            ActiveDialog::OpenWith => EventResult::Ignored,
+            ActiveDialog::None if self.search_focused => {
+                let mut q = self.search_query.clone();
+                q.push_str(text);
+                self.set_search_query(&q);
+                EventResult::Consumed
+            }
+            ActiveDialog::None => EventResult::Ignored,
+        }
+    }
+
+    fn backspace(&mut self) -> EventResult {
+        match self.active_dialog {
+            // `String::pop` removes a whole `char`, so a multi-byte character
+            // goes in one press instead of leaving a broken tail behind.
+            ActiveDialog::AddFileType => {
+                self.new_field_mut().pop();
+                EventResult::Consumed
+            }
+            ActiveDialog::OpenWith => EventResult::Ignored,
+            ActiveDialog::None if self.search_focused => {
+                let mut q = self.search_query.clone();
+                if q.pop().is_none() {
+                    return EventResult::Ignored;
+                }
+                self.set_search_query(&q);
+                EventResult::Consumed
+            }
+            ActiveDialog::None => EventResult::Ignored,
+        }
+    }
+
+    fn new_field_mut(&mut self) -> &mut String {
+        match self.new_field {
+            NewField::Extension => &mut self.new_ext,
+            NewField::MimeType => &mut self.new_mime,
+            NewField::Description => &mut self.new_desc,
+        }
+    }
+
+    /// The text currently in a given "Add File Type" field.
+    pub fn new_field_text(&self, field: NewField) -> &str {
+        match field {
+            NewField::Extension => &self.new_ext,
+            NewField::MimeType => &self.new_mime,
+            NewField::Description => &self.new_desc,
+        }
+    }
+
+    /// Step a selection by `delta` within `0..=last`.
+    ///
+    /// Shared by the table and the dialog list, which want exactly the same
+    /// behaviour: Down from nothing enters at the top, Up from nothing enters
+    /// at the bottom, and both ends stop rather than wrap.
+    ///
+    /// Every conversion is checked and the addition saturates. A list longer
+    /// than `isize::MAX` cannot exist, but an `as` cast that wrapped would put
+    /// the selection on a negative row, and a `delta` large enough to overflow
+    /// would wrap *past* the clamp that is there to catch it.
+    fn stepped(current: Option<usize>, delta: isize, last: usize) -> usize {
+        let last_i = isize::try_from(last).unwrap_or(isize::MAX);
+        match current {
+            None if delta > 0 => 0,
+            None => last,
+            Some(i) => {
+                let moved = isize::try_from(i).unwrap_or(last_i).saturating_add(delta);
+                usize::try_from(moved.clamp(0, last_i)).unwrap_or(0)
+            }
+        }
+    }
+
+    /// Move the table selection by `delta` rows, clamped at both ends.
+    fn move_selection(&mut self, delta: isize) -> EventResult {
+        if self.active_dialog != ActiveDialog::None {
+            return self.move_dialog_selection(delta);
+        }
+        let count = self.filtered_file_types().len();
+        if count == 0 {
+            return EventResult::Ignored;
+        }
+        let next = Self::stepped(self.selected_index, delta, count.saturating_sub(1));
+        if self.selected_index == Some(next) {
+            return EventResult::Ignored;
+        }
+        self.selected_index = Some(next);
+        self.scroll_selection_into_view();
+        EventResult::Consumed
+    }
+
+    fn move_dialog_selection(&mut self, delta: isize) -> EventResult {
+        if self.active_dialog != ActiveDialog::OpenWith {
+            return EventResult::Ignored;
+        }
+        let count = self
+            .registry
+            .apps_for_extension(&self.dialog_target_ext)
+            .len();
+        if count == 0 {
+            return EventResult::Ignored;
+        }
+        let next = Self::stepped(self.dialog_selected_app, delta, count.saturating_sub(1));
+        if self.dialog_selected_app == Some(next) {
+            return EventResult::Ignored;
+        }
+        self.dialog_selected_app = Some(next);
+        EventResult::Consumed
+    }
+
+    // ========================================================================
+    // Rendering
+    // ========================================================================
 
     /// Render the full UI into a `RenderTree`.
     pub fn render(&self) -> RenderTree {
-        let mut rt = RenderTree::new();
+        self.frame(self.window_width, self.window_height)
+            .into_tree()
+    }
 
-        // Background
-        rt.push(RenderCommand::FillRect {
+    /// Draw the whole window, recording a hit box for every control as it goes.
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let l = Layout::new(width, height);
+        // From here on the layout's own `width`/`height` are used rather than
+        // the arguments: `Layout::new` is where a zero or a NaN gets turned
+        // into something drawable, and a background painted from the raw
+        // arguments would disagree with every rectangle laid on top of it.
+        let mut frame = Frame::new(l.width, l.height);
+
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
+            width: l.width,
+            height: l.height,
             color: COLOR_BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
-        self.render_toolbar(&mut rt);
-        self.render_sidebar(&mut rt);
-        self.render_table(&mut rt);
-        self.render_details_panel(&mut rt);
+        self.draw_toolbar(&mut frame, &l);
+        self.draw_sidebar(&mut frame, &l);
+        self.draw_table(&mut frame, &l);
+        self.draw_details_panel(&mut frame, &l);
 
-        if self.active_dialog == ActiveDialog::OpenWith {
-            self.render_open_with_dialog(&mut rt);
+        if self.active_dialog != ActiveDialog::None {
+            // A dialog is modal: what it covers keeps its pixels and loses its
+            // clicks. Without this the toolbar behind it still worked, so the
+            // dialog only *looked* in front.
+            frame.discard_hits();
+            frame.push(RenderCommand::FillRect {
+                x: 0.0,
+                y: 0.0,
+                width: l.width,
+                height: l.height,
+                color: Color::rgba(0, 0, 0, 128),
+                corner_radii: CornerRadii::ZERO,
+            });
+            frame.hit(Target::Scrim, Rect::new(0.0, 0.0, l.width, l.height));
+            match self.active_dialog {
+                ActiveDialog::OpenWith => self.draw_open_with_dialog(&mut frame, &l),
+                ActiveDialog::AddFileType => self.draw_add_file_type_dialog(&mut frame, &l),
+                ActiveDialog::None => {}
+            }
         }
 
-        rt
+        frame
+    }
+
+    /// Draw a rounded button with its label centred by measurement.
+    fn draw_button(
+        frame: &mut Frame,
+        target: Target,
+        r: Rect,
+        label: &str,
+        bg: Color,
+        fg: Color,
+        size: f32,
+    ) {
+        if r.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: r.x,
+            y: r.y,
+            width: r.w,
+            height: r.h,
+            color: bg,
+            corner_radii: CornerRadii::all(4.0),
+        });
+        let w = text::measure(label, size, FontWeightHint::Regular).min(r.w);
+        frame.push(RenderCommand::Text {
+            x: r.x + (r.w - w).max(0.0) / 2.0,
+            y: r.y + (r.h - size).max(0.0) / 2.0,
+            text: String::from(label),
+            color: fg,
+            font_size: size,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(r.w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        frame.hit(target, r);
     }
 
     /// Render the top toolbar with search bar and action buttons.
-    fn render_toolbar(&self, rt: &mut RenderTree) {
-        // Toolbar background
-        rt.push(RenderCommand::FillRect {
+    fn draw_toolbar(&self, frame: &mut Frame, l: &Layout) {
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.window_width,
+            width: l.width,
             height: TOOLBAR_HEIGHT,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Title
-        rt.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: PADDING,
-            y: 14.0,
+            y: (TOOLBAR_HEIGHT - FONT_SIZE_HEADING) / 2.0,
             text: String::from("File Associations"),
             color: COLOR_TEXT,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Search bar background
-        let search_x = SIDEBAR_WIDTH + PADDING;
-        rt.push(RenderCommand::FillRect {
-            x: search_x,
-            y: 7.0,
-            width: SEARCH_WIDTH,
-            height: SEARCH_HEIGHT,
-            color: COLOR_SURFACE0,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        // Search placeholder or query text
-        let search_text = if self.search_query.is_empty() {
-            String::from("Search by extension or description...")
-        } else {
-            self.search_query.clone()
-        };
-        let search_text_color = if self.search_query.is_empty() {
-            COLOR_OVERLAY0
-        } else {
-            COLOR_TEXT
-        };
-        rt.push(RenderCommand::Text {
-            x: search_x + 8.0,
-            y: 15.0,
-            text: search_text,
-            color: search_text_color,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(SEARCH_WIDTH - 16.0),
+            max_width: Some((l.search.x - PADDING).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
-        // "Reset Defaults" button
-        let reset_x = self.window_width - BUTTON_WIDTH - PADDING;
-        rt.push(RenderCommand::FillRect {
-            x: reset_x,
-            y: 7.0,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        rt.push(RenderCommand::Text {
-            x: reset_x + 10.0,
-            y: 15.0,
-            text: String::from("Reset Defaults"),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(BUTTON_WIDTH - 20.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Search box. The caret is a border rather than a blinking bar: this
+        // window has no clock, and a caret that cannot blink is better drawn as
+        // something that does not look like it should.
+        if !l.search.is_empty() {
+            let r = l.search;
+            frame.push(RenderCommand::FillRect {
+                x: r.x,
+                y: r.y,
+                width: r.w,
+                height: r.h,
+                color: COLOR_SURFACE0,
+                corner_radii: CornerRadii::all(4.0),
+            });
+            if self.search_focused {
+                frame.push(RenderCommand::StrokeRect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.w,
+                    height: r.h,
+                    color: COLOR_BLUE,
+                    line_width: 1.0,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+            }
+            let empty = self.search_query.is_empty();
+            let shown = if empty {
+                String::from("Search by extension or description...")
+            } else {
+                self.search_query.clone()
+            };
+            frame.push(RenderCommand::Text {
+                x: r.x + 8.0,
+                y: r.y + (r.h - FONT_SIZE).max(0.0) / 2.0,
+                text: shown,
+                color: if empty { COLOR_OVERLAY0 } else { COLOR_TEXT },
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((r.w - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.hit(Target::Search, r);
+        }
 
-        // "Export" button
-        let export_x = reset_x - BUTTON_WIDTH - PADDING;
-        rt.push(RenderCommand::FillRect {
-            x: export_x,
-            y: 7.0,
-            width: BUTTON_WIDTH - 20.0,
-            height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        rt.push(RenderCommand::Text {
-            x: export_x + 14.0,
-            y: 15.0,
-            text: String::from("Export"),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        if !self.status.is_empty() && !l.status.is_empty() {
+            frame.push(RenderCommand::Text {
+                x: l.status.x,
+                y: l.status.y + (l.status.h - FONT_SIZE_SMALL).max(0.0) / 2.0,
+                text: self.status.clone(),
+                color: COLOR_SUBTEXT0,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(l.status.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
+        Self::draw_button(
+            frame,
+            Target::AddButton,
+            l.add,
+            "Add Type",
+            COLOR_SURFACE1,
+            COLOR_TEXT,
+            FONT_SIZE_SMALL,
+        );
+        Self::draw_button(
+            frame,
+            Target::ExportButton,
+            l.export,
+            "Export",
+            COLOR_SURFACE1,
+            COLOR_TEXT,
+            FONT_SIZE_SMALL,
+        );
+        Self::draw_button(
+            frame,
+            Target::ResetButton,
+            l.reset,
+            "Reset Defaults",
+            COLOR_SURFACE1,
+            COLOR_TEXT,
+            FONT_SIZE_SMALL,
+        );
     }
 
     /// Render the category sidebar.
-    fn render_sidebar(&self, rt: &mut RenderTree) {
-        let sidebar_y = TOOLBAR_HEIGHT;
-        let sidebar_h = self.window_height - TOOLBAR_HEIGHT;
-
-        // Sidebar background
-        rt.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: sidebar_y,
-            width: SIDEBAR_WIDTH,
-            height: sidebar_h,
+    fn draw_sidebar(&self, frame: &mut Frame, l: &Layout) {
+        frame.push(RenderCommand::FillRect {
+            x: l.sidebar.x,
+            y: l.sidebar.y,
+            width: l.sidebar.w,
+            height: l.sidebar.h,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
-        // "All Types" item
+        // Everything in the sidebar is cut to the sidebar, so a category row
+        // that falls off the bottom of a short window loses its hit box with
+        // its pixels rather than staying clickable in the dark.
+        frame.clip(l.sidebar);
+
         let all_selected = self.selected_category.is_none();
-        let all_bg = if all_selected {
-            COLOR_SURFACE0
-        } else {
-            COLOR_MANTLE
-        };
-        rt.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: sidebar_y,
-            width: SIDEBAR_WIDTH,
-            height: SIDEBAR_ITEM_HEIGHT,
-            color: all_bg,
-            corner_radii: CornerRadii::ZERO,
-        });
-        rt.push(RenderCommand::Text {
-            x: PADDING + 24.0,
-            y: sidebar_y + 10.0,
-            text: String::from("All Types"),
-            color: if all_selected { COLOR_BLUE } else { COLOR_TEXT },
-            font_size: FONT_SIZE,
-            font_weight: if all_selected {
-                FontWeightHint::Bold
-            } else {
-                FontWeightHint::Regular
-            },
-            max_width: Some(SIDEBAR_WIDTH - 34.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        self.draw_sidebar_item(frame, l.all_types, None, "All Types", all_selected, None);
 
-        // Category items
-        let mut y = sidebar_y + SIDEBAR_ITEM_HEIGHT + 8.0;
-
-        // Section label
-        rt.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: PADDING,
-            y,
+            y: l.sidebar.y + SIDEBAR_ITEM_HEIGHT + 6.0,
             text: String::from("CATEGORIES"),
             color: COLOR_OVERLAY0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((l.sidebar.w - 2.0 * PADDING).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
-        y += 20.0;
 
-        for cat in FileCategory::ALL {
-            let is_selected = self.selected_category == Some(*cat);
-            let bg = if is_selected {
+        for (i, cat) in FileCategory::ALL.iter().enumerate() {
+            let r = l.category_row(i);
+            let selected = self.selected_category == Some(*cat);
+            let count = self.registry.file_types_by_category(*cat).len();
+            self.draw_sidebar_item(frame, r, Some(*cat), cat.label(), selected, Some(count));
+        }
+
+        frame.unclip();
+    }
+
+    fn draw_sidebar_item(
+        &self,
+        frame: &mut Frame,
+        r: Rect,
+        cat: Option<FileCategory>,
+        label: &str,
+        selected: bool,
+        count: Option<usize>,
+    ) {
+        if r.is_empty() {
+            return;
+        }
+        frame.push(RenderCommand::FillRect {
+            x: r.x,
+            y: r.y,
+            width: r.w,
+            height: r.h,
+            color: if selected {
                 COLOR_SURFACE0
             } else {
                 COLOR_MANTLE
-            };
+            },
+            corner_radii: CornerRadii::ZERO,
+        });
 
-            rt.push(RenderCommand::FillRect {
-                x: 0.0,
-                y,
-                width: SIDEBAR_WIDTH,
-                height: SIDEBAR_ITEM_HEIGHT,
-                color: bg,
-                corner_radii: CornerRadii::ZERO,
-            });
-
-            // Category icon circle
-            rt.push(RenderCommand::FillRect {
+        if let Some(cat) = cat {
+            frame.push(RenderCommand::FillRect {
                 x: PADDING,
-                y: y + 7.0,
+                y: r.y + 7.0,
                 width: 20.0,
                 height: 20.0,
                 color: cat.color(),
                 corner_radii: CornerRadii::all(10.0),
             });
-            rt.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: PADDING + 5.0,
-                y: y + 10.0,
+                y: r.y + 10.0,
                 text: String::from(cat.icon()),
                 color: COLOR_BASE,
                 font_size: FONT_SIZE_SMALL,
@@ -1339,150 +2286,104 @@ impl FileAssocUI {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
+        }
 
-            // Category label
-            let label_color = if is_selected { COLOR_BLUE } else { COLOR_TEXT };
-            rt.push(RenderCommand::Text {
-                x: PADDING + 28.0,
-                y: y + 10.0,
-                text: String::from(cat.label()),
-                color: label_color,
-                font_size: FONT_SIZE,
-                font_weight: if is_selected {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(SIDEBAR_WIDTH - 48.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        frame.push(RenderCommand::Text {
+            x: PADDING + 28.0,
+            y: r.y + 10.0,
+            text: String::from(label),
+            color: if selected { COLOR_BLUE } else { COLOR_TEXT },
+            font_size: FONT_SIZE,
+            font_weight: if selected {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
+            max_width: Some((r.w - PADDING - 28.0 - 26.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
 
-            // Count badge
-            let count = self.registry.file_types_by_category(*cat).len();
-            let count_str = format!("{count}");
-            rt.push(RenderCommand::Text {
-                x: SIDEBAR_WIDTH - 30.0,
-                y: y + 10.0,
-                text: count_str,
+        if let Some(count) = count {
+            frame.push(RenderCommand::Text {
+                x: (r.right() - 30.0).max(0.0),
+                y: r.y + 10.0,
+                text: format!("{count}"),
                 color: COLOR_OVERLAY0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-
-            y += SIDEBAR_ITEM_HEIGHT;
         }
+
+        frame.hit(Target::Category(cat), r);
     }
 
     /// Render the main file type table.
-    fn render_table(&self, rt: &mut RenderTree) {
-        let table_x = SIDEBAR_WIDTH;
-        let table_y = TOOLBAR_HEIGHT;
-        let table_w = self.window_width - SIDEBAR_WIDTH - DETAILS_PANEL_WIDTH;
-        let table_h = self.window_height - TOOLBAR_HEIGHT;
-
-        // Table background
-        rt.push(RenderCommand::FillRect {
-            x: table_x,
-            y: table_y,
-            width: table_w,
-            height: table_h,
+    fn draw_table(&self, frame: &mut Frame, l: &Layout) {
+        frame.push(RenderCommand::FillRect {
+            x: l.table.x,
+            y: l.table.y,
+            width: l.table.w,
+            height: l.table.h,
             color: COLOR_BASE,
             corner_radii: CornerRadii::ZERO,
         });
+        // Recorded before the rows, so a row painted on top of it wins the hit
+        // test and the bare table only answers where no row is drawn. That is
+        // what lets the wheel work over the header and the empty space below
+        // the last row while a click there still selects nothing.
+        frame.hit(Target::Table, l.table);
 
-        // Column headers
-        rt.push(RenderCommand::FillRect {
-            x: table_x,
-            y: table_y,
-            width: table_w,
-            height: TABLE_HEADER_HEIGHT,
+        frame.push(RenderCommand::FillRect {
+            x: l.table_header.x,
+            y: l.table_header.y,
+            width: l.table_header.w,
+            height: l.table_header.h,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let col_ext_x = table_x + PADDING;
-        let col_desc_x = table_x + 80.0;
-        let col_mime_x = table_x + 240.0;
-        let col_app_x = table_x + 400.0;
-        let header_y = table_y + 9.0;
+        let header_y = l.table_header.y + (l.table_header.h - FONT_SIZE_SMALL).max(0.0) / 2.0;
+        for (x, title) in l
+            .columns
+            .iter()
+            .zip(["Ext", "Description", "MIME Type", "Default App"])
+        {
+            frame.push(RenderCommand::Text {
+                x: *x,
+                y: header_y,
+                text: String::from(title),
+                color: COLOR_SUBTEXT0,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some((l.table.right() - x).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
-        rt.push(RenderCommand::Text {
-            x: col_ext_x,
-            y: header_y,
-            text: String::from("Ext"),
-            color: COLOR_SUBTEXT0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        rt.push(RenderCommand::Text {
-            x: col_desc_x,
-            y: header_y,
-            text: String::from("Description"),
-            color: COLOR_SUBTEXT0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        rt.push(RenderCommand::Text {
-            x: col_mime_x,
-            y: header_y,
-            text: String::from("MIME Type"),
-            color: COLOR_SUBTEXT0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        rt.push(RenderCommand::Text {
-            x: col_app_x,
-            y: header_y,
-            text: String::from("Default App"),
-            color: COLOR_SUBTEXT0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Separator line
-        rt.push(RenderCommand::Line {
-            x1: table_x,
-            y1: table_y + TABLE_HEADER_HEIGHT,
-            x2: table_x + table_w,
-            y2: table_y + TABLE_HEADER_HEIGHT,
+        frame.push(RenderCommand::Line {
+            x1: l.table.x,
+            y1: l.rows.y,
+            x2: l.table.right(),
+            y2: l.rows.y,
             color: COLOR_SURFACE1,
             width: 1.0,
         });
 
-        // Clip to table area
-        let rows_y = table_y + TABLE_HEADER_HEIGHT;
-        let rows_h = table_h - TABLE_HEADER_HEIGHT;
-        rt.push(RenderCommand::PushClip {
-            x: table_x,
-            y: rows_y,
-            width: table_w,
-            height: rows_h,
-        });
+        // The frame trims every hit box recorded inside this clip and drops the
+        // ones it cuts to nothing, so a row scrolled out of the viewport stops
+        // being clickable by construction rather than by a bound the hit test
+        // has to remember to apply.
+        frame.clip(l.rows);
 
         let filtered = self.filtered_file_types();
-        let mut y = rows_y - self.scroll_offset;
-
-        for (i, ft) in filtered.iter().enumerate() {
-            if y + ROW_HEIGHT < rows_y {
-                y += ROW_HEIGHT;
+        for (y, i) in self.table_rows(l) {
+            let Some(ft) = filtered.get(i) else {
                 continue;
-            }
-            if y > rows_y + rows_h {
-                break;
-            }
-
-            let is_selected = self.selected_index == Some(i);
-            let row_bg = if is_selected {
+            };
+            let selected = self.selected_index == Some(i);
+            let row_bg = if selected {
                 COLOR_SURFACE1
             } else if i % 2 == 0 {
                 COLOR_BASE
@@ -1490,360 +2391,305 @@ impl FileAssocUI {
                 COLOR_SURFACE0
             };
 
-            rt.push(RenderCommand::FillRect {
-                x: table_x,
+            frame.push(RenderCommand::FillRect {
+                x: l.table.x,
                 y,
-                width: table_w,
+                width: l.table.w,
                 height: ROW_HEIGHT,
                 color: row_bg,
                 corner_radii: CornerRadii::ZERO,
             });
 
-            let text_y = y + 9.0;
-
-            // Extension with colored dot
+            let text_y = y + (ROW_HEIGHT - FONT_SIZE).max(0.0) / 2.0;
             let cat = self.registry.get_category(&ft.extension);
-            rt.push(RenderCommand::FillRect {
-                x: col_ext_x,
-                y: y + 11.0,
+            frame.push(RenderCommand::FillRect {
+                x: l.columns[0],
+                y: y + (ROW_HEIGHT - 8.0) / 2.0,
                 width: 8.0,
                 height: 8.0,
                 color: cat.color(),
                 corner_radii: CornerRadii::all(4.0),
             });
-            let mut ext_display = String::from(".");
-            ext_display.push_str(&ft.extension);
-            rt.push(RenderCommand::Text {
-                x: col_ext_x + 14.0,
+            frame.push(RenderCommand::Text {
+                x: l.columns[0] + 14.0,
                 y: text_y,
-                text: ext_display,
-                color: if is_selected { COLOR_BLUE } else { COLOR_TEXT },
+                text: format!(".{}", ft.extension),
+                color: if selected { COLOR_BLUE } else { COLOR_TEXT },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some((l.columns[1] - l.columns[0] - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
             });
-
-            // Description
-            rt.push(RenderCommand::Text {
-                x: col_desc_x,
+            frame.push(RenderCommand::Text {
+                x: l.columns[1],
                 y: text_y,
                 text: ft.description.clone(),
                 color: COLOR_TEXT,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(150.0),
+                max_width: Some((l.columns[2] - l.columns[1] - 8.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // MIME type
-            rt.push(RenderCommand::Text {
-                x: col_mime_x,
+            frame.push(RenderCommand::Text {
+                x: l.columns[2],
                 y: text_y,
                 text: ft.mime_type.clone(),
                 color: COLOR_SUBTEXT0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(150.0),
+                max_width: Some((l.columns[3] - l.columns[2] - 8.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            // Default app name
             let app_name = ft
                 .default_app_id
                 .as_ref()
                 .and_then(|id| self.registry.get_app(id))
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| String::from("(none)"));
-            let app_color = if ft.default_app_id.is_some() {
-                COLOR_GREEN
-            } else {
-                COLOR_OVERLAY0
-            };
-            rt.push(RenderCommand::Text {
-                x: col_app_x,
+                .map_or_else(|| String::from("(none)"), |a| a.name.clone());
+            frame.push(RenderCommand::Text {
+                x: l.columns[3],
                 y: text_y,
                 text: app_name,
-                color: app_color,
+                color: if ft.default_app_id.is_some() {
+                    COLOR_GREEN
+                } else {
+                    COLOR_OVERLAY0
+                },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(table_w - (col_app_x - table_x) - PADDING),
+                max_width: Some((l.table.right() - PADDING - l.columns[3]).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
 
-            y += ROW_HEIGHT;
+            frame.hit(
+                Target::Row(i),
+                Rect::new(l.table.x, y, l.table.w, ROW_HEIGHT),
+            );
         }
 
-        rt.push(RenderCommand::PopClip);
+        frame.unclip();
 
-        // "No results" message
         if filtered.is_empty() {
-            rt.push(RenderCommand::Text {
-                x: table_x + table_w / 2.0 - 50.0,
-                y: rows_y + 40.0,
-                text: String::from("No matching file types"),
+            let msg = "No matching file types";
+            let w = text::measure(msg, FONT_SIZE, FontWeightHint::Regular).min(l.rows.w);
+            frame.push(RenderCommand::Text {
+                x: l.rows.x + (l.rows.w - w).max(0.0) / 2.0,
+                y: l.rows.y + 40.0,
+                text: String::from(msg),
                 color: COLOR_OVERLAY0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some(l.rows.w),
+                overflow: TextOverflow::Ellipsis,
             });
         }
     }
 
     /// Render the right-side details panel for the selected file type.
-    fn render_details_panel(&self, rt: &mut RenderTree) {
-        let panel_x = self.window_width - DETAILS_PANEL_WIDTH;
-        let panel_y = TOOLBAR_HEIGHT;
-        let panel_h = self.window_height - TOOLBAR_HEIGHT;
-
-        // Panel background
-        rt.push(RenderCommand::FillRect {
-            x: panel_x,
-            y: panel_y,
-            width: DETAILS_PANEL_WIDTH,
-            height: panel_h,
+    fn draw_details_panel(&self, frame: &mut Frame, l: &Layout) {
+        let panel = l.details;
+        frame.push(RenderCommand::FillRect {
+            x: panel.x,
+            y: panel.y,
+            width: panel.w,
+            height: panel.h,
             color: COLOR_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
-
-        // Separator line
-        rt.push(RenderCommand::Line {
-            x1: panel_x,
-            y1: panel_y,
-            x2: panel_x,
-            y2: panel_y + panel_h,
+        frame.push(RenderCommand::Line {
+            x1: panel.x,
+            y1: panel.y,
+            x2: panel.x,
+            y2: panel.bottom(),
             color: COLOR_SURFACE1,
             width: 1.0,
         });
 
-        let x = panel_x + PADDING;
-        let mut y = panel_y + PADDING;
+        // Same reason as the sidebar: a button laid out below a short window's
+        // bottom edge must lose its hit box, not merely its pixels.
+        frame.clip(panel);
 
-        // Panel title
-        rt.push(RenderCommand::Text {
+        let x = panel.x + PADDING;
+        let content_w = (panel.w - 2.0 * PADDING).max(0.0);
+        let mut y = panel.y + PADDING;
+
+        frame.push(RenderCommand::Text {
             x,
             y,
             text: String::from("Details"),
             color: COLOR_TEXT,
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
         });
         y += 28.0;
 
         let filtered = self.filtered_file_types();
-        let selected_ft = self.selected_index.and_then(|i| filtered.get(i).copied());
+        let Some(ft) = self.selected_index.and_then(|i| filtered.get(i).copied()) else {
+            frame.push(RenderCommand::Text {
+                x,
+                y,
+                text: String::from("Select a file type to see details"),
+                color: COLOR_OVERLAY0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(content_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.unclip();
+            return;
+        };
 
-        match selected_ft {
-            None => {
-                rt.push(RenderCommand::Text {
-                    x,
-                    y,
-                    text: String::from("Select a file type to see details"),
-                    color: COLOR_OVERLAY0,
-                    font_size: FONT_SIZE,
+        let cat = self.registry.get_category(&ft.extension);
+        frame.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: 60.0_f32.min(content_w),
+            height: 28.0,
+            color: cat.color(),
+            corner_radii: CornerRadii::all(4.0),
+        });
+        frame.push(RenderCommand::Text {
+            x: x + 8.0,
+            y: y + 7.0,
+            text: format!(".{}", ft.extension),
+            color: COLOR_BASE,
+            font_size: FONT_SIZE,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some((content_w - 8.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        y += 40.0;
+
+        let app_name = ft
+            .default_app_id
+            .as_ref()
+            .and_then(|id| self.registry.get_app(id))
+            .map_or_else(|| String::from("(none)"), |a| a.name.clone());
+        for (label, value) in [
+            ("Description", ft.description.as_str()),
+            ("MIME Type", ft.mime_type.as_str()),
+            ("Category", cat.label()),
+            ("Default App", app_name.as_str()),
+        ] {
+            Self::draw_detail_row(frame, x, y, content_w, label, value);
+            y += 24.0;
+        }
+        y += 12.0;
+
+        Self::draw_button(
+            frame,
+            Target::OpenWithButton,
+            Rect::new(x, y, content_w, BUTTON_HEIGHT),
+            "Open With...",
+            COLOR_BLUE,
+            COLOR_BASE,
+            FONT_SIZE,
+        );
+        y += BUTTON_HEIGHT + 8.0;
+
+        Self::draw_button(
+            frame,
+            Target::ClearButton,
+            Rect::new(x, y, content_w, BUTTON_HEIGHT),
+            "Clear Association",
+            COLOR_RED,
+            COLOR_BASE,
+            FONT_SIZE,
+        );
+        y += BUTTON_HEIGHT + 16.0;
+
+        frame.push(RenderCommand::Text {
+            x,
+            y,
+            text: String::from("Compatible Apps"),
+            color: COLOR_SUBTEXT0,
+            font_size: FONT_SIZE_SMALL,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(content_w),
+            overflow: TextOverflow::Ellipsis,
+        });
+        y += 20.0;
+
+        let compatible = self.registry.apps_for_extension(&ft.extension);
+        if compatible.is_empty() {
+            frame.push(RenderCommand::Text {
+                x,
+                y,
+                text: String::from("No compatible apps"),
+                color: COLOR_OVERLAY0,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(content_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        } else {
+            for (i, app) in compatible.iter().enumerate() {
+                let is_default = ft.default_app_id.as_deref() == Some(app.id.as_str());
+                let r = Rect::new(x, y, content_w, COMPAT_ROW_HEIGHT);
+                frame.push(RenderCommand::FillRect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.w,
+                    height: r.h,
+                    color: if is_default {
+                        COLOR_SURFACE0
+                    } else {
+                        COLOR_MANTLE
+                    },
+                    corner_radii: CornerRadii::all(3.0),
+                });
+                frame.push(RenderCommand::Text {
+                    x: r.x + 8.0,
+                    y: r.y + (r.h - FONT_SIZE_SMALL).max(0.0) / 2.0,
+                    text: app.name.clone(),
+                    color: if is_default { COLOR_GREEN } else { COLOR_TEXT },
+                    font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(DETAILS_PANEL_WIDTH - 2.0 * PADDING),
+                    max_width: Some((r.w - 16.0).max(0.0)),
                     overflow: TextOverflow::Ellipsis,
                 });
-            }
-            Some(ft) => {
-                // Extension badge
-                let cat = self.registry.get_category(&ft.extension);
-                rt.push(RenderCommand::FillRect {
-                    x,
-                    y,
-                    width: 60.0,
-                    height: 28.0,
-                    color: cat.color(),
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                let mut badge_text = String::from(".");
-                badge_text.push_str(&ft.extension);
-                rt.push(RenderCommand::Text {
-                    x: x + 8.0,
-                    y: y + 7.0,
-                    text: badge_text,
-                    color: COLOR_BASE,
-                    font_size: FONT_SIZE,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                y += 40.0;
-
-                // Description
-                self.render_detail_row(rt, x, y, "Description", &ft.description);
-                y += 24.0;
-
-                // MIME type
-                self.render_detail_row(rt, x, y, "MIME Type", &ft.mime_type);
-                y += 24.0;
-
-                // Category
-                self.render_detail_row(rt, x, y, "Category", cat.label());
-                y += 24.0;
-
-                // Default app
-                let app_name = ft
-                    .default_app_id
-                    .as_ref()
-                    .and_then(|id| self.registry.get_app(id))
-                    .map(|a| a.name.clone())
-                    .unwrap_or_else(|| String::from("(none)"));
-                self.render_detail_row(rt, x, y, "Default App", &app_name);
-                y += 36.0;
-
-                // "Change Default" button
-                rt.push(RenderCommand::FillRect {
-                    x,
-                    y,
-                    width: DETAILS_PANEL_WIDTH - 2.0 * PADDING,
-                    height: BUTTON_HEIGHT,
-                    color: COLOR_BLUE,
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                rt.push(RenderCommand::Text {
-                    x: x + (DETAILS_PANEL_WIDTH - 2.0 * PADDING) / 2.0 - 40.0,
-                    y: y + 8.0,
-                    text: String::from("Open With..."),
-                    color: COLOR_BASE,
-                    font_size: FONT_SIZE,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                y += BUTTON_HEIGHT + 8.0;
-
-                // "Clear Association" button
-                rt.push(RenderCommand::FillRect {
-                    x,
-                    y,
-                    width: DETAILS_PANEL_WIDTH - 2.0 * PADDING,
-                    height: BUTTON_HEIGHT,
-                    color: COLOR_RED,
-                    corner_radii: CornerRadii::all(4.0),
-                });
-                rt.push(RenderCommand::Text {
-                    x: x + (DETAILS_PANEL_WIDTH - 2.0 * PADDING) / 2.0 - 50.0,
-                    y: y + 8.0,
-                    text: String::from("Clear Association"),
-                    color: COLOR_BASE,
-                    font_size: FONT_SIZE,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                y += BUTTON_HEIGHT + 16.0;
-
-                // Compatible apps list
-                rt.push(RenderCommand::Text {
-                    x,
-                    y,
-                    text: String::from("Compatible Apps"),
-                    color: COLOR_SUBTEXT0,
-                    font_size: FONT_SIZE_SMALL,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-                y += 20.0;
-
-                let compatible = self.registry.apps_for_extension(&ft.extension);
-                if compatible.is_empty() {
-                    rt.push(RenderCommand::Text {
-                        x,
-                        y,
-                        text: String::from("No compatible apps"),
-                        color: COLOR_OVERLAY0,
-                        font_size: FONT_SIZE_SMALL,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
-                    });
-                } else {
-                    for app in &compatible {
-                        let is_default = ft.default_app_id.as_deref() == Some(&app.id);
-                        let name_color = if is_default { COLOR_GREEN } else { COLOR_TEXT };
-
-                        rt.push(RenderCommand::FillRect {
-                            x,
-                            y,
-                            width: DETAILS_PANEL_WIDTH - 2.0 * PADDING,
-                            height: 24.0,
-                            color: if is_default {
-                                COLOR_SURFACE0
-                            } else {
-                                COLOR_MANTLE
-                            },
-                            corner_radii: CornerRadii::all(3.0),
-                        });
-                        rt.push(RenderCommand::Text {
-                            x: x + 8.0,
-                            y: y + 5.0,
-                            text: app.name.clone(),
-                            color: name_color,
-                            font_size: FONT_SIZE_SMALL,
-                            font_weight: FontWeightHint::Regular,
-                            max_width: Some(DETAILS_PANEL_WIDTH - 2.0 * PADDING - 16.0),
-                            overflow: TextOverflow::Ellipsis,
-                        });
-
-                        y += 26.0;
-                    }
-                }
+                frame.hit(Target::CompatibleApp(i), r);
+                y += COMPAT_ROW_HEIGHT + 2.0;
             }
         }
+
+        frame.unclip();
     }
 
     /// Helper: render a label+value detail row.
-    fn render_detail_row(&self, rt: &mut RenderTree, x: f32, y: f32, label: &str, value: &str) {
-        rt.push(RenderCommand::Text {
+    fn draw_detail_row(frame: &mut Frame, x: f32, y: f32, w: f32, label: &str, value: &str) {
+        let value_x = x + DETAIL_LABEL_WIDTH;
+        frame.push(RenderCommand::Text {
             x,
             y,
             text: String::from(label),
             color: COLOR_SUBTEXT0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(DETAIL_LABEL_WIDTH.min(w)),
+            overflow: TextOverflow::Ellipsis,
         });
-        rt.push(RenderCommand::Text {
-            x: x + 90.0,
+        frame.push(RenderCommand::Text {
+            x: value_x,
             y,
             text: String::from(value),
             color: COLOR_TEXT,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(DETAILS_PANEL_WIDTH - 90.0 - 2.0 * PADDING),
+            max_width: Some((w - DETAIL_LABEL_WIDTH).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
     }
 
-    /// Render the "Open With" modal dialog.
-    fn render_open_with_dialog(&self, rt: &mut RenderTree) {
-        // Dim overlay
-        rt.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: Color::rgba(0, 0, 0, 128),
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Dialog panel
-        let dx = (self.window_width - DIALOG_WIDTH) / 2.0;
-        let dy = (self.window_height - DIALOG_HEIGHT) / 2.0;
-
-        // Shadow
-        rt.push(RenderCommand::BoxShadow {
-            x: dx,
-            y: dy,
-            width: DIALOG_WIDTH,
-            height: DIALOG_HEIGHT,
+    /// The panel, shadow and title bar every dialog shares.
+    fn draw_dialog_chrome(frame: &mut Frame, l: &Layout, title: &str) {
+        let d = l.dialog;
+        frame.push(RenderCommand::BoxShadow {
+            x: d.x,
+            y: d.y,
+            width: d.w,
+            height: d.h,
             offset_x: 0.0,
             offset_y: 4.0,
             blur: 16.0,
@@ -1851,22 +2697,19 @@ impl FileAssocUI {
             color: Color::rgba(0, 0, 0, 100),
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-
-        rt.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: DIALOG_WIDTH,
-            height: DIALOG_HEIGHT,
+        frame.push(RenderCommand::FillRect {
+            x: d.x,
+            y: d.y,
+            width: d.w,
+            height: d.h,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-
-        // Title bar
-        rt.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: DIALOG_WIDTH,
-            height: 40.0,
+        frame.push(RenderCommand::FillRect {
+            x: d.x,
+            y: d.y,
+            width: d.w,
+            height: DIALOG_TITLE_HEIGHT.min(d.h),
             color: COLOR_SURFACE1,
             corner_radii: CornerRadii {
                 top_left: CORNER_RADIUS,
@@ -1875,153 +2718,294 @@ impl FileAssocUI {
                 bottom_right: 0.0,
             },
         });
-        let mut dialog_title = String::from("Open With — .");
-        dialog_title.push_str(&self.dialog_target_ext);
-        rt.push(RenderCommand::Text {
-            x: dx + PADDING,
-            y: dy + 12.0,
-            text: dialog_title,
+        frame.push(RenderCommand::Text {
+            x: d.x + PADDING,
+            y: d.y + (DIALOG_TITLE_HEIGHT - FONT_SIZE).max(0.0) / 2.0,
+            text: String::from(title),
             color: COLOR_TEXT,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((d.w - 2.0 * PADDING).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
+    }
 
-        // App list
+    /// The `Cancel` / `OK` pair every dialog shares.
+    fn draw_dialog_buttons(frame: &mut Frame, l: &Layout, ok_label: &str) {
+        let (cancel, ok) = l.dialog_buttons();
+        Self::draw_button(
+            frame,
+            Target::DialogCancel,
+            cancel,
+            "Cancel",
+            COLOR_SURFACE1,
+            COLOR_TEXT,
+            FONT_SIZE_SMALL,
+        );
+        Self::draw_button(
+            frame,
+            Target::DialogOk,
+            ok,
+            ok_label,
+            COLOR_BLUE,
+            COLOR_BASE,
+            FONT_SIZE_SMALL,
+        );
+    }
+
+    /// Render the "Open With" modal dialog.
+    fn draw_open_with_dialog(&self, frame: &mut Frame, l: &Layout) {
+        Self::draw_dialog_chrome(
+            frame,
+            l,
+            &format!("Open With \u{2014} .{}", self.dialog_target_ext),
+        );
+
+        let list = l.dialog_list();
+        frame.clip(list);
         let compatible = self.registry.apps_for_extension(&self.dialog_target_ext);
-        let list_y = dy + 48.0;
-
-        rt.push(RenderCommand::PushClip {
-            x: dx,
-            y: list_y,
-            width: DIALOG_WIDTH,
-            height: DIALOG_HEIGHT - 48.0 - 60.0,
-        });
-
-        let mut ay = list_y;
         for (i, app) in compatible.iter().enumerate() {
-            let is_selected = self.dialog_selected_app == Some(i);
-            let row_bg = if is_selected {
-                COLOR_BLUE
-            } else {
-                COLOR_SURFACE0
-            };
-            let text_color = if is_selected { COLOR_BASE } else { COLOR_TEXT };
-
-            rt.push(RenderCommand::FillRect {
-                x: dx + 4.0,
-                y: ay,
-                width: DIALOG_WIDTH - 8.0,
-                height: DIALOG_APP_ROW_HEIGHT,
-                color: row_bg,
+            let r = Rect::new(
+                l.dialog.x + 4.0,
+                list.y + i as f32 * DIALOG_APP_ROW_HEIGHT,
+                (l.dialog.w - 8.0).max(0.0),
+                DIALOG_APP_ROW_HEIGHT,
+            );
+            let selected = self.dialog_selected_app == Some(i);
+            frame.push(RenderCommand::FillRect {
+                x: r.x,
+                y: r.y,
+                width: r.w,
+                height: r.h,
+                color: if selected { COLOR_BLUE } else { COLOR_SURFACE0 },
                 corner_radii: CornerRadii::all(4.0),
             });
-            rt.push(RenderCommand::Text {
-                x: dx + 16.0,
-                y: ay + 6.0,
+            frame.push(RenderCommand::Text {
+                x: r.x + 12.0,
+                y: r.y + 6.0,
                 text: app.name.clone(),
-                color: text_color,
+                color: if selected { COLOR_BASE } else { COLOR_TEXT },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some((r.w - 24.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
             });
-            rt.push(RenderCommand::Text {
-                x: dx + 16.0,
-                y: ay + 20.0,
+            frame.push(RenderCommand::Text {
+                x: r.x + 12.0,
+                y: r.y + 20.0,
                 text: app.exec_path.clone(),
-                color: if is_selected {
+                color: if selected {
                     COLOR_MANTLE
                 } else {
                     COLOR_OVERLAY0
                 },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(DIALOG_WIDTH - 32.0),
+                max_width: Some((r.w - 24.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-
-            ay += DIALOG_APP_ROW_HEIGHT;
+            frame.hit(Target::DialogApp(i), r);
         }
+        if compatible.is_empty() {
+            frame.push(RenderCommand::Text {
+                x: l.dialog.x + PADDING,
+                y: list.y + PADDING,
+                text: format!("No app handles .{}", self.dialog_target_ext),
+                color: COLOR_OVERLAY0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((l.dialog.w - 2.0 * PADDING).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        frame.unclip();
 
-        rt.push(RenderCommand::PopClip);
-
-        // "Always use this app" checkbox area
-        let checkbox_y = dy + DIALOG_HEIGHT - 56.0;
-        let box_size = 16.0;
-        rt.push(RenderCommand::StrokeRect {
-            x: dx + PADDING,
-            y: checkbox_y,
-            width: box_size,
-            height: box_size,
+        let (box_rect, strip) = l.dialog_checkbox();
+        frame.push(RenderCommand::StrokeRect {
+            x: box_rect.x,
+            y: box_rect.y,
+            width: box_rect.w,
+            height: box_rect.h,
             color: COLOR_OVERLAY0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
         if self.dialog_always_use {
-            rt.push(RenderCommand::FillRect {
-                x: dx + PADDING + 3.0,
-                y: checkbox_y + 3.0,
-                width: box_size - 6.0,
-                height: box_size - 6.0,
+            frame.push(RenderCommand::FillRect {
+                x: box_rect.x + 3.0,
+                y: box_rect.y + 3.0,
+                width: (box_rect.w - 6.0).max(0.0),
+                height: (box_rect.h - 6.0).max(0.0),
                 color: COLOR_BLUE,
                 corner_radii: CornerRadii::all(2.0),
             });
         }
-        rt.push(RenderCommand::Text {
-            x: dx + PADDING + box_size + 8.0,
-            y: checkbox_y + 2.0,
+        frame.push(RenderCommand::Text {
+            x: box_rect.right() + 8.0,
+            y: box_rect.y + 1.0,
             text: String::from("Always use this app"),
             color: COLOR_TEXT,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((strip.right() - box_rect.right() - 8.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
+        frame.hit(Target::DialogAlwaysUse, strip);
 
-        // Bottom button bar
-        let btn_y = dy + DIALOG_HEIGHT - 30.0;
+        Self::draw_dialog_buttons(frame, l, "OK");
+    }
 
-        // Cancel button
-        rt.push(RenderCommand::FillRect {
-            x: dx + DIALOG_WIDTH - 2.0 * (BUTTON_WIDTH + PADDING),
-            y: btn_y - 4.0,
-            width: BUTTON_WIDTH - 10.0,
-            height: BUTTON_HEIGHT - 4.0,
-            color: COLOR_SURFACE1,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        rt.push(RenderCommand::Text {
-            x: dx + DIALOG_WIDTH - 2.0 * (BUTTON_WIDTH + PADDING) + 20.0,
-            y: btn_y,
-            text: String::from("Cancel"),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    /// Render the "Add File Type" modal dialog.
+    fn draw_add_file_type_dialog(&self, frame: &mut Frame, l: &Layout) {
+        Self::draw_dialog_chrome(frame, l, "Add File Type");
 
-        // OK button
-        rt.push(RenderCommand::FillRect {
-            x: dx + DIALOG_WIDTH - BUTTON_WIDTH - PADDING,
-            y: btn_y - 4.0,
-            width: BUTTON_WIDTH - 10.0,
-            height: BUTTON_HEIGHT - 4.0,
-            color: COLOR_BLUE,
-            corner_radii: CornerRadii::all(4.0),
-        });
-        rt.push(RenderCommand::Text {
-            x: dx + DIALOG_WIDTH - BUTTON_WIDTH - PADDING + 28.0,
-            y: btn_y,
-            text: String::from("OK"),
-            color: COLOR_BASE,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        for (i, field) in NewField::ALL.iter().enumerate() {
+            let r = l.dialog_field(i);
+            if r.is_empty() {
+                continue;
+            }
+            frame.push(RenderCommand::Text {
+                x: r.x,
+                y: (r.y - FIELD_LABEL_HEIGHT).max(l.dialog.y),
+                text: String::from(field.label()),
+                color: COLOR_SUBTEXT0,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(r.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.push(RenderCommand::FillRect {
+                x: r.x,
+                y: r.y,
+                width: r.w,
+                height: r.h,
+                color: COLOR_MANTLE,
+                corner_radii: CornerRadii::all(4.0),
+            });
+            let focused = self.new_field == *field;
+            if focused {
+                frame.push(RenderCommand::StrokeRect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.w,
+                    height: r.h,
+                    color: COLOR_BLUE,
+                    line_width: 1.0,
+                    corner_radii: CornerRadii::all(4.0),
+                });
+            }
+            let value = self.new_field_text(*field);
+            let empty = value.is_empty();
+            frame.push(RenderCommand::Text {
+                x: r.x + 8.0,
+                y: r.y + (r.h - FONT_SIZE).max(0.0) / 2.0,
+                text: if empty {
+                    match field {
+                        NewField::Extension => String::from("txt"),
+                        NewField::MimeType => String::from("application/octet-stream"),
+                        NewField::Description => String::from("(optional)"),
+                    }
+                } else {
+                    value.to_string()
+                },
+                color: if empty { COLOR_OVERLAY0 } else { COLOR_TEXT },
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some((r.w - 16.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
+            });
+            frame.hit(Target::DialogField(*field), r);
+        }
+
+        let cat = l.dialog_category();
+        if !cat.is_empty() {
+            frame.push(RenderCommand::Text {
+                x: cat.x,
+                y: (cat.y - FIELD_LABEL_HEIGHT).max(l.dialog.y),
+                text: String::from("Category"),
+                color: COLOR_SUBTEXT0,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(cat.w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+        Self::draw_button(
+            frame,
+            Target::DialogCategory,
+            cat,
+            self.new_category.label(),
+            self.new_category.color(),
+            COLOR_BASE,
+            FONT_SIZE,
+        );
+
+        Self::draw_dialog_buttons(frame, l, "Add");
+    }
+}
+
+// ============================================================================
+// The window
+// ============================================================================
+
+impl App for FileAssocUI {
+    fn title(&self) -> String {
+        String::from("File Associations")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        // Ctrl+Q closes the window. Escape does not: it backs out of a dialog,
+        // a search or a selection, which is what the key is for here.
+        if let Event::Key(key) = event
+            && key.pressed
+            && key.key == Key::Q
+            && key.modifiers.ctrl
+        {
+            return Response::Exit;
+        }
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The remembered size is only ever a starting guess; this is the real
+        // one, and the hit test reads it back through `handle_event`.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for FileAssocUI {
+    type Target = Target;
+    type Outcome = EventResult;
+
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Key(key.clone()))
     }
 }
 
@@ -2029,7 +3013,9 @@ impl FileAssocUI {
 // Entry point
 // ============================================================================
 
-fn main() {}
+fn main() -> ExitCode {
+    app::launch("fileassoc", &mut FileAssocUI::new())
+}
 
 // ============================================================================
 // Tests
@@ -2037,7 +3023,26 @@ fn main() {}
 
 #[cfg(test)]
 mod tests {
+    // A test that cannot index a slice or unwrap an `Option` it has just built
+    // is a test that spends more lines apologising than asserting. Panicking on
+    // bad data is the point here -- it is how the test fails.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::float_cmp
+    )]
+
     use super::*;
+    // Not in the production imports: nothing outside the tests names a
+    // modifier set, because the app reads `key.modifiers.ctrl` off the event it
+    // was handed and never constructs one.
+    use guitk::event::Modifiers;
+    // The free helpers -- `click`, `rect_of`, `press`. The production code
+    // imports only the `Probe` trait it implements.
+    use guitk::probe;
 
     // -- FileCategory tests --------------------------------------------------
 
@@ -2226,8 +3231,20 @@ mod tests {
             detail: String::from("bad format"),
         };
         let s = format!("{e}");
-        assert!(s.contains("5"));
+        assert!(s.contains('5'));
         assert!(s.contains("bad format"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_extension() {
+        let e = AssocError::InvalidExtension(String::from("the extension box is empty"));
+        assert!(format!("{e}").contains("the extension box is empty"));
+    }
+
+    #[test]
+    fn test_error_display_already_exists() {
+        let e = AssocError::AlreadyExists(String::from("mp3"));
+        assert!(format!("{e}").contains("mp3"));
     }
 
     // -- AssociationRegistry tests -------------------------------------------
@@ -2843,5 +3860,689 @@ mod tests {
         ui.select_category(Some(FileCategory::Audio));
         let rt = ui.render();
         assert!(!rt.is_empty());
+    }
+
+    // ========================================================================
+    // Interaction — driven through the probe, as a user would
+    //
+    // The tests above this line all call methods. That was the only thing they
+    // *could* do: before this app was wired, no click reached any of those
+    // methods, so `test_ui_open_with_dialog` proved the dialog opened when
+    // asked and proved nothing about whether anything could ask. These press
+    // the pixels instead.
+    // ========================================================================
+
+    /// The layout at the default window size, which is the size the probe
+    /// helpers use unless a test says otherwise.
+    fn layout() -> Layout {
+        Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// The controls this window always draws, whatever is selected.
+    ///
+    /// `Target::Table` is not among them, and deliberately: it is recorded
+    /// *under* the rows so that the wheel works anywhere over the table while a
+    /// click only selects where a row is actually drawn. Its centre therefore
+    /// answers `Row`, which is the intended behaviour rather than a fault —
+    /// `the_empty_table_below_the_last_row_selects_nothing` is where it is
+    /// checked.
+    const ALWAYS_DRAWN: [Target; 5] = [
+        Target::Search,
+        Target::AddButton,
+        Target::ExportButton,
+        Target::ResetButton,
+        Target::Category(None),
+    ];
+
+    /// Filter the table down to `ext` and click its row, as a user hunting for
+    /// one file type would.
+    ///
+    /// Searching by extension can match more than one row (`html` also matches
+    /// anything whose MIME type mentions it), so the row is found by its own
+    /// extension rather than assumed to be the first.
+    fn select_ext(ui: &mut FileAssocUI, ext: &str) {
+        ui.set_search_query(ext);
+        let i = ui
+            .filtered_file_types()
+            .iter()
+            .position(|ft| ft.extension == ext)
+            .unwrap_or_else(|| panic!("no row for .{ext} after filtering for it"));
+        assert_eq!(probe::click(ui, Target::Row(i)), EventResult::Consumed);
+        assert_eq!(ui.selected_index, Some(i));
+    }
+
+    /// An extension more than one installed app can open, which is what the
+    /// "Open With" dialog and the compatible-apps list are for.
+    const SHARED_EXT: &str = "html";
+
+    #[test]
+    fn every_control_answers_where_the_frame_draws_it() {
+        let ui = FileAssocUI::new();
+        for target in ALWAYS_DRAWN {
+            let r = probe::rect_of(&ui, target)
+                .unwrap_or_else(|| panic!("nothing drawn for {target:?}"));
+            let (cx, cy) = r.centre();
+            assert_eq!(
+                ui.target_at(cx, cy),
+                Some(target),
+                "{target:?} is drawn at {r:?} but the hit test does not answer there",
+            );
+        }
+    }
+
+    #[test]
+    fn no_size_puts_a_hit_box_outside_the_window() {
+        // Down to one pixel: `Frame` does not clip to the window, so a control
+        // whose position is a fixed offset from the toolbar would keep a hit
+        // box below the bottom edge and stay clickable while invisible.
+        for (w, h) in [
+            (WINDOW_WIDTH, WINDOW_HEIGHT),
+            (640.0, 480.0),
+            (320.0, 240.0),
+            (160.0, 120.0),
+            (40.0, 40.0),
+            (1.0, 1.0),
+        ] {
+            let mut ui = FileAssocUI::new();
+            ui.select_file_type(0);
+            ui.open_open_with_dialog();
+            let window = Rect::new(0.0, 0.0, w, h);
+            for (target, r) in ui.frame(w, h).hits() {
+                assert_eq!(
+                    r.intersect(window),
+                    Some(*r),
+                    "at ({w}, {h}) the hit box for {target:?} is {r:?}, outside the window",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_selects_the_row_it_lands_on() {
+        let mut ui = FileAssocUI::new();
+        assert_eq!(ui.selected_index, None);
+
+        let row = probe::target_matching(&ui, |t| matches!(t, Target::Row(_)))
+            .expect("the table drew no rows");
+        assert_eq!(probe::click(&mut ui, row), EventResult::Consumed);
+
+        let Target::Row(i) = row else {
+            panic!("target_matching returned {row:?}");
+        };
+        assert_eq!(ui.selected_index, Some(i));
+        // And the details panel now has something to say about it.
+        assert!(probe::is_visible(&ui, Target::OpenWithButton));
+        assert!(probe::is_visible(&ui, Target::ClearButton));
+    }
+
+    #[test]
+    fn the_empty_table_below_the_last_row_selects_nothing() {
+        let mut ui = FileAssocUI::new();
+        // A filter that matches one row, so the space under it is bare table.
+        ui.set_search_query("mp3");
+        assert_eq!(ui.filtered_file_types().len(), 1);
+
+        let l = layout();
+        let y = l.rows.bottom() - 4.0;
+        assert_eq!(ui.target_at(l.rows.centre().0, y), Some(Target::Table));
+        assert_eq!(
+            ui.handle_event(&Event::Mouse(MouseEvent {
+                x: l.rows.centre().0,
+                y,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            })),
+            EventResult::Ignored,
+        );
+        assert_eq!(ui.selected_index, None);
+    }
+
+    #[test]
+    fn a_sidebar_category_filters_the_table_and_the_table_says_so() {
+        let mut ui = FileAssocUI::new();
+        let all = ui.filtered_file_types().len();
+
+        assert_eq!(
+            probe::click(&mut ui, Target::Category(Some(FileCategory::Audio))),
+            EventResult::Consumed,
+        );
+        assert_eq!(ui.selected_category, Some(FileCategory::Audio));
+        let audio = ui.filtered_file_types();
+        assert!(!audio.is_empty() && audio.len() < all);
+        for ft in &audio {
+            assert_eq!(ui.registry.get_category(&ft.extension), FileCategory::Audio,);
+        }
+
+        // And "All Types" puts them all back.
+        probe::click(&mut ui, Target::Category(None));
+        assert_eq!(ui.filtered_file_types().len(), all);
+    }
+
+    #[test]
+    fn typing_only_reaches_the_search_box_once_it_has_been_clicked() {
+        let mut ui = FileAssocUI::new();
+
+        // Unfocused, a letter is not a filter. This is the whole reason
+        // `search_focused` exists: a table you can arrow around would otherwise
+        // empty itself the moment you pressed a letter.
+        assert_eq!(
+            probe::key(&mut ui, &probe::typing("m")),
+            EventResult::Ignored
+        );
+        assert_eq!(ui.search_query, "");
+
+        probe::click(&mut ui, Target::Search);
+        assert!(ui.search_focused);
+        probe::type_str(&mut ui, "mp3");
+        assert_eq!(ui.search_query, "mp3");
+        assert_eq!(ui.filtered_file_types().len(), 1);
+
+        probe::key(&mut ui, &probe::press(Key::Backspace));
+        assert_eq!(ui.search_query, "mp");
+    }
+
+    #[test]
+    fn a_click_anywhere_else_takes_the_caret_out_of_the_search_box() {
+        let mut ui = FileAssocUI::new();
+        probe::click(&mut ui, Target::Search);
+        assert!(ui.search_focused);
+
+        probe::click(&mut ui, Target::Category(Some(FileCategory::Images)));
+        assert!(!ui.search_focused);
+        // So the next keystroke does not silently filter the table.
+        assert_eq!(
+            probe::key(&mut ui, &probe::typing("x")),
+            EventResult::Ignored
+        );
+        assert_eq!(ui.search_query, "");
+    }
+
+    #[test]
+    fn escape_backs_out_of_one_thing_at_a_time() {
+        let mut ui = FileAssocUI::new();
+        probe::click(&mut ui, Target::Search);
+        probe::type_str(&mut ui, "mp3");
+        let row = probe::target_matching(&ui, |t| matches!(t, Target::Row(_))).unwrap();
+        probe::click(&mut ui, row);
+        probe::click(&mut ui, Target::OpenWithButton);
+        assert_eq!(ui.active_dialog, ActiveDialog::OpenWith);
+
+        // Dialog first...
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert_eq!(ui.active_dialog, ActiveDialog::None);
+        assert_eq!(ui.search_query, "mp3");
+
+        // ...then the search...
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        assert_eq!(ui.search_query, "");
+
+        // ...then the selection, which the cleared search kept alive only if it
+        // still points at a row. It does not, so the third press finds nothing.
+        assert_eq!(ui.selected_index, None);
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Escape)),
+            EventResult::Ignored,
+        );
+    }
+
+    #[test]
+    fn an_open_dialog_takes_the_clicks_of_everything_it_covers() {
+        let mut ui = FileAssocUI::new();
+        probe::click(&mut ui, Target::Category(Some(FileCategory::Audio)));
+        let before = ui.selected_category;
+
+        probe::click(&mut ui, Target::AddButton);
+        assert_eq!(ui.active_dialog, ActiveDialog::AddFileType);
+
+        // The sidebar is still painted, and is no longer a control.
+        assert!(!probe::is_visible(&ui, Target::Category(None)));
+        assert!(!probe::is_visible(&ui, Target::ResetButton));
+        let l = layout();
+        assert_eq!(
+            ui.target_at(l.reset.centre().0, l.reset.centre().1),
+            Some(Target::Scrim)
+        );
+
+        // Clicking the scrim shuts the dialog and changes nothing else.
+        probe::click(&mut ui, Target::Scrim);
+        assert_eq!(ui.active_dialog, ActiveDialog::None);
+        assert_eq!(ui.selected_category, before);
+        assert!(probe::is_visible(&ui, Target::ResetButton));
+    }
+
+    #[test]
+    fn the_add_dialog_registers_a_file_type_that_was_typed_into_it() {
+        let mut ui = FileAssocUI::new();
+        let before = ui.registry.file_type_count();
+
+        probe::click(&mut ui, Target::AddButton);
+        assert_eq!(ui.new_field, NewField::Extension);
+        probe::type_str(&mut ui, "opus");
+        probe::key(&mut ui, &probe::press(Key::Tab));
+        assert_eq!(ui.new_field, NewField::MimeType);
+        probe::type_str(&mut ui, "audio/opus");
+        probe::key(&mut ui, &probe::press(Key::Tab));
+        probe::type_str(&mut ui, "Opus Audio");
+
+        // Clicking the category button cycles it, which is the only way to set
+        // it -- there is no room in a 400-pixel dialog for a seven-item list.
+        let first = ui.new_category;
+        probe::click(&mut ui, Target::DialogCategory);
+        assert_ne!(ui.new_category, first);
+
+        probe::click(&mut ui, Target::DialogOk);
+        assert_eq!(ui.active_dialog, ActiveDialog::None);
+        assert_eq!(ui.registry.file_type_count(), before + 1);
+        let added = ui
+            .registry
+            .get_file_type("opus")
+            .expect(".opus was not registered");
+        assert_eq!(added.mime_type, "audio/opus");
+        assert_eq!(added.description, "Opus Audio");
+    }
+
+    #[test]
+    fn the_add_dialog_stays_open_and_says_why_when_it_cannot_add() {
+        let mut ui = FileAssocUI::new();
+        probe::click(&mut ui, Target::AddButton);
+
+        // Nothing typed: OK must not close over an empty extension.
+        probe::click(&mut ui, Target::DialogOk);
+        assert_eq!(ui.active_dialog, ActiveDialog::AddFileType);
+        assert!(
+            ui.status.contains("extension"),
+            "status was {:?}",
+            ui.status
+        );
+
+        // A duplicate is refused too, and says which one.
+        probe::type_str(&mut ui, "mp3");
+        probe::click(&mut ui, Target::DialogOk);
+        assert_eq!(ui.active_dialog, ActiveDialog::AddFileType);
+        assert!(ui.status.contains("mp3"), "status was {:?}", ui.status);
+
+        // Cancel leaves the registry exactly as it found it.
+        let before = ui.registry.file_type_count();
+        probe::click(&mut ui, Target::DialogCancel);
+        assert_eq!(ui.active_dialog, ActiveDialog::None);
+        assert_eq!(ui.registry.file_type_count(), before);
+    }
+
+    #[test]
+    fn the_open_with_dialog_only_changes_the_default_when_always_is_ticked() {
+        let mut ui = FileAssocUI::new();
+        select_ext(&mut ui, SHARED_EXT);
+        let before = ui
+            .registry
+            .get_default_app(SHARED_EXT)
+            .map(|a| a.id.clone())
+            .expect("the shared extension has no default to change");
+
+        // Pick a different app, leave "always" alone, confirm.
+        probe::click(&mut ui, Target::OpenWithButton);
+        let other = ui
+            .registry
+            .apps_for_extension(SHARED_EXT)
+            .iter()
+            .position(|a| a.id != before)
+            .expect("only one app opens it, so this test cannot say anything");
+        probe::click(&mut ui, Target::DialogApp(other));
+        probe::click(&mut ui, Target::DialogOk);
+        assert_eq!(
+            ui.registry
+                .get_default_app(SHARED_EXT)
+                .map(|a| a.id.clone()),
+            Some(before.clone()),
+            "a one-off open changed the default",
+        );
+
+        // Again, with the box ticked this time.
+        probe::click(&mut ui, Target::OpenWithButton);
+        probe::click(&mut ui, Target::DialogApp(other));
+        probe::click(&mut ui, Target::DialogAlwaysUse);
+        assert!(ui.dialog_always_use);
+        probe::click(&mut ui, Target::DialogOk);
+        assert_ne!(
+            ui.registry
+                .get_default_app(SHARED_EXT)
+                .map(|a| a.id.clone()),
+            Some(before),
+        );
+    }
+
+    #[test]
+    fn the_open_with_dialog_starts_on_the_app_that_is_already_the_default() {
+        let mut ui = FileAssocUI::new();
+        select_ext(&mut ui, SHARED_EXT);
+        let current = ui
+            .registry
+            .get_default_app(SHARED_EXT)
+            .map(|a| a.id.clone())
+            .unwrap();
+
+        probe::click(&mut ui, Target::OpenWithButton);
+        let expected = ui
+            .registry
+            .apps_for_extension(SHARED_EXT)
+            .iter()
+            .position(|a| a.id == current);
+        assert_eq!(ui.dialog_selected_app, expected);
+        assert!(
+            expected.is_some(),
+            "the default is not among the apps offered"
+        );
+    }
+
+    #[test]
+    fn clicking_a_compatible_app_makes_it_the_default_without_a_dialog() {
+        let mut ui = FileAssocUI::new();
+        select_ext(&mut ui, SHARED_EXT);
+
+        let apps = ui.registry.apps_for_extension(SHARED_EXT);
+        let before = ui
+            .registry
+            .get_default_app(SHARED_EXT)
+            .map(|a| a.id.clone());
+        let other = apps
+            .iter()
+            .position(|a| Some(&a.id) != before.as_ref())
+            .expect("only one app opens the shared extension");
+        let wanted = apps[other].id.clone();
+
+        probe::click(&mut ui, Target::CompatibleApp(other));
+        assert_eq!(
+            ui.registry
+                .get_default_app(SHARED_EXT)
+                .map(|a| a.id.clone()),
+            Some(wanted),
+        );
+        assert_eq!(ui.active_dialog, ActiveDialog::None, "a dialog opened");
+    }
+
+    #[test]
+    fn clear_association_empties_the_default_for_the_selected_row() {
+        let mut ui = FileAssocUI::new();
+        select_ext(&mut ui, "mp3");
+        assert!(ui.registry.get_default_app("mp3").is_some());
+
+        probe::click(&mut ui, Target::ClearButton);
+        assert!(ui.registry.get_default_app("mp3").is_none());
+        assert!(ui.status.contains("mp3"), "status was {:?}", ui.status);
+    }
+
+    #[test]
+    fn reset_puts_back_an_association_that_was_cleared() {
+        let mut ui = FileAssocUI::new();
+        select_ext(&mut ui, "mp3");
+        probe::click(&mut ui, Target::ClearButton);
+        assert!(ui.registry.get_default_app("mp3").is_none());
+
+        // Reset is in the toolbar, which the search filter does not cover.
+        probe::click(&mut ui, Target::ResetButton);
+        assert!(ui.registry.get_default_app("mp3").is_some());
+        assert_eq!(ui.selected_index, None);
+    }
+
+    #[test]
+    fn export_captures_the_current_associations_and_ctrl_e_does_the_same() {
+        let mut ui = FileAssocUI::new();
+        assert_eq!(ui.last_export, "");
+
+        probe::click(&mut ui, Target::ExportButton);
+        let by_click = ui.last_export.clone();
+        assert!(by_click.contains("mp3"), "export was {by_click:?}");
+        assert!(ui.status.contains("Exported"), "status was {:?}", ui.status);
+
+        let mut other = FileAssocUI::new();
+        probe::key(&mut other, &probe::ctrl(Key::E));
+        assert_eq!(other.last_export, by_click);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_table_and_stops_at_both_ends() {
+        let mut ui = FileAssocUI::new();
+        let l = layout();
+        let (cx, cy) = l.rows.centre();
+
+        // The list is longer than the viewport, or this test proves nothing.
+        assert!(
+            ui.max_scroll() > 0.0,
+            "the default table fits, so it cannot scroll"
+        );
+
+        let scroll = |ui: &mut FileAssocUI, dy: f32| {
+            ui.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy },
+            }))
+        };
+
+        assert_eq!(scroll(&mut ui, -1.0), EventResult::Consumed);
+        assert_eq!(ui.scroll_offset, wheel::pixels(-1.0, ROW_HEIGHT).abs());
+
+        // Up past the top clamps at zero rather than going negative.
+        scroll(&mut ui, 50.0);
+        assert_eq!(ui.scroll_offset, 0.0);
+
+        // Down past the end clamps at the last screenful.
+        scroll(&mut ui, -500.0);
+        assert_eq!(ui.scroll_offset, ui.max_scroll());
+    }
+
+    #[test]
+    fn the_wheel_over_the_toolbar_leaves_the_table_alone() {
+        let mut ui = FileAssocUI::new();
+        let l = layout();
+        let (cx, cy) = l.reset.centre();
+        assert_eq!(
+            ui.handle_event(&Event::Mouse(MouseEvent {
+                x: cx,
+                y: cy,
+                kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+            })),
+            EventResult::Ignored,
+        );
+        assert_eq!(ui.scroll_offset, 0.0);
+    }
+
+    #[test]
+    fn the_arrows_walk_the_selection_and_drag_the_viewport_with_them() {
+        let mut ui = FileAssocUI::new();
+        probe::key(&mut ui, &probe::press(Key::Down));
+        assert_eq!(ui.selected_index, Some(0));
+
+        // Walk to the end. The selection must stay on screen the whole way --
+        // without `scroll_selection_into_view` the arrow keys march off the
+        // bottom of a list that never follows.
+        let last = ui.filtered_file_types().len() - 1;
+        for _ in 0..last {
+            probe::key(&mut ui, &probe::press(Key::Down));
+        }
+        assert_eq!(ui.selected_index, Some(last));
+        assert!(
+            probe::is_visible(&ui, Target::Row(last)),
+            "row {last} is selected but scrolled out of sight",
+        );
+
+        // And it stops there rather than wrapping.
+        assert_eq!(
+            probe::key(&mut ui, &probe::press(Key::Down)),
+            EventResult::Ignored,
+        );
+        assert_eq!(ui.selected_index, Some(last));
+    }
+
+    #[test]
+    fn a_narrower_window_shrinks_the_details_panel_before_the_table() {
+        let wide = Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let narrow = Layout::new(420.0, WINDOW_HEIGHT);
+        assert!(narrow.details.w < wide.details.w);
+        assert!(narrow.table.w > 0.0, "the table was squeezed out entirely");
+        // The three body panels tile the window without overlapping.
+        assert_eq!(narrow.sidebar.right(), narrow.table.x);
+        assert_eq!(narrow.table.right(), narrow.details.x);
+    }
+
+    #[test]
+    fn a_resized_window_lays_out_again_and_the_hit_test_follows() {
+        let mut ui = FileAssocUI::new();
+        let old = probe::rect_of(&ui, Target::ResetButton).unwrap();
+
+        ui.handle_event(&Event::Resize {
+            width: 640,
+            height: 480,
+        });
+        let new = probe::rect_of_sized(&ui, Target::ResetButton, (640.0, 480.0)).unwrap();
+        assert_ne!(old.x, new.x);
+        let (cx, cy) = new.centre();
+        assert_eq!(ui.target_at(cx, cy), Some(Target::ResetButton));
+    }
+
+    #[test]
+    fn render_lays_out_at_the_size_it_is_handed() {
+        let mut ui = FileAssocUI::new();
+        // A compositor may call `render` at a size it never sent a `Resize`
+        // for, and a window that drew its old layout there would put every
+        // control in the wrong place.
+        let rt = App::render(&mut ui, 500.0, 400.0);
+        assert!(!rt.is_empty());
+        assert_eq!(ui.window_width, 500.0);
+        assert_eq!(ui.window_height, 400.0);
+        assert_eq!(
+            probe::rect_of_sized(&ui, Target::ResetButton, (500.0, 400.0)),
+            Some(Layout::new(500.0, 400.0).reset),
+        );
+    }
+
+    #[test]
+    fn a_degenerate_size_does_not_poison_the_layout() {
+        // A compositor mid-resize can report zero, and a NaN width would make
+        // every comparison downstream false -- including the scroll clamp, so
+        // the table would never move again.
+        for (w, h) in [(0.0, 0.0), (f32::NAN, 300.0), (300.0, f32::INFINITY)] {
+            let l = Layout::new(w, h);
+            assert!(l.width.is_finite() && l.width > 0.0);
+            assert!(l.height.is_finite() && l.height > 0.0);
+        }
+        let mut ui = FileAssocUI::new();
+        ui.resize(f32::NAN, f32::NAN);
+        ui.scroll_by(f32::NAN);
+        assert!(ui.scroll_offset.is_finite());
+    }
+
+    #[test]
+    fn ctrl_q_closes_the_window_and_the_close_button_does_too() {
+        let mut ui = FileAssocUI::new();
+        assert_eq!(
+            ui.on_event(&Event::Key(probe::ctrl(Key::Q))),
+            Response::Exit,
+        );
+        assert_eq!(ui.on_event(&Event::CloseRequested), Response::Exit);
+        // A bare Q is text, not a command: it goes to whatever has the caret.
+        assert_eq!(
+            ui.on_event(&Event::Key(probe::press_with(Key::Q, Modifiers::default()))),
+            Response::Idle,
+        );
+    }
+
+    #[test]
+    fn only_an_event_that_changes_something_asks_for_a_frame() {
+        let mut ui = FileAssocUI::new();
+        // Nothing under the pointer, nothing to redraw.
+        let (bx, by) = probe::bare_point(&ui, (WINDOW_WIDTH, WINDOW_HEIGHT))
+            .expect("every point in the window is covered");
+        assert_eq!(
+            ui.on_event(&Event::Mouse(MouseEvent {
+                x: bx,
+                y: by,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            })),
+            Response::Idle,
+        );
+        assert_eq!(ui.on_event(&Event::FocusOut), Response::Idle);
+
+        let l = layout();
+        assert_eq!(
+            ui.on_event(&Event::Mouse(MouseEvent {
+                x: l.reset.centre().0,
+                y: l.reset.centre().1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            })),
+            Response::Redraw,
+        );
+    }
+
+    #[test]
+    fn every_target_the_frame_records_is_one_the_app_handles() {
+        // A control drawn but not routed is the fault this whole app had: a
+        // toolbar, a sidebar, a table and a modal dialog, all pictures. This
+        // walks every state that draws anything and clicks all of it.
+        let mut seen: Vec<String> = Vec::new();
+        for state in 0..3 {
+            let mut ui = FileAssocUI::new();
+            ui.select_file_type(0);
+            match state {
+                1 => ui.open_open_with_dialog(),
+                2 => ui.open_add_file_type_dialog(),
+                _ => {}
+            }
+            for name in probe::control_names(&ui) {
+                if !seen.contains(&name) {
+                    seen.push(name);
+                }
+            }
+            let targets: Vec<Target> = ui
+                .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+                .hits()
+                .iter()
+                .map(|(t, _)| *t)
+                .collect();
+            for target in targets {
+                let mut fresh = FileAssocUI::new();
+                fresh.select_file_type(0);
+                match state {
+                    1 => fresh.open_open_with_dialog(),
+                    2 => fresh.open_add_file_type_dialog(),
+                    _ => {}
+                }
+                // `Table` is the one deliberate exception: it exists so the
+                // wheel works over the header and the space below the last
+                // row, and a click there is meant to do nothing.
+                let outcome = probe::click(&mut fresh, target);
+                if target != Target::Table {
+                    assert_eq!(
+                        outcome,
+                        EventResult::Consumed,
+                        "{target:?} is drawn but a click on it does nothing",
+                    );
+                }
+            }
+        }
+
+        // And every variant of `Target` is reachable in at least one of them.
+        for name in [
+            "Search",
+            "AddButton",
+            "ExportButton",
+            "ResetButton",
+            "Category",
+            "Row",
+            "Table",
+            "OpenWithButton",
+            "ClearButton",
+            "CompatibleApp",
+            "DialogApp",
+            "DialogAlwaysUse",
+            "DialogOk",
+            "DialogCancel",
+            "DialogField",
+            "DialogCategory",
+            "Scrim",
+        ] {
+            assert!(
+                seen.iter().any(|s| s == name),
+                "no state draws {name}; drawn were {seen:?}",
+            );
+        }
     }
 }

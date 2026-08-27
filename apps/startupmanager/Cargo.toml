@@ -2,8 +2,14 @@
 name = "startupmanager"
 version = "0.1.0"
 edition = "2024"
+description = "SlateOS Startup Apps Manager — which programs launch at boot"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window and its event loop. Without this `fn main` was empty, which here
+# meant the toolbar, the sortable table, the search box and both dialogs were
+# drawn and not one of them handled a click: a program made entirely of
+# pictures of controls.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

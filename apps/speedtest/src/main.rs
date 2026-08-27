@@ -14,22 +14,24 @@
 //! performed through Slate OS syscalls; simulated with representative
 //! data for initial development.
 
-#[allow(unused_imports)]
-use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
-use guitk::fold;
-#[allow(unused_imports)]
-use guitk::ratio;
-use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
-use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
-#[allow(unused_imports)]
-use guitk::style::CornerRadii;
-use guitk::wheel;
-
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::num::NonZeroU64;
+use std::process::ExitCode;
+use std::time::Duration;
+
+use guitk::color::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::fold;
+use guitk::frame::Rect;
+use guitk::probe::Probe;
+use guitk::ratio;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
+use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
+use guitk::style::CornerRadii;
+use guitk::text;
+use guitk::wheel;
+use oswindow::app::{self, App, Response};
 
 /// Seed used when the system has no entropy to offer.
 ///
@@ -63,25 +65,35 @@ const TEAL: Color = Color::rgb(148, 226, 213);
 
 // ============================================================================
 // Layout Constants
+//
+// Sizes, not positions. Every *position* is computed in `Layout` from the
+// window's actual size; the constants here are the things that do not depend
+// on it -- how tall a row is, how wide a button wants to be.
 // ============================================================================
 
+/// The size the window asks for when it opens.
 const WINDOW_WIDTH: f32 = 900.0;
+/// The height the window asks for when it opens.
 const WINDOW_HEIGHT: f32 = 720.0;
 const TITLE_BAR_HEIGHT: f32 = 40.0;
-const GAUGE_RADIUS: f32 = 150.0;
-const GAUGE_CENTER_X: f32 = WINDOW_WIDTH / 2.0;
-const GAUGE_CENTER_Y: f32 = 240.0;
+/// Space between the window's edge and the panels along the bottom.
+const MARGIN: f32 = 20.0;
+/// Space between the graph and the history panel.
+const GAP: f32 = 20.0;
+/// The largest the speedometer is ever drawn, however big the window is.
+///
+/// A dial that grew without limit would be a 400 px needle on a maximised
+/// screen with the numbers it exists to show stranded in the middle of it.
+const GAUGE_MAX_RADIUS: f32 = 150.0;
+/// Ring outside the arc for the tick marks and their labels.
+const GAUGE_LABEL_RING: f32 = 24.0;
+/// The arc is 270 degrees with its opening at the bottom, so the dial's height
+/// is not `2 * radius`: it runs from the top of the circle down to the ends of
+/// the arc at `sin(45 degrees)`, plus the label ring at both extremes.
+const GAUGE_HEIGHT_PER_RADIUS: f32 = 1.75;
 const GAUGE_ARC_SEGMENTS: usize = 60;
 const GAUGE_ARC_START_ANGLE: f32 = 135.0;
 const GAUGE_ARC_SWEEP: f32 = 270.0;
-const GRAPH_X: f32 = 40.0;
-const GRAPH_Y: f32 = 420.0;
-const GRAPH_WIDTH: f32 = 520.0;
-const GRAPH_HEIGHT: f32 = 180.0;
-const HISTORY_X: f32 = 580.0;
-const HISTORY_Y: f32 = 420.0;
-const HISTORY_WIDTH: f32 = 300.0;
-const HISTORY_HEIGHT: f32 = 260.0;
 const HISTORY_ROW_HEIGHT: f32 = 26.0;
 /// Height of the history panel's title bar, above the list.
 const HISTORY_HEADER_HEIGHT: f32 = 30.0;
@@ -92,12 +104,237 @@ const HISTORY_HEADER_HEIGHT: f32 = 30.0;
 /// drawn nowhere, and so must not be reachable or scrollable-to either. Both
 /// were literals before, which is how the hit test came to accept clicks on a
 /// strip of panel where nothing is visible.
+///
+/// Reserved whether or not there is a result to put in it, so that the first
+/// completed test does not shorten the list under a pointer already in it.
 const HISTORY_STATS_HEIGHT: f32 = 24.0;
 const BUTTON_WIDTH: f32 = 140.0;
 const BUTTON_HEIGHT: f32 = 36.0;
-const PHASE_INDICATOR_Y: f32 = 370.0;
+const EXPORT_WIDTH: f32 = 100.0;
+const EXPORT_HEIGHT: f32 = 28.0;
+const SERVER_WIDTH: f32 = 200.0;
+const SERVER_HEIGHT: f32 = 28.0;
+/// Height of the download/upload/latency strip under the Start button.
+const SUMMARY_HEIGHT: f32 = 32.0;
+/// Height of the Latency -> Download -> Upload strip.
+const PHASE_ROW_HEIGHT: f32 = 20.0;
+/// Width the phase strip wants, when the window is wide enough to give it.
+const PHASE_ROW_WIDTH: f32 = 360.0;
+/// Vertical breathing room between the stacked pieces of the upper half.
+const STACK_GAP: f32 = 8.0;
 const MAX_HISTORY: usize = 20;
 const MAX_GRAPH_POINTS: usize = 120;
+
+/// Speed markers on the gauge (in Mbps).
+const GAUGE_MARKERS: &[f32] = &[0.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0];
+
+// ============================================================================
+// Controls
+// ============================================================================
+
+/// Everything in the window that answers to a pointer.
+///
+/// The hit boxes are recorded by the renderer as it draws, so there is exactly
+/// one description of where a control is. `handle_click` used to re-derive
+/// each rectangle from the layout constants a second time; the two agreed only
+/// because they were written from the same literals on the same afternoon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The server picker's button.
+    ServerButton,
+    /// One row of the open server list.
+    ServerItem(usize),
+    /// Start / Re-Test.
+    Start,
+    /// Write the history out as text.
+    Export,
+    /// One result in the history list.
+    HistoryRow(usize),
+    /// The history panel itself, under the rows: the wheel scrolls anywhere
+    /// over the panel, including its header and its stats strip, but a *click*
+    /// there selects nothing because no row is drawn there.
+    HistoryPanel,
+    /// Everything an open server list covers. A click here shuts the list
+    /// instead of reaching the control underneath it.
+    DropdownScrim,
+}
+
+/// This program's frame type: a render tree that also remembers where each
+/// [`Target`] was drawn.
+type Frame = guitk::frame::Frame<Target>;
+
+/// Where every control is, for one window size.
+///
+/// Constructed fresh per frame and per hit test rather than cached, so there is
+/// no chance of answering a click from a layout the user is not looking at.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Layout {
+    /// The window's width, after the guard against a degenerate size.
+    width: f32,
+    /// The window's height, after the same guard.
+    height: f32,
+    /// Where the title bar's own text ends, so the phase readout cannot be
+    /// right-aligned on top of it.
+    title_text_right: f32,
+    /// The server picker's button.
+    server: Rect,
+    /// Centre of the speedometer.
+    gauge_centre: (f32, f32),
+    /// Radius of the speedometer's arc, excluding the label ring.
+    gauge_radius: f32,
+    /// The strip the three phase indicators are spread across.
+    phase_row: Rect,
+    /// The Start / Re-Test button.
+    start: Rect,
+    /// The download/upload/latency strip.
+    summary: Rect,
+    /// The speed-over-time panel.
+    graph: Rect,
+    /// The Export button, tucked under the graph.
+    export: Rect,
+    /// The history panel, whole.
+    history: Rect,
+    /// The part of the history panel the list is actually visible in: below
+    /// the header, above the stats strip.
+    history_list: Rect,
+}
+
+impl Layout {
+    /// Lay the window out at `width` by `height`.
+    ///
+    /// Nothing is clamped up to a minimum size. A control positioned off the
+    /// edge of a too-small window would still be recorded as a hit box and so
+    /// would still be clickable while being invisible, which is worse than a
+    /// cramped window; so every piece shrinks instead, down to nothing.
+    fn new(width: f32, height: f32) -> Self {
+        // A compositor mid-resize can report a zero-width window, and a NaN
+        // would poison every comparison downstream -- once `history_scroll`
+        // is NaN the list never moves again.
+        let width = if width.is_finite() {
+            width.max(1.0)
+        } else {
+            WINDOW_WIDTH
+        };
+        let height = if height.is_finite() {
+            height.max(1.0)
+        } else {
+            WINDOW_HEIGHT
+        };
+
+        let server = Rect::new(
+            ((width - SERVER_WIDTH) / 2.0).max(0.0),
+            TITLE_BAR_HEIGHT + 8.0,
+            SERVER_WIDTH.min(width),
+            SERVER_HEIGHT,
+        );
+
+        // --- the band along the bottom: graph, export, history -------------
+        let band_h = (height * 0.36)
+            .clamp(0.0, 280.0)
+            .min((height - server.bottom() - 100.0).max(0.0));
+        let band_top = height - MARGIN - band_h;
+
+        let inner_w = (width - 2.0 * MARGIN - GAP).max(0.0);
+        let history_w = (inner_w * 0.36).min(320.0);
+        let graph_w = inner_w - history_w;
+
+        let graph_h = (band_h - EXPORT_HEIGHT - STACK_GAP).max(0.0);
+        let graph = Rect::new(MARGIN, band_top, graph_w, graph_h);
+        let export = Rect::new(
+            MARGIN,
+            band_top + graph_h + STACK_GAP,
+            EXPORT_WIDTH.min(graph_w),
+            EXPORT_HEIGHT.min(band_h),
+        );
+        let history = Rect::new(MARGIN + graph_w + GAP, band_top, history_w, band_h);
+        let history_list = Rect::new(
+            history.x,
+            history.y + HISTORY_HEADER_HEIGHT,
+            history.w,
+            (history.h - HISTORY_HEADER_HEIGHT - HISTORY_STATS_HEIGHT).max(0.0),
+        );
+
+        // --- the upper half, stacked upwards from the band -----------------
+        let upper_top = server.bottom() + STACK_GAP;
+
+        // Each row of the stack is placed by its *bottom* edge and then
+        // trimmed at `upper_top`, so a window too short to hold the stack
+        // squeezes its rows away instead of pushing them up over the server
+        // picker. That matters more than it looks: the picker is drawn first,
+        // so an overlapping button would win the hit test and the picker would
+        // be visible but unclickable -- the same "there but not there" fault
+        // the no-clamping rule above exists to prevent.
+        let stacked = |bottom: f32, height: f32, x: f32, w: f32| {
+            let y = (bottom - height).max(upper_top);
+            Rect::new(x, y, w, (bottom - y).max(0.0))
+        };
+
+        let summary = stacked(band_top - STACK_GAP, SUMMARY_HEIGHT, 0.0, width);
+        let start = stacked(
+            summary.y - STACK_GAP,
+            BUTTON_HEIGHT,
+            ((width - BUTTON_WIDTH) / 2.0).max(0.0),
+            BUTTON_WIDTH.min(width),
+        );
+        let phase_w = PHASE_ROW_WIDTH.min(width);
+        let phase_row = stacked(
+            start.y - STACK_GAP,
+            PHASE_ROW_HEIGHT,
+            ((width - phase_w) / 2.0).max(0.0),
+            phase_w,
+        );
+
+        // Whatever is left over is the dial's, capped so it does not swell to
+        // fill a maximised screen.
+        let gauge_room = (phase_row.y - STACK_GAP - upper_top).max(0.0);
+        let gauge_radius = ((gauge_room - 2.0 * GAUGE_LABEL_RING) / GAUGE_HEIGHT_PER_RADIUS)
+            .min(width / 2.0 - GAUGE_LABEL_RING - MARGIN)
+            .clamp(0.0, GAUGE_MAX_RADIUS);
+        let gauge_centre = (
+            width / 2.0,
+            upper_top
+                + GAUGE_LABEL_RING
+                + gauge_radius
+                + (gauge_room - dial_height(gauge_radius)) / 2.0,
+        );
+
+        // The last word on every rectangle: nothing may extend past the window.
+        //
+        // `Frame` deliberately does not clip to the window -- it records what it
+        // is told -- so a rectangle laid out off the edge would keep a hit box
+        // and stay clickable while being invisible. Most of the arithmetic above
+        // already shrinks rather than overflowing, but a few positions are fixed
+        // offsets from the title bar (the server picker sits at y=48 whatever
+        // the window's height is), and in a window shorter than that they land
+        // entirely outside it. Trimming here catches all of them at once, and a
+        // rectangle trimmed to nothing simply stops being a target.
+        let window = Rect::new(0.0, 0.0, width, height);
+        let trim = |r: Rect| r.intersect(window).unwrap_or(Rect::EMPTY);
+
+        Self {
+            width,
+            height,
+            title_text_right: 16.0
+                + text::measure("Network Speed Test", 16.0, FontWeightHint::Bold)
+                + 12.0,
+            server: trim(server),
+            gauge_centre,
+            gauge_radius,
+            phase_row: trim(phase_row),
+            start: trim(start),
+            summary: trim(summary),
+            graph: trim(graph),
+            export: trim(export),
+            history: trim(history),
+            history_list: trim(history_list),
+        }
+    }
+}
+
+/// How much vertical room a dial of this radius takes, labels included.
+fn dial_height(radius: f32) -> f32 {
+    radius * GAUGE_HEIGHT_PER_RADIUS + 2.0 * GAUGE_LABEL_RING
+}
 
 // ============================================================================
 // Simulated Measurement Parameters
@@ -126,9 +363,6 @@ const SIM_LATENCY_VARIANCE_MS: f64 = 3.0;
 const LATENCY_PROBE_INTERVAL_SECS: f32 = 0.1;
 /// Fraction of a throughput phase spent ramping up to the target rate.
 const THROUGHPUT_RAMP_FRACTION: f64 = 0.2;
-
-/// Speed markers on the gauge (in Mbps).
-const GAUGE_MARKERS: &[f32] = &[0.0, 25.0, 50.0, 100.0, 200.0, 500.0, 1000.0];
 
 // ============================================================================
 // Speed Test Phase
@@ -1147,59 +1381,33 @@ impl SpeedTestUI {
     }
 
     // ========================================================================
-    // History list layout
+    // Layout
     //
-    // One description of where the history rows are, shared by the renderer,
-    // the hit test and the scroll bound. It used to be three descriptions --
-    // and they disagreed, in every way three copies of the same arithmetic
-    // can: see `history_rows` for the mirrored hover and
-    // `history_viewport_height` for the clickable strip that shows nothing.
+    // One description of where everything is, read by the renderer and by the
+    // hit test through the same `Frame`. It used to be neither: the geometry
+    // was a screen of absolute constants derived from `WINDOW_WIDTH`, and
+    // `handle_click` re-derived every rectangle a second time from the same
+    // constants. Three consequences, all of them shipped:
+    //
+    //  * the window did not resize. `self.width`/`self.height` were written
+    //    once at construction and read by the background fill and the title
+    //    bar; nothing else consulted them and no `Event::Resize` arm existed,
+    //    so widening the window painted a wider background around a 900x720
+    //    layout pinned to the top-left.
+    //  * the Start button and the whole result summary were drawn *underneath*
+    //    the graph panel. Start sat at y 410..446 and the summary at 455..;
+    //    the graph's opaque background covered 420..600 and was pushed after
+    //    both. So the numbers a speed test exists to produce -- download,
+    //    upload, latency/jitter -- were painted every frame and never once
+    //    visible, and the button you press to start was two thirds buried.
+    //  * click and paint agreed only by being written twice from the same
+    //    literals, which is the arrangement `history_row_at` was already the
+    //    scar tissue from.
     // ========================================================================
 
-    /// Y of the first pixel of the list, below the panel's title.
-    const fn history_list_top() -> f32 {
-        HISTORY_Y + HISTORY_HEADER_HEIGHT
-    }
-
-    /// Height of the strip of the panel the list is actually *visible* in.
-    ///
-    /// Not simply `HISTORY_HEIGHT - HISTORY_HEADER_HEIGHT`: the stats strip is
-    /// opaque and covers the bottom of that area. The hit test used the
-    /// panel's full height, so the bottom 24 px selected a row that the stats
-    /// strip had painted over -- pointing at "avg 84.2 Mbps" highlighted a
-    /// result you could not see.
-    fn history_viewport_height(&self) -> f32 {
-        let stats = if self.history.is_empty() {
-            0.0
-        } else {
-            HISTORY_STATS_HEIGHT
-        };
-        HISTORY_HEIGHT - HISTORY_HEADER_HEIGHT - stats
-    }
-
-    /// Every history row in draw order, as `(screen y of its top, index into
-    /// the history)`.
-    ///
-    /// The scroll offset is already applied, so the renderer and the hit test
-    /// do not merely agree on the formula -- they read the same numbers.
-    ///
-    /// The index mapping is the point. The list is drawn newest-first, so draw
-    /// position `i` is history index `len - 1 - i`. That reversal lived only
-    /// in the renderer; the hit test stored the raw draw position in
-    /// `history_hover`, which the renderer then matched against a history
-    /// index. The list was therefore mirrored: hovering the newest result
-    /// highlighted the oldest, and the middle row was the only one that
-    /// highlighted itself.
-    fn history_rows(&self) -> Vec<(f32, usize)> {
-        let top = Self::history_list_top() - self.history_scroll;
-        // `.rev()` *is* the newest-first ordering, and `enumerate` then gives
-        // the draw position -- so the reversal is one call rather than an
-        // index subtraction that has to be trusted not to underflow.
-        (0..self.history.len())
-            .rev()
-            .enumerate()
-            .map(|(draw_pos, idx)| (top + draw_pos as f32 * HISTORY_ROW_HEIGHT, idx))
-            .collect()
+    /// Where every control is, for one window size.
+    fn layout(&self) -> Layout {
+        Layout::new(self.width, self.height)
     }
 
     /// How far the list can scroll before its last row sits on the bottom of
@@ -1210,8 +1418,12 @@ impl SpeedTestUI {
     /// across the renderer. Deriving it from the measured content is what lets
     /// the wheel stop rather than walking the list off into empty space.
     pub fn max_history_scroll(&self) -> f32 {
+        self.max_history_scroll_in(&self.layout())
+    }
+
+    fn max_history_scroll_in(&self, l: &Layout) -> f32 {
         let content = self.history.len() as f32 * HISTORY_ROW_HEIGHT;
-        (content - self.history_viewport_height()).max(0.0)
+        (content - l.history_list.h).max(0.0)
     }
 
     /// Pull the offset back inside its bounds after the list or the panel
@@ -1229,32 +1441,43 @@ impl SpeedTestUI {
         self.clamp_history_scroll();
     }
 
-    /// Whether `(x, y)` is anywhere over the history panel.
+    /// Every history row in draw order, as `(screen y of its top, index into
+    /// the history)`.
     ///
-    /// Used to decide whether the wheel belongs to the history, so spinning it
-    /// over the gauge does not scroll a list on the other side of the window.
-    fn over_history(x: f32, y: f32) -> bool {
-        (HISTORY_X..=HISTORY_X + HISTORY_WIDTH).contains(&x)
-            && (HISTORY_Y..=HISTORY_Y + HISTORY_HEIGHT).contains(&y)
+    /// The scroll offset is already applied, so the renderer and the hit test
+    /// do not merely agree on the formula -- they read the same numbers.
+    ///
+    /// The index mapping is the point. The list is drawn newest-first, so draw
+    /// position `i` is history index `len - 1 - i`. That reversal lived only
+    /// in the renderer; the hit test stored the raw draw position in
+    /// `history_hover`, which the renderer then matched against a history
+    /// index. The list was therefore mirrored: hovering the newest result
+    /// highlighted the oldest, and the middle row was the only one that
+    /// highlighted itself.
+    fn history_rows(&self, l: &Layout) -> Vec<(f32, usize)> {
+        let top = l.history_list.y - self.history_scroll;
+        // `.rev()` *is* the newest-first ordering, and `enumerate` then gives
+        // the draw position -- so the reversal is one call rather than an
+        // index subtraction that has to be trusted not to underflow.
+        (0..self.history.len())
+            .rev()
+            .enumerate()
+            .map(|(draw_pos, idx)| (top + draw_pos as f32 * HISTORY_ROW_HEIGHT, idx))
+            .collect()
     }
 
-    /// The history index under `(x, y)`, if a row is drawn there.
+    // ========================================================================
+    // Events
+    // ========================================================================
+
+    /// The control under `(x, y)`, or `None` for bare background.
     ///
-    /// The single hit test: click and hover both go through it, so the two can
-    /// no longer disagree about what the pointer is on.
-    fn history_row_at(&self, x: f32, y: f32) -> Option<usize> {
-        if !(HISTORY_X..=HISTORY_X + HISTORY_WIDTH).contains(&x) {
-            return None;
-        }
-        let top = Self::history_list_top();
-        let bottom = top + self.history_viewport_height();
-        if y < top || y >= bottom {
-            return None;
-        }
-        self.history_rows()
-            .into_iter()
-            .find(|&(ry, _)| y >= ry && y < ry + HISTORY_ROW_HEIGHT)
-            .map(|(_, idx)| idx)
+    /// Drawn rather than remembered: the frame the user is looking at is the
+    /// only authority on where anything is, and re-deriving it here is how the
+    /// two stay one description. A frame is a few hundred pushes into a
+    /// `Vec` -- cheaper than the mouse move that asked for it.
+    fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.width, self.height).hit_test(x, y)
     }
 
     /// Handle a UI event (keyboard or mouse).
@@ -1277,6 +1500,13 @@ impl SpeedTestUI {
                     EventResult::Ignored
                 }
             }
+            // The layout is derived from these two numbers, so this arm is the
+            // difference between an app that resizes and one that paints a
+            // wider background around a picture of a 900x720 window.
+            Event::Resize { width, height } => {
+                self.resize(*width as f32, *height as f32);
+                EventResult::Consumed
+            }
             Event::Mouse(mouse_event) => {
                 let x = mouse_event.x;
                 let y = mouse_event.y;
@@ -1295,7 +1525,14 @@ impl SpeedTestUI {
                     // directly, with no need to bank it until it becomes a
                     // whole row.
                     MouseEventKind::Scroll { dy, .. } => {
-                        if Self::over_history(x, y) {
+                        // The panel target underlies the header and the stats
+                        // strip as well as the rows, so the wheel works over
+                        // the whole panel while a *click* still only reaches a
+                        // row where a row is drawn.
+                        if matches!(
+                            self.target_at(x, y),
+                            Some(Target::HistoryPanel | Target::HistoryRow(_))
+                        ) {
                             self.scroll_history_by(wheel::pixels(dy, HISTORY_ROW_HEIGHT));
                             EventResult::Consumed
                         } else {
@@ -1307,6 +1544,16 @@ impl SpeedTestUI {
             }
             _ => EventResult::Ignored,
         }
+    }
+
+    /// Adopt a new window size and pull anything that hung off the old one
+    /// back inside.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.width = width;
+        self.height = height;
+        // A taller panel shows more rows, which can leave the offset past the
+        // end of a list that no longer reaches that far.
+        self.clamp_history_scroll();
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -1341,122 +1588,139 @@ impl SpeedTestUI {
     }
 
     fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
-        // Start/Restart button.
-        let btn_x = GAUGE_CENTER_X - BUTTON_WIDTH / 2.0;
-        let btn_y = GAUGE_CENTER_Y + GAUGE_RADIUS + 20.0;
-        if x >= btn_x
-            && x <= btn_x + BUTTON_WIDTH
-            && y >= btn_y
-            && y <= btn_y + BUTTON_HEIGHT
-            && (self.phase.is_idle()
-                || self.phase.is_complete()
-                || matches!(self.phase, SpeedTestPhase::Error(_)))
-        {
-            self.start_test();
-            return EventResult::Consumed;
-        }
-
-        // Export button.
-        let export_x = GRAPH_X;
-        let export_y = GRAPH_Y + GRAPH_HEIGHT + 10.0;
-        if x >= export_x && x <= export_x + 100.0 && y >= export_y && y <= export_y + 28.0 {
-            let _export = self.history.export_as_text();
-            self.export_button_hover = true;
-            return EventResult::Consumed;
-        }
-
-        // Server dropdown toggle.
-        let dd_x = GAUGE_CENTER_X - 100.0;
-        let dd_y = TITLE_BAR_HEIGHT + 8.0;
-        if x >= dd_x && x <= dd_x + 200.0 && y >= dd_y && y <= dd_y + 28.0 {
-            self.server_dropdown_open = !self.server_dropdown_open;
-            return EventResult::Consumed;
-        }
-
-        // Server dropdown items.
-        if self.server_dropdown_open {
-            let item_y_start = dd_y + 30.0;
-            for (i, _server) in self.servers.iter().enumerate() {
-                let item_y = item_y_start + i as f32 * 28.0;
-                if x >= dd_x && x <= dd_x + 200.0 && y >= item_y && y <= item_y + 28.0 {
-                    self.select_server(i);
-                    return EventResult::Consumed;
+        match self.target_at(x, y) {
+            Some(Target::Start) => {
+                // A running test's button says "Testing..." and does nothing;
+                // Escape is the way out of it.
+                if self.phase.is_testing() {
+                    EventResult::Ignored
+                } else {
+                    self.start_test();
+                    EventResult::Consumed
                 }
             }
-            // Click outside closes dropdown.
-            self.server_dropdown_open = false;
-            return EventResult::Consumed;
+            Some(Target::Export) => {
+                let _export = self.history.export_as_text();
+                self.export_button_hover = true;
+                EventResult::Consumed
+            }
+            Some(Target::ServerButton) => {
+                self.server_dropdown_open = !self.server_dropdown_open;
+                EventResult::Consumed
+            }
+            Some(Target::ServerItem(index)) => {
+                self.select_server(index);
+                EventResult::Consumed
+            }
+            // The open list covers the window, so a click anywhere else shuts
+            // it instead of reaching what is behind it -- the frame records
+            // that as a target rather than leaving it to a fall-through, so a
+            // control added later cannot accidentally be clicked through an
+            // open menu.
+            Some(Target::DropdownScrim) => {
+                self.server_dropdown_open = false;
+                EventResult::Consumed
+            }
+            Some(Target::HistoryRow(index)) => {
+                // Selecting a history item could show details; for now just
+                // highlight it.
+                self.history_hover = Some(index);
+                EventResult::Consumed
+            }
+            Some(Target::HistoryPanel) | None => EventResult::Ignored,
         }
-
-        // History items.
-        if let Some(idx) = self.history_row_at(x, y) {
-            // Selecting a history item could show details; for now just
-            // highlight it.
-            self.history_hover = Some(idx);
-            return EventResult::Consumed;
-        }
-
-        EventResult::Ignored
     }
 
     fn handle_mouse_move(&mut self, x: f32, y: f32) -> EventResult {
-        // Update button hover states.
-        let btn_x = GAUGE_CENTER_X - BUTTON_WIDTH / 2.0;
-        let btn_y = GAUGE_CENTER_Y + GAUGE_RADIUS + 20.0;
-        self.start_button_hover =
-            x >= btn_x && x <= btn_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT;
+        let target = self.target_at(x, y);
+        let start = target == Some(Target::Start);
+        let export = target == Some(Target::Export);
+        let row = match target {
+            Some(Target::HistoryRow(index)) => Some(index),
+            _ => None,
+        };
 
-        let export_x = GRAPH_X;
-        let export_y = GRAPH_Y + GRAPH_HEIGHT + 10.0;
-        self.export_button_hover =
-            x >= export_x && x <= export_x + 100.0 && y >= export_y && y <= export_y + 28.0;
+        // `Consumed` means "this changed what is on screen", which is what a
+        // caller needs in order to decide whether to redraw. A move that
+        // leaves every highlight where it was must not cost a frame, and at
+        // pointer rates most moves are exactly that.
+        let changed = start != self.start_button_hover
+            || export != self.export_button_hover
+            || row != self.history_hover;
+        self.start_button_hover = start;
+        self.export_button_hover = export;
+        self.history_hover = row;
 
-        // History hover.
-        self.history_hover = self.history_row_at(x, y);
-
-        EventResult::Ignored
+        if changed {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
     }
 
     // ========================================================================
     // Rendering
     // ========================================================================
 
-    /// Render the entire UI into a `RenderTree`.
+    /// Render the entire UI at the size it last knew about.
+    ///
+    /// Kept for callers that have no size to offer; [`Self::frame`] is the
+    /// real renderer and is what a window calls, with the size the compositor
+    /// actually gave it.
     pub fn render(&self) -> RenderTree {
-        let mut tree = RenderTree::new();
-
-        // Background.
-        tree.fill_rect(0.0, 0.0, self.width, self.height, CRUST);
-
-        self.render_title_bar(&mut tree);
-        self.render_server_selector(&mut tree);
-        self.render_gauge(&mut tree);
-        self.render_speed_label(&mut tree);
-        self.render_phase_indicators(&mut tree);
-        self.render_start_button(&mut tree);
-        self.render_result_summary(&mut tree);
-        self.render_graph(&mut tree);
-        self.render_history_panel(&mut tree);
-        self.render_export_button(&mut tree);
-
-        // Server dropdown overlay (rendered last so it draws on top).
-        if self.server_dropdown_open {
-            self.render_server_dropdown(&mut tree);
-        }
-
-        tree
+        self.frame(self.width, self.height).into_tree()
     }
 
-    fn render_title_bar(&self, tree: &mut RenderTree) {
-        tree.push(RenderCommand::FillRect {
+    /// Draw the whole window at `width` by `height`, recording where every
+    /// control ended up.
+    pub fn frame(&self, width: f32, height: f32) -> Frame {
+        let l = Layout::new(width, height);
+        let mut frame = Frame::new(width, height);
+
+        // Background.
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.width,
+            width,
+            height,
+            color: CRUST,
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        self.draw_title_bar(&mut frame, &l);
+        self.draw_server_selector(&mut frame, &l);
+        self.draw_gauge(&mut frame, &l);
+        self.draw_speed_label(&mut frame, &l);
+        self.draw_phase_indicators(&mut frame, &l);
+        self.draw_start_button(&mut frame, &l);
+        self.draw_result_summary(&mut frame, &l);
+        self.draw_graph(&mut frame, &l);
+        self.draw_history_panel(&mut frame, &l);
+        self.draw_export_button(&mut frame, &l);
+
+        // Server dropdown overlay (drawn last so it draws on top).
+        if self.server_dropdown_open {
+            // An open menu is modal: everything under it keeps its pixels and
+            // loses its clicks. Without this the Start button behind the list
+            // still worked, so the menu only *looked* in front.
+            frame.discard_hits();
+            frame.hit(Target::DropdownScrim, Rect::new(0.0, 0.0, width, height));
+            self.draw_server_dropdown(&mut frame, &l);
+        }
+
+        frame
+    }
+
+    fn draw_title_bar(&self, frame: &mut Frame, l: &Layout) {
+        frame.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: l.width,
             height: TITLE_BAR_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: 16.0,
             y: 12.0,
             text: "Network Speed Test".into(),
@@ -1466,46 +1730,48 @@ impl SpeedTestUI {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        tree.push(RenderCommand::Text {
-            x: self.width - 200.0,
+        // Right-aligned by measurement rather than by a 200 px guess, so a
+        // long phase name -- "Error: server URL must not be empty" is one --
+        // ends at the window's edge instead of past it.
+        let phase = format!("Phase: {}", self.phase.label());
+        let phase_w = text::measure(&phase, 12.0, FontWeightHint::Regular);
+        frame.push(RenderCommand::Text {
+            x: (l.width - 16.0 - phase_w).max(l.title_text_right),
             y: 14.0,
-            text: format!("Phase: {}", self.phase.label()),
+            text: phase,
             color: SUBTEXT0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((l.width - 16.0 - l.title_text_right).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
     }
 
-    fn render_server_selector(&self, tree: &mut RenderTree) {
-        let x = GAUGE_CENTER_X - 100.0;
-        let y = TITLE_BAR_HEIGHT + 8.0;
-        let w = 200.0_f32;
-        let h = 28.0_f32;
+    fn draw_server_selector(&self, frame: &mut Frame, l: &Layout) {
+        let r = l.server;
 
-        // Dropdown button background.
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
+        frame.push(RenderCommand::FillRect {
+            x: r.x,
+            y: r.y,
+            width: r.w,
+            height: r.h,
             color: SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
+        frame.hit(Target::ServerButton, r);
 
         let server_name = self
             .servers
             .get(self.selected_server)
             .map_or("Select Server", |s| s.name.as_str());
-        tree.push(RenderCommand::Text {
-            x: x + 10.0,
-            y: y + 7.0,
+        frame.push(RenderCommand::Text {
+            x: r.x + 10.0,
+            y: r.y + 7.0,
             text: server_name.into(),
             color: TEXT_COLOR,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(w - 30.0),
+            max_width: Some((r.w - 30.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
@@ -1515,9 +1781,9 @@ impl SpeedTestUI {
         } else {
             "\u{25BC}"
         };
-        tree.push(RenderCommand::Text {
-            x: x + w - 20.0,
-            y: y + 7.0,
+        frame.push(RenderCommand::Text {
+            x: r.right() - 20.0,
+            y: r.y + 7.0,
             text: arrow_text.into(),
             color: SUBTEXT0,
             font_size: 10.0,
@@ -1527,15 +1793,14 @@ impl SpeedTestUI {
         });
     }
 
-    fn render_server_dropdown(&self, tree: &mut RenderTree) {
-        let x = GAUGE_CENTER_X - 100.0;
-        let base_y = TITLE_BAR_HEIGHT + 38.0;
-        let w = 200.0_f32;
-        let item_h = 28.0_f32;
+    fn draw_server_dropdown(&self, frame: &mut Frame, l: &Layout) {
+        let item_h = SERVER_HEIGHT;
+        let x = l.server.x;
+        let w = l.server.w;
+        let base_y = l.server.bottom() + 10.0;
         let total_h = self.servers.len() as f32 * item_h;
 
-        // Dropdown background.
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y: base_y,
             width: w,
@@ -1543,7 +1808,7 @@ impl SpeedTestUI {
             color: SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
-        tree.push(RenderCommand::StrokeRect {
+        frame.push(RenderCommand::StrokeRect {
             x,
             y: base_y,
             width: w,
@@ -1556,7 +1821,7 @@ impl SpeedTestUI {
         for (i, server) in self.servers.iter().enumerate() {
             let iy = base_y + i as f32 * item_h;
             if i == self.selected_server {
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: x + 2.0,
                     y: iy + 1.0,
                     width: w - 4.0,
@@ -1565,7 +1830,7 @@ impl SpeedTestUI {
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + 10.0,
                 y: iy + 6.0,
                 text: format!("{} ({})", server.name, server.location),
@@ -1576,17 +1841,18 @@ impl SpeedTestUI {
                 },
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 20.0),
+                max_width: Some((w - 20.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
+            frame.hit(Target::ServerItem(i), Rect::new(x, iy, w, item_h));
         }
     }
 
-    fn render_gauge(&self, tree: &mut RenderTree) {
-        let cx = GAUGE_CENTER_X;
-        let cy = GAUGE_CENTER_Y;
-        let outer_r = GAUGE_RADIUS;
-        let inner_r = GAUGE_RADIUS - 16.0;
+    fn draw_gauge(&self, frame: &mut Frame, l: &Layout) {
+        let (cx, cy) = l.gauge_centre;
+        let outer_r = l.gauge_radius;
+        let track = (outer_r * 0.107).max(3.0);
+        let inner_r = outer_r - track;
 
         // Draw arc background (dark track).
         for seg in 0..GAUGE_ARC_SEGMENTS {
@@ -1596,13 +1862,13 @@ impl SpeedTestUI {
             let a1 = gauge_fraction_to_angle(frac1);
             let (ox0, oy0) = point_on_circle(cx, cy, outer_r, a0);
             let (ox1, oy1) = point_on_circle(cx, cy, outer_r, a1);
-            tree.push(RenderCommand::Line {
+            frame.push(RenderCommand::Line {
                 x1: ox0,
                 y1: oy0,
                 x2: ox1,
                 y2: oy1,
                 color: SURFACE0,
-                width: 16.0,
+                width: track,
             });
         }
 
@@ -1615,26 +1881,26 @@ impl SpeedTestUI {
             let frac1 = (seg.saturating_add(1) as f32 / GAUGE_ARC_SEGMENTS as f32).min(fill_frac);
             let a0 = gauge_fraction_to_angle(frac0);
             let a1 = gauge_fraction_to_angle(frac1);
-            let (ox0, oy0) = point_on_circle(cx, cy, outer_r - 8.0, a0);
-            let (ox1, oy1) = point_on_circle(cx, cy, outer_r - 8.0, a1);
+            let (ox0, oy0) = point_on_circle(cx, cy, outer_r - track / 2.0, a0);
+            let (ox1, oy1) = point_on_circle(cx, cy, outer_r - track / 2.0, a1);
             let color = gauge_color_at(frac0);
-            tree.push(RenderCommand::Line {
+            frame.push(RenderCommand::Line {
                 x1: ox0,
                 y1: oy0,
                 x2: ox1,
                 y2: oy1,
                 color,
-                width: 14.0,
+                width: track * 0.875,
             });
         }
 
         // Draw speed marker ticks and labels.
         for &marker in GAUGE_MARKERS {
-            let frac = speed_to_gauge_fraction(marker as f64);
+            let frac = speed_to_gauge_fraction(f64::from(marker));
             let angle = gauge_fraction_to_angle(frac);
             let (tx0, ty0) = point_on_circle(cx, cy, outer_r + 2.0, angle);
             let (tx1, ty1) = point_on_circle(cx, cy, outer_r + 10.0, angle);
-            tree.push(RenderCommand::Line {
+            frame.push(RenderCommand::Line {
                 x1: tx0,
                 y1: ty0,
                 x2: tx1,
@@ -1648,7 +1914,7 @@ impl SpeedTestUI {
             } else {
                 format!("{}", marker as u32)
             };
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: lx - 10.0,
                 y: ly - 5.0,
                 text: label,
@@ -1663,8 +1929,8 @@ impl SpeedTestUI {
         // Needle indicator.
         let needle_frac = speed_to_gauge_fraction(self.current_speed_mbps);
         let needle_angle = gauge_fraction_to_angle(needle_frac);
-        let (nx, ny) = point_on_circle(cx, cy, inner_r - 4.0, needle_angle);
-        tree.push(RenderCommand::Line {
+        let (nx, ny) = point_on_circle(cx, cy, (inner_r - 4.0).max(0.0), needle_angle);
+        frame.push(RenderCommand::Line {
             x1: cx,
             y1: cy,
             x2: nx,
@@ -1674,7 +1940,7 @@ impl SpeedTestUI {
         });
 
         // Center dot.
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x: cx - 6.0,
             y: cy - 6.0,
             width: 12.0,
@@ -1684,30 +1950,37 @@ impl SpeedTestUI {
         });
     }
 
-    fn render_speed_label(&self, tree: &mut RenderTree) {
-        let cx = GAUGE_CENTER_X;
-        let cy = GAUGE_CENTER_Y;
+    fn draw_speed_label(&self, frame: &mut Frame, l: &Layout) {
+        let (cx, cy) = l.gauge_centre;
+        let r = l.gauge_radius;
+        // The readout lives in the gauge's open bottom, so it is sized from
+        // the gauge rather than from a literal: a small window shrinks the arc
+        // and the number together instead of leaving a 32 px figure sprawled
+        // across a 60 px dial.
+        let value_size = (r * 0.21).clamp(10.0, 32.0);
+        let unit_size = (r * 0.093).clamp(8.0, 14.0);
+        let latency_size = (r * 0.073).clamp(7.0, 11.0);
 
-        // Speed value text.
         let speed_text = format!("{:.1}", self.current_speed_mbps);
-        tree.push(RenderCommand::Text {
-            x: cx - 50.0,
-            y: cy + 35.0,
+        let speed_w = text::measure(&speed_text, value_size, FontWeightHint::Bold);
+        frame.push(RenderCommand::Text {
+            x: cx - speed_w / 2.0,
+            y: cy + r * 0.23,
             text: speed_text,
             color: TEXT_COLOR,
-            font_size: 32.0,
+            font_size: value_size,
             font_weight: FontWeightHint::Bold,
-            max_width: Some(100.0),
-            overflow: TextOverflow::Ellipsis,
+            max_width: None,
+            overflow: TextOverflow::Clip,
         });
 
-        // Unit label.
-        tree.push(RenderCommand::Text {
-            x: cx - 20.0,
-            y: cy + 70.0,
+        let unit_w = text::measure("Mbps", unit_size, FontWeightHint::Regular);
+        frame.push(RenderCommand::Text {
+            x: cx - unit_w / 2.0,
+            y: cy + r * 0.47,
             text: "Mbps".into(),
             color: SUBTEXT0,
-            font_size: 14.0,
+            font_size: unit_size,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1715,12 +1988,14 @@ impl SpeedTestUI {
 
         // Latency readout below gauge.
         if self.current_latency_ms > 0.0 {
-            tree.push(RenderCommand::Text {
-                x: cx - 40.0,
-                y: cy + 90.0,
-                text: format!("Latency: {:.1} ms", self.current_latency_ms),
+            let latency = format!("Latency: {:.1} ms", self.current_latency_ms);
+            let latency_w = text::measure(&latency, latency_size, FontWeightHint::Regular);
+            frame.push(RenderCommand::Text {
+                x: cx - latency_w / 2.0,
+                y: cy + r * 0.6,
+                text: latency,
                 color: SUBTEXT1,
-                font_size: 11.0,
+                font_size: latency_size,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1728,16 +2003,15 @@ impl SpeedTestUI {
         }
     }
 
-    fn render_phase_indicators(&self, tree: &mut RenderTree) {
+    fn draw_phase_indicators(&self, frame: &mut Frame, l: &Layout) {
         let phases = [TestKind::Latency, TestKind::Download, TestKind::Upload];
         let labels = ["Latency", "Download", "Upload"];
         let icons = [TEAL, BLUE, MAUVE];
-        let total_width = 360.0_f32;
-        let start_x = GAUGE_CENTER_X - total_width / 2.0;
-        let y = PHASE_INDICATOR_Y;
+        let step = (l.phase_row.w / 3.0).max(0.0);
+        let y = l.phase_row.y;
 
         for (i, (kind, label)) in phases.iter().zip(labels.iter()).enumerate() {
-            let x = start_x + i as f32 * 120.0;
+            let x = l.phase_row.x + i as f32 * step;
 
             let (dot_color, text_color) = match &self.phase {
                 SpeedTestPhase::Testing(active) if active == kind => {
@@ -1770,7 +2044,7 @@ impl SpeedTestUI {
             };
 
             // Phase dot.
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x,
                 y,
                 width: 10.0,
@@ -1780,21 +2054,23 @@ impl SpeedTestUI {
             });
 
             // Phase label.
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + 16.0,
                 y: y - 1.0,
                 text: (*label).into(),
                 color: text_color,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
+                max_width: Some((step - 26.0).max(0.0)),
+                overflow: TextOverflow::Ellipsis,
             });
 
-            // Arrow between phases.
+            // Arrow between phases, centred in the gap this label leaves.
             if i < 2 {
-                tree.push(RenderCommand::Text {
-                    x: x + 90.0,
+                let label_end = x + 16.0 + text::measure(label, 12.0, FontWeightHint::Regular);
+                let arrow_x = (label_end + (x + step - label_end) / 2.0 - 4.0).max(label_end + 2.0);
+                frame.push(RenderCommand::Text {
+                    x: arrow_x,
                     y: y - 1.0,
                     text: "\u{2192}".into(),
                     color: SURFACE2,
@@ -1807,9 +2083,8 @@ impl SpeedTestUI {
         }
     }
 
-    fn render_start_button(&self, tree: &mut RenderTree) {
-        let x = GAUGE_CENTER_X - BUTTON_WIDTH / 2.0;
-        let y = GAUGE_CENTER_Y + GAUGE_RADIUS + 20.0;
+    fn draw_start_button(&self, frame: &mut Frame, l: &Layout) {
+        let r = l.start;
 
         let (bg, label) = if self.phase.is_testing() {
             (SURFACE1, "Testing...")
@@ -1821,156 +2096,138 @@ impl SpeedTestUI {
             (BLUE, "Start Test")
         };
 
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
+        frame.push(RenderCommand::FillRect {
+            x: r.x,
+            y: r.y,
+            width: r.w,
+            height: r.h,
             color: bg,
             corner_radii: CornerRadii::all(6.0),
         });
-        tree.push(RenderCommand::Text {
-            x: x + 30.0,
-            y: y + 10.0,
+        let label_w = text::measure(label, 14.0, FontWeightHint::Bold);
+        frame.push(RenderCommand::Text {
+            x: r.x + (r.w - label_w).max(0.0) / 2.0,
+            y: r.y + (r.h - 14.0) / 2.0,
             text: label.into(),
             color: if bg == SAPPHIRE { CRUST } else { TEXT_COLOR },
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(r.w),
+            overflow: TextOverflow::Ellipsis,
         });
+        frame.hit(Target::Start, r);
     }
 
-    fn render_result_summary(&self, tree: &mut RenderTree) {
+    fn draw_result_summary(&self, frame: &mut Frame, l: &Layout) {
+        let r = l.summary;
         if !self.phase.is_complete() && !self.phase.is_testing() {
             if let SpeedTestPhase::Error(ref msg) = self.phase {
-                tree.push(RenderCommand::Text {
-                    x: GAUGE_CENTER_X - 120.0,
-                    y: GAUGE_CENTER_Y + GAUGE_RADIUS + 65.0,
-                    text: format!("Error: {msg}"),
+                let text = format!("Error: {msg}");
+                let w = text::measure(&text, 12.0, FontWeightHint::Regular).min(r.w);
+                frame.push(RenderCommand::Text {
+                    x: r.x + (r.w - w).max(0.0) / 2.0,
+                    y: r.y + 8.0,
+                    text,
                     color: RED,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(240.0),
+                    max_width: Some(r.w),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
             return;
         }
 
-        let y_base = GAUGE_CENTER_Y + GAUGE_RADIUS + 65.0;
-        let col_width = 140.0_f32;
-
-        // Download.
-        let dl_x = GAUGE_CENTER_X - col_width * 1.5;
-        tree.push(RenderCommand::Text {
-            x: dl_x,
-            y: y_base,
-            text: "Download".into(),
-            color: SUBTEXT0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        tree.push(RenderCommand::Text {
-            x: dl_x,
-            y: y_base + 14.0,
-            text: format!("{:.1} Mbps", self.download_tester.avg_mbps()),
-            color: BLUE,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Upload.
-        let ul_x = GAUGE_CENTER_X - col_width * 0.5;
-        tree.push(RenderCommand::Text {
-            x: ul_x,
-            y: y_base,
-            text: "Upload".into(),
-            color: SUBTEXT0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        tree.push(RenderCommand::Text {
-            x: ul_x,
-            y: y_base + 14.0,
-            text: format!("{:.1} Mbps", self.upload_tester.avg_mbps()),
-            color: MAUVE,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Latency / Jitter.
-        let lat_x = GAUGE_CENTER_X + col_width * 0.5;
-        tree.push(RenderCommand::Text {
-            x: lat_x,
-            y: y_base,
-            text: "Latency / Jitter".into(),
-            color: SUBTEXT0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        tree.push(RenderCommand::Text {
-            x: lat_x,
-            y: y_base + 14.0,
-            text: format!(
-                "{:.1} / {:.1} ms",
-                self.latency_tester.avg_rtt().unwrap_or(0.0),
-                self.latency_tester.jitter().unwrap_or(0.0),
+        // Three equal columns across the summary strip. They used to be three
+        // offsets from the gauge's centre, 140 px apart, which put the leftmost
+        // at x=240 in a 900 px window and left the whole row overlapping the
+        // graph panel below it.
+        let col_w = (r.w / 3.0).max(0.0);
+        let columns = [
+            (
+                "Download",
+                format!("{:.1} Mbps", self.download_tester.avg_mbps()),
+                BLUE,
             ),
-            color: TEAL,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+            (
+                "Upload",
+                format!("{:.1} Mbps", self.upload_tester.avg_mbps()),
+                MAUVE,
+            ),
+            (
+                "Latency / Jitter",
+                format!(
+                    "{:.1} / {:.1} ms",
+                    self.latency_tester.avg_rtt().unwrap_or(0.0),
+                    self.latency_tester.jitter().unwrap_or(0.0),
+                ),
+                TEAL,
+            ),
+        ];
+
+        for (i, (heading, value, color)) in columns.into_iter().enumerate() {
+            let cx = r.x + (i as f32 + 0.5) * col_w;
+            let heading_w = text::measure(heading, 10.0, FontWeightHint::Regular).min(col_w);
+            frame.push(RenderCommand::Text {
+                x: cx - heading_w / 2.0,
+                y: r.y,
+                text: heading.into(),
+                color: SUBTEXT0,
+                font_size: 10.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(col_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+            let value_w = text::measure(&value, 14.0, FontWeightHint::Bold).min(col_w);
+            frame.push(RenderCommand::Text {
+                x: cx - value_w / 2.0,
+                y: r.y + 14.0,
+                text: value,
+                color,
+                font_size: 14.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(col_w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
-    fn render_graph(&self, tree: &mut RenderTree) {
-        // Graph panel background.
-        tree.push(RenderCommand::FillRect {
-            x: GRAPH_X,
-            y: GRAPH_Y,
-            width: GRAPH_WIDTH,
-            height: GRAPH_HEIGHT,
+    fn draw_graph(&self, frame: &mut Frame, l: &Layout) {
+        let panel = l.graph;
+
+        frame.push(RenderCommand::FillRect {
+            x: panel.x,
+            y: panel.y,
+            width: panel.w,
+            height: panel.h,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
-        tree.push(RenderCommand::StrokeRect {
-            x: GRAPH_X,
-            y: GRAPH_Y,
-            width: GRAPH_WIDTH,
-            height: GRAPH_HEIGHT,
+        frame.push(RenderCommand::StrokeRect {
+            x: panel.x,
+            y: panel.y,
+            width: panel.w,
+            height: panel.h,
             color: SURFACE0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
 
-        // Graph title.
-        tree.push(RenderCommand::Text {
-            x: GRAPH_X + 12.0,
-            y: GRAPH_Y + 8.0,
+        frame.push(RenderCommand::Text {
+            x: panel.x + 12.0,
+            y: panel.y + 8.0,
             text: "Speed Over Time".into(),
             color: TEXT_COLOR,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((panel.w - 24.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
 
-        let plot_x = GRAPH_X + 50.0;
-        let plot_y = GRAPH_Y + 30.0;
-        let plot_w = GRAPH_WIDTH - 60.0;
-        let plot_h = GRAPH_HEIGHT - 50.0;
+        let plot_x = panel.x + 50.0;
+        let plot_y = panel.y + 30.0;
+        let plot_w = (panel.w - 60.0).max(0.0);
+        let plot_h = (panel.h - 50.0).max(0.0);
 
         // Grid lines and Y-axis labels.
         let y_steps = 4u32;
@@ -1985,8 +2242,7 @@ impl SpeedTestUI {
         for i in 0..=y_steps {
             let frac = i as f32 / y_steps as f32;
             let gy = plot_y + plot_h - frac * plot_h;
-            // Grid line.
-            tree.push(RenderCommand::Line {
+            frame.push(RenderCommand::Line {
                 x1: plot_x,
                 y1: gy,
                 x2: plot_x + plot_w,
@@ -1994,12 +2250,11 @@ impl SpeedTestUI {
                 color: SURFACE0,
                 width: 0.5,
             });
-            // Y label.
-            let val = max_speed * frac as f64;
-            tree.push(RenderCommand::Text {
-                x: GRAPH_X + 4.0,
+            let val = max_speed * f64::from(frac);
+            frame.push(RenderCommand::Text {
+                x: panel.x + 4.0,
                 y: gy - 5.0,
-                text: format!("{:.0}", val),
+                text: format!("{val:.0}"),
                 color: SURFACE2,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
@@ -2021,7 +2276,7 @@ impl SpeedTestUI {
                 let y0 = plot_y + plot_h - (s0.mbps / max_speed) as f32 * plot_h;
                 let x1 = plot_x + (s1.elapsed_secs / max_time) * plot_w;
                 let y1 = plot_y + plot_h - (s1.mbps / max_speed) as f32 * plot_h;
-                tree.push(RenderCommand::Line {
+                frame.push(RenderCommand::Line {
                     x1: x0,
                     y1: y0,
                     x2: x1,
@@ -2037,10 +2292,10 @@ impl SpeedTestUI {
                 let frac = i as f32 / label_count as f32;
                 let t = max_time * frac;
                 let lx = plot_x + frac * plot_w;
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: lx - 8.0,
                     y: plot_y + plot_h + 4.0,
-                    text: format!("{:.0}s", t),
+                    text: format!("{t:.0}s"),
                     color: SURFACE2,
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
@@ -2050,8 +2305,9 @@ impl SpeedTestUI {
             }
         } else {
             // No data placeholder.
-            tree.push(RenderCommand::Text {
-                x: plot_x + plot_w / 2.0 - 40.0,
+            let w = text::measure("No data yet", 12.0, FontWeightHint::Regular);
+            frame.push(RenderCommand::Text {
+                x: plot_x + (plot_w - w) / 2.0,
                 y: plot_y + plot_h / 2.0 - 5.0,
                 text: "No data yet".into(),
                 color: SURFACE2,
@@ -2063,58 +2319,59 @@ impl SpeedTestUI {
         }
     }
 
-    fn render_history_panel(&self, tree: &mut RenderTree) {
-        // Panel background.
-        tree.push(RenderCommand::FillRect {
-            x: HISTORY_X,
-            y: HISTORY_Y,
-            width: HISTORY_WIDTH,
-            height: HISTORY_HEIGHT,
+    fn draw_history_panel(&self, frame: &mut Frame, l: &Layout) {
+        let panel = l.history;
+        let list = l.history_list;
+
+        frame.push(RenderCommand::FillRect {
+            x: panel.x,
+            y: panel.y,
+            width: panel.w,
+            height: panel.h,
             color: BASE,
             corner_radii: CornerRadii::all(8.0),
         });
-        tree.push(RenderCommand::StrokeRect {
-            x: HISTORY_X,
-            y: HISTORY_Y,
-            width: HISTORY_WIDTH,
-            height: HISTORY_HEIGHT,
+        frame.push(RenderCommand::StrokeRect {
+            x: panel.x,
+            y: panel.y,
+            width: panel.w,
+            height: panel.h,
             color: SURFACE0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
+        // Recorded before the rows, so a row painted on top of it wins the hit
+        // test and the bare panel only answers where no row is drawn. That is
+        // what lets the wheel work over the header and the stats strip while a
+        // click there still selects nothing.
+        frame.hit(Target::HistoryPanel, panel);
 
-        // Header.
-        tree.push(RenderCommand::Text {
-            x: HISTORY_X + 12.0,
-            y: HISTORY_Y + 8.0,
+        frame.push(RenderCommand::Text {
+            x: panel.x + 12.0,
+            y: panel.y + 8.0,
             text: format!("History ({})", self.history.len()),
             color: TEXT_COLOR,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some((panel.w - 24.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
         });
 
-        let content_y = Self::history_list_top();
-        let content_h = self.history_viewport_height();
-
-        // Clip to history area.
-        tree.push(RenderCommand::PushClip {
-            x: HISTORY_X,
-            y: content_y,
-            width: HISTORY_WIDTH,
-            height: content_h,
-        });
+        // Clip to history area. The frame trims every hit box recorded inside
+        // to this rectangle and drops the ones it cuts to nothing, so a row
+        // scrolled out of the viewport stops being clickable by construction
+        // rather than by a bound the hit test remembers to apply.
+        frame.clip(list);
 
         if self.history.is_empty() {
-            tree.push(RenderCommand::Text {
-                x: HISTORY_X + 12.0,
-                y: content_y + 10.0,
+            frame.push(RenderCommand::Text {
+                x: panel.x + 12.0,
+                y: list.y + 10.0,
                 text: "Run a test to see results".into(),
                 color: SURFACE2,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(HISTORY_WIDTH - 24.0),
+                max_width: Some((panel.w - 24.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         } else {
@@ -2122,8 +2379,8 @@ impl SpeedTestUI {
             // through `history_rows`, which is what stops the highlight
             // landing on a different row from the pointer.
             let results = self.history.results();
-            for (ry, idx) in self.history_rows() {
-                if ry + HISTORY_ROW_HEIGHT <= content_y || ry >= content_y + content_h {
+            for (ry, idx) in self.history_rows(l) {
+                if ry + HISTORY_ROW_HEIGHT <= list.y || ry >= list.bottom() {
                     continue;
                 }
                 let Some(result) = results.get(idx) else {
@@ -2132,39 +2389,42 @@ impl SpeedTestUI {
 
                 // Hover highlight.
                 if self.history_hover == Some(idx) {
-                    tree.push(RenderCommand::FillRect {
-                        x: HISTORY_X + 4.0,
+                    frame.push(RenderCommand::FillRect {
+                        x: panel.x + 4.0,
                         y: ry,
-                        width: HISTORY_WIDTH - 8.0,
+                        width: (panel.w - 8.0).max(0.0),
                         height: HISTORY_ROW_HEIGHT,
                         color: SURFACE0,
                         corner_radii: CornerRadii::all(3.0),
                     });
                 }
 
-                tree.push(RenderCommand::Text {
-                    x: HISTORY_X + 12.0,
+                frame.push(RenderCommand::Text {
+                    x: panel.x + 12.0,
                     y: ry + 6.0,
                     text: result.summary_line(),
                     color: SUBTEXT1,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(HISTORY_WIDTH - 24.0),
+                    max_width: Some((panel.w - 24.0).max(0.0)),
                     overflow: TextOverflow::Ellipsis,
                 });
+                frame.hit(
+                    Target::HistoryRow(idx),
+                    Rect::new(panel.x, ry, panel.w, HISTORY_ROW_HEIGHT),
+                );
             }
         }
 
-        tree.push(RenderCommand::PopClip);
+        frame.unclip();
 
         // History stats at the bottom.
         if !self.history.is_empty() {
-            let stats_y = HISTORY_Y + HISTORY_HEIGHT - 22.0;
-            tree.push(RenderCommand::FillRect {
-                x: HISTORY_X,
-                y: stats_y - 2.0,
-                width: HISTORY_WIDTH,
-                height: 24.0,
+            frame.push(RenderCommand::FillRect {
+                x: panel.x,
+                y: list.bottom(),
+                width: panel.w,
+                height: HISTORY_STATS_HEIGHT,
                 color: MANTLE,
                 corner_radii: CornerRadii {
                     top_left: 0.0,
@@ -2173,9 +2433,9 @@ impl SpeedTestUI {
                     bottom_left: 8.0,
                 },
             });
-            tree.push(RenderCommand::Text {
-                x: HISTORY_X + 8.0,
-                y: stats_y + 2.0,
+            frame.push(RenderCommand::Text {
+                x: panel.x + 8.0,
+                y: list.bottom() + 6.0,
                 text: format!(
                     "Avg: {:.0}/{:.0} Mbps, {:.0}ms",
                     self.history.avg_download(),
@@ -2185,21 +2445,20 @@ impl SpeedTestUI {
                 color: SUBTEXT0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
-                max_width: Some(HISTORY_WIDTH - 16.0),
+                max_width: Some((panel.w - 16.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
         }
     }
 
-    fn render_export_button(&self, tree: &mut RenderTree) {
-        let x = GRAPH_X;
-        let y = GRAPH_Y + GRAPH_HEIGHT + 10.0;
+    fn draw_export_button(&self, frame: &mut Frame, l: &Layout) {
+        let r = l.export;
 
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 100.0,
-            height: 28.0,
+        frame.push(RenderCommand::FillRect {
+            x: r.x,
+            y: r.y,
+            width: r.w,
+            height: r.h,
             color: if self.export_button_hover {
                 SURFACE1
             } else {
@@ -2207,16 +2466,18 @@ impl SpeedTestUI {
             },
             corner_radii: CornerRadii::all(4.0),
         });
-        tree.push(RenderCommand::Text {
-            x: x + 14.0,
-            y: y + 7.0,
+        let label_w = text::measure("Export", 11.0, FontWeightHint::Regular);
+        frame.push(RenderCommand::Text {
+            x: r.x + (r.w - label_w).max(0.0) / 2.0,
+            y: r.y + (r.h - 11.0) / 2.0,
             text: "Export".into(),
             color: SUBTEXT0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+            max_width: Some(r.w),
+            overflow: TextOverflow::Ellipsis,
         });
+        frame.hit(Target::Export, r);
     }
 
     /// Return the graph samples for the currently active or last completed phase.
@@ -2244,10 +2505,88 @@ impl Default for SpeedTestUI {
 }
 
 // ============================================================================
-// Entry point (placeholder for Slate OS)
+// The window
 // ============================================================================
 
-fn main() {}
+impl App for SpeedTestUI {
+    fn title(&self) -> String {
+        "Network Speed Test".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// The clock, but only while there is something to measure.
+    ///
+    /// A speed test is a measurement over time and the dial sweeps as it runs,
+    /// so a running test asks for a frame's worth of clock. An idle window asks
+    /// for none: `sync_clock` cancels the wake-up, and a window showing a
+    /// finished result costs the compositor nothing until the user touches it.
+    fn tick_interval(&self) -> Option<Duration> {
+        self.phase.is_testing().then(|| Duration::from_millis(16))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        // Ctrl+Q closes the window. Escape does not: it cancels a running test,
+        // which is the more useful answer to the key a user reaches for when a
+        // ten-second measurement is halfway through.
+        if let Event::Key(key) = event
+            && key.pressed
+            && key.key == Key::Q
+            && key.modifiers.ctrl
+        {
+            return Response::Exit;
+        }
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The remembered size is only ever a starting guess; this is the real
+        // one, and the hit test reads it back through `handle_event`.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for SpeedTestUI {
+    type Target = Target;
+    type Outcome = EventResult;
+
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Key(key.clone()))
+    }
+}
+
+// ============================================================================
+// Entry point
+// ============================================================================
+
+fn main() -> ExitCode {
+    app::launch("speedtest", &mut SpeedTestUI::new())
+}
 
 // ============================================================================
 // Tests
@@ -2269,8 +2608,12 @@ mod tests {
 
     use super::*;
     // Not in the production imports above, because nothing outside the tests
-    // builds a `MouseEvent` -- the app only ever destructures one.
-    use guitk::event::MouseEvent;
+    // names a modifier set: the app reads `key.modifiers.ctrl` off the event it
+    // was handed and never constructs one.
+    use guitk::event::Modifiers;
+    // The free helpers -- `click`, `rect_of`, `press`. The production code
+    // imports only the `Probe` trait it implements.
+    use guitk::probe;
 
     /// A frame at roughly 60 Hz, the interval `oswindow` would hand us.
     const FRAME_MS: u64 = 16;
@@ -3191,8 +3534,19 @@ mod tests {
     // highlight survived a test suite for as long as it did.
     // ====================================================================
 
+    /// The layout at the default window size, which is the size every test
+    /// here runs at. A function rather than a `const`, because the geometry is
+    /// now *derived* from the window size instead of being a table of literals
+    /// -- which is the whole point of `Layout`, and the reason a test can no
+    /// longer name a position without saying which window it means.
+    fn layout() -> Layout {
+        Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
     /// An x well inside the history panel.
-    const HIST_X: f32 = HISTORY_X + 20.0;
+    fn hist_x() -> f32 {
+        layout().history.x + 20.0
+    }
 
     /// An app holding `n` results, each identifiable by its download speed
     /// and therefore by the summary line drawn for it.
@@ -3217,7 +3571,9 @@ mod tests {
                     text,
                     font_size,
                     ..
-                } if *x == HISTORY_X + 12.0 && *font_size == 10.0 => Some((*y - 6.0, text.clone())),
+                } if *x == layout().history.x + 12.0 && *font_size == 10.0 => {
+                    Some((*y - 6.0, text.clone()))
+                }
                 _ => None,
             })
             .collect()
@@ -3227,7 +3583,7 @@ mod tests {
     fn painted_highlight(ui: &SpeedTestUI) -> Option<f32> {
         ui.render().commands.iter().find_map(|cmd| match cmd {
             RenderCommand::FillRect { x, y, height, .. }
-                if *x == HISTORY_X + 4.0 && *height == HISTORY_ROW_HEIGHT =>
+                if *x == layout().history.x + 4.0 && *height == HISTORY_ROW_HEIGHT =>
             {
                 Some(*y)
             }
@@ -3237,7 +3593,7 @@ mod tests {
 
     fn hover(ui: &mut SpeedTestUI, y: f32) {
         ui.handle_event(&Event::Mouse(MouseEvent {
-            x: HIST_X,
+            x: hist_x(),
             y,
             kind: MouseEventKind::Move,
         }));
@@ -3245,8 +3601,8 @@ mod tests {
 
     fn wheel_over_history(ui: &mut SpeedTestUI, dy: f32) -> EventResult {
         ui.handle_event(&Event::Mouse(MouseEvent {
-            x: HIST_X,
-            y: HISTORY_Y + 60.0,
+            x: hist_x(),
+            y: layout().history_list.y + 20.0,
             kind: MouseEventKind::Scroll { dx: 0.0, dy },
         }))
     }
@@ -3284,7 +3640,7 @@ mod tests {
             ui.history_hover = None;
             assert_eq!(
                 ui.handle_event(&Event::Mouse(MouseEvent {
-                    x: HIST_X,
+                    x: hist_x(),
                     y,
                     kind: MouseEventKind::Press(MouseButton::Left),
                 })),
@@ -3338,7 +3694,7 @@ mod tests {
     #[test]
     fn a_row_under_the_stats_strip_cannot_be_pointed_at() {
         let mut ui = ui_with_history(MAX_HISTORY);
-        let strip_top = HISTORY_Y + HISTORY_HEIGHT - HISTORY_STATS_HEIGHT;
+        let strip_top = layout().history_list.bottom();
         // Inside the panel, below the visible list, above the panel's foot.
         hover(&mut ui, strip_top + HISTORY_STATS_HEIGHT / 2.0);
         assert_eq!(ui.history_hover, None);
@@ -3367,14 +3723,14 @@ mod tests {
             .commands
             .iter()
             .find_map(|cmd| match cmd {
-                RenderCommand::PushClip { x, y, height, .. } if *x == HISTORY_X => {
+                RenderCommand::PushClip { x, y, height, .. } if *x == layout().history.x => {
                     Some((*y, *height))
                 }
                 _ => None,
             })
             .expect("the history list is drawn under a clip");
-        assert_eq!(clip.0, SpeedTestUI::history_list_top());
-        assert_eq!(clip.1, ui.history_viewport_height());
+        assert_eq!(clip.0, layout().history_list.y);
+        assert_eq!(clip.1, layout().history_list.h);
 
         // And the hit test agrees at both edges of that rectangle.
         let mut ui = ui;
@@ -3421,14 +3777,14 @@ mod tests {
         let last = rows.last().expect("some rows are drawn");
         assert_eq!(last.1, make_result(0.0, 50.0, 10.0).summary_line());
         assert!(
-            last.0 + HISTORY_ROW_HEIGHT <= list_bottom(&ui) + 0.01,
+            last.0 + HISTORY_ROW_HEIGHT <= list_bottom() + 0.01,
             "the oldest row hangs past the bottom of the viewport",
         );
     }
 
     /// The lowest y the list is visible at -- the top of the stats strip.
-    fn list_bottom(ui: &SpeedTestUI) -> f32 {
-        SpeedTestUI::history_list_top() + ui.history_viewport_height()
+    fn list_bottom() -> f32 {
+        layout().history_list.bottom()
     }
 
     /// A list shorter than its viewport does not scroll at all.
@@ -3445,9 +3801,10 @@ mod tests {
     fn scrolling_outside_the_panel_leaves_the_history_alone() {
         let mut ui = ui_with_history(MAX_HISTORY);
         let before = ui.history_scroll;
+        let l = layout();
         let res = ui.handle_event(&Event::Mouse(MouseEvent {
-            x: GAUGE_CENTER_X,
-            y: GAUGE_CENTER_Y,
+            x: l.gauge_centre.0,
+            y: l.gauge_centre.1,
             kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
         }));
         assert_eq!(res, EventResult::Ignored);
@@ -3480,6 +3837,411 @@ mod tests {
         ui.clamp_history_scroll();
         assert!(ui.history_scroll <= ui.max_history_scroll());
         assert_eq!(ui.history_scroll, at_end, "a full list's height is fixed");
+    }
+
+    // ====================================================================
+    // The window: layout, resize, modality and the clock
+    //
+    // Everything below drives the app the way `oswindow` does -- through
+    // `App::on_event`, `App::render` and `Probe`'s hit test -- rather than
+    // through its internals. Before this file had a `main`, none of that
+    // existed: every control was drawn at a literal coordinate, and a test
+    // could only ask the same literal back. That is how the whole result
+    // readout came to be painted underneath the graph panel every frame and
+    // seen in none of them.
+    // ====================================================================
+
+    /// The controls that are drawn in every state of the app, so a test may
+    /// expect a hit box for each without setting anything up first.
+    const ALWAYS_DRAWN: [Target; 4] = [
+        Target::ServerButton,
+        Target::Start,
+        Target::Export,
+        Target::HistoryPanel,
+    ];
+
+    /// Where the renderer put a given piece of text, if it put it anywhere.
+    fn text_at(ui: &SpeedTestUI, needle: &str) -> Option<(f32, f32)> {
+        ui.render().commands.iter().find_map(|cmd| match cmd {
+            RenderCommand::Text { x, y, text, .. } if text == needle => Some((*x, *y)),
+            _ => None,
+        })
+    }
+
+    /// The regression test for a readout that was painted and then covered.
+    ///
+    /// `render` drew the Start button at y 410..446 and the whole
+    /// download/upload/latency strip at y 455 and below -- and *then* filled
+    /// the graph panel over x 40..560, y 420..600 with an opaque rectangle.
+    /// The numbers this app exists to produce were painted every frame and
+    /// visible in none of them, and the Start button was two-thirds buried.
+    /// Nothing caught it because each half drew exactly where its own
+    /// constants said it should; only their relationship was wrong, and no
+    /// one had written the relationship down.
+    #[test]
+    fn the_start_button_and_the_readout_do_not_share_space_with_the_panels() {
+        let l = layout();
+        for (name, r) in [
+            ("the Start button", l.start),
+            ("the result strip", l.summary),
+        ] {
+            assert!(
+                r.intersect(l.graph).is_none(),
+                "{name} overlaps the graph panel, which is painted over it",
+            );
+            assert!(
+                r.intersect(l.history).is_none(),
+                "{name} overlaps the history panel, which is painted over it",
+            );
+        }
+    }
+
+    /// And the same thing said about the pixels rather than the rectangles:
+    /// after a real run, the three headings are drawn clear of the band the
+    /// two opaque panels occupy.
+    #[test]
+    fn a_finished_runs_numbers_are_painted_where_nothing_covers_them() {
+        let mut ui = SpeedTestUI::with_seed(11);
+        run_a_full_test(&mut ui);
+        let l = layout();
+        for heading in ["Download", "Upload", "Latency / Jitter"] {
+            let (x, y) =
+                text_at(&ui, heading).unwrap_or_else(|| panic!("{heading} is not drawn at all"));
+            assert!(
+                y >= 0.0 && y < l.graph.y,
+                "{heading} is drawn at y={y}, inside the panel band that starts at {}",
+                l.graph.y,
+            );
+            assert!(
+                x >= 0.0 && x < l.width,
+                "{heading} is drawn at x={x}, outside a {} px window",
+                l.width,
+            );
+        }
+    }
+
+    /// Every control answers a click in the middle of where it is drawn. This
+    /// is the property the hit test used to have its own second copy of.
+    #[test]
+    fn every_control_answers_where_the_frame_draws_it() {
+        let ui = SpeedTestUI::new();
+        for target in ALWAYS_DRAWN {
+            let r = probe::rect_of(&ui, target)
+                .unwrap_or_else(|| panic!("{target:?} records no hit box"));
+            let (cx, cy) = r.centre();
+            assert_eq!(
+                ui.target_at(cx, cy),
+                Some(target),
+                "{target:?} is drawn at {r:?} but clicking its middle does not reach it",
+            );
+        }
+    }
+
+    /// A control laid out past the window's edge would keep its hit box and so
+    /// stay clickable while being invisible -- which is why `Layout` shrinks
+    /// rather than clamping. Stated here over a spread of sizes, including
+    /// ones far smaller than the app's controls.
+    #[test]
+    fn no_size_puts_a_hit_box_outside_the_window() {
+        for size in [
+            (900.0, 720.0),
+            (1600.0, 1000.0),
+            (640.0, 480.0),
+            (420.0, 360.0),
+            (240.0, 200.0),
+            (1.0, 1.0),
+        ] {
+            let ui = ui_with_history(MAX_HISTORY);
+            for (target, r) in ui.frame(size.0, size.1).hits() {
+                assert!(
+                    r.x >= 0.0
+                        && r.y >= 0.0
+                        && r.right() <= size.0 + 0.01
+                        && r.bottom() <= size.1 + 0.01,
+                    "at {size:?} the hit box for {target:?} is {r:?}, outside the window",
+                );
+            }
+        }
+    }
+
+    /// Resizing relays the window out: the controls move, and the hit test
+    /// moves with them. Before `Event::Resize` was handled at all, `self.width`
+    /// was written once at construction, so a widened window painted a wider
+    /// background around a picture of a 900x720 one.
+    #[test]
+    fn a_resized_window_lays_out_again_and_the_hit_test_follows() {
+        let size = (1280.0, 820.0);
+        let mut ui = SpeedTestUI::new();
+        let before = probe::rect_of(&ui, Target::Start).expect("the Start button is drawn");
+
+        assert_eq!(
+            ui.handle_event(&Event::Resize {
+                width: size.0 as u32,
+                height: size.1 as u32,
+            }),
+            EventResult::Consumed,
+        );
+
+        let after = probe::rect_of_sized(&ui, Target::Start, size).expect("still drawn");
+        assert_ne!(
+            before, after,
+            "the Start button did not move with the window"
+        );
+        assert!(
+            (after.centre().0 - size.0 / 2.0).abs() < 1.0,
+            "the Start button is not centred in the window it was drawn for: {after:?}",
+        );
+        let (cx, cy) = after.centre();
+        assert_eq!(ui.target_at(cx, cy), Some(Target::Start));
+    }
+
+    /// `App::render` must believe the size it is handed rather than a size it
+    /// remembers, because the compositor can hand it one it has never seen an
+    /// `Event::Resize` for.
+    #[test]
+    fn render_lays_out_at_the_size_it_is_handed() {
+        let mut ui = SpeedTestUI::new();
+        let tree = App::render(&mut ui, 1024.0, 680.0);
+        let covered = tree.commands.iter().any(|cmd| {
+            matches!(
+                cmd,
+                RenderCommand::FillRect { width, height, .. }
+                    if *width == 1024.0 && *height == 680.0
+            )
+        });
+        assert!(
+            covered,
+            "the background does not fill the window it was given"
+        );
+        let r = probe::rect_of_sized(&ui, Target::Start, (1024.0, 680.0)).expect("drawn");
+        assert!((r.centre().0 - 512.0).abs() < 1.0, "{r:?} is not centred");
+    }
+
+    /// An open menu is modal: what it covers keeps its pixels and loses its
+    /// clicks. Without the scrim the Start button behind the list still
+    /// worked, so the menu only *looked* in front of it.
+    #[test]
+    fn an_open_server_list_takes_the_clicks_of_what_it_covers() {
+        let mut ui = SpeedTestUI::new();
+        let start = probe::rect_of(&ui, Target::Start).expect("the Start button is drawn");
+
+        assert_eq!(
+            probe::click(&mut ui, Target::ServerButton),
+            EventResult::Consumed
+        );
+        assert!(ui.server_dropdown_open, "the picker did not open the list");
+
+        let (cx, cy) = start.centre();
+        assert_eq!(
+            ui.target_at(cx, cy),
+            Some(Target::DropdownScrim),
+            "the Start button is still reachable underneath an open menu",
+        );
+        assert_eq!(ui.handle_click(cx, cy), EventResult::Consumed);
+        assert!(!ui.server_dropdown_open, "the click did not shut the menu");
+        assert!(
+            ui.phase().is_idle(),
+            "the click started a test through the menu covering the button",
+        );
+    }
+
+    /// Choosing from the list selects that server and shuts the list.
+    #[test]
+    fn choosing_a_server_selects_it_and_shuts_the_list() {
+        let mut ui = SpeedTestUI::new();
+        let last = ui.servers.len() - 1;
+        probe::click(&mut ui, Target::ServerButton);
+        assert_eq!(
+            probe::click(&mut ui, Target::ServerItem(last)),
+            EventResult::Consumed,
+        );
+        assert_eq!(ui.selected_server, last);
+        assert!(!ui.server_dropdown_open);
+        assert_eq!(
+            ui.config.server_url, ui.servers[last].url,
+            "selecting a server did not point the config at it",
+        );
+    }
+
+    /// The list's items only exist while it is open -- the closed picker must
+    /// not leave nine invisible menu rows lying across the window.
+    #[test]
+    fn a_shut_server_list_has_no_items_to_click() {
+        let ui = SpeedTestUI::new();
+        assert_eq!(probe::rect_of(&ui, Target::ServerItem(0)), None);
+        assert_eq!(probe::rect_of(&ui, Target::DropdownScrim), None);
+    }
+
+    /// The wheel works anywhere over the panel -- header and stats strip
+    /// included -- while a *click* there still selects nothing, because no row
+    /// is drawn there. Those are two different questions about the same pixel,
+    /// and the frame answers both from one recording.
+    #[test]
+    fn the_wheel_works_over_the_panels_furniture_where_a_click_selects_nothing() {
+        let l = layout();
+        let dead_spots = [
+            ("the header", l.history.y + HISTORY_HEADER_HEIGHT / 2.0),
+            (
+                "the stats strip",
+                l.history_list.bottom() + HISTORY_STATS_HEIGHT / 2.0,
+            ),
+        ];
+        for (name, y) in dead_spots {
+            let mut ui = ui_with_history(MAX_HISTORY);
+            let x = l.history.centre().0;
+            assert_eq!(
+                ui.target_at(x, y),
+                Some(Target::HistoryPanel),
+                "{name} is not part of the panel",
+            );
+            assert_eq!(
+                ui.handle_click(x, y),
+                EventResult::Ignored,
+                "clicking {name} did something",
+            );
+            assert_eq!(ui.history_hover, None, "clicking {name} selected a row");
+            assert_eq!(
+                ui.handle_event(&Event::Mouse(MouseEvent {
+                    x,
+                    y,
+                    kind: MouseEventKind::Scroll { dx: 0.0, dy: -1.0 },
+                })),
+                EventResult::Consumed,
+                "the wheel does not work over {name}",
+            );
+            assert_eq!(ui.history_scroll, 3.0 * HISTORY_ROW_HEIGHT);
+        }
+    }
+
+    /// The clock is asked for only while there is something to measure. A
+    /// window showing a finished result costs the compositor nothing.
+    #[test]
+    fn the_clock_is_only_armed_while_a_test_runs() {
+        let mut ui = SpeedTestUI::with_seed(5);
+        assert_eq!(ui.tick_interval(), None, "an idle window wants the clock");
+
+        press(&mut ui, Key::Enter);
+        assert!(ui.phase().is_testing());
+        let interval = ui.tick_interval().expect("a running test needs the clock");
+        assert!(
+            interval <= Duration::from_millis(20),
+            "a sweeping dial cannot be animated at {interval:?}",
+        );
+
+        for _ in 0..FRAME_BUDGET {
+            if ui.phase().is_complete() {
+                break;
+            }
+            ui.on_event(&Event::Tick {
+                elapsed_ms: FRAME_MS,
+            });
+        }
+        assert!(ui.phase().is_complete(), "the run never finished");
+        assert_eq!(
+            ui.tick_interval(),
+            None,
+            "a finished window keeps the clock"
+        );
+    }
+
+    /// A tick is only worth a frame while it changes something.
+    #[test]
+    fn an_idle_tick_does_not_ask_for_a_redraw() {
+        let mut ui = SpeedTestUI::new();
+        assert!(matches!(
+            ui.on_event(&Event::Tick {
+                elapsed_ms: FRAME_MS
+            }),
+            Response::Idle,
+        ));
+        press(&mut ui, Key::Enter);
+        assert!(matches!(
+            ui.on_event(&Event::Tick {
+                elapsed_ms: FRAME_MS
+            }),
+            Response::Redraw,
+        ));
+    }
+
+    /// Pointer motion over dead space costs no frame; motion that lights a
+    /// button costs exactly one.
+    #[test]
+    fn only_a_move_that_changes_something_asks_for_a_frame() {
+        let mut ui = SpeedTestUI::new();
+        let (bx, by) = probe::bare_point(&ui, SpeedTestUI::SIZE).expect("some background is bare");
+        let mv = |x: f32, y: f32| {
+            Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            })
+        };
+        assert!(matches!(ui.on_event(&mv(bx, by)), Response::Idle));
+
+        let (sx, sy) = probe::rect_of(&ui, Target::Start).expect("drawn").centre();
+        assert!(
+            matches!(ui.on_event(&mv(sx, sy)), Response::Redraw),
+            "moving onto the Start button did not light it",
+        );
+        assert!(
+            matches!(ui.on_event(&mv(sx, sy)), Response::Idle),
+            "a second move onto an already-lit button asked for a frame",
+        );
+    }
+
+    /// Ctrl+Q and the close button end the app. Escape does not -- it cancels
+    /// a running measurement, which is the more useful answer to the key a
+    /// user reaches for ten seconds into one.
+    #[test]
+    fn ctrl_q_closes_the_window_and_escape_cancels_the_run() {
+        let mut ui = SpeedTestUI::new();
+        assert!(matches!(
+            ui.on_event(&Event::Key(probe::ctrl(Key::Q))),
+            Response::Exit,
+        ));
+        assert!(matches!(
+            ui.on_event(&Event::CloseRequested),
+            Response::Exit,
+        ));
+
+        press(&mut ui, Key::Enter);
+        assert!(ui.phase().is_testing());
+        assert!(
+            !matches!(
+                ui.on_event(&Event::Key(probe::press(Key::Escape))),
+                Response::Exit,
+            ),
+            "Escape closed the window",
+        );
+        assert!(ui.phase().is_idle(), "Escape did not cancel the run");
+    }
+
+    /// Every recorded target is one the click handler answers. A hit box with
+    /// no handler is a control that swallows a click and does nothing.
+    #[test]
+    fn every_target_the_frame_records_is_one_the_app_handles() {
+        let mut ui = ui_with_history(3);
+        probe::click(&mut ui, Target::ServerButton);
+        let recorded: Vec<Target> = ui
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .hits()
+            .iter()
+            .map(|(t, _)| *t)
+            .collect();
+        assert!(
+            recorded.contains(&Target::DropdownScrim) && recorded.contains(&Target::ServerItem(0)),
+            "an open list records neither its scrim nor its items: {recorded:?}",
+        );
+        // Closed, the same walk records the ordinary controls instead.
+        probe::key(&mut ui, &probe::press(Key::Escape));
+        let names = probe::control_names(&ui);
+        for target in ALWAYS_DRAWN {
+            let name = probe::variant_name(target);
+            assert!(
+                names.iter().any(|n| n.starts_with(&name)),
+                "{name} is missing from {names:?}",
+            );
+        }
     }
 
     // --- Test helper ---

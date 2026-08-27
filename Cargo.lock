@@ -3841,6 +3841,7 @@ name = "fileassoc"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -11914,6 +11915,7 @@ name = "speedtest"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -12134,6 +12136,7 @@ name = "startupmanager"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]

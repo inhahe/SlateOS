@@ -699,6 +699,11 @@ fn create_zip(entries: &[CreateEntry]) -> Vec<u8> {
             name: dir_member_name(&e.name, e.kind == EntryKind::Directory).into_vec(),
             data: e.data.clone(),
             store_only: false,
+            // `CreateEntry` carries no modification time, so there is nothing
+            // to record here -- 0 is the honest answer rather than a
+            // placeholder. Recording one would mean widening `CreateEntry`,
+            // which the tar and cpio writers below would also have to honour.
+            dos_datetime: 0,
         });
     }
     crate::fs::zip::create(&zip_entries)

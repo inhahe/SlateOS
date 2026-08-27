@@ -113,15 +113,14 @@ where
 
 /// Initialise an **empty** NUMA-statistics table.
 ///
-/// Seeds NO node rows, NO distance matrix, and zero totals.  Real NUMA
-/// accounting is wired through [`register_node`] (one row per online node with
-/// its real memory size and CPU set, populated from the ACPI SRAT at bring-up),
-/// [`set_distance`] (from the ACPI SLIT), and the
-/// `record_local_alloc`/`record_remote_alloc`/`record_access`/`record_migration`
-/// functions; until those are called the tables are genuinely empty, so the
-/// `/proc/numastat` file and the `numastat` kshell command report zeros rather
-/// than fabricated numbers — the kernel's hard "never invent data in procfs"
-/// rule.
+/// Seeds NO node rows, NO distance matrix, and zero totals.  The node rows are
+/// filled in immediately afterwards by [`adopt_topology`], which reads the real
+/// topology out of [`crate::numa`]; the distance matrix and the
+/// allocation/access/migration counters stay empty, because the ACPI SLIT is
+/// not parsed and nothing records per-node page placement.  See
+/// [`adopt_topology`] for why filling either from a plausible-looking source
+/// would be worse than leaving it empty — the kernel's hard "never invent data
+/// in procfs" rule.
 ///
 /// NOTE: this previously seeded two fictional nodes (id 0/1, 8 GiB each, with
 /// local_allocs 50_000/30_000, local_accesses 1_000_000/800_000, and
@@ -130,8 +129,14 @@ where
 /// 250), which `/proc/numastat` then displayed as if they were real per-node
 /// memory-placement measurements.  That demo data was removed; the self-test
 /// now builds its own fixtures explicitly via the real API (see [`self_test`]).
-/// The memory subsystem is expected to call [`register_node`]/[`set_distance`]
-/// from the ACPI topology and the record_* functions as memory is placed.
+///
+/// This doc used to end by saying the memory subsystem "is expected to" call
+/// [`register_node`]/[`set_distance`] from the ACPI topology.  It never did,
+/// for as long as the module existed, and the sentence is why nobody checked:
+/// a comment describing wiring that does not exist reads exactly like one
+/// describing wiring that does.  The topology half is now genuinely wired
+/// ([`adopt_topology`]); the record_* half still has no producer, and is
+/// described above as absent rather than as expected.
 pub fn init_defaults() {
     let mut guard = STATE.lock();
     if guard.is_some() {
@@ -147,12 +152,230 @@ pub fn init_defaults() {
     });
 }
 
+/// Adopt the NUMA topology [`crate::numa`] detected at boot.
+///
+/// This is the wiring that makes `/proc/numastat` describe the machine it is
+/// running on.  Without it the table stays empty for the whole boot and the
+/// file reports `nodes: 0` — not "unknown", but a false count, since a machine
+/// with memory has at least one node.  `numa::init()` has known the answer all
+/// along (from the ACPI SRAT, or from the single-node fallback whose memory
+/// total comes from the frame allocator); nothing had ever asked it.
+///
+/// **The CPU set comes from [`crate::numa::cpu_node`], one online CPU at a
+/// time, rather than from the per-node CPU bitmask.** Both are derived from
+/// the same SRAT, so today they agree — but `cpu_node` is the map the
+/// *scheduler* actually places threads by, so sourcing from it means
+/// `/proc/numastat` cannot report a CPU on a node the scheduler treats as
+/// elsewhere.  Agreement by construction, not by coincidence.  It also has no
+/// 32-CPU ceiling, which the `u32` bitmask does.
+///
+/// **What this deliberately does not populate:**
+///
+/// * **The allocation, access-latency and migration counters.**  Nothing
+///   produces them: the frame allocator does not record which node a page came
+///   from.  They stay zero because zero is what is known, and a plausible
+///   number here would be indistinguishable from a measurement.
+/// * **The distance matrix**, though [`crate::numa::distance`] is right there
+///   and returns exactly the 10/20 shape [`set_distance`] wants.  That
+///   function's own doc says it is a uniform-remote-cost *model* standing in
+///   for the ACPI SLIT, which is not parsed yet.  [`NodeDistance`] has no
+///   field separating modelled from measured, so writing those numbers here
+///   would turn a guess into a reading the moment it reached procfs — the same
+///   failure as the fabricated seed rows this module used to carry, arriving
+///   by a longer route.  `get_distance` returning `NotFound` is the honest
+///   answer until the SLIT is parsed.
+///
+/// Idempotent, and safe to call before `numa::init()`: a node that reports
+/// itself absent means the topology has not been detected yet, and nothing is
+/// registered.  That is what lets [`self_test`] — which wipes the table and
+/// runs long before `numa::init()` at boot — end by calling this to restore
+/// real data when it is invoked manually from kshell afterwards.
+///
+/// **Adoption is one-shot: the CPU sets are a snapshot.** A CPU that comes
+/// online after this returns is not in `/proc/numastat`, because nothing
+/// re-runs adoption on a hotplug event.  That is not merely theoretical —
+/// `smp::init()` waits for APs with a *bounded* spin, so an AP that misses the
+/// window bumps the online count on its own afterwards.  The returned count is
+/// the snapshot this call enumerated, so a caller that needs to check the
+/// result can compare against what was actually placed rather than against a
+/// number that may have moved since.  Tracked in `known-issues.md` →
+/// `A-NUMASTAT-CPU-SETS-ARE-A-BOOT-SNAPSHOT-NOT-A-HOTPLUG-VIEW`.
+///
+/// # Returns
+///
+/// The number of online CPUs enumerated while building the per-node sets, or
+/// `0` if the topology was not available yet and nothing was registered.
+pub fn adopt_topology() -> usize {
+    init_defaults();
+
+    let topo = crate::numa::topology_info();
+
+    // `numa`'s node array is statically zeroed with `NODE_COUNT` defaulting to
+    // 1, so before `numa::init()` runs it advertises one node that is not
+    // `present`.  Adopting from that would register nothing while reporting
+    // "0 of 1", which reads as a failure rather than as "asked too early".
+    // Return silently instead: the boot-time call from `self_test` lands here,
+    // and `main` calls again for real once the topology exists.
+    if !topo.nodes.iter().take(topo.node_count).any(|n| n.present) {
+        return 0;
+    }
+
+    // Read once and reuse.  Every per-node loop below must enumerate the *same*
+    // set of CPUs, or a CPU appearing mid-scan would be placed on some nodes'
+    // lists and not others; and it is this value, not a later re-read, that
+    // callers are told to check against.
+    let cpu_count = crate::smp::cpu_count();
+
+    let mut adopted = 0usize;
+    for (id, info) in topo.nodes.iter().enumerate().take(topo.node_count) {
+        if !info.present {
+            continue;
+        }
+        // Ask the placement map itself which CPUs belong here.
+        let mut cpus = Vec::new();
+        for cpu in 0..cpu_count {
+            if crate::numa::cpu_node(cpu) != id {
+                continue;
+            }
+            if let Ok(n) = u32::try_from(cpu) {
+                cpus.push(n);
+            }
+        }
+        let Ok(node_id) = u32::try_from(id) else {
+            continue;
+        };
+        match register_node(node_id, info.total_memory, &cpus) {
+            Ok(()) => adopted += 1,
+            // `AlreadyExists` means this ran twice, which is fine and is why
+            // the function is documented idempotent.  Anything else means the
+            // table could not take the real topology, and a silently short
+            // node list is precisely the failure this whole change exists to
+            // remove -- so say so rather than letting procfs under-report.
+            Err(KernelError::AlreadyExists) => {}
+            Err(e) => {
+                crate::serial_println!(
+                    "[numastat] WARN: could not adopt node {node_id}: {e:?} -- /proc/numastat will under-report"
+                );
+            }
+        }
+    }
+
+    crate::serial_println!(
+        "[numastat] adopted {} of {} node(s) from numa topology ({}), {} CPU(s) placed; counters and distances stay empty (no producer / SLIT unparsed)",
+        adopted,
+        topo.node_count,
+        if topo.is_numa { "SRAT" } else { "UMA fallback" },
+        cpu_count,
+    );
+
+    cpu_count
+}
+
+/// Verify that what `/proc/numastat` will report matches the machine
+/// [`crate::numa`] found.
+///
+/// Separate from [`self_test`] because it tests a different thing at a
+/// different time.  [`self_test`] runs near the top of boot and proves the
+/// *accounting* works, on fixtures it builds itself; this runs after
+/// [`adopt_topology`], with `numa::init()` behind it, and proves the *wiring*
+/// works — that the numbers a user reads describe their hardware.  Merging
+/// them is impossible in either direction: the fixture test must run before
+/// there is real data to destroy, and this one cannot run before there is real
+/// data to check.
+///
+/// It deliberately re-reads both instruments rather than trusting the return
+/// codes [`adopt_topology`] already saw.  Accepted writes prove the table took
+/// the values; only a read-back through the same API `procfs` uses proves the
+/// file describes the machine.
+///
+/// The CPU tally is the sharpest of the three checks.  Node counts and memory
+/// sizes are copied straight across and would have to be corrupted to differ,
+/// but the CPU sets are *derived* — one `numa::cpu_node` query per online CPU
+/// — so a CPU whose node is absent from the present set vanishes silently from
+/// every node's list while every other number stays right.  Summing them and
+/// demanding the enumerated count is what makes that visible.
+///
+/// **`cpus_at_adoption` must be [`adopt_topology`]'s return value, not a fresh
+/// `smp::cpu_count()`.** Those differ exactly when a CPU comes online between
+/// the two calls, which `smp::init()` permits: it waits for APs with a bounded
+/// spin, so a late AP bumps the online count itself after `init` returns.
+/// Re-reading would then fail the boot over a table that is entirely correct —
+/// merely one CPU out of date — which is a flake, not a bug report.  What this
+/// check is *for* is the derivation: every CPU adoption looked at must land on
+/// exactly one node.  Staleness is a known property of one-shot adoption and is
+/// documented on [`adopt_topology`], not asserted against here.
+///
+/// # Panics
+///
+/// Panics if `/proc/numastat` would not describe the machine `numa` found.
+/// That is the intent: this runs only from the boot self-test path, where a
+/// panic is the failure channel, and a procfs file that misdescribes the
+/// hardware is worse than not booting.
+pub fn self_test_adoption(cpus_at_adoption: usize) {
+    crate::serial_println!("numastat::self_test_adoption() — running tests...");
+
+    let topo = crate::numa::topology_info();
+    let present = topo
+        .nodes
+        .iter()
+        .take(topo.node_count)
+        .filter(|n| n.present)
+        .count();
+    let rows = list_nodes();
+
+    // 1: one row per present node -- never zero, which is what this whole
+    //    wiring exists to stop `/proc/numastat` claiming.
+    assert!(
+        present > 0,
+        "numa reports no present node after init; a machine with memory has at least one"
+    );
+    assert_eq!(
+        rows.len(),
+        present,
+        "numastat holds {} node row(s) but numa reports {present} present node(s)",
+        rows.len()
+    );
+    crate::serial_println!("  [1/3] {present} present node(s), one row each: OK");
+
+    // 2: each row's memory is the node's, not a placeholder.
+    for row in &rows {
+        let info = topo
+            .nodes
+            .get(row.id as usize)
+            .expect("every adopted id indexes topo.nodes: adopt_topology enumerates it");
+        assert_eq!(
+            row.total_memory, info.total_memory,
+            "node {} memory disagrees: numastat {} vs numa {}",
+            row.id, row.total_memory, info.total_memory
+        );
+        assert_eq!(
+            row.state,
+            NodeState::Online,
+            "node {} adopted from a present numa node should be online",
+            row.id
+        );
+    }
+    crate::serial_println!("  [2/3] per-node memory matches numa: OK");
+
+    // 3: every CPU adoption enumerated is placed on exactly one node.
+    let mapped: usize = rows.iter().map(|n| n.cpus.len()).sum();
+    assert_eq!(
+        mapped, cpus_at_adoption,
+        "numastat placed {mapped} CPU(s) across its nodes but adoption enumerated {cpus_at_adoption}; numa::cpu_node names a node that reports itself absent"
+    );
+    crate::serial_println!(
+        "  [3/3] all {cpus_at_adoption} enumerated CPU(s) placed exactly once: OK"
+    );
+
+    crate::serial_println!("numastat::self_test_adoption() — all 3 tests passed");
+}
+
 /// Register a NUMA node.
 ///
-/// The memory subsystem calls this once per online node at bring-up (from the
-/// ACPI SRAT) so the per-node table reflects the real topology — the node's
-/// actual memory size and CPU set — with all allocation/access/migration
-/// counters zeroed.  The record_* functions return `NotFound` for an
+/// [`adopt_topology`] calls this once per online node just after
+/// `numa::init()`, so the per-node table reflects the real topology — the
+/// node's actual memory size and CPU set — with all allocation/access/
+/// migration counters zeroed.  The record_* functions return `NotFound` for an
 /// unregistered node id.
 pub fn register_node(id: u32, total_memory: u64, cpus: &[u32]) -> KernelResult<()> {
     with_state(|state| {
@@ -427,17 +650,36 @@ pub fn self_test() {
     assert!(ops > 0);
     crate::serial_println!("  [8/8] stats: OK");
 
-    // Leave the table EMPTY, not DEAD: clear the fixtures, then re-open it.
+    // Leave the table LIVE, not DEAD and not stale: clear the fixtures, then
+    // re-open it and re-adopt the real topology.
+    //
     // Clearing alone would switch this module off for the rest of the boot
     // -- `init_defaults` runs once, that once is here, and every later write
     // would take the `NotSupported` arm and be dropped by a caller that must
     // not let statistics fail a real operation.  known-issues.md:
     // A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT.
     //
-    // /proc/numastat therefore reads empty rather than stale, until the
-    // memory subsystem wires real accounting into it.
+    // Re-opening but not re-adopting is the subtler trap, and it is why
+    // `adopt_topology` is called here rather than only from `main`: this
+    // function is also reachable as `numastat test` from kshell, long after
+    // boot.  Without this line, running the self-test would silently empty
+    // /proc/numastat for the rest of the boot -- a diagnostic command
+    // destroying the thing it diagnoses.  At boot the call is a documented
+    // no-op, because `numa::init()` has not run yet and no node reports
+    // itself present; `main` adopts for real a moment later.
+    // Two steps, not one, even though `adopt_topology` opens the table itself:
+    // re-opening and re-adopting are separate obligations and the call site is
+    // where that should be legible.  `check-selftest-reinit.py` also scans for
+    // the literal `init_defaults()` after a clear and cannot see through a
+    // call, which is the right tradeoff -- a gate that chased callees would
+    // pass on any function that merely might re-open the table.
+    //
+    // The CPU count it returns is discarded on purpose: this call is here to
+    // *restore* the table, not to check it.  Only `main`'s call feeds
+    // `self_test_adoption`, which is the one that verifies the placement.
     *STATE.lock() = None;
     init_defaults();
+    adopt_topology();
 
     crate::serial_println!("numastat::self_test() — all 8 tests passed");
 }

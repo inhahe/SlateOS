@@ -11689,33 +11689,43 @@ fn gen_compstat() -> Vec<u8> {
 fn gen_irqstat() -> Vec<u8> {
     use alloc::format;
     let mut out = String::new();
-    let (irqs, cpus, total, spurious, _samples, ops) = crate::fs::irqstat::stats();
-    out.push_str(&format!("irq_lines: {}\n", irqs));
-    out.push_str(&format!("cpus: {}\n", cpus));
-    out.push_str(&format!("total_irqs: {}\n", total));
-    out.push_str(&format!("total_spurious: {}\n", spurious));
-    out.push_str(&format!("ops: {}\n", ops));
+    let t = crate::fs::irqstat::totals();
+    out.push_str(&format!("irq_lines: {}\n", t.lines));
+    out.push_str(&format!("total_irqs: {}\n", t.hardware));
+    out.push_str(&format!("timer_irqs: {}\n", t.timer));
+    out.push_str(&format!("device_irqs: {}\n", t.device));
+    out.push_str(&format!("ipi_irqs: {}\n", t.ipi));
+    out.push_str(&format!("total_spurious: {}\n", t.spurious));
+    out.push_str(&format!("unassigned_irqs: {}\n", t.unassigned));
     for line in crate::fs::irqstat::irq_lines() {
-        out.push_str(&format!(
-            "IRQ{}: {} ({}) count={} spurious={}\n",
-            line.irq_num,
-            line.name,
-            line.irq_type.label(),
-            line.count,
-            line.spurious
-        ));
+        // Key rows by VECTOR, which is what the kernel actually counts.  The
+        // IOAPIC input is printed alongside for the vectors that have one; the
+        // timer, the two IPIs and the spurious vector have none, and a row
+        // labelled "IRQ 0" for the LAPIC timer would be exactly the confusion
+        // that hid an off-by-one in the IRQ balancer for months.
+        match line.irq_num {
+            Some(irq) => out.push_str(&format!(
+                "vector{}: {} ({}) irq={} count={}\n",
+                line.vector,
+                line.name,
+                line.irq_type.label(),
+                irq,
+                line.count
+            )),
+            None => out.push_str(&format!(
+                "vector{}: {} ({}) count={}\n",
+                line.vector,
+                line.name,
+                line.irq_type.label(),
+                line.count
+            )),
+        }
     }
-    for cs in crate::fs::irqstat::per_cpu() {
-        out.push_str(&format!(
-            "cpu{}: total={} ipi={} timer={} avg_lat={}ns max_lat={}ns\n",
-            cs.cpu_id,
-            cs.total_irqs,
-            cs.total_ipi,
-            cs.total_timer,
-            cs.avg_latency_ns,
-            cs.max_latency_ns
-        ));
-    }
+    // Deliberately NO per-CPU section.  The counters behind this file are a flat
+    // global array, so an interrupt's count carries no record of which CPU took
+    // it.  Emitting `cpu0: total=0 ...` rows would not be a blank — it would be
+    // a measurement claim that every AP is idle.  See fs/irqstat.rs.
+    out.push_str("per_cpu: unavailable (interrupt counters are not per-CPU)\n");
     out.into_bytes()
 }
 

@@ -117,14 +117,8 @@ fn icmp_ping_with_ttl(ip_addr: u32, seq: u16, ttl: u8) -> Result<u16, i64> {
     // SAFETY: SYS_ICMP_PING takes three scalar arguments; no pointer
     // dereferences occur in userspace. The TTL is encoded in arg2's
     // upper bits per the kernel's traceroute interface convention.
-    let ret = unsafe {
-        syscall3(SYS_ICMP_PING, u64::from(ip_addr), arg2, 0)
-    };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(ret as u16)
-    }
+    let ret = unsafe { syscall3(SYS_ICMP_PING, u64::from(ip_addr), arg2, 0) };
+    if ret < 0 { Err(ret) } else { Ok(ret as u16) }
 }
 
 /// Wait for an ICMP echo/traceroute reply with the given timeout.
@@ -134,18 +128,14 @@ fn icmp_ping_with_ttl(ip_addr: u32, seq: u16, ttl: u8) -> Result<u16, i64> {
 fn icmp_ping_wait(seq: u16, timeout_ms: u64) -> Result<PingReply, i64> {
     // SAFETY: SYS_ICMP_PING_WAIT takes scalar arguments; no pointer
     // dereferences occur in userspace.
-    let ret = unsafe {
-        syscall3(SYS_ICMP_PING_WAIT, u64::from(seq), timeout_ms, 0)
-    };
+    let ret = unsafe { syscall3(SYS_ICMP_PING_WAIT, u64::from(seq), timeout_ms, 0) };
     if ret < 0 {
         Err(ret)
     } else {
         // The kernel returns RTT in nanoseconds. Convert to microseconds
         // for display. The reply source is determined by the kernel's
         // traceroute probe table correlation.
-        Ok(PingReply {
-            rtt_ns: ret as u64,
-        })
+        Ok(PingReply { rtt_ns: ret as u64 })
     }
 }
 
@@ -173,7 +163,12 @@ fn dns_reverse_resolve(ip_addr: u32) -> Result<String, i64> {
     // SAFETY: buf_ptr points to a stack-allocated buffer of buf_len bytes.
     // The kernel writes at most buf_len bytes and returns the hostname length.
     let ret = unsafe {
-        syscall3(SYS_DNS_REVERSE_RESOLVE, u64::from(ip_addr), buf_ptr, buf_len)
+        syscall3(
+            SYS_DNS_REVERSE_RESOLVE,
+            u64::from(ip_addr),
+            buf_ptr,
+            buf_len,
+        )
     };
     if ret < 0 {
         Err(ret)
@@ -460,12 +455,7 @@ fn resolve_hostname(ip: u32, numeric: bool) -> String {
 }
 
 /// Print the traceroute header line.
-fn print_header(
-    stdout: &mut io::StdoutLock<'_>,
-    host: &str,
-    ip_str: &str,
-    max_hops: u8,
-) {
+fn print_header(stdout: &mut io::StdoutLock<'_>, host: &str, ip_str: &str, max_hops: u8) {
     let _ = writeln!(
         stdout,
         "traceroute to {host} ({ip_str}), {max_hops} hops max, 56 byte packets",
@@ -480,12 +470,7 @@ fn print_header(
 ///  2  10.0.0.1 (10.0.0.1)  1.234 ms  1.198 ms  1.156 ms
 ///  3  * * *
 /// ```
-fn print_hop_line(
-    stdout: &mut io::StdoutLock<'_>,
-    hop: u8,
-    probes: &[ProbeResult],
-    numeric: bool,
-) {
+fn print_hop_line(stdout: &mut io::StdoutLock<'_>, hop: u8, probes: &[ProbeResult], numeric: bool) {
     let _ = write!(stdout, "{hop:>2}  ");
 
     let mut last_ip: Option<u32> = None;
@@ -520,12 +505,7 @@ fn print_hop_line(
 }
 
 /// Print a single hop line in JSON format.
-fn print_hop_json(
-    stdout: &mut io::StdoutLock<'_>,
-    hop: u8,
-    probes: &[ProbeResult],
-    numeric: bool,
-) {
+fn print_hop_json(stdout: &mut io::StdoutLock<'_>, hop: u8, probes: &[ProbeResult], numeric: bool) {
     let _ = write!(stdout, "{{\"hop\":{hop},\"probes\":[");
 
     for (idx, probe) in probes.iter().enumerate() {
@@ -559,12 +539,7 @@ fn print_hop_json(
 /// The kernel's traceroute probe table correlates the response to determine
 /// whether the reply came from an intermediate router (Time Exceeded) or
 /// the destination (Echo Reply).
-fn run_probe(
-    ip_addr: u32,
-    seq: u16,
-    ttl: u8,
-    timeout_ms: u64,
-) -> ProbeResult {
+fn run_probe(ip_addr: u32, seq: u16, ttl: u8, timeout_ms: u64) -> ProbeResult {
     // Send ICMP echo request with TTL.
     let actual_seq = match icmp_ping_with_ttl(ip_addr, seq, ttl) {
         Ok(s) => s,
@@ -604,14 +579,12 @@ fn run_probe(
                 reached_dst: true,
             }
         }
-        Err(_) => {
-            ProbeResult {
-                received: false,
-                rtt_ns: 0,
-                responder_ip: 0,
-                reached_dst: false,
-            }
-        }
+        Err(_) => ProbeResult {
+            received: false,
+            rtt_ns: 0,
+            responder_ip: 0,
+            reached_dst: false,
+        },
     }
 }
 
@@ -630,8 +603,8 @@ fn run() -> Result<(), String> {
     let ip_str: String;
 
     if is_ipv4_address(&opts.host) {
-        ip_addr = parse_ipv4(&opts.host)
-            .ok_or_else(|| format!("invalid IP address: '{}'", opts.host))?;
+        ip_addr =
+            parse_ipv4(&opts.host).ok_or_else(|| format!("invalid IP address: '{}'", opts.host))?;
         ip_str = opts.host.clone();
     } else {
         // Hostname: resolve via DNS syscall.
@@ -959,7 +932,10 @@ mod tests {
         // Verify format_rtt_ms produces consistent output across a range.
         for ns in (0..10_000_000u64).step_by(100_000) {
             let s = format_rtt_ms(ns);
-            assert!(s.contains('.'), "RTT string must contain decimal point: {s}");
+            assert!(
+                s.contains('.'),
+                "RTT string must contain decimal point: {s}"
+            );
             // Should always have 3 decimal places.
             let parts: Vec<&str> = s.split('.').collect();
             assert_eq!(parts.len(), 2);

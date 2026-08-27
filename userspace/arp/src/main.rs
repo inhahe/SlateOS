@@ -133,7 +133,9 @@ fn parse_ipv4(s: &str) -> Option<u32> {
     for ch in s.chars() {
         match ch {
             '0'..='9' => {
-                cur = cur.checked_mul(10)?.checked_add(u16::from(ch as u8 - b'0'))?;
+                cur = cur
+                    .checked_mul(10)?
+                    .checked_add(u16::from(ch as u8 - b'0'))?;
                 if cur > 255 {
                     return None;
                 }

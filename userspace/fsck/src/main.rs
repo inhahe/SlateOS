@@ -175,9 +175,10 @@ fn fstype_from_argv0(argv0: &str) -> Option<String> {
     };
     // Look for "fsck.<type>".
     if let Some(rest) = basename.strip_prefix("fsck.")
-        && !rest.is_empty() {
-            return Some(rest.to_string());
-        }
+        && !rest.is_empty()
+    {
+        return Some(rest.to_string());
+    }
     None
 }
 
@@ -347,9 +348,9 @@ fn read_fstab() -> Vec<FstabEntry> {
 
         // Skip pseudo-filesystems that cannot be checked.
         match fstype.as_str() {
-            "proc" | "sysfs" | "devtmpfs" | "tmpfs" | "devpts" | "cgroup"
-            | "cgroup2" | "hugetlbfs" | "mqueue" | "debugfs" | "tracefs"
-            | "securityfs" | "pstore" | "bpf" | "autofs" | "none" | "swap" => continue,
+            "proc" | "sysfs" | "devtmpfs" | "tmpfs" | "devpts" | "cgroup" | "cgroup2"
+            | "hugetlbfs" | "mqueue" | "debugfs" | "tracefs" | "securityfs" | "pstore" | "bpf"
+            | "autofs" | "none" | "swap" => continue,
             _ => {}
         }
 
@@ -530,13 +531,12 @@ fn check_device(device: &str, fstype: &Option<String>, opts: &Options) -> CheckR
     };
 
     // Warn if mounted (non-root checks on mounted fs are risky).
-    if is_mounted(&dev_path) && !opts.no_modify
-        && !opts.json {
-            eprintln!(
-                "fsck: warning: {dev_display} is mounted; \
+    if is_mounted(&dev_path) && !opts.no_modify && !opts.json {
+        eprintln!(
+            "fsck: warning: {dev_display} is mounted; \
                  running check in read-only mode"
-            );
-        }
+        );
+    }
 
     if !opts.json {
         println!("fsck: checking {dev_display} (type: {resolved_fstype})");
@@ -611,19 +611,15 @@ fn check_device(device: &str, fstype: &Option<String>, opts: &Options) -> CheckR
         }
 
         result.errors_remaining = repair_ret as u64;
-        result.errors_fixed = result
-            .errors_found
-            .saturating_sub(result.errors_remaining);
+        result.errors_fixed = result.errors_found.saturating_sub(result.errors_remaining);
 
         // A repair return of 0 means the kernel fixed everything.
         // Convention: if the root filesystem was repaired, recommend reboot.
         if result.errors_fixed > 0
-            && (dev_path == "/dev/sda1"
-                || dev_path == "/dev/root"
-                || dev_path == "/dev/nvme0n1p1")
-            {
-                result.needs_reboot = true;
-            }
+            && (dev_path == "/dev/sda1" || dev_path == "/dev/root" || dev_path == "/dev/nvme0n1p1")
+        {
+            result.needs_reboot = true;
+        }
 
         if !opts.json {
             if result.errors_remaining == 0 {
@@ -640,9 +636,7 @@ fn check_device(device: &str, fstype: &Option<String>, opts: &Options) -> CheckR
             }
 
             if result.needs_reboot {
-                println!(
-                    "  WARNING: root filesystem was modified; reboot is recommended."
-                );
+                println!("  WARNING: root filesystem was modified; reboot is recommended.");
             }
         }
     } else if opts.no_modify {
@@ -659,9 +653,7 @@ fn check_device(device: &str, fstype: &Option<String>, opts: &Options) -> CheckR
         // Errors found but no auto-repair flag.
         result.errors_remaining = result.errors_found;
         if !opts.json {
-            println!(
-                "  {dev_display}: errors found. Run with -a or -y to repair."
-            );
+            println!("  {dev_display}: errors found. Run with -a or -y to repair.");
         }
     }
 
@@ -825,8 +817,10 @@ fn main() {
             println!("  Filesystem type: {t}");
         }
         println!("  Devices to check: {}", entries.len());
-        println!("  Flags: auto_repair={}, yes_all={}, no_modify={}, force={}",
-            opts.auto_repair, opts.yes_all, opts.no_modify, opts.force);
+        println!(
+            "  Flags: auto_repair={}, yes_all={}, no_modify={}, force={}",
+            opts.auto_repair, opts.yes_all, opts.no_modify, opts.force
+        );
         println!();
     }
 
@@ -919,9 +913,17 @@ mod tests {
 
     #[test]
     fn parse_args_short_flags_set_options() {
-        let opts =
-            parse_args_from(&args(&["fsck", "-a", "-y", "-f", "-v", "-C", "-A", "/dev/sda1"]))
-                .expect("should parse");
+        let opts = parse_args_from(&args(&[
+            "fsck",
+            "-a",
+            "-y",
+            "-f",
+            "-v",
+            "-C",
+            "-A",
+            "/dev/sda1",
+        ]))
+        .expect("should parse");
         assert!(opts.auto_repair);
         assert!(opts.yes_all);
         assert!(opts.force);
@@ -939,8 +941,14 @@ mod tests {
 
     #[test]
     fn parse_args_long_flags_set_options() {
-        let opts = parse_args_from(&args(&["fsck", "--force", "--verbose", "--json", "/dev/sda1"]))
-            .expect("should parse");
+        let opts = parse_args_from(&args(&[
+            "fsck",
+            "--force",
+            "--verbose",
+            "--json",
+            "/dev/sda1",
+        ]))
+        .expect("should parse");
         assert!(opts.force);
         assert!(opts.verbose);
         assert!(opts.json);
@@ -973,8 +981,7 @@ mod tests {
 
     #[test]
     fn parse_args_unknown_option_is_usage_error() {
-        let err =
-            parse_args_from(&args(&["fsck", "--nope"])).expect_err("expected usage error");
+        let err = parse_args_from(&args(&["fsck", "--nope"])).expect_err("expected usage error");
         match err {
             ParseTerminal::UsageError(msg) => assert!(msg.contains("--nope")),
             other => panic!("expected UsageError, got {other:?}"),
@@ -983,8 +990,7 @@ mod tests {
 
     #[test]
     fn parse_args_picks_fstype_from_argv0() {
-        let opts =
-            parse_args_from(&args(&["/sbin/fsck.ext4", "/dev/sda1"])).expect("should parse");
+        let opts = parse_args_from(&args(&["/sbin/fsck.ext4", "/dev/sda1"])).expect("should parse");
         assert_eq!(opts.fstype.as_deref(), Some("ext4"));
     }
 

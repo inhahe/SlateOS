@@ -53,7 +53,7 @@
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::indexing_slicing,
-    clippy::large_stack_arrays,
+    clippy::large_stack_arrays
 )]
 #![cfg_attr(not(test), no_main)]
 #![cfg_attr(test, allow(dead_code))]
@@ -231,15 +231,25 @@ unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 
 
 // Stubs for non-x86_64 targets (keeps tests compiling on the host).
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn syscall0(_nr: u64) -> i64 { -1 }
+unsafe fn syscall0(_nr: u64) -> i64 {
+    -1
+}
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 { -1 }
+unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
+    -1
+}
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 { -1 }
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -1
+}
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn syscall4(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64) -> i64 { -1 }
+unsafe fn syscall4(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64) -> i64 {
+    -1
+}
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn syscall5(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64) -> i64 { -1 }
+unsafe fn syscall5(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64) -> i64 {
+    -1
+}
 
 // ============================================================================
 // Syscall wrappers — Process / Clock
@@ -371,9 +381,7 @@ fn tcp_accept(listener: u64) -> Result<u64, InetdError> {
     // SAFETY: listener is a valid listener handle from tcp_bind.
     let ret = unsafe { syscall1(SYS_TCP_ACCEPT, listener) };
     if ret < 0 {
-        Err(InetdError::Network(format!(
-            "tcp_accept failed: {ret}"
-        )))
+        Err(InetdError::Network(format!("tcp_accept failed: {ret}")))
     } else {
         Ok(ret as u64)
     }
@@ -496,14 +504,7 @@ fn tcp_close_listener(listener: u64) {
 fn tcp_peer_addr(handle: u64) -> Result<(u32, u16), InetdError> {
     let mut buf = [0u8; 6];
     // SAFETY: handle is valid. buf is a stack-allocated 6-byte buffer.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_PEER_ADDR,
-            handle,
-            buf.as_mut_ptr() as u64,
-            0,
-        )
-    };
+    let ret = unsafe { syscall3(SYS_TCP_PEER_ADDR, handle, buf.as_mut_ptr() as u64, 0) };
     if ret < 0 {
         return Err(InetdError::Network("tcp_peer_addr failed".into()));
     }
@@ -631,13 +632,27 @@ fn now_unix_secs() -> u64 {
 fn format_daytime(unix_secs: u64) -> String {
     let bt = unix_to_broken(unix_secs);
     let weekday = match bt.weekday {
-        0 => "Sun", 1 => "Mon", 2 => "Tue", 3 => "Wed",
-        4 => "Thu", 5 => "Fri", _ => "Sat",
+        0 => "Sun",
+        1 => "Mon",
+        2 => "Tue",
+        3 => "Wed",
+        4 => "Thu",
+        5 => "Fri",
+        _ => "Sat",
     };
     let month = match bt.month {
-        1 => "Jan",   2 => "Feb",  3 => "Mar",  4 => "Apr",
-        5 => "May",   6 => "Jun",  7 => "Jul",  8 => "Aug",
-        9 => "Sep",  10 => "Oct", 11 => "Nov",  _ => "Dec",
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        _ => "Dec",
     };
     format!(
         "{weekday} {month} {:02} {:02}:{:02}:{:02} {}\r\n",
@@ -701,7 +716,15 @@ fn unix_to_broken(unix_secs: u64) -> BrokenTime {
     }
     let day = (remaining as u32) + 1;
 
-    BrokenTime { year: y, month, day, hour, minute, second, weekday }
+    BrokenTime {
+        year: y,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        weekday,
+    }
 }
 
 // ============================================================================
@@ -1014,10 +1037,17 @@ fn resolve_builtin(name: &str) -> Option<BuiltinService> {
 /// Parse a single non-comment, non-empty line from inetd.conf.
 ///
 /// Format: `service_name  socket_type  protocol  wait/nowait  user  program  [args...]`
-fn parse_config_line(line: &str, global_rate: u32, global_max: u32) -> Result<ServiceEntry, String> {
+fn parse_config_line(
+    line: &str,
+    global_rate: u32,
+    global_max: u32,
+) -> Result<ServiceEntry, String> {
     let fields: Vec<&str> = line.split_whitespace().collect();
     if fields.len() < 6 {
-        return Err(format!("too few fields (need >= 6, got {}): {line}", fields.len()));
+        return Err(format!(
+            "too few fields (need >= 6, got {}): {line}",
+            fields.len()
+        ));
     }
 
     let service_name = fields[0];
@@ -1043,10 +1073,7 @@ fn parse_config_line(line: &str, global_rate: u32, global_max: u32) -> Result<Se
             ));
         }
         (SocketType::Dgram, true) => {
-            return Err(format!(
-                "dgram socket with TCP protocol '{}'",
-                protocol
-            ));
+            return Err(format!("dgram socket with TCP protocol '{}'", protocol));
         }
         _ => {}
     }
@@ -1085,9 +1112,7 @@ fn parse_config_line(line: &str, global_rate: u32, global_max: u32) -> Result<Se
 
     // If the program is "internal" but we have no builtin handler, reject it.
     if program == "internal" && builtin.is_none() {
-        return Err(format!(
-            "no built-in handler for service '{service_name}'"
-        ));
+        return Err(format!("no built-in handler for service '{service_name}'"));
     }
 
     Ok(ServiceEntry {
@@ -1107,7 +1132,11 @@ fn parse_config_line(line: &str, global_rate: u32, global_max: u32) -> Result<Se
 }
 
 /// Parse the entire configuration file content.
-fn parse_config(content: &str, global_rate: u32, global_max: u32) -> Result<Vec<ServiceEntry>, String> {
+fn parse_config(
+    content: &str,
+    global_rate: u32,
+    global_max: u32,
+) -> Result<Vec<ServiceEntry>, String> {
     let mut services = Vec::new();
     for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -1463,18 +1492,14 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 if i >= args.len() {
                     return Err("-R requires an argument".into());
                 }
-                cfg.rate_limit = args[i]
-                    .parse::<u32>()
-                    .map_err(|e| format!("-R: {e}"))?;
+                cfg.rate_limit = args[i].parse::<u32>().map_err(|e| format!("-R: {e}"))?;
             }
             "-c" => {
                 i += 1;
                 if i >= args.len() {
                     return Err("-c requires an argument".into());
                 }
-                cfg.max_per_source = args[i]
-                    .parse::<u32>()
-                    .map_err(|e| format!("-c: {e}"))?;
+                cfg.max_per_source = args[i].parse::<u32>().map_err(|e| format!("-c: {e}"))?;
             }
             "-h" | "--help" => {
                 return Err(String::new()); // Triggers help display.
@@ -1532,10 +1557,7 @@ fn bind_services(services: &[ServiceEntry], logger: &Logger) -> Vec<ListenerSlot
 
         match result {
             Ok((handle, is_tcp)) => {
-                logger.log(
-                    LogLevel::Info,
-                    &format!("bound {svc} on port {}", svc.port),
-                );
+                logger.log(LogLevel::Info, &format!("bound {svc} on port {}", svc.port));
                 slots.push(ListenerSlot {
                     service_idx: idx,
                     handle,
@@ -1544,10 +1566,7 @@ fn bind_services(services: &[ServiceEntry], logger: &Logger) -> Vec<ListenerSlot
                 });
             }
             Err(e) => {
-                logger.log(
-                    LogLevel::Error,
-                    &format!("failed to bind {svc}: {e}"),
-                );
+                logger.log(LogLevel::Error, &format!("failed to bind {svc}: {e}"));
             }
         }
     }
@@ -1631,7 +1650,9 @@ fn handle_tcp_connection(
     };
 
     // Check rate limits.
-    if let Err(e) = tracker.check_allowed(src_ip, svc.port, svc.max_rate, svc.max_per_source, now_ms) {
+    if let Err(e) =
+        tracker.check_allowed(src_ip, svc.port, svc.max_rate, svc.max_per_source, now_ms)
+    {
         logger.log(LogLevel::Warning, &format!("{e}"));
         tcp_close(conn_handle);
         return;
@@ -1662,7 +1683,10 @@ fn handle_tcp_connection(
             Ok(child_pid) => {
                 logger.log(
                     LogLevel::Debug,
-                    &format!("spawned {} (pid {child_pid}) for {}", svc.program, svc.service_name),
+                    &format!(
+                        "spawned {} (pid {child_pid}) for {}",
+                        svc.program, svc.service_name
+                    ),
                 );
                 if svc.wait_mode == WaitMode::Wait {
                     // Mark the slot as busy until the child exits.
@@ -1676,7 +1700,10 @@ fn handle_tcp_connection(
                 });
             }
             Err(e) => {
-                logger.log(LogLevel::Error, &format!("spawn failed for {}: {e}", svc.service_name));
+                logger.log(
+                    LogLevel::Error,
+                    &format!("spawn failed for {}: {e}", svc.service_name),
+                );
                 tcp_close(conn_handle);
                 tracker.release(src_ip, svc.port);
             }
@@ -1701,7 +1728,9 @@ fn handle_udp_datagram(
     let now_ms = clock_monotonic_ms();
 
     // Check rate limits.
-    if let Err(e) = tracker.check_allowed(src_ip, svc.port, svc.max_rate, svc.max_per_source, now_ms) {
+    if let Err(e) =
+        tracker.check_allowed(src_ip, svc.port, svc.max_rate, svc.max_per_source, now_ms)
+    {
         logger.log(LogLevel::Warning, &format!("{e}"));
         return;
     }
@@ -1730,7 +1759,10 @@ fn handle_udp_datagram(
             Ok(child_pid) => {
                 logger.log(
                     LogLevel::Debug,
-                    &format!("spawned {} (pid {child_pid}) for UDP {}", svc.program, svc.service_name),
+                    &format!(
+                        "spawned {} (pid {child_pid}) for UDP {}",
+                        svc.program, svc.service_name
+                    ),
                 );
                 if svc.wait_mode == WaitMode::Wait {
                     slots[slot_idx].wait_busy = true;
@@ -1750,9 +1782,12 @@ fn handle_udp_datagram(
 /// Try to reload the configuration file. Returns the new service list on
 /// success, or an error string.
 #[allow(dead_code)] // Called on SIGHUP signal for live reconfiguration.
-fn reload_config(config_path: &str, rate_limit: u32, max_per_source: u32) -> Result<Vec<ServiceEntry>, String> {
-    let content = fs_read_file(config_path)
-        .map_err(|e| format!("reload: {e}"))?;
+fn reload_config(
+    config_path: &str,
+    rate_limit: u32,
+    max_per_source: u32,
+) -> Result<Vec<ServiceEntry>, String> {
+    let content = fs_read_file(config_path).map_err(|e| format!("reload: {e}"))?;
     let text = String::from_utf8_lossy(&content);
     parse_config(&text, rate_limit, max_per_source)
 }
@@ -1768,11 +1803,14 @@ fn write_pid_file(pid: u64) {
 fn run_daemon(cfg: &Config) -> i32 {
     let logger = Logger::new(cfg.debug);
 
-    logger.log(LogLevel::Info, &format!(
-        "inetd starting with {} services from {}",
-        cfg.services.len(),
-        cfg.config_path
-    ));
+    logger.log(
+        LogLevel::Info,
+        &format!(
+            "inetd starting with {} services from {}",
+            cfg.services.len(),
+            cfg.config_path
+        ),
+    );
 
     // Write PID file.
     write_pid_file(get_pid());
@@ -1872,10 +1910,7 @@ fn run(args: &[String]) -> i32 {
         return 1;
     }
 
-    let cfg = Config {
-        services,
-        ..cfg
-    };
+    let cfg = Config { services, ..cfg };
 
     run_daemon(&cfg)
 }
@@ -2352,7 +2387,7 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
     #[test]
     fn test_source_tracker_prune_old_timestamps() {
         let mut tracker = SourceTracker::new();
-        tracker.record_connection(1000);   // old
+        tracker.record_connection(1000); // old
         tracker.record_connection(50_000); // old
         tracker.record_connection(70_000); // recent
         tracker.prune(70_000);
@@ -2544,7 +2579,11 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
 
     #[test]
     fn test_parse_args_custom_config() {
-        let args = vec!["inetd".to_string(), "-f".to_string(), "/tmp/test.conf".to_string()];
+        let args = vec![
+            "inetd".to_string(),
+            "-f".to_string(),
+            "/tmp/test.conf".to_string(),
+        ];
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.config_path, "/tmp/test.conf");
     }
@@ -2688,7 +2727,8 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
 
     #[test]
     fn test_service_entry_display_external() {
-        let entry = parse_config_line("ssh stream tcp nowait root /usr/sbin/sshd sshd -i", 256, 64).unwrap();
+        let entry = parse_config_line("ssh stream tcp nowait root /usr/sbin/sshd sshd -i", 256, 64)
+            .unwrap();
         let display = format!("{entry}");
         assert!(display.contains("ssh"));
         assert!(display.contains("/usr/sbin/sshd"));
@@ -2697,7 +2737,8 @@ ssh       stream  tcp  nowait  root  /usr/sbin/sshd  sshd -i
     #[test]
     fn test_service_entry_is_internal() {
         let internal = parse_config_line("echo stream tcp nowait root internal", 256, 64).unwrap();
-        let external = parse_config_line("ssh stream tcp nowait root /usr/sbin/sshd sshd", 256, 64).unwrap();
+        let external =
+            parse_config_line("ssh stream tcp nowait root /usr/sbin/sshd sshd", 256, 64).unwrap();
         assert!(internal.is_internal());
         assert!(!external.is_internal());
     }

@@ -119,7 +119,9 @@ impl core::fmt::Display for ScpError {
         match self {
             Self::Usage(msg) => write!(f, "scp: {msg}"),
             Self::Io(msg) => write!(f, "scp: {msg}"),
-            Self::RemoteNotSupported(msg) => write!(f, "scp: remote transfer not yet supported: {msg}"),
+            Self::RemoteNotSupported(msg) => {
+                write!(f, "scp: remote transfer not yet supported: {msg}")
+            }
         }
     }
 }
@@ -152,7 +154,9 @@ impl Location {
         if let Some(colon_pos) = s.find(':') {
             // Windows drive letter: single ASCII letter followed by ':'
             let is_drive_letter = colon_pos == 1
-                && s.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic());
+                && s.as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_alphabetic());
 
             if !is_drive_letter && colon_pos > 0 {
                 // Check there is no slash before the colon (that would mean
@@ -302,32 +306,33 @@ fn parse_args(args: &[String]) -> Result<ParseResult, ScpError> {
         // These consume the next argument.
         if arg == "-P" {
             i += 1;
-            let val = args.get(i).ok_or_else(|| {
-                ScpError::Usage("-P requires a port number".into())
-            })?;
-            port = Some(val.parse::<u16>().map_err(|_| {
-                ScpError::Usage(format!("invalid port: {val}"))
-            })?);
+            let val = args
+                .get(i)
+                .ok_or_else(|| ScpError::Usage("-P requires a port number".into()))?;
+            port = Some(
+                val.parse::<u16>()
+                    .map_err(|_| ScpError::Usage(format!("invalid port: {val}")))?,
+            );
             i += 1;
             continue;
         }
         if arg == "-i" {
             i += 1;
-            let val = args.get(i).ok_or_else(|| {
-                ScpError::Usage("-i requires an identity file path".into())
-            })?;
+            let val = args
+                .get(i)
+                .ok_or_else(|| ScpError::Usage("-i requires an identity file path".into()))?;
             identity = Some(val.clone());
             i += 1;
             continue;
         }
         if arg == "-l" {
             i += 1;
-            let val = args.get(i).ok_or_else(|| {
-                ScpError::Usage("-l requires a bandwidth limit in KB/s".into())
-            })?;
-            bandwidth_limit = val.parse::<u64>().map_err(|_| {
-                ScpError::Usage(format!("invalid bandwidth limit: {val}"))
-            })?;
+            let val = args
+                .get(i)
+                .ok_or_else(|| ScpError::Usage("-l requires a bandwidth limit in KB/s".into()))?;
+            bandwidth_limit = val
+                .parse::<u64>()
+                .map_err(|_| ScpError::Usage(format!("invalid bandwidth limit: {val}")))?;
             i += 1;
             continue;
         }
@@ -344,9 +349,7 @@ fn parse_args(args: &[String]) -> Result<ParseResult, ScpError> {
                     'C' => compress = true,
                     'B' => batch = true,
                     _ => {
-                        return Err(ScpError::Usage(format!(
-                            "unknown option: -{ch}"
-                        )));
+                        return Err(ScpError::Usage(format!("unknown option: -{ch}")));
                     }
                 }
             }
@@ -366,9 +369,9 @@ fn parse_args(args: &[String]) -> Result<ParseResult, ScpError> {
     }
 
     // Last positional is always the target.
-    let target_str = positional.pop().ok_or_else(|| {
-        ScpError::Usage("missing target".into())
-    })?;
+    let target_str = positional
+        .pop()
+        .ok_or_else(|| ScpError::Usage("missing target".into()))?;
     let target = Location::parse(&target_str);
 
     let sources: Vec<Location> = positional.iter().map(|s| Location::parse(s)).collect();
@@ -376,15 +379,15 @@ fn parse_args(args: &[String]) -> Result<ParseResult, ScpError> {
     // Validate: if multiple sources, target must look like a directory
     // (remote target or ends with / or is an existing directory).
     if sources.len() > 1
-        && let Location::Local(ref p) = target {
-            let path = Path::new(p);
-            if !path.is_dir() && !p.ends_with('/') && !p.ends_with('\\') {
-                return Err(ScpError::Usage(
-                    "target must be a directory when copying multiple sources"
-                        .into(),
-                ));
-            }
+        && let Location::Local(ref p) = target
+    {
+        let path = Path::new(p);
+        if !path.is_dir() && !p.ends_with('/') && !p.ends_with('\\') {
+            return Err(ScpError::Usage(
+                "target must be a directory when copying multiple sources".into(),
+            ));
         }
+    }
 
     Ok(ParseResult::Run(Config {
         sources,
@@ -519,8 +522,7 @@ impl Progress {
         let now = clock_ns();
         // Throttle output to at most once per 200ms.
         let interval = 200_000_000u64; // 200ms in nanoseconds
-        if now.saturating_sub(self.last_print_ns) < interval
-            && self.transferred < self.total_bytes
+        if now.saturating_sub(self.last_print_ns) < interval && self.transferred < self.total_bytes
         {
             return;
         }
@@ -567,7 +569,6 @@ impl Progress {
         let display_name = if self.file_name.len() > 24 {
             let start = self.file_name.len() - 24;
             format!("...{}", &self.file_name[start + 3..])
-
         } else {
             self.file_name.clone()
         };
@@ -646,9 +647,9 @@ struct PreservedMeta {
 /// Read metadata we want to preserve from a source path.
 fn read_preserved_meta(meta: &Metadata) -> PreservedMeta {
     let modified = meta.modified().ok().and_then(|t| {
-        t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| {
-            (d.as_secs() as i64, d.subsec_nanos() as i64)
-        })
+        t.duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| (d.as_secs() as i64, d.subsec_nanos() as i64))
     });
 
     // On Slate OS we'd read the actual Unix permission bits. For now we store
@@ -672,14 +673,14 @@ fn read_preserved_meta(meta: &Metadata) -> PreservedMeta {
 fn apply_preserved_meta(path: &Path, meta: &PreservedMeta) {
     // Apply modification time if we have it.
     if let Some((secs, _nanos)) = meta.modified
-        && let Some(t) = std::time::UNIX_EPOCH.checked_add(
-            std::time::Duration::from_secs(secs as u64),
-        ) {
-            // std::fs::File::set_modified is not in std, but
-            // filetime-equivalent syscalls would go here. For now we use
-            // set_permissions as the only portable metadata we can write.
-            let _ = t; // Timestamp application is a stub until utimensat is available.
-        }
+        && let Some(t) =
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs as u64))
+    {
+        // std::fs::File::set_modified is not in std, but
+        // filetime-equivalent syscalls would go here. For now we use
+        // set_permissions as the only portable metadata we can write.
+        let _ = t; // Timestamp application is a stub until utimensat is available.
+    }
 
     // Apply permissions.
     if let Some(mode) = meta.permissions {
@@ -723,9 +724,8 @@ fn copy_file(
     throttle: &mut Throttle,
     stats: &mut TransferStats,
 ) -> Result<(), ScpError> {
-    let src_meta = fs::metadata(src).map_err(|e| {
-        ScpError::Io(format!("{}: {e}", src.display()))
-    })?;
+    let src_meta =
+        fs::metadata(src).map_err(|e| ScpError::Io(format!("{}: {e}", src.display())))?;
 
     if src_meta.is_dir() {
         return Err(ScpError::Io(format!(
@@ -752,35 +752,31 @@ fn copy_file(
 
     // Ensure parent directory exists.
     if let Some(parent) = dst.parent()
-        && !parent.exists() {
-            fs::create_dir_all(parent).map_err(|e| {
-                ScpError::Io(format!(
-                    "cannot create directory {}: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).map_err(|e| {
+            ScpError::Io(format!("cannot create directory {}: {e}", parent.display()))
+        })?;
+    }
 
-    let mut reader = File::open(src).map_err(|e| {
-        ScpError::Io(format!("{}: {e}", src.display()))
-    })?;
-    let mut writer = File::create(dst).map_err(|e| {
-        ScpError::Io(format!("{}: {e}", dst.display()))
-    })?;
+    let mut reader =
+        File::open(src).map_err(|e| ScpError::Io(format!("{}: {e}", src.display())))?;
+    let mut writer =
+        File::create(dst).map_err(|e| ScpError::Io(format!("{}: {e}", dst.display())))?;
 
     let mut buf = [0u8; COPY_BUF_SIZE];
     let mut progress = Progress::new(&file_name, file_size);
 
     loop {
-        let n = reader.read(&mut buf).map_err(|e| {
-            ScpError::Io(format!("read {}: {e}", src.display()))
-        })?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| ScpError::Io(format!("read {}: {e}", src.display())))?;
         if n == 0 {
             break;
         }
-        writer.write_all(&buf[..n]).map_err(|e| {
-            ScpError::Io(format!("write {}: {e}", dst.display()))
-        })?;
+        writer
+            .write_all(&buf[..n])
+            .map_err(|e| ScpError::Io(format!("write {}: {e}", dst.display())))?;
 
         throttle.account(n as u64);
         progress.update(n as u64, config.quiet);
@@ -819,29 +815,21 @@ fn copy_directory(
     }
 
     // Create the destination directory.
-    fs::create_dir_all(dst).map_err(|e| {
-        ScpError::Io(format!(
-            "cannot create directory {}: {e}",
-            dst.display()
-        ))
-    })?;
+    fs::create_dir_all(dst)
+        .map_err(|e| ScpError::Io(format!("cannot create directory {}: {e}", dst.display())))?;
     stats.directories = stats.directories.saturating_add(1);
 
     // Preserve metadata on the directory itself.
     if config.preserve
-        && let Ok(src_meta) = fs::metadata(src) {
-            let preserved = read_preserved_meta(&src_meta);
-            apply_preserved_meta(dst, &preserved);
-        }
+        && let Ok(src_meta) = fs::metadata(src)
+    {
+        let preserved = read_preserved_meta(&src_meta);
+        apply_preserved_meta(dst, &preserved);
+    }
 
     // Read directory entries and sort for deterministic output.
     let mut entries: Vec<_> = fs::read_dir(src)
-        .map_err(|e| {
-            ScpError::Io(format!(
-                "cannot read directory {}: {e}",
-                src.display()
-            ))
-        })?
+        .map_err(|e| ScpError::Io(format!("cannot read directory {}: {e}", src.display())))?
         .filter_map(|entry| entry.ok())
         .collect();
     entries.sort_by_key(|e| e.file_name());
@@ -851,20 +839,14 @@ fn copy_directory(
         let entry_name = entry.file_name();
         let dst_child = dst.join(&entry_name);
 
-        let ft = entry.file_type().map_err(|e| {
-            ScpError::Io(format!("{}: {e}", entry_path.display()))
-        })?;
+        let ft = entry
+            .file_type()
+            .map_err(|e| ScpError::Io(format!("{}: {e}", entry_path.display())))?;
 
         if ft.is_dir() {
             copy_directory(&entry_path, &dst_child, config, throttle, stats)?;
         } else if ft.is_file() {
-            if let Err(e) = copy_file(
-                &entry_path,
-                &dst_child,
-                config,
-                throttle,
-                stats,
-            ) {
+            if let Err(e) = copy_file(&entry_path, &dst_child, config, throttle, stats) {
                 eprintln!("{e}");
                 stats.errors = stats.errors.saturating_add(1);
             }
@@ -882,13 +864,8 @@ fn copy_directory(
                     #[cfg(not(unix))]
                     {
                         let _ = link_target; // suppress unused warning
-                        if let Err(e) = copy_file(
-                            &entry_path,
-                            &dst_child,
-                            config,
-                            throttle,
-                            stats,
-                        ) {
+                        if let Err(e) = copy_file(&entry_path, &dst_child, config, throttle, stats)
+                        {
                             eprintln!("{e}");
                             stats.errors = stats.errors.saturating_add(1);
                         }
@@ -914,9 +891,8 @@ fn copy_source_to_dest(
     throttle: &mut Throttle,
     stats: &mut TransferStats,
 ) -> Result<(), ScpError> {
-    let src_meta = fs::symlink_metadata(src_path).map_err(|e| {
-        ScpError::Io(format!("{}: {e}", src_path.display()))
-    })?;
+    let src_meta = fs::symlink_metadata(src_path)
+        .map_err(|e| ScpError::Io(format!("{}: {e}", src_path.display())))?;
 
     if src_meta.is_dir() {
         copy_directory(src_path, dst_path, config, throttle, stats)
@@ -1098,13 +1074,8 @@ fn execute_transfer(config: &Config) -> Result<TransferStats, ScpError> {
             target_path.clone()
         };
 
-        if let Err(e) = copy_source_to_dest(
-            &src_path,
-            &dst_path,
-            config,
-            &mut throttle,
-            &mut stats,
-        ) {
+        if let Err(e) = copy_source_to_dest(&src_path, &dst_path, config, &mut throttle, &mut stats)
+        {
             eprintln!("{e}");
             stats.errors = stats.errors.saturating_add(1);
         }
@@ -1397,10 +1368,7 @@ mod tests {
 
     #[test]
     fn parse_args_unknown_flag() {
-        let args: Vec<String> = vec!["-z", "a", "b"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let args: Vec<String> = vec!["-z", "a", "b"].into_iter().map(String::from).collect();
         assert!(matches!(parse_args(&args), Err(ScpError::Usage(_))));
     }
 

@@ -54,11 +54,7 @@ const MIN_POLL_INTERVAL: u32 = 64;
 const MAX_POLL_INTERVAL: u32 = 1024;
 
 /// Default NTP servers used when none are specified.
-const DEFAULT_SERVERS: &[&str] = &[
-    "pool.ntp.org",
-    "time.google.com",
-    "time.cloudflare.com",
-];
+const DEFAULT_SERVERS: &[&str] = &["pool.ntp.org", "time.google.com", "time.cloudflare.com"];
 
 /// Default configuration file path.
 const DEFAULT_CONFIG_PATH: &str = "/etc/ntp.conf";
@@ -253,7 +249,11 @@ impl NtpPacket {
     ///
     /// KoD: stratum == 0 and ref_id is an ASCII code like "DENY", "RATE", etc.
     fn is_kod(&self) -> bool {
-        self.stratum == 0 && self.ref_id.iter().all(|&b| b.is_ascii_graphic() || b == b' ')
+        self.stratum == 0
+            && self
+                .ref_id
+                .iter()
+                .all(|&b| b.is_ascii_graphic() || b == b' ')
     }
 
     /// Return the KoD code as a string (if this is a KoD packet).
@@ -273,7 +273,10 @@ impl NtpPacket {
     /// Validate that this is a plausible server response.
     fn validate_response(&self) -> Result<(), String> {
         if self.mode != 4 {
-            return Err(format!("unexpected mode {} (expected 4 = server)", self.mode));
+            return Err(format!(
+                "unexpected mode {} (expected 4 = server)",
+                self.mode
+            ));
         }
         if self.stratum > 15 && self.stratum != 0 {
             return Err(format!("invalid stratum: {}", self.stratum));
@@ -364,8 +367,7 @@ fn compute_jitter(samples: &[NtpSample]) -> f64 {
     if samples.len() < 2 {
         return 0.0;
     }
-    let mean: f64 =
-        samples.iter().map(|s| s.offset_us as f64).sum::<f64>() / samples.len() as f64;
+    let mean: f64 = samples.iter().map(|s| s.offset_us as f64).sum::<f64>() / samples.len() as f64;
     let variance: f64 = samples
         .iter()
         .map(|s| {
@@ -449,9 +451,7 @@ fn datetime_to_unix(dt: &DateTime) -> Result<u64, String> {
         days += if is_leap_year(y) { 366 } else { 365 };
     }
     for m in 1..dt.month {
-        days += u64::from(
-            days_in_month(dt.year, m).ok_or_else(|| format!("invalid month: {m}"))?,
-        );
+        days += u64::from(days_in_month(dt.year, m).ok_or_else(|| format!("invalid month: {m}"))?);
     }
     days += u64::from(dt.day.saturating_sub(1));
 
@@ -495,7 +495,14 @@ fn unix_to_datetime(mut secs: u64) -> DateTime {
     }
 
     let day = days as u32 + 1;
-    DateTime { year, month, day, hour, minute, second }
+    DateTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    }
 }
 
 /// Format a Unix timestamp as ISO 8601 (e.g. "2026-05-18T14:30:00Z").
@@ -511,8 +518,7 @@ fn format_iso8601(unix_secs: u64) -> String {
 fn format_human(unix_secs: u64) -> String {
     let dt = unix_to_datetime(unix_secs);
     static MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let mi = dt.month.saturating_sub(1).min(11) as usize;
     format!(
@@ -625,10 +631,7 @@ fn adjust_system_time_ns(delta_ns: i64) -> Result<(), String> {
 /// gracefully rather than abort an exchange.
 fn read_unix_secs_micros() -> (u64, u32) {
     match read_system_time_ns() {
-        Ok(ns) if ns >= 0 => (
-            (ns / NS_PER_SEC) as u64,
-            ((ns % NS_PER_SEC) / 1_000) as u32,
-        ),
+        Ok(ns) if ns >= 0 => ((ns / NS_PER_SEC) as u64, ((ns % NS_PER_SEC) / 1_000) as u32),
         _ => (0, 0),
     }
 }
@@ -656,8 +659,7 @@ fn ntp_query_one(
     let _ = use_unpriv_port;
     let bind_addr = "0.0.0.0:0";
 
-    let socket =
-        UdpSocket::bind(bind_addr).map_err(|e| format!("bind UDP: {e}"))?;
+    let socket = UdpSocket::bind(bind_addr).map_err(|e| format!("bind UDP: {e}"))?;
     socket
         .set_read_timeout(Some(Duration::from_secs(timeout_secs)))
         .map_err(|e| format!("set timeout: {e}"))?;
@@ -881,8 +883,7 @@ fn write_drift(path: &str, ppm: f64) -> Result<(), String> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         let _ = fs::create_dir_all(parent);
     }
-    fs::write(path, format!("{ppm:.6}\n").as_bytes())
-        .map_err(|e| format!("{path}: {e}"))
+    fs::write(path, format!("{ppm:.6}\n").as_bytes()).map_err(|e| format!("{path}: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -982,14 +983,7 @@ fn format_peer_status(
     let jitter_ms = jitter_us / 1000.0;
     format!(
         "*{:<24} .{:.<5}. {:>2} u {:>4} {:>3} {:>8.3} {:>9.3} {:>8.3}",
-        server,
-        "",
-        stratum,
-        "-",
-        reach,
-        delay_ms,
-        offset_ms,
-        jitter_ms,
+        server, "", stratum, "-", reach, delay_ms, offset_ms, jitter_ms,
     )
 }
 
@@ -1029,7 +1023,10 @@ fn run_ntpdate(opts: &NtpdateOpts) -> Result<(), String> {
 
     for server in &servers {
         if opts.debug {
-            eprintln!("ntpdate: querying {server} ({} samples)...", opts.num_samples);
+            eprintln!(
+                "ntpdate: querying {server} ({} samples)...",
+                opts.num_samples
+            );
         }
 
         let mut samples = ntp_query_multi(
@@ -1267,7 +1264,10 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
 
         // Sleep until next poll.
         if opts.debug {
-            eprintln!("ntpd: sleeping {} s until next poll", discipline.poll_interval);
+            eprintln!(
+                "ntpd: sleeping {} s until next poll",
+                discipline.poll_interval
+            );
         }
         std::thread::sleep(Duration::from_secs(u64::from(discipline.poll_interval)));
     }
@@ -1315,18 +1315,14 @@ fn parse_ntpdate_args(args: &[String]) -> Result<NtpdateOpts, String> {
             "-q" => opts.query_only = true,
             "-p" => {
                 i += 1;
-                let val = args
-                    .get(i)
-                    .ok_or("-p requires an argument")?;
+                let val = args.get(i).ok_or("-p requires an argument")?;
                 opts.num_samples = val
                     .parse()
                     .map_err(|_| format!("-p: invalid number: {val}"))?;
             }
             "-t" => {
                 i += 1;
-                let val = args
-                    .get(i)
-                    .ok_or("-t requires an argument")?;
+                let val = args.get(i).ok_or("-t requires an argument")?;
                 opts.timeout_secs = val
                     .parse()
                     .map_err(|_| format!("-t: invalid number: {val}"))?;
@@ -1369,10 +1365,7 @@ fn parse_ntpd_args(args: &[String]) -> Result<NtpdOpts, String> {
             }
             "-c" => {
                 i += 1;
-                opts.config_path = args
-                    .get(i)
-                    .ok_or("-c requires a config file path")?
-                    .clone();
+                opts.config_path = args.get(i).ok_or("-c requires a config file path")?.clone();
             }
             "--help" | "-h" => {
                 print_ntpd_usage();
@@ -1467,26 +1460,22 @@ fn main() {
     }
 
     let result = match personality {
-        "ntpdate" | "sntp" => {
-            match parse_ntpdate_args(&args) {
-                Ok(opts) => run_ntpdate(&opts),
-                Err(e) => {
-                    eprintln!("{personality}: {e}");
-                    print_ntpdate_usage();
-                    process::exit(1);
-                }
+        "ntpdate" | "sntp" => match parse_ntpdate_args(&args) {
+            Ok(opts) => run_ntpdate(&opts),
+            Err(e) => {
+                eprintln!("{personality}: {e}");
+                print_ntpdate_usage();
+                process::exit(1);
             }
-        }
-        _ => {
-            match parse_ntpd_args(&args) {
-                Ok(opts) => run_ntpd(&opts),
-                Err(e) => {
-                    eprintln!("ntpd: {e}");
-                    print_ntpd_usage();
-                    process::exit(1);
-                }
+        },
+        _ => match parse_ntpd_args(&args) {
+            Ok(opts) => run_ntpd(&opts),
+            Err(e) => {
+                eprintln!("ntpd: {e}");
+                print_ntpd_usage();
+                process::exit(1);
             }
-        }
+        },
     };
 
     if let Err(e) = result {
@@ -1629,7 +1618,11 @@ mod tests {
         let ts = NtpTimestamp::from_unix(0, 500_000);
         // Allow small rounding error.
         let diff = (ts.fraction as i64 - 0x8000_0000_i64).unsigned_abs();
-        assert!(diff < 5000, "fraction {:#x} not close to 0x80000000", ts.fraction);
+        assert!(
+            diff < 5000,
+            "fraction {:#x} not close to 0x80000000",
+            ts.fraction
+        );
     }
 
     #[test]
@@ -1725,7 +1718,11 @@ mod tests {
 
     #[test]
     fn test_clock_filter_single() {
-        let s = NtpSample { offset_us: 500, delay_us: 100, stratum: 2 };
+        let s = NtpSample {
+            offset_us: 500,
+            delay_us: 100,
+            stratum: 2,
+        };
         let mut samples = vec![s.clone()];
         let best = clock_filter(&mut samples).unwrap();
         assert_eq!(best.offset_us, 500);
@@ -1734,9 +1731,21 @@ mod tests {
     #[test]
     fn test_clock_filter_picks_min_delay() {
         let mut samples = vec![
-            NtpSample { offset_us: 500, delay_us: 300, stratum: 2 },
-            NtpSample { offset_us: 400, delay_us: 100, stratum: 2 },
-            NtpSample { offset_us: 600, delay_us: 200, stratum: 2 },
+            NtpSample {
+                offset_us: 500,
+                delay_us: 300,
+                stratum: 2,
+            },
+            NtpSample {
+                offset_us: 400,
+                delay_us: 100,
+                stratum: 2,
+            },
+            NtpSample {
+                offset_us: 600,
+                delay_us: 200,
+                stratum: 2,
+            },
         ];
         let best = clock_filter(&mut samples).unwrap();
         assert_eq!(best.delay_us, 100);
@@ -1748,8 +1757,15 @@ mod tests {
     #[test]
     fn test_stratum_valid() {
         let pkt = NtpPacket {
-            li: 0, vn: 4, mode: 4, stratum: 2, poll: 6, precision: -20,
-            root_delay: 0, root_dispersion: 0, ref_id: [10, 0, 0, 1],
+            li: 0,
+            vn: 4,
+            mode: 4,
+            stratum: 2,
+            poll: 6,
+            precision: -20,
+            root_delay: 0,
+            root_dispersion: 0,
+            ref_id: [10, 0, 0, 1],
             ref_ts: NtpTimestamp::default(),
             origin_ts: NtpTimestamp::default(),
             receive_ts: NtpTimestamp::default(),
@@ -1761,8 +1777,15 @@ mod tests {
     #[test]
     fn test_stratum_invalid_16() {
         let pkt = NtpPacket {
-            li: 0, vn: 4, mode: 4, stratum: 16, poll: 6, precision: -20,
-            root_delay: 0, root_dispersion: 0, ref_id: [10, 0, 0, 1],
+            li: 0,
+            vn: 4,
+            mode: 4,
+            stratum: 16,
+            poll: 6,
+            precision: -20,
+            root_delay: 0,
+            root_dispersion: 0,
+            ref_id: [10, 0, 0, 1],
             ref_ts: NtpTimestamp::default(),
             origin_ts: NtpTimestamp::default(),
             receive_ts: NtpTimestamp::default(),
@@ -1774,8 +1797,14 @@ mod tests {
     #[test]
     fn test_stratum_1_primary() {
         let pkt = NtpPacket {
-            li: 0, vn: 4, mode: 4, stratum: 1, poll: 6, precision: -20,
-            root_delay: 0, root_dispersion: 0,
+            li: 0,
+            vn: 4,
+            mode: 4,
+            stratum: 1,
+            poll: 6,
+            precision: -20,
+            root_delay: 0,
+            root_dispersion: 0,
             ref_id: [b'G', b'P', b'S', 0],
             ref_ts: NtpTimestamp::default(),
             origin_ts: NtpTimestamp::default(),
@@ -1791,8 +1820,14 @@ mod tests {
     #[test]
     fn test_kod_deny() {
         let pkt = NtpPacket {
-            li: 0, vn: 4, mode: 4, stratum: 0, poll: 6, precision: -20,
-            root_delay: 0, root_dispersion: 0,
+            li: 0,
+            vn: 4,
+            mode: 4,
+            stratum: 0,
+            poll: 6,
+            precision: -20,
+            root_delay: 0,
+            root_dispersion: 0,
             ref_id: [b'D', b'E', b'N', b'Y'],
             ref_ts: NtpTimestamp::default(),
             origin_ts: NtpTimestamp::default(),
@@ -1806,8 +1841,14 @@ mod tests {
     #[test]
     fn test_kod_rate() {
         let pkt = NtpPacket {
-            li: 0, vn: 4, mode: 4, stratum: 0, poll: 6, precision: -20,
-            root_delay: 0, root_dispersion: 0,
+            li: 0,
+            vn: 4,
+            mode: 4,
+            stratum: 0,
+            poll: 6,
+            precision: -20,
+            root_delay: 0,
+            root_dispersion: 0,
             ref_id: [b'R', b'A', b'T', b'E'],
             ref_ts: NtpTimestamp::default(),
             origin_ts: NtpTimestamp::default(),
@@ -1823,8 +1864,14 @@ mod tests {
     #[test]
     fn test_not_kod_normal_server() {
         let pkt = NtpPacket {
-            li: 0, vn: 4, mode: 4, stratum: 2, poll: 6, precision: -20,
-            root_delay: 0, root_dispersion: 0,
+            li: 0,
+            vn: 4,
+            mode: 4,
+            stratum: 2,
+            poll: 6,
+            precision: -20,
+            root_delay: 0,
+            root_dispersion: 0,
             ref_id: [192, 168, 1, 1],
             ref_ts: NtpTimestamp::default(),
             origin_ts: NtpTimestamp::default(),
@@ -1842,7 +1889,10 @@ mod tests {
         let dirs = parse_config(conf);
         assert_eq!(dirs.len(), 2);
         assert_eq!(dirs[0], ConfigDirective::Server("pool.ntp.org".to_string()));
-        assert_eq!(dirs[1], ConfigDirective::Server("time.google.com".to_string()));
+        assert_eq!(
+            dirs[1],
+            ConfigDirective::Server("time.google.com".to_string())
+        );
     }
 
     #[test]
@@ -1872,7 +1922,10 @@ mod tests {
         let conf = "driftfile /var/lib/ntp/drift\n";
         let dirs = parse_config(conf);
         assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0], ConfigDirective::DriftFile("/var/lib/ntp/drift".to_string()));
+        assert_eq!(
+            dirs[0],
+            ConfigDirective::DriftFile("/var/lib/ntp/drift".to_string())
+        );
     }
 
     #[test]
@@ -1880,7 +1933,10 @@ mod tests {
         let conf = "logfile /var/log/ntp.log\n";
         let dirs = parse_config(conf);
         assert_eq!(dirs.len(), 1);
-        assert_eq!(dirs[0], ConfigDirective::LogFile("/var/log/ntp.log".to_string()));
+        assert_eq!(
+            dirs[0],
+            ConfigDirective::LogFile("/var/log/ntp.log".to_string())
+        );
     }
 
     #[test]
@@ -2054,17 +2110,52 @@ logfile /var/log/ntp.log
 
     #[test]
     fn test_unix_epoch_roundtrip() {
-        let dt = DateTime { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 };
+        let dt = DateTime {
+            year: 1970,
+            month: 1,
+            day: 1,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        };
         assert_eq!(datetime_to_unix(&dt).unwrap(), 0);
     }
 
     #[test]
     fn test_datetime_roundtrip_various() {
         let cases = [
-            DateTime { year: 1970, month: 1, day: 1, hour: 0, minute: 0, second: 0 },
-            DateTime { year: 2000, month: 2, day: 29, hour: 23, minute: 59, second: 59 },
-            DateTime { year: 2024, month: 12, day: 31, hour: 12, minute: 0, second: 0 },
-            DateTime { year: 2038, month: 1, day: 19, hour: 3, minute: 14, second: 7 },
+            DateTime {
+                year: 1970,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0,
+            },
+            DateTime {
+                year: 2000,
+                month: 2,
+                day: 29,
+                hour: 23,
+                minute: 59,
+                second: 59,
+            },
+            DateTime {
+                year: 2024,
+                month: 12,
+                day: 31,
+                hour: 12,
+                minute: 0,
+                second: 0,
+            },
+            DateTime {
+                year: 2038,
+                month: 1,
+                day: 19,
+                hour: 3,
+                minute: 14,
+                second: 7,
+            },
         ];
         for dt in &cases {
             let ts = datetime_to_unix(dt).unwrap();
@@ -2075,7 +2166,14 @@ logfile /var/log/ntp.log
 
     #[test]
     fn test_datetime_before_epoch() {
-        let dt = DateTime { year: 1969, month: 12, day: 31, hour: 23, minute: 59, second: 59 };
+        let dt = DateTime {
+            year: 1969,
+            month: 12,
+            day: 31,
+            hour: 23,
+            minute: 59,
+            second: 59,
+        };
         assert!(datetime_to_unix(&dt).is_err());
     }
 
@@ -2117,16 +2215,32 @@ logfile /var/log/ntp.log
 
     #[test]
     fn test_jitter_single_sample() {
-        let samples = [NtpSample { offset_us: 100, delay_us: 50, stratum: 2 }];
+        let samples = [NtpSample {
+            offset_us: 100,
+            delay_us: 50,
+            stratum: 2,
+        }];
         assert_eq!(compute_jitter(&samples), 0.0);
     }
 
     #[test]
     fn test_jitter_identical_samples() {
         let samples = [
-            NtpSample { offset_us: 100, delay_us: 50, stratum: 2 },
-            NtpSample { offset_us: 100, delay_us: 50, stratum: 2 },
-            NtpSample { offset_us: 100, delay_us: 50, stratum: 2 },
+            NtpSample {
+                offset_us: 100,
+                delay_us: 50,
+                stratum: 2,
+            },
+            NtpSample {
+                offset_us: 100,
+                delay_us: 50,
+                stratum: 2,
+            },
+            NtpSample {
+                offset_us: 100,
+                delay_us: 50,
+                stratum: 2,
+            },
         ];
         assert_eq!(compute_jitter(&samples), 0.0);
     }
@@ -2134,8 +2248,16 @@ logfile /var/log/ntp.log
     #[test]
     fn test_jitter_high_variance() {
         let samples = [
-            NtpSample { offset_us: 0, delay_us: 50, stratum: 2 },
-            NtpSample { offset_us: 1_000_000, delay_us: 50, stratum: 2 },
+            NtpSample {
+                offset_us: 0,
+                delay_us: 50,
+                stratum: 2,
+            },
+            NtpSample {
+                offset_us: 1_000_000,
+                delay_us: 50,
+                stratum: 2,
+            },
         ];
         let j = compute_jitter(&samples);
         assert!(j > 400_000.0, "jitter should be high: {j}");
@@ -2240,8 +2362,15 @@ logfile /var/log/ntp.log
     #[test]
     fn test_validate_wrong_mode() {
         let pkt = NtpPacket {
-            li: 0, vn: 4, mode: 3, stratum: 2, poll: 6, precision: -20,
-            root_delay: 0, root_dispersion: 0, ref_id: [0; 4],
+            li: 0,
+            vn: 4,
+            mode: 3,
+            stratum: 2,
+            poll: 6,
+            precision: -20,
+            root_delay: 0,
+            root_dispersion: 0,
+            ref_id: [0; 4],
             ref_ts: NtpTimestamp::default(),
             origin_ts: NtpTimestamp::default(),
             receive_ts: NtpTimestamp::default(),
@@ -2253,8 +2382,15 @@ logfile /var/log/ntp.log
     #[test]
     fn test_validate_zero_transmit() {
         let pkt = NtpPacket {
-            li: 0, vn: 4, mode: 4, stratum: 2, poll: 6, precision: -20,
-            root_delay: 0, root_dispersion: 0, ref_id: [0; 4],
+            li: 0,
+            vn: 4,
+            mode: 4,
+            stratum: 2,
+            poll: 6,
+            precision: -20,
+            root_delay: 0,
+            root_dispersion: 0,
+            ref_id: [0; 4],
             ref_ts: NtpTimestamp::default(),
             origin_ts: NtpTimestamp::default(),
             receive_ts: NtpTimestamp::default(),

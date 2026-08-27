@@ -473,19 +473,23 @@ impl Filter {
 
         // Port filter.
         if let Some(port) = self.port
-            && sport != port && dport != port {
-                return false;
-            }
+            && sport != port
+            && dport != port
+        {
+            return false;
+        }
 
         if let Some(port) = self.src_port
-            && sport != port {
-                return false;
-            }
+            && sport != port
+        {
+            return false;
+        }
 
         if let Some(port) = self.dst_port
-            && dport != port {
-                return false;
-            }
+            && dport != port
+        {
+            return false;
+        }
 
         true
     }
@@ -885,9 +889,10 @@ fn capture_live(
 
     loop {
         if let Some(max) = count
-            && captured >= max {
-                break;
-            }
+            && captured >= max
+        {
+            break;
+        }
 
         // Read a packet (format: 4-byte LE length prefix + raw frame).
         let n = match file.read(&mut buf) {
@@ -923,14 +928,12 @@ fn capture_live(
                     let ip_hdr_len = (ip.ihl as usize) * 4;
                     let transport = &pkt_data[14 + ip_hdr_len..];
                     match ip.protocol {
-                        PROTO_TCP
-                            if transport.len() >= 4 => {
-                                (read_u16_be(transport, 0), read_u16_be(transport, 2))
-                            }
-                        PROTO_UDP
-                            if transport.len() >= 4 => {
-                                (read_u16_be(transport, 0), read_u16_be(transport, 2))
-                            }
+                        PROTO_TCP if transport.len() >= 4 => {
+                            (read_u16_be(transport, 0), read_u16_be(transport, 2))
+                        }
+                        PROTO_UDP if transport.len() >= 4 => {
+                            (read_u16_be(transport, 0), read_u16_be(transport, 2))
+                        }
                         _ => (0, 0),
                     }
                 } else {
@@ -945,9 +948,10 @@ fn capture_live(
         };
 
         if let Some(ref eth_hdr) = eth
-            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport) {
-                continue;
-            }
+            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport)
+        {
+            continue;
+        }
 
         display_packet(pkt_data, opts, ts_ns, prev_ts);
 
@@ -986,9 +990,10 @@ fn capture_from_proc_net(
 
     for line in content.lines() {
         if let Some(max) = count
-            && displayed >= max {
-                break;
-            }
+            && displayed >= max
+        {
+            break;
+        }
 
         // Parse text-based packet info.
         // Expected format: "PROTO SRC_IP:PORT > DST_IP:PORT FLAGS LEN TS"
@@ -1040,9 +1045,10 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
 
     while let Some((ts_sec, ts_usec, pkt_data)) = reader.next_packet() {
         if let Some(max) = count
-            && displayed >= max {
-                break;
-            }
+            && displayed >= max
+        {
+            break;
+        }
 
         let ts_ns = (ts_sec as u64) * 1_000_000_000 + (ts_usec as u64) * 1000;
 
@@ -1076,9 +1082,10 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
         };
 
         if let Some(ref eth_hdr) = eth
-            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport) {
-                continue;
-            }
+            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport)
+        {
+            continue;
+        }
 
         display_packet(pkt_data, opts, ts_ns, prev_ts_ns);
         prev_ts_ns = ts_ns;
@@ -1175,9 +1182,10 @@ fn parse_filter(args: &[String]) -> Filter {
                         filter.host = Some(ip);
                     }
                 } else if let Ok(port) = arg.parse::<u16>()
-                    && filter.port.is_none() {
-                        filter.port = Some(port);
-                    }
+                    && filter.port.is_none()
+                {
+                    filter.port = Some(port);
+                }
             }
         }
         idx += 1;

@@ -455,8 +455,7 @@ fn parse_options(data: &[u8]) -> Option<DhcpOptions> {
                 opts.domain_name = String::from_utf8(value.to_vec()).ok();
             }
             OPT_BROADCAST if len >= 4 => {
-                opts.broadcast =
-                    Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+                opts.broadcast = Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
             }
             OPT_NTP => {
                 let mut j = 0;
@@ -475,8 +474,7 @@ fn parse_options(data: &[u8]) -> Option<DhcpOptions> {
                     Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
             }
             OPT_SERVER_ID if len >= 4 => {
-                opts.server_id =
-                    Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
+                opts.server_id = Some(u32::from_be_bytes([value[0], value[1], value[2], value[3]]));
             }
             OPT_RENEWAL_TIME if len >= 4 => {
                 opts.renewal_time =
@@ -668,7 +666,13 @@ fn build_inform(xid: u32, mac: &[u8; 6], ciaddr: u32, hostname: Option<&str>) ->
     write_option(
         &mut buf,
         55,
-        &[OPT_SUBNET_MASK, OPT_ROUTER, OPT_DNS, OPT_DOMAIN_NAME, OPT_NTP],
+        &[
+            OPT_SUBNET_MASK,
+            OPT_ROUTER,
+            OPT_DNS,
+            OPT_DOMAIN_NAME,
+            OPT_NTP,
+        ],
     );
     buf.push(OPT_END);
     while buf.len() < 300 {
@@ -704,10 +708,7 @@ impl LeaseInfo {
     fn from_ack(msg: &DhcpMessage, obtained_at: u64) -> Self {
         let lease_time = msg.options.lease_time.unwrap_or(86400);
         let renewal_time = msg.options.renewal_time.unwrap_or(lease_time / 2);
-        let rebinding_time = msg
-            .options
-            .rebinding_time
-            .unwrap_or(lease_time * 7 / 8);
+        let rebinding_time = msg.options.rebinding_time.unwrap_or(lease_time * 7 / 8);
 
         Self {
             ip_address: msg.yiaddr,
@@ -728,7 +729,8 @@ impl LeaseInfo {
 
     /// Absolute timestamp when T1 (renewal) fires.
     fn t1_expiry(&self) -> u64 {
-        self.obtained_at.saturating_add(u64::from(self.renewal_time))
+        self.obtained_at
+            .saturating_add(u64::from(self.renewal_time))
     }
 
     /// Absolute timestamp when T2 (rebinding) fires.
@@ -750,7 +752,10 @@ impl LeaseInfo {
     /// Format the lease as a human-readable string.
     fn display(&self) -> String {
         let mut s = String::new();
-        s.push_str(&format!("IP address   : {}\n", ip_to_string(self.ip_address)));
+        s.push_str(&format!(
+            "IP address   : {}\n",
+            ip_to_string(self.ip_address)
+        ));
         s.push_str(&format!(
             "Subnet mask  : {} (/{})  \n",
             ip_to_string(self.subnet_mask),
@@ -774,7 +779,10 @@ impl LeaseInfo {
         if let Some(ref d) = self.domain_name {
             s.push_str(&format!("Domain       : {d}\n"));
         }
-        s.push_str(&format!("Server       : {}\n", ip_to_string(self.server_id)));
+        s.push_str(&format!(
+            "Server       : {}\n",
+            ip_to_string(self.server_id)
+        ));
         s.push_str(&format!("Lease time   : {} seconds\n", self.lease_time));
         s.push_str(&format!("T1 (renew)   : {} seconds\n", self.renewal_time));
         s.push_str(&format!("T2 (rebind)  : {} seconds\n", self.rebinding_time));
@@ -910,10 +918,7 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
         match arg.as_str() {
             "-i" => {
                 i += 1;
-                cfg.interface = args
-                    .get(i)
-                    .ok_or("-i requires an interface name")?
-                    .clone();
+                cfg.interface = args.get(i).ok_or("-i requires an interface name")?.clone();
             }
             "-n" => cfg.no_configure = true,
             "-r" => {
@@ -1079,11 +1084,8 @@ fn apply_config_file(cfg: &mut Config, file_result: &ConfigFileResult) {
     }
     // Apply statics matching this interface (or global).
     for st in &file_result.statics {
-        let applies = st.interface.is_none()
-            || st
-                .interface
-                .as_ref()
-                .is_some_and(|s| s == &cfg.interface);
+        let applies =
+            st.interface.is_none() || st.interface.as_ref().is_some_and(|s| s == &cfg.interface);
         if applies {
             if let Some(ip) = st.ip_address {
                 cfg.static_ip = Some(ip);
@@ -1235,7 +1237,10 @@ fn configure_interface(iface: &str, lease: &LeaseInfo, cfg: &Config) {
             "  apply lease ip={} mask={} gw={} up -> rc={}",
             ip_to_string(lease.ip_address),
             ip_to_string(lease.subnet_mask),
-            gateway.map_or_else(|| "none".to_string(), |g| ip_to_string(u32::from_be_bytes(g))),
+            gateway.map_or_else(
+                || "none".to_string(),
+                |g| ip_to_string(u32::from_be_bytes(g))
+            ),
             ret
         );
     }
@@ -1331,7 +1336,9 @@ fn generate_xid() -> u32 {
 
 /// Write the current PID to the PID file.
 fn write_pid_file() -> io::Result<()> {
-    let dir = Path::new(PID_FILE).parent().unwrap_or(Path::new("/var/run"));
+    let dir = Path::new(PID_FILE)
+        .parent()
+        .unwrap_or(Path::new("/var/run"));
     fs::create_dir_all(dir)?;
     fs::write(PID_FILE, format!("{}\n", process::id()))
 }
@@ -1386,7 +1393,9 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
     // Bind to DHCP client port.
     let socket = UdpSocket::bind(format!("0.0.0.0:{DHCP_CLIENT_PORT}"))
         .map_err(|e| format!("cannot bind to port {DHCP_CLIENT_PORT}: {e}"))?;
-    socket.set_broadcast(true).map_err(|e| format!("set_broadcast: {e}"))?;
+    socket
+        .set_broadcast(true)
+        .map_err(|e| format!("set_broadcast: {e}"))?;
     socket
         .set_read_timeout(Some(Duration::from_secs(cfg.timeout)))
         .map_err(|e| format!("set_read_timeout: {e}"))?;
@@ -1423,10 +1432,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                             if msg.options.msg_type == Some(DHCP_OFFER) {
                                 debug_log(
                                     cfg,
-                                    &format!(
-                                        "received OFFER: {}",
-                                        ip_to_string(msg.yiaddr)
-                                    ),
+                                    &format!("received OFFER: {}", ip_to_string(msg.yiaddr)),
                                 );
                                 // Send REQUEST for this offer.
                                 let server_id = msg.options.server_id;
@@ -1440,10 +1446,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                                     cfg.hostname.as_deref(),
                                 );
                                 socket
-                                    .send_to(
-                                        &pkt,
-                                        format!("255.255.255.255:{DHCP_SERVER_PORT}"),
-                                    )
+                                    .send_to(&pkt, format!("255.255.255.255:{DHCP_SERVER_PORT}"))
                                     .map_err(|e| format!("send REQUEST: {e}"))?;
                                 state = DhcpState::Requesting;
                             }
@@ -1495,9 +1498,7 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                                     debug_log(cfg, "received NAK; restarting");
                                     retries += 1;
                                     if retries > MAX_RETRIES {
-                                        return Err(
-                                            "server rejected request (NAK)".to_string()
-                                        );
+                                        return Err("server rejected request (NAK)".to_string());
                                     }
                                     state = DhcpState::Init;
                                 }
@@ -1580,32 +1581,32 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                     continue;
                 }
                 // Wait for response.
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .ok();
+                socket.set_read_timeout(Some(Duration::from_secs(10))).ok();
                 let mut buf = [0u8; DHCP_MAX_LEN];
                 match socket.recv_from(&mut buf) {
                     Ok((len, _)) => {
                         if let Some(msg) = DhcpMessage::parse(&buf[..len])
-                            && msg.op == BOOTREPLY && msg.xid == new_xid {
-                                if msg.options.msg_type == Some(DHCP_ACK) {
-                                    let new_lease = LeaseInfo::from_ack(&msg, now_secs());
-                                    info_log(&format!(
-                                        "lease renewed: {} ({}s)",
-                                        ip_to_string(new_lease.ip_address),
-                                        new_lease.lease_time
-                                    ));
-                                    configure_interface(&cfg.interface, &new_lease, cfg);
-                                    write_lease_file(&cfg.interface, &new_lease);
-                                    state = DhcpState::Bound;
-                                    continue;
-                                }
-                                if msg.options.msg_type == Some(DHCP_NAK) {
-                                    info_log("renewal NAK; restarting");
-                                    state = DhcpState::Init;
-                                    continue;
-                                }
+                            && msg.op == BOOTREPLY
+                            && msg.xid == new_xid
+                        {
+                            if msg.options.msg_type == Some(DHCP_ACK) {
+                                let new_lease = LeaseInfo::from_ack(&msg, now_secs());
+                                info_log(&format!(
+                                    "lease renewed: {} ({}s)",
+                                    ip_to_string(new_lease.ip_address),
+                                    new_lease.lease_time
+                                ));
+                                configure_interface(&cfg.interface, &new_lease, cfg);
+                                write_lease_file(&cfg.interface, &new_lease);
+                                state = DhcpState::Bound;
+                                continue;
                             }
+                            if msg.options.msg_type == Some(DHCP_NAK) {
+                                info_log("renewal NAK; restarting");
+                                state = DhcpState::Init;
+                                continue;
+                            }
+                        }
                     }
                     Err(_) => {
                         // Timeout; will retry or transition to REBINDING on next loop.
@@ -1643,38 +1644,37 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                     None,
                     cfg.hostname.as_deref(),
                 );
-                if let Err(e) =
-                    socket.send_to(&pkt, format!("255.255.255.255:{DHCP_SERVER_PORT}"))
+                if let Err(e) = socket.send_to(&pkt, format!("255.255.255.255:{DHCP_SERVER_PORT}"))
                 {
                     debug_log(cfg, &format!("send rebind: {e}"));
                     std::thread::sleep(Duration::from_secs(30));
                     continue;
                 }
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(10)))
-                    .ok();
+                socket.set_read_timeout(Some(Duration::from_secs(10))).ok();
                 let mut buf = [0u8; DHCP_MAX_LEN];
                 if let Ok((len, _)) = socket.recv_from(&mut buf)
                     && let Some(msg) = DhcpMessage::parse(&buf[..len])
-                        && msg.op == BOOTREPLY && msg.xid == new_xid {
-                            if msg.options.msg_type == Some(DHCP_ACK) {
-                                let new_lease = LeaseInfo::from_ack(&msg, now_secs());
-                                info_log(&format!(
-                                    "lease rebound: {} ({}s)",
-                                    ip_to_string(new_lease.ip_address),
-                                    new_lease.lease_time
-                                ));
-                                configure_interface(&cfg.interface, &new_lease, cfg);
-                                write_lease_file(&cfg.interface, &new_lease);
-                                state = DhcpState::Bound;
-                                continue;
-                            }
-                            if msg.options.msg_type == Some(DHCP_NAK) {
-                                info_log("rebinding NAK; restarting");
-                                state = DhcpState::Init;
-                                continue;
-                            }
-                        }
+                    && msg.op == BOOTREPLY
+                    && msg.xid == new_xid
+                {
+                    if msg.options.msg_type == Some(DHCP_ACK) {
+                        let new_lease = LeaseInfo::from_ack(&msg, now_secs());
+                        info_log(&format!(
+                            "lease rebound: {} ({}s)",
+                            ip_to_string(new_lease.ip_address),
+                            new_lease.lease_time
+                        ));
+                        configure_interface(&cfg.interface, &new_lease, cfg);
+                        write_lease_file(&cfg.interface, &new_lease);
+                        state = DhcpState::Bound;
+                        continue;
+                    }
+                    if msg.options.msg_type == Some(DHCP_NAK) {
+                        info_log("rebinding NAK; restarting");
+                        state = DhcpState::Init;
+                        continue;
+                    }
+                }
                 socket
                     .set_read_timeout(Some(Duration::from_secs(cfg.timeout)))
                     .ok();
@@ -1694,8 +1694,8 @@ fn release_lease(cfg: &Config) -> Result<(), String> {
     let xid = generate_xid();
     let pkt = build_release(xid, &mac, lease.ip_address, lease.server_id);
 
-    let socket = UdpSocket::bind(format!("0.0.0.0:{DHCP_CLIENT_PORT}"))
-        .map_err(|e| format!("bind: {e}"))?;
+    let socket =
+        UdpSocket::bind(format!("0.0.0.0:{DHCP_CLIENT_PORT}")).map_err(|e| format!("bind: {e}"))?;
     let server_addr = format!("{}:{DHCP_SERVER_PORT}", ip_to_string(lease.server_id));
     socket
         .send_to(&pkt, &server_addr)
@@ -1785,9 +1785,10 @@ fn main() {
 
     // Auto-detect interface if not specified.
     if cfg.interface == "eth0"
-        && let Some(detected) = detect_interface() {
-            cfg.interface = detected;
-        }
+        && let Some(detected) = detect_interface()
+    {
+        cfg.interface = detected;
+    }
 
     // Handle -k (kill daemon).
     if cfg.kill {
@@ -2042,7 +2043,17 @@ mod tests {
         write_client_id(&mut buf, &mac);
         assert_eq!(
             buf,
-            vec![OPT_CLIENT_ID, 7, HTYPE_ETHERNET, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
+            vec![
+                OPT_CLIENT_ID,
+                7,
+                HTYPE_ETHERNET,
+                0xAA,
+                0xBB,
+                0xCC,
+                0xDD,
+                0xEE,
+                0xFF
+            ]
         );
     }
 
@@ -2107,7 +2118,18 @@ mod tests {
 
     #[test]
     fn test_parse_options_domain_name() {
-        let data = [OPT_DOMAIN_NAME, 7, b'f', b'o', b'o', b'.', b'c', b'o', b'm', OPT_END];
+        let data = [
+            OPT_DOMAIN_NAME,
+            7,
+            b'f',
+            b'o',
+            b'o',
+            b'.',
+            b'c',
+            b'o',
+            b'm',
+            OPT_END,
+        ];
         let opts = parse_options(&data).unwrap();
         assert_eq!(opts.domain_name, Some("foo.com".to_string()));
     }
@@ -2159,7 +2181,15 @@ mod tests {
 
     #[test]
     fn test_parse_options_with_padding() {
-        let data = [OPT_PAD, OPT_PAD, OPT_MSG_TYPE, 1, DHCP_ACK, OPT_PAD, OPT_END];
+        let data = [
+            OPT_PAD,
+            OPT_PAD,
+            OPT_MSG_TYPE,
+            1,
+            DHCP_ACK,
+            OPT_PAD,
+            OPT_END,
+        ];
         let opts = parse_options(&data).unwrap();
         assert_eq!(opts.msg_type, Some(DHCP_ACK));
     }
@@ -2244,9 +2274,9 @@ mod tests {
         let mac = [0; 6];
         let pkt = build_discover(1, &mac, Some("myhost"), None);
         // The hostname option should appear somewhere in the packet.
-        let found = pkt.windows(8).any(|w| {
-            w[0] == OPT_HOSTNAME && w[1] == 6 && &w[2..8] == b"myhost"
-        });
+        let found = pkt
+            .windows(8)
+            .any(|w| w[0] == OPT_HOSTNAME && w[1] == 6 && &w[2..8] == b"myhost");
         assert!(found, "hostname option not found in DISCOVER");
     }
 
@@ -2329,11 +2359,7 @@ mod tests {
     // ---- DHCP message parsing ----
 
     /// Helper: build a minimal valid DHCP reply packet.
-    fn make_test_reply(
-        xid: u32,
-        yiaddr: u32,
-        options_data: &[u8],
-    ) -> Vec<u8> {
+    fn make_test_reply(xid: u32, yiaddr: u32, options_data: &[u8]) -> Vec<u8> {
         let mut pkt = vec![0u8; DHCP_HEADER_LEN];
         pkt[0] = BOOTREPLY;
         pkt[1] = HTYPE_ETHERNET;
@@ -2426,7 +2452,7 @@ mod tests {
         assert_eq!(lease.ip_address, 0x0A00020F);
         assert_eq!(lease.subnet_mask, 0xFFFF_FF00);
         assert_eq!(lease.lease_time, 86400);
-        assert_eq!(lease.renewal_time, 43200);  // lease_time / 2
+        assert_eq!(lease.renewal_time, 43200); // lease_time / 2
         assert_eq!(lease.rebinding_time, 75600); // lease_time * 7/8
         assert_eq!(lease.server_id, 0x0A000001);
         assert_eq!(lease.obtained_at, 1000);
@@ -2640,7 +2666,10 @@ mod tests {
         let text = "static routers=10.0.0.1\n";
         let result = parse_config_file(text);
         assert_eq!(result.statics.len(), 1);
-        assert_eq!(result.statics[0].routers, vec![parse_ipv4("10.0.0.1").unwrap()]);
+        assert_eq!(
+            result.statics[0].routers,
+            vec![parse_ipv4("10.0.0.1").unwrap()]
+        );
     }
 
     #[test]
@@ -2650,7 +2679,10 @@ mod tests {
         assert_eq!(result.statics.len(), 1);
         assert_eq!(
             result.statics[0].dns_servers,
-            vec![parse_ipv4("8.8.8.8").unwrap(), parse_ipv4("8.8.4.4").unwrap()]
+            vec![
+                parse_ipv4("8.8.8.8").unwrap(),
+                parse_ipv4("8.8.4.4").unwrap()
+            ]
         );
     }
 
@@ -2733,30 +2765,21 @@ static domain_name_servers=8.8.8.8, 1.1.1.1
 
     #[test]
     fn test_parse_args_requested_ip() {
-        let args: Vec<String> = ["-r", "10.0.0.50"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = ["-r", "10.0.0.50"].iter().map(|s| s.to_string()).collect();
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.requested_ip, parse_ipv4("10.0.0.50"));
     }
 
     #[test]
     fn test_parse_args_client_ip() {
-        let args: Vec<String> = ["-s", "10.0.0.51"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = ["-s", "10.0.0.51"].iter().map(|s| s.to_string()).collect();
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.client_ip, parse_ipv4("10.0.0.51"));
     }
 
     #[test]
     fn test_parse_args_hostname() {
-        let args: Vec<String> = ["--hostname=mybox"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = ["--hostname=mybox"].iter().map(|s| s.to_string()).collect();
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.hostname, Some("mybox".to_string()));
     }
@@ -2795,10 +2818,7 @@ static domain_name_servers=8.8.8.8, 1.1.1.1
 
     #[test]
     fn test_parse_args_invalid_ip() {
-        let args: Vec<String> = ["-r", "not.an.ip"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let args: Vec<String> = ["-r", "not.an.ip"].iter().map(|s| s.to_string()).collect();
         assert!(parse_args(&args).is_err());
     }
 

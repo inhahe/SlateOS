@@ -72,15 +72,7 @@ fn kernel_errstr(code: i64) -> &'static str {
 /// `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9`. `rcx`/`r11` are clobbered by the
 /// `syscall` instruction itself.
 #[cfg(target_arch = "x86_64")]
-unsafe fn syscall6(
-    nr: u64,
-    a1: u64,
-    a2: u64,
-    a3: u64,
-    a4: u64,
-    a5: u64,
-    a6: u64,
-) -> i64 {
+unsafe fn syscall6(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64, a6: u64) -> i64 {
     let ret: i64;
     // SAFETY: the caller guarantees that any pointer arguments reference
     // live, correctly-sized buffers for the duration of the call. The kernel
@@ -125,7 +117,13 @@ fn canonical_fstype(fstype: &str) -> Option<&'static str> {
 /// ABI does not yet carry mount options, so unsupported flags (bind, remount)
 /// are rejected up front rather than silently ignored.
 #[cfg(target_arch = "x86_64")]
-fn do_mount(source: &str, target: &str, fstype: &str, flags: u64, _data: &str) -> Result<(), String> {
+fn do_mount(
+    source: &str,
+    target: &str,
+    fstype: &str,
+    flags: u64,
+    _data: &str,
+) -> Result<(), String> {
     if flags & MS_BIND != 0 {
         return Err("mount: bind mounts are not supported by the kernel ABI".to_string());
     }
@@ -190,7 +188,15 @@ fn do_umount(target: &str, flags: u64) -> Result<(), String> {
     // SAFETY: `tgt` stays live across the call; the kernel validates the
     // pointer+length before reading user memory.
     let ret = unsafe {
-        syscall6(SYS_FS_UMOUNT, tgt.as_ptr() as u64, tgt.len() as u64, 0, 0, 0, 0)
+        syscall6(
+            SYS_FS_UMOUNT,
+            tgt.as_ptr() as u64,
+            tgt.len() as u64,
+            0,
+            0,
+            0,
+            0,
+        )
     };
 
     if ret < 0 {
@@ -201,7 +207,13 @@ fn do_umount(target: &str, flags: u64) -> Result<(), String> {
 
 /// Host build fallback: the native mount syscall cannot run off-target.
 #[cfg(not(target_arch = "x86_64"))]
-fn do_mount(_source: &str, _target: &str, _fstype: &str, _flags: u64, _data: &str) -> Result<(), String> {
+fn do_mount(
+    _source: &str,
+    _target: &str,
+    _fstype: &str,
+    _flags: u64,
+    _data: &str,
+) -> Result<(), String> {
     Err("mount: native syscall unavailable on this host architecture".to_string())
 }
 
@@ -290,7 +302,10 @@ fn list_mounts() {
     }
 
     for m in &mounts {
-        println!("{} on {} type {} ({})", m.device, m.mount_point, m.fs_type, m.options);
+        println!(
+            "{} on {} type {} ({})",
+            m.device, m.mount_point, m.fs_type, m.options
+        );
     }
 }
 
@@ -359,15 +374,27 @@ fn mount_all() {
         }
 
         // Skip if already mounted.
-        if current_mounts.iter().any(|m| m.mount_point == entry.mount_point) {
+        if current_mounts
+            .iter()
+            .any(|m| m.mount_point == entry.mount_point)
+        {
             println!("  skip:  {} (already mounted)", entry.mount_point);
             continue;
         }
 
         let (flags, data) = parse_mount_options(&entry.options);
-        print!("  mount: {} on {} ({})... ", entry.device, entry.mount_point, entry.fs_type);
+        print!(
+            "  mount: {} on {} ({})... ",
+            entry.device, entry.mount_point, entry.fs_type
+        );
 
-        match do_mount(&entry.device, &entry.mount_point, &entry.fs_type, flags, &data) {
+        match do_mount(
+            &entry.device,
+            &entry.mount_point,
+            &entry.fs_type,
+            flags,
+            &data,
+        ) {
             Ok(()) => {
                 println!("ok");
                 success += 1;
@@ -414,9 +441,7 @@ fn print_usage() {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let progname = args.first()
-        .map(|s| s.as_str())
-        .unwrap_or("mount");
+    let progname = args.first().map(|s| s.as_str()).unwrap_or("mount");
 
     // Detect if invoked as "umount".
     let is_umount = progname.ends_with("umount");
@@ -533,7 +558,10 @@ fn main() {
             println!("{:<20} {:<20} {:<10} Options", "Device", "Mount", "Type");
             println!("{:<20} {:<20} {:<10} -------", "------", "-----", "----");
             for e in &entries {
-                println!("{:<20} {:<20} {:<10} {}", e.device, e.mount_point, e.fs_type, e.options);
+                println!(
+                    "{:<20} {:<20} {:<10} {}",
+                    e.device, e.mount_point, e.fs_type, e.options
+                );
             }
         }
         return;

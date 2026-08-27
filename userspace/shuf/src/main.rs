@@ -23,10 +23,7 @@ enum Mode {
 }
 
 fn detect_mode(argv0: &str) -> Mode {
-    let name = argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
     match lower.as_str() {
@@ -154,13 +151,18 @@ fn run_shuf() -> Result<(), String> {
                 if i >= argv.len() {
                     return Err("option '-n' requires an argument".to_string());
                 }
-                head_count = Some(argv[i].parse::<usize>()
-                    .map_err(|_| format!("invalid count: '{}'", argv[i]))?);
+                head_count = Some(
+                    argv[i]
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid count: '{}'", argv[i]))?,
+                );
             }
             _ if arg.starts_with("--head-count=") => {
                 let val = &arg["--head-count=".len()..];
-                head_count = Some(val.parse::<usize>()
-                    .map_err(|_| format!("invalid count: '{val}'"))?);
+                head_count = Some(
+                    val.parse::<usize>()
+                        .map_err(|_| format!("invalid count: '{val}'"))?,
+                );
             }
             "-o" | "--output" => {
                 i += 1;
@@ -176,8 +178,10 @@ fn run_shuf() -> Result<(), String> {
             "-z" | "--zero-terminated" => zero_terminated = true,
             _ if arg.starts_with("--random-source=") => {
                 let val = &arg["--random-source=".len()..];
-                seed = Some(val.parse::<u64>()
-                    .map_err(|_| format!("invalid seed: '{val}'"))?);
+                seed = Some(
+                    val.parse::<u64>()
+                        .map_err(|_| format!("invalid seed: '{val}'"))?,
+                );
             }
             "--" => {
                 i += 1;
@@ -217,10 +221,7 @@ fn run_shuf() -> Result<(), String> {
     // Open output
     let stdout = io::stdout();
     let mut out: Box<dyn Write> = match output_file {
-        Some(ref path) => Box::new(
-            fs::File::create(path)
-                .map_err(|e| format!("{path}: {e}"))?
-        ),
+        Some(ref path) => Box::new(fs::File::create(path).map_err(|e| format!("{path}: {e}"))?),
         None => Box::new(stdout.lock()),
     };
 
@@ -261,9 +262,11 @@ fn parse_range(s: &str) -> Result<(i64, i64), String> {
     if parts.len() != 2 {
         return Err(format!("invalid range: '{s}'"));
     }
-    let lo = parts[0].parse::<i64>()
+    let lo = parts[0]
+        .parse::<i64>()
         .map_err(|_| format!("invalid range start: '{}'", parts[0]))?;
-    let hi = parts[1].parse::<i64>()
+    let hi = parts[1]
+        .parse::<i64>()
         .map_err(|_| format!("invalid range end: '{}'", parts[1]))?;
     if lo > hi {
         return Err(format!("range start {lo} is greater than end {hi}"));
@@ -275,8 +278,7 @@ fn read_lines_delimited(file: Option<&str>, delim: u8) -> Result<Vec<String>, St
     let reader: Box<dyn BufRead> = match file {
         Some("-") | None => Box::new(io::stdin().lock()),
         Some(path) => {
-            let f = fs::File::open(path)
-                .map_err(|e| format!("{path}: {e}"))?;
+            let f = fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
             Box::new(io::BufReader::new(f))
         }
     };
@@ -287,7 +289,8 @@ fn read_lines_delimited(file: Option<&str>, delim: u8) -> Result<Vec<String>, St
 
     loop {
         buf.clear();
-        let n = reader.read_until(delim, &mut buf)
+        let n = reader
+            .read_until(delim, &mut buf)
             .map_err(|e| format!("read: {e}"))?;
         if n == 0 {
             break;
@@ -321,7 +324,8 @@ fn run_factor() -> Result<(), String> {
                 eprintln!("Print the prime factors of each NUMBER.");
                 process::exit(0);
             }
-            let n = arg.parse::<u64>()
+            let n = arg
+                .parse::<u64>()
                 .map_err(|_| format!("'{arg}' is not a valid number"))?;
             print_factors(n);
         }
@@ -334,7 +338,8 @@ fn run_factor() -> Result<(), String> {
             if line.is_empty() {
                 continue;
             }
-            let n = line.parse::<u64>()
+            let n = line
+                .parse::<u64>()
                 .map_err(|_| format!("'{line}' is not a valid number"))?;
             print_factors(n);
         }
@@ -386,11 +391,11 @@ fn print_factors(n: u64) {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum NumfmtUnit {
-    None,    // Raw number
-    Auto,    // Auto-detect suffix
-    Si,      // SI suffixes (K=1000, M=1000000, ...)
-    Iec,     // IEC suffixes (K=1024, M=1048576, ...)
-    IecI,    // IEC with 'i' suffix (Ki, Mi, Gi, ...)
+    None, // Raw number
+    Auto, // Auto-detect suffix
+    Si,   // SI suffixes (K=1000, M=1000000, ...)
+    Iec,  // IEC suffixes (K=1024, M=1048576, ...)
+    IecI, // IEC with 'i' suffix (Ki, Mi, Gi, ...)
 }
 
 fn run_numfmt() -> Result<(), String> {
@@ -432,14 +437,17 @@ fn run_numfmt() -> Result<(), String> {
                 to_unit = parse_unit(&arg["--to=".len()..])?;
             }
             _ if arg.starts_with("--padding=") => {
-                padding = Some(arg["--padding=".len()..].parse::<i32>()
-                    .map_err(|_| format!("invalid padding: '{}'", &arg["--padding=".len()..]))?);
+                padding =
+                    Some(arg["--padding=".len()..].parse::<i32>().map_err(|_| {
+                        format!("invalid padding: '{}'", &arg["--padding=".len()..])
+                    })?);
             }
             _ if arg.starts_with("--round=") => {
                 round = match &arg["--round=".len()..] {
                     "from-zero" | "towards-zero" | "up" | "down" | "nearest" => {
                         // Leak a &str that lasts the program lifetime — acceptable for CLI
-                        let s: &'static str = Box::leak(arg["--round=".len()..].to_string().into_boxed_str());
+                        let s: &'static str =
+                            Box::leak(arg["--round=".len()..].to_string().into_boxed_str());
                         s
                     }
                     other => return Err(format!("invalid rounding method: '{other}'")),
@@ -452,7 +460,8 @@ fn run_numfmt() -> Result<(), String> {
                 format_str = Some(arg["--format=".len()..].to_string());
             }
             _ if arg.starts_with("--field=") => {
-                field = arg["--field=".len()..].parse::<usize>()
+                field = arg["--field=".len()..]
+                    .parse::<usize>()
                     .map_err(|_| format!("invalid field: '{}'", &arg["--field=".len()..]))?;
                 if field == 0 {
                     return Err("field number must be >= 1".to_string());
@@ -476,8 +485,9 @@ fn run_numfmt() -> Result<(), String> {
                 header_lines = 1;
             }
             _ if arg.starts_with("--header=") => {
-                header_lines = arg["--header=".len()..].parse::<usize>()
-                    .map_err(|_| format!("invalid header count: '{}'", &arg["--header=".len()..]))?;
+                header_lines = arg["--header=".len()..].parse::<usize>().map_err(|_| {
+                    format!("invalid header count: '{}'", &arg["--header=".len()..])
+                })?;
             }
             "--" => {
                 i += 1;
@@ -500,7 +510,15 @@ fn run_numfmt() -> Result<(), String> {
 
     if !inputs.is_empty() {
         for input in &inputs {
-            let result = convert_number(input, from_unit, to_unit, padding, round, suffix.as_deref(), format_str.as_deref())?;
+            let result = convert_number(
+                input,
+                from_unit,
+                to_unit,
+                padding,
+                round,
+                suffix.as_deref(),
+                format_str.as_deref(),
+            )?;
             writeln!(out, "{result}").map_err(|e| format!("write: {e}"))?;
         }
     } else {
@@ -525,8 +543,12 @@ fn run_numfmt() -> Result<(), String> {
                 let mut result_parts: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
                 let converted = convert_number(
                     parts[field_idx].trim(),
-                    from_unit, to_unit, padding, round,
-                    suffix.as_deref(), format_str.as_deref(),
+                    from_unit,
+                    to_unit,
+                    padding,
+                    round,
+                    suffix.as_deref(),
+                    format_str.as_deref(),
                 )?;
                 result_parts[field_idx] = converted;
                 let delim_str = String::from(delimiter.unwrap_or(' '));
@@ -559,13 +581,14 @@ fn parse_number_with_suffix(s: &str, unit: NumfmtUnit) -> Result<f64, String> {
     }
 
     match unit {
-        NumfmtUnit::None => {
-            s.parse::<f64>().map_err(|_| format!("invalid number: '{s}'"))
-        }
+        NumfmtUnit::None => s
+            .parse::<f64>()
+            .map_err(|_| format!("invalid number: '{s}'")),
         NumfmtUnit::Auto | NumfmtUnit::Si | NumfmtUnit::Iec | NumfmtUnit::IecI => {
             // Strip trailing suffix and multiply
             let (num_str, multiplier) = extract_suffix(s, unit)?;
-            let base: f64 = num_str.parse()
+            let base: f64 = num_str
+                .parse()
                 .map_err(|_| format!("invalid number: '{num_str}'"))?;
             Ok(base * multiplier)
         }
@@ -615,7 +638,13 @@ fn extract_suffix(s: &str, unit: NumfmtUnit) -> Result<(&str, f64), String> {
     Ok((num_part, multiplier))
 }
 
-fn format_number(value: f64, unit: NumfmtUnit, round_method: &str, padding: Option<i32>, format_str: Option<&str>) -> String {
+fn format_number(
+    value: f64,
+    unit: NumfmtUnit,
+    round_method: &str,
+    padding: Option<i32>,
+    format_str: Option<&str>,
+) -> String {
     let formatted = match unit {
         NumfmtUnit::None => {
             if let Some(fmt) = format_str {
@@ -657,7 +686,13 @@ fn format_number(value: f64, unit: NumfmtUnit, round_method: &str, padding: Opti
     }
 }
 
-fn format_with_suffix(value: f64, base: f64, iec_suffix: &str, round_method: &str, format_str: Option<&str>) -> String {
+fn format_with_suffix(
+    value: f64,
+    base: f64,
+    iec_suffix: &str,
+    round_method: &str,
+    format_str: Option<&str>,
+) -> String {
     let suffixes = ["", "K", "M", "G", "T", "P", "E"];
     let abs_val = value.abs();
 
@@ -706,7 +741,11 @@ fn apply_rounding(value: f64, method: &str) -> f64 {
         "nearest" => value.round(),
         _ => {
             // from-zero: round away from zero
-            if value >= 0.0 { value.ceil() } else { value.floor() }
+            if value >= 0.0 {
+                value.ceil()
+            } else {
+                value.floor()
+            }
         }
     }
 }
@@ -719,7 +758,11 @@ fn apply_format(value: f64, fmt: &str) -> String {
             let rest = &fmt[start + 2..];
             let end = rest.find(['f', 'g', 'e']).unwrap_or(rest.len());
             if let Ok(prec) = rest[..end].parse::<usize>() {
-                let spec = if end < rest.len() { rest.as_bytes()[end] } else { b'f' };
+                let spec = if end < rest.len() {
+                    rest.as_bytes()[end]
+                } else {
+                    b'f'
+                };
                 let formatted = match spec {
                     b'g' => {
                         let s = format!("{value:.prec$}");
@@ -734,7 +777,11 @@ fn apply_format(value: f64, fmt: &str) -> String {
                 };
                 let prefix = &fmt[..start];
                 let suffix_start = start + 2 + end + 1;
-                let suffix_str = if suffix_start <= fmt.len() { &fmt[suffix_start..] } else { "" };
+                let suffix_str = if suffix_start <= fmt.len() {
+                    &fmt[suffix_start..]
+                } else {
+                    ""
+                };
                 return format!("{prefix}{formatted}{suffix_str}");
             }
         }
@@ -796,10 +843,7 @@ fn run() -> Result<(), String> {
 fn main() {
     if let Err(e) = run() {
         let prog = env::args().next().unwrap_or_else(|| "shuf".to_string());
-        let name = prog
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&prog);
+        let name = prog.rsplit(['/', '\\']).next().unwrap_or(&prog);
         eprintln!("{name}: {e}");
         process::exit(1);
     }
@@ -939,55 +983,118 @@ mod tests {
 
     #[test]
     fn test_parse_number_none() {
-        assert_eq!(parse_number_with_suffix("42", NumfmtUnit::None).unwrap(), 42.0);
-        assert_eq!(parse_number_with_suffix("3.25", NumfmtUnit::None).unwrap(), 3.25);
-        assert_eq!(parse_number_with_suffix("-100", NumfmtUnit::None).unwrap(), -100.0);
+        assert_eq!(
+            parse_number_with_suffix("42", NumfmtUnit::None).unwrap(),
+            42.0
+        );
+        assert_eq!(
+            parse_number_with_suffix("3.25", NumfmtUnit::None).unwrap(),
+            3.25
+        );
+        assert_eq!(
+            parse_number_with_suffix("-100", NumfmtUnit::None).unwrap(),
+            -100.0
+        );
     }
 
     #[test]
     fn test_parse_number_si() {
-        assert_eq!(parse_number_with_suffix("1K", NumfmtUnit::Si).unwrap(), 1000.0);
-        assert_eq!(parse_number_with_suffix("1M", NumfmtUnit::Si).unwrap(), 1_000_000.0);
-        assert_eq!(parse_number_with_suffix("1G", NumfmtUnit::Si).unwrap(), 1_000_000_000.0);
-        assert_eq!(parse_number_with_suffix("2.5K", NumfmtUnit::Si).unwrap(), 2500.0);
+        assert_eq!(
+            parse_number_with_suffix("1K", NumfmtUnit::Si).unwrap(),
+            1000.0
+        );
+        assert_eq!(
+            parse_number_with_suffix("1M", NumfmtUnit::Si).unwrap(),
+            1_000_000.0
+        );
+        assert_eq!(
+            parse_number_with_suffix("1G", NumfmtUnit::Si).unwrap(),
+            1_000_000_000.0
+        );
+        assert_eq!(
+            parse_number_with_suffix("2.5K", NumfmtUnit::Si).unwrap(),
+            2500.0
+        );
     }
 
     #[test]
     fn test_parse_number_iec() {
-        assert_eq!(parse_number_with_suffix("1K", NumfmtUnit::Iec).unwrap(), 1024.0);
-        assert_eq!(parse_number_with_suffix("1M", NumfmtUnit::Iec).unwrap(), 1_048_576.0);
-        assert_eq!(parse_number_with_suffix("1G", NumfmtUnit::Iec).unwrap(), 1_073_741_824.0);
+        assert_eq!(
+            parse_number_with_suffix("1K", NumfmtUnit::Iec).unwrap(),
+            1024.0
+        );
+        assert_eq!(
+            parse_number_with_suffix("1M", NumfmtUnit::Iec).unwrap(),
+            1_048_576.0
+        );
+        assert_eq!(
+            parse_number_with_suffix("1G", NumfmtUnit::Iec).unwrap(),
+            1_073_741_824.0
+        );
     }
 
     #[test]
     fn test_parse_number_iec_i() {
-        assert_eq!(parse_number_with_suffix("1Ki", NumfmtUnit::IecI).unwrap(), 1024.0);
-        assert_eq!(parse_number_with_suffix("1Mi", NumfmtUnit::IecI).unwrap(), 1_048_576.0);
+        assert_eq!(
+            parse_number_with_suffix("1Ki", NumfmtUnit::IecI).unwrap(),
+            1024.0
+        );
+        assert_eq!(
+            parse_number_with_suffix("1Mi", NumfmtUnit::IecI).unwrap(),
+            1_048_576.0
+        );
     }
 
     #[test]
     fn test_format_number_none() {
-        assert_eq!(format_number(42.0, NumfmtUnit::None, "from-zero", None, None), "42");
-        assert_eq!(format_number(3.25, NumfmtUnit::None, "from-zero", None, None), "3.25");
+        assert_eq!(
+            format_number(42.0, NumfmtUnit::None, "from-zero", None, None),
+            "42"
+        );
+        assert_eq!(
+            format_number(3.25, NumfmtUnit::None, "from-zero", None, None),
+            "3.25"
+        );
     }
 
     #[test]
     fn test_format_number_si() {
-        assert_eq!(format_number(1000.0, NumfmtUnit::Si, "from-zero", None, None), "1K");
-        assert_eq!(format_number(1500.0, NumfmtUnit::Si, "from-zero", None, None), "2K");
-        assert_eq!(format_number(1_000_000.0, NumfmtUnit::Si, "from-zero", None, None), "1M");
+        assert_eq!(
+            format_number(1000.0, NumfmtUnit::Si, "from-zero", None, None),
+            "1K"
+        );
+        assert_eq!(
+            format_number(1500.0, NumfmtUnit::Si, "from-zero", None, None),
+            "2K"
+        );
+        assert_eq!(
+            format_number(1_000_000.0, NumfmtUnit::Si, "from-zero", None, None),
+            "1M"
+        );
     }
 
     #[test]
     fn test_format_number_iec() {
-        assert_eq!(format_number(1024.0, NumfmtUnit::Iec, "from-zero", None, None), "1K");
-        assert_eq!(format_number(1_048_576.0, NumfmtUnit::Iec, "from-zero", None, None), "1M");
+        assert_eq!(
+            format_number(1024.0, NumfmtUnit::Iec, "from-zero", None, None),
+            "1K"
+        );
+        assert_eq!(
+            format_number(1_048_576.0, NumfmtUnit::Iec, "from-zero", None, None),
+            "1M"
+        );
     }
 
     #[test]
     fn test_format_number_iec_i() {
-        assert_eq!(format_number(1024.0, NumfmtUnit::IecI, "from-zero", None, None), "1Ki");
-        assert_eq!(format_number(1_048_576.0, NumfmtUnit::IecI, "from-zero", None, None), "1Mi");
+        assert_eq!(
+            format_number(1024.0, NumfmtUnit::IecI, "from-zero", None, None),
+            "1Ki"
+        );
+        assert_eq!(
+            format_number(1_048_576.0, NumfmtUnit::IecI, "from-zero", None, None),
+            "1Mi"
+        );
     }
 
     #[test]
@@ -1054,31 +1161,78 @@ mod tests {
 
     #[test]
     fn test_convert_si_to_none() {
-        let result = convert_number("1K", NumfmtUnit::Si, NumfmtUnit::None, None, "from-zero", None, None).unwrap();
+        let result = convert_number(
+            "1K",
+            NumfmtUnit::Si,
+            NumfmtUnit::None,
+            None,
+            "from-zero",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(result, "1000");
     }
 
     #[test]
     fn test_convert_iec_to_none() {
-        let result = convert_number("1K", NumfmtUnit::Iec, NumfmtUnit::None, None, "from-zero", None, None).unwrap();
+        let result = convert_number(
+            "1K",
+            NumfmtUnit::Iec,
+            NumfmtUnit::None,
+            None,
+            "from-zero",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(result, "1024");
     }
 
     #[test]
     fn test_convert_none_to_si() {
-        let result = convert_number("1000", NumfmtUnit::None, NumfmtUnit::Si, None, "from-zero", None, None).unwrap();
+        let result = convert_number(
+            "1000",
+            NumfmtUnit::None,
+            NumfmtUnit::Si,
+            None,
+            "from-zero",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(result, "1K");
     }
 
     #[test]
     fn test_convert_with_suffix() {
-        let result = convert_number("1000B", NumfmtUnit::None, NumfmtUnit::Si, None, "from-zero", Some("B"), None).unwrap();
+        let result = convert_number(
+            "1000B",
+            NumfmtUnit::None,
+            NumfmtUnit::Si,
+            None,
+            "from-zero",
+            Some("B"),
+            None,
+        )
+        .unwrap();
         assert_eq!(result, "1KB");
     }
 
     #[test]
     fn test_convert_empty_input() {
-        assert!(convert_number("", NumfmtUnit::None, NumfmtUnit::None, None, "from-zero", None, None).is_err());
+        assert!(
+            convert_number(
+                "",
+                NumfmtUnit::None,
+                NumfmtUnit::None,
+                None,
+                "from-zero",
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 
     // ── Format string ──
@@ -1137,7 +1291,13 @@ mod tests {
     #[test]
     fn test_format_small_number() {
         // Numbers below base should not get a suffix
-        assert_eq!(format_number(500.0, NumfmtUnit::Si, "from-zero", None, None), "500");
-        assert_eq!(format_number(100.0, NumfmtUnit::Iec, "from-zero", None, None), "100");
+        assert_eq!(
+            format_number(500.0, NumfmtUnit::Si, "from-zero", None, None),
+            "500"
+        );
+        assert_eq!(
+            format_number(100.0, NumfmtUnit::Iec, "from-zero", None, None),
+            "100"
+        );
     }
 }

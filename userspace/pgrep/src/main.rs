@@ -541,9 +541,10 @@ fn enumerate_pids() -> Vec<u32> {
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str()
-                && let Ok(pid) = name.parse::<u32>() {
-                    pids.push(pid);
-                }
+                && let Ok(pid) = name.parse::<u32>()
+            {
+                pids.push(pid);
+            }
         }
     }
     pids
@@ -998,10 +999,12 @@ fn resolve_uid(spec: &str) -> Option<u32> {
     if let Some(content) = read_file("/etc/passwd") {
         for line in content.lines() {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 3 && fields[0] == spec
-                && let Ok(uid) = fields[2].parse::<u32>() {
-                    return Some(uid);
-                }
+            if fields.len() >= 3
+                && fields[0] == spec
+                && let Ok(uid) = fields[2].parse::<u32>()
+            {
+                return Some(uid);
+            }
         }
     }
 
@@ -1021,15 +1024,17 @@ fn resolve_tty(spec: &str) -> Option<i32> {
     }
     // Strip "tty" prefix.
     if let Some(rest) = spec.strip_prefix("tty")
-        && let Ok(n) = rest.parse::<i32>() {
-            return Some(n);
-        }
+        && let Ok(n) = rest.parse::<i32>()
+    {
+        return Some(n);
+    }
     // Strip "pts/" prefix -- map to negative numbers as a convention.
     if let Some(rest) = spec.strip_prefix("pts/")
-        && let Ok(n) = rest.parse::<i32>() {
-            // Use negative as convention for pts devices.
-            return Some(-(n + 1));
-        }
+        && let Ok(n) = rest.parse::<i32>()
+    {
+        // Use negative as convention for pts devices.
+        return Some(-(n + 1));
+    }
     // Return tty number 0 for "?" meaning no terminal.
     if spec == "?" || spec == "none" {
         return Some(0);
@@ -1274,21 +1279,24 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                 // Check for -<SIGNAL> (pkill mode).
                 if mode == Mode::Pkill
                     && let Some(stripped) = arg.strip_prefix('-')
-                        && !stripped.is_empty() && !saw_pattern {
-                            // Try numeric signal.
-                            if let Ok(num) = stripped.parse::<u32>()
-                                && let Some(sig) = signal_by_number(num) {
-                                    opts.signal = sig.action;
-                                    i += 1;
-                                    continue;
-                                }
-                            // Try named signal.
-                            if let Some(sig) = signal_by_name(stripped) {
-                                opts.signal = sig.action;
-                                i += 1;
-                                continue;
-                            }
-                        }
+                    && !stripped.is_empty()
+                    && !saw_pattern
+                {
+                    // Try numeric signal.
+                    if let Ok(num) = stripped.parse::<u32>()
+                        && let Some(sig) = signal_by_number(num)
+                    {
+                        opts.signal = sig.action;
+                        i += 1;
+                        continue;
+                    }
+                    // Try named signal.
+                    if let Some(sig) = signal_by_name(stripped) {
+                        opts.signal = sig.action;
+                        i += 1;
+                        continue;
+                    }
+                }
 
                 // Unknown flag?
                 if arg.starts_with('-') && !saw_pattern {
@@ -1368,25 +1376,30 @@ fn process_matches(proc_info: &ProcessInfo, opts: &Options, my_pid: u32) -> bool
 
     // Apply non-pattern filters first.
     if let Some(ppid) = opts.parent_pid
-        && proc_info.ppid != ppid {
-            return false;
-        }
+        && proc_info.ppid != ppid
+    {
+        return false;
+    }
     if let Some(euid) = opts.filter_euid
-        && proc_info.euid != euid {
-            return false;
-        }
+        && proc_info.euid != euid
+    {
+        return false;
+    }
     if let Some(ruid) = opts.filter_ruid
-        && proc_info.ruid != ruid {
-            return false;
-        }
+        && proc_info.ruid != ruid
+    {
+        return false;
+    }
     if let Some(pgrp) = opts.filter_pgrp
-        && proc_info.pgrp != pgrp {
-            return false;
-        }
+        && proc_info.pgrp != pgrp
+    {
+        return false;
+    }
     if let Some(tty) = opts.filter_tty
-        && proc_info.tty != tty {
-            return false;
-        }
+        && proc_info.tty != tty
+    {
+        return false;
+    }
 
     // Pattern matching.
     let pattern = match &opts.pattern {

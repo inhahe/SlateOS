@@ -90048,37 +90048,61 @@ What remains is one rung further out and is **lane A's**, not lane C's: the
 callers still pass `0` even where they are holding a real mtime. Split out as
 `A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` below, because it is
 a different defect from this one — this entry was about the writer *fabricating*
-a time it never had, which is fixed; that one is about the writer *discarding*
-a time it does have. Until it is done, archives SlateOS writes still carry no
-time, and still say so.
+a time it never had, which is fixed; that one is about the writer failing to
+*look up* a time that was available for the asking.
+
+**Update 2026-08-27:** that split-out entry is now fixed for the `zip` shell
+command, so archives written by `zip` carry real dates. `archive create` still
+writes none, tracked as `A-CREATEENTRY-HAS-NO-MTIME-SO-EVERY-ARCHIVE-FORMAT-LOSES-IT`.
 
 ---
 
 ## `A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` (lane A, 2026-08-27)
 
-**Status:** OPEN.
+**Status: FIXED 2026-08-27 for `kshell`** (steps 1 and 2 below); the
+`archive.rs` half is **split out** as its own entry,
+`A-CREATEENTRY-HAS-NO-MTIME-SO-EVERY-ARCHIVE-FORMAT-LOSES-IT`, because it is a
+different change to a different struct shared with the tar/cpio/ar writers.
+
+`tzrules::dos_datetime_from_unix` landed in `37c04848e`; the `kshell` wiring and
+its boot self-test rung 96 follow. Boot test PASS with rung 96 green, which is
+what proves it: the rung recomputes the expected DOS pair from what
+`Vfs::metadata` reports for the same file and demands the archive match, in the
+recursive arm as well as the plain one.
 
 **In short:** SlateOS can now record, for each file it puts into a ZIP archive,
 when that file was last changed — the slot in the file format exists and the
 writer fills it in. But the two places in the kernel that actually create
-archives still pass "not recorded", even though one of them has already looked
-up the real time and is throwing it away. So a `zip` command run on the shell
-produces an archive whose Date column is empty, and it does not have to be.
+archives still passed "not recorded", so a `zip` command run on the shell
+produced an archive whose Date column is empty, and it did not have to be.
 
 **Where it lives.**
 
 | Site | Has an mtime? | Passes |
 |---|---|---|
-| `kernel/src/kshell.rs` (`zip` command, ~line 131500) | **yes** — calls `Vfs::lstat`, whose `FileMeta::modified_ns` is a real wall-clock time | `dos_datetime: 0` |
+| `kernel/src/kshell.rs` (`zip` command, ~line 131500) | can get one for the cost of a second stat | `dos_datetime: 0` |
 | `kernel/src/fs/archive.rs` `create_zip` (~line 696) | no — `CreateEntry` has no time field at all | `dos_datetime: 0` |
 
-The two are not the same problem. `kshell` is discarding a value it holds:
-`Vfs::lstat(&abs)` is called for every top-level argument, and the `Ok(meta)`
-arm looks only at `meta.entry_type`. `archive.rs` genuinely has nothing to pass
-— `CreateEntry` is `{ name, data, kind }` — so fixing it means widening that
-struct, which the tar and cpio writers alongside it would also want to honour.
+The two are not the same problem. `kshell` already stats every input, so the
+time is one call away. `archive.rs` genuinely has nothing to pass — `CreateEntry`
+is `{ name, data, kind }` — so fixing it means widening that struct, which the
+tar and cpio writers alongside it would also want to honour.
 
-**Why it is not already fixed.** The missing piece is an *encoder*: something
+**Correction, 2026-08-27, found while fixing this.** The sentence originally
+here — that `kshell` "is discarding a value it holds", because `Vfs::lstat(&abs)`
+returns a `FileMeta` whose `modified_ns` the `Ok(meta)` arm ignores — was
+**wrong**, and so was the title's "THEY ALREADY HAVE". `Vfs::lstat` returns a
+`DirEntry` (`vfs.rs:3458`), which is `{ name, entry_type, size }` and carries no
+timestamps at all; the only call that yields an mtime is `Vfs::metadata`
+(`vfs.rs:2996`), which nothing on this path made. The defect is real and the fix
+below is unchanged in substance, but it costs an extra stat per member rather
+than being free. Recorded rather than silently edited because the mistake is
+instructive: the entry was written from a grep for `lstat` plus an assumption
+about what it returns, and a reader who trusted step 2 verbatim would have
+written `meta.modified_ns` and hit `E0609`. It did — see the compile error in
+the fixing session.
+
+**Why it was not already fixed.** The missing piece was an *encoder*: something
 that turns nanoseconds-since-the-Unix-epoch into the packed MS-DOS date/time
 pair the format wants. That needs a calendar, and the decision recorded in
 design-decisions.md §621 is that `ziparchive` must not own one — it is `no_std`
@@ -90097,24 +90121,117 @@ depends on (`kernel/Cargo.toml:26`).
    `A-ZIPARCHIVE-CREATE-STAMPED-EVERY-MEMBER-1980-01-01` was about. Seconds are
    stored halved, so an odd second must round consistently; round *down*, so a
    recorded time is never later than the real one.
-2. In `kshell.rs`, keep the `FileMeta` from the `lstat` that already happens,
-   carry `modified_ns` alongside the path in `input_files`, and convert at the
-   `ZipWriteEntry` construction. Note the recursive arm: `zip_collect_files`
-   does not currently stat what it collects, so it needs the same treatment or
-   it will silently keep passing `0` for everything under `-r`.
+   **Done** — `37c04848e`, with seven tests including both range edges, a leap
+   day, odd-second rounding, and a walk over every representable day.
+2. In `kshell.rs`, carry the mtime alongside the path in `input_files` and
+   convert at the `ZipWriteEntry` construction. Note the recursive arm:
+   `zip_collect_files` does not currently stat what it collects, so it needs the
+   same treatment or it will silently keep passing `0` for everything under
+   `-r`.
+
+   **Done**, with three deviations from the plan as written, all forced by the
+   correction above:
+
+   - The `(PathBuf, PathBuf)` tuple became a `ZipInput { name, source,
+     dos_datetime }` struct. A third element would have made every call site
+     read `.0`/`.1`/`.2` over two paths that are not interchangeable.
+   - Both arms call `Vfs::metadata` explicitly, since `lstat` has no mtime to
+     carry. In `cmd_zip` that is a second call next to the `lstat`, which is
+     still needed to classify *without* following a symlink — `metadata` does
+     follow, and recursing into a symlinked directory could leave the tree the
+     user named or loop.
+   - That `metadata` follows symlinks is right rather than merely tolerable
+     here: the member's bytes come from `read_file`, which follows the link
+     too, so the recorded time describes the same bytes that get stored.
+
+   A stat that fails leaves the member timeless rather than dropping it —
+   the same outcome as a filesystem that does not track mtimes.
 3. Decide separately whether `CreateEntry` grows a `modified_ns`; that is a
-   wider change touching tar/cpio/ar and is worth its own task.
+   wider change touching tar/cpio/ar and is worth its own task. **Split out**
+   as `A-CREATEENTRY-HAS-NO-MTIME-SO-EVERY-ARCHIVE-FORMAT-LOSES-IT`.
 
 **Note on timezone.** DOS timestamps are *local* time with no zone recorded.
 The kernel has no user timezone, so a kernel-side encoder will be writing UTC
 into a slot that readers interpret as local. That is a real, known inaccuracy
 of the format rather than of this fix, and every OS writing ZIPs has it; it is
 worth a comment at the conversion site so the next reader does not "fix" it.
+Done — `zip_dos_time`'s doc comment says so, and says why shifting by a guessed
+offset would turn a known-imprecise time into a confidently wrong one.
 
 **How it was found.** Not by looking for it. While adding
 `ZipWriteEntry::dos_datetime` for lane C, the mechanical step of putting
 `dos_datetime: 0` at each construction site meant reading each one — and
-`kshell.rs` turned out to have an `lstat` result in scope three lines up.
+`kshell.rs` turned out to be stat-ing every input already.
+
+---
+
+## `A-CREATEENTRY-HAS-NO-MTIME-SO-EVERY-ARCHIVE-FORMAT-LOSES-IT` (lane A, 2026-08-27)
+
+**Status:** OPEN. Split out of
+`A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` above, whose `kshell`
+half is fixed. This is the other half, and it is a different change to a
+different struct.
+
+**In short:** the `archive create` command can write four archive formats — zip,
+tar, cpio and ar. None of them records when any file was last changed, because
+the struct the command hands to all four (`CreateEntry`) has no field for a
+time. For tar, cpio and ar this is worse than merely missing: those formats have
+no way to say "unknown", so the zero being written **is** a date, and it reads
+as **1970-01-01 00:00:00**. Every file in every tar SlateOS writes claims to
+have been last modified at the dawn of the Unix epoch.
+
+**Why zip and tar differ, and why that matters.** In ZIP, `0` is not a date at
+all — it is day 0 of month 0, which no calendar can name, so a reader shows a
+blank and is telling the truth (design-decisions.md §618, §621). In tar, cpio
+and ar the field is a plain count of seconds since 1970, so `0` is exactly as
+valid as any other value and a reader has no way to tell a missing time from a
+genuine one. The same literal zero is honest in one format and a fabrication in
+the other three. This is the same trap as
+`A-ZIPARCHIVE-CREATE-STAMPED-EVERY-MEMBER-1980-01-01`, arrived at from the
+opposite direction: there a made-up date was written where none was known; here
+a "none" sentinel is written into a format that reads it as a date.
+
+**Where it lives.** `kernel/src/fs/archive.rs`:
+
+| Site | Field | Currently | What a reader sees |
+|---|---|---|---|
+| `CreateEntry` (~115) | — | `{ name, data, kind }`, no time at all | — |
+| `create_zip` (~692) | `dos_datetime` | `0` | blank — honest |
+| `create_tar` (~712) | `mtime` | `0` | `1970-01-01` — a fabrication |
+| `create_cpio` (~735) | `mtime` | `0` | `1970-01-01` — a fabrication |
+| `create_ar` (~760) | `mtime` | `0` | `1970-01-01` — a fabrication |
+
+Note that three of the four writers **already have the field** and are passing a
+literal zero into it. Only the source of the value is missing, which is why this
+is one change to `CreateEntry` and not four changes to four writers.
+
+**What the proper fix looks like.**
+
+1. Add `pub modified_ns: Timestamp` to `CreateEntry`, using the same `0 = not
+   available` convention as `FileMeta::modified_ns`, and update the construction
+   sites (there are several in `archive.rs`'s own self-tests).
+2. `create_zip` converts with `tzrules::dos_datetime_from_unix(modified_ns /
+   1_000_000_000)`, which already maps 0 → 0 because 1970 is before the DOS
+   epoch. That helper exists as of `37c04848e`; this is now the second caller,
+   which is the condition §621 said should trigger sharing it.
+3. tar/cpio/ar take `modified_ns / 1_000_000_000` directly — no calendar needed,
+   the field is already Unix seconds. **They still need a decision for the
+   unknown case**, since 0 means 1970 to them and there is no sentinel. The
+   likely answer is that the caller must supply a real time and the writers stop
+   pretending otherwise; a survey of what GNU tar does with an unknown mtime
+   would settle it.
+4. Whoever calls `archive::create` must then actually stat its inputs. Check
+   each caller — a widened struct that everyone fills with `0` fixes nothing.
+
+**Why it is worth doing separately.** Widening `CreateEntry` touches every
+construction site and all four writers, and step 3 contains a real open question
+about formats with no "unknown" encoding. Bundling that into the `kshell` fix
+would have held a working, tested, boot-verified change behind an unresolved
+design question.
+
+**How it was found.** By fixing the entry above: `archive.rs` was the second of
+the two sites listed there, and reading it showed that the missing time was not
+merely unwired but had nowhere to live.
 
 ---
 

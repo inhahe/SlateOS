@@ -244,6 +244,23 @@ pub fn parse_zip(path: &Path, bytes: Vec<u8>) -> Result<ArchiveModel, ArchiveErr
 ///   UTC — which is also what `format_date` renders in
 ///   (`TD-NO-SYSTEM-DEFAULT-ZONE-WITHOUT-TZ`), making the round trip show back
 ///   exactly the digits the archive stored.
+///
+/// # The inverse is already written — do not write a second one
+///
+/// When this app grows a writing side, the encoder it needs is
+/// [`guitk::tzrules::dos_datetime_from_unix`], which lane A landed in `37c04848e`
+/// (`requests/a-c-the-dos-encoder-already-exists-dont-write-it.md`). It packs
+/// `(date << 16) | time` exactly as this function unpacks it, refuses anything
+/// outside `DOS_EPOCH_UNIX ..= DOS_END_UNIX` by returning the same `0` sentinel
+/// this function reads as "not recorded", and rounds odd seconds *down* so a
+/// stored time is never later than the real one. It takes **seconds**, not
+/// nanoseconds.
+///
+/// The decoder stays here rather than being hoisted to join it, because it does
+/// more than decode: the month/day range check above is a decision about whether
+/// there is a date to render at all, and moving it into a calendar crate would
+/// either lose that check or drag a rendering decision somewhere it does not
+/// belong. Nothing outside `apps/**` decodes a pair today.
 #[must_use]
 pub fn dos_datetime_to_unix(pair: u32) -> u64 {
     if pair == 0 {

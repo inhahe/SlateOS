@@ -2048,7 +2048,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert!(metrics_str.contains("os_http_requests_total "));
         assert!(metrics_str.contains("os_dns_cache_entries "));
         assert!(metrics_str.contains("os_tasks_total "));
-        assert!(metrics_str.contains("os_net_rx_bytes_total "));
+        // Net counters carry a `source` label so a scraper can tell frames on
+        // the wire from frames between namespaces.  Assert a labelled *sample*
+        // for every source, not `"os_net_rx_bytes_total "` with a trailing
+        // space: that fragment is satisfied by the `# HELP`/`# TYPE` lines
+        // alone, so it would still pass on a build that emitted no samples at
+        // all -- which is exactly what it did when the label was introduced.
+        for src in crate::net::interface::Source::ALL {
+            let expected = format!("os_net_rx_bytes_total{{source=\"{}\"}}", src.name());
+            assert!(metrics_str.contains(&expected));
+        }
         // New TCP metrics.
         assert!(metrics_str.contains("# TYPE os_tcp_connections_active gauge"));
         assert!(metrics_str.contains("os_tcp_connections_established "));

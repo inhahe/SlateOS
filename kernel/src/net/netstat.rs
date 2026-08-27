@@ -642,8 +642,18 @@ pub fn self_test() -> KernelResult<()> {
         let formatted = format_interface_stats();
         assert!(formatted.contains("eth0"), "interface name");
         assert!(formatted.contains("MAC:"), "mac field");
-        assert!(formatted.contains("RX packets:"), "rx field");
-        assert!(formatted.contains("TX packets:"), "tx field");
+        assert!(formatted.contains("RX packets"), "rx column");
+        assert!(formatted.contains("TX packets"), "tx column");
+
+        // The point of the by-source table is that veth traffic is no longer
+        // reported as the NIC's.  Assert the split is *present*, not just that
+        // some packet counts are printed: a regression that collapsed the table
+        // back to one row would still satisfy the two assertions above.
+        assert!(formatted.contains("Traffic by source:"), "source table");
+        for src in super::interface::Source::ALL {
+            assert!(formatted.contains(src.name()), "row per source");
+        }
+        assert!(formatted.contains("total"), "total row");
 
         passed = passed.saturating_add(1);
         crate::serial_println!("[netstat]   test 7 (interface stats) PASSED");

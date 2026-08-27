@@ -231,10 +231,18 @@ pub fn format_udp_sockets(entries: &[UdpEntry]) -> String {
 }
 
 /// Format interface statistics.
+///
+/// The configuration block describes the NIC. The traffic block below it is a
+/// **row per counter source** (`net::interface::Source`) plus a total, because
+/// not every frame this stack moves goes through the card: veth pairs carry
+/// container-to-container traffic that never reaches the wire. Printing one
+/// merged set of numbers under the heading `eth0` — which is what this did
+/// until 2026-08-27 — made a busy pair of containers look like a busy NIC with
+/// no way to tell the difference from the output.
 pub fn format_interface_stats() -> String {
+    use super::interface::Source;
     use super::ipv6::Ipv6Addr;
     let info = super::interface::info();
-    let stats = super::interface::stats();
 
     let mut out = String::with_capacity(768);
     out.push_str("Interface: eth0\n");
@@ -263,18 +271,36 @@ pub fn format_interface_stats() -> String {
         }
     ));
     out.push('\n');
+    out.push_str("Traffic by source:\n");
+    out.push_str(
+        "  source  RX packets       RX bytes  TX packets       TX bytes  TX err  RX drop\n",
+    );
+    let mut total = super::interface::InterfaceStats::ZERO;
+    for src in Source::ALL {
+        let s = super::interface::stats_for(src);
+        total = total.plus(s);
+        out.push_str(&format!(
+            "  {:<6}  {:>10}  {:>13}  {:>10}  {:>13}  {:>6}  {:>7}\n",
+            src.name(),
+            s.rx_packets,
+            s.rx_bytes,
+            s.tx_packets,
+            s.tx_bytes,
+            s.tx_errors,
+            s.rx_drops
+        ));
+    }
     out.push_str(&format!(
-        "  RX packets: {:<10}  bytes: {}\n",
-        stats.rx_packets, stats.rx_bytes
+        "  {:<6}  {:>10}  {:>13}  {:>10}  {:>13}  {:>6}  {:>7}\n",
+        "total",
+        total.rx_packets,
+        total.rx_bytes,
+        total.tx_packets,
+        total.tx_bytes,
+        total.tx_errors,
+        total.rx_drops
     ));
-    out.push_str(&format!(
-        "  TX packets: {:<10}  bytes: {}\n",
-        stats.tx_packets, stats.tx_bytes
-    ));
-    out.push_str(&format!(
-        "  TX errors:  {:<10}  RX drops: {}\n",
-        stats.tx_errors, stats.rx_drops
-    ));
+    out.push_str("  (eth0 = frames on the wire; veth = between namespaces, never on the wire)\n");
 
     out
 }
@@ -343,7 +369,11 @@ pub fn format_routing() -> String {
 /// Format protocol statistics summary.
 pub fn format_protocol_stats() -> String {
     let tcp_stats = super::tcp::stats();
-    let iface_stats = super::interface::stats();
+    // The total across every counter source, not the NIC's column: a frame
+    // drained from a veth pair is handed to `ethernet::process_frame` exactly
+    // like one off the wire, so it is genuinely a packet this IP layer
+    // received. It is the *wire* attribution it lacks, not the processing.
+    let iface_stats = super::interface::stats_total();
     let dns_stats = super::dns::cache_stats();
     let (_, arp_count) = super::arp::cache_entries();
     let ndp_count = super::icmpv6::neighbor_cache_count();

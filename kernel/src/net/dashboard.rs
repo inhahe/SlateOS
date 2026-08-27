@@ -151,7 +151,9 @@ fn api_status() -> Vec<u8> {
     // Task count from scheduler.
     let task_count = crate::sched::task_list().len();
 
-    // Network interface info.
+    // Network interface info. `stats()` is the NIC's own column — the right one
+    // to sit beside this interface's IP and MAC. Veth traffic has its own column
+    // (`interface::Source::Veth`) and is reported by `/metrics` and `netstat -i`.
     let iface = crate::net::interface::info();
     let net_stats = crate::net::interface::stats();
 
@@ -236,6 +238,9 @@ fn api_tasks() -> Vec<u8> {
 
 fn api_network() -> Vec<u8> {
     let iface = crate::net::interface::info();
+    // The NIC's column: these counters are emitted under the `"interface"` key
+    // next to that interface's addresses, so they must describe the wire and not
+    // the machine's veth pairs. See net::interface::Source.
     let net_stats = crate::net::interface::stats();
     let tcp_conns = crate::net::tcp::all_connections();
 
@@ -1071,30 +1076,59 @@ fn api_metrics() -> Vec<u8> {
     prom_gauge(&mut t, "os_tasks_total", "Active task count.", task_count);
 
     // -- Network interface (L2) -----------------------------------------------
-    let net_stats = crate::net::interface::stats();
-    prom_counter(
+    //
+    // Carried on a `source` label rather than merged: `eth0` is traffic that
+    // crossed the wire, `veth` is traffic between this machine's own network
+    // namespaces. A scraper can sum the label to get the old single number; it
+    // could not have recovered the split from one.
+    let net_by_source: Vec<(&str, crate::net::interface::InterfaceStats)> =
+        crate::net::interface::Source::ALL
+            .iter()
+            .map(|s| (s.name(), crate::net::interface::stats_for(*s)))
+            .collect();
+    let rx_bytes: Vec<(&str, u64)> = net_by_source
+        .iter()
+        .map(|(n, s)| (*n, s.rx_bytes))
+        .collect();
+    let tx_bytes: Vec<(&str, u64)> = net_by_source
+        .iter()
+        .map(|(n, s)| (*n, s.tx_bytes))
+        .collect();
+    let rx_packets: Vec<(&str, u64)> = net_by_source
+        .iter()
+        .map(|(n, s)| (*n, s.rx_packets))
+        .collect();
+    let tx_packets: Vec<(&str, u64)> = net_by_source
+        .iter()
+        .map(|(n, s)| (*n, s.tx_packets))
+        .collect();
+    prom_counter_labeled(
         &mut t,
         "os_net_rx_bytes_total",
-        "Network bytes received.",
-        net_stats.rx_bytes,
+        "Network bytes received, by counter source.",
+        "source",
+        &rx_bytes,
     );
-    prom_counter(
+    prom_counter_labeled(
         &mut t,
         "os_net_tx_bytes_total",
-        "Network bytes transmitted.",
-        net_stats.tx_bytes,
+        "Network bytes transmitted, by counter source.",
+        "source",
+        &tx_bytes,
     );
-    prom_counter(
+    prom_counter_labeled(
         &mut t,
         "os_net_rx_packets_total",
-        "Network packets received.",
-        net_stats.rx_packets,
+        "Network packets received, by counter source.",
+        "source",
+        &rx_packets,
     );
-    prom_counter(
+    prom_counter_labeled(
         &mut t,
         "os_net_tx_packets_total",
-        "Network packets transmitted.",
-        net_stats.tx_packets,
+        "Network packets transmitted, by counter source.",
+        "source",
+        &tx_packets,
     );
 
     // -- TCP ------------------------------------------------------------------
@@ -1395,6 +1429,40 @@ fn prom_counter(buf: &mut String, name: &str, help: &str, value: impl core::fmt:
         h = help,
         v = value,
     );
+}
+
+/// Emit a counter metric as one labelled series per entry in `series`.
+///
+/// `HELP`/`TYPE` are written once, as the exposition format requires, followed
+/// by one `name{label="…"} value` line per entry. Used where a single number
+/// would merge sources a scraper needs to tell apart — network traffic on the
+/// wire versus between namespaces, for instance; summing the label back up is
+/// the scraper's job and it can do it, whereas splitting a merged total is not
+/// possible at all.
+fn prom_counter_labeled(
+    buf: &mut String,
+    name: &str,
+    help: &str,
+    label: &str,
+    series: &[(&str, u64)],
+) {
+    use core::fmt::Write;
+    let _ = write!(
+        buf,
+        "# HELP {n} {h}\n# TYPE {n} counter\n",
+        n = name,
+        h = help
+    );
+    for (label_value, value) in series {
+        let _ = writeln!(
+            buf,
+            "{n}{{{l}=\"{lv}\"}} {v}",
+            n = name,
+            l = label,
+            lv = label_value,
+            v = value,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

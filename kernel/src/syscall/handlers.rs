@@ -12645,9 +12645,24 @@ pub fn sys_dns_reverse_resolve(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_NET_STAT` — query network interface statistics.
+/// `SYS_NET_STAT` — query network traffic statistics.
 ///
 /// `arg0`: pointer to 48-byte output buffer.
+/// `arg1`: which counter source to report —
+///   - `0` — **every source summed** (the historical meaning of this call, and
+///     the value a caller that predates the split will already be passing).
+///   - `1` — the NIC only: frames that actually crossed the wire.
+///   - `2` — the veth aggregate: frames moved between network namespaces on
+///     this machine, which never reached the card.
+///
+/// Any other value is [`KernelError::InvalidArgument`] rather than a silent
+/// fallback to `0`, so that a caller written against a future source cannot be
+/// handed the total and told it is that source's traffic.
+///
+/// The split exists because `net::interface` used to keep one set of counters
+/// fed by both the NIC and `net::veth::poll`, so a machine busy only between its
+/// own containers reported a busy NIC. See
+/// `known-issues.md` → `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`.
 ///
 /// Returns 0 on success.
 pub fn sys_net_stat(args: &SyscallArgs) -> SyscallResult {
@@ -12655,7 +12670,12 @@ pub fn sys_net_stat(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let stats = crate::net::interface::stats();
+    let stats = match args.arg1 {
+        0 => crate::net::interface::stats_total(),
+        1 => crate::net::interface::stats_for(crate::net::interface::Source::Nic),
+        2 => crate::net::interface::stats_for(crate::net::interface::Source::Veth),
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
 
     // Output: 6 × u64 = 48 bytes.  Packed on the stack and emitted with one
     // copy, so the six field stores run against kernel memory and the whole

@@ -573,15 +573,17 @@ pub fn poll_all() {
 
     // Process collected frames outside the lock.
     for (frame, ns_id) in &pending {
-        // Record stats via the interface module.
-        super::interface::record_rx(frame.len());
+        // Record stats via the interface module, against the veth aggregate
+        // rather than the NIC — this frame came off a virtual pair and never
+        // touched the wire. See net::interface::Source.
+        super::interface::record_rx(super::interface::Source::Veth, frame.len());
 
         // Feed into the protocol stack in the endpoint's own network
         // namespace so socket lookup and "addressed to us" checks are
         // scoped correctly (a frame drained from a container-side veth
         // endpoint is processed as that container's namespace, not root).
         if let Err(e) = super::ethernet::process_frame(frame, *ns_id) {
-            super::interface::record_rx_drop();
+            super::interface::record_rx_drop(super::interface::Source::Veth);
             crate::serial_println!("[veth] Error processing frame: {:?}", e);
         }
     }

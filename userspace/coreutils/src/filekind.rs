@@ -170,26 +170,55 @@ pub fn is_seekable(file: &mut File) -> bool {
 /// no way to name the descriptor at all.
 #[must_use]
 pub fn borrowed_stdin() -> Option<ManuallyDrop<File>> {
+    borrowed(0)
+}
+
+/// [`borrowed_stdin`] for any of the three standard descriptors.
+///
+/// `dd` needs descriptor **1** answered the same way, and for more than a
+/// question: its `seek=`, its `conv=sparse` and its post-copy `ftruncate` all
+/// operate on standard output when no `of=` was given, which is the ordinary
+/// `dd … > file` spelling. Reaching those through a borrowed `File` is what
+/// keeps `dd seek=10 > img` from being a different program than
+/// `dd seek=10 of=img`.
+///
+/// Only 0, 1 and 2 are nameable: on Windows a descriptor number is not a
+/// handle, so the mapping has to go through the three `std::io` accessors and
+/// there is no fourth. Anything else is `None`, as is a platform that is
+/// neither Unix nor Windows.
+///
+/// The same borrowing rule applies as above — the handle does not own the
+/// descriptor, and dropping it must not close it.
+#[must_use]
+pub fn borrowed(fd: i32) -> Option<ManuallyDrop<File>> {
     #[cfg(unix)]
     {
-        use std::io::stdin;
-        use std::os::fd::{AsRawFd, FromRawFd};
-        let fd = stdin().as_raw_fd();
-        // SAFETY: `fd` is standard input, which the runtime keeps open for the
-        // whole process, and `ManuallyDrop` prevents the `File` from closing it.
+        use std::os::fd::FromRawFd;
+        if !(0..=2).contains(&fd) {
+            return None;
+        }
+        // SAFETY: `fd` is one of the three standard descriptors, which the
+        // runtime keeps open for the whole process, and `ManuallyDrop`
+        // prevents the `File` from closing it.
         Some(unsafe { ManuallyDrop::new(File::from_raw_fd(fd)) })
     }
     #[cfg(all(not(unix), windows))]
     {
-        use std::io::stdin;
         use std::os::windows::io::{AsRawHandle, FromRawHandle};
-        let handle = stdin().as_raw_handle();
-        // SAFETY: as above — standard input's handle, which the runtime keeps
-        // open for the whole process, kept from being closed by `ManuallyDrop`.
+        let handle = match fd {
+            0 => std::io::stdin().as_raw_handle(),
+            1 => std::io::stdout().as_raw_handle(),
+            2 => std::io::stderr().as_raw_handle(),
+            _ => return None,
+        };
+        // SAFETY: as above — a standard descriptor's handle, which the runtime
+        // keeps open for the whole process, kept from being closed by
+        // `ManuallyDrop`.
         Some(unsafe { ManuallyDrop::new(File::from_raw_handle(handle)) })
     }
     #[cfg(all(not(unix), not(windows)))]
     {
+        let _ = fd;
         None
     }
 }

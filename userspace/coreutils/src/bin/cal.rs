@@ -2497,10 +2497,11 @@ fn build(
             match cols {
                 // The default: three months per row unless the terminal is too
                 // narrow for three, never more than three however wide it is.
-                COLUMNS_MAX_THREE => {
-                    if new_n < MONTHS_IN_YEAR_ROW {
-                        ctl.months_in_row = new_n.max(1);
-                    }
+                // The width test is a guard rather than an `if` inside the arm
+                // so that "wide enough for three" falls to the `_` arm, which
+                // is where "leave `months_in_row` at its default" already is.
+                COLUMNS_MAX_THREE if new_n < MONTHS_IN_YEAR_ROW => {
+                    ctl.months_in_row = new_n.max(1);
                 }
                 COLUMNS_AUTO => ctl.months_in_row = new_n.max(1),
                 _ => {}

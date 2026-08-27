@@ -81427,7 +81427,7 @@ one too many.
 
 ---
 
-## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 516 of 1940
+## `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH` (lane A, 2026-08-26) — **open**, 515 of 1937
 
 **In short:** the kernel has ~430 small modules that each keep a table of numbers
 and print it — how much swap is compressed, which signals a process has blocked,
@@ -81531,6 +81531,7 @@ naive way.
 |---|---|---|---|
 | 2026-08-26 | `pagecache` | 516 (unchanged, and that is the point) | category 3, fixed *without* moving this count. `mm/page_cache.rs` carries the comment "Counters (monitoring; mirror what fs::pagecache exposes for stats)" above its `STAT_HITS`/`STAT_MISSES`/`STAT_EVICTIONS` — the two halves of one intent, never joined, so `/proc/pagecache` reported a 0.00% hit rate while the cache served VFS reads and demand paging. Joined at *read* time (a projected `kernel` row) rather than by calling `record_hit` on the cache's fast path, which would put this module's spin lock and a per-device string compare inside an operation whose purpose is to beat the disk. The four `record_*` stay unreachable and now legitimately so, reserved for a per-device source that does not exist. **Lesson for the metric: it counts functions, but the defect is an unfed table.** Where the subsystem already keeps free counters, projection is the fix and the count will not move. Do not read a flat count as no progress. |
 | 2026-08-26 | `futexstat` | 516 | category 3, the sharpest instance found so far. `procfs.rs` publishes `futexstat::stats()` and `hotspots(10)` under `/proc`, and the `futexstat` shell command prints the same table — while all four of `record_wait` / `record_wake` / `record_timeout` / `record_contention` were unreachable. So `/proc`'s futex hotspot list was permanently empty and its wait/wake/timeout totals permanently zero, on a kernel whose futex implementation works. A reader takes that as *measured* zero contention. Fixed by wiring the four recorders into `kernel/src/ipc/futex.rs` at the real blocking and waking points. |
+| 2026-08-26 | `irqstat` | 515 (and 222 → 220 modules, 1940 → 1937 mutators) | category 3, the third projection — and **the first one where deleting the mutators was right**, against this entry's own standing advice. `/proc/irqstat` and the `irqstat` command served per-IRQ-line counts, per-CPU interrupt totals and ISR latency while all six of `record`/`record_latency`/`mark_spurious`/`register_irq`/`register_cpu`/`init_defaults` were unreachable; before that the table was seeded with five fictional IRQ lines and four fictional per-CPU rows. Rewritten as a stateless projection of `idt::vector_counts()` — no `STATE`, no lock, nothing to seed or reset — which also makes `A-FS-ACCOUNTING-TABLES-ARE-CLOSED-FOR-THE-WHOLE-BOOT` inapplicable to this module by construction rather than by care. **Why deletion, when the rule above says the function is usually right and the caller is what is missing:** here the functions were the wrong *shape*, not merely uncalled. `record(cpu, irq)` presumes a per-CPU per-line table the kernel's counter architecture cannot feed (`VECTOR_COUNTS` is one flat global array), and `IrqLine::spurious`/`affinity_mask` and the whole `CpuIrqState` latency pair had no source at all — they *were* the fabrication surface. Keeping them would not have preserved evidence of an unfed number; it would have preserved an invitation to the wrong fix, namely a second counter of the same event on the ISR path, which is two numbers that can disagree with nothing to say which is right. The `IrqType` enum went the same way: `Timer`/`Keyboard`/`Disk`/`Network`/`Usb`/`Gpu` is a guess about which device sits behind a line, and the kernel does not know that, so it is now `Timer`/`Device`/`Ipi`/`Spurious`/`Unassigned` — derived from the vector number, which the kernel *does* know. **Read the count change with care:** unlike the two rows below, this one moves the metric by removing functions rather than by wiring callers, so the drop is not five modules' worth of progress. That is the mirror of the `pagecache` lesson — the metric counts functions, and the defect is an unfed table. |
 | 2026-08-26 | `netdev` | 516 (unchanged, and that is the point) | category 3, the second projection. `/proc/netdev` listed no interfaces and reported `total_rx_bytes: 0` on a kernel that had just completed a DHCP exchange, because all six of `record_rx`/`record_tx`/`record_error`/`record_drop`/`register_iface`/`set_link_state` were unreachable -- while `net::interface` counted every frame in six relaxed atomics that `netstat -i` was already printing. The two halves of one intent, never joined, exactly as with `pagecache`. Joined at *read* time (a projected `kernel` row) rather than by calling `record_rx` per frame, which would put this module's spin lock and a string compare per interface on the path of every packet. The six `record_*`/`register_*` stay unreachable and now legitimately so, reserved for a per-NIC source that does not exist. **New finding while naming the row:** `net::interface`'s counters are not one NIC's -- `net::veth::poll` records into the same atomics, so the total includes frames that never reached the wire. The projected row is therefore named `kernel` and not `eth0`, and the conflation is logged separately as `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`. |
 
 The futexstat fix is worth reading before doing the next category-3 module,
@@ -81647,8 +81648,22 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **439 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **438 of 800 remain**
 
+> **Burn-down log.** 2026-08-26: `cmd_irqstat` (1) cleared — 439 → 438 across
+> 210 → 209 functions. **Not a burn-down; a side effect, and worth recording as
+> one.** The `irqstat register <num> <name>` subcommand guessed `0` for an
+> unparseable IRQ number and `"irqN"` for a missing name. It was not fixed — it
+> was *deleted*, along with the whole mutable table it wrote into, when
+> `fs::irqstat` became a projection of `idt::vector_counts()` (see
+> `A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS`). There is no
+> longer a table to register a line in, so the arm has no meaning to restore.
+> The general lesson: a guessed operand is sometimes a symptom of a command that
+> should not exist, rather than of a missing parse. `check-option-refusal.py`
+> found this on its own — the ledger entry claiming a site that no longer existed
+> failed the gate, which is the behaviour its header advertises and the reason
+> the counts are kept per-function rather than as a global total.
+>
 > **Burn-down log.** 2026-08-26 (thirty-second batch): `cmd_signalq` (6)
 > cleared — 445 → 439 across 211 → 210 functions. Not pinned by a rung.
 >
@@ -88100,7 +88115,27 @@ projection, to decide what the projected row could truthfully be called.
 
 ## `A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS` (lane A, 2026-08-26)
 
-**Status:** OPEN
+**Status:** ✅ FIXED 2026-08-26 — all four steps landed. Steps 1–3 (count at
+`dispatch_vector`'s choke point, widen `VECTOR_STATS_SIZE` to 256, repoint
+`kcounters`/`kstat` and narrow `kshell`'s exception line to `take(32)`) landed
+earlier; **step 4, the `fs::irqstat` projection, landed with this note.**
+
+Two corrections to the plan below, both found while implementing step 4 and
+worth keeping because both would have produced a *passing-looking* wrong result:
+
+1. **The suggested `apic::tick_count()` cross-check must be `>=`, not `==`.**
+   `TICK_COUNT` is deliberately bumped by the BSP only, so that `tick_count()`
+   stays wall-clock rate instead of advancing N× on an N-CPU machine
+   (`apic.rs:1101`). `dispatch_vector` counts the timer on *every* CPU. BSP ticks
+   are therefore a strict subset of counted timer interrupts, and the equality
+   this entry originally called for would fail on any SMP boot. The `>=` form
+   still catches the failure that was actually worth catching — a timer entry
+   path reaching `handle_timer_irq` without passing the choke point — so nothing
+   is lost. Asserted in `fs::irqstat::self_test` test 5, which reads the ticks
+   *first* so an interleaved tick can only widen the margin, never flake it.
+2. **Per-CPU attribution was not merely deferred, it was removed from the
+   output.** See the `irqstat` row in
+   `A-FS-MODULES-EXPOSE-MUTATORS-NOTHING-CAN-REACH`'s burn-down log.
 
 **In short:** the `counters` command reports `irq.timer_irqs: 0` on a machine
 whose timer has fired millions of times, and reports `irq.total_interrupts` as a

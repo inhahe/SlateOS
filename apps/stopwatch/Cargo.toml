@@ -6,5 +6,9 @@ edition = "2024"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
 
+# The window and its clock. Without it `main` built a StopwatchApp, dropped it
+# and exited — a stopwatch with no face, no buttons, and nothing to tick it.
+oswindow = { path = "../../gui/window" }
+
 [lints]
 workspace = true

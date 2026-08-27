@@ -176,9 +176,30 @@ _LANE_BY_PREFIX = (
 
 
 def _lane_of(path: str) -> str:
-    """Which lane owns `path`?  'A' for lane A's tree and for anything
-    unattributed -- see _LANE_BY_PREFIX on why unknown defaults to us."""
+    """Which lane owns `path`?
+
+    Returns a lane letter, or `"-"` for code that belongs to no lane: a
+    third-party dependency, or anything outside this worktree.  That case must
+    be distinguished from lane A's, because "default to us" is only the safe
+    direction among *our* crates.  A rustc error inside a registry dependency
+    is not lane A's to fix any more than lane B's is -- cargo reports those with
+    an absolute path into `~/.cargo/registry` or `~/.rustup`, which matches no
+    lane prefix and would otherwise fall through to "A" and block a commit over
+    a crate nobody here can edit.
+    """
     p = path.replace("\\", "/").lstrip("./")
+
+    # Not ours: an absolute path (rustc emits workspace-relative paths for
+    # workspace members), or anything under a cargo/rustup cache.
+    if (
+        ".cargo/registry" in p
+        or ".cargo/git" in p
+        or ".rustup/" in p
+        or p.startswith("/")
+        or (len(p) > 2 and p[1] == ":")  # C:/... -- a Windows absolute path
+    ):
+        return "-"
+
     for prefix, lane in _LANE_BY_PREFIX:
         if p.startswith(prefix):
             return lane
@@ -324,14 +345,20 @@ def main() -> int:
                 print(f"    ... and {len(errors) - 20} more")
             print()
             for p in ours[:10]:
-                print(f"    lane A: {p}")
+                print(f"    lane A  : {p}")
             for p in theirs[:10]:
-                print(f"    lane {_lane_of(p)}: {p}")
+                lane = _lane_of(p)
+                who = "external" if lane == "-" else f"lane {lane} "
+                print(f"    {who}: {p}")
             print()
             if ours:
                 print("[pre-boot] a cfg(unix) arm in lane A's tree does not compile.")
                 print("           rustc discards those tokens on this Windows host, so")
                 print("           nothing else in the gate would ever have told you.")
+            elif any(_lane_of(p) == "-" for p in theirs):
+                print("[pre-boot] the breakage is outside this worktree (a dependency),")
+                print("           so it is nobody's lane and does NOT block you.  Most")
+                print("           likely a toolchain or dependency version change.")
             else:
                 print("[pre-boot] the breakage is in another lane's tree, so this does")
                 print("           NOT block you -- lane A must not write there.  File")

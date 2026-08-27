@@ -504,8 +504,30 @@ pub fn self_test() {
     serial_println!("[irqbalance]   Enable/disable: OK");
 
     // Test 6: Stats.
+    //
+    // `smp::cpu_count()` is live: an AP bumps it from `ap_entry` after
+    // `smp::init` has already returned. So `assert_eq!(st.cpu_count,
+    // smp::cpu_count())` compared two readings taken microseconds apart, and
+    // held only if no CPU came online in between -- the same shape that
+    // panicked `irqstat::self_test` over a single timer tick.
+    //
+    // Re-reading cannot fix it, but it does not have to. The counter has
+    // exactly one writer, `NUM_CPUS_ONLINE.fetch_add(1)` in `smp.rs`, and
+    // nothing anywhere decrements it, so it is monotone non-decreasing. A
+    // reading taken before the call and one taken after therefore bracket
+    // whatever `stats()` itself saw. That makes this sandwich exact rather
+    // than merely tolerant: it still fails if `stats` reports a count it could
+    // not possibly have read, which is the property the rung is here to check.
+    let before = smp::cpu_count();
     let st = stats();
-    assert_eq!(st.cpu_count, smp::cpu_count());
+    let after = smp::cpu_count();
+    assert!(
+        before <= st.cpu_count && st.cpu_count <= after,
+        "stats().cpu_count = {} is outside [{}, {}] read around the call",
+        st.cpu_count,
+        before,
+        after
+    );
     serial_println!(
         "[irqbalance]   Stats: OK (ops={}, migrations={}, cpus={})",
         st.balance_ops,

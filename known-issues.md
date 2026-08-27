@@ -88787,7 +88787,98 @@ registrant.
 
 ---
 
-## `A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES` (lane A, 2026-08-26)
+## `A-DEVFS-READ-FILE-AND-READ-AT-SERVE-DIFFERENT-NODES` (lane A, 2026-08-26)
+
+**In short:** There are two ways to read a file in this kernel — ask for the
+whole thing (`read_file`), or ask for a byte range (`read_at`). For `/dev`,
+those two answer differently about *which devices exist*. Reading all of
+`/dev/kmsg` is refused; reading the first 64 bytes of it works. Nothing is
+corrupted and nothing crashes — a caller that gets the refusal is told
+`NotSupported`, which is a coherent "use the other path" — but the split is
+undocumented and a caller has no way to know which nodes are on which side.
+
+`kernel/src/fs/devfs.rs`. `read_file` (`match rel`) serves `null`, `zero`,
+`full`, `random`, `urandom`, `console`, `tty` and nothing else at the root;
+`stdin`, `stdout`, `stderr`, `kmsg` and `uptime` fall to `_ => unserved(rel)`,
+which returns `NotSupported` for a node that exists. `read_at` serves **all**
+of them, including `kmsg` (drains the klog ring) and `uptime` (formats elapsed
+time).
+
+**Why it is not simply a bug.** `unserved`'s doc comment makes the case for the
+split deliberately, for block devices: `NotFound` "for a device `stat` just
+described would send the caller hunting for an absent node instead of using
+`read_at`". A whole-file read of an endless stream is meaningless, so refusing
+it is defensible. What is *not* defensible is that the line between the two
+sets looks arbitrary: `/dev/zero` is just as endless as `/dev/kmsg`, and it is
+served by both.
+
+**The proper fix** is to decide the rule and apply it uniformly. Two coherent
+choices:
+
+* **Every root character device serves both**, with `read_file` returning a
+  bounded chunk — which is what `zero`/`random` already do (4096 and 256 bytes
+  respectively). Cheapest, and makes `cat /dev/kmsg` work through the VFS.
+* **No root character device serves `read_file`**, all of them answering
+  `NotSupported` so a caller must use `read_at`. More honest about the fact
+  that these are streams, but it breaks any existing caller reading `/dev/zero`
+  whole, and the devfs self-test does exactly that.
+
+The first is recommended: it matches the majority of the current behaviour and
+breaks nothing.
+
+**How it was found.** Writing the regression rung for
+`A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES`. The rung's first draft asserted
+the eleven retyped nodes were readable via `read_file` and would have failed on
+four of them. It was rewritten to use `read_at`.
+
+**Not a regression.** `read_file` dispatches on the node's path and never on
+its `EntryType`, so retyping the nodes to `CharDevice` did not change which
+side of the split any of them is on. True since the nodes were added.
+
+---
+
+## `A-DEVFS-NULL-AND-ZERO-STAT-AS-REGULAR-FILES` (lane A, 2026-08-26) — ✅ FIXED 2026-08-26
+
+**Fixed.** The eleven root nodes are now `DevNode::chr_served(path, mode)` — a
+new constructor, not a reuse of `chr`. That distinction is the substance of the
+fix: `chr` documents itself as "served by the syscall layer, not by devfs" and
+hardcodes `0o660`, whereas these eleven are served by devfs's own read/write
+and carry conventional modes (`/dev/null` is `crw-rw-rw-`, `/dev/console` is
+`crw-------`). Retyping them to `chr` would have made `cat /dev/zero` an error.
+`uptime` stays `file`; it is the one node here that genuinely is one.
+
+All four blast-radius sites listed below were walked. Three findings:
+
+1. **The retype fixes a second bug that was never filed.** `container.rs`'s
+   `CharDevice | BlockDevice` arm skips device nodes when archiving, arguing
+   that writing one as an empty regular file "would be worse than skipping it:
+   extracting the archive would replace a device with a plain file of the same
+   name." That is exactly what a `tar` of `/dev` did until now, because `null`
+   was typed `File`. The walk now skips it.
+2. **`/dev/random` was escaping the page cache only by accident.**
+   `read_file_routed` skips the cache when `entry_type != File` **or**
+   `ino == 0`; devfs reports `ino: 0` from `FileMeta::minimal`, so it was the
+   second clause doing all the work. Had devfs ever gained stable inodes,
+   `/dev/random` would have silently begun serving the same bytes forever, and
+   nothing would have caught it. The exclusion is now structural, by type.
+3. **`read_file` and `read_at` serve different sets of nodes**, which the new
+   rung had to be written around. `read_file` handles null/zero/full/random/
+   urandom/console/tty; `stdin`, `stdout`, `stderr` and `kmsg` fall through to
+   `unserved` → `NotSupported` ("served here, just not by the whole-file
+   path"). Not a regression — `read_file` dispatches on path, never on
+   `EntryType`, so the retype did not change it — but it means a whole-file
+   read of `/dev/kmsg` through the VFS is refused while `read_at` works. Filed
+   below as its own entry.
+
+**Regression test.** A new rung asserts the pairing that nothing else did:
+these eleven are `CharDevice` **and** readable via `read_at`. The two halves
+catch opposite regressions — typed `file`, `[ -c ]` is false; typed `chr`, the
+syscall layer intercepts and devfs refuses the read. The existing
+`/input`,`/dri`,`/snd` loop pins the opposite pairing (CharDevice, read refused
+with `NotSupported`). `/uptime` is asserted to remain `File`, so a careless
+"make everything in here a device" fails.
+
+**Original report follows.**
 
 **In short:** `stat("/dev/null")` reports `S_IFREG` — a regular file — instead
 of `S_IFCHR`, a character device. Eleven of the twelve nodes at the devfs root

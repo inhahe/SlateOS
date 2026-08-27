@@ -171,11 +171,38 @@ impl DevNode {
         }
     }
 
+    /// A character device this filesystem serves itself.
+    ///
+    /// The sibling of [`Self::file`], and the distinction between them is
+    /// *what `stat` says*, not who does the I/O: both are read and written by
+    /// devfs's own `read_file`/`write_file`, which dispatch on the node's
+    /// **path**, never on its [`EntryType`]. `/dev/null` is a character
+    /// device that this filesystem happens to implement.
+    ///
+    /// Distinct from [`Self::chr`], where the syscall layer intercepts `open`
+    /// and devfs refuses the read. Both report `S_IFCHR`; only these are
+    /// readable through the VFS.
+    ///
+    /// Takes an explicit mode because these are the nodes with conventional
+    /// Unix permissions worth matching — `/dev/null` is `crw-rw-rw-` and
+    /// `/dev/console` is `crw-------`, where [`Self::chr`]'s nodes are
+    /// uniformly `0o660`.
+    const fn chr_served(path: &'static str, mode: u16) -> Self {
+        Self {
+            path,
+            entry_type: EntryType::CharDevice,
+            mode,
+        }
+    }
+
     /// A character device node, served by the syscall layer, not by devfs.
     ///
     /// Mode 0o660 for all of them: on Linux each is `crw-rw----` owned by a
     /// per-class group (`input`, `video`, `audio`). We have no groups yet, so
     /// the bits are the honest part and the ownership is not.
+    ///
+    /// See [`Self::chr_served`] for the nodes that are character devices *and*
+    /// served from here.
     const fn chr(path: &'static str) -> Self {
         Self {
             path,
@@ -213,20 +240,33 @@ impl DevNode {
 /// openable by exact path and invisible to everything else, which is the kind
 /// of half-existence that makes a port fail for no discoverable reason.
 const DEV_NODES: &[DevNode] = &[
-    // Utility files, served by this filesystem's own read/write.
-    DevNode::file("null", 0o666),
-    DevNode::file("zero", 0o666),
-    DevNode::file("full", 0o666),
-    DevNode::file("random", 0o666),
-    DevNode::file("urandom", 0o666),
-    DevNode::file("console", 0o600),
-    DevNode::file("tty", 0o666),
-    DevNode::file("stdin", 0o666),
-    DevNode::file("stdout", 0o666),
-    DevNode::file("stderr", 0o666),
-    DevNode::file("kmsg", 0o666),
-    // Read-only: `write_file` refuses it with NotSupported, so 0o444 is what
-    // the mode bits should have said all along.
+    // Character devices, served by this filesystem's own read/write.
+    //
+    // These are `chr_served` and not `file` because `[ -c /dev/null ]` is an
+    // ordinary idiom in configure scripts and shell libraries, and a program
+    // that special-cases a character device -- to avoid seeking, buffering or
+    // truncating it -- takes the regular-file path on anything typed `file`.
+    // That failure is quiet: the node behaves correctly when *used*, so only
+    // code that asks what it *is* gets a wrong answer, and such code usually
+    // responds by silently choosing a different strategy rather than erroring.
+    DevNode::chr_served("null", 0o666),
+    DevNode::chr_served("zero", 0o666),
+    DevNode::chr_served("full", 0o666),
+    DevNode::chr_served("random", 0o666),
+    DevNode::chr_served("urandom", 0o666),
+    DevNode::chr_served("console", 0o600),
+    DevNode::chr_served("tty", 0o666),
+    // Linux makes these three symlinks to /proc/self/fd/N. We have no such
+    // link, and of the two types actually available here `chr` is the closer
+    // answer: what they resolve to is always a character device.
+    DevNode::chr_served("stdin", 0o666),
+    DevNode::chr_served("stdout", 0o666),
+    DevNode::chr_served("stderr", 0o666),
+    DevNode::chr_served("kmsg", 0o666),
+    // The one node here that genuinely is a regular file: `uptime` is text,
+    // and nothing about it is device-like.  Read-only -- `write_file` refuses
+    // it with NotSupported, so 0o444 is what the mode bits should have said
+    // all along.
     DevNode::file("uptime", 0o444),
     // Device-node directories.
     DevNode::dir("input"),
@@ -1044,6 +1084,56 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[devfs]   stat /nonexistent: NotFound OK");
+
+    // ------------------------------------------------------------------
+    // The root nodes are character devices *and* readable from here.
+    //
+    // Both halves matter, and they are the two ways this can regress in
+    // opposite directions.  Typed `file` (as they were until this rung was
+    // written) `[ -c /dev/null ]` is false and a program that special-cases a
+    // character device silently takes the regular-file path.  Retyped to
+    // `chr`, they would be intercepted by the syscall layer and devfs would
+    // refuse the read -- turning `cat /dev/zero` into an error on a node that
+    // works.  `chr_served` is the combination, and nothing else in the table
+    // asserts it: the `/input`, `/dri` and `/snd` loop below checks the
+    // opposite pairing (CharDevice, read refused with NotSupported).
+    //
+    // `uptime` is checked as the deliberate exception.  Without it a careless
+    // "make everything here a device" would pass.
+    // ------------------------------------------------------------------
+    // The read is checked through `read_at`, not `read_file`: the two serve
+    // *different sets of nodes* here.  `read_file` handles only null, zero,
+    // full, random, urandom, console and tty; stdin/stdout/stderr/kmsg reach
+    // `unserved`, which answers `NotSupported` -- "served here, just not by
+    // the whole-file path", the same answer a block device gets.  `read_at` is
+    // the path a device read actually takes and serves all of them.
+    for name in [
+        "/null", "/zero", "/full", "/random", "/urandom", "/console", "/tty", "/stdin", "/stdout",
+        "/stderr", "/kmsg",
+    ] {
+        let st = fs.stat(Path::new(name))?;
+        if st.entry_type != EntryType::CharDevice {
+            serial_println!(
+                "[devfs]   FAIL: {} stats as {:?}, expected CharDevice",
+                name,
+                st.entry_type
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Readable through the VFS -- the property that separates these from
+        // the syscall-layer nodes, which answer NotSupported on any read.
+        if let Err(e) = fs.read_at(Path::new(name), 0, 64) {
+            serial_println!("[devfs]   FAIL: read_at {} failed: {:?}", name, e);
+            return Err(KernelError::InternalError);
+        }
+    }
+    if fs.stat(Path::new("/uptime"))?.entry_type != EntryType::File {
+        serial_println!("[devfs]   FAIL: /uptime should stay a regular file");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[devfs]   root nodes: 11 char devices readable from here, /uptime still a file OK"
+    );
 
     // ------------------------------------------------------------------
     // Device-node subdirectories.

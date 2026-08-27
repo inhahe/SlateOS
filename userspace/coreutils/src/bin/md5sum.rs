@@ -146,10 +146,14 @@ impl Md5 {
     /// One 64-byte round, on a full block.
     fn compress(state: &mut [u32; 4], block: &[u8; 64]) {
         let mut m = [0u32; 16];
-        for (word, chunk) in m.iter_mut().zip(block.chunks_exact(4)) {
-            // `chunks_exact(4)` yields exactly four bytes, so the conversion
-            // cannot fail; `unwrap_or` keeps the function panic-free anyway.
-            *word = u32::from_le_bytes(chunk.try_into().unwrap_or([0; 4]));
+        // `as_chunks` states the width as a const generic, so each item is a
+        // `&[u8; 4]` rather than a slice that happens to be four long. That is
+        // what `from_le_bytes` wants, which retires the `try_into().unwrap_or`
+        // this used to need — and with it the silent `[0; 4]` fallback, which
+        // would have digested zeroes rather than failing had it ever run.
+        let (words, _) = block.as_chunks::<4>();
+        for (word, chunk) in m.iter_mut().zip(words) {
+            *word = u32::from_le_bytes(*chunk);
         }
 
         let [mut a, mut b, mut c, mut d] = *state;
@@ -213,14 +217,14 @@ impl Md5 {
         }
 
         // `used == 0` from here on, so the tail may assign it outright.
-        let mut it = data.chunks_exact(64);
-        for chunk in it.by_ref() {
-            let mut full = [0u8; 64];
-            full.copy_from_slice(chunk);
-            Self::compress(&mut self.state, &full);
+        // `as_chunks` hands back `&[u8; 64]` blocks directly, which is what
+        // `compress` takes — so the copy into a local `full` that this used to
+        // need for the length proof is gone with it.
+        let (blocks, rest) = data.as_chunks::<64>();
+        for block in blocks {
+            Self::compress(&mut self.state, block);
         }
 
-        let rest = it.remainder();
         if let Some(dst) = self.block.get_mut(..rest.len()) {
             dst.copy_from_slice(rest);
         }
@@ -240,8 +244,12 @@ impl Md5 {
         self.absorb(&bits.to_le_bytes());
 
         let mut out = [0u8; 16];
-        for (dst, word) in out.chunks_exact_mut(4).zip(self.state) {
-            dst.copy_from_slice(&word.to_le_bytes());
+        // Const-generic width again: `dst` is a `&mut [u8; 4]`, so storing the
+        // word is a whole-array assignment that cannot be a length mismatch,
+        // rather than a `copy_from_slice` that would panic if it ever were.
+        let (dwords, _) = out.as_chunks_mut::<4>();
+        for (dst, word) in dwords.iter_mut().zip(self.state) {
+            *dst = word.to_le_bytes();
         }
         out
     }

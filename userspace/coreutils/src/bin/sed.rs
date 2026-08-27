@@ -4062,6 +4062,7 @@ fn status(quit: Option<i32>, bad: bool) -> i32 {
 )]
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
 
     fn os(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
@@ -4693,11 +4694,12 @@ mod tests {
 
     #[test]
     fn capital_w_writes_as_far_as_the_first_separator() {
-        let dir = std::env::temp_dir().join("sed-w-test");
-        let _ = fs::create_dir_all(&dir);
-        let target = dir.join("first.txt");
+        // `W` names its output file in the script, so this test needs a real
+        // path — and the path must be this test's alone. A shared one makes the
+        // "W wrote nothing" assertions read a concurrent run's bytes.
+        let dir = ScratchDir::new("sed-w-test");
+        let target = dir.path("first.txt");
         let path = target.to_string_lossy().into_owned();
-        let _ = fs::remove_file(&target);
 
         // Two lines joined by `N`, so the pattern space holds an embedded
         // separator: `W` takes the first line and terminates it, whatever the
@@ -4707,20 +4709,20 @@ mod tests {
         assert_eq!(fs::read(&target).expect("W wrote nothing"), b"a\n");
 
         // With no embedded separator, `W` writes the whole pattern space and
-        // inherits the input line's missing separator, exactly like `w`.
+        // inherits the input line's missing separator, exactly like `w`. The
+        // removal is not cleanup — it is what makes the read below prove `W`
+        // wrote, rather than re-reading the previous phase's `a\n`.
         let _ = fs::remove_file(&target);
         run_opts(&format!("W {path}"), "a", true, false);
         assert_eq!(fs::read(&target).expect("W wrote nothing"), b"a");
-        let _ = fs::remove_file(&target);
     }
 
     // ---------------- `R` ----------------
 
     #[test]
     fn capital_r_takes_one_line_per_cycle_from_a_shared_position() {
-        let dir = std::env::temp_dir().join("sed-r-test");
-        let _ = fs::create_dir_all(&dir);
-        let inc = dir.join("inc.txt");
+        let dir = ScratchDir::new("sed-r-test");
+        let inc = dir.path("inc.txt");
         fs::write(&inc, b"A\nB\nC\n").expect("writing the include");
         let path = inc.to_string_lossy().into_owned();
 
@@ -4741,7 +4743,7 @@ mod tests {
         );
 
         // A file with no final separator hands its last line over as it is.
-        let short = dir.join("short.txt");
+        let short = dir.path("short.txt");
         fs::write(&short, b"Z").expect("writing the include");
         assert_eq!(
             run(&format!("R {}", short.to_string_lossy()), "1\n"),
@@ -4751,8 +4753,6 @@ mod tests {
         // A missing file is an inclusion that is not there, which is not a
         // failure: the text comes out without it.
         assert_eq!(run(&format!("R {path}.nosuch"), "1\n2\n"), "1\n2\n");
-        let _ = fs::remove_file(&inc);
-        let _ = fs::remove_file(&short);
     }
 
     // ---------------- `--sandbox` ----------------
@@ -4819,14 +4819,11 @@ mod tests {
 
     #[test]
     fn capital_w_splits_on_the_separator_too() {
-        let dir = std::env::temp_dir().join("sed-wz-test");
-        let _ = fs::create_dir_all(&dir);
-        let target = dir.join("wz.txt");
-        let _ = fs::remove_file(&target);
+        let dir = ScratchDir::new("sed-wz-test");
+        let target = dir.path("wz.txt");
         let script = format!("N;W {}", target.to_string_lossy());
         run_sep(script.as_bytes(), b"a\0b\0", true, false, 0);
         assert_eq!(fs::read(&target).expect("W wrote nothing"), b"a\0");
-        let _ = fs::remove_file(&target);
     }
 
     // ---------------- compile errors ----------------

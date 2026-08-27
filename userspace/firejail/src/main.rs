@@ -33,8 +33,7 @@ const DEFAULT_SYMLINK_DIR: &str = "/usr/local/bin";
 // ============================================================================
 
 /// Network mode for a sandbox.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 enum NetMode {
     /// No network restrictions (host networking).
     #[default]
@@ -44,7 +43,6 @@ enum NetMode {
     /// Attach to a specific interface (bridge or physical).
     Interface(String),
 }
-
 
 impl fmt::Display for NetMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -126,8 +124,7 @@ struct FsConfig {
 // ============================================================================
 
 /// Capability drop mode.
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 enum CapsDrop {
     /// Do not drop any capabilities.
     #[default]
@@ -137,7 +134,6 @@ enum CapsDrop {
     /// Drop specific capabilities.
     List(Vec<String>),
 }
-
 
 impl fmt::Display for CapsDrop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -236,9 +232,10 @@ impl SandboxConfig {
             self.network.netfilter = true;
         }
         if matches!(self.network.mode, NetMode::Host)
-            && let Some(ref mode) = profile.net_mode {
-                self.network.mode = mode.clone();
-            }
+            && let Some(ref mode) = profile.net_mode
+        {
+            self.network.mode = mode.clone();
+        }
         for r in &profile.restrictions {
             self.filesystem.restrictions.push(r.clone());
         }
@@ -405,7 +402,10 @@ fn parse_profile_content(content: &str, source: &Path) -> Result<ProfileConfig, 
 
 /// Split a comma-separated value string into individual trimmed entries.
 fn split_csv(s: &str) -> Vec<String> {
-    s.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()
+    s.split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
 }
 
 // ============================================================================
@@ -765,8 +765,16 @@ fn write_sandbox_file(sandbox_dir: &Path, info: &SandboxInfo) -> Result<(), Stri
         cpu = info.cpu_millipercent,
         mem = info.mem_kb,
         net = info.net_mode,
-        caps = if info.caps_dropped { "dropped" } else { "retained" },
-        seccomp = if info.seccomp_enabled { "enabled" } else { "disabled" },
+        caps = if info.caps_dropped {
+            "dropped"
+        } else {
+            "retained"
+        },
+        seccomp = if info.seccomp_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
         children = children_str.join(","),
     );
     fs::write(&path, content)
@@ -813,9 +821,10 @@ fn list_available_profiles(profile_dir: &Path) -> Vec<String> {
         for entry in dir.flatten() {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("profile")
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    names.push(stem.to_string());
-                }
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                names.push(stem.to_string());
+            }
         }
     }
 
@@ -1108,9 +1117,10 @@ fn run_firejail(args: &[String]) -> i32 {
         children: Vec::new(),
     };
     if let Err(e) = write_sandbox_file(sandbox_dir, &info)
-        && config.debug {
-            eprintln!("firejail: warning: {e}");
-        }
+        && config.debug
+    {
+        eprintln!("firejail: warning: {e}");
+    }
 
     if !config.quiet {
         println!("Sandbox {sandbox_name} started (PID {our_pid})");
@@ -1177,7 +1187,10 @@ fn print_sandbox_summary(config: &SandboxConfig, name: &str, program: &str) {
         println!("  Private /dev: yes");
     }
     if !config.filesystem.private_etc.is_empty() {
-        println!("  Private /etc: {}", config.filesystem.private_etc.join(", "));
+        println!(
+            "  Private /etc: {}",
+            config.filesystem.private_etc.join(", ")
+        );
     }
     if !config.filesystem.private_bin.is_empty() {
         println!(
@@ -1485,10 +1498,7 @@ fn firemon_tree() -> i32 {
     }
 
     for entry in &entries {
-        println!(
-            "{} ({}) -- {}",
-            entry.name, entry.pid, entry.program
-        );
+        println!("{} ({}) -- {}", entry.name, entry.pid, entry.program);
         for (i, child) in entry.children.iter().enumerate() {
             let connector = if i + 1 < entry.children.len() {
                 "├── "
@@ -1701,10 +1711,7 @@ fn firecfg_fix() -> i32 {
                 }
                 _ => {
                     // Path exists but is not a firejail symlink, skip it.
-                    println!(
-                        "  Skipping {name}: {} already exists",
-                        link_path.display()
-                    );
+                    println!("  Skipping {name}: {} already exists", link_path.display());
                     skipped += 1;
                     continue;
                 }
@@ -1751,18 +1758,16 @@ fn firecfg_clean() -> i32 {
 
         // Only remove if it is a symlink pointing to firejail.
         match fs::read_link(&link_path) {
-            Ok(target) if target == firejail_path => {
-                match fs::remove_file(&link_path) {
-                    Ok(()) => {
-                        println!("  Removed: {}", link_path.display());
-                        removed += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  Error removing {}: {e}", link_path.display());
-                        errors += 1;
-                    }
+            Ok(target) if target == firejail_path => match fs::remove_file(&link_path) {
+                Ok(()) => {
+                    println!("  Removed: {}", link_path.display());
+                    removed += 1;
                 }
-            }
+                Err(e) => {
+                    eprintln!("  Error removing {}: {e}", link_path.display());
+                    errors += 1;
+                }
+            },
             _ => {
                 not_found += 1;
             }
@@ -1787,8 +1792,7 @@ fn create_symlink(target: &Path, link: &Path) -> Result<(), String> {
     // symlink may not be available (e.g., Windows during development).
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target, link)
-            .map_err(|e| format!("symlink failed: {e}"))
+        std::os::unix::fs::symlink(target, link).map_err(|e| format!("symlink failed: {e}"))
     }
     #[cfg(not(unix))]
     {
@@ -1868,6 +1872,7 @@ fn main() {
 #[allow(clippy::field_reassign_with_default)] // Tests construct sandbox profiles by mutating defaults; clearer than functional-update.
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
 
     // -----------------------------------------------------------------------
     // Personality extraction tests
@@ -1917,18 +1922,12 @@ mod tests {
 
     #[test]
     fn test_personality_firemon_windows() {
-        assert_eq!(
-            extract_personality("C:\\tools\\firemon.exe"),
-            "firemon"
-        );
+        assert_eq!(extract_personality("C:\\tools\\firemon.exe"), "firemon");
     }
 
     #[test]
     fn test_personality_firecfg_windows() {
-        assert_eq!(
-            extract_personality("D:\\bin\\firecfg.exe"),
-            "firecfg"
-        );
+        assert_eq!(extract_personality("D:\\bin\\firecfg.exe"), "firecfg");
     }
 
     #[test]
@@ -1940,10 +1939,7 @@ mod tests {
 
     #[test]
     fn test_personality_mixed_separators() {
-        assert_eq!(
-            extract_personality("/usr/local\\bin/firejail"),
-            "firejail"
-        );
+        assert_eq!(extract_personality("/usr/local\\bin/firejail"), "firejail");
     }
 
     #[test]
@@ -1973,10 +1969,7 @@ mod tests {
 
     #[test]
     fn test_net_mode_display_interface() {
-        assert_eq!(
-            NetMode::Interface("eth0".to_string()).to_string(),
-            "eth0"
-        );
+        assert_eq!(NetMode::Interface("eth0".to_string()).to_string(), "eth0");
     }
 
     #[test]
@@ -2063,10 +2056,7 @@ mod tests {
 
     #[test]
     fn test_split_csv_with_spaces() {
-        assert_eq!(
-            split_csv("fonts , ssl , pki"),
-            vec!["fonts", "ssl", "pki"]
-        );
+        assert_eq!(split_csv("fonts , ssl , pki"), vec!["fonts", "ssl", "pki"]);
     }
 
     #[test]
@@ -2196,10 +2186,7 @@ mod tests {
 
     #[test]
     fn test_extract_option_value_present() {
-        assert_eq!(
-            extract_option_value("--net=none", "--net="),
-            Some("none")
-        );
+        assert_eq!(extract_option_value("--net=none", "--net="), Some("none"));
     }
 
     #[test]
@@ -2610,10 +2597,7 @@ mod tests {
     fn test_parse_firejail_args_net_interface() {
         let args: Vec<String> = vec!["--net=eth0".to_string(), "bash".to_string()];
         let (config, _) = parse_firejail_args(&args).unwrap();
-        assert_eq!(
-            config.network.mode,
-            NetMode::Interface("eth0".to_string())
-        );
+        assert_eq!(config.network.mode, NetMode::Interface("eth0".to_string()));
     }
 
     #[test]
@@ -2636,23 +2620,14 @@ mod tests {
 
     #[test]
     fn test_parse_firejail_args_mac() {
-        let args: Vec<String> = vec![
-            "--mac=00:11:22:33:44:55".to_string(),
-            "bash".to_string(),
-        ];
+        let args: Vec<String> = vec!["--mac=00:11:22:33:44:55".to_string(), "bash".to_string()];
         let (config, _) = parse_firejail_args(&args).unwrap();
-        assert_eq!(
-            config.network.ip.mac,
-            Some("00:11:22:33:44:55".to_string())
-        );
+        assert_eq!(config.network.ip.mac, Some("00:11:22:33:44:55".to_string()));
     }
 
     #[test]
     fn test_parse_firejail_args_hostname() {
-        let args: Vec<String> = vec![
-            "--hostname=sandbox1".to_string(),
-            "bash".to_string(),
-        ];
+        let args: Vec<String> = vec!["--hostname=sandbox1".to_string(), "bash".to_string()];
         let (config, _) = parse_firejail_args(&args).unwrap();
         assert_eq!(config.network.hostname, Some("sandbox1".to_string()));
     }
@@ -2783,20 +2758,14 @@ mod tests {
 
     #[test]
     fn test_parse_firejail_args_name() {
-        let args: Vec<String> = vec![
-            "--name=mybox".to_string(),
-            "bash".to_string(),
-        ];
+        let args: Vec<String> = vec!["--name=mybox".to_string(), "bash".to_string()];
         let (config, _) = parse_firejail_args(&args).unwrap();
         assert_eq!(config.name, Some("mybox".to_string()));
     }
 
     #[test]
     fn test_parse_firejail_args_blacklist() {
-        let args: Vec<String> = vec![
-            "--blacklist=/boot".to_string(),
-            "bash".to_string(),
-        ];
+        let args: Vec<String> = vec!["--blacklist=/boot".to_string(), "bash".to_string()];
         let (config, _) = parse_firejail_args(&args).unwrap();
         assert_eq!(
             config.filesystem.restrictions,
@@ -2806,10 +2775,7 @@ mod tests {
 
     #[test]
     fn test_parse_firejail_args_whitelist() {
-        let args: Vec<String> = vec![
-            "--whitelist=/home/user".to_string(),
-            "bash".to_string(),
-        ];
+        let args: Vec<String> = vec!["--whitelist=/home/user".to_string(), "bash".to_string()];
         let (config, _) = parse_firejail_args(&args).unwrap();
         assert_eq!(
             config.filesystem.restrictions,
@@ -2819,10 +2785,7 @@ mod tests {
 
     #[test]
     fn test_parse_firejail_args_readonly() {
-        let args: Vec<String> = vec![
-            "--read-only=/etc".to_string(),
-            "bash".to_string(),
-        ];
+        let args: Vec<String> = vec!["--read-only=/etc".to_string(), "bash".to_string()];
         let (config, _) = parse_firejail_args(&args).unwrap();
         assert_eq!(
             config.filesystem.restrictions,
@@ -2832,10 +2795,7 @@ mod tests {
 
     #[test]
     fn test_parse_firejail_args_tmpfs() {
-        let args: Vec<String> = vec![
-            "--tmpfs=/var/tmp".to_string(),
-            "bash".to_string(),
-        ];
+        let args: Vec<String> = vec!["--tmpfs=/var/tmp".to_string(), "bash".to_string()];
         let (config, _) = parse_firejail_args(&args).unwrap();
         assert_eq!(
             config.filesystem.restrictions,
@@ -2845,10 +2805,7 @@ mod tests {
 
     #[test]
     fn test_parse_firejail_args_noexec() {
-        let args: Vec<String> = vec![
-            "--noexec=/tmp".to_string(),
-            "bash".to_string(),
-        ];
+        let args: Vec<String> = vec!["--noexec=/tmp".to_string(), "bash".to_string()];
         let (config, _) = parse_firejail_args(&args).unwrap();
         assert_eq!(
             config.filesystem.restrictions,
@@ -3047,9 +3004,8 @@ mod tests {
     #[test]
     fn test_parse_sandbox_file_content() {
         // We test the parsing logic indirectly by creating a temp file.
-        let dir = env::temp_dir().join("firejail_test_parse");
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("100.sandbox");
+        let scratch = ScratchDir::new("firejail_parse");
+        let path = scratch.path("100.sandbox");
         let content = "pid=100\n\
                         name=browser\n\
                         program=firefox\n\
@@ -3074,25 +3030,22 @@ mod tests {
         assert!(info.caps_dropped);
         assert!(info.seccomp_enabled);
         assert_eq!(info.children, vec![101, 102]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_parse_sandbox_file_missing_pid() {
-        let dir = env::temp_dir().join("firejail_test_nopid");
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("bad.sandbox");
+        let scratch = ScratchDir::new("firejail_nopid");
+        let path = scratch.path("bad.sandbox");
         let content = "name=test\nprogram=bash\n";
         let _ = fs::write(&path, content);
         let result = parse_sandbox_file(&path);
         assert!(result.is_none());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_write_and_read_sandbox_file() {
-        let dir = env::temp_dir().join("firejail_test_wr");
-        let _ = fs::create_dir_all(&dir);
+        let scratch = ScratchDir::new("firejail_wr");
+        let dir = scratch.dir();
         let info = SandboxInfo {
             pid: 999,
             name: "mybox".to_string(),
@@ -3106,45 +3059,47 @@ mod tests {
             seccomp_enabled: true,
             children: vec![1000, 1001],
         };
-        write_sandbox_file(&dir, &info).unwrap();
-        let read_info = parse_sandbox_file(&dir.join("999.sandbox")).unwrap();
+        write_sandbox_file(dir, &info).unwrap();
+        let read_info = parse_sandbox_file(&scratch.path("999.sandbox")).unwrap();
         assert_eq!(read_info.pid, 999);
         assert_eq!(read_info.name, "mybox");
         assert_eq!(read_info.program, "bash");
         assert!(read_info.seccomp_enabled);
         assert!(!read_info.caps_dropped);
         assert_eq!(read_info.children, vec![1000, 1001]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_remove_sandbox_file() {
-        let dir = env::temp_dir().join("firejail_test_rm");
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("555.sandbox");
+        // This is the test that actually failed for lane C under two
+        // overlapping workspace runs: with a fixed directory name the other
+        // run held `555.sandbox` open, and Windows refuses to unlink an open
+        // file, so the removal came back as "Access is denied. (os error 5)"
+        // — a hard failure attributed to `remove_sandbox_file` rather than to
+        // the fixture.
+        let scratch = ScratchDir::new("firejail_rm");
+        let path = scratch.path("555.sandbox");
         let _ = fs::write(&path, "pid=555\nname=test\n");
         assert!(path.exists());
-        remove_sandbox_file(&dir, 555).unwrap();
+        remove_sandbox_file(scratch.dir(), 555).unwrap();
         assert!(!path.exists());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_remove_sandbox_file_nonexistent() {
-        let dir = env::temp_dir().join("firejail_test_rm_ne");
-        let _ = fs::create_dir_all(&dir);
+        let scratch = ScratchDir::new("firejail_rm_ne");
         // Should not error when file does not exist.
-        remove_sandbox_file(&dir, 9999).unwrap();
-        let _ = fs::remove_dir_all(&dir);
+        remove_sandbox_file(scratch.dir(), 9999).unwrap();
     }
 
     #[test]
     fn test_read_sandbox_entries_empty_dir() {
-        let dir = env::temp_dir().join("firejail_test_empty");
-        let _ = fs::create_dir_all(&dir);
-        let entries = read_sandbox_entries(&dir);
+        // A private directory is what makes "empty" mean empty: under a shared
+        // name a concurrent run's `100.sandbox` is a perfectly good entry, and
+        // this assertion fails on someone else's file.
+        let scratch = ScratchDir::new("firejail_empty");
+        let entries = read_sandbox_entries(scratch.dir());
         assert!(entries.is_empty());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3156,29 +3111,25 @@ mod tests {
 
     #[test]
     fn test_read_sandbox_entries_ignores_non_sandbox() {
-        let dir = env::temp_dir().join("firejail_test_ignore");
-        let _ = fs::create_dir_all(&dir);
-        let _ = fs::write(dir.join("100.sandbox"), "pid=100\nname=a\n");
-        let _ = fs::write(dir.join("readme.txt"), "not a sandbox file");
-        let entries = read_sandbox_entries(&dir);
+        let scratch = ScratchDir::new("firejail_ignore");
+        let _ = fs::write(scratch.path("100.sandbox"), "pid=100\nname=a\n");
+        let _ = fs::write(scratch.path("readme.txt"), "not a sandbox file");
+        let entries = read_sandbox_entries(scratch.dir());
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].pid, 100);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_read_sandbox_entries_sorted() {
-        let dir = env::temp_dir().join("firejail_test_sort");
-        let _ = fs::create_dir_all(&dir);
-        let _ = fs::write(dir.join("300.sandbox"), "pid=300\nname=c\n");
-        let _ = fs::write(dir.join("100.sandbox"), "pid=100\nname=a\n");
-        let _ = fs::write(dir.join("200.sandbox"), "pid=200\nname=b\n");
-        let entries = read_sandbox_entries(&dir);
+        let scratch = ScratchDir::new("firejail_sort");
+        let _ = fs::write(scratch.path("300.sandbox"), "pid=300\nname=c\n");
+        let _ = fs::write(scratch.path("100.sandbox"), "pid=100\nname=a\n");
+        let _ = fs::write(scratch.path("200.sandbox"), "pid=200\nname=b\n");
+        let entries = read_sandbox_entries(scratch.dir());
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].pid, 100);
         assert_eq!(entries[1].pid, 200);
         assert_eq!(entries[2].pid, 300);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------

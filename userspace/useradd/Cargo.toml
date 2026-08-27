@@ -3,3 +3,12 @@ name = "useradd"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+
+# `TestEnv` drew its directory name from a process-wide counter alone. A counter
+# separates the threads of one run, which is the axis a clock misses — but it
+# resets to 0 in every run, so two concurrent runs walk the same names in the
+# same order, and `TestEnv::new` opens by `remove_dir_all`-ing the path. Each
+# run therefore deletes the other's `/etc/shadow` stand-in mid-test. See
+# known-issues.md `B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS`.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

@@ -49,3 +49,11 @@ pwdb = { path = "../pwdb" }
 # so does `date`; three private copies had disagreed about what an unset `TZ`
 # means (it is `/etc/localtime`, not UTC). See `userspace/localtime`.
 localtime = { path = "../localtime" }
+
+# `sed`'s `w`/`W`/`R` tests write to a real file, because those commands take a
+# file name as an argument and there is no way to exercise them otherwise. They
+# named that file `temp_dir()/sed-w-test` and friends — one fixed path per test,
+# shared with every concurrent copy of the suite, and truncated on entry. See
+# known-issues.md `B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS`.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

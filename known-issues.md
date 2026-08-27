@@ -89190,3 +89190,34 @@ recorded as "re-run with `--timeout-scale 5`", which could never have worked: a
 deadlock does not finish at any multiple of the budget, it just fails more
 slowly. The probe is now removed and the reasoning left in its place, which
 makes the case measurable again.
+### TD-C-ARCHIVEMANAGER-HOLDS-THE-WHOLE-ARCHIVE-IN-MEMORY — 2026-08-26 — LANE C, OPEN
+
+**In short:** Opening a ZIP in the archive manager reads the entire file into
+memory and keeps it there for as long as the window is open. A 400 MB archive
+therefore costs 400 MB of RAM to *look* at, even to read one small file out of
+it, and archives over 512 MB are refused outright with a message saying so
+rather than being opened. Nothing gives a wrong answer; the program is simply
+much more expensive than it needs to be on big files, and puts a ceiling where
+there should not be one.
+
+**Where:** `apps/archivemanager/src/backend.rs` — `MAX_ARCHIVE_BYTES` and
+`open`, which does `fs::read(path)` and stores the result in
+`ArchiveSource::bytes`. Every read after that (`ziparchive::entry_data`,
+`extract_entry`) takes a `&[u8]` covering the whole archive.
+
+**Why it is like this:** `ziparchive` is a `no_std` crate with a slice API — it
+parses a `&[u8]` and hands back offsets into it. There is no seeking reader to
+give it, so the only way to call it is to have the whole file in memory. The
+512 MB cap is not arbitrary caution: without it, opening a DVD image with a
+`.zip` extension would try to allocate several gigabytes and be killed, which
+looks to the user like the program crashing on a file it should have refused.
+
+**Proper fix:** on the crate side, not this one. `ziparchive` wants a reader
+trait — something that can be asked for a byte range — so the central directory
+can be parsed from the tail of the file and each member inflated by streaming
+its own extent. The archive manager would then hold a file handle and a parsed
+directory, and `MAX_ARCHIVE_BYTES` would disappear along with the refusal
+message. That is a lane A change; it is not filed as a request yet because the
+current behaviour is correct for every archive a desktop user is likely to open,
+and the crate is a week old — asking for a second API before the first one has
+been used in anger is how APIs get designed twice.

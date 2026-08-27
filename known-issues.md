@@ -80709,13 +80709,31 @@ all fails the gate's first condition and is therefore never reported:
 |---|---|---|
 | 6 | `apps/maze` | The advertised "Timer tracking" never ticked: `elapsed_secs` was set to zero in two places, read only by `format_time`, and incremented nowhere — and `format_time` was itself never called by `render`, so even a working clock would not have reached the screen. |
 | 7 | `apps/magnifier` | No `tick_interval`, so the smoothing that `smooth_edges` promised could not have eased anything. The field was settable from the keyboard and changed nothing observable. |
+| 8 | `apps/life` | Conway's Game of Life could not advance one generation. `tick_accum`, `speed_ms` and the catch-up loop were all present and all correct; nothing ever handed them a millisecond. |
 
 The addition to the lesson: **an unwired `main` hides an unwired clock.** The
 gate looks for an app that receives events and ignores the time one; an app
 that receives no events at all is a strictly worse case and scores clean. Any
 app still on the window-wiring backlog should be assumed to have this fault
 until its clock is checked, and the check belongs in the wiring work rather
-than in a separate sweep — which is how both of these were found.
+than in a separate sweep — which is how all three of these were found.
+
+**#8 is the sub-case worth naming separately: the timekeeping was already
+right.** In the first seven, the clock's absence and the timekeeping's quality
+were separate questions that happened to have the same answer — nobody had
+written the arm, and often nobody had written a correct `tick` either
+(`apps/metronome`'s tap tempo was an empty arm whose comment read "in a real
+app this would use system time"). `apps/life` is the case where every line of
+the time handling was correct, was covered, and would survive a reading, and
+the program was still a still photograph. That is worth stating because it is
+the version of this fault that gets through a code review: a reviewer looking
+at `tick_accum += elapsed_ms; while accum >= interval { step() }` finds
+nothing to object to, and the entire fault is one match arm that is not in the
+function being read. The only reading that catches it starts at the window and
+works inwards — *what does `oswindow` call, and does that path arrive here?* —
+which is the same direction the rule above already prescribes for tests
+("test a wiring through the entry point, not the target"), and it applies to
+reading code exactly as much as to testing it.
 
 ---
 

@@ -18,18 +18,18 @@
 //! simulated with representative computation; on real Slate OS hardware the
 //! stubs would be replaced with timed kernel/driver calls.
 
-#[allow(unused_imports)]
+use std::collections::VecDeque;
+use std::process::ExitCode;
+
 use guitk::color::Color;
-#[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::fold;
-#[allow(unused_imports)]
+use guitk::frame::Rect;
+use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
-#[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::wheel;
-
-use std::collections::VecDeque;
+use oswindow::app::{self, App, Response};
 
 // ============================================================================
 // Catppuccin Mocha Theme Colors
@@ -60,8 +60,6 @@ const WINDOW_WIDTH: f32 = 960.0;
 const WINDOW_HEIGHT: f32 = 740.0;
 const TITLE_BAR_HEIGHT: f32 = 40.0;
 const TAB_BAR_HEIGHT: f32 = 36.0;
-#[allow(dead_code)]
-const SIDEBAR_WIDTH: f32 = 220.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const CONTENT_PADDING: f32 = 16.0;
 const ROW_HEIGHT: f32 = 24.0;
@@ -70,13 +68,24 @@ const BAR_CHART_HEIGHT: f32 = 16.0;
 const PROGRESS_BAR_HEIGHT: f32 = 20.0;
 const BUTTON_WIDTH: f32 = 120.0;
 const BUTTON_HEIGHT: f32 = 34.0;
+/// Space between the right-hand edge of the window and the Run button.
+const BUTTON_MARGIN: f32 = 20.0;
+/// Space between two adjacent buttons in the strip.
+const BUTTON_SPACING: f32 = 10.0;
+/// The strip's total height less the buttons in it — half above, half below,
+/// which is what puts the buttons `BUTTON_SPACING` clear of the status bar.
+const BUTTON_STRIP_MARGIN: f32 = 20.0;
 const MAX_HISTORY: usize = 10;
 
 // The History tab's furniture, above its first data row. Named because the
-// renderer stacks them and the click handler has to skip exactly the same
-// stack: it used to open-code `+ 30.0` and stop there, missing the summary
-// line and the column header, so every click landed two rows below the row
-// the user aimed at. See `BenchmarkApp::history_rows_top`.
+// renderer stacks them and a click used to have to skip exactly the same
+// stack: the handler open-coded `+ 30.0` and stopped there, missing the
+// summary line and the column header, so every click landed two rows below the
+// row the user aimed at. Clicks now land on the hit box the renderer recorded
+// as it drew the row, so there is no second sum left to get wrong. The names
+// survive as `history_rows_top_at`, which the renderer itself calls to place
+// the rows -- so the sum is made once and read by whoever needs it, rather
+// than restated.
 /// The "Benchmark History" title.
 const HISTORY_TITLE_ROW: f32 = 30.0;
 /// The best/average/worst summary line.
@@ -1190,6 +1199,164 @@ pub fn run_all_benchmarks(hardware: &HardwareInfo) -> BenchmarkResult {
 }
 
 // ============================================================================
+// Targets and layout
+// ============================================================================
+
+/// Everything in the window that answers a pointer.
+///
+/// The renderer records where it draws each of these, and the click handler
+/// asks the frame rather than re-deriving the geometry. This app is the reason
+/// that rule exists here: its History rows were located twice, by two
+/// expressions that added up different amounts of furniture, so a click
+/// selected the row two below the one under the pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// One of the tabs across the top.
+    Tab(Tab),
+    /// Start a run.
+    Run,
+    /// Write the latest run out as a text report.
+    Export,
+    /// Throw the history away. Only drawn on the History tab.
+    ClearHistory,
+    /// A row of the History tab's table, by position in the history.
+    HistoryRow(usize),
+}
+
+type Frame = guitk::frame::Frame<Target>;
+
+/// A dimension that can safely be laid out in: never negative, never NaN.
+///
+/// A window manager can hand over a zero size during a resize, and an `f32`
+/// that arrived over an event boundary can be anything at all. Both would
+/// otherwise propagate into every rectangle in the window.
+fn sane(v: f32) -> f32 {
+    if v.is_finite() { v.max(0.0) } else { 0.0 }
+}
+
+/// Take `want` pixels off the top of the space between `y` and `limit`.
+///
+/// Returns what was actually available, which is less than `want` in a window
+/// too short to hold it. Shrinking rather than clamping is the rule: `Frame`
+/// does not clip to the window, so a rectangle clamped to a fixed height in a
+/// 20 px window would record a hit box below the bottom edge, and a click that
+/// cannot happen would still be reported.
+fn take_top(y: &mut f32, limit: f32, width: f32, want: f32) -> Rect {
+    let h = want.min((limit - *y).max(0.0));
+    let r = Rect::new(0.0, *y, width, h);
+    *y += h;
+    r
+}
+
+/// Take `want` pixels off the bottom of the space between `floor` and `bottom`.
+fn take_bottom(bottom: &mut f32, floor: f32, width: f32, want: f32) -> Rect {
+    let h = want.min((*bottom - floor).max(0.0));
+    *bottom -= h;
+    Rect::new(0.0, *bottom, width, h)
+}
+
+/// `r` cut down to whatever part of it is inside `bounds`.
+fn trim(r: Rect, bounds: Rect) -> Rect {
+    r.intersect(bounds).unwrap_or(Rect::EMPTY)
+}
+
+/// Where every fixed part of the window goes, at one particular size.
+///
+/// Derived from the live window size on every frame and never remembered, so
+/// there is no stale copy to disagree with the window the user is looking at.
+struct Layout {
+    width: f32,
+    title: Rect,
+    tab_bar: Rect,
+    /// The scrollable pane between the tab bar and the button strip.
+    content: Rect,
+    /// The strip the three buttons sit in, including its margins.
+    buttons: Rect,
+    status: Rect,
+}
+
+impl Layout {
+    fn new(width: f32, height: f32) -> Self {
+        let width = sane(width);
+        let height = sane(height);
+
+        // Chrome off the top, then off the bottom; the content is what is left.
+        let mut top = 0.0;
+        let title = take_top(&mut top, height, width, TITLE_BAR_HEIGHT);
+        let tab_bar = take_top(&mut top, height, width, TAB_BAR_HEIGHT);
+
+        let mut bottom = height;
+        let status = take_bottom(&mut bottom, top, width, STATUS_BAR_HEIGHT);
+        let buttons = take_bottom(&mut bottom, top, width, BUTTON_HEIGHT + BUTTON_STRIP_MARGIN);
+
+        let content = Rect::new(0.0, top, width, (bottom - top).max(0.0));
+        Self {
+            width,
+            title,
+            tab_bar,
+            content,
+            buttons,
+            status,
+        }
+    }
+
+    /// The `index`-th tab's slice of the tab bar.
+    ///
+    /// The tabs share the window's full width equally, which is why the click
+    /// handler used to be able to get away with `x / tab_width` — and why it
+    /// silently stopped being right the moment anything else moved.
+    fn tab(&self, index: usize) -> Rect {
+        let count = Tab::all().len();
+        if count == 0 {
+            return Rect::EMPTY;
+        }
+        let w = self.width / count as f32;
+        trim(
+            Rect::new(index as f32 * w, self.tab_bar.y, w, self.tab_bar.h),
+            self.tab_bar,
+        )
+    }
+
+    /// The `slot`-th button, counting leftwards from the right-hand edge:
+    /// 0 is Run, 1 is Export, 2 is Clear History.
+    fn button(&self, slot: usize) -> Rect {
+        let step = BUTTON_WIDTH + BUTTON_SPACING;
+        let x = self.width - BUTTON_WIDTH - BUTTON_MARGIN - slot as f32 * step;
+        let y = self.buttons.y + BUTTON_STRIP_MARGIN / 2.0;
+        trim(Rect::new(x, y, BUTTON_WIDTH, BUTTON_HEIGHT), self.buttons)
+    }
+
+    fn run_button(&self) -> Rect {
+        self.button(0)
+    }
+
+    fn export_button(&self) -> Rect {
+        self.button(1)
+    }
+
+    fn clear_button(&self) -> Rect {
+        self.button(2)
+    }
+}
+
+/// Screen `y` of the History tab's first data row, given the top edge of the
+/// content pane and a scroll offset.
+///
+/// The renderer stacks the title, the summary line and the column header above
+/// the first row; the click handler used to skip only the title, so a click
+/// landed two rows below the row under the pointer. There is no click-side
+/// copy any more — the renderer calls this to *place* the rows, and a click is
+/// tested against the hit boxes it recorded while doing so. It stays a named
+/// function only because the tests need to say where a row should be, and a
+/// test that restated the sum would be no check at all.
+fn history_rows_top(content_top: f32, scroll: f32) -> f32 {
+    content_top + CONTENT_PADDING - scroll
+        + HISTORY_TITLE_ROW
+        + HISTORY_SUMMARY_ROW
+        + HISTORY_HEADER_ROW
+}
+
+// ============================================================================
 // Main Application State
 // ============================================================================
 
@@ -1288,78 +1455,86 @@ impl BenchmarkApp {
     // be recomputed independently by the renderer and the click handler, from
     // the same constants — and they disagreed. That is the divergence class in
     // `known-issues.md` (`C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-
-    // SEPARATELY`). They are derived once here.
+    // SEPARATELY`). The fixed chrome is derived once, by `Layout`; everything
+    // that scrolls is located by the hit boxes the renderer records as it
+    // draws, so there is no second expression left to disagree with the first.
     // ========================================================================
+
+    /// Where the window's fixed parts are, at the size it is now.
+    fn layout(&self) -> Layout {
+        Layout::new(self.width, self.height)
+    }
+
+    /// Adopt a new window size.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.width = sane(width);
+        self.height = sane(height);
+        // A window that just grew may have brought the end of the content into
+        // view, in which case the old offset is past the new limit.
+        self.scroll_y = self.scroll_y.clamp(0.0, self.max_scroll());
+    }
 
     /// Top edge of the scrollable content area.
     pub fn content_top(&self) -> f32 {
-        TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT
+        self.layout().content.y
     }
 
     /// Height of the scrollable content area: what is left after the title
     /// bar, the tab bar, the button strip and the status bar.
     pub fn content_height(&self) -> f32 {
-        (self.height - self.content_top() - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 20.0).max(0.0)
+        self.layout().content.h
     }
 
     /// Bottom edge of the scrollable content area.
     pub fn content_bottom_edge(&self) -> f32 {
-        self.content_top() + self.content_height()
+        self.layout().content.bottom()
     }
 
-    /// Screen `y` of the History tab's first data row, at the current scroll.
-    ///
-    /// The renderer stacks the title, the summary line and the column header
-    /// above it; the click handler skipped only the title, so a click landed
-    /// two rows below the row under the pointer. Both go through here now.
-    fn history_rows_top(&self) -> f32 {
-        self.content_top() + CONTENT_PADDING - self.scroll_y
-            + HISTORY_TITLE_ROW
-            + HISTORY_SUMMARY_ROW
-            + HISTORY_HEADER_ROW
-    }
-
-    /// Draw the active tab's content at a given scroll offset.
+    /// Draw the active tab's content into `content`, at a given scroll offset.
     ///
     /// Taking the offset as an argument rather than reading `self.scroll_y` is
     /// what lets [`Self::max_scroll`] measure the content at rest: a renderer
     /// that reads the field can only ever be asked "how tall is it *from
     /// here*", which is the question whose answer we are trying to bound.
-    fn render_active_tab(&self, tree: &mut RenderTree, scroll: f32) {
-        let top = self.content_top();
+    ///
+    /// Taking the rectangle as an argument is the same discipline applied to
+    /// size: the first frame a real window submits arrives before any resize
+    /// event, so a tab that laid itself out against the remembered size would
+    /// draw that frame at the wrong one.
+    fn render_active_tab(&self, frame: &mut Frame, content: Rect, scroll: f32) {
         match self.active_tab {
-            Tab::Overview => self.render_overview(tree, top, scroll),
+            Tab::Overview => self.render_overview(frame, content, scroll),
             Tab::Cpu => {
                 self.render_category_detail(
-                    tree,
-                    top,
+                    frame,
+                    content,
                     scroll,
                     self.history.latest().map(|r| &r.cpu),
                     "CPU",
                 );
             }
             Tab::Memory => self.render_category_detail(
-                tree,
-                top,
+                frame,
+                content,
                 scroll,
                 self.history.latest().map(|r| &r.memory),
                 "Memory",
             ),
             Tab::Disk => self.render_category_detail(
-                tree,
-                top,
+                frame,
+                content,
                 scroll,
                 self.history.latest().map(|r| &r.disk),
                 "Disk",
             ),
             Tab::Graphics => self.render_category_detail(
-                tree,
-                top,
+                frame,
+                content,
                 scroll,
                 self.history.latest().map(|r| &r.graphics),
                 "Graphics",
             ),
-            Tab::History => self.render_history_tab(tree, top, scroll),
+            Tab::History => self.render_history_tab(frame, content, scroll),
         }
     }
 
@@ -1372,9 +1547,9 @@ impl BenchmarkApp {
     /// the renderer would be one edit away from disagreeing with it — which is
     /// the whole class of bug this app already had.
     pub fn max_scroll(&self) -> f32 {
-        let mut scratch = RenderTree::new();
-        self.render_active_tab(&mut scratch, 0.0);
-        let Some(bottom) = content_bottom(&scratch.commands) else {
+        let mut scratch = Frame::new(self.width, self.height);
+        self.render_active_tab(&mut scratch, self.layout().content, 0.0);
+        let Some(bottom) = content_bottom(scratch.commands()) else {
             return 0.0;
         };
         (bottom + CONTENT_BOTTOM_MARGIN - self.content_bottom_edge()).max(0.0)
@@ -1423,9 +1598,12 @@ impl BenchmarkApp {
                 }
                 EventResult::Consumed
             }
+            // Through `resize`, not by assigning the fields: a window that got
+            // taller has less to scroll through, and a scroll offset left over
+            // from the shorter one would leave the pane parked past its own
+            // content with no way back but the wheel.
             Event::Resize { width, height } => {
-                self.width = *width as f32;
-                self.height = *height as f32;
+                self.resize(*width as f32, *height as f32);
                 EventResult::Consumed
             }
             _ => EventResult::Ignored,
@@ -1548,65 +1726,49 @@ impl BenchmarkApp {
         self.active_tab = tabs.get(prev_idx).copied().unwrap_or(Tab::Overview);
     }
 
+    /// What the frame drew at `(x, y)`, if anything.
+    ///
+    /// Asking the frame is the whole point: a control is where the renderer
+    /// put it, and nothing else in this file is entitled to a second opinion.
+    /// A control that scrolled out of the content pane is clipped away by
+    /// [`guitk::frame::Frame::hit`] and so cannot be clicked, which is what a
+    /// user sees too.
+    #[must_use]
+    pub fn target_at(&self, x: f32, y: f32) -> Option<Target> {
+        self.frame(self.width, self.height).hit_test(x, y)
+    }
+
     fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
-        // Tab bar clicks.
-        if (TITLE_BAR_HEIGHT..=TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT).contains(&y) {
-            let tab_width = self.width / Tab::all().len() as f32;
-            let idx = (x / tab_width) as usize;
-            if let Some(&tab) = Tab::all().get(idx) {
+        match self.target_at(x, y) {
+            Some(Target::Tab(tab)) => {
                 self.active_tab = tab;
                 self.scroll_y = 0.0;
-                return EventResult::Consumed;
+                EventResult::Consumed
             }
-        }
-
-        // Run button (bottom-right area).
-        let btn_x = self.width - BUTTON_WIDTH - 20.0;
-        let btn_y = self.height - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 10.0;
-        if x >= btn_x
-            && x <= btn_x + BUTTON_WIDTH
-            && y >= btn_y
-            && y <= btn_y + BUTTON_HEIGHT
-            && !self.progress.phase.is_running()
-        {
-            self.run_benchmark();
-            return EventResult::Consumed;
-        }
-
-        // Export button.
-        let export_x = btn_x - BUTTON_WIDTH - 10.0;
-        if x >= export_x && x <= export_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT
-        {
-            if !self.history.is_empty() {
-                let _report = self.export_report();
+            // A run already under way is not restarted by clicking Run again.
+            Some(Target::Run) if self.progress.phase.is_running() => EventResult::Ignored,
+            Some(Target::Run) => {
+                self.run_benchmark();
+                EventResult::Consumed
             }
-            return EventResult::Consumed;
-        }
-
-        // Clear history button (only on History tab).
-        if self.active_tab == Tab::History {
-            let clear_x = export_x - BUTTON_WIDTH - 10.0;
-            if x >= clear_x
-                && x <= clear_x + BUTTON_WIDTH
-                && y >= btn_y
-                && y <= btn_y + BUTTON_HEIGHT
-            {
+            Some(Target::Export) => {
+                if !self.history.is_empty() {
+                    let _report = self.export_report();
+                }
+                EventResult::Consumed
+            }
+            Some(Target::ClearHistory) => {
                 self.history.clear();
                 self.comparison = None;
                 self.selected_history_idx = None;
-                return EventResult::Consumed;
+                EventResult::Consumed
             }
+            Some(Target::HistoryRow(row)) => {
+                self.selected_history_idx = Some(row);
+                EventResult::Consumed
+            }
+            None => EventResult::Ignored,
         }
-
-        // History row click (on History tab).
-        if self.active_tab == Tab::History
-            && let Some(row) = self.history_row_at(x, y)
-        {
-            self.selected_history_idx = Some(row);
-            return EventResult::Consumed;
-        }
-
-        EventResult::Ignored
     }
 
     /// Which History row, if any, is drawn under `(x, y)`.
@@ -1616,53 +1778,43 @@ impl BenchmarkApp {
     /// also draws — 50 px, or just over two rows, so clicking a row selected
     /// the one two below it. It also never checked that the click was inside
     /// the content area, so a click on the button strip below selected
-    /// whichever row the arithmetic happened to land on.
+    /// whichever row the arithmetic happened to land on. Both faults were in
+    /// the arithmetic, and the arithmetic is gone: the answer now comes from
+    /// the rectangle the renderer recorded for that row.
+    #[must_use]
     pub fn history_row_at(&self, x: f32, y: f32) -> Option<usize> {
-        if !x.is_finite() || !y.is_finite() {
-            return None;
-        }
-        if x < CONTENT_PADDING || x > self.width - CONTENT_PADDING {
-            return None;
-        }
-        if y < self.content_top() || y >= self.content_bottom_edge() {
-            return None;
-        }
-        let offset = y - self.history_rows_top();
-        if offset < 0.0 {
-            return None;
-        }
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let row = (offset / ROW_HEIGHT) as usize;
-        if row < self.history.len() {
-            Some(row)
-        } else {
-            None
+        match self.target_at(x, y) {
+            Some(Target::HistoryRow(row)) => Some(row),
+            _ => None,
         }
     }
 
     fn handle_mouse_move(&mut self, x: f32, y: f32) -> EventResult {
-        let btn_x = self.width - BUTTON_WIDTH - 20.0;
-        let btn_y = self.height - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 10.0;
-        self.run_button_hover =
-            x >= btn_x && x <= btn_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT;
+        let target = self.target_at(x, y);
+        let was = (
+            self.run_button_hover,
+            self.export_button_hover,
+            self.clear_button_hover,
+        );
+        self.run_button_hover = target == Some(Target::Run);
+        self.export_button_hover = target == Some(Target::Export);
+        self.clear_button_hover = target == Some(Target::ClearHistory);
 
-        let export_x = btn_x - BUTTON_WIDTH - 10.0;
-        self.export_button_hover = x >= export_x
-            && x <= export_x + BUTTON_WIDTH
-            && y >= btn_y
-            && y <= btn_y + BUTTON_HEIGHT;
-
-        if self.active_tab == Tab::History {
-            let clear_x = export_x - BUTTON_WIDTH - 10.0;
-            self.clear_button_hover = x >= clear_x
-                && x <= clear_x + BUTTON_WIDTH
-                && y >= btn_y
-                && y <= btn_y + BUTTON_HEIGHT;
+        // A button that has just lit up (or stopped being lit) is a visible
+        // change, so it has to ask for the frame that shows it. Reporting
+        // `Ignored` unconditionally — as this did — meant the highlight only
+        // appeared if something else happened to trigger a redraw.
+        if was
+            == (
+                self.run_button_hover,
+                self.export_button_hover,
+                self.clear_button_hover,
+            )
+        {
+            EventResult::Ignored
         } else {
-            self.clear_button_hover = false;
+            EventResult::Consumed
         }
-
-        EventResult::Ignored
     }
 
     /// Export a full report of the latest benchmark run.
@@ -1687,33 +1839,60 @@ impl BenchmarkApp {
     // ========================================================================
 
     /// Render the entire UI into a `RenderTree`.
+    ///
+    /// Kept alongside the [`App::render`] the window calls, because it is what
+    /// the tests below drive the program with and what a caller holding a
+    /// `BenchmarkApp` naturally reaches for.
     pub fn render(&self) -> RenderTree {
-        let mut tree = RenderTree::new();
-
-        // Full window background.
-        tree.fill_rect(0.0, 0.0, self.width, self.height, CRUST);
-
-        self.render_title_bar(&mut tree);
-        self.render_tab_bar(&mut tree);
-        self.render_content(&mut tree);
-        self.render_status_bar(&mut tree);
-        self.render_buttons(&mut tree);
-
-        tree
+        self.frame(self.width, self.height).into_tree()
     }
 
-    fn render_title_bar(&self, tree: &mut RenderTree) {
-        tree.push(RenderCommand::FillRect {
+    /// Draw the whole window at `width` × `height`, recording as it goes where
+    /// each control ended up.
+    ///
+    /// The drawing and the hit boxes come out of one pass, which is what makes
+    /// [`Self::target_at`] answer for the window the user is actually looking
+    /// at rather than for one reconstructed from the same constants.
+    fn frame(&self, width: f32, height: f32) -> Frame {
+        let layout = Layout::new(width, height);
+        let mut frame = Frame::new(layout.width, sane(height));
+
+        // Full window background.
+        frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: self.width,
-            height: TITLE_BAR_HEIGHT,
+            width: frame.width,
+            height: frame.height,
+            color: CRUST,
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        self.render_title_bar(&mut frame, &layout);
+        self.render_tab_bar(&mut frame, &layout);
+        self.render_content(&mut frame, &layout);
+        self.render_status_bar(&mut frame, &layout);
+        self.render_buttons(&mut frame, &layout);
+
+        debug_assert!(
+            frame.is_balanced(),
+            "a clip or translation was pushed and not popped",
+        );
+        frame
+    }
+
+    fn render_title_bar(&self, frame: &mut Frame, layout: &Layout) {
+        let bar = layout.title;
+        frame.push(RenderCommand::FillRect {
+            x: bar.x,
+            y: bar.y,
+            width: bar.w,
+            height: bar.h,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: 16.0,
-            y: 12.0,
+            y: bar.y + 12.0,
             text: "Slate OS System Benchmark".into(),
             font_size: 16.0,
             color: TEXT_COLOR,
@@ -1726,9 +1905,9 @@ impl BenchmarkApp {
             "{} | {} MB RAM",
             self.hardware.cpu_model, self.hardware.ram_total_mb
         );
-        tree.push(RenderCommand::Text {
-            x: self.width - 400.0,
-            y: 14.0,
+        frame.push(RenderCommand::Text {
+            x: layout.width - 400.0,
+            y: bar.y + 14.0,
             text: hw_summary,
             font_size: 11.0,
             color: SUBTEXT0,
@@ -1738,46 +1917,44 @@ impl BenchmarkApp {
         });
     }
 
-    fn render_tab_bar(&self, tree: &mut RenderTree) {
-        let y = TITLE_BAR_HEIGHT;
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.width,
-            height: TAB_BAR_HEIGHT,
+    fn render_tab_bar(&self, frame: &mut Frame, layout: &Layout) {
+        let bar = layout.tab_bar;
+        frame.push(RenderCommand::FillRect {
+            x: bar.x,
+            y: bar.y,
+            width: bar.w,
+            height: bar.h,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let tabs = Tab::all();
-        let tab_width = self.width / tabs.len() as f32;
-        for (i, tab) in tabs.iter().enumerate() {
-            let tx = i as f32 * tab_width;
+        for (i, tab) in Tab::all().iter().enumerate() {
+            let slot = layout.tab(i);
             let is_active = *tab == self.active_tab;
 
             if is_active {
-                tree.push(RenderCommand::FillRect {
-                    x: tx,
-                    y,
-                    width: tab_width,
-                    height: TAB_BAR_HEIGHT,
+                frame.push(RenderCommand::FillRect {
+                    x: slot.x,
+                    y: slot.y,
+                    width: slot.w,
+                    height: slot.h,
                     color: SURFACE0,
                     corner_radii: CornerRadii::ZERO,
                 });
                 // Active indicator line.
-                tree.push(RenderCommand::FillRect {
-                    x: tx,
-                    y: y + TAB_BAR_HEIGHT - 2.0,
-                    width: tab_width,
-                    height: 2.0,
+                frame.push(RenderCommand::FillRect {
+                    x: slot.x,
+                    y: slot.bottom() - 2.0,
+                    width: slot.w,
+                    height: 2.0f32.min(slot.h),
                     color: BLUE,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
 
-            tree.push(RenderCommand::Text {
-                x: tx + tab_width / 2.0 - 20.0,
-                y: y + 10.0,
+            frame.push(RenderCommand::Text {
+                x: slot.x + slot.w / 2.0 - 20.0,
+                y: slot.y + 10.0,
                 text: tab.label().into(),
                 font_size: 13.0,
                 color: if is_active { TEXT_COLOR } else { SUBTEXT0 },
@@ -1786,51 +1963,49 @@ impl BenchmarkApp {
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(tab_width - 8.0),
+                max_width: Some((slot.w - 8.0).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
+
+            frame.hit(Target::Tab(*tab), slot);
         }
 
         // Separator line below tabs.
-        tree.push(RenderCommand::Line {
-            x1: 0.0,
-            y1: y + TAB_BAR_HEIGHT,
-            x2: self.width,
-            y2: y + TAB_BAR_HEIGHT,
+        frame.push(RenderCommand::Line {
+            x1: bar.x,
+            y1: bar.bottom(),
+            x2: bar.right(),
+            y2: bar.bottom(),
             color: SURFACE0,
             width: 1.0,
         });
     }
 
-    fn render_content(&self, tree: &mut RenderTree) {
-        // The rectangle comes from the same two methods the click handler and
-        // the scroll bound use; it used to be recomputed here from the raw
-        // constants, which is how the two came to disagree.
-        tree.push(RenderCommand::PushClip {
-            x: 0.0,
-            y: self.content_top(),
-            width: self.width,
-            height: self.content_height(),
-        });
+    fn render_content(&self, frame: &mut Frame, layout: &Layout) {
+        // Clipping through the frame rather than pushing the command directly
+        // is what trims the hit boxes recorded inside to the visible content
+        // area: a history row scrolled up under the tab bar records no box at
+        // all, so it cannot be clicked.
+        frame.clip(layout.content);
 
-        self.render_active_tab(tree, self.scroll_y);
+        self.render_active_tab(frame, layout.content, self.scroll_y);
 
-        tree.push(RenderCommand::PopClip);
+        frame.unclip();
     }
 
-    fn render_overview(&self, tree: &mut RenderTree, base_y: f32, scroll: f32) {
+    fn render_overview(&self, frame: &mut Frame, content: Rect, scroll: f32) {
         let x = CONTENT_PADDING;
-        let mut y = base_y + CONTENT_PADDING - scroll;
+        let mut y = content.y + CONTENT_PADDING - scroll;
 
         // Progress bar (if running or just completed).
         if self.progress.phase.is_running() || self.progress.phase.is_complete() {
-            self.render_progress_bar(tree, x, y, self.width - 2.0 * CONTENT_PADDING);
+            self.render_progress_bar(frame, x, y, content.w - 2.0 * CONTENT_PADDING);
             y += PROGRESS_BAR_HEIGHT + 20.0;
         }
 
         if let Some(result) = self.history.latest() {
             // Overall score display.
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x,
                 y,
                 text: "Overall Score".into(),
@@ -1842,7 +2017,7 @@ impl BenchmarkApp {
             });
             y += 20.0;
 
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x,
                 y,
                 text: format!("{:.0}", result.overall_score),
@@ -1857,7 +2032,7 @@ impl BenchmarkApp {
             if let Some(ref comp) = self.comparison {
                 let delta_text = format_delta(comp.overall_change_pct);
                 let delta_color = delta_color(comp.overall_change_pct);
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: x + 160.0,
                     y: y + 6.0,
                     text: delta_text,
@@ -1871,7 +2046,7 @@ impl BenchmarkApp {
             y += 40.0;
 
             // Category score cards.
-            let card_width = (self.width - 3.0 * CONTENT_PADDING) / 2.0;
+            let card_width = (content.w - 3.0 * CONTENT_PADDING) / 2.0;
             let card_height = 90.0;
             let categories: [(&str, f64, Color); 4] = [
                 ("CPU", result.cpu.composite_score, BLUE),
@@ -1887,7 +2062,7 @@ impl BenchmarkApp {
                 let cy = y + row as f32 * (card_height + 10.0);
 
                 // Card background.
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: cx,
                     y: cy,
                     width: card_width,
@@ -1897,7 +2072,7 @@ impl BenchmarkApp {
                 });
 
                 // Category name.
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: cx + 12.0,
                     y: cy + 10.0,
                     text: (*name).into(),
@@ -1909,7 +2084,7 @@ impl BenchmarkApp {
                 });
 
                 // Score.
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: cx + 12.0,
                     y: cy + 30.0,
                     text: format!("{:.0}", score),
@@ -1925,7 +2100,7 @@ impl BenchmarkApp {
                 let bar_frac = (*score / 10000.0).min(1.0) as f32;
                 let bar_y = cy + 62.0;
 
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: cx + 12.0,
                     y: bar_y,
                     width: bar_max_w,
@@ -1934,7 +2109,7 @@ impl BenchmarkApp {
                     corner_radii: CornerRadii::all(3.0),
                 });
                 if bar_frac > 0.0 {
-                    tree.push(RenderCommand::FillRect {
+                    frame.push(RenderCommand::FillRect {
                         x: cx + 12.0,
                         y: bar_y,
                         width: bar_max_w * bar_frac,
@@ -1954,7 +2129,7 @@ impl BenchmarkApp {
                         _ => 0.0,
                     };
                     let delta_text = format_delta(pct);
-                    tree.push(RenderCommand::Text {
+                    frame.push(RenderCommand::Text {
                         x: cx + card_width - 80.0,
                         y: cy + 12.0,
                         text: delta_text,
@@ -1970,7 +2145,7 @@ impl BenchmarkApp {
             y += 2.0 * (card_height + 10.0) + 20.0;
 
             // Hardware info section.
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x,
                 y,
                 text: "Hardware Info".into(),
@@ -1985,15 +2160,15 @@ impl BenchmarkApp {
             for (i, (label, value)) in self.hardware.summary_lines().iter().enumerate() {
                 let row_y = y + i as f32 * ROW_HEIGHT;
                 let bg_color = if i % 2 == 0 { BASE } else { SURFACE0 };
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x,
                     y: row_y,
-                    width: self.width - 2.0 * CONTENT_PADDING,
+                    width: content.w - 2.0 * CONTENT_PADDING,
                     height: ROW_HEIGHT,
                     color: bg_color,
                     corner_radii: CornerRadii::ZERO,
                 });
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: x + 8.0,
                     y: row_y + 4.0,
                     text: label.clone(),
@@ -2003,22 +2178,22 @@ impl BenchmarkApp {
                     max_width: Some(150.0),
                     overflow: TextOverflow::Ellipsis,
                 });
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: x + 170.0,
                     y: row_y + 4.0,
                     text: value.clone(),
                     font_size: 12.0,
                     color: TEXT_COLOR,
                     font_weight: FontWeightHint::Regular,
-                    max_width: Some(self.width - 200.0),
+                    max_width: Some(content.w - 200.0),
                     overflow: TextOverflow::Ellipsis,
                 });
             }
         } else {
             // No results yet.
-            tree.push(RenderCommand::Text {
-                x: self.width / 2.0 - 120.0,
-                y: base_y + 100.0,
+            frame.push(RenderCommand::Text {
+                x: content.w / 2.0 - 120.0,
+                y: content.y + 100.0,
                 text: "No benchmark results yet".into(),
                 font_size: 16.0,
                 color: SUBTEXT0,
@@ -2026,9 +2201,9 @@ impl BenchmarkApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            tree.push(RenderCommand::Text {
-                x: self.width / 2.0 - 140.0,
-                y: base_y + 130.0,
+            frame.push(RenderCommand::Text {
+                x: content.w / 2.0 - 140.0,
+                y: content.y + 130.0,
                 text: "Press F5 or click Run to start benchmarking".into(),
                 font_size: 13.0,
                 color: OVERLAY0,
@@ -2039,11 +2214,11 @@ impl BenchmarkApp {
         }
     }
 
-    fn render_progress_bar(&self, tree: &mut RenderTree, x: f32, y: f32, bar_width: f32) {
+    fn render_progress_bar(&self, frame: &mut Frame, x: f32, y: f32, bar_width: f32) {
         let overall = self.progress.overall_progress();
 
         // Background track.
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y,
             width: bar_width,
@@ -2055,7 +2230,7 @@ impl BenchmarkApp {
         // Filled portion.
         if overall > 0.0 {
             let fill_width = bar_width * overall;
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x,
                 y,
                 width: fill_width,
@@ -2066,7 +2241,7 @@ impl BenchmarkApp {
         }
 
         // Phase label.
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: x + 8.0,
             y: y + 3.0,
             text: format!("{} - {:.0}%", self.progress.phase.label(), overall * 100.0),
@@ -2078,7 +2253,7 @@ impl BenchmarkApp {
         });
 
         // Elapsed time.
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: x + bar_width - 60.0,
             y: y + 3.0,
             text: self.progress.elapsed_display(),
@@ -2092,16 +2267,16 @@ impl BenchmarkApp {
 
     fn render_category_detail(
         &self,
-        tree: &mut RenderTree,
-        base_y: f32,
+        frame: &mut Frame,
+        content: Rect,
         scroll: f32,
         category: Option<&CategoryResult>,
         title: &str,
     ) {
         let x = CONTENT_PADDING;
-        let mut y = base_y + CONTENT_PADDING - scroll;
+        let mut y = content.y + CONTENT_PADDING - scroll;
 
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x,
             y,
             text: format!("{} Benchmark Results", title),
@@ -2115,7 +2290,7 @@ impl BenchmarkApp {
 
         if let Some(cat) = category {
             // Composite score.
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x,
                 y,
                 text: format!("Composite Score: {:.0}", cat.composite_score),
@@ -2128,15 +2303,15 @@ impl BenchmarkApp {
             y += 30.0;
 
             // Column headers.
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x,
                 y,
-                width: self.width - 2.0 * CONTENT_PADDING,
+                width: content.w - 2.0 * CONTENT_PADDING,
                 height: ROW_HEIGHT,
                 color: SURFACE0,
                 corner_radii: CornerRadii::ZERO,
             });
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 4.0,
                 text: "Test".into(),
@@ -2146,7 +2321,7 @@ impl BenchmarkApp {
                 max_width: Some(200.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + 250.0,
                 y: y + 4.0,
                 text: "Score".into(),
@@ -2156,7 +2331,7 @@ impl BenchmarkApp {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + 420.0,
                 y: y + 4.0,
                 text: "Bar".into(),
@@ -2181,17 +2356,17 @@ impl BenchmarkApp {
                 let row_y = y + i as f32 * (ROW_HEIGHT + 4.0);
                 let bg_color = if i % 2 == 0 { BASE } else { SURFACE0 };
 
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x,
                     y: row_y,
-                    width: self.width - 2.0 * CONTENT_PADDING,
+                    width: content.w - 2.0 * CONTENT_PADDING,
                     height: ROW_HEIGHT,
                     color: bg_color,
                     corner_radii: CornerRadii::ZERO,
                 });
 
                 // Test name.
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: x + 8.0,
                     y: row_y + 4.0,
                     text: sub.name.clone(),
@@ -2204,7 +2379,7 @@ impl BenchmarkApp {
 
                 // Score value.
                 let direction_indicator = if sub.lower_is_better { " *" } else { "" };
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: x + 250.0,
                     y: row_y + 4.0,
                     text: format!("{}{}", sub.formatted_score(), direction_indicator),
@@ -2225,7 +2400,7 @@ impl BenchmarkApp {
                 let bar_x = x + 420.0;
                 let bar_w = BAR_CHART_MAX_WIDTH;
 
-                tree.push(RenderCommand::FillRect {
+                frame.push(RenderCommand::FillRect {
                     x: bar_x,
                     y: row_y + 4.0,
                     width: bar_w,
@@ -2235,7 +2410,7 @@ impl BenchmarkApp {
                 });
                 if bar_frac > 0.0 {
                     let bar_color = category_color(title);
-                    tree.push(RenderCommand::FillRect {
+                    frame.push(RenderCommand::FillRect {
                         x: bar_x,
                         y: row_y + 4.0,
                         width: bar_w * bar_frac.min(1.0),
@@ -2250,7 +2425,7 @@ impl BenchmarkApp {
             let has_lower = cat.sub_tests.iter().any(|s| s.lower_is_better);
             if has_lower {
                 let footnote_y = y + cat.sub_tests.len() as f32 * (ROW_HEIGHT + 4.0) + 10.0;
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: x + 8.0,
                     y: footnote_y,
                     text: "* lower is better".into(),
@@ -2262,7 +2437,7 @@ impl BenchmarkApp {
                 });
             }
         } else {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x,
                 y,
                 text: format!("No {} benchmark results yet. Press F5 to run.", title),
@@ -2275,11 +2450,11 @@ impl BenchmarkApp {
         }
     }
 
-    fn render_history_tab(&self, tree: &mut RenderTree, base_y: f32, scroll: f32) {
+    fn render_history_tab(&self, frame: &mut Frame, content: Rect, scroll: f32) {
         let x = CONTENT_PADDING;
-        let mut y = base_y + CONTENT_PADDING - scroll;
+        let mut y = content.y + CONTENT_PADDING - scroll;
 
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x,
             y,
             text: "Benchmark History".into(),
@@ -2292,7 +2467,7 @@ impl BenchmarkApp {
         y += HISTORY_TITLE_ROW;
 
         if self.history.is_empty() {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x,
                 y,
                 text: "No benchmark runs recorded.".into(),
@@ -2307,7 +2482,7 @@ impl BenchmarkApp {
 
         // Summary stats.
         if let Some(best) = self.history.best_overall() {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x,
                 y,
                 text: format!("Best: {:.0}  |  ", best),
@@ -2319,7 +2494,7 @@ impl BenchmarkApp {
             });
         }
         if let Some(avg) = self.history.average_overall() {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + 120.0,
                 y,
                 text: format!("Avg: {:.0}  |  ", avg),
@@ -2331,7 +2506,7 @@ impl BenchmarkApp {
             });
         }
         if let Some(worst) = self.history.worst_overall() {
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + 240.0,
                 y,
                 text: format!("Worst: {:.0}", worst),
@@ -2345,8 +2520,8 @@ impl BenchmarkApp {
         y += HISTORY_SUMMARY_ROW;
 
         // Column headers.
-        let row_width = self.width - 2.0 * CONTENT_PADDING;
-        tree.push(RenderCommand::FillRect {
+        let row_width = content.w - 2.0 * CONTENT_PADDING;
+        frame.push(RenderCommand::FillRect {
             x,
             y,
             width: row_width,
@@ -2358,7 +2533,7 @@ impl BenchmarkApp {
         let col_positions = [8.0, 40.0, 130.0, 220.0, 320.0, 410.0, 520.0];
         for (i, header) in headers.iter().enumerate() {
             let col_x = col_positions.get(i).copied().unwrap_or(0.0);
-            tree.push(RenderCommand::Text {
+            frame.push(RenderCommand::Text {
                 x: x + col_x,
                 y: y + 4.0,
                 text: (*header).into(),
@@ -2369,18 +2544,11 @@ impl BenchmarkApp {
                 overflow: TextOverflow::Clip,
             });
         }
-        y += HISTORY_HEADER_ROW;
-
-        // The furniture this renderer has just stacked must be the same stack
-        // `history_rows_top` adds up, or a click lands on a different row than
-        // the one drawn under it — which is exactly what it did.
-        debug_assert!(
-            (scroll - self.scroll_y).abs() > f32::EPSILON
-                || (y - self.history_rows_top()).abs() < 0.01,
-            "the History tab's first row is at {y}, but the click handler \
-             looks for it at {}",
-            self.history_rows_top(),
-        );
+        // Not `y += HISTORY_HEADER_ROW`: the rows are placed by the same
+        // expression a test asks where they should be, so a stack that grows a
+        // fourth piece of furniture moves the drawing and the expectation
+        // together or neither.
+        let y = history_rows_top(content.y, scroll);
 
         // History rows.
         for (i, run) in self.history.iter().enumerate() {
@@ -2394,14 +2562,19 @@ impl BenchmarkApp {
                 SURFACE0
             };
 
-            tree.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width: row_width,
-                height: ROW_HEIGHT,
+            let row = Rect::new(x, row_y, row_width, ROW_HEIGHT);
+            frame.push(RenderCommand::FillRect {
+                x: row.x,
+                y: row.y,
+                width: row.w,
+                height: row.h,
                 color: bg_color,
                 corner_radii: CornerRadii::ZERO,
             });
+            // The row is selectable exactly where it was drawn, and the clip
+            // pushed by `render_content` trims a row scrolled up under the tab
+            // bar out of existence — so the two can no longer disagree.
+            frame.hit(Target::HistoryRow(i), row);
 
             let run_num = format!("{}", i.saturating_add(1));
             let values = [
@@ -2424,7 +2597,7 @@ impl BenchmarkApp {
                     5 => LAVENDER,
                     _ => TEXT_COLOR,
                 };
-                tree.push(RenderCommand::Text {
+                frame.push(RenderCommand::Text {
                     x: x + col_x,
                     y: row_y + 4.0,
                     text: val.clone(),
@@ -2440,19 +2613,19 @@ impl BenchmarkApp {
         // Score trend mini-chart if multiple runs.
         if self.history.len() >= 2 {
             let chart_y = y + self.history.len() as f32 * ROW_HEIGHT + 20.0;
-            self.render_trend_chart(tree, x, chart_y, row_width, 100.0);
+            self.render_trend_chart(frame, x, chart_y, row_width, 100.0);
         }
     }
 
     fn render_trend_chart(
         &self,
-        tree: &mut RenderTree,
+        frame: &mut Frame,
         x: f32,
         y: f32,
         chart_width: f32,
         chart_height: f32,
     ) {
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x,
             y,
             text: "Score Trend".into(),
@@ -2465,7 +2638,7 @@ impl BenchmarkApp {
         let chart_y = y + 20.0;
 
         // Chart background.
-        tree.push(RenderCommand::FillRect {
+        frame.push(RenderCommand::FillRect {
             x,
             y: chart_y,
             width: chart_width,
@@ -2512,7 +2685,7 @@ impl BenchmarkApp {
             let x2 = x1 + step_x;
             let y2 = chart_y + chart_height - padding_bottom - curr_frac * usable_height;
 
-            tree.push(RenderCommand::Line {
+            frame.push(RenderCommand::Line {
                 x1,
                 y1,
                 x2,
@@ -2528,7 +2701,7 @@ impl BenchmarkApp {
             let px = x + 10.0 + i as f32 * step_x;
             let py = chart_y + chart_height - padding_bottom - frac * usable_height;
 
-            tree.push(RenderCommand::FillRect {
+            frame.push(RenderCommand::FillRect {
                 x: px - 3.0,
                 y: py - 3.0,
                 width: 6.0,
@@ -2539,13 +2712,14 @@ impl BenchmarkApp {
         }
     }
 
-    fn render_status_bar(&self, tree: &mut RenderTree) {
-        let y = self.height - STATUS_BAR_HEIGHT;
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
+    fn render_status_bar(&self, frame: &mut Frame, layout: &Layout) {
+        let bar = layout.status;
+        let y = bar.y;
+        frame.push(RenderCommand::FillRect {
+            x: bar.x,
             y,
-            width: self.width,
-            height: STATUS_BAR_HEIGHT,
+            width: bar.w,
+            height: bar.h,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2563,20 +2737,20 @@ impl BenchmarkApp {
             "Ready - Press F5 to run benchmark".into()
         };
 
-        tree.push(RenderCommand::Text {
+        frame.push(RenderCommand::Text {
             x: 12.0,
             y: y + 7.0,
             text: status,
             font_size: 11.0,
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
-            max_width: Some(self.width - 200.0),
+            max_width: Some((layout.width - 200.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
         });
 
         // Run count.
-        tree.push(RenderCommand::Text {
-            x: self.width - 160.0,
+        frame.push(RenderCommand::Text {
+            x: layout.width - 160.0,
             y: y + 7.0,
             text: format!("Runs: {}/{}", self.history.len(), MAX_HISTORY),
             font_size: 11.0,
@@ -2587,11 +2761,9 @@ impl BenchmarkApp {
         });
     }
 
-    fn render_buttons(&self, tree: &mut RenderTree) {
-        let btn_y = self.height - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 10.0;
-
+    fn render_buttons(&self, frame: &mut Frame, layout: &Layout) {
         // Run button.
-        let run_x = self.width - BUTTON_WIDTH - 20.0;
+        let run = layout.run_button();
         let run_color = if self.progress.phase.is_running() {
             SURFACE1
         } else if self.run_button_hover {
@@ -2599,110 +2771,66 @@ impl BenchmarkApp {
         } else {
             SURFACE0
         };
-        tree.push(RenderCommand::FillRect {
-            x: run_x,
-            y: btn_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: run_color,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        if !self.progress.phase.is_running() {
-            tree.push(RenderCommand::StrokeRect {
-                x: run_x,
-                y: btn_y,
-                width: BUTTON_WIDTH,
-                height: BUTTON_HEIGHT,
-                color: BLUE,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-        }
-        tree.push(RenderCommand::Text {
-            x: run_x + BUTTON_WIDTH / 2.0 - 18.0,
-            y: btn_y + 10.0,
-            text: if self.progress.phase.is_running() {
-                "Running...".into()
+        render_button(
+            frame,
+            run,
+            run_color,
+            BLUE,
+            // A running benchmark cannot be started again, and the missing
+            // outline is the only thing that says so — so it is drawn from the
+            // same condition the click handler refuses on.
+            !self.progress.phase.is_running(),
+            18.0,
+            if self.progress.phase.is_running() {
+                "Running..."
             } else {
-                "Run (F5)".into()
+                "Run (F5)"
             },
-            font_size: 12.0,
-            color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+            FontWeightHint::Bold,
+        );
+        // Recorded even while running: the click handler ignores the press, but
+        // a button that stops being *there* would let the click fall through to
+        // whatever is behind it, which is not what a disabled button does.
+        frame.hit(Target::Run, run);
 
         // Export button.
-        let export_x = run_x - BUTTON_WIDTH - 10.0;
+        let export = layout.export_button();
         let export_color = if self.export_button_hover {
             GREEN
         } else {
             SURFACE0
         };
-        tree.push(RenderCommand::FillRect {
-            x: export_x,
-            y: btn_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: export_color,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        tree.push(RenderCommand::StrokeRect {
-            x: export_x,
-            y: btn_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: GREEN,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        tree.push(RenderCommand::Text {
-            x: export_x + BUTTON_WIDTH / 2.0 - 28.0,
-            y: btn_y + 10.0,
-            text: "Export (Ctrl+E)".into(),
-            font_size: 12.0,
-            color: TEXT_COLOR,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        render_button(
+            frame,
+            export,
+            export_color,
+            GREEN,
+            true,
+            28.0,
+            "Export (Ctrl+E)",
+            FontWeightHint::Regular,
+        );
+        frame.hit(Target::Export, export);
 
         // Clear history button (only on History tab).
         if self.active_tab == Tab::History {
-            let clear_x = export_x - BUTTON_WIDTH - 10.0;
+            let clear = layout.clear_button();
             let clear_color = if self.clear_button_hover {
                 RED
             } else {
                 SURFACE0
             };
-            tree.push(RenderCommand::FillRect {
-                x: clear_x,
-                y: btn_y,
-                width: BUTTON_WIDTH,
-                height: BUTTON_HEIGHT,
-                color: clear_color,
-                corner_radii: CornerRadii::all(6.0),
-            });
-            tree.push(RenderCommand::StrokeRect {
-                x: clear_x,
-                y: btn_y,
-                width: BUTTON_WIDTH,
-                height: BUTTON_HEIGHT,
-                color: RED,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-            tree.push(RenderCommand::Text {
-                x: clear_x + BUTTON_WIDTH / 2.0 - 35.0,
-                y: btn_y + 10.0,
-                text: "Clear History".into(),
-                font_size: 12.0,
-                color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            render_button(
+                frame,
+                clear,
+                clear_color,
+                RED,
+                true,
+                35.0,
+                "Clear History",
+                FontWeightHint::Regular,
+            );
+            frame.hit(Target::ClearHistory, clear);
         }
     }
 }
@@ -2716,6 +2844,65 @@ impl Default for BenchmarkApp {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+/// Draw one button of the bottom strip.
+///
+/// `label_inset` is how far left of the button's centre the label starts — a
+/// stand-in for measuring the text, which the render tree cannot do here.
+///
+/// A button whose rectangle was squeezed to nothing by a short window draws
+/// nothing at all rather than a sliver, which is the same "shrink, never clamp"
+/// rule [`Layout`] follows: half a button is a lie about where it can be
+/// clicked.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one call site per button; gathering the fill/outline/label \
+              parameters into a struct would introduce more names than the \
+              three callers between them use"
+)]
+fn render_button(
+    frame: &mut Frame,
+    rect: Rect,
+    fill: Color,
+    outline: Color,
+    outlined: bool,
+    label_inset: f32,
+    label: &str,
+    weight: FontWeightHint,
+) {
+    if rect.is_empty() {
+        return;
+    }
+    frame.push(RenderCommand::FillRect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.w,
+        height: rect.h,
+        color: fill,
+        corner_radii: CornerRadii::all(6.0),
+    });
+    if outlined {
+        frame.push(RenderCommand::StrokeRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: outline,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(6.0),
+        });
+    }
+    frame.push(RenderCommand::Text {
+        x: rect.x + rect.w / 2.0 - label_inset,
+        y: rect.y + 10.0,
+        text: label.into(),
+        font_size: 12.0,
+        color: TEXT_COLOR,
+        font_weight: weight,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+}
 
 /// Color for a score value (0-10000 scale). Green for high, yellow for mid, red for low.
 fn score_color(score: f64) -> Color {
@@ -2764,10 +2951,73 @@ fn category_color(name: &str) -> Color {
 }
 
 // ============================================================================
-// Entry point (placeholder for Slate OS)
+// Window and probe wiring
 // ============================================================================
 
-fn main() {}
+impl App for BenchmarkApp {
+    fn title(&self) -> String {
+        "Benchmark".into()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        // Ctrl+Q closes the window. Escape does not: here it clears the History
+        // tab's selection, which is what the key is already for.
+        if let Event::Key(key) = event
+            && key.pressed
+            && key.key == Key::Q
+            && key.modifiers.ctrl
+        {
+            return Response::Exit;
+        }
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The remembered size is only ever a starting guess; this is the real
+        // one, and the hit test reads it back through `handle_event`.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for BenchmarkApp {
+    type Target = Target;
+    type Outcome = EventResult;
+
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    app::launch("benchmark", &mut BenchmarkApp::new())
+}
 
 // ============================================================================
 // Tests
@@ -3766,7 +4016,8 @@ mod tests {
     // the assertion `dy * 20.0` would have passed too.
     // ========================================================================
 
-    use guitk::event::MouseEvent;
+    use guitk::event::{Modifiers, MouseEvent};
+    use guitk::probe;
 
     /// What one wheel notch is worth, in pixels of content.
     ///
@@ -3853,9 +4104,10 @@ mod tests {
     /// whole point of the exercise being that only the renderer knows where a
     /// row is.
     fn drawn_history_number_cells(app: &BenchmarkApp) -> Vec<f32> {
-        let mut tree = RenderTree::new();
-        app.render_active_tab(&mut tree, app.scroll_y);
-        tree.commands
+        let mut frame = Frame::new(app.width, app.height);
+        app.render_active_tab(&mut frame, app.layout().content, app.scroll_y);
+        frame
+            .commands()
             .iter()
             .filter_map(|cmd| match cmd {
                 RenderCommand::Text {
@@ -3873,9 +4125,9 @@ mod tests {
 
     /// Where the active tab's drawing stops, at the current scroll offset.
     fn drawn_bottom(app: &BenchmarkApp) -> f32 {
-        let mut tree = RenderTree::new();
-        app.render_active_tab(&mut tree, app.scroll_y);
-        content_bottom(&tree.commands).unwrap_or(0.0)
+        let mut frame = Frame::new(app.width, app.height);
+        app.render_active_tab(&mut frame, app.layout().content, app.scroll_y);
+        content_bottom(frame.commands()).unwrap_or(0.0)
     }
 
     #[test]
@@ -4089,7 +4341,8 @@ mod tests {
         }
         app.active_tab = Tab::History;
         app.scroll_y = 0.0;
-        let past_the_end = app.history_rows_top() + (app.history.len() as f32 + 1.0) * ROW_HEIGHT;
+        let past_the_end = history_rows_top(app.content_top(), app.scroll_y)
+            + (app.history.len() as f32 + 1.0) * ROW_HEIGHT;
         assert!(
             past_the_end < app.content_bottom_edge(),
             "fixture has no room below the table, so it cannot tell a click              past the last row from a click outside the pane",
@@ -4205,6 +4458,258 @@ mod tests {
                 "clicking the row drawn at y={cell_y} selected {:?}",
                 app.selected_history_idx,
             );
+        }
+    }
+
+    // ========================================================================
+    // The window: every control is reached through the probe, at the place the
+    // renderer drew it
+    //
+    // These aim at controls by name rather than by coordinate, so a layout
+    // change moves the test with the program. A control that stops being drawn
+    // fails them by being unfindable, which is the failure worth having: the
+    // whole tab strip was previously located by open-coded arithmetic that no
+    // test could tell had drifted from the drawing.
+    // ========================================================================
+
+    #[test]
+    fn every_tab_in_the_strip_can_be_reached_by_clicking_it() {
+        let mut app = BenchmarkApp::new();
+        for tab in Tab::all() {
+            assert_eq!(
+                probe::click(&mut app, Target::Tab(*tab)),
+                EventResult::Consumed,
+                "clicking the {tab:?} tab was ignored",
+            );
+            assert_eq!(app.active_tab, *tab);
+        }
+    }
+
+    #[test]
+    fn switching_tab_by_clicking_returns_the_content_to_the_top() {
+        // The keyboard path is covered above; this is the click path, which
+        // used to be a separate arithmetic branch and so could forget.
+        let mut app = scrolling_app(Tab::History);
+        app.handle_event(&scroll_event(-1.0));
+        assert!(app.scroll_y > 0.0);
+        // The fixture's window is deliberately short, and `click_sized` is the
+        // only form that respects that: `click` would resize the app back to
+        // `SIZE` first and quietly test a different window.
+        let size = (app.width, app.height);
+        probe::click_sized(
+            &mut app,
+            Target::Tab(Tab::Overview),
+            MouseButton::Left,
+            size,
+        );
+        assert_eq!(app.scroll_y, 0.0);
+    }
+
+    #[test]
+    fn the_run_button_runs_the_benchmark() {
+        let mut app = BenchmarkApp::new();
+        assert!(app.history.is_empty());
+        assert_eq!(
+            probe::click(&mut app, Target::Run),
+            EventResult::Consumed,
+            "the Run button was drawn but clicking it did nothing",
+        );
+        assert_eq!(app.history.len(), 1);
+    }
+
+    #[test]
+    fn the_clear_button_is_only_there_on_the_history_tab() {
+        let mut app = BenchmarkApp::new();
+        app.run_benchmark();
+        for tab in Tab::all() {
+            app.active_tab = *tab;
+            assert_eq!(
+                probe::is_visible(&app, Target::ClearHistory),
+                *tab == Tab::History,
+                "the Clear History button's presence on the {tab:?} tab is wrong",
+            );
+            // Run and Export are on every tab, so a test that only ever looked
+            // at History could not tell "hidden" from "never drawn".
+            assert!(probe::is_visible(&app, Target::Run));
+            assert!(probe::is_visible(&app, Target::Export));
+        }
+    }
+
+    #[test]
+    fn the_clear_button_empties_the_history_and_the_selection_with_it() {
+        let mut app = hit_test_app();
+        app.selected_history_idx = Some(1);
+        assert_eq!(
+            probe::click(&mut app, Target::ClearHistory),
+            EventResult::Consumed,
+        );
+        assert!(app.history.is_empty());
+        assert_eq!(
+            app.selected_history_idx, None,
+            "a cleared history left a selection pointing at a run that no longer exists"
+        );
+        assert!(app.comparison.is_none());
+    }
+
+    #[test]
+    fn a_running_benchmark_refuses_a_second_start_without_disappearing() {
+        // The button stays drawn while running -- greyed, without its outline
+        // -- so it still swallows the click rather than letting it through to
+        // whatever is behind. Being ignored and being absent look the same to
+        // the user only until something else is under the pointer.
+        let mut app = BenchmarkApp::new();
+        app.progress.phase = BenchPhase::RunningCpu;
+        assert!(
+            probe::is_visible(&app, Target::Run),
+            "the Run button vanished while the benchmark was running",
+        );
+        assert_eq!(probe::click(&mut app, Target::Run), EventResult::Ignored);
+        assert!(app.history.is_empty());
+    }
+
+    #[test]
+    fn hovering_a_button_lights_only_that_button() {
+        let mut app = BenchmarkApp::new();
+        app.active_tab = Tab::History;
+        let run = probe::rect_of(&app, Target::Run).unwrap();
+        let (x, y) = run.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(app.run_button_hover);
+        assert!(!app.export_button_hover);
+        assert!(!app.clear_button_hover);
+
+        // Moving off every button clears the highlight -- the old handler only
+        // ever set it, so a pointer that left the strip left a button lit.
+        let bare = probe::bare_point(&app, BenchmarkApp::SIZE).unwrap();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: bare.0,
+            y: bare.1,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(!app.run_button_hover);
+    }
+
+    #[test]
+    fn ctrl_q_closes_the_window_and_escape_does_not() {
+        let mut app = hit_test_app();
+        app.selected_history_idx = Some(0);
+        assert_eq!(
+            app.on_event(&Event::Key(probe::press(Key::Escape))),
+            Response::Redraw,
+            "Escape closed the window; it is the key that drops the selection",
+        );
+        assert_eq!(app.selected_history_idx, None);
+        assert_eq!(
+            app.on_event(&Event::Key(probe::ctrl(Key::Q))),
+            Response::Exit,
+        );
+        assert_eq!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit,
+            "the window's own close button was ignored",
+        );
+    }
+
+    #[test]
+    fn the_window_draws_what_it_is_given_rather_than_what_it_remembers() {
+        // The first frame a real window submits arrives before any resize
+        // event, so a renderer that trusted the remembered size would draw it
+        // at the wrong one. `Probe::draw` takes `&self` precisely so it cannot
+        // resize its way out of the question -- an app that only drew the size
+        // it was given *after* adopting it would still fail here.
+        const WIDE: (f32, f32) = (1280.0, 900.0);
+        let mut app = BenchmarkApp::new();
+        app.run_benchmark();
+        assert_eq!(
+            (app.width, app.height),
+            BenchmarkApp::SIZE,
+            "fixture has already adopted the size under test",
+        );
+
+        // The chrome follows the right-hand edge.
+        let run = probe::rect_of_sized(&app, Target::Run, WIDE).unwrap();
+        assert!(
+            (run.right() - (WIDE.0 - BUTTON_MARGIN)).abs() < EPS,
+            "the Run button's right edge is at {}, not {}",
+            run.right(),
+            WIDE.0 - BUTTON_MARGIN,
+        );
+        // And so does the content inside the pane. Measured on the rows the
+        // History table draws, not on the widest rectangle anywhere: the
+        // window background is drawn from the frame's own width and so spans
+        // the right size whatever the tabs do, which would let a tab still
+        // laying itself out against `self.width` pass unnoticed.
+        let mut app = hit_test_app();
+        app.width = WINDOW_WIDTH;
+        app.height = WINDOW_HEIGHT;
+        let want = WIDE.0 - 2.0 * CONTENT_PADDING;
+        let rows: Vec<f32> = app
+            .draw(WIDE)
+            .commands()
+            .iter()
+            .filter_map(|cmd| match cmd {
+                RenderCommand::FillRect { x, width, .. } if (*x - CONTENT_PADDING).abs() < EPS => {
+                    Some(*width)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !rows.is_empty(),
+            "the History table drew no rows to measure"
+        );
+        for w in rows {
+            assert!(
+                (w - want).abs() < EPS,
+                "a row is {w} wide in a {}-wide window; it should be {want}",
+                WIDE.0,
+            );
+        }
+
+        // The window agrees once it has adopted the size, too.
+        let tree = App::render(&mut app, WIDE.0, WIDE.1);
+        assert!(!tree.commands.is_empty());
+        assert_eq!((app.width, app.height), WIDE);
+    }
+
+    #[test]
+    fn a_window_too_short_for_its_own_chrome_drops_controls_rather_than_stacking_them() {
+        // Shrink, never clamp: a clamped rectangle would sit outside the window
+        // and record a hit box there, so a control the user cannot see would
+        // still be clickable. The buttons and the status bar are the first
+        // things to go, and they go by becoming empty, not by overlapping the
+        // tab strip.
+        const SHORT: (f32, f32) = (960.0, 60.0);
+        let app = BenchmarkApp::new();
+        let frame = app.draw(SHORT);
+        for (target, rect) in frame.hits() {
+            assert!(
+                rect.bottom() <= SHORT.1 + EPS && rect.right() <= SHORT.0 + EPS,
+                "{target:?} was recorded at {rect:?}, outside a {SHORT:?} window",
+            );
+            assert!(!rect.is_empty(), "{target:?} recorded an empty hit box");
+        }
+        assert!(
+            !probe::rect_of_sized(&app, Target::Run, SHORT).is_some_and(|r| r.bottom() > SHORT.1),
+            "the Run button was clamped into the window instead of squeezed out of it",
+        );
+    }
+
+    #[test]
+    fn a_zero_sized_window_draws_without_panicking() {
+        // A window being dragged to nothing, or minimised, submits sizes a
+        // layout built from subtraction turns negative.
+        let app = BenchmarkApp::new();
+        for size in [(0.0, 0.0), (0.0, 600.0), (960.0, 0.0), (f32::NAN, 40.0)] {
+            let frame = app.draw(size);
+            assert!(frame.is_balanced());
+            for (target, rect) in frame.hits() {
+                assert!(!rect.is_empty(), "{target:?} at {size:?} recorded {rect:?}");
+            }
         }
     }
 }

@@ -2243,7 +2243,10 @@ mod tests {
             f64::from_bits(0x000a_bcde_f012_3456),
             f64::INFINITY,
             f64::NEG_INFINITY,
-            3.141_592_653_589_793,
+            // Spelled as the constant rather than as its shortest decimal:
+            // they are the same `f64`, and `clippy::approx_constant` refuses
+            // the literal.
+            std::f64::consts::PI,
             1e-300,
             6.02e23,
         ] {

@@ -220,6 +220,18 @@ pub fn is_visible<P: Probe>(app: &P, target: P::Target) -> bool {
     rect_of(app, target).is_some()
 }
 
+/// [`is_visible`] at a size other than [`Probe::SIZE`].
+///
+/// Every other reader here has a `_sized` twin, and for a while this one did
+/// not — so a test that asked "is this button reachable in a 180x120 window?"
+/// silently got the answer for [`Probe::SIZE`] instead, and passed while the
+/// button was in fact off the edge. An assertion about a small window has to
+/// be *made* at that small window.
+#[must_use]
+pub fn is_visible_sized<P: Probe>(app: &P, target: P::Target, size: (f32, f32)) -> bool {
+    rect_of_sized(app, target, size).is_some()
+}
+
 /// Left-click the middle of whatever the renderer drew for `target`.
 ///
 /// # Panics
@@ -483,6 +495,9 @@ mod tests {
         Cancel,
         Row(usize),
         Buried,
+        /// A control the renderer drops when the window is too narrow for it,
+        /// the way a real toolbar drops a button rather than drawing a sliver.
+        Wide,
     }
 
     /// A program just real enough to drive: it draws two buttons, a scrolling
@@ -541,6 +556,9 @@ mod tests {
 
             frame.hit(Target::Ok, Rect::new(10.0, 100.0, 60.0, 24.0));
             frame.hit(Target::Cancel, Rect::new(80.0, 100.0, 60.0, 24.0));
+            if width >= 150.0 {
+                frame.hit(Target::Wide, Rect::new(width - 60.0, 100.0, 50.0, 24.0));
+            }
             // The second copy of `Buried`, painted last and so the reachable
             // one.
             frame.hit(Target::Buried, Rect::new(150.0, 100.0, 40.0, 24.0));
@@ -607,6 +625,27 @@ mod tests {
         assert!(
             !is_visible(&app, Target::Row(7)),
             "row 7 is below a 60px pane and must not be reachable"
+        );
+    }
+
+    #[test]
+    fn a_reader_asked_about_a_small_window_answers_about_that_window() {
+        let app = Fake::default();
+        assert!(
+            is_visible(&app, Target::Wide),
+            "there is room for it at the default size"
+        );
+        assert!(
+            !is_visible_sized(&app, Target::Wide, (120.0, 140.0)),
+            "a narrow window drops it, and the reader must say so"
+        );
+        assert!(is_visible_sized(&app, Target::Wide, (400.0, 140.0)));
+        // The unsized reader always answers about `Probe::SIZE`. That is the
+        // trap: without the `_sized` twin a test about a small window would
+        // ask this one, get the default size's answer, and pass regardless.
+        assert_eq!(
+            is_visible(&app, Target::Wide),
+            is_visible_sized(&app, Target::Wide, Fake::SIZE)
         );
     }
 

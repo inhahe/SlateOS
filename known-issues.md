@@ -90167,10 +90167,31 @@ offset would turn a known-imprecise time into a confidently wrong one.
 
 ## `A-CREATEENTRY-HAS-NO-MTIME-SO-EVERY-ARCHIVE-FORMAT-LOSES-IT` (lane A, 2026-08-27)
 
-**Status:** OPEN. Split out of
+**Status:** **FIXED 2026-08-27.** Split out of
 `A-KERNEL-ZIP-WRITERS-DISCARD-THE-MTIME-THEY-ALREADY-HAVE` above, whose `kshell`
 half is fixed. This is the other half, and it is a different change to a
 different struct.
+
+**How it was fixed.** `CreateEntry` gained `pub modified_ns: Timestamp`;
+`create_zip` encodes it with `tzrules::dos_datetime_from_unix`, and
+`create_tar`/`create_cpio`/`create_ar` store whole Unix seconds via the new
+`unix_seconds_u64` / `unix_seconds_u32` helpers. `kshell`'s `archive create`
+stats each input next to the `read_file` it already did. A new self-test,
+`test_mtime_reaches_every_writer`, asserts the *encoding* in all four formats
+against a hand-computed expectation, plus that an unavailable time still reaches
+ZIP as `0` rather than clamping to 1980.
+
+**On step 3's open question (the unknown case in tar/cpio/ar):** resolved by
+making it unreachable rather than by choosing a fabrication. `0` now arises only
+when the clock was never set, a state in which *every* timestamp in the system
+is `0` and a 1970 reading is at least systemically consistent rather than
+uniquely wrong. No survey of GNU tar was needed: the question only had force
+while the caller was *guaranteed* to supply no time, and it no longer is.
+
+**One thing this did not fix, deliberately:** `list_zip` still discards the
+DOS pair it can now read back, so `archive list` reports `0` for a ZIP whose
+time `archive create` just wrote correctly. Tracked separately as
+`A-ARCHIVE-LIST-DISCARDS-THE-ZIP-TIMESTAMP-IT-JUST-LEARNED-TO-WRITE` below.
 
 **In short:** the `archive create` command can write four archive formats — zip,
 tar, cpio and ar. None of them records when any file was last changed, because
@@ -90232,6 +90253,61 @@ design question.
 **How it was found.** By fixing the entry above: `archive.rs` was the second of
 the two sites listed there, and reading it showed that the missing time was not
 merely unwired but had nowhere to live.
+
+---
+
+## `A-ARCHIVE-LIST-DISCARDS-THE-ZIP-TIMESTAMP-IT-JUST-LEARNED-TO-WRITE` (lane A, 2026-08-27)
+
+**Status:** OPEN.
+
+**In short:** `archive create out.zip f.txt` now records when `f.txt` was last
+changed, but `archive list out.zip` reports that time as `1970-01-01` — for the
+same archive it just wrote. The reading half throws the value away. It is a
+one-line hole in a function, not a design gap: `list_tar`, `list_cpio`,
+`list_ar` and `list_rar` all pass their `mtime` through; only `list_zip` and
+`list_7z` hardcode `0`.
+
+**Where it lives.** `kernel/src/fs/archive.rs`, `list_zip` (~344) and `list_7z`
+(~453), both building an `ArchiveEntry` with a literal `mtime: 0`.
+
+**Why it wasn't fixed alongside the writer.** ZIP does not store Unix seconds;
+it stores a packed DOS date/time pair, so `list_zip` cannot pass its value
+through the way the other four do — it needs a *decoder*, which does not exist
+in the kernel tree. Writing one is a change to `tzrules` (a different crate,
+with its own tests) and it needs a `-> Option<i64>` shape to reject the pairs
+the format allows but the calendar does not (month 0, day 0, February 30). That
+is a self-contained second change, and bundling it would have held a tested
+writer-side fix behind it.
+
+Note that this makes ZIP's `mtime` *honestly* `0` for a genuinely unstamped
+member and *dishonestly* `0` for a stamped one, with no way for a reader to
+tell them apart — the same conflation the writer side was fixed to avoid.
+
+**What the proper fix looks like.**
+
+1. Add `pub fn unix_from_dos_datetime(packed: u32) -> Option<i64>` to `tzrules`,
+   inverse of `dos_datetime_from_unix` (`37c04848e`). `None` for `0` and for
+   any pair naming a date that does not exist — the format's fields are wide
+   enough to hold month 15 and day 31 of February, and a decoder that trusts
+   them produces a nonsense instant rather than a refusal. Round-trip test it
+   against the encoder over the full representable range; the encoder's own
+   `every_representable_day_packs_into_a_valid_in_range_field` walk (~46,750
+   days) is the natural fixture to reuse.
+2. `list_zip` maps `None` to `0` and `Some(s)` to `s as u64`. The lossiness of
+   that mapping is the conflation noted above and is only acceptable because
+   `ArchiveEntry::mtime` has no richer type; widening it to `Option<u64>` would
+   be better and touches every `list_*`.
+3. Lane C has an independent decoder in `apps/archivemanager` that also
+   range-checks as part of deciding whether to render a date. Once `tzrules`
+   has one, §621's condition for hoisting is met — file a request offering it
+   rather than leaving two implementations of the same table.
+4. `list_7z` is a separate matter: `sevenz::un7z` does not surface a time at
+   all, so its `0` is honest until the parser is extended.
+
+**How it was found.** Writing `test_mtime_reaches_every_writer` for the entry
+above. The tar/cpio/ar arms could assert through `list_format`; the ZIP arm had
+to reach past it to `zip::parse`, which is what exposed that `list` was the
+lossy layer rather than the writer.
 
 ---
 
@@ -91127,3 +91203,60 @@ truncation), so it belongs there and not in `cal`. Once it exists, `cal.rs`'s
 deliberately diverges" in the module doc (7 items, of which these are 5), and
 the tests `a_wide_terminal_never_widens_the_row_but_columns_auto_does` and
 `a_pipe_removes_both_of_the_things_a_colour_would_have_marked`.
+
+---
+
+## `B-RENICE-DIVERGES-FROM-UTIL-LINUX-IN-FIVE-MEASURED-PLACES` (lane B, 2026-08-27) -- **open**, deliberate divergence
+
+**In short:** our `renice` is a transcription of util-linux 2.39.3's, and
+almost everything about it -- including several behaviours nobody would guess
+-- was measured against the real binary and matched. Five things are on
+purpose different. One is an upstream bug we declined to copy; the rest are
+house rules. Recorded here so a future reader who diffs the two does not
+"fix" them back.
+
+| # | Upstream (measured) | Ours | Why |
+|---|---|---|---|
+| 1 | A *successful* user lookup can be rejected because of a leftover from an earlier operand: `renice 0 -u root` works, but `renice 0 -p abc -u root` says `unknown user root`. | A lookup that succeeds is accepted, whatever came before it. | Upstream bug -- one `char *endptr` is shared by every `strtol` in `main`, and the `getpwnam` path never assigns to it. It reports a user that exists as missing, which is a wrong answer rather than a cosmetic one. See design decision 623 for the rule this sets. |
+| 2 | Diagnostics are prefixed with `argv[0]` as typed, so a symlinked or path-qualified invocation says something else. | Always `renice:`. | House rule across this coreutils. |
+| 3 | The password database is glibc's NSS, so LDAP/systemd-userdb accounts resolve. | `pwdb` -- `/etc/passwd` and `/etc/group`, the same files `id` and `chown` read. | This OS has no NSS. A name absent from those files is `unknown user`. |
+| 4 | An operand echoed back in a diagnostic is printed as raw bytes, so a username containing an escape sequence reaches the terminal. | Escaped through `quote::escape_unprintable`. | A diagnostic must not be a way to drive the terminal. Same call as every other bin in this sweep. |
+| 5 | `--version` prints `renice from util-linux 2.39.3`. | `renice from SlateOS coreutils 0.1.0`. | Keeps the shape scripts grep for without claiming to be util-linux. Same call as `cal` (`B-CAL-IS-NARROWER-THAN-UPSTREAM-IN-FIVE-PLACES`). |
+
+**Everything else was measured and matched**, including the parts that look
+like bugs and are not:
+
+- `-n` is **absolute**, not relative, unless `POSIXLY_CORRECT` is set in the
+  environment -- upstream's own comment calls this incorrect and says it has
+  been that way since 2009. `--relative` and `--priority` are the unambiguous
+  spellings.
+- `-h`, `--help`, `-v`, `-V` and `--version` are honoured **only as the whole
+  command line**. `renice -h -p 1` is not help; it is `invalid priority '-h'`.
+- The priority word goes through C's `strtol` in base 10, so `renice ' 5' 1`
+  and `renice +5 1` are accepted, `renice 0x10 1` is not, and -- the one that
+  surprises -- `renice '' 1` **is accepted with priority 0** while
+  `renice ' ' 1` is refused, because `strtol` leaves its end pointer at the
+  start when it converts nothing.
+- An out-of-range priority is not an error: `strtol` saturates to `LONG_MAX`
+  and the value is then truncated to `int`. `renice 2147483647 $$` prints
+  `new priority 19`, because the *kernel* clamps and the program reads the
+  priority back after setting it.
+- A target is an `int`, so `renice 0 4294967296` renices process **0** and
+  `renice 0 2147483648` is `bad process ID value: 2147483648` -- and the
+  message prints the word as typed, not the truncated number.
+- `-p`, `-g` and `-u` are sticky mode words that may repeat, and the last one
+  before a target wins: `renice 0 -g -p 410` renices process 410.
+- A failing target does not stop the ones after it; the status is 1 if any
+  failed.
+- Nothing takes an option after the first non-option word, and `--` is not
+  special: `renice -- 0 $$` is `invalid priority '--'`.
+
+**Where it lives:** `userspace/coreutils/src/bin/renice.rs` -- the "Measured
+against util-linux 2.39.3" table and the "Where this deliberately diverges"
+list in the module doc, and a test named for each behaviour. Divergence 1 is
+pinned by `a_successful_lookup_is_not_poisoned_by_an_earlier_bad_operand`.
+
+**What would change this:** #3 stops being a limitation if this OS grows a
+name-service layer; the call site is the single `pwdb::Db::load()` in
+`run_main`. #1, #2, #4 and #5 are settled policy and should not be revisited
+without changing the corresponding rule for every other bin in this sweep.

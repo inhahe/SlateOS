@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window. Without it the game simulated a board for nobody: `main` built a
+# `TetrisApp` and dropped it, so gravity never ran and no key ever arrived.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

@@ -6,5 +6,10 @@ edition = "2024"
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
 
+# The window and its heartbeat. Without it `main` built a PomodoroApp, dropped
+# it and exited — four screens, eight settings and a focus log, none of them
+# reachable, and no clock to count a pomodoro down with.
+oswindow = { path = "../../gui/window" }
+
 [lints]
 workspace = true
